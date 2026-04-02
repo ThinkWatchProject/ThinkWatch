@@ -4,6 +4,7 @@ import {
   createRoute,
   Outlet,
 } from '@tanstack/react-router';
+import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/hooks/use-auth';
 import { AppShell } from '@/components/layout/app-shell';
 import { LoginPage } from '@/routes/login';
@@ -23,12 +24,13 @@ import { RolesPage } from '@/routes/admin/roles';
 import { SettingsPage } from '@/routes/admin/settings';
 
 function RootComponent() {
+  const { t } = useTranslation();
   const { user, loading, login, logout } = useAuth();
 
   if (loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
-        <div className="text-muted-foreground">Loading...</div>
+        <div className="text-muted-foreground">{t('common.loading')}</div>
       </div>
     );
   }
@@ -45,10 +47,11 @@ function RootComponent() {
 }
 
 function NotFoundPage() {
+  const { t } = useTranslation();
   return (
     <div className="flex flex-col items-center justify-center py-24 text-center">
-      <h1 className="text-4xl font-bold">404</h1>
-      <p className="mt-2 text-muted-foreground">Page not found</p>
+      <h1 className="text-4xl font-bold">{t('notFound.title')}</h1>
+      <p className="mt-2 text-muted-foreground">{t('notFound.message')}</p>
     </div>
   );
 }

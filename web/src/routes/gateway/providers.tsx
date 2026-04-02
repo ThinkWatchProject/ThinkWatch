@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -42,6 +43,7 @@ const providerTypeColors: Record<string, 'default' | 'secondary' | 'outline'> = 
 };
 
 export function ProvidersPage() {
+  const { t } = useTranslation();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -100,7 +102,7 @@ export function ProvidersPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this provider?')) return;
+    if (!confirm(t('providers.deleteConfirm'))) return;
     try {
       await apiDelete(`/api/admin/providers/${id}`);
       await fetchProviders();
@@ -113,33 +115,33 @@ export function ProvidersPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Providers</h1>
-          <p className="text-muted-foreground">Manage AI model providers</p>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('providers.title')}</h1>
+          <p className="text-muted-foreground">{t('providers.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger render={<Button />}>
             <Plus className="h-4 w-4" />
-            Add Provider
+            {t('providers.addProvider')}
           </DialogTrigger>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
-              <DialogTitle>Add Provider</DialogTitle>
-              <DialogDescription>Configure a new AI provider connection.</DialogDescription>
+              <DialogTitle>{t('providers.addProvider')}</DialogTitle>
+              <DialogDescription>{t('providers.dialogDescription')}</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleCreate} className="space-y-4">
               {formError && (
                 <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{formError}</div>
               )}
               <div className="space-y-2">
-                <Label htmlFor="prov-name">Name</Label>
+                <Label htmlFor="prov-name">{t('common.name')}</Label>
                 <Input id="prov-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-openai" required />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="prov-display">Display Name</Label>
+                <Label htmlFor="prov-display">{t('providers.displayName')}</Label>
                 <Input id="prov-display" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="OpenAI Production" />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="prov-type">Provider Type</Label>
+                <Label htmlFor="prov-type">{t('providers.providerType')}</Label>
                 <select
                   id="prov-type"
                   value={providerType}
@@ -153,16 +155,16 @@ export function ProvidersPage() {
                 </select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="prov-url">Base URL</Label>
+                <Label htmlFor="prov-url">{t('providers.baseUrl')}</Label>
                 <Input id="prov-url" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" required />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="prov-key">API Key</Label>
+                <Label htmlFor="prov-key">{t('providers.apiKey')}</Label>
                 <Input id="prov-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." required />
               </div>
               <DialogFooter>
                 <Button type="submit" disabled={submitting}>
-                  {submitting ? 'Creating...' : 'Create Provider'}
+                  {submitting ? t('providers.creating') : t('providers.createProvider')}
                 </Button>
               </DialogFooter>
             </form>
@@ -176,25 +178,25 @@ export function ProvidersPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">All Providers</CardTitle>
+          <CardTitle className="text-base">{t('providers.allProviders')}</CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading providers...</p>
+            <p className="text-sm text-muted-foreground">{t('providers.loadingProviders')}</p>
           ) : providers.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
-              <p className="text-sm text-muted-foreground">No providers configured yet.</p>
-              <p className="text-xs text-muted-foreground mt-1">Add a provider to get started.</p>
+              <p className="text-sm text-muted-foreground">{t('providers.noProviders')}</p>
+              <p className="text-xs text-muted-foreground mt-1">{t('providers.noProvidersHint')}</p>
             </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Type</TableHead>
-                  <TableHead>Base URL</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Created</TableHead>
+                  <TableHead>{t('common.name')}</TableHead>
+                  <TableHead>{t('providers.type')}</TableHead>
+                  <TableHead>{t('providers.baseUrl')}</TableHead>
+                  <TableHead>{t('common.status')}</TableHead>
+                  <TableHead>{t('providers.created')}</TableHead>
                   <TableHead className="w-10" />
                 </TableRow>
               </TableHeader>
@@ -210,7 +212,7 @@ export function ProvidersPage() {
                     <TableCell className="font-mono text-xs">{p.base_url}</TableCell>
                     <TableCell>
                       <Badge variant={p.is_active ? 'default' : 'destructive'}>
-                        {p.is_active ? 'Active' : 'Inactive'}
+                        {p.is_active ? t('common.active') : t('common.inactive')}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">

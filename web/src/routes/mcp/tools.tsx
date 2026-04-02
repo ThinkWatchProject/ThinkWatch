@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
@@ -21,6 +22,7 @@ interface McpServer {
 }
 
 export function McpToolsPage() {
+  const { t } = useTranslation();
   const [tools, setTools] = useState<McpTool[]>([]);
   const [servers, setServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
@@ -54,8 +56,8 @@ export function McpToolsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">MCP Tools</h1>
-        <p className="text-muted-foreground">Browse tools available from MCP servers</p>
+        <h1 className="text-2xl font-semibold tracking-tight">{t('mcpTools.title')}</h1>
+        <p className="text-muted-foreground">{t('mcpTools.subtitle')}</p>
       </div>
 
       {error && (
@@ -63,14 +65,14 @@ export function McpToolsPage() {
       )}
 
       <div className="flex items-center gap-3">
-        <Label htmlFor="tool-filter">Filter by server</Label>
+        <Label htmlFor="tool-filter">{t('mcpTools.filterByServer')}</Label>
         <select
           id="tool-filter"
           value={filterServer}
           onChange={(e) => setFilterServer(e.target.value)}
           className="flex h-8 w-64 rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
         >
-          <option value="">All servers</option>
+          <option value="">{t('mcpTools.allServers')}</option>
           {servers.map((s) => (
             <option key={s.id} value={s.id}>{s.name}</option>
           ))}
@@ -78,13 +80,13 @@ export function McpToolsPage() {
       </div>
 
       {loading ? (
-        <p className="text-sm text-muted-foreground">Loading tools...</p>
+        <p className="text-sm text-muted-foreground">{t('mcpTools.loadingTools')}</p>
       ) : filteredTools.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12 text-center">
             <Wrench className="h-10 w-10 text-muted-foreground mb-3" />
-            <p className="text-sm text-muted-foreground">No tools discovered yet.</p>
-            <p className="text-xs text-muted-foreground mt-1">Use &quot;Discover Tools&quot; on a server to populate this list.</p>
+            <p className="text-sm text-muted-foreground">{t('mcpTools.noTools')}</p>
+            <p className="text-xs text-muted-foreground mt-1">{t('mcpTools.noToolsHint')}</p>
           </CardContent>
         </Card>
       ) : (
@@ -100,10 +102,10 @@ export function McpToolsPage() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-2">
-                    <p className="text-xs text-muted-foreground">{tool.description || 'No description'}</p>
+                    <p className="text-xs text-muted-foreground">{tool.description || t('mcpTools.noDescription')}</p>
                     {tool.input_schema && Object.keys(tool.input_schema).length > 0 && (
                       <div>
-                        <Badge variant="outline" className="text-[10px]">Input Schema</Badge>
+                        <Badge variant="outline" className="text-[10px]">{t('mcpTools.inputSchema')}</Badge>
                         <pre className="mt-1 max-h-24 overflow-auto rounded bg-muted p-2 text-[10px] leading-tight">
                           {JSON.stringify(tool.input_schema, null, 2)}
                         </pre>

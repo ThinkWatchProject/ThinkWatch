@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -26,13 +27,6 @@ interface AuditEntry {
   resource: string;
 }
 
-const statCards = [
-  { title: 'Total Requests', icon: BarChart3, description: 'Today' },
-  { title: 'Active Providers', icon: Cpu, description: 'Configured' },
-  { title: 'API Keys', icon: Key, description: 'Active keys' },
-  { title: 'MCP Servers', icon: Server, description: 'Connected' },
-];
-
 const serviceList: { name: string; key: keyof HealthStatus; icon: typeof Database }[] = [
   { name: 'PostgreSQL', key: 'postgres', icon: Database },
   { name: 'Redis', key: 'redis', icon: MemoryStick },
@@ -40,10 +34,18 @@ const serviceList: { name: string; key: keyof HealthStatus; icon: typeof Databas
 ];
 
 export function DashboardPage() {
+  const { t } = useTranslation();
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [recentActivity, setRecentActivity] = useState<AuditEntry[]>([]);
   const [loadingHealth, setLoadingHealth] = useState(true);
   const [loadingActivity, setLoadingActivity] = useState(true);
+
+  const statCards = [
+    { title: t('dashboard.totalRequests'), icon: BarChart3, description: t('dashboard.today') },
+    { title: t('dashboard.activeProviders'), icon: Cpu, description: t('dashboard.configured') },
+    { title: t('dashboard.apiKeysCount'), icon: Key, description: t('dashboard.activeKeys') },
+    { title: t('dashboard.mcpServersCount'), icon: Server, description: t('dashboard.connected') },
+  ];
 
   useEffect(() => {
     api<HealthStatus>('/api/health')
@@ -60,9 +62,9 @@ export function DashboardPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{t('dashboard.title')}</h1>
         <p className="text-muted-foreground">
-          Overview of your AI API and MCP gateway
+          {t('dashboard.subtitle')}
         </p>
       </div>
 
@@ -84,21 +86,21 @@ export function DashboardPage() {
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">Recent Activity</CardTitle>
+            <CardTitle className="text-base">{t('dashboard.recentActivity')}</CardTitle>
           </CardHeader>
           <CardContent>
             {loadingActivity ? (
-              <p className="text-sm text-muted-foreground">Loading...</p>
+              <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
             ) : recentActivity.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No recent activity</p>
+              <p className="text-sm text-muted-foreground">{t('dashboard.noRecentActivity')}</p>
             ) : (
               <Table>
                 <TableHeader>
                   <TableRow>
-                    <TableHead>Time</TableHead>
-                    <TableHead>User</TableHead>
-                    <TableHead>Action</TableHead>
-                    <TableHead>Resource</TableHead>
+                    <TableHead>{t('dashboard.time')}</TableHead>
+                    <TableHead>{t('dashboard.user')}</TableHead>
+                    <TableHead>{t('dashboard.action')}</TableHead>
+                    <TableHead>{t('dashboard.resource')}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -120,11 +122,11 @@ export function DashboardPage() {
 
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">System Status</CardTitle>
+            <CardTitle className="text-base">{t('dashboard.systemStatus')}</CardTitle>
           </CardHeader>
           <CardContent>
             {loadingHealth ? (
-              <p className="text-sm text-muted-foreground">Checking services...</p>
+              <p className="text-sm text-muted-foreground">{t('dashboard.checkingServices')}</p>
             ) : (
               <div className="space-y-3">
                 {serviceList.map((svc) => {
@@ -136,7 +138,7 @@ export function DashboardPage() {
                         <span className="text-sm font-medium">{svc.name}</span>
                       </div>
                       <Badge variant={ok ? 'default' : 'destructive'}>
-                        {ok ? 'Healthy' : 'Unreachable'}
+                        {ok ? t('common.healthy') : t('dashboard.unreachable')}
                       </Badge>
                     </div>
                   );

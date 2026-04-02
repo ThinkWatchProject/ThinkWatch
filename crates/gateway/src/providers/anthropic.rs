@@ -1,5 +1,5 @@
 use super::traits::*;
-use eventsource_stream::Eventsource;
+use crate::sse_parser::SseStreamExt;
 use futures::stream::StreamExt;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
@@ -288,7 +288,7 @@ impl AiProvider for AnthropicProvider {
                 return;
             }
 
-            let mut event_stream = resp.bytes_stream().eventsource();
+            let mut event_stream = resp.bytes_stream().sse_events();
 
             // Track message-level state from message_start
             let mut message_id = String::new();

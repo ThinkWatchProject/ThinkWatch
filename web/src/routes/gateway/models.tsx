@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Brain } from 'lucide-react';
@@ -31,6 +32,7 @@ const providerColors: Record<string, 'default' | 'secondary' | 'outline'> = {
 };
 
 export function ModelsPage() {
+  const { t } = useTranslation();
   const [models, setModels] = useState<Model[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -45,9 +47,9 @@ export function ModelsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Models</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{t('models.title')}</h1>
         <p className="text-muted-foreground">
-          Available models across all configured providers
+          {t('models.subtitle')}
         </p>
       </div>
 
@@ -56,13 +58,13 @@ export function ModelsPage() {
       )}
 
       {loading ? (
-        <p className="text-sm text-muted-foreground">Loading models...</p>
+        <p className="text-sm text-muted-foreground">{t('models.loadingModels')}</p>
       ) : models.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12 text-center">
             <Brain className="h-10 w-10 text-muted-foreground mb-3" />
-            <p className="text-sm text-muted-foreground">No models available.</p>
-            <p className="text-xs text-muted-foreground mt-1">Configure a provider first to see available models.</p>
+            <p className="text-sm text-muted-foreground">{t('models.noModels')}</p>
+            <p className="text-xs text-muted-foreground mt-1">{t('models.noModelsHint')}</p>
           </CardContent>
         </Card>
       ) : (
@@ -78,7 +80,7 @@ export function ModelsPage() {
                   </CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <p className="text-xs text-muted-foreground">Owned by: {model.owned_by}</p>
+                  <p className="text-xs text-muted-foreground">{t('models.owner')}: {model.owned_by}</p>
                 </CardContent>
               </Card>
             );

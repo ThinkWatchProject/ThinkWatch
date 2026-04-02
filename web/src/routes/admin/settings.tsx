@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
@@ -27,6 +28,7 @@ interface AuditConfig {
 }
 
 export function SettingsPage() {
+  const { t } = useTranslation();
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [oidcConfig, setOidcConfig] = useState<OidcConfig | null>(null);
   const [auditConfig, setAuditConfig] = useState<AuditConfig | null>(null);
@@ -49,47 +51,47 @@ export function SettingsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Settings</h1>
-        <p className="text-muted-foreground">System configuration and integrations</p>
+        <h1 className="text-2xl font-semibold tracking-tight">{t('settingsPage.title')}</h1>
+        <p className="text-muted-foreground">{t('settingsPage.subtitle')}</p>
       </div>
 
       <Tabs defaultValue="general">
         <TabsList>
           <TabsTrigger value="general">
             <Settings className="h-4 w-4" />
-            General
+            {t('settingsPage.general')}
           </TabsTrigger>
           <TabsTrigger value="oidc">
             <Shield className="h-4 w-4" />
-            OIDC / SSO
+            {t('settingsPage.oidc')}
           </TabsTrigger>
           <TabsTrigger value="audit">
             <ScrollText className="h-4 w-4" />
-            Audit
+            {t('settingsPage.auditConfig')}
           </TabsTrigger>
         </TabsList>
 
         <TabsContent value="general">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Server Information</CardTitle>
+              <CardTitle className="text-base">{t('settingsPage.serverInfo')}</CardTitle>
             </CardHeader>
             <CardContent>
               {loading ? (
-                <p className="text-sm text-muted-foreground">Loading...</p>
+                <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
               ) : (
                 <div className="space-y-4">
                   <div className="grid gap-4 sm:grid-cols-3">
                     <div>
-                      <Label className="text-xs text-muted-foreground">Version</Label>
+                      <Label className="text-xs text-muted-foreground">{t('settingsPage.version')}</Label>
                       <p className="text-sm font-medium">{systemInfo?.version ?? '—'}</p>
                     </div>
                     <div>
-                      <Label className="text-xs text-muted-foreground">Uptime</Label>
+                      <Label className="text-xs text-muted-foreground">{t('settingsPage.uptime')}</Label>
                       <p className="text-sm font-medium">{systemInfo?.uptime ?? '—'}</p>
                     </div>
                     <div>
-                      <Label className="text-xs text-muted-foreground">Go Version</Label>
+                      <Label className="text-xs text-muted-foreground">{t('settingsPage.goVersion')}</Label>
                       <p className="text-sm font-medium">{systemInfo?.go_version ?? '—'}</p>
                     </div>
                   </div>
@@ -102,26 +104,26 @@ export function SettingsPage() {
         <TabsContent value="oidc">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">OpenID Connect / SSO</CardTitle>
+              <CardTitle className="text-base">{t('settingsPage.oidcTitle')}</CardTitle>
             </CardHeader>
             <CardContent>
               {loading ? (
-                <p className="text-sm text-muted-foreground">Loading...</p>
+                <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
               ) : (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
-                    <Label className="text-sm">Status</Label>
+                    <Label className="text-sm">{t('common.status')}</Label>
                     <Badge variant={oidcConfig?.enabled ? 'default' : 'secondary'}>
-                      {oidcConfig?.enabled ? 'Enabled' : 'Disabled'}
+                      {oidcConfig?.enabled ? t('common.enabled') : t('common.disabled')}
                     </Badge>
                   </div>
                   <Separator />
                   <div>
-                    <Label className="text-xs text-muted-foreground">Issuer URL</Label>
+                    <Label className="text-xs text-muted-foreground">{t('settingsPage.issuerUrl')}</Label>
                     <p className="mt-1 font-mono text-sm">{oidcConfig?.issuer_url ?? '—'}</p>
                   </div>
                   <div>
-                    <Label className="text-xs text-muted-foreground">Client ID</Label>
+                    <Label className="text-xs text-muted-foreground">{t('settingsPage.clientId')}</Label>
                     <p className="mt-1 font-mono text-sm">
                       {oidcConfig?.client_id
                         ? `${oidcConfig.client_id.slice(0, 8)}${'*'.repeat(Math.max(0, oidcConfig.client_id.length - 8))}`
@@ -137,34 +139,34 @@ export function SettingsPage() {
         <TabsContent value="audit">
           <Card>
             <CardHeader>
-              <CardTitle className="text-base">Audit Configuration</CardTitle>
+              <CardTitle className="text-base">{t('settingsPage.auditTitle')}</CardTitle>
             </CardHeader>
             <CardContent>
               {loading ? (
-                <p className="text-sm text-muted-foreground">Loading...</p>
+                <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
               ) : (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between">
                     <div>
-                      <Label className="text-sm">Quickwit</Label>
+                      <Label className="text-sm">{t('settingsPage.quickwit')}</Label>
                       <p className="text-xs text-muted-foreground mt-0.5">
                         {auditConfig?.quickwit_url || '—'}
                       </p>
                     </div>
                     <Badge variant={auditConfig?.quickwit_enabled ? 'default' : 'secondary'}>
-                      {auditConfig?.quickwit_enabled ? 'Connected' : 'Disconnected'}
+                      {auditConfig?.quickwit_enabled ? t('settingsPage.connected') : t('settingsPage.disconnected')}
                     </Badge>
                   </div>
                   <Separator />
                   <div className="flex items-center justify-between">
                     <div>
-                      <Label className="text-sm">Syslog</Label>
+                      <Label className="text-sm">{t('settingsPage.syslog')}</Label>
                       <p className="text-xs text-muted-foreground mt-0.5">
                         {auditConfig?.syslog_address || '—'}
                       </p>
                     </div>
                     <Badge variant={auditConfig?.syslog_enabled ? 'default' : 'secondary'}>
-                      {auditConfig?.syslog_enabled ? 'Connected' : 'Disconnected'}
+                      {auditConfig?.syslog_enabled ? t('settingsPage.connected') : t('settingsPage.disconnected')}
                     </Badge>
                   </div>
                 </div>

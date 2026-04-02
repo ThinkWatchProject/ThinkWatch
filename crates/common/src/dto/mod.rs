@@ -15,6 +15,9 @@ pub struct LoginResponse {
     pub refresh_token: String,
     pub token_type: String,
     pub expires_in: i64,
+    /// Per-session HMAC signing key (hex-encoded, 32 bytes).
+    /// Used by the frontend to sign state-changing requests.
+    pub signing_key: String,
 }
 
 #[derive(Debug, Deserialize)]

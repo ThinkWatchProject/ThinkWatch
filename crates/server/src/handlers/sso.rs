@@ -44,11 +44,11 @@ pub struct SsoCallbackParams {
     pub state: String,
 }
 
-/// GET /api/auth/sso/callback — handle OIDC callback, issue JWT.
+/// GET /api/auth/sso/callback — handle OIDC callback, redirect with tokens in fragment.
 pub async fn sso_callback(
     State(state): State<AppState>,
     Query(params): Query<SsoCallbackParams>,
-) -> Result<Json<LoginResponse>, AppError> {
+) -> Result<Redirect, AppError> {
     let oidc = state.oidc.as_ref().ok_or(AppError::BadRequest(
         "SSO is not configured".into(),
     ))?;
@@ -158,10 +158,17 @@ pub async fn sso_callback(
             })),
     );
 
-    Ok(Json(LoginResponse {
-        access_token,
-        refresh_token,
-        token_type: "Bearer".into(),
-        expires_in: 900,
-    }))
+    // Redirect to frontend with tokens in URL fragment (never sent to server in subsequent requests)
+    let frontend_url = state.config.cors_origins.first()
+        .map(|s| s.as_str())
+        .unwrap_or("http://localhost:5173");
+
+    let redirect_url = format!(
+        "{}/sso-callback#access_token={}&refresh_token={}&expires_in=900",
+        frontend_url,
+        urlencoding::encode(&access_token),
+        urlencoding::encode(&refresh_token),
+    );
+
+    Ok(Redirect::temporary(&redirect_url))
 }

@@ -1,5 +1,5 @@
 use super::traits::*;
-use eventsource_stream::Eventsource;
+use crate::sse_parser::SseStreamExt;
 use futures::stream::StreamExt;
 use futures::Stream;
 use std::pin::Pin;
@@ -94,7 +94,7 @@ impl AiProvider for OpenAiProvider {
                 return;
             }
 
-            let mut event_stream = resp.bytes_stream().eventsource();
+            let mut event_stream = resp.bytes_stream().sse_events();
 
             while let Some(event_result) = event_stream.next().await {
                 match event_result {

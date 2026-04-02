@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Separator } from '@/components/ui/separator';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
@@ -8,6 +9,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { LogOut, User } from 'lucide-react';
+import { LanguageSwitcher } from './language-switcher';
 
 interface AppHeaderProps {
   userEmail?: string;
@@ -15,6 +17,7 @@ interface AppHeaderProps {
 }
 
 export function AppHeader({ userEmail, onLogout }: AppHeaderProps) {
+  const { t } = useTranslation();
   const initials = userEmail
     ? userEmail.substring(0, 2).toUpperCase()
     : 'AB';
@@ -24,6 +27,7 @@ export function AppHeader({ userEmail, onLogout }: AppHeaderProps) {
       <SidebarTrigger />
       <Separator orientation="vertical" className="h-6" />
       <div className="flex-1" />
+      <LanguageSwitcher />
       <DropdownMenu>
         <DropdownMenuTrigger
           render={<button className="flex items-center gap-2 rounded-md p-1 hover:bg-accent" />}
@@ -36,11 +40,11 @@ export function AppHeader({ userEmail, onLogout }: AppHeaderProps) {
         <DropdownMenuContent align="end">
           <DropdownMenuItem>
             <User className="mr-2 h-4 w-4" />
-            Profile
+            {t('auth.profile')}
           </DropdownMenuItem>
           <DropdownMenuItem onClick={onLogout}>
             <LogOut className="mr-2 h-4 w-4" />
-            Logout
+            {t('auth.logout')}
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

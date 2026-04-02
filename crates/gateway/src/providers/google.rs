@@ -240,9 +240,9 @@ impl AiProvider for GoogleProvider {
                 return;
             }
 
-            use eventsource_stream::Eventsource;
+            use crate::sse_parser::SseStreamExt;
             use futures::StreamExt;
-            let mut stream = resp.bytes_stream().eventsource();
+            let mut stream = resp.bytes_stream().sse_events();
             let chunk_id = format!("gemini-{}", uuid::Uuid::new_v4());
 
             while let Some(event) = stream.next().await {

@@ -45,28 +45,24 @@ reqwest = { version = "0.13", features = ["stream", "json", "rustls"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = "0.1"
 http-body-util = "0.1"
-eventsource-stream = "0.2"
 
 # Async
 futures = "0.3"
 tokio-stream = "0.1"
 async-stream = "0.3"
 
-# Token counting
-tiktoken-rs = "0.9"
-
 # Crypto
 aes-gcm = "0.10"
 sha2 = "0.11"
+hmac = "0.13"
 rand = "0.10"
 hex = "0.4"
+subtle = "2"
+urlencoding = "2"
 
 # Observability
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-tracing-opentelemetry = "0.32"
-opentelemetry = "0.31"
-opentelemetry-otlp = "0.31"
 
 # Config
 dotenvy = "0.15"

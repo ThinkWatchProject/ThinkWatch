@@ -9,6 +9,8 @@ use agent_bastion_common::dto::{
 use agent_bastion_common::errors::AppError;
 use agent_bastion_common::models::User;
 
+use crate::middleware::verify_signature;
+
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
@@ -44,6 +46,10 @@ pub async fn login(
         .jwt
         .create_refresh_token(user.id, &user.email, roles)?;
 
+    let signing_key = verify_signature::create_signing_key(&state.redis, &user.id)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
+
     state.audit.log(
         AuditEntry::new("auth.login")
             .user_id(user.id)
@@ -54,7 +60,8 @@ pub async fn login(
         access_token,
         refresh_token,
         token_type: "Bearer".into(),
-        expires_in: 900, // 15 minutes
+        expires_in: 900,
+        signing_key,
     }))
 }
 
@@ -122,11 +129,16 @@ pub async fn refresh(
         .jwt
         .create_refresh_token(claims.sub, &claims.email, claims.roles)?;
 
+    let signing_key = verify_signature::create_signing_key(&state.redis, &claims.sub)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
+
     Ok(Json(LoginResponse {
         access_token,
         refresh_token,
         token_type: "Bearer".into(),
         expires_in: 900,
+        signing_key,
     }))
 }
 

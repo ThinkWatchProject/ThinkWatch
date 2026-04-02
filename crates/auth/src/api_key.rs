@@ -32,7 +32,9 @@ pub fn hash_api_key(key: &str) -> String {
 }
 
 pub fn verify_api_key(plaintext: &str, stored_hash: &str) -> bool {
-    hash_api_key(plaintext) == stored_hash
+    use subtle::ConstantTimeEq;
+    let computed = hash_api_key(plaintext);
+    computed.as_bytes().ct_eq(stored_hash.as_bytes()).into()
 }
 
 #[cfg(test)]

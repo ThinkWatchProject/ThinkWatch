@@ -10,6 +10,7 @@ argon2 = { workspace = true }
 sha2 = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
+subtle = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

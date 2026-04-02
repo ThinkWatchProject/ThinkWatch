@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -29,6 +30,7 @@ interface AuditResponse {
 }
 
 export function AuditPage() {
+  const { t } = useTranslation();
   const [logs, setLogs] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -63,14 +65,14 @@ export function AuditPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Audit Logs</h1>
-        <p className="text-muted-foreground">System-wide audit trail</p>
+        <h1 className="text-2xl font-semibold tracking-tight">{t('audit.title')}</h1>
+        <p className="text-muted-foreground">{t('audit.subtitle')}</p>
       </div>
 
       <div className="flex flex-wrap items-end gap-3">
         <div className="flex-1 min-w-[200px]">
           <Input
-            placeholder="Search logs..."
+            placeholder={t('audit.searchPlaceholder')}
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
@@ -78,12 +80,12 @@ export function AuditPage() {
         </div>
         <div className="flex items-center gap-2">
           <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className="w-40" />
-          <span className="text-sm text-muted-foreground">to</span>
+          <span className="text-sm text-muted-foreground">{t('audit.to')}</span>
           <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className="w-40" />
         </div>
         <Button variant="outline" onClick={handleSearch}>
           <Search className="h-4 w-4" />
-          Search
+          {t('common.search')}
         </Button>
       </div>
 
@@ -93,25 +95,25 @@ export function AuditPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Log Entries</CardTitle>
+          <CardTitle className="text-base">{t('audit.logEntries')}</CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading audit logs...</p>
+            <p className="text-sm text-muted-foreground">{t('audit.loadingLogs')}</p>
           ) : logs.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
-              <p className="text-sm text-muted-foreground">No audit logs found.</p>
+              <p className="text-sm text-muted-foreground">{t('audit.noLogs')}</p>
             </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-8" />
-                  <TableHead>Timestamp</TableHead>
-                  <TableHead>User</TableHead>
-                  <TableHead>Action</TableHead>
-                  <TableHead>Resource</TableHead>
-                  <TableHead>IP Address</TableHead>
+                  <TableHead>{t('audit.timestamp')}</TableHead>
+                  <TableHead>{t('audit.user')}</TableHead>
+                  <TableHead>{t('audit.action')}</TableHead>
+                  <TableHead>{t('audit.resource')}</TableHead>
+                  <TableHead>{t('audit.ipAddress')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>

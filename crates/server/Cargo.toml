@@ -30,3 +30,9 @@ utoipa-swagger-ui = { workspace = true }
 openidconnect = { workspace = true }
 rust_decimal = { workspace = true }
 reqwest = { workspace = true }
+urlencoding = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }
+rand = { workspace = true }
+subtle = { workspace = true }

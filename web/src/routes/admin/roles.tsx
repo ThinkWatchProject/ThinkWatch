@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Shield } from 'lucide-react';
@@ -68,11 +69,13 @@ const systemRoles: SystemRole[] = [
 ];
 
 export function RolesPage() {
+  const { t } = useTranslation();
+
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Roles &amp; Permissions</h1>
-        <p className="text-muted-foreground">System-defined roles and their permissions</p>
+        <h1 className="text-2xl font-semibold tracking-tight">{t('roles.title')}</h1>
+        <p className="text-muted-foreground">{t('roles.subtitle')}</p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
@@ -82,13 +85,13 @@ export function RolesPage() {
               <CardTitle className="flex items-center gap-2 text-sm font-medium">
                 <Shield className="h-4 w-4 text-muted-foreground" />
                 <Badge variant="secondary">{role.name}</Badge>
-                <Badge variant="outline" className="ml-auto text-[10px]">System</Badge>
+                <Badge variant="outline" className="ml-auto text-[10px]">{t('roles.systemRole')}</Badge>
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               <p className="text-xs text-muted-foreground">{role.description}</p>
               <div>
-                <p className="text-xs font-medium mb-1.5">Permissions</p>
+                <p className="text-xs font-medium mb-1.5">{t('roles.permissions')}</p>
                 <div className="flex flex-wrap gap-1">
                   {role.permissions.map((perm) => (
                     <Badge key={perm} variant="outline" className="text-[10px]">

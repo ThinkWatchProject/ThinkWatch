@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -43,6 +44,7 @@ const statusVariants: Record<string, 'default' | 'secondary' | 'destructive' | '
 };
 
 export function McpServersPage() {
+  const { t } = useTranslation();
   const [servers, setServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -104,7 +106,7 @@ export function McpServersPage() {
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this MCP server?')) return;
+    if (!confirm(t('mcpServers.deleteConfirm'))) return;
     try {
       await apiDelete(`/api/mcp/servers/${id}`);
       await fetchServers();
@@ -126,37 +128,37 @@ export function McpServersPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">MCP Servers</h1>
-          <p className="text-muted-foreground">Manage Model Context Protocol servers</p>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('mcpServers.title')}</h1>
+          <p className="text-muted-foreground">{t('mcpServers.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger render={<Button />}>
             <Plus className="h-4 w-4" />
-            Register Server
+            {t('mcpServers.registerServer')}
           </DialogTrigger>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
-              <DialogTitle>Register MCP Server</DialogTitle>
-              <DialogDescription>Connect a new MCP server to the gateway.</DialogDescription>
+              <DialogTitle>{t('mcpServers.dialogTitle')}</DialogTitle>
+              <DialogDescription>{t('mcpServers.dialogDescription')}</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleCreate} className="space-y-4">
               {formError && (
                 <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{formError}</div>
               )}
               <div className="space-y-2">
-                <Label htmlFor="mcp-name">Name</Label>
+                <Label htmlFor="mcp-name">{t('common.name')}</Label>
                 <Input id="mcp-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-mcp-server" required />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="mcp-desc">Description</Label>
+                <Label htmlFor="mcp-desc">{t('common.description')}</Label>
                 <Input id="mcp-desc" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Code analysis tools" />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="mcp-url">Endpoint URL</Label>
+                <Label htmlFor="mcp-url">{t('mcpServers.endpointUrl')}</Label>
                 <Input id="mcp-url" value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} placeholder="http://localhost:8081/mcp" required />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="mcp-transport">Transport Type</Label>
+                <Label htmlFor="mcp-transport">{t('mcpServers.transportType')}</Label>
                 <select
                   id="mcp-transport"
                   value={transportType}
@@ -169,7 +171,7 @@ export function McpServersPage() {
                 </select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="mcp-auth">Auth Type</Label>
+                <Label htmlFor="mcp-auth">{t('mcpServers.authType')}</Label>
                 <select
                   id="mcp-auth"
                   value={authType}
@@ -183,13 +185,13 @@ export function McpServersPage() {
               </div>
               {authType !== 'none' && (
                 <div className="space-y-2">
-                  <Label htmlFor="mcp-secret">Auth Secret</Label>
+                  <Label htmlFor="mcp-secret">{t('mcpServers.authSecret')}</Label>
                   <Input id="mcp-secret" type="password" value={authSecret} onChange={(e) => setAuthSecret(e.target.value)} placeholder="Secret or token" required />
                 </div>
               )}
               <DialogFooter>
                 <Button type="submit" disabled={submitting}>
-                  {submitting ? 'Registering...' : 'Register Server'}
+                  {submitting ? t('mcpServers.registering') : t('mcpServers.registerServer')}
                 </Button>
               </DialogFooter>
             </form>
@@ -203,26 +205,26 @@ export function McpServersPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">All MCP Servers</CardTitle>
+          <CardTitle className="text-base">{t('mcpServers.allServers')}</CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading servers...</p>
+            <p className="text-sm text-muted-foreground">{t('mcpServers.loadingServers')}</p>
           ) : servers.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
-              <p className="text-sm text-muted-foreground">No MCP servers registered yet.</p>
-              <p className="text-xs text-muted-foreground mt-1">Register a server to start using MCP tools.</p>
+              <p className="text-sm text-muted-foreground">{t('mcpServers.noServers')}</p>
+              <p className="text-xs text-muted-foreground mt-1">{t('mcpServers.noServersHint')}</p>
             </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Endpoint URL</TableHead>
-                  <TableHead>Transport</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Last Health Check</TableHead>
-                  <TableHead>Tools</TableHead>
+                  <TableHead>{t('common.name')}</TableHead>
+                  <TableHead>{t('mcpServers.endpointUrl')}</TableHead>
+                  <TableHead>{t('mcpServers.transport')}</TableHead>
+                  <TableHead>{t('common.status')}</TableHead>
+                  <TableHead>{t('mcpServers.lastHealthCheck')}</TableHead>
+                  <TableHead>{t('mcpServers.toolsCount')}</TableHead>
                   <TableHead className="w-20" />
                 </TableRow>
               </TableHeader>
@@ -245,10 +247,10 @@ export function McpServersPage() {
                     <TableCell className="text-sm">{s.tools_count}</TableCell>
                     <TableCell>
                       <div className="flex gap-1">
-                        <Button variant="ghost" size="icon-sm" onClick={() => handleDiscover(s.id)} title="Discover Tools">
+                        <Button variant="ghost" size="icon-sm" onClick={() => handleDiscover(s.id)} title={t('mcpServers.discoverTools')}>
                           <Search className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="icon-sm" onClick={() => handleDelete(s.id)} title="Delete">
+                        <Button variant="ghost" size="icon-sm" onClick={() => handleDelete(s.id)} title={t('common.delete')}>
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>

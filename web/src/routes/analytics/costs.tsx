@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Table,
@@ -26,6 +27,7 @@ interface CostStats {
 }
 
 export function CostsPage() {
+  const { t } = useTranslation();
   const [rows, setRows] = useState<CostRow[]>([]);
   const [stats, setStats] = useState<CostStats>({ total_cost_mtd: 0, budget_usage_pct: 0 });
   const [loading, setLoading] = useState(true);
@@ -47,14 +49,14 @@ export function CostsPage() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-2xl font-semibold tracking-tight">Cost Analytics</h1>
-        <p className="text-muted-foreground">Cost tracking and budget monitoring</p>
+        <h1 className="text-2xl font-semibold tracking-tight">{t('analyticsCosts.title')}</h1>
+        <p className="text-muted-foreground">{t('analyticsCosts.subtitle')}</p>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Total Cost (MTD)</CardTitle>
+            <CardTitle className="text-sm font-medium">{t('analyticsCosts.totalCostMtd')}</CardTitle>
             <DollarSign className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
@@ -65,7 +67,7 @@ export function CostsPage() {
         </Card>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">Budget Usage</CardTitle>
+            <CardTitle className="text-sm font-medium">{t('analyticsCosts.budgetUsage')}</CardTitle>
             <TrendingUp className="h-4 w-4 text-muted-foreground" />
           </CardHeader>
           <CardContent>
@@ -84,11 +86,11 @@ export function CostsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Cost Trend</CardTitle>
+          <CardTitle className="text-base">{t('analyticsCosts.costTrend')}</CardTitle>
         </CardHeader>
         <CardContent className="flex h-48 items-center justify-center text-muted-foreground">
           <TrendingUp className="mr-2 h-5 w-5" />
-          Chart visualization coming soon
+          {t('analyticsCosts.chartPlaceholder')}
         </CardContent>
       </Card>
 
@@ -98,25 +100,25 @@ export function CostsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">Cost by Model</CardTitle>
+          <CardTitle className="text-base">{t('analyticsCosts.costByModel')}</CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading cost data...</p>
+            <p className="text-sm text-muted-foreground">{t('analyticsCosts.loadingCosts')}</p>
           ) : rows.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
-              <p className="text-sm text-muted-foreground">No cost data available yet.</p>
+              <p className="text-sm text-muted-foreground">{t('analyticsCosts.noCosts')}</p>
             </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Model</TableHead>
-                  <TableHead className="text-right">Requests</TableHead>
-                  <TableHead className="text-right">Input Tokens</TableHead>
-                  <TableHead className="text-right">Output Tokens</TableHead>
-                  <TableHead className="text-right">Total Cost</TableHead>
-                  <TableHead className="text-right">% of Total</TableHead>
+                  <TableHead>{t('analyticsCosts.model')}</TableHead>
+                  <TableHead className="text-right">{t('analyticsCosts.requests')}</TableHead>
+                  <TableHead className="text-right">{t('analyticsCosts.inputTokens')}</TableHead>
+                  <TableHead className="text-right">{t('analyticsCosts.outputTokens')}</TableHead>
+                  <TableHead className="text-right">{t('analyticsCosts.totalCost')}</TableHead>
+                  <TableHead className="text-right">{t('analyticsCosts.percentOfTotal')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>

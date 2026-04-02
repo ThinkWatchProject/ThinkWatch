@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -35,6 +36,7 @@ interface User {
 }
 
 export function UsersPage() {
+  const { t } = useTranslation();
   const [users, setUsers] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -93,37 +95,37 @@ export function UsersPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">Users</h1>
-          <p className="text-muted-foreground">Manage user accounts</p>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('users.title')}</h1>
+          <p className="text-muted-foreground">{t('users.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger render={<Button />}>
             <Plus className="h-4 w-4" />
-            Add User
+            {t('users.addUser')}
           </DialogTrigger>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
-              <DialogTitle>Add User</DialogTitle>
-              <DialogDescription>Create a new user account.</DialogDescription>
+              <DialogTitle>{t('users.addUser')}</DialogTitle>
+              <DialogDescription>{t('users.dialogDescription')}</DialogDescription>
             </DialogHeader>
             <form onSubmit={handleCreate} className="space-y-4">
               {formError && (
                 <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{formError}</div>
               )}
               <div className="space-y-2">
-                <Label htmlFor="user-email">Email</Label>
+                <Label htmlFor="user-email">{t('auth.email')}</Label>
                 <Input id="user-email" type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="user@company.com" required />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="user-name">Display Name</Label>
+                <Label htmlFor="user-name">{t('users.displayName')}</Label>
                 <Input id="user-name" value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder="John Doe" />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="user-password">Password</Label>
+                <Label htmlFor="user-password">{t('auth.password')}</Label>
                 <Input id="user-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Minimum 8 characters" required />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="user-role">Role</Label>
+                <Label htmlFor="user-role">{t('users.role')}</Label>
                 <select
                   id="user-role"
                   value={role}
@@ -139,7 +141,7 @@ export function UsersPage() {
               </div>
               <DialogFooter>
                 <Button type="submit" disabled={submitting}>
-                  {submitting ? 'Creating...' : 'Create User'}
+                  {submitting ? t('users.creating') : t('users.createUser')}
                 </Button>
               </DialogFooter>
             </form>
@@ -153,25 +155,25 @@ export function UsersPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">All Users</CardTitle>
+          <CardTitle className="text-base">{t('users.allUsers')}</CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading users...</p>
+            <p className="text-sm text-muted-foreground">{t('users.loadingUsers')}</p>
           ) : users.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
-              <p className="text-sm text-muted-foreground">No users found.</p>
+              <p className="text-sm text-muted-foreground">{t('users.noUsers')}</p>
             </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Email</TableHead>
-                  <TableHead>Display Name</TableHead>
-                  <TableHead>Roles</TableHead>
-                  <TableHead>SSO</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Created</TableHead>
+                  <TableHead>{t('auth.email')}</TableHead>
+                  <TableHead>{t('users.displayName')}</TableHead>
+                  <TableHead>{t('users.roles')}</TableHead>
+                  <TableHead>{t('users.sso')}</TableHead>
+                  <TableHead>{t('common.status')}</TableHead>
+                  <TableHead>{t('users.created')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -195,7 +197,7 @@ export function UsersPage() {
                     </TableCell>
                     <TableCell>
                       <Badge variant={u.is_active ? 'default' : 'destructive'}>
-                        {u.is_active ? 'Active' : 'Inactive'}
+                        {u.is_active ? t('common.active') : t('common.inactive')}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">

@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import {
   Sidebar,
   SidebarContent,
@@ -27,49 +28,61 @@ import {
 } from 'lucide-react';
 import { useNavigate, useLocation } from '@tanstack/react-router';
 
-const navGroups = [
+interface NavItem {
+  titleKey: string;
+  icon: typeof LayoutDashboard;
+  href: string;
+}
+
+interface NavGroup {
+  labelKey: string;
+  items: NavItem[];
+}
+
+const navGroups: NavGroup[] = [
   {
-    label: 'Overview',
+    labelKey: 'nav.overview',
     items: [
-      { title: 'Dashboard', icon: LayoutDashboard, href: '/' as const },
+      { titleKey: 'nav.dashboard', icon: LayoutDashboard, href: '/' },
     ],
   },
   {
-    label: 'AI Gateway',
+    labelKey: 'nav.aiGateway',
     items: [
-      { title: 'Providers', icon: Plug, href: '/gateway/providers' as const },
-      { title: 'Models', icon: BrainCircuit, href: '/gateway/models' as const },
-      { title: 'API Keys', icon: Key, href: '/gateway/api-keys' as const },
-      { title: 'Request Logs', icon: ScrollText, href: '/gateway/logs' as const },
+      { titleKey: 'nav.providers', icon: Plug, href: '/gateway/providers' },
+      { titleKey: 'nav.models', icon: BrainCircuit, href: '/gateway/models' },
+      { titleKey: 'nav.apiKeys', icon: Key, href: '/gateway/api-keys' },
+      { titleKey: 'nav.requestLogs', icon: ScrollText, href: '/gateway/logs' },
     ],
   },
   {
-    label: 'MCP Gateway',
+    labelKey: 'nav.mcpGateway',
     items: [
-      { title: 'MCP Servers', icon: Server, href: '/mcp/servers' as const },
-      { title: 'Tools', icon: Wrench, href: '/mcp/tools' as const },
-      { title: 'MCP Logs', icon: ScrollText, href: '/mcp/logs' as const },
+      { titleKey: 'nav.mcpServers', icon: Server, href: '/mcp/servers' },
+      { titleKey: 'nav.tools', icon: Wrench, href: '/mcp/tools' },
+      { titleKey: 'nav.mcpLogs', icon: ScrollText, href: '/mcp/logs' },
     ],
   },
   {
-    label: 'Analytics',
+    labelKey: 'nav.analytics',
     items: [
-      { title: 'Usage', icon: BarChart3, href: '/analytics/usage' as const },
-      { title: 'Costs', icon: DollarSign, href: '/analytics/costs' as const },
-      { title: 'Audit Logs', icon: ClipboardList, href: '/analytics/audit' as const },
+      { titleKey: 'nav.usage', icon: BarChart3, href: '/analytics/usage' },
+      { titleKey: 'nav.costs', icon: DollarSign, href: '/analytics/costs' },
+      { titleKey: 'nav.auditLogs', icon: ClipboardList, href: '/analytics/audit' },
     ],
   },
   {
-    label: 'Admin',
+    labelKey: 'nav.admin',
     items: [
-      { title: 'Users', icon: Users, href: '/admin/users' as const },
-      { title: 'Roles', icon: Shield, href: '/admin/roles' as const },
-      { title: 'Settings', icon: Settings, href: '/admin/settings' as const },
+      { titleKey: 'nav.users', icon: Users, href: '/admin/users' },
+      { titleKey: 'nav.roles', icon: Shield, href: '/admin/roles' },
+      { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings' },
     ],
   },
 ];
 
 export function AppSidebar() {
+  const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const currentPath = location.pathname;
@@ -87,8 +100,8 @@ export function AppSidebar() {
       </SidebarHeader>
       <SidebarContent>
         {navGroups.map((group) => (
-          <SidebarGroup key={group.label}>
-            <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
+          <SidebarGroup key={group.labelKey}>
+            <SidebarGroupLabel>{t(group.labelKey)}</SidebarGroupLabel>
             <SidebarGroupContent>
               <SidebarMenu>
                 {group.items.map((item) => {
@@ -97,13 +110,13 @@ export function AppSidebar() {
                       ? currentPath === '/'
                       : currentPath.startsWith(item.href);
                   return (
-                    <SidebarMenuItem key={item.title}>
+                    <SidebarMenuItem key={item.titleKey}>
                       <SidebarMenuButton
                         isActive={isActive}
-                        onClick={() => navigate({ to: item.href })}
+                        onClick={() => navigate({ to: item.href as '/' })}
                       >
                         <item.icon className="h-4 w-4" />
-                        <span>{item.title}</span>
+                        <span>{t(item.titleKey)}</span>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
                   );

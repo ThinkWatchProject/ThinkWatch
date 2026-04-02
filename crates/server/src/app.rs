@@ -16,7 +16,13 @@ use agent_bastion_auth::jwt::JwtManager;
 use agent_bastion_auth::oidc::OidcManager;
 use agent_bastion_common::audit::AuditLogger;
 use agent_bastion_common::config::AppConfig;
+use agent_bastion_gateway::cache::ResponseCache;
+use agent_bastion_gateway::content_filter::ContentFilter;
+use agent_bastion_gateway::model_mapping::ModelMapper;
+use agent_bastion_gateway::budget_alert::{BudgetAlertConfig, BudgetAlertManager};
+use agent_bastion_gateway::pii_redactor::PiiRedactor;
 use agent_bastion_gateway::proxy::{self as gateway_proxy, GatewayState};
+use agent_bastion_gateway::quota::QuotaManager;
 use agent_bastion_gateway::router::ModelRouter;
 use agent_bastion_mcp_gateway::access_control::AccessController;
 use agent_bastion_mcp_gateway::pool::ConnectionPool;
@@ -66,6 +72,18 @@ pub fn create_gateway_app(
     let model_router = Arc::new(ModelRouter::new());
     let gateway_state = GatewayState {
         router: model_router,
+        model_mapper: Arc::new(ModelMapper::new()),
+        content_filter: Arc::new(ContentFilter::new()),
+        quota: Arc::new(QuotaManager::new(state.redis.clone())),
+        cache: Arc::new(ResponseCache::new(state.redis.clone(), 3600)),
+        pii_redactor: Arc::new(PiiRedactor::new()),
+        budget_alert: Some(Arc::new(BudgetAlertManager::new(
+            state.redis.clone(),
+            BudgetAlertConfig {
+                webhook_url: None, // Configured via admin API
+                thresholds: vec![0.50, 0.80, 0.95],
+            },
+        ))),
     };
     let ai_routes = Router::new()
         .route("/v1/chat/completions", post(gateway_proxy::proxy_chat_completion))
@@ -137,6 +155,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route("/api/auth/sso/callback", get(handlers::sso::sso_callback));
 
     // User-level routes (any authenticated user)
+    // Signature verification runs on POST/DELETE/PATCH (skipped for GET)
     let user_routes = Router::new()
         .route("/api/auth/me", get(handlers::auth::me))
         .route(
@@ -153,6 +172,11 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route("/api/analytics/usage/stats", get(handlers::analytics::get_usage_stats))
         .route("/api/analytics/costs", get(handlers::analytics::get_costs))
         .route("/api/analytics/costs/stats", get(handlers::analytics::get_cost_stats))
+        .route("/api/health", get(handlers::health::api_health_check))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::verify_signature::verify_signature,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::auth_guard::require_auth,
@@ -189,6 +213,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route("/api/admin/settings/audit", get(handlers::admin::get_audit_settings))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
+            crate::middleware::verify_signature::verify_signature,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             crate::middleware::require_role::require_admin,
         ))
         .layer(axum::middleware::from_fn_with_state(
@@ -196,9 +224,8 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             crate::middleware::auth_guard::require_auth,
         ));
 
-    // Health check (includes service connectivity)
+    // Public health check (no internal details)
     let health = Router::new()
-        .route("/api/health", get(handlers::health::api_health_check))
         .route("/health", get(handlers::health::health_check));
 
     let app = Router::new()

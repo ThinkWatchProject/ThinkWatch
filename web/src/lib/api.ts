@@ -6,23 +6,82 @@ interface ApiOptions {
   headers?: Record<string, string>;
 }
 
+// --- HMAC Signing (Web Crypto API) ---
+
+async function signRequest(
+  method: string,
+  path: string,
+  bodyStr: string | undefined,
+): Promise<Record<string, string>> {
+  const signingKeyHex = sessionStorage.getItem('signing_key');
+  if (!signingKeyHex) return {};
+
+  // Only sign state-changing methods
+  if (['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())) return {};
+
+  const timestamp = Math.floor(Date.now() / 1000).toString();
+  const nonce = crypto.randomUUID();
+
+  // SHA-256 of body
+  const bodyBytes = new TextEncoder().encode(bodyStr ?? '');
+  const bodyHash = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bodyBytes)))
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  // String-to-sign
+  const stringToSign = `${method.toUpperCase()}\n${path}\n${timestamp}\n${nonce}\n${bodyHash}`;
+
+  // Import HMAC key
+  const keyBytes = new Uint8Array(signingKeyHex.match(/.{2}/g)!.map(h => parseInt(h, 16)));
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw',
+    keyBytes,
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  );
+
+  // Sign
+  const sigBytes = new Uint8Array(
+    await crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(stringToSign)),
+  );
+  const sigHex = Array.from(sigBytes)
+    .map(b => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  return {
+    'X-Signature-Timestamp': timestamp,
+    'X-Signature-Nonce': nonce,
+    'X-Signature': `hmac-sha256:${sigHex}`,
+  };
+}
+
+// --- API Client ---
+
 export async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
   const token = localStorage.getItem('access_token');
+  const method = options.method ?? 'GET';
+  const bodyStr = options.body ? JSON.stringify(options.body) : undefined;
+
+  // Compute signature headers for write operations
+  const sigHeaders = await signRequest(method, path, bodyStr);
 
   const res = await fetch(`${API_BASE}${path}`, {
-    method: options.method ?? 'GET',
+    method,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...sigHeaders,
       ...options.headers,
     },
-    body: options.body ? JSON.stringify(options.body) : undefined,
+    body: bodyStr,
   });
 
   if (res.status === 401) {
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
-    window.location.href = '/login';
+    sessionStorage.removeItem('signing_key');
+    window.location.href = '/';
     throw new Error('Unauthorized');
   }
 

@@ -10,7 +10,7 @@ reqwest = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
 http-body-util = { workspace = true }
-eventsource-stream = { workspace = true }
+bytes = "1"
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -25,3 +25,6 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 fred = { workspace = true }
 utoipa = { workspace = true }
+sha2 = { workspace = true }
+regex = "1"
+rand = { workspace = true }

@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
+import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -41,6 +42,7 @@ interface CreateKeyResponse {
 }
 
 export function ApiKeysPage() {
+  const { t } = useTranslation();
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -108,7 +110,7 @@ export function ApiKeysPage() {
   };
 
   const handleRevoke = async (id: string) => {
-    if (!confirm('Are you sure you want to revoke this API key?')) return;
+    if (!confirm(t('apiKeys.revokeConfirm'))) return;
     try {
       await apiDelete(`/api/keys/${id}`);
       await fetchKeys();
@@ -126,21 +128,21 @@ export function ApiKeysPage() {
     <div className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">API Keys</h1>
-          <p className="text-muted-foreground">Manage gateway API keys</p>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('apiKeys.title')}</h1>
+          <p className="text-muted-foreground">{t('apiKeys.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={handleDialogChange}>
           <DialogTrigger render={<Button />}>
             <Plus className="h-4 w-4" />
-            Create API Key
+            {t('apiKeys.createKey')}
           </DialogTrigger>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
-              <DialogTitle>{createdKey ? 'API Key Created' : 'Create API Key'}</DialogTitle>
+              <DialogTitle>{createdKey ? t('apiKeys.keyCreated') : t('apiKeys.createKey')}</DialogTitle>
               <DialogDescription>
                 {createdKey
-                  ? 'Copy this key now. It will not be shown again.'
-                  : 'Generate a new API key for the gateway.'}
+                  ? t('apiKeys.keyCreatedHint')
+                  : t('apiKeys.dialogDescription')}
               </DialogDescription>
             </DialogHeader>
             {createdKey ? (
@@ -150,10 +152,10 @@ export function ApiKeysPage() {
                 </div>
                 <Button variant="outline" className="w-full" onClick={handleCopy}>
                   {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-                  {copied ? 'Copied!' : 'Copy to Clipboard'}
+                  {copied ? t('common.copied') : t('apiKeys.copyToClipboard')}
                 </Button>
                 <DialogFooter>
-                  <Button onClick={() => handleDialogChange(false)}>Done</Button>
+                  <Button onClick={() => handleDialogChange(false)}>{t('common.done')}</Button>
                 </DialogFooter>
               </div>
             ) : (
@@ -162,24 +164,24 @@ export function ApiKeysPage() {
                   <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{formError}</div>
                 )}
                 <div className="space-y-2">
-                  <Label htmlFor="key-name">Name</Label>
+                  <Label htmlFor="key-name">{t('common.name')}</Label>
                   <Input id="key-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-service-key" required />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="key-models">Allowed Models</Label>
+                  <Label htmlFor="key-models">{t('apiKeys.allowedModels')}</Label>
                   <Input id="key-models" value={allowedModels} onChange={(e) => setAllowedModels(e.target.value)} placeholder="gpt-4o, claude-sonnet-4 (comma-separated)" />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="key-rate">Rate Limit (RPM)</Label>
+                  <Label htmlFor="key-rate">{t('apiKeys.rateLimitRpm')}</Label>
                   <Input id="key-rate" type="number" value={rateLimitRpm} onChange={(e) => setRateLimitRpm(e.target.value)} placeholder="60" />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="key-expires">Expires In (days)</Label>
+                  <Label htmlFor="key-expires">{t('apiKeys.expiresInDays')}</Label>
                   <Input id="key-expires" type="number" value={expiresInDays} onChange={(e) => setExpiresInDays(e.target.value)} placeholder="90" />
                 </div>
                 <DialogFooter>
                   <Button type="submit" disabled={submitting}>
-                    {submitting ? 'Creating...' : 'Create Key'}
+                    {submitting ? t('apiKeys.creating') : t('apiKeys.createKeyBtn')}
                   </Button>
                 </DialogFooter>
               </form>
@@ -194,27 +196,27 @@ export function ApiKeysPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">All API Keys</CardTitle>
+          <CardTitle className="text-base">{t('apiKeys.allKeys')}</CardTitle>
         </CardHeader>
         <CardContent>
           {loading ? (
-            <p className="text-sm text-muted-foreground">Loading keys...</p>
+            <p className="text-sm text-muted-foreground">{t('apiKeys.loadingKeys')}</p>
           ) : keys.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
-              <p className="text-sm text-muted-foreground">No API keys created yet.</p>
-              <p className="text-xs text-muted-foreground mt-1">Create a key to start making requests through the gateway.</p>
+              <p className="text-sm text-muted-foreground">{t('apiKeys.noKeys')}</p>
+              <p className="text-xs text-muted-foreground mt-1">{t('apiKeys.noKeysHint')}</p>
             </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Name</TableHead>
-                  <TableHead>Key Prefix</TableHead>
-                  <TableHead>Team</TableHead>
-                  <TableHead>Rate Limit</TableHead>
-                  <TableHead>Expires</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Created</TableHead>
+                  <TableHead>{t('common.name')}</TableHead>
+                  <TableHead>{t('apiKeys.keyPrefix')}</TableHead>
+                  <TableHead>{t('apiKeys.team')}</TableHead>
+                  <TableHead>{t('apiKeys.rateLimit')}</TableHead>
+                  <TableHead>{t('apiKeys.expires')}</TableHead>
+                  <TableHead>{t('common.status')}</TableHead>
+                  <TableHead>{t('common.createdAt')}</TableHead>
                   <TableHead className="w-10" />
                 </TableRow>
               </TableHeader>
@@ -228,11 +230,11 @@ export function ApiKeysPage() {
                     <TableCell className="text-sm">{k.team_name ?? '—'}</TableCell>
                     <TableCell className="text-sm">{k.rate_limit_rpm ? `${k.rate_limit_rpm}/min` : '—'}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">
-                      {k.expires_at ? new Date(k.expires_at).toLocaleDateString() : 'Never'}
+                      {k.expires_at ? new Date(k.expires_at).toLocaleDateString() : t('apiKeys.never')}
                     </TableCell>
                     <TableCell>
                       <Badge variant={k.is_active ? 'default' : 'destructive'}>
-                        {k.is_active ? 'Active' : 'Revoked'}
+                        {k.is_active ? t('common.active') : t('apiKeys.revoked')}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
