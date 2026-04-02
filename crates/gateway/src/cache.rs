@@ -7,6 +7,12 @@ use sha2::{Digest, Sha256};
 ///
 /// Only caches non-streaming requests with deterministic parameters
 /// (temperature == 0 or absent).
+///
+/// NOTE: The cache is intentionally shared across all users. The cache key is
+/// derived solely from the model, messages, and max_tokens. This is by design
+/// for many use cases (identical prompts yield identical results when temperature
+/// is 0). If per-user isolation is needed, callers should incorporate a user or
+/// team identifier into the request before caching.
 #[derive(Clone)]
 pub struct ResponseCache {
     redis: Client,

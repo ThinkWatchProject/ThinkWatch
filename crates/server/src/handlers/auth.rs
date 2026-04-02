@@ -18,6 +18,28 @@ pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
 ) -> Result<Json<LoginResponse>, AppError> {
+    // Input validation
+    if req.password.len() < 8 {
+        return Err(AppError::BadRequest("Password must be at least 8 characters".into()));
+    }
+    if !req.email.contains('@') || !req.email.contains('.') {
+        return Err(AppError::BadRequest("Invalid email format".into()));
+    }
+
+    // Rate limiting: per-email, max 10 attempts per minute
+    let rate_key = format!("auth_rate:{}", req.email);
+    let count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1)
+        .await
+        .unwrap_or(1);
+    if count == 1 {
+        let _: () = fred::interfaces::KeysInterface::expire(&state.redis, &rate_key, 60, None)
+            .await
+            .unwrap_or(());
+    }
+    if count > 10 {
+        return Err(AppError::BadRequest("Too many login attempts. Please try again later.".into()));
+    }
+
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1 AND is_active = true")
         .bind(&req.email)
         .fetch_optional(&state.db)
@@ -69,6 +91,14 @@ pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
+    // Input validation
+    if req.password.len() < 8 {
+        return Err(AppError::BadRequest("Password must be at least 8 characters".into()));
+    }
+    if !req.email.contains('@') || !req.email.contains('.') {
+        return Err(AppError::BadRequest("Invalid email format".into()));
+    }
+
     // Check if user already exists
     let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)")
         .bind(&req.email)

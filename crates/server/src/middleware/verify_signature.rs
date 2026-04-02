@@ -101,7 +101,7 @@ pub async fn verify_signature(
     }
 
     // Check nonce uniqueness (prevent replay)
-    let nonce_key = format!("nonce:{nonce}");
+    let nonce_key = format!("nonce:{user_id}:{nonce}");
     let was_set: bool = fred::interfaces::KeysInterface::set(
         &state.redis,
         &nonce_key,

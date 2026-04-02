@@ -36,3 +36,4 @@ sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 subtle = { workspace = true }
+url = { workspace = true }

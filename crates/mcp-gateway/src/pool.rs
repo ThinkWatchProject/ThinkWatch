@@ -144,6 +144,11 @@ impl ConnectionPool {
             .await
             .map_err(|e| PoolError::ParseError(e.to_string()))?;
 
+        // Validate JSON-RPC version
+        if json_resp.jsonrpc != "2.0" {
+            return Err(PoolError::ParseError("Invalid JSON-RPC version".into()));
+        }
+
         Ok(json_resp)
     }
 }

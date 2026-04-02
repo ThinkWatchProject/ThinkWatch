@@ -47,6 +47,21 @@ pub async fn create_user(
     State(state): State<AppState>,
     Json(req): Json<CreateUserByAdminRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
+    // Input validation
+    if req.password.len() < 8 {
+        return Err(AppError::BadRequest("Password must be at least 8 characters".into()));
+    }
+    if !req.email.contains('@') || !req.email.contains('.') {
+        return Err(AppError::BadRequest("Invalid email format".into()));
+    }
+
+    // Role escalation prevention
+    let role_name = req.role.as_deref().unwrap_or("developer");
+    let allowed_roles = ["developer", "viewer", "team_manager"];
+    if !allowed_roles.contains(&role_name) {
+        return Err(AppError::BadRequest("Cannot assign admin or super_admin role via API".into()));
+    }
+
     let exists = sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)")
         .bind(&req.email)
         .fetch_one(&state.db)
@@ -68,7 +83,6 @@ pub async fn create_user(
     .fetch_one(&state.db)
     .await?;
 
-    let role_name = req.role.as_deref().unwrap_or("developer");
     sqlx::query(
         r#"INSERT INTO user_roles (user_id, role_id, scope)
            SELECT $1, id, 'global' FROM roles WHERE name = $2"#,

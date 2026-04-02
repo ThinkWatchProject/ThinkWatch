@@ -10,6 +10,24 @@ use agent_bastion_common::models::Provider;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
+pub(crate) fn validate_url(url_str: &str) -> Result<(), AppError> {
+    let parsed = url::Url::parse(url_str).map_err(|_| AppError::BadRequest("Invalid URL".into()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AppError::BadRequest("URL must use http or https".into()));
+    }
+    if let Some(host) = parsed.host_str() {
+        let blocked = ["localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "[::1]"];
+        if blocked.iter().any(|b| host == *b) {
+            return Err(AppError::BadRequest("URL points to blocked address".into()));
+        }
+        // Block private IP ranges
+        if host.starts_with("10.") || host.starts_with("192.168.") || host.starts_with("172.") {
+            return Err(AppError::BadRequest("URL points to private network".into()));
+        }
+    }
+    Ok(())
+}
+
 fn encryption_key(state: &AppState) -> Result<[u8; 32], AppError> {
     crypto::parse_encryption_key(&state.config.encryption_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))
@@ -36,6 +54,9 @@ pub async fn create_provider(
     if req.name.is_empty() || req.base_url.is_empty() || req.api_key.is_empty() {
         return Err(AppError::BadRequest("name, base_url, and api_key are required".into()));
     }
+
+    // SSRF prevention: validate base_url
+    validate_url(&req.base_url)?;
 
     let key = encryption_key(&state)?;
     let encrypted_key = crypto::encrypt(req.api_key.as_bytes(), &key)

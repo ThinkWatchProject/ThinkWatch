@@ -1,6 +1,6 @@
 use agent_bastion_common::errors::AppError;
 use fred::clients::Client;
-use fred::interfaces::KeysInterface;
+use fred::interfaces::{KeysInterface, LuaInterface};
 
 /// Per-user/team token quota information.
 #[derive(Debug, Clone)]
@@ -125,6 +125,49 @@ impl QuotaManager {
             remaining,
             period,
         })
+    }
+
+    /// Atomically check quota and consume tokens in a single Redis round-trip.
+    /// Returns remaining tokens after consumption, or an error if quota would be exceeded.
+    pub async fn check_and_consume(&self, key: &str, tokens: u32) -> Result<u64, AppError> {
+        const LUA_QUOTA_CHECK_AND_CONSUME: &str = r#"
+local limit_key = KEYS[1]
+local usage_key = KEYS[2]
+local tokens = tonumber(ARGV[1])
+
+local limit = tonumber(redis.call('GET', limit_key) or '0')
+if limit <= 0 then return -1 end
+
+local used = tonumber(redis.call('GET', usage_key) or '0')
+if used + tokens > limit then return 0 end
+
+redis.call('INCRBY', usage_key, tokens)
+return limit - used - tokens
+"#;
+
+        let limit_key = Self::limit_key(key);
+        let usage_key = Self::usage_key(key);
+
+        let result: i64 = self
+            .redis
+            .eval::<i64, _, _, _>(
+                LUA_QUOTA_CHECK_AND_CONSUME,
+                vec![limit_key, usage_key],
+                vec![tokens.to_string()],
+            )
+            .await
+            .map_err(|e| {
+                tracing::warn!("Atomic quota check failed: {e}");
+                AppError::Internal(anyhow::anyhow!("Quota check failed"))
+            })?;
+
+        match result {
+            -1 => Ok(u64::MAX), // No limit set (unlimited)
+            0 => Err(AppError::BadRequest(
+                "Token quota exceeded for this month".into(),
+            )),
+            remaining => Ok(remaining as u64),
+        }
     }
 
     /// Set/update quota limit for a key.

@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use tower_http::catch_panic::CatchPanicLayer;
 use tower_http::cors::CorsLayer;
+use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -118,6 +119,7 @@ pub fn create_gateway_app(
         .merge(health)
         .merge(ai_routes)
         .merge(mcp_routes)
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB for large prompts
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             std::time::Duration::from_secs(120), // longer timeout for streaming
@@ -233,6 +235,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .merge(public_routes)
         .merge(user_routes)
         .merge(admin_routes)
+        .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1MB for console API
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             std::time::Duration::from_secs(30),

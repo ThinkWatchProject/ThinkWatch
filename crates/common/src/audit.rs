@@ -118,15 +118,15 @@ impl Default for AuditConfig {
     }
 }
 
-/// Async audit log dispatcher. Receives entries via channel, writes to Quickwit + syslog.
+/// Async audit log dispatcher. Receives entries via a bounded channel, writes to Quickwit + syslog.
 #[derive(Clone)]
 pub struct AuditLogger {
-    tx: mpsc::UnboundedSender<AuditEntry>,
+    tx: mpsc::Sender<AuditEntry>,
 }
 
 impl AuditLogger {
     pub fn new(config: AuditConfig) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::channel(10_000);
 
         tokio::spawn(audit_worker(config, rx));
 
@@ -134,13 +134,13 @@ impl AuditLogger {
     }
 
     pub fn log(&self, entry: AuditEntry) {
-        if let Err(e) = self.tx.send(entry) {
-            tracing::warn!("Audit log channel send failed: {e}");
+        if let Err(e) = self.tx.try_send(entry) {
+            tracing::warn!("Audit log channel send failed (buffer full or closed): {e}");
         }
     }
 }
 
-async fn audit_worker(config: AuditConfig, mut rx: mpsc::UnboundedReceiver<AuditEntry>) {
+async fn audit_worker(config: AuditConfig, mut rx: mpsc::Receiver<AuditEntry>) {
     let http_client = reqwest::Client::new();
     let syslog_socket = config.syslog_addr.as_ref().and_then(|_| {
         match UdpSocket::bind("0.0.0.0:0") {

@@ -32,6 +32,9 @@ pub async fn create_server(
         return Err(AppError::BadRequest("name and endpoint_url are required".into()));
     }
 
+    // SSRF prevention: validate endpoint_url
+    super::providers::validate_url(&req.endpoint_url)?;
+
     let auth_encrypted = if let Some(ref secret) = req.auth_secret {
         let key = crypto::parse_encryption_key(&state.config.encryption_key)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))?;
