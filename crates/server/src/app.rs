@@ -162,7 +162,8 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route("/api/auth/register", post(handlers::auth::register))
         .route("/api/auth/refresh", post(handlers::auth::refresh))
         .route("/api/auth/sso/authorize", get(handlers::sso::sso_authorize))
-        .route("/api/auth/sso/callback", get(handlers::sso::sso_callback));
+        .route("/api/auth/sso/callback", get(handlers::sso::sso_callback))
+        .route("/api/auth/sso/status", get(handlers::health::sso_status));
 
     // User-level routes (any authenticated user)
     // Signature verification runs on POST/DELETE/PATCH (skipped for GET)
@@ -183,6 +184,11 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             get(handlers::api_keys::get_key).delete(handlers::api_keys::revoke_key),
         )
         .route("/api/mcp/tools", get(handlers::mcp_tools::list_tools))
+        .route("/api/mcp/logs", get(handlers::mcp_logs::list_mcp_logs))
+        .route(
+            "/api/gateway/logs",
+            get(handlers::gateway_logs::list_gateway_logs),
+        )
         .route("/api/audit/logs", get(handlers::audit::list_audit_logs))
         .route("/api/analytics/usage", get(handlers::analytics::get_usage))
         .route(
@@ -212,7 +218,9 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         )
         .route(
             "/api/admin/providers/{id}",
-            get(handlers::providers::get_provider).delete(handlers::providers::delete_provider),
+            get(handlers::providers::get_provider)
+                .patch(handlers::providers::update_provider)
+                .delete(handlers::providers::delete_provider),
         )
         .route(
             "/api/mcp/servers",
@@ -220,7 +228,9 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         )
         .route(
             "/api/mcp/servers/{id}",
-            get(handlers::mcp_servers::get_server).delete(handlers::mcp_servers::delete_server),
+            get(handlers::mcp_servers::get_server)
+                .patch(handlers::mcp_servers::update_server)
+                .delete(handlers::mcp_servers::delete_server),
         )
         .route(
             "/api/mcp/servers/{id}/discover",

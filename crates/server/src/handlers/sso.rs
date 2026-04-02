@@ -149,6 +149,14 @@ pub async fn sso_callback(
             })),
     );
 
+    // Create signing key for HMAC request signing
+    let signing_key =
+        crate::middleware::verify_signature::create_signing_key(&state.redis, &user.id)
+            .await
+            .map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))
+            })?;
+
     // Redirect to frontend with tokens in URL fragment (never sent to server in subsequent requests)
     let frontend_url = state
         .config
@@ -158,10 +166,11 @@ pub async fn sso_callback(
         .unwrap_or("http://localhost:5173");
 
     let redirect_url = format!(
-        "{}/sso-callback#access_token={}&refresh_token={}&expires_in=900",
+        "{}/#access_token={}&refresh_token={}&signing_key={}&expires_in=900",
         frontend_url,
         urlencoding::encode(&access_token),
         urlencoding::encode(&refresh_token),
+        urlencoding::encode(&signing_key),
     );
 
     Ok(Redirect::temporary(&redirect_url))

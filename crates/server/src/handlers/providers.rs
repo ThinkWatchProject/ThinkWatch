@@ -86,6 +86,57 @@ pub async fn create_provider(
     Ok(Json(provider))
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateProviderRequest {
+    pub display_name: Option<String>,
+    pub base_url: Option<String>,
+    pub api_key: Option<String>,
+}
+
+pub async fn update_provider(
+    _auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateProviderRequest>,
+) -> Result<Json<Provider>, AppError> {
+    let existing = sqlx::query_as::<_, Provider>("SELECT * FROM providers WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound("Provider not found".into()))?;
+
+    let display_name = req
+        .display_name
+        .as_deref()
+        .unwrap_or(&existing.display_name);
+    let base_url = req.base_url.as_deref().unwrap_or(&existing.base_url);
+
+    if req.base_url.is_some() {
+        validate_url(base_url)?;
+    }
+
+    let api_key_encrypted = if let Some(ref new_key) = req.api_key {
+        let key = encryption_key(&state)?;
+        crypto::encrypt(new_key.as_bytes(), &key)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption failed: {e}")))?
+    } else {
+        existing.api_key_encrypted.clone()
+    };
+
+    let updated = sqlx::query_as::<_, Provider>(
+        r#"UPDATE providers SET display_name = $2, base_url = $3, api_key_encrypted = $4
+           WHERE id = $1 RETURNING *"#,
+    )
+    .bind(id)
+    .bind(display_name)
+    .bind(base_url)
+    .bind(&api_key_encrypted)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(updated))
+}
+
 pub async fn get_provider(
     _auth_user: AuthUser,
     State(state): State<AppState>,

@@ -63,6 +63,53 @@ pub async fn create_server(
     Ok(Json(server))
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct UpdateMcpServerRequest {
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub endpoint_url: Option<String>,
+}
+
+pub async fn update_server(
+    _auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateMcpServerRequest>,
+) -> Result<Json<McpServer>, AppError> {
+    let existing = sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound("MCP Server not found".into()))?;
+
+    let name = req.name.as_deref().unwrap_or(&existing.name);
+    let description = req
+        .description
+        .as_deref()
+        .or(existing.description.as_deref());
+    let endpoint_url = req
+        .endpoint_url
+        .as_deref()
+        .unwrap_or(&existing.endpoint_url);
+
+    if req.endpoint_url.is_some() {
+        super::providers::validate_url(endpoint_url)?;
+    }
+
+    let updated = sqlx::query_as::<_, McpServer>(
+        r#"UPDATE mcp_servers SET name = $2, description = $3, endpoint_url = $4
+           WHERE id = $1 RETURNING *"#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(description)
+    .bind(endpoint_url)
+    .fetch_one(&state.db)
+    .await?;
+
+    Ok(Json(updated))
+}
+
 pub async fn get_server(
     _auth_user: AuthUser,
     State(state): State<AppState>,

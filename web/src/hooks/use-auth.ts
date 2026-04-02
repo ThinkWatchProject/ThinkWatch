@@ -54,5 +54,12 @@ export function useAuth() {
     setUser(null);
   };
 
-  return { user, loading, login, logout };
+  const handleSsoCallback = useCallback(async (accessToken: string, refreshToken: string, signingKey: string) => {
+    localStorage.setItem('access_token', accessToken);
+    localStorage.setItem('refresh_token', refreshToken);
+    sessionStorage.setItem('signing_key', signingKey);
+    await fetchUser();
+  }, [fetchUser]);
+
+  return { user, loading, login, logout, handleSsoCallback };
 }

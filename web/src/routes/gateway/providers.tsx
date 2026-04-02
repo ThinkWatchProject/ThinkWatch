@@ -22,8 +22,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, Trash2 } from 'lucide-react';
-import { api, apiPost, apiDelete } from '@/lib/api';
+import { Plus, Trash2, Pencil } from 'lucide-react';
+import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 
 interface Provider {
   id: string;
@@ -56,6 +56,15 @@ export function ProvidersPage() {
   const [providerType, setProviderType] = useState('openai');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+
+  // Edit state
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editProvider, setEditProvider] = useState<Provider | null>(null);
+  const [editDisplayName, setEditDisplayName] = useState('');
+  const [editBaseUrl, setEditBaseUrl] = useState('');
+  const [editApiKey, setEditApiKey] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState('');
 
   const fetchProviders = async () => {
     try {
@@ -108,6 +117,36 @@ export function ProvidersPage() {
       await fetchProviders();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to delete provider');
+    }
+  };
+
+  const openEditDialog = (p: Provider) => {
+    setEditProvider(p);
+    setEditDisplayName(p.display_name);
+    setEditBaseUrl(p.base_url);
+    setEditApiKey('');
+    setEditError('');
+    setEditDialogOpen(true);
+  };
+
+  const handleEdit = async () => {
+    if (!editProvider) return;
+    setEditError('');
+    setEditSaving(true);
+    try {
+      const body: Record<string, string> = {
+        display_name: editDisplayName,
+        base_url: editBaseUrl,
+      };
+      if (editApiKey) body.api_key = editApiKey;
+      await apiPatch(`/api/admin/providers/${editProvider.id}`, body);
+      setEditDialogOpen(false);
+      setEditProvider(null);
+      await fetchProviders();
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Failed to update provider');
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -219,9 +258,14 @@ export function ProvidersPage() {
                       {new Date(p.created_at).toLocaleDateString()}
                     </TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="icon-sm" onClick={() => handleDelete(p.id)}>
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
+                      <div className="flex gap-1">
+                        <Button variant="ghost" size="icon-sm" onClick={() => openEditDialog(p)} title={t('common.edit')}>
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button variant="ghost" size="icon-sm" onClick={() => handleDelete(p.id)} title={t('common.delete')}>
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 ))}
@@ -230,6 +274,39 @@ export function ProvidersPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Edit Provider Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('providers.editProvider')}</DialogTitle>
+            <DialogDescription>{t('providers.editDescription')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {editError && (
+              <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{editError}</div>
+            )}
+            <div className="space-y-2">
+              <Label>{t('providers.displayName')}</Label>
+              <Input value={editDisplayName} onChange={(e) => setEditDisplayName(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label>{t('providers.baseUrl')}</Label>
+              <Input value={editBaseUrl} onChange={(e) => setEditBaseUrl(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label>{t('providers.apiKey')}</Label>
+              <Input type="password" value={editApiKey} onChange={(e) => setEditApiKey(e.target.value)} placeholder={t('providers.apiKeyUnchanged')} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>{t('common.cancel')}</Button>
+            <Button onClick={handleEdit} disabled={editSaving}>
+              {editSaving ? t('common.loading') : t('common.save')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

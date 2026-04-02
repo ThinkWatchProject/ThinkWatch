@@ -39,8 +39,9 @@ import {
   RotateCcw,
   Send,
   AlertCircle,
+  Pencil,
 } from 'lucide-react';
-import { api, apiPost, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 
 interface LogForwarder {
   id: string;
@@ -99,6 +100,18 @@ export function LogForwardersPage() {
   const [formWebhookUrl, setFormWebhookUrl] = useState('');
   const [formAuthHeader, setFormAuthHeader] = useState('');
   const [creating, setCreating] = useState(false);
+
+  // Edit state
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editForwarder, setEditForwarder] = useState<LogForwarder | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editAddress, setEditAddress] = useState('');
+  const [editFacility, setEditFacility] = useState('16');
+  const [editBrokerUrl, setEditBrokerUrl] = useState('');
+  const [editTopic, setEditTopic] = useState('');
+  const [editWebhookUrl, setEditWebhookUrl] = useState('');
+  const [editAuthHeader, setEditAuthHeader] = useState('');
+  const [saving, setSaving] = useState(false);
 
   const loadForwarders = useCallback(async () => {
     try {
@@ -188,6 +201,54 @@ export function LogForwardersPage() {
   const handleResetStats = async (id: string) => {
     await apiPost(`/api/admin/log-forwarders/${id}/reset-stats`, {});
     loadForwarders();
+  };
+
+  const openEditDialog = (f: LogForwarder) => {
+    setEditForwarder(f);
+    setEditName(f.name);
+    setEditAddress(f.config.address || '');
+    setEditFacility(f.config.facility || '16');
+    setEditBrokerUrl(f.config.broker_url || '');
+    setEditTopic(f.config.topic || '');
+    setEditWebhookUrl(f.config.url || '');
+    setEditAuthHeader(f.config.auth_header || '');
+    setEditDialogOpen(true);
+  };
+
+  const buildEditConfig = (): Record<string, string> => {
+    if (!editForwarder) return {};
+    switch (editForwarder.forwarder_type) {
+      case 'udp_syslog':
+      case 'tcp_syslog':
+        return { address: editAddress, facility: editFacility };
+      case 'kafka':
+        return { broker_url: editBrokerUrl, topic: editTopic };
+      case 'webhook': {
+        const cfg: Record<string, string> = { url: editWebhookUrl };
+        if (editAuthHeader) cfg.auth_header = editAuthHeader;
+        return cfg;
+      }
+      default:
+        return {};
+    }
+  };
+
+  const handleEdit = async () => {
+    if (!editForwarder) return;
+    setSaving(true);
+    try {
+      await apiPatch(`/api/admin/log-forwarders/${editForwarder.id}`, {
+        name: editName,
+        config: buildEditConfig(),
+      });
+      setEditDialogOpen(false);
+      setEditForwarder(null);
+      loadForwarders();
+    } catch {
+      // ignore
+    } finally {
+      setSaving(false);
+    }
   };
 
   return (
@@ -349,6 +410,14 @@ export function LogForwardersPage() {
                         <Button
                           variant="ghost"
                           size="icon"
+                          title={t('common.edit')}
+                          onClick={() => openEditDialog(f)}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
                           title={f.enabled ? t('logForwarders.pause') : t('logForwarders.resume')}
                           onClick={() => handleToggle(f.id)}
                         >
@@ -390,6 +459,67 @@ export function LogForwardersPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Edit Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('logForwarders.editForwarder')}</DialogTitle>
+            <DialogDescription>{t('logForwarders.editDescription')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            <div>
+              <Label>{t('common.name')}</Label>
+              <Input value={editName} onChange={(e) => setEditName(e.target.value)} />
+            </div>
+
+            {editForwarder && (editForwarder.forwarder_type === 'udp_syslog' || editForwarder.forwarder_type === 'tcp_syslog') && (
+              <>
+                <div>
+                  <Label>{t('logForwarders.address')}</Label>
+                  <Input value={editAddress} onChange={(e) => setEditAddress(e.target.value)} placeholder="127.0.0.1:514" />
+                </div>
+                <div>
+                  <Label>{t('logForwarders.facility')}</Label>
+                  <Input type="number" value={editFacility} onChange={(e) => setEditFacility(e.target.value)} />
+                </div>
+              </>
+            )}
+
+            {editForwarder?.forwarder_type === 'kafka' && (
+              <>
+                <div>
+                  <Label>{t('logForwarders.brokerUrl')}</Label>
+                  <Input value={editBrokerUrl} onChange={(e) => setEditBrokerUrl(e.target.value)} />
+                </div>
+                <div>
+                  <Label>{t('logForwarders.topic')}</Label>
+                  <Input value={editTopic} onChange={(e) => setEditTopic(e.target.value)} />
+                </div>
+              </>
+            )}
+
+            {editForwarder?.forwarder_type === 'webhook' && (
+              <>
+                <div>
+                  <Label>{t('logForwarders.webhookUrl')}</Label>
+                  <Input value={editWebhookUrl} onChange={(e) => setEditWebhookUrl(e.target.value)} />
+                </div>
+                <div>
+                  <Label>{t('logForwarders.authHeader')}</Label>
+                  <Input value={editAuthHeader} onChange={(e) => setEditAuthHeader(e.target.value)} />
+                </div>
+              </>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>{t('common.cancel')}</Button>
+            <Button onClick={handleEdit} disabled={saving || !editName}>
+              {saving ? t('common.loading') : t('common.save')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

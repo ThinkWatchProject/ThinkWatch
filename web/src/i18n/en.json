@@ -24,7 +24,8 @@
     "revoke": "Revoke",
     "copy": "Copy",
     "copied": "Copied!",
-    "done": "Done"
+    "done": "Done",
+    "edit": "Edit"
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -70,7 +71,15 @@
     "sessionsRevoked": "All sessions have been revoked. Please log in again.",
     "deleteAccount": "Delete Account",
     "deleteAccountConfirm": "This will permanently delete your account and all associated data. This action cannot be undone. Type your email to confirm:",
-    "accountDeleted": "Account deleted."
+    "accountDeleted": "Account deleted.",
+    "noAccount": "Don't have an account? Register",
+    "haveAccount": "Already have an account? Sign in",
+    "registerTitle": "Create Account",
+    "registerSubtitle": "Register for AgentBastion",
+    "displayName": "Display Name",
+    "register": "Register",
+    "registering": "Registering...",
+    "passwordTooShort": "Password must be at least 8 characters"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -111,7 +120,10 @@
     "creating": "Creating...",
     "createProvider": "Create Provider",
     "type": "Type",
-    "created": "Created"
+    "created": "Created",
+    "editProvider": "Edit Provider",
+    "editDescription": "Update provider settings.",
+    "apiKeyUnchanged": "Leave blank to keep current key"
   },
   "apiKeys": {
     "title": "API Keys",
@@ -166,7 +178,9 @@
     "dialogTitle": "Register MCP Server",
     "dialogDescription": "Connect a new MCP server to the gateway.",
     "registering": "Registering...",
-    "transport": "Transport"
+    "transport": "Transport",
+    "editServer": "Edit MCP Server",
+    "editDescription": "Update MCP server settings."
   },
   "mcpTools": {
     "title": "MCP Tools",
@@ -191,7 +205,9 @@
     "duration": "Duration",
     "status": "Status",
     "placeholder": "MCP call logging will be available in Phase 5.",
-    "placeholderHint": "Logs will include tool invocations, durations, and error tracking."
+    "placeholderHint": "Logs will include tool invocations, durations, and error tracking.",
+    "noLogs": "No MCP call logs yet.",
+    "noLogsHint": "Logs will appear here as MCP tools are invoked."
   },
   "analyticsUsage": {
     "title": "Usage Analytics",
@@ -304,7 +320,9 @@
     "latency": "Latency",
     "status": "Status",
     "placeholder": "Request logging will be available in Phase 5.",
-    "placeholderHint": "Logs will include token usage, cost tracking, and latency metrics."
+    "placeholderHint": "Logs will include token usage, cost tracking, and latency metrics.",
+    "filterModel": "Filter by model...",
+    "noLogs": "No gateway request logs yet."
   },
   "logForwarders": {
     "title": "Log Forwarding",
@@ -331,7 +349,9 @@
     "deleteConfirm": "Are you sure you want to delete this forwarder?",
     "allForwarders": "All Forwarders",
     "noForwarders": "No log forwarders configured yet.",
-    "noForwardersHint": "Add a forwarder to start sending audit logs to external systems."
+    "noForwardersHint": "Add a forwarder to start sending audit logs to external systems.",
+    "editForwarder": "Edit Forwarder",
+    "editDescription": "Update forwarder name and configuration."
   },
   "notFound": {
     "title": "404",

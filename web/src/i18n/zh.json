@@ -24,7 +24,8 @@
     "revoke": "撤销",
     "copy": "复制",
     "copied": "已复制！",
-    "done": "完成"
+    "done": "完成",
+    "edit": "编辑"
   },
   "nav": {
     "dashboard": "仪表盘",
@@ -70,7 +71,15 @@
     "sessionsRevoked": "所有会话已注销，请重新登录。",
     "deleteAccount": "删除账号",
     "deleteAccountConfirm": "此操作将永久删除您的账号及所有关联数据，且不可恢复。请输入您的邮箱以确认：",
-    "accountDeleted": "账号已删除。"
+    "accountDeleted": "账号已删除。",
+    "noAccount": "没有账号？注册",
+    "haveAccount": "已有账号？登录",
+    "registerTitle": "创建账号",
+    "registerSubtitle": "注册 AgentBastion 账号",
+    "displayName": "显示名称",
+    "register": "注册",
+    "registering": "注册中...",
+    "passwordTooShort": "密码至少需要 8 个字符"
   },
   "dashboard": {
     "title": "仪表盘",
@@ -111,7 +120,10 @@
     "creating": "创建中...",
     "createProvider": "创建提供商",
     "type": "类型",
-    "created": "创建时间"
+    "created": "创建时间",
+    "editProvider": "编辑提供商",
+    "editDescription": "更新提供商设置。",
+    "apiKeyUnchanged": "留空以保留当前密钥"
   },
   "apiKeys": {
     "title": "API 密钥",
@@ -166,7 +178,9 @@
     "dialogTitle": "注册 MCP 服务器",
     "dialogDescription": "连接新的 MCP 服务器到网关。",
     "registering": "注册中...",
-    "transport": "传输"
+    "transport": "传输",
+    "editServer": "编辑 MCP 服务器",
+    "editDescription": "更新 MCP 服务器设置。"
   },
   "mcpTools": {
     "title": "MCP 工具",
@@ -191,7 +205,9 @@
     "duration": "耗时",
     "status": "状态",
     "placeholder": "MCP 调用日志将在第 5 阶段提供。",
-    "placeholderHint": "日志将包含工具调用、耗时和错误追踪。"
+    "placeholderHint": "日志将包含工具调用、耗时和错误追踪。",
+    "noLogs": "暂无 MCP 调用日志。",
+    "noLogsHint": "MCP 工具被调用后日志将显示在此处。"
   },
   "analyticsUsage": {
     "title": "用量分析",
@@ -304,7 +320,9 @@
     "latency": "延迟",
     "status": "状态",
     "placeholder": "请求日志将在第 5 阶段提供。",
-    "placeholderHint": "日志将包含令牌使用、成本追踪和延迟指标。"
+    "placeholderHint": "日志将包含令牌使用、成本追踪和延迟指标。",
+    "filterModel": "按模型筛选...",
+    "noLogs": "暂无网关请求日志。"
   },
   "logForwarders": {
     "title": "日志转发",
@@ -331,7 +349,9 @@
     "deleteConfirm": "确定要删除此转发器吗？",
     "allForwarders": "所有转发器",
     "noForwarders": "尚未配置日志转发器。",
-    "noForwardersHint": "添加转发器以开始将审计日志发送到外部系统。"
+    "noForwardersHint": "添加转发器以开始将审计日志发送到外部系统。",
+    "editForwarder": "编辑转发器",
+    "editDescription": "更新转发器名称和配置。"
   },
   "notFound": {
     "title": "404",

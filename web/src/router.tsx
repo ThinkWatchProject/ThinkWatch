@@ -1,3 +1,4 @@
+import { useEffect } from 'react';
 import {
   createRouter,
   createRootRoute,
@@ -8,6 +9,7 @@ import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/hooks/use-auth';
 import { AppShell } from '@/components/layout/app-shell';
 import { LoginPage } from '@/routes/login';
+import { RegisterPage } from '@/routes/register';
 import { DashboardPage } from '@/routes/dashboard';
 import { ProvidersPage } from '@/routes/gateway/providers';
 import { ModelsPage } from '@/routes/gateway/models';
@@ -27,7 +29,22 @@ import { ProfilePage } from '@/routes/profile';
 
 function RootComponent() {
   const { t } = useTranslation();
-  const { user, loading, login, logout } = useAuth();
+  const { user, loading, login, logout, handleSsoCallback } = useAuth();
+
+  // Handle SSO callback: tokens in URL fragment
+  useEffect(() => {
+    const hash = window.location.hash;
+    if (hash.includes('access_token=')) {
+      const params = new URLSearchParams(hash.slice(1));
+      const accessToken = params.get('access_token');
+      const refreshToken = params.get('refresh_token');
+      const signingKey = params.get('signing_key');
+      if (accessToken && refreshToken && signingKey) {
+        handleSsoCallback(accessToken, refreshToken, signingKey);
+        window.history.replaceState(null, '', '/');
+      }
+    }
+  }, [handleSsoCallback]);
 
   if (loading) {
     return (
@@ -159,6 +176,15 @@ const profileRoute = createRoute({
   component: ProfilePage,
 });
 
+const registerRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/register',
+  component: () => {
+    const navigate = registerRoute.useNavigate();
+    return <RegisterPage onRegistered={() => navigate({ to: '/' })} />;
+  },
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   providersRoute,
@@ -176,6 +202,7 @@ const routeTree = rootRoute.addChildren([
   settingsRoute,
   logForwardersRoute,
   profileRoute,
+  registerRoute,
 ]);
 
 export const router = createRouter({ routeTree });

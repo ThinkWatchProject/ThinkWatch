@@ -22,8 +22,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, Trash2, Search } from 'lucide-react';
-import { api, apiPost, apiDelete } from '@/lib/api';
+import { Plus, Trash2, Search, Pencil } from 'lucide-react';
+import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 
 interface McpServer {
   id: string;
@@ -58,6 +58,15 @@ export function McpServersPage() {
   const [transportType, setTransportType] = useState('streamable_http');
   const [authType, setAuthType] = useState('none');
   const [authSecret, setAuthSecret] = useState('');
+
+  // Edit state
+  const [editDialogOpen, setEditDialogOpen] = useState(false);
+  const [editServer, setEditServer] = useState<McpServer | null>(null);
+  const [editName, setEditName] = useState('');
+  const [editDescription, setEditDescription] = useState('');
+  const [editEndpointUrl, setEditEndpointUrl] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+  const [editError, setEditError] = useState('');
 
   const fetchServers = async () => {
     try {
@@ -121,6 +130,35 @@ export function McpServersPage() {
       await fetchServers();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to discover tools');
+    }
+  };
+
+  const openEditDialog = (s: McpServer) => {
+    setEditServer(s);
+    setEditName(s.name);
+    setEditDescription(s.description);
+    setEditEndpointUrl(s.endpoint_url);
+    setEditError('');
+    setEditDialogOpen(true);
+  };
+
+  const handleEdit = async () => {
+    if (!editServer) return;
+    setEditError('');
+    setEditSaving(true);
+    try {
+      await apiPatch(`/api/mcp/servers/${editServer.id}`, {
+        name: editName,
+        description: editDescription,
+        endpoint_url: editEndpointUrl,
+      });
+      setEditDialogOpen(false);
+      setEditServer(null);
+      await fetchServers();
+    } catch (err) {
+      setEditError(err instanceof Error ? err.message : 'Failed to update server');
+    } finally {
+      setEditSaving(false);
     }
   };
 
@@ -247,6 +285,9 @@ export function McpServersPage() {
                     <TableCell className="text-sm">{s.tools_count}</TableCell>
                     <TableCell>
                       <div className="flex gap-1">
+                        <Button variant="ghost" size="icon-sm" onClick={() => openEditDialog(s)} title={t('common.edit')}>
+                          <Pencil className="h-4 w-4" />
+                        </Button>
                         <Button variant="ghost" size="icon-sm" onClick={() => handleDiscover(s.id)} title={t('mcpServers.discoverTools')}>
                           <Search className="h-4 w-4" />
                         </Button>
@@ -262,6 +303,39 @@ export function McpServersPage() {
           )}
         </CardContent>
       </Card>
+
+      {/* Edit MCP Server Dialog */}
+      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('mcpServers.editServer')}</DialogTitle>
+            <DialogDescription>{t('mcpServers.editDescription')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4">
+            {editError && (
+              <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{editError}</div>
+            )}
+            <div className="space-y-2">
+              <Label htmlFor="edit-mcp-name">{t('common.name')}</Label>
+              <Input id="edit-mcp-name" value={editName} onChange={(e) => setEditName(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-mcp-desc">{t('common.description')}</Label>
+              <Input id="edit-mcp-desc" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-mcp-url">{t('mcpServers.endpointUrl')}</Label>
+              <Input id="edit-mcp-url" value={editEndpointUrl} onChange={(e) => setEditEndpointUrl(e.target.value)} />
+            </div>
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>{t('common.cancel')}</Button>
+            <Button onClick={handleEdit} disabled={editSaving}>
+              {editSaving ? t('common.loading') : t('common.save')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

@@ -56,6 +56,41 @@ async function signRequest(
   };
 }
 
+// --- Token Refresh ---
+
+let refreshPromise: Promise<boolean> | null = null;
+
+async function tryRefreshToken(): Promise<boolean> {
+  // Deduplicate concurrent refresh attempts
+  if (refreshPromise) return refreshPromise;
+
+  refreshPromise = (async () => {
+    const refreshToken = localStorage.getItem('refresh_token');
+    if (!refreshToken) return false;
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: refreshToken }),
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      localStorage.setItem('access_token', data.access_token);
+      localStorage.setItem('refresh_token', data.refresh_token);
+      sessionStorage.setItem('signing_key', data.signing_key);
+      return true;
+    } catch {
+      return false;
+    }
+  })();
+
+  try {
+    return await refreshPromise;
+  } finally {
+    refreshPromise = null;
+  }
+}
+
 // --- API Client ---
 
 export async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
@@ -78,6 +113,24 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
   });
 
   if (res.status === 401) {
+    // Attempt token refresh before logging out
+    const refreshed = await tryRefreshToken();
+    if (refreshed) {
+      // Retry the original request with new token
+      const newToken = localStorage.getItem('access_token');
+      const retrySigHeaders = await signRequest(method, path, bodyStr);
+      const retryRes = await fetch(`${API_BASE}${path}`, {
+        method,
+        headers: {
+          'Content-Type': 'application/json',
+          ...(newToken ? { Authorization: `Bearer ${newToken}` } : {}),
+          ...retrySigHeaders,
+          ...options.headers,
+        },
+        body: bodyStr,
+      });
+      if (retryRes.ok) return retryRes.json();
+    }
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
     sessionStorage.removeItem('signing_key');

@@ -1,10 +1,12 @@
-import { useState, type FormEvent } from 'react';
+import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Shield } from 'lucide-react';
+
+const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
 interface LoginPageProps {
   onLogin: (email: string, password: string) => Promise<void>;
@@ -16,6 +18,15 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
+  const [ssoEnabled, setSsoEnabled] = useState(false);
+
+  useEffect(() => {
+    // Use public endpoint (no auth required)
+    fetch(`${API_BASE}/api/auth/sso/status`)
+      .then((r) => r.json())
+      .then((d: { enabled: boolean }) => setSsoEnabled(d.enabled))
+      .catch(() => {});
+  }, []);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -28,6 +39,10 @@ export function LoginPage({ onLogin }: LoginPageProps) {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleSsoLogin = () => {
+    window.location.href = `${API_BASE}/api/auth/sso/authorize`;
   };
 
   return (
@@ -79,9 +94,14 @@ export function LoginPage({ onLogin }: LoginPageProps) {
                 <span className="bg-card px-2 text-muted-foreground">{t('auth.or')}</span>
               </div>
             </div>
-            <Button type="button" variant="outline" className="w-full" disabled>
+            <Button type="button" variant="outline" className="w-full" disabled={!ssoEnabled} onClick={handleSsoLogin}>
               {t('auth.signInWith')}
             </Button>
+            <div className="text-center">
+              <a href="/register" className="text-sm text-muted-foreground hover:text-foreground">
+                {t('auth.noAccount')}
+              </a>
+            </div>
           </form>
         </CardContent>
       </Card>

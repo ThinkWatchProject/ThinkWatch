@@ -11,6 +11,13 @@ pub async fn health_check() -> Json<Value> {
     }))
 }
 
+/// GET /api/auth/sso/status — public, returns whether SSO is enabled (no auth required).
+pub async fn sso_status(State(state): State<AppState>) -> Json<Value> {
+    Json(json!({
+        "enabled": state.config.oidc_enabled(),
+    }))
+}
+
 #[derive(Debug, Serialize)]
 pub struct ServiceHealth {
     pub postgres: bool,
