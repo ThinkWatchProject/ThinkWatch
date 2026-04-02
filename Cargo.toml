@@ -11,7 +11,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "BUSL-1.1"
 
 [workspace.dependencies]
 # Web framework

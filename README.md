@@ -150,4 +150,10 @@ Contributions are welcome. Please open an issue to discuss before submitting a P
 
 ## License
 
-[MIT](LICENSE)
+AgentBastion is source-available under the [Business Source License 1.1](LICENSE).
+Non-production use is free. Production use is free up to `10,000,000`
+Billable Tokens per UTC calendar month; above that threshold, a commercial
+license is required and priced by usage volume.
+
+See [LICENSING.md](LICENSING.md) for the production-use threshold, the Billable
+Token definition, and the changeover to `GPL-2.0-or-later`.

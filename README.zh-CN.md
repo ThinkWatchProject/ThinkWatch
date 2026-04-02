@@ -148,6 +148,12 @@ AgentBastion/
 
 欢迎贡献。提交大型变更前请先开 Issue 讨论。
 
-## 开源协议
+## 授权协议
 
-[MIT](LICENSE)
+AgentBastion 采用 [Business Source License 1.1](LICENSE) 进行源码可见分发。
+非生产用途可免费使用。生产用途在每个 UTC 自然月内不超过
+`10,000,000` Billable Tokens 时可免费使用；超过该阈值后，需购买按
+使用量计费的商业授权。
+
+具体的生产阈值、Billable Tokens 定义以及后续切换到
+`GPL-2.0-or-later` 的规则，见 [LICENSING.md](LICENSING.md)。
