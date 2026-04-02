@@ -1,10 +1,15 @@
 use chrono::Utc;
 use serde::Serialize;
+use sqlx::PgPool;
+use std::collections::HashMap;
 use std::net::UdpSocket;
-use tokio::sync::mpsc;
+use std::sync::Arc;
+use tokio::sync::{mpsc, RwLock};
 use uuid::Uuid;
 
-/// Audit log entry sent to Quickwit and optionally syslog.
+use crate::models::LogForwarder;
+
+/// Audit log entry sent to Quickwit and dynamically configured forwarders.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEntry {
     pub id: String,
@@ -89,7 +94,6 @@ mod tests {
         assert_eq!(entry.detail, Some(detail));
         assert_eq!(entry.ip_address.as_deref(), Some("10.0.0.1"));
         assert_eq!(entry.user_agent.as_deref(), Some("curl/8.0"));
-        // id and created_at should be populated automatically
         assert!(!entry.id.is_empty());
         assert!(!entry.created_at.is_empty());
     }
@@ -101,10 +105,6 @@ pub struct AuditConfig {
     pub quickwit_url: Option<String>,
     /// Quickwit index ID
     pub quickwit_index: String,
-    /// Syslog server address, e.g. "127.0.0.1:514"
-    pub syslog_addr: Option<String>,
-    /// Syslog facility (default: local0)
-    pub syslog_facility: u8,
 }
 
 impl Default for AuditConfig {
@@ -112,25 +112,49 @@ impl Default for AuditConfig {
         Self {
             quickwit_url: None,
             quickwit_index: "audit_logs".into(),
-            syslog_addr: None,
-            syslog_facility: 16, // local0
         }
     }
 }
 
-/// Async audit log dispatcher. Receives entries via a bounded channel, writes to Quickwit + syslog.
+// ---------------------------------------------------------------------------
+// Forwarder runtime state — one per active forwarder row
+// ---------------------------------------------------------------------------
+
+struct ForwarderRuntime {
+    config: LogForwarder,
+    udp_socket: Option<UdpSocket>,
+}
+
+/// Shared forwarder registry, reloaded periodically from the database.
+type ForwarderRegistry = Arc<RwLock<HashMap<Uuid, ForwarderRuntime>>>;
+
+/// Async audit log dispatcher. Receives entries via a bounded channel,
+/// writes to Quickwit + DB-configured forwarders (syslog, kafka, webhook).
 #[derive(Clone)]
 pub struct AuditLogger {
     tx: mpsc::Sender<AuditEntry>,
+    db: Option<PgPool>,
+    registry: ForwarderRegistry,
 }
 
 impl AuditLogger {
-    pub fn new(config: AuditConfig) -> Self {
+    pub fn new(config: AuditConfig, db: Option<PgPool>) -> Self {
         let (tx, rx) = mpsc::channel(10_000);
+        let registry: ForwarderRegistry = Arc::new(RwLock::new(HashMap::new()));
 
-        tokio::spawn(audit_worker(config, rx));
+        // Spawn the background worker
+        tokio::spawn(audit_worker(config, rx, db.clone(), registry.clone()));
 
-        Self { tx }
+        // Spawn periodic forwarder reload (every 10s)
+        if let Some(pool) = &db {
+            let pool = pool.clone();
+            let reg = registry.clone();
+            tokio::spawn(async move {
+                reload_forwarders_loop(pool, reg).await;
+            });
+        }
+
+        Self { tx, db, registry }
     }
 
     pub fn log(&self, entry: AuditEntry) {
@@ -138,19 +162,61 @@ impl AuditLogger {
             tracing::warn!("Audit log channel send failed (buffer full or closed): {e}");
         }
     }
+
+    /// Force-reload forwarder configs from DB (called after CRUD ops).
+    pub async fn reload_forwarders(&self) {
+        if let Some(ref db) = self.db {
+            reload_forwarders(db, &self.registry).await;
+        }
+    }
 }
 
-async fn audit_worker(config: AuditConfig, mut rx: mpsc::Receiver<AuditEntry>) {
-    let http_client = reqwest::Client::new();
-    let syslog_socket = config.syslog_addr.as_ref().and_then(|_| {
-        match UdpSocket::bind("0.0.0.0:0") {
-            Ok(s) => Some(s),
-            Err(e) => {
-                tracing::warn!("Failed to bind syslog UDP socket: {e}");
-                None
-            }
+/// Periodically reload forwarder configs from the database.
+async fn reload_forwarders_loop(db: PgPool, registry: ForwarderRegistry) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    loop {
+        interval.tick().await;
+        reload_forwarders(&db, &registry).await;
+    }
+}
+
+async fn reload_forwarders(db: &PgPool, registry: &ForwarderRegistry) {
+    let rows = match sqlx::query_as::<_, LogForwarder>("SELECT * FROM log_forwarders")
+        .fetch_all(db)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("Failed to load log forwarders from DB: {e}");
+            return;
         }
-    });
+    };
+
+    let mut map = HashMap::new();
+    for row in rows {
+        let udp_socket = if row.forwarder_type == "udp_syslog" && row.enabled {
+            UdpSocket::bind("0.0.0.0:0").ok()
+        } else {
+            None
+        };
+        map.insert(row.id, ForwarderRuntime { config: row, udp_socket });
+    }
+
+    let mut guard = registry.write().await;
+    *guard = map;
+}
+
+// ---------------------------------------------------------------------------
+// Background worker
+// ---------------------------------------------------------------------------
+
+async fn audit_worker(
+    config: AuditConfig,
+    mut rx: mpsc::Receiver<AuditEntry>,
+    db: Option<PgPool>,
+    registry: ForwarderRegistry,
+) {
+    let http_client = reqwest::Client::new();
 
     // Buffer for batching Quickwit ingests
     let mut batch: Vec<AuditEntry> = Vec::with_capacity(64);
@@ -159,12 +225,9 @@ async fn audit_worker(config: AuditConfig, mut rx: mpsc::Receiver<AuditEntry>) {
     loop {
         tokio::select! {
             Some(entry) = rx.recv() => {
-                // Send to syslog immediately (low-latency requirement)
-                if let (Some(addr), Some(sock)) = (&config.syslog_addr, &syslog_socket) {
-                    send_syslog(sock, addr, &entry, config.syslog_facility);
-                }
+                // Forward to all enabled forwarders immediately
+                forward_to_all(&http_client, &registry, &db, &entry).await;
                 batch.push(entry);
-                // Flush if batch is large enough
                 if batch.len() >= 50 {
                     flush_to_quickwit(&http_client, &config, &mut batch).await;
                 }
@@ -178,6 +241,203 @@ async fn audit_worker(config: AuditConfig, mut rx: mpsc::Receiver<AuditEntry>) {
         }
     }
 }
+
+/// Forward a single entry to all enabled forwarders.
+async fn forward_to_all(
+    http_client: &reqwest::Client,
+    registry: &ForwarderRegistry,
+    db: &Option<PgPool>,
+    entry: &AuditEntry,
+) {
+    let guard = registry.read().await;
+    for (id, runtime) in guard.iter() {
+        if !runtime.config.enabled {
+            continue;
+        }
+        let result = match runtime.config.forwarder_type.as_str() {
+            "udp_syslog" => send_udp_syslog(runtime, entry),
+            "tcp_syslog" => send_tcp_syslog(&runtime.config, entry).await,
+            "kafka" => send_kafka(http_client, &runtime.config, entry).await,
+            "webhook" => send_webhook(http_client, &runtime.config, entry).await,
+            other => {
+                tracing::warn!("Unknown forwarder type: {other}");
+                Err(format!("Unknown forwarder type: {other}"))
+            }
+        };
+
+        // Update stats in DB (fire-and-forget)
+        if let Some(pool) = &db {
+            match result {
+                Ok(()) => {
+                    let _ = sqlx::query(
+                        "UPDATE log_forwarders SET sent_count = sent_count + 1, last_sent_at = now(), updated_at = now() WHERE id = $1"
+                    )
+                    .bind(id)
+                    .execute(pool)
+                    .await;
+                }
+                Err(ref err_msg) => {
+                    let _ = sqlx::query(
+                        "UPDATE log_forwarders SET error_count = error_count + 1, last_error = $2, updated_at = now() WHERE id = $1"
+                    )
+                    .bind(id)
+                    .bind(err_msg)
+                    .execute(pool)
+                    .await;
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Forwarder implementations
+// ---------------------------------------------------------------------------
+
+fn send_udp_syslog(runtime: &ForwarderRuntime, entry: &AuditEntry) -> Result<(), String> {
+    let addr = runtime.config.config.get("address")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'address' in udp_syslog config")?;
+    let facility: u8 = runtime.config.config.get("facility")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(16) as u8; // default: local0
+
+    let socket = runtime.udp_socket.as_ref()
+        .ok_or("UDP socket not initialized")?;
+
+    let severity = 6u8; // informational
+    let priority = facility * 8 + severity;
+    let hostname = "agent-bastion";
+    let app_name = "audit";
+    let msg_id = &entry.action;
+
+    let structured_data = format!(
+        "[audit@0 user_id=\"{}\" action=\"{}\" resource=\"{}\" ip=\"{}\"]",
+        entry.user_id.as_deref().unwrap_or("-"),
+        entry.action,
+        entry.resource.as_deref().unwrap_or("-"),
+        entry.ip_address.as_deref().unwrap_or("-"),
+    );
+
+    let message = format!(
+        "<{priority}>1 {timestamp} {hostname} {app_name} - {msg_id} {structured_data} {action} on {resource}",
+        priority = priority,
+        timestamp = &entry.created_at,
+        hostname = hostname,
+        app_name = app_name,
+        msg_id = msg_id,
+        structured_data = structured_data,
+        action = entry.action,
+        resource = entry.resource.as_deref().unwrap_or("-"),
+    );
+
+    socket.send_to(message.as_bytes(), addr)
+        .map(|_| ())
+        .map_err(|e| format!("Syslog UDP send failed: {e}"))
+}
+
+async fn send_tcp_syslog(config: &LogForwarder, entry: &AuditEntry) -> Result<(), String> {
+    let addr = config.config.get("address")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'address' in tcp_syslog config")?;
+    let facility: u8 = config.config.get("facility")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(16) as u8;
+
+    let severity = 6u8;
+    let priority = facility * 8 + severity;
+
+    let structured_data = format!(
+        "[audit@0 user_id=\"{}\" action=\"{}\" resource=\"{}\" ip=\"{}\"]",
+        entry.user_id.as_deref().unwrap_or("-"),
+        entry.action,
+        entry.resource.as_deref().unwrap_or("-"),
+        entry.ip_address.as_deref().unwrap_or("-"),
+    );
+
+    let message = format!(
+        "<{priority}>1 {ts} agent-bastion audit - {action} {sd} {action} on {resource}\n",
+        priority = priority,
+        ts = &entry.created_at,
+        action = entry.action,
+        sd = structured_data,
+        resource = entry.resource.as_deref().unwrap_or("-"),
+    );
+
+    let mut stream = tokio::net::TcpStream::connect(addr).await
+        .map_err(|e| format!("TCP syslog connect failed: {e}"))?;
+    tokio::io::AsyncWriteExt::write_all(&mut stream, message.as_bytes()).await
+        .map_err(|e| format!("TCP syslog write failed: {e}"))
+}
+
+async fn send_kafka(
+    client: &reqwest::Client,
+    config: &LogForwarder,
+    entry: &AuditEntry,
+) -> Result<(), String> {
+    // Kafka via REST proxy (Confluent-compatible)
+    let broker_url = config.config.get("broker_url")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'broker_url' in kafka config")?;
+    let topic = config.config.get("topic")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'topic' in kafka config")?;
+
+    let payload = serde_json::json!({
+        "records": [{
+            "value": entry
+        }]
+    });
+
+    let url = format!("{}/topics/{}", broker_url.trim_end_matches('/'), topic);
+    let resp = client.post(&url)
+        .header("Content-Type", "application/vnd.kafka.json.v2+json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Kafka REST proxy request failed: {e}"))?;
+
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("Kafka REST proxy returned error: {body}"))
+    }
+}
+
+async fn send_webhook(
+    client: &reqwest::Client,
+    config: &LogForwarder,
+    entry: &AuditEntry,
+) -> Result<(), String> {
+    let url = config.config.get("url")
+        .and_then(|v| v.as_str())
+        .ok_or("Missing 'url' in webhook config")?;
+
+    let mut req = client.post(url)
+        .header("Content-Type", "application/json")
+        .json(entry);
+
+    // Optional auth header
+    if let Some(token) = config.config.get("auth_header").and_then(|v| v.as_str()) {
+        req = req.header("Authorization", token);
+    }
+
+    let resp = req.send().await
+        .map_err(|e| format!("Webhook request failed: {e}"))?;
+
+    if resp.status().is_success() {
+        Ok(())
+    } else {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        Err(format!("Webhook returned {status}: {body}"))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Quickwit (unchanged)
+// ---------------------------------------------------------------------------
 
 fn sanitize_detail(detail: &mut Option<serde_json::Value>) {
     if let Some(serde_json::Value::Object(map)) = detail {
@@ -198,12 +458,10 @@ async fn flush_to_quickwit(
         return;
     };
 
-    // Sanitize sensitive fields before sending
     for entry in batch.iter_mut() {
         sanitize_detail(&mut entry.detail);
     }
 
-    // NDJSON format
     let ndjson: String = batch
         .iter()
         .filter_map(|e| serde_json::to_string(e).ok())
@@ -235,44 +493,10 @@ async fn flush_to_quickwit(
     batch.clear();
 }
 
-fn send_syslog(socket: &UdpSocket, addr: &str, entry: &AuditEntry, facility: u8) {
-    // RFC 5424 syslog message
-    let severity = 6u8; // informational
-    let priority = facility * 8 + severity;
-    let hostname = "agent-bastion";
-    let app_name = "audit";
-    let msg_id = &entry.action;
-
-    let structured_data = format!(
-        "[audit@0 user_id=\"{}\" action=\"{}\" resource=\"{}\" ip=\"{}\"]",
-        entry.user_id.as_deref().unwrap_or("-"),
-        entry.action,
-        entry.resource.as_deref().unwrap_or("-"),
-        entry.ip_address.as_deref().unwrap_or("-"),
-    );
-
-    let message = format!(
-        "<{priority}>1 {timestamp} {hostname} {app_name} - {msg_id} {structured_data} {action} on {resource}",
-        priority = priority,
-        timestamp = &entry.created_at,
-        hostname = hostname,
-        app_name = app_name,
-        msg_id = msg_id,
-        structured_data = structured_data,
-        action = entry.action,
-        resource = entry.resource.as_deref().unwrap_or("-"),
-    );
-
-    if let Err(e) = socket.send_to(message.as_bytes(), addr) {
-        tracing::warn!("Syslog send failed: {e}");
-    }
-}
-
 /// Initialize the Quickwit index (create if not exists). Call once at startup.
 pub async fn ensure_quickwit_index(quickwit_url: &str, index_id: &str) {
     let client = reqwest::Client::new();
 
-    // Check if index exists
     let check_url = format!("{}/api/v1/indexes/{}", quickwit_url, index_id);
     match client.get(&check_url).send().await {
         Ok(resp) if resp.status().is_success() => {
@@ -282,7 +506,6 @@ pub async fn ensure_quickwit_index(quickwit_url: &str, index_id: &str) {
         _ => {}
     }
 
-    // Create index from embedded config
     let index_config = include_str!("../../../deploy/quickwit/audit_logs_index.yaml");
     let create_url = format!("{}/api/v1/indexes", quickwit_url);
 

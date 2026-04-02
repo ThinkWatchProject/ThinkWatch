@@ -40,7 +40,7 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let audit_logger = AuditLogger::new(config.audit_config());
+    let audit_logger = AuditLogger::new(config.audit_config(), Some(pool.clone()));
 
     // Initialize OIDC if configured (all fields validated by oidc_enabled())
     let oidc_manager = if config.oidc_enabled() {

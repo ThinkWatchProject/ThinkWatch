@@ -176,7 +176,6 @@ pub async fn get_oidc_settings(
 pub struct AuditConfigResponse {
     pub quickwit_url: Option<String>,
     pub quickwit_index: String,
-    pub syslog_addr: Option<String>,
 }
 
 pub async fn get_audit_settings(
@@ -186,6 +185,5 @@ pub async fn get_audit_settings(
     Json(AuditConfigResponse {
         quickwit_url: state.config.quickwit_url.clone(),
         quickwit_index: state.config.quickwit_index.clone(),
-        syslog_addr: state.config.syslog_addr.clone(),
     })
 }

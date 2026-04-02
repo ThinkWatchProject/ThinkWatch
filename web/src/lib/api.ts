@@ -96,5 +96,8 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
 export const apiPost = <T>(path: string, body: unknown) =>
   api<T>(path, { method: 'POST', body });
 
+export const apiPatch = <T>(path: string, body: unknown) =>
+  api<T>(path, { method: 'PATCH', body });
+
 export const apiDelete = <T>(path: string) =>
   api<T>(path, { method: 'DELETE' });

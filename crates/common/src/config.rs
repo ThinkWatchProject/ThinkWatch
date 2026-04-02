@@ -19,9 +19,6 @@ pub struct AppConfig {
     pub quickwit_url: Option<String>,
     pub quickwit_index: String,
 
-    // Syslog (audit log forwarding)
-    pub syslog_addr: Option<String>,
-
     // OIDC / SSO (e.g. Zitadel)
     pub oidc_issuer_url: Option<String>,
     pub oidc_client_id: Option<String>,
@@ -61,9 +58,6 @@ impl AppConfig {
             quickwit_index: std::env::var("QUICKWIT_INDEX")
                 .unwrap_or_else(|_| "audit_logs".into()),
 
-            // Syslog
-            syslog_addr: std::env::var("SYSLOG_ADDR").ok(),
-
             // OIDC
             oidc_issuer_url: std::env::var("OIDC_ISSUER_URL").ok(),
             oidc_client_id: std::env::var("OIDC_CLIENT_ID").ok(),
@@ -90,8 +84,6 @@ impl AppConfig {
         crate::audit::AuditConfig {
             quickwit_url: self.quickwit_url.clone(),
             quickwit_index: self.quickwit_index.clone(),
-            syslog_addr: self.syslog_addr.clone(),
-            ..Default::default()
         }
     }
 

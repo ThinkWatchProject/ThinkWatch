@@ -25,6 +25,7 @@ import {
   Users,
   Shield,
   Settings,
+  Forward,
 } from 'lucide-react';
 import { useNavigate, useLocation } from '@tanstack/react-router';
 
@@ -76,6 +77,7 @@ const navGroups: NavGroup[] = [
     items: [
       { titleKey: 'nav.users', icon: Users, href: '/admin/users' },
       { titleKey: 'nav.roles', icon: Shield, href: '/admin/roles' },
+      { titleKey: 'nav.logForwarders', icon: Forward, href: '/admin/log-forwarders' },
       { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings' },
     ],
   },

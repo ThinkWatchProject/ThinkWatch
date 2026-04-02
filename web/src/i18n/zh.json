@@ -45,7 +45,8 @@
     "admin": "管理",
     "users": "用户",
     "roles": "角色",
-    "settings": "设置"
+    "settings": "设置",
+    "logForwarders": "日志转发"
   },
   "auth": {
     "signIn": "登录",
@@ -284,7 +285,9 @@
     "clientId": "客户端 ID",
     "auditTitle": "审计配置",
     "quickwit": "Quickwit",
-    "syslog": "Syslog",
+    "logForwarding": "日志转发",
+    "logForwardingHint": "Syslog、Kafka、Webhook 目标通过日志转发页面配置。",
+    "manage": "管理",
     "connected": "已连接",
     "disconnected": "已断开"
   },
@@ -302,6 +305,33 @@
     "status": "状态",
     "placeholder": "请求日志将在第 5 阶段提供。",
     "placeholderHint": "日志将包含令牌使用、成本追踪和延迟指标。"
+  },
+  "logForwarders": {
+    "title": "日志转发",
+    "subtitle": "配置审计日志转发到外部系统（SIEM、Kafka、Webhook）",
+    "addForwarder": "添加转发器",
+    "dialogDescription": "配置新的日志转发目标。",
+    "type": "类型",
+    "address": "地址",
+    "facility": "设施代码",
+    "brokerUrl": "Broker URL（REST 代理）",
+    "topic": "主题",
+    "webhookUrl": "Webhook URL",
+    "authHeader": "授权头",
+    "destination": "目标地址",
+    "sent": "已发送",
+    "errors": "错误",
+    "lastSent": "最后发送",
+    "running": "运行中",
+    "paused": "已暂停",
+    "pause": "暂停",
+    "resume": "恢复",
+    "test": "发送测试",
+    "resetStats": "重置统计",
+    "deleteConfirm": "确定要删除此转发器吗？",
+    "allForwarders": "所有转发器",
+    "noForwarders": "尚未配置日志转发器。",
+    "noForwardersHint": "添加转发器以开始将审计日志发送到外部系统。"
   },
   "notFound": {
     "title": "404",

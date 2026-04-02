@@ -1,6 +1,6 @@
 use axum::{
     http::{header, HeaderValue, Method},
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Router,
 };
 use fred::clients::Client;
@@ -224,6 +224,29 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route("/api/admin/settings/system", get(handlers::admin::get_system_settings))
         .route("/api/admin/settings/oidc", get(handlers::admin::get_oidc_settings))
         .route("/api/admin/settings/audit", get(handlers::admin::get_audit_settings))
+        // Log forwarders CRUD
+        .route(
+            "/api/admin/log-forwarders",
+            get(handlers::log_forwarders::list_forwarders)
+                .post(handlers::log_forwarders::create_forwarder),
+        )
+        .route(
+            "/api/admin/log-forwarders/{id}",
+            patch(handlers::log_forwarders::update_forwarder)
+                .delete(handlers::log_forwarders::delete_forwarder),
+        )
+        .route(
+            "/api/admin/log-forwarders/{id}/toggle",
+            post(handlers::log_forwarders::toggle_forwarder),
+        )
+        .route(
+            "/api/admin/log-forwarders/{id}/test",
+            post(handlers::log_forwarders::test_forwarder),
+        )
+        .route(
+            "/api/admin/log-forwarders/{id}/reset-stats",
+            post(handlers::log_forwarders::reset_stats),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::verify_signature::verify_signature,

@@ -22,9 +22,7 @@ interface OidcConfig {
 
 interface AuditConfig {
   quickwit_url: string;
-  quickwit_enabled: boolean;
-  syslog_address: string;
-  syslog_enabled: boolean;
+  quickwit_index: string;
 }
 
 export function SettingsPage() {
@@ -153,21 +151,21 @@ export function SettingsPage() {
                         {auditConfig?.quickwit_url || '—'}
                       </p>
                     </div>
-                    <Badge variant={auditConfig?.quickwit_enabled ? 'default' : 'secondary'}>
-                      {auditConfig?.quickwit_enabled ? t('settingsPage.connected') : t('settingsPage.disconnected')}
+                    <Badge variant={auditConfig?.quickwit_url ? 'default' : 'secondary'}>
+                      {auditConfig?.quickwit_url ? t('settingsPage.connected') : t('settingsPage.disconnected')}
                     </Badge>
                   </div>
                   <Separator />
                   <div className="flex items-center justify-between">
                     <div>
-                      <Label className="text-sm">{t('settingsPage.syslog')}</Label>
+                      <Label className="text-sm">{t('settingsPage.logForwarding')}</Label>
                       <p className="text-xs text-muted-foreground mt-0.5">
-                        {auditConfig?.syslog_address || '—'}
+                        {t('settingsPage.logForwardingHint')}
                       </p>
                     </div>
-                    <Badge variant={auditConfig?.syslog_enabled ? 'default' : 'secondary'}>
-                      {auditConfig?.syslog_enabled ? t('settingsPage.connected') : t('settingsPage.disconnected')}
-                    </Badge>
+                    <a href="/admin/log-forwarders" className="text-sm text-primary hover:underline">
+                      {t('settingsPage.manage')}
+                    </a>
                   </div>
                 </div>
               )}

@@ -4,6 +4,7 @@ pub mod api_keys;
 pub mod audit;
 pub mod auth;
 pub mod health;
+pub mod log_forwarders;
 pub mod mcp_servers;
 pub mod mcp_tools;
 pub mod providers;
