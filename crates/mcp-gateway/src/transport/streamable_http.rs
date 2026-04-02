@@ -63,6 +63,11 @@ pub async fn handle_post(
         }
     };
 
+    if claims.token_type != "access" {
+        let resp = err_response(request.id.clone(), INVALID_REQUEST, "Invalid token type");
+        return (StatusCode::UNAUTHORIZED, Json(resp)).into_response();
+    }
+
     let user_id = claims.sub;
 
     // --- Session management ------------------------------------------------
@@ -107,7 +112,11 @@ pub async fn handle_delete(
         None => return StatusCode::UNAUTHORIZED.into_response(),
     };
 
-    if state.jwt_manager.verify_token(token).is_err() {
+    let claims = match state.jwt_manager.verify_token(token) {
+        Ok(c) => c,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    if claims.token_type != "access" {
         return StatusCode::UNAUTHORIZED.into_response();
     }
 

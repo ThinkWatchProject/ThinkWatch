@@ -84,8 +84,17 @@ pub async fn revoke_token(
 ) -> anyhow::Result<()> {
     use fred::interfaces::KeysInterface;
     let key = format!("jwt_blacklist:{token_hash}");
-    let _: () = redis.set(&key, "1", None, None, false).await?;
-    let _: () = redis.expire(&key, ttl_secs, None).await?;
+    // Use atomic SET EX to avoid a race condition where a crash between
+    // SET and EXPIRE would leave the key without a TTL (never expiring).
+    let _: () = redis
+        .set(
+            &key,
+            "1",
+            Some(fred::types::Expiration::EX(ttl_secs)),
+            None,
+            false,
+        )
+        .await?;
     Ok(())
 }
 

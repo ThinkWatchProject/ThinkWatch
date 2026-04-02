@@ -108,7 +108,7 @@ pub async fn create_user(
 
 /// POST /api/admin/users/{id}/force-logout — admin force-logout a user.
 pub async fn force_logout_user(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     axum::extract::Path(user_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -120,7 +120,7 @@ pub async fn force_logout_user(
 
     state.audit.log(
         agent_bastion_common::audit::AuditEntry::new("admin.force_logout")
-            .user_id(_auth_user.claims.sub)
+            .user_id(auth_user.claims.sub)
             .resource(format!("user:{user_id}")),
     );
 

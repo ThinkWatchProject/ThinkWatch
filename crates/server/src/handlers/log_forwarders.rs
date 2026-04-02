@@ -34,7 +34,7 @@ pub struct CreateForwarderRequest {
 }
 
 pub async fn create_forwarder(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Json(req): Json<CreateForwarderRequest>,
 ) -> Result<Json<LogForwarder>, AppError> {
@@ -65,7 +65,7 @@ pub async fn create_forwarder(
 
     state.audit.log(
         agent_bastion_common::audit::AuditEntry::new("log_forwarder.created")
-            .user_id(_auth_user.claims.sub)
+            .user_id(auth_user.claims.sub)
             .resource(format!("log_forwarder:{}", forwarder.id)),
     );
 
@@ -120,7 +120,7 @@ pub async fn update_forwarder(
 // --- Delete forwarder ---
 
 pub async fn delete_forwarder(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -137,7 +137,7 @@ pub async fn delete_forwarder(
 
     state.audit.log(
         agent_bastion_common::audit::AuditEntry::new("log_forwarder.deleted")
-            .user_id(_auth_user.claims.sub)
+            .user_id(auth_user.claims.sub)
             .resource(format!("log_forwarder:{id}")),
     );
 
@@ -147,7 +147,7 @@ pub async fn delete_forwarder(
 // --- Toggle (pause / resume) ---
 
 pub async fn toggle_forwarder(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<LogForwarder>, AppError> {
@@ -169,7 +169,7 @@ pub async fn toggle_forwarder(
     };
     state.audit.log(
         agent_bastion_common::audit::AuditEntry::new(action)
-            .user_id(_auth_user.claims.sub)
+            .user_id(auth_user.claims.sub)
             .resource(format!("log_forwarder:{id}")),
     );
 
@@ -204,7 +204,7 @@ pub struct TestResult {
 }
 
 pub async fn test_forwarder(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TestResult>, AppError> {
@@ -215,7 +215,7 @@ pub async fn test_forwarder(
         .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;
 
     let test_entry = agent_bastion_common::audit::AuditEntry::new("log_forwarder.test")
-        .user_id(_auth_user.claims.sub)
+        .user_id(auth_user.claims.sub)
         .resource(format!("log_forwarder:{id}"));
 
     // Send test message and report result
@@ -235,7 +235,8 @@ pub async fn test_forwarder(
                 .config
                 .get("facility")
                 .and_then(|v| v.as_u64())
-                .unwrap_or(16) as u8;
+                .and_then(|v| u8::try_from(v).ok())
+                .unwrap_or(16);
             let priority = facility * 8 + 6u8;
             let msg = format!(
                 "<{}>1 {} agent-bastion audit - {} [audit@0 test=\"true\"] test message\n",

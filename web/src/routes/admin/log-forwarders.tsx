@@ -259,12 +259,14 @@ export function LogForwardersPage() {
           <p className="text-muted-foreground">{t('logForwarders.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger asChild>
-            <Button onClick={() => { resetForm(); setDialogOpen(true); }}>
-              <Plus className="mr-2 h-4 w-4" />
-              {t('logForwarders.addForwarder')}
-            </Button>
-          </DialogTrigger>
+          <DialogTrigger
+            render={
+              <Button onClick={() => { resetForm(); setDialogOpen(true); }}>
+                <Plus className="mr-2 h-4 w-4" />
+                {t('logForwarders.addForwarder')}
+              </Button>
+            }
+          />
           <DialogContent className="max-w-md">
             <DialogHeader>
               <DialogTitle>{t('logForwarders.addForwarder')}</DialogTitle>
@@ -277,7 +279,7 @@ export function LogForwardersPage() {
               </div>
               <div>
                 <Label>{t('logForwarders.type')}</Label>
-                <Select value={formType} onValueChange={setFormType}>
+                <Select value={formType} onValueChange={(v) => { if (v !== null) setFormType(v); }}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     {FORWARDER_TYPES.map((ft) => (

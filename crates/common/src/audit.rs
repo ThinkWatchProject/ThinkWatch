@@ -318,7 +318,8 @@ fn send_udp_syslog(runtime: &ForwarderRuntime, entry: &AuditEntry) -> Result<(),
         .config
         .get("facility")
         .and_then(|v| v.as_u64())
-        .unwrap_or(16) as u8; // default: local0
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(16); // default: local0
 
     let socket = runtime
         .udp_socket
@@ -367,7 +368,8 @@ async fn send_tcp_syslog(config: &LogForwarder, entry: &AuditEntry) -> Result<()
         .config
         .get("facility")
         .and_then(|v| v.as_u64())
-        .unwrap_or(16) as u8;
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(16);
 
     let severity = 6u8;
     let priority = facility * 8 + severity;
