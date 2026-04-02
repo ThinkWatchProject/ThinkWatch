@@ -194,8 +194,17 @@ openssl rand -base64 24
 
 ### 3.3 Deploy
 
+Pull the pre-built images from GitHub Container Registry and start all services:
+
 ```bash
+docker compose -f deploy/docker-compose.yml --env-file .env.production pull
 docker compose -f deploy/docker-compose.yml --env-file .env.production up -d
+```
+
+To pin a specific release instead of `latest`:
+
+```bash
+IMAGE_TAG=<git-sha> docker compose -f deploy/docker-compose.yml --env-file .env.production up -d
 ```
 
 This starts:
@@ -278,31 +287,38 @@ Add labels to the `server` and `web` services in your compose override to config
 
 A Helm chart is provided at `deploy/helm/agent-bastion/`.
 
-### 4.1 Build and Push Docker Images
+### 4.1 Images
 
-```bash
-# Server image
-docker build -f deploy/docker/Dockerfile.server -t your-registry/agent-bastion-server:0.1.0 .
-docker push your-registry/agent-bastion-server:0.1.0
+Pre-built images are published automatically to GitHub Container Registry on every push to `main`:
 
-# Web UI image
-docker build -f deploy/docker/Dockerfile.web -t your-registry/agent-bastion-web:0.1.0 .
-docker push your-registry/agent-bastion-web:0.1.0
 ```
+ghcr.io/agentbastion/agent-bastion-server:latest
+ghcr.io/agentbastion/agent-bastion-server:<git-sha>
+
+ghcr.io/agentbastion/agent-bastion-web:latest
+ghcr.io/agentbastion/agent-bastion-web:<git-sha>
+```
+
+No authentication is needed — the packages are public.
 
 ### 4.2 Install with Helm
 
 ```bash
 helm install agent-bastion deploy/helm/agent-bastion \
-  --set image.server.repository=your-registry/agent-bastion-server \
-  --set image.server.tag=0.1.0 \
-  --set image.web.repository=your-registry/agent-bastion-web \
-  --set image.web.tag=0.1.0 \
   --set secrets.jwtSecret=$(openssl rand -hex 32) \
   --set secrets.encryptionKey=$(openssl rand -hex 32) \
   --set secrets.databaseUrl="postgres://bastion:password@postgres:5432/agent_bastion" \
   --set secrets.redisUrl="redis://:password@redis:6379" \
   --set config.corsOrigins="https://console.internal.example.com"
+```
+
+To deploy a specific image tag:
+
+```bash
+helm install agent-bastion deploy/helm/agent-bastion \
+  --set image.server.tag=<git-sha> \
+  --set image.web.tag=<git-sha> \
+  ...
 ```
 
 ### 4.3 Configure Ingress

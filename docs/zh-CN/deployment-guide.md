@@ -194,8 +194,17 @@ openssl rand -base64 24
 
 ### 3.3 部署
 
+从 GitHub Container Registry 拉取预构建镜像并启动所有服务：
+
 ```bash
+docker compose -f deploy/docker-compose.yml --env-file .env.production pull
 docker compose -f deploy/docker-compose.yml --env-file .env.production up -d
+```
+
+如需固定特定版本而非 `latest`：
+
+```bash
+IMAGE_TAG=<git-sha> docker compose -f deploy/docker-compose.yml --env-file .env.production up -d
 ```
 
 这将启动：
@@ -278,31 +287,38 @@ server {
 
 在 `deploy/helm/agent-bastion/` 提供了 Helm chart。
 
-### 4.1 构建并推送 Docker 镜像
+### 4.1 镜像
 
-```bash
-# Server image
-docker build -f deploy/docker/Dockerfile.server -t your-registry/agent-bastion-server:0.1.0 .
-docker push your-registry/agent-bastion-server:0.1.0
+预构建镜像在每次推送到 `main` 分支时自动发布到 GitHub Container Registry：
 
-# Web UI image
-docker build -f deploy/docker/Dockerfile.web -t your-registry/agent-bastion-web:0.1.0 .
-docker push your-registry/agent-bastion-web:0.1.0
 ```
+ghcr.io/agentbastion/agent-bastion-server:latest
+ghcr.io/agentbastion/agent-bastion-server:<git-sha>
+
+ghcr.io/agentbastion/agent-bastion-web:latest
+ghcr.io/agentbastion/agent-bastion-web:<git-sha>
+```
+
+镜像为公开可访问，无需认证即可拉取。
 
 ### 4.2 使用 Helm 安装
 
 ```bash
 helm install agent-bastion deploy/helm/agent-bastion \
-  --set image.server.repository=your-registry/agent-bastion-server \
-  --set image.server.tag=0.1.0 \
-  --set image.web.repository=your-registry/agent-bastion-web \
-  --set image.web.tag=0.1.0 \
   --set secrets.jwtSecret=$(openssl rand -hex 32) \
   --set secrets.encryptionKey=$(openssl rand -hex 32) \
   --set secrets.databaseUrl="postgres://bastion:password@postgres:5432/agent_bastion" \
   --set secrets.redisUrl="redis://:password@redis:6379" \
   --set config.corsOrigins="https://console.internal.example.com"
+```
+
+如需部署特定版本：
+
+```bash
+helm install agent-bastion deploy/helm/agent-bastion \
+  --set image.server.tag=<git-sha> \
+  --set image.web.tag=<git-sha> \
+  ...
 ```
 
 ### 4.3 配置 Ingress
