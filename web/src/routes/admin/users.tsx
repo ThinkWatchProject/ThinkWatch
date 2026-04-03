@@ -73,8 +73,8 @@ export function UsersPage() {
 
   const fetchUsers = async () => {
     try {
-      const data = await api<User[]>('/api/admin/users');
-      setUsers(data);
+      const res = await api<{ data: User[]; total: number; page: number; per_page: number }>('/api/admin/users');
+      setUsers(res.data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load users');
     } finally {

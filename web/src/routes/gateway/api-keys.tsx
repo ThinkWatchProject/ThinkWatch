@@ -53,6 +53,13 @@ interface ApiKey {
   last_rotation_at: string | null;
 }
 
+interface PaginatedResponse<T> {
+  data: T[];
+  total: number;
+  page: number;
+  per_page: number;
+}
+
 interface CreateKeyResponse {
   id: string;
   api_key: string;
@@ -186,8 +193,8 @@ export function ApiKeysPage() {
 
   const fetchKeys = async () => {
     try {
-      const data = await api<ApiKey[]>('/api/keys');
-      setKeys(data);
+      const res = await api<PaginatedResponse<ApiKey>>('/api/keys');
+      setKeys(res.data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load API keys');
     } finally {

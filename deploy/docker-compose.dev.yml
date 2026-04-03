@@ -30,29 +30,31 @@ services:
 
   # --- S3-compatible storage for Quickwit ---
   rustfs:
-    image: ghcr.io/rustfs/rustfs:1.0.0-alpha.90
+    image: rustfs/rustfs:1.0.0-alpha.90
     command: server /data --console-address ":9001"
     ports:
       - "9000:9000"
       - "9001:9001"
     environment:
-      RUSTFS_ROOT_USER: rustfs_admin
-      RUSTFS_ROOT_PASSWORD: rustfs_secret
+      RUSTFS_ACCESS_KEY: rustfs_admin
+      RUSTFS_SECRET_KEY: rustfs_secret
+      RUSTFS_CONSOLE_ENABLE: "true"
     volumes:
       - rustfs_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
-      interval: 5s
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
+      interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 20s
 
   # Create the quickwit bucket on startup
   rustfs-init:
-    image: ghcr.io/rustfs/rustfs:1.0.0-alpha.90
+    image: rustfs/rustfs:1.0.0-alpha.90
     entrypoint: /bin/sh
     command: >
       -c "
-      until curl -sf http://rustfs:9000/minio/health/live; do sleep 1; done;
+      until curl -sf http://rustfs:9000/health; do sleep 1; done;
       rustfs-client alias set local http://rustfs:9000 rustfs_admin rustfs_secret;
       rustfs-client mb local/quickwit --ignore-existing;
       echo 'Bucket quickwit created';

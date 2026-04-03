@@ -231,6 +231,8 @@ pub async fn register(
         display_name: user.display_name,
         avatar_url: user.avatar_url,
         is_active: user.is_active,
+        roles: vec!["developer".to_string()],
+        created_at: user.created_at,
     }))
 }
 
@@ -294,6 +296,8 @@ pub async fn me(
         display_name: user.display_name,
         avatar_url: user.avatar_url,
         is_active: user.is_active,
+        roles: auth_user.claims.roles.clone(),
+        created_at: user.created_at,
     }))
 }
 

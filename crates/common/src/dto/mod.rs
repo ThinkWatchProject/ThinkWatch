@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -41,6 +42,8 @@ pub struct UserResponse {
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub is_active: bool,
+    pub roles: Vec<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 // --- API Key DTOs ---

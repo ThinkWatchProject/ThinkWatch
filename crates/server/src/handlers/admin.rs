@@ -34,14 +34,34 @@ pub async fn list_users(
     .fetch_all(&state.db)
     .await?;
 
+    let user_ids: Vec<uuid::Uuid> = users.iter().map(|u| u.id).collect();
+
+    // Fetch roles for all users in one query
+    let role_rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
+        "SELECT ur.user_id, r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = ANY($1)",
+    )
+    .bind(&user_ids)
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut roles_map: std::collections::HashMap<uuid::Uuid, Vec<String>> = std::collections::HashMap::new();
+    for (uid, rname) in role_rows {
+        roles_map.entry(uid).or_default().push(rname);
+    }
+
     let responses: Vec<UserResponse> = users
         .into_iter()
-        .map(|u| UserResponse {
-            id: u.id,
-            email: u.email,
-            display_name: u.display_name,
-            avatar_url: u.avatar_url,
-            is_active: u.is_active,
+        .map(|u| {
+            let roles = roles_map.remove(&u.id).unwrap_or_default();
+            UserResponse {
+                id: u.id,
+                email: u.email,
+                display_name: u.display_name,
+                avatar_url: u.avatar_url,
+                is_active: u.is_active,
+                roles,
+                created_at: u.created_at,
+            }
         })
         .collect();
 
@@ -122,6 +142,8 @@ pub async fn create_user(
         display_name: user.display_name,
         avatar_url: user.avatar_url,
         is_active: user.is_active,
+        roles: vec![role_name.to_string()],
+        created_at: user.created_at,
     }))
 }
 

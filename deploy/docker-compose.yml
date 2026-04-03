@@ -108,18 +108,20 @@ services:
     restart: unless-stopped
 
   rustfs:
-    image: ghcr.io/rustfs/rustfs:1.0.0-alpha.90
+    image: rustfs/rustfs:1.0.0-alpha.90
     command: server /data --console-address ":9001"
     environment:
-      RUSTFS_ROOT_USER: ${RUSTFS_USER:-rustfs}
-      RUSTFS_ROOT_PASSWORD: ${RUSTFS_PASSWORD}
+      RUSTFS_ACCESS_KEY: ${RUSTFS_USER:-rustfs}
+      RUSTFS_SECRET_KEY: ${RUSTFS_PASSWORD}
+      RUSTFS_CONSOLE_ENABLE: "true"
     volumes:
       - rustfs_data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 20s
     deploy:
       resources:
         limits:

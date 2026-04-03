@@ -23,7 +23,7 @@ pub async fn get_usage_stats(
     let today = chrono::Utc::now().date_naive();
 
     let total_tokens: Option<i64> = sqlx::query_scalar(
-        "SELECT COALESCE(SUM(total_tokens::bigint), 0) FROM usage_records WHERE created_at::date = $1",
+        "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint FROM usage_records WHERE created_at::date = $1",
     )
     .bind(today)
     .fetch_one(&state.db)
@@ -60,8 +60,8 @@ pub async fn get_usage(
             created_at::date as date,
             model_id,
             COUNT(*) as request_count,
-            COALESCE(SUM(input_tokens::bigint), 0) as input_tokens,
-            COALESCE(SUM(output_tokens::bigint), 0) as output_tokens,
+            COALESCE(SUM(input_tokens::bigint), 0)::bigint as input_tokens,
+            COALESCE(SUM(output_tokens::bigint), 0)::bigint as output_tokens,
             COALESCE(SUM(cost_usd), 0) as total_cost
            FROM usage_records
            GROUP BY created_at::date, model_id
@@ -141,8 +141,8 @@ pub async fn get_costs(
         r#"SELECT
             model_id,
             COUNT(*) as request_count,
-            COALESCE(SUM(input_tokens::bigint), 0) as input_tokens,
-            COALESCE(SUM(output_tokens::bigint), 0) as output_tokens,
+            COALESCE(SUM(input_tokens::bigint), 0)::bigint as input_tokens,
+            COALESCE(SUM(output_tokens::bigint), 0)::bigint as output_tokens,
             COALESCE(SUM(cost_usd), 0) as total_cost
            FROM usage_records
            WHERE created_at::date >= $1
