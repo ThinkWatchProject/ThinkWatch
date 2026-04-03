@@ -39,6 +39,8 @@ const providerTypeColors: Record<string, 'default' | 'secondary' | 'outline'> = 
   openai: 'default',
   anthropic: 'secondary',
   google: 'outline',
+  azure_openai: 'default',
+  bedrock: 'secondary',
   custom: 'outline',
 };
 
@@ -189,17 +191,36 @@ export function ProvidersPage() {
                 >
                   <option value="openai">OpenAI</option>
                   <option value="anthropic">Anthropic</option>
-                  <option value="google">Google</option>
-                  <option value="custom">Custom</option>
+                  <option value="google">Google Gemini</option>
+                  <option value="azure_openai">Azure OpenAI</option>
+                  <option value="bedrock">AWS Bedrock</option>
+                  <option value="custom">Custom (OpenAI-compatible)</option>
                 </select>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="prov-url">{t('providers.baseUrl')}</Label>
-                <Input id="prov-url" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder="https://api.openai.com/v1" required />
+                <Input id="prov-url" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={
+                  providerType === 'azure_openai' ? 'https://your-resource.openai.azure.com' :
+                  providerType === 'bedrock' ? 'us-east-1' :
+                  providerType === 'anthropic' ? 'https://api.anthropic.com' :
+                  providerType === 'google' ? 'https://generativelanguage.googleapis.com' :
+                  'https://api.openai.com'
+                } required />
+                {providerType === 'bedrock' && (
+                  <p className="text-xs text-muted-foreground">{t('providers.bedrockUrlHint', 'Enter AWS region (e.g. us-east-1)')}</p>
+                )}
+                {providerType === 'azure_openai' && (
+                  <p className="text-xs text-muted-foreground">{t('providers.azureUrlHint', 'Enter Azure OpenAI resource endpoint')}</p>
+                )}
               </div>
               <div className="space-y-2">
-                <Label htmlFor="prov-key">{t('providers.apiKey')}</Label>
-                <Input id="prov-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." required />
+                <Label htmlFor="prov-key">{providerType === 'bedrock' ? t('providers.awsCredentials', 'AWS Credentials') : t('providers.apiKey')}</Label>
+                <Input id="prov-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={
+                  providerType === 'bedrock' ? 'ACCESS_KEY_ID:SECRET_ACCESS_KEY' : 'sk-...'
+                } required />
+                {providerType === 'bedrock' && (
+                  <p className="text-xs text-muted-foreground">{t('providers.bedrockKeyHint', 'Format: ACCESS_KEY_ID:SECRET_ACCESS_KEY')}</p>
+                )}
               </div>
               <DialogFooter>
                 <Button type="submit" disabled={submitting}>

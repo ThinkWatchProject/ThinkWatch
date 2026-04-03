@@ -29,3 +29,6 @@ sha2 = { workspace = true }
 regex = "1"
 rand = { workspace = true }
 metrics = { workspace = true }
+aws-sigv4 = { workspace = true }
+aws-credential-types = { workspace = true }
+http_1x = { package = "http", version = "1" }

@@ -25,10 +25,12 @@ const STEPS = ['welcome', 'admin', 'settings', 'provider', 'complete'] as const;
 type Step = (typeof STEPS)[number];
 
 const PROVIDER_TYPES = [
-  { value: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
+  { value: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com' },
   { value: 'anthropic', label: 'Anthropic', baseUrl: 'https://api.anthropic.com' },
-  { value: 'google', label: 'Google', baseUrl: 'https://generativelanguage.googleapis.com' },
-  { value: 'custom', label: 'Custom', baseUrl: '' },
+  { value: 'google', label: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com' },
+  { value: 'azure_openai', label: 'Azure OpenAI', baseUrl: '' },
+  { value: 'bedrock', label: 'AWS Bedrock', baseUrl: 'us-east-1' },
+  { value: 'custom', label: 'Custom (OpenAI-compatible)', baseUrl: '' },
 ];
 
 interface SetupResult {

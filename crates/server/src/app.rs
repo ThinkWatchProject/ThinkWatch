@@ -429,6 +429,8 @@ fn default_model_prefixes(provider_type: &str) -> Vec<&'static str> {
         "openai" => vec!["gpt-", "o1-", "o3-", "o4-", "chatgpt-"],
         "anthropic" => vec!["claude-"],
         "google" => vec!["gemini-"],
+        "azure_openai" => vec![], // Azure uses deployment names, must register specific models
+        "bedrock" => vec![], // Bedrock uses full model IDs like "anthropic.claude-3-5-sonnet-20241022-v2:0"
         _ => vec![],
     }
 }
@@ -440,8 +442,8 @@ async fn load_providers_into_router(
     router: &mut ModelRouter,
 ) -> anyhow::Result<()> {
     use agent_bastion_gateway::providers::{
-        anthropic::AnthropicProvider, custom::CustomProvider, google::GoogleProvider,
-        openai::OpenAiProvider,
+        anthropic::AnthropicProvider, azure_openai::AzureOpenAiProvider, bedrock::BedrockProvider,
+        custom::CustomProvider, google::GoogleProvider, openai::OpenAiProvider,
     };
 
     let providers = sqlx::query_as::<_, agent_bastion_common::models::Provider>(
@@ -463,6 +465,24 @@ async fn load_providers_into_router(
                 "openai" => Arc::new(OpenAiProvider::new(provider.base_url.clone(), api_key)),
                 "anthropic" => Arc::new(AnthropicProvider::new(provider.base_url.clone(), api_key)),
                 "google" => Arc::new(GoogleProvider::new(provider.base_url.clone(), api_key)),
+                "azure_openai" => {
+                    // Azure: base_url is the resource endpoint, api_key is the Azure API key
+                    // api_version from config_json or default
+                    let api_version = provider
+                        .config_json
+                        .get("api_version")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                    Arc::new(AzureOpenAiProvider::new(
+                        provider.base_url.clone(),
+                        api_key,
+                        api_version,
+                    ))
+                }
+                "bedrock" => {
+                    // Bedrock: base_url stores the AWS region, api_key stores "access_key_id:secret_access_key"
+                    Arc::new(BedrockProvider::new(provider.base_url.clone(), api_key))
+                }
                 _ => Arc::new(CustomProvider::new(
                     provider.name.clone(),
                     provider.base_url.clone(),

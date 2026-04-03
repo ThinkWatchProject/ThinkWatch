@@ -1,4 +1,6 @@
 pub mod anthropic;
+pub mod azure_openai;
+pub mod bedrock;
 pub mod custom;
 pub mod google;
 pub mod openai;
