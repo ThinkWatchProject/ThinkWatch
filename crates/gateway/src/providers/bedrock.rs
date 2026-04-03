@@ -1,5 +1,6 @@
 use super::traits::*;
 use futures::Stream;
+use futures::stream::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
@@ -39,6 +40,13 @@ impl BedrockProvider {
     fn endpoint_url(&self, model_id: &str) -> String {
         format!(
             "https://bedrock-runtime.{}.amazonaws.com/model/{}/converse",
+            self.region, model_id
+        )
+    }
+
+    fn stream_endpoint_url(&self, model_id: &str) -> String {
+        format!(
+            "https://bedrock-runtime.{}.amazonaws.com/model/{}/converse-stream",
             self.region, model_id
         )
     }
@@ -325,41 +333,183 @@ impl AiProvider for BedrockProvider {
         &self,
         request: ChatCompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
-        // Bedrock streaming uses a different endpoint (/converse-stream) with
-        // binary event-stream encoding. For now, fall back to non-streaming
-        // by making a sync call and emitting a single chunk.
-        let provider = Self {
-            region: self.region.clone(),
-            access_key_id: self.access_key_id.clone(),
-            secret_access_key: self.secret_access_key.clone(),
-            client: self.client.clone(),
-        };
+        let client = self.client.clone();
+        let url = self.stream_endpoint_url(&request.model);
+        let model = request.model.clone();
+        let region = self.region.clone();
+        let access_key_id = self.access_key_id.clone();
+        let secret_access_key = self.secret_access_key.clone();
+
+        let bedrock_req = convert_to_bedrock(&request);
 
         Box::pin(async_stream::stream! {
-            match provider.chat_completion(request).await {
-                Ok(resp) => {
-                    let text = resp
-                        .choices
-                        .first()
-                        .and_then(|c| c.message.content.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    yield Ok(ChatCompletionChunk {
-                        id: resp.id,
-                        object: "chat.completion.chunk".to_string(),
-                        created: resp.created,
-                        model: resp.model,
-                        choices: vec![ChunkChoice {
-                            index: 0,
-                            delta: serde_json::json!({"role": "assistant", "content": text}),
-                            finish_reason: Some("stop".to_string()),
-                        }],
-                        usage: resp.usage,
-                    });
+            let body_bytes = match serde_json::to_vec(&bedrock_req) {
+                Ok(b) => b,
+                Err(e) => {
+                    yield Err(GatewayError::TransformError(e.to_string()));
+                    return;
                 }
+            };
+
+            // Sign the request
+            let provider = BedrockProvider {
+                region, access_key_id, secret_access_key,
+                client: client.clone(),
+            };
+            let signed_headers = match provider.sign_request(&url, &body_bytes).await {
+                Ok(h) => h,
                 Err(e) => {
                     yield Err(e);
+                    return;
+                }
+            };
+
+            let mut req_builder = client
+                .post(&url)
+                .header("content-type", "application/json")
+                .body(body_bytes);
+
+            for (name, value) in &signed_headers {
+                req_builder = req_builder.header(name.as_str(), value.as_str());
+            }
+
+            let resp = match req_builder.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    yield Err(GatewayError::NetworkError(e.to_string()));
+                    return;
+                }
+            };
+
+            if !resp.status().is_success() {
+                let body = resp.text().await.unwrap_or_default();
+                yield Err(GatewayError::ProviderError(format!(
+                    "Bedrock stream error: {body}"
+                )));
+                return;
+            }
+
+            let message_id = format!("bedrock-{}", uuid::Uuid::new_v4());
+
+            // Emit initial role chunk
+            yield Ok(ChatCompletionChunk {
+                id: message_id.clone(),
+                object: "chat.completion.chunk".to_string(),
+                created: chrono::Utc::now().timestamp(),
+                model: model.clone(),
+                choices: vec![ChunkChoice {
+                    index: 0,
+                    delta: serde_json::json!({"role": "assistant"}),
+                    finish_reason: None,
+                }],
+                usage: None,
+            });
+
+            // Read the binary event-stream response
+            let mut byte_stream = resp.bytes_stream();
+            let mut buffer = bytes::BytesMut::new();
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(c) => c,
+                    Err(e) => {
+                        yield Err(GatewayError::NetworkError(e.to_string()));
+                        break;
+                    }
+                };
+
+                buffer.extend_from_slice(&chunk);
+
+                // Try to decode event-stream frames from the buffer
+                // AWS event-stream binary format:
+                //   [4 bytes total_len] [4 bytes headers_len] [4 bytes prelude_crc]
+                //   [headers] [payload] [4 bytes message_crc]
+                while buffer.len() >= 12 {
+                    let total_len = u32::from_be_bytes([buffer[0], buffer[1], buffer[2], buffer[3]]) as usize;
+
+                    if buffer.len() < total_len {
+                        break; // Need more data
+                    }
+
+                    let headers_len = u32::from_be_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]) as usize;
+
+                    // Payload starts after prelude (12 bytes) + headers
+                    let payload_start = 12 + headers_len;
+                    let payload_end = total_len - 4; // Exclude message CRC
+
+                    if payload_start <= payload_end && payload_end <= buffer.len() {
+                        let payload = &buffer[payload_start..payload_end];
+
+                        // Try to parse as JSON — Bedrock wraps events in typed envelopes
+                        if let Ok(event) = serde_json::from_slice::<serde_json::Value>(payload) {
+                            // contentBlockDelta contains text chunks
+                            if let Some(text) = event.get("contentBlockDelta")
+                                .and_then(|d| d.get("delta"))
+                                .and_then(|d| d.get("text"))
+                                .and_then(|t| t.as_str()) {
+                                    yield Ok(ChatCompletionChunk {
+                                        id: message_id.clone(),
+                                        object: "chat.completion.chunk".to_string(),
+                                        created: chrono::Utc::now().timestamp(),
+                                        model: model.clone(),
+                                        choices: vec![ChunkChoice {
+                                            index: 0,
+                                            delta: serde_json::json!({"content": text}),
+                                            finish_reason: None,
+                                        }],
+                                        usage: None,
+                                    });
+                            }
+
+                            // messageStop signals end of stream
+                            if event.get("messageStop").is_some() {
+                                let stop_reason = event.get("messageStop")
+                                    .and_then(|s| s.get("stopReason"))
+                                    .and_then(|r| r.as_str())
+                                    .unwrap_or("end_turn");
+
+                                let finish_reason = match stop_reason {
+                                    "end_turn" => "stop",
+                                    "max_tokens" => "length",
+                                    other => other,
+                                };
+
+                                yield Ok(ChatCompletionChunk {
+                                    id: message_id.clone(),
+                                    object: "chat.completion.chunk".to_string(),
+                                    created: chrono::Utc::now().timestamp(),
+                                    model: model.clone(),
+                                    choices: vec![ChunkChoice {
+                                        index: 0,
+                                        delta: serde_json::json!({}),
+                                        finish_reason: Some(finish_reason.to_string()),
+                                    }],
+                                    usage: None,
+                                });
+                            }
+
+                            // metadata contains usage info
+                            if let Some(usage) = event.get("metadata").and_then(|m| m.get("usage")) {
+                                let input = usage.get("inputTokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                let output = usage.get("outputTokens").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                                yield Ok(ChatCompletionChunk {
+                                    id: message_id.clone(),
+                                    object: "chat.completion.chunk".to_string(),
+                                    created: chrono::Utc::now().timestamp(),
+                                    model: model.clone(),
+                                    choices: vec![],
+                                    usage: Some(Usage {
+                                        prompt_tokens: input,
+                                        completion_tokens: output,
+                                        total_tokens: input + output,
+                                    }),
+                                });
+                            }
+                        }
+                    }
+
+                    // Advance buffer past this frame
+                    let _ = buffer.split_to(total_len);
                 }
             }
         })
