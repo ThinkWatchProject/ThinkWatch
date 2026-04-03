@@ -16,6 +16,7 @@ import { ProvidersPage } from '@/routes/gateway/providers';
 import { ModelsPage } from '@/routes/gateway/models';
 import { ApiKeysPage } from '@/routes/gateway/api-keys';
 import { GatewayLogsPage } from '@/routes/gateway/logs';
+import { GuidePage } from '@/routes/gateway/guide';
 import { McpServersPage } from '@/routes/mcp/servers';
 import { McpToolsPage } from '@/routes/mcp/tools';
 import { McpLogsPage } from '@/routes/mcp/logs';
@@ -153,6 +154,12 @@ const gatewayLogsRoute = createRoute({
   component: GatewayLogsPage,
 });
 
+const guideRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/gateway/guide',
+  component: GuidePage,
+});
+
 const mcpServersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/mcp/servers',
@@ -240,6 +247,7 @@ const routeTree = rootRoute.addChildren([
   modelsRoute,
   apiKeysRoute,
   gatewayLogsRoute,
+  guideRoute,
   mcpServersRoute,
   mcpToolsRoute,
   mcpLogsRoute,

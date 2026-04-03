@@ -48,7 +48,8 @@
     "users": "用户",
     "roles": "角色",
     "settings": "设置",
-    "logForwarders": "日志转发"
+    "logForwarders": "日志转发",
+    "configGuide": "配置指南"
   },
   "auth": {
     "signIn": "登录",
@@ -402,6 +403,26 @@
     "noForwardersHint": "添加转发器以开始将审计日志发送到外部系统。",
     "editForwarder": "编辑转发器",
     "editDescription": "更新转发器名称和配置。"
+  },
+  "guide": {
+    "title": "配置指南",
+    "subtitle": "配置您的 AI 工具通过 AgentBastion 网关访问 API",
+    "gatewayUrl": "网关地址",
+    "apiKeyNote": "请将 API Key 替换为您在 AI Gateway > API Keys 中创建的实际密钥",
+    "claudeCode": "Claude Code",
+    "cursor": "Cursor",
+    "continue": "Continue",
+    "cline": "Cline",
+    "openaiSdk": "OpenAI SDK",
+    "anthropicSdk": "Anthropic SDK",
+    "curl": "cURL",
+    "steps": "配置步骤",
+    "copyCode": "复制",
+    "copied": "已复制！",
+    "supportedEndpoints": "支持的端点",
+    "openaiEndpoint": "OpenAI 兼容：/v1/chat/completions",
+    "anthropicEndpoint": "Anthropic Messages：/v1/messages",
+    "modelsEndpoint": "模型列表：/v1/models"
   },
   "notFound": {
     "title": "404",

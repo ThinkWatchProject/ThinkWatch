@@ -113,7 +113,12 @@ pub async fn create_gateway_app(
     };
 
     // AI Gateway: /v1/*
-    let model_router = Arc::new(ModelRouter::new());
+    // Load providers from database and register them in the model router
+    let mut model_router = ModelRouter::new();
+    if let Err(e) = load_providers_into_router(&state, &mut model_router).await {
+        tracing::error!("Failed to load providers: {e}");
+    }
+    let model_router = Arc::new(model_router);
     let gateway_state = GatewayState {
         router: model_router,
         model_mapper: Arc::new(ModelMapper::new()),
@@ -133,6 +138,10 @@ pub async fn create_gateway_app(
         .route(
             "/v1/chat/completions",
             post(gateway_proxy::proxy_chat_completion),
+        )
+        .route(
+            "/v1/messages",
+            post(gateway_proxy::proxy_anthropic_messages),
         )
         .route("/v1/models", get(gateway_proxy::list_models_handler))
         .layer(axum::middleware::from_fn_with_state(
@@ -407,4 +416,95 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .with_state(state);
 
     security_layers(app)
+}
+
+// ---------------------------------------------------------------------------
+// Provider loading from database
+// ---------------------------------------------------------------------------
+
+/// Default model prefix patterns for known provider types.
+fn default_model_prefixes(provider_type: &str) -> Vec<&'static str> {
+    match provider_type {
+        "openai" => vec!["gpt-", "o1-", "o3-", "o4-", "chatgpt-"],
+        "anthropic" => vec!["claude-"],
+        "google" => vec!["gemini-"],
+        _ => vec![],
+    }
+}
+
+/// Load all active providers from the database, instantiate the appropriate
+/// provider implementation, and register them in the model router.
+async fn load_providers_into_router(
+    state: &AppState,
+    router: &mut ModelRouter,
+) -> anyhow::Result<()> {
+    use agent_bastion_gateway::providers::{
+        anthropic::AnthropicProvider, custom::CustomProvider, google::GoogleProvider,
+        openai::OpenAiProvider,
+    };
+
+    let providers = sqlx::query_as::<_, agent_bastion_common::models::Provider>(
+        "SELECT * FROM providers WHERE is_active = true AND deleted_at IS NULL",
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let encryption_key =
+        agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)?;
+
+    for provider in &providers {
+        let api_key_bytes =
+            agent_bastion_common::crypto::decrypt(&provider.api_key_encrypted, &encryption_key)?;
+        let api_key = String::from_utf8(api_key_bytes)?;
+
+        let dyn_provider: Arc<dyn agent_bastion_gateway::providers::DynAiProvider> =
+            match provider.provider_type.as_str() {
+                "openai" => Arc::new(OpenAiProvider::new(provider.base_url.clone(), api_key)),
+                "anthropic" => Arc::new(AnthropicProvider::new(provider.base_url.clone(), api_key)),
+                "google" => Arc::new(GoogleProvider::new(provider.base_url.clone(), api_key)),
+                _ => Arc::new(CustomProvider::new(
+                    provider.name.clone(),
+                    provider.base_url.clone(),
+                    api_key,
+                )),
+            };
+
+        // Register models from the models table
+        let models = sqlx::query_scalar::<_, String>(
+            "SELECT model_id FROM models WHERE provider_id = $1 AND is_active = true",
+        )
+        .bind(provider.id)
+        .fetch_all(&state.db)
+        .await?;
+
+        if models.is_empty() {
+            // No specific models registered — use default prefixes
+            for prefix in default_model_prefixes(&provider.provider_type) {
+                router.register_provider(prefix, Arc::clone(&dyn_provider));
+            }
+        } else {
+            for model_id in &models {
+                router.register_provider(model_id, Arc::clone(&dyn_provider));
+            }
+        }
+
+        tracing::info!(
+            provider = %provider.name,
+            provider_type = %provider.provider_type,
+            model_count = if models.is_empty() {
+                default_model_prefixes(&provider.provider_type).len()
+            } else {
+                models.len()
+            },
+            "Provider loaded"
+        );
+    }
+
+    tracing::info!(
+        total_providers = providers.len(),
+        total_routes = router.list_models().len(),
+        "All providers loaded into model router"
+    );
+
+    Ok(())
 }

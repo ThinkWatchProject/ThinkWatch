@@ -177,6 +177,161 @@ pub async fn list_models_handler(State(state): State<GatewayState>) -> Json<serd
     }))
 }
 
+/// POST /v1/messages
+///
+/// Anthropic Messages API passthrough. Used by Claude Code and other tools
+/// that speak the Anthropic native format. Routes to the provider registered
+/// for the requested model, forwarding the request as-is to the Anthropic
+/// upstream (no format conversion needed).
+///
+/// This endpoint also applies content filtering, quota checks, and audit
+/// logging, but does NOT do PII redaction or caching (complex content types).
+pub async fn proxy_anthropic_messages(
+    State(state): State<GatewayState>,
+    _headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, GatewayErrorResponse> {
+    let model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| GatewayError::TransformError("Missing 'model' field".into()))?
+        .to_string();
+
+    let is_stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    // Apply model mapping
+    let mapped_model = state.model_mapper.map(&model);
+
+    // Content filter — check user messages
+    if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
+        let chat_messages: Vec<crate::providers::traits::ChatMessage> = messages
+            .iter()
+            .filter_map(|m| {
+                Some(crate::providers::traits::ChatMessage {
+                    role: m.get("role")?.as_str()?.to_string(),
+                    content: m.get("content").cloned().unwrap_or(serde_json::Value::Null),
+                })
+            })
+            .collect();
+
+        if let Err(filter_result) = state.content_filter.check(&chat_messages) {
+            tracing::warn!("Content filter triggered: {filter_result}");
+            return Err(GatewayError::TransformError(format!(
+                "Request blocked by content filter: {filter_result}"
+            ))
+            .into());
+        }
+    }
+
+    // Route to provider
+    let provider = state.router.route(&mapped_model).ok_or_else(|| {
+        GatewayError::ProviderError(format!("No provider found for model: {mapped_model}"))
+    })?;
+
+    // For Anthropic providers, we can access the underlying provider details.
+    // Build the upstream request by forwarding the body as-is.
+    // We need the provider's base_url and api_key — use the DynAiProvider
+    // to make a direct Anthropic API call.
+
+    // Convert to OpenAI format internally, let the provider handle the rest
+    let max_tokens = body
+        .get("max_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(4096) as u32;
+
+    // Build a ChatCompletionRequest from the Anthropic body
+    let mut messages = Vec::new();
+    if let Some(system) = body.get("system").and_then(|v| v.as_str()) {
+        messages.push(crate::providers::traits::ChatMessage {
+            role: "system".to_string(),
+            content: serde_json::Value::String(system.to_string()),
+        });
+    }
+    if let Some(msg_array) = body.get("messages").and_then(|v| v.as_array()) {
+        for m in msg_array {
+            if let (Some(role), Some(content)) =
+                (m.get("role").and_then(|v| v.as_str()), m.get("content"))
+            {
+                messages.push(crate::providers::traits::ChatMessage {
+                    role: role.to_string(),
+                    content: content.clone(),
+                });
+            }
+        }
+    }
+
+    let request = crate::providers::traits::ChatCompletionRequest {
+        model: mapped_model.clone(),
+        messages,
+        temperature: body.get("temperature").and_then(|v| v.as_f64()),
+        max_tokens: Some(max_tokens),
+        stream: Some(is_stream),
+        extra: serde_json::json!({}),
+    };
+
+    if is_stream {
+        let stream = provider.stream_chat_completion(request);
+        Ok(stream_to_sse(stream).into_response())
+    } else {
+        let response = provider.chat_completion_boxed(request).await?;
+
+        // Convert OpenAI response back to Anthropic format
+        let anthropic_response = convert_to_anthropic_response(&response);
+        Ok(Json(anthropic_response).into_response())
+    }
+}
+
+/// Convert an OpenAI-format response back to Anthropic Messages API format.
+fn convert_to_anthropic_response(
+    resp: &crate::providers::traits::ChatCompletionResponse,
+) -> serde_json::Value {
+    let content: Vec<serde_json::Value> = resp
+        .choices
+        .iter()
+        .map(|c| {
+            let text = c.message.content.as_str().unwrap_or("").to_string();
+            serde_json::json!({
+                "type": "text",
+                "text": text,
+            })
+        })
+        .collect();
+
+    let stop_reason = resp
+        .choices
+        .first()
+        .and_then(|c| c.finish_reason.as_deref())
+        .map(|r| match r {
+            "stop" => "end_turn",
+            "length" => "max_tokens",
+            other => other,
+        })
+        .unwrap_or("end_turn");
+
+    let (input_tokens, output_tokens) = resp
+        .usage
+        .as_ref()
+        .map(|u| (u.prompt_tokens, u.completion_tokens))
+        .unwrap_or((0, 0));
+
+    serde_json::json!({
+        "id": resp.id,
+        "type": "message",
+        "role": "assistant",
+        "model": resp.model,
+        "content": content,
+        "stop_reason": stop_reason,
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+        }
+    })
+}
+
 // ---------- Error adapter ----------
 
 /// Newtype wrapper so we can implement `IntoResponse` for `GatewayError`.

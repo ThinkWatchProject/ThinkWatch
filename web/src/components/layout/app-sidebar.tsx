@@ -26,6 +26,7 @@ import {
   Shield,
   Settings,
   Forward,
+  BookOpen,
 } from 'lucide-react';
 import { useNavigate, useLocation } from '@tanstack/react-router';
 
@@ -54,6 +55,7 @@ const navGroups: NavGroup[] = [
       { titleKey: 'nav.models', icon: BrainCircuit, href: '/gateway/models' },
       { titleKey: 'nav.apiKeys', icon: Key, href: '/gateway/api-keys' },
       { titleKey: 'nav.requestLogs', icon: ScrollText, href: '/gateway/logs' },
+      { titleKey: 'nav.configGuide', icon: BookOpen, href: '/gateway/guide' },
     ],
   },
   {

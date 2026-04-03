@@ -48,7 +48,8 @@
     "users": "Users",
     "roles": "Roles",
     "settings": "Settings",
-    "logForwarders": "Log Forwarding"
+    "logForwarders": "Log Forwarding",
+    "configGuide": "Configuration Guide"
   },
   "auth": {
     "signIn": "Sign in",
@@ -402,6 +403,26 @@
     "noForwardersHint": "Add a forwarder to start sending audit logs to external systems.",
     "editForwarder": "Edit Forwarder",
     "editDescription": "Update forwarder name and configuration."
+  },
+  "guide": {
+    "title": "Configuration Guide",
+    "subtitle": "Configure your AI tools to use AgentBastion as the API gateway",
+    "gatewayUrl": "Gateway URL",
+    "apiKeyNote": "Replace the API key with your actual key from AI Gateway > API Keys",
+    "claudeCode": "Claude Code",
+    "cursor": "Cursor",
+    "continue": "Continue",
+    "cline": "Cline",
+    "openaiSdk": "OpenAI SDK",
+    "anthropicSdk": "Anthropic SDK",
+    "curl": "cURL",
+    "steps": "Configuration Steps",
+    "copyCode": "Copy",
+    "copied": "Copied!",
+    "supportedEndpoints": "Supported Endpoints",
+    "openaiEndpoint": "OpenAI-compatible: /v1/chat/completions",
+    "anthropicEndpoint": "Anthropic Messages: /v1/messages",
+    "modelsEndpoint": "List models: /v1/models"
   },
   "notFound": {
     "title": "404",
