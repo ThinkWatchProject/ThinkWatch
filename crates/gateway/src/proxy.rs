@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::budget_alert::BudgetAlertManager;
 use crate::cache::ResponseCache;
 use crate::content_filter::ContentFilter;
+use crate::cost_tracker::CostTracker;
 use crate::metadata::RequestMetadata;
 use crate::model_mapping::ModelMapper;
 use crate::pii_redactor::PiiRedactor;
@@ -25,6 +26,7 @@ pub struct GatewayState {
     pub cache: Arc<ResponseCache>,
     pub pii_redactor: Arc<PiiRedactor>,
     pub budget_alert: Option<Arc<BudgetAlertManager>>,
+    pub cost_tracker: Arc<CostTracker>,
 }
 
 /// POST /v1/chat/completions
@@ -121,14 +123,26 @@ pub async fn proxy_chat_completion(
 
         // 8c. Budget alert check (async, non-blocking)
         if let Some(ref budget_alert) = state.budget_alert {
-            let alert = Arc::clone(budget_alert);
-            let key = quota_key.clone();
-            // In a real setup, current_spend and budget_limit would come from
-            // a spending tracker; here we pass placeholder values that the
-            // caller should replace with actual spend data.
-            tokio::spawn(async move {
-                alert.check_and_alert(&key, 0.0, 0.0).await;
-            });
+            if let Some(ref usage) = response.usage {
+                let request_cost = state.cost_tracker.calculate_cost(
+                    &request.model,
+                    usage.prompt_tokens,
+                    usage.completion_tokens,
+                );
+                if request_cost > 0.0 {
+                    let alert = Arc::clone(budget_alert);
+                    let key = quota_key.clone();
+                    let quota = state.quota.clone();
+                    tokio::spawn(async move {
+                        // Get monthly spend from quota tracker
+                        if let Ok(info) = quota.get_usage(&key).await {
+                            let budget_limit = info.limit as f64;
+                            let current_spend = info.used as f64;
+                            alert.check_and_alert(&key, current_spend, budget_limit).await;
+                        }
+                    });
+                }
+            }
         }
 
         // 8d. Cache the response

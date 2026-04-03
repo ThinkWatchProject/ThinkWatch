@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use agent_bastion_auth::api_key;
 use agent_bastion_common::audit::AuditEntry;
-use agent_bastion_common::dto::{CreateApiKeyRequest, CreateApiKeyResponse};
+use agent_bastion_common::dto::{CreateApiKeyRequest, CreateApiKeyResponse, PaginatedResponse, PaginationParams};
 use agent_bastion_common::errors::AppError;
 use agent_bastion_common::models::ApiKey;
 
@@ -15,15 +15,33 @@ use crate::middleware::auth_guard::AuthUser;
 pub async fn list_keys(
     auth_user: AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<ApiKey>>, AppError> {
-    let keys = sqlx::query_as::<_, ApiKey>(
-        "SELECT * FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC",
+    Query(pagination): Query<PaginationParams>,
+) -> Result<Json<PaginatedResponse<ApiKey>>, AppError> {
+    let per_page = pagination.per_page();
+    let offset = pagination.offset();
+
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL",
     )
     .bind(auth_user.claims.sub)
+    .fetch_one(&state.db)
+    .await?;
+
+    let keys = sqlx::query_as::<_, ApiKey>(
+        "SELECT * FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+    )
+    .bind(auth_user.claims.sub)
+    .bind(per_page as i64)
+    .bind(offset as i64)
     .fetch_all(&state.db)
     .await?;
 
-    Ok(Json(keys))
+    Ok(Json(PaginatedResponse {
+        data: keys,
+        total,
+        page: pagination.page.unwrap_or(1).max(1),
+        per_page,
+    }))
 }
 
 pub async fn create_key(

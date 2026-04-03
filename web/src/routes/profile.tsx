@@ -7,9 +7,12 @@ import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { Lock, LogOut, Trash2 } from 'lucide-react';
 import { apiPost, apiDelete } from '@/lib/api';
+import { ConfirmDialog } from '@/components/confirm-dialog';
+import { useNavigate } from '@tanstack/react-router';
 
 export function ProfilePage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
 
   // --- Password change ---
   const [oldPassword, setOldPassword] = useState('');
@@ -18,6 +21,20 @@ export function ProfilePage() {
   const [pwError, setPwError] = useState('');
   const [pwSuccess, setPwSuccess] = useState('');
   const [pwLoading, setPwLoading] = useState(false);
+
+  // --- Dialog states ---
+  const [revokeDialogOpen, setRevokeDialogOpen] = useState(false);
+  const [revokeLoading, setRevokeLoading] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [actionError, setActionError] = useState('');
+
+  const clearTokensAndRedirect = () => {
+    localStorage.removeItem('access_token');
+    localStorage.removeItem('refresh_token');
+    sessionStorage.removeItem('signing_key');
+    navigate({ to: '/' });
+  };
 
   const handleChangePassword = async (e: FormEvent) => {
     e.preventDefault();
@@ -29,7 +46,7 @@ export function ProfilePage() {
       return;
     }
     if (newPassword.length < 8) {
-      setPwError(t('auth.passwordMinLength', 'Password must be at least 8 characters'));
+      setPwError(t('auth.passwordTooShort'));
       return;
     }
 
@@ -44,12 +61,7 @@ export function ProfilePage() {
       setNewPassword('');
       setConfirmPassword('');
       // Force logout after 2 seconds
-      setTimeout(() => {
-        localStorage.removeItem('access_token');
-        localStorage.removeItem('refresh_token');
-        sessionStorage.removeItem('signing_key');
-        window.location.href = '/';
-      }, 2000);
+      setTimeout(clearTokensAndRedirect, 2000);
     } catch (err) {
       setPwError(err instanceof Error ? err.message : 'Failed to change password');
     } finally {
@@ -59,32 +71,31 @@ export function ProfilePage() {
 
   // --- Revoke all sessions ---
   const handleRevokeSessions = async () => {
-    if (!confirm(t('auth.revokeSessionsConfirm'))) return;
+    setRevokeLoading(true);
+    setActionError('');
     try {
       await apiPost('/api/auth/revoke-sessions', {});
-      alert(t('auth.sessionsRevoked'));
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('refresh_token');
-      sessionStorage.removeItem('signing_key');
-      window.location.href = '/';
+      setRevokeDialogOpen(false);
+      clearTokensAndRedirect();
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed');
+      setActionError(err instanceof Error ? err.message : 'Failed');
+    } finally {
+      setRevokeLoading(false);
     }
   };
 
   // --- Delete account ---
   const handleDeleteAccount = async () => {
-    const email = prompt(t('auth.deleteAccountConfirm'));
-    if (!email) return;
+    setDeleteLoading(true);
+    setActionError('');
     try {
       await apiDelete('/api/auth/account');
-      alert(t('auth.accountDeleted'));
-      localStorage.removeItem('access_token');
-      localStorage.removeItem('refresh_token');
-      sessionStorage.removeItem('signing_key');
-      window.location.href = '/';
+      setDeleteDialogOpen(false);
+      clearTokensAndRedirect();
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Failed');
+      setActionError(err instanceof Error ? err.message : 'Failed');
+    } finally {
+      setDeleteLoading(false);
     }
   };
 
@@ -141,7 +152,7 @@ export function ProfilePage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <Button variant="outline" onClick={handleRevokeSessions}>
+          <Button variant="outline" onClick={() => setRevokeDialogOpen(true)}>
             <LogOut className="h-4 w-4 mr-2" />
             {t('auth.revokeSessions')}
           </Button>
@@ -159,12 +170,35 @@ export function ProfilePage() {
           </CardTitle>
         </CardHeader>
         <CardContent>
-          <Button variant="destructive" onClick={handleDeleteAccount}>
+          {actionError && (
+            <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive mb-4">{actionError}</div>
+          )}
+          <Button variant="destructive" onClick={() => setDeleteDialogOpen(true)}>
             <Trash2 className="h-4 w-4 mr-2" />
             {t('auth.deleteAccount')}
           </Button>
         </CardContent>
       </Card>
+
+      <ConfirmDialog
+        open={revokeDialogOpen}
+        onOpenChange={setRevokeDialogOpen}
+        title={t('auth.revokeSessions')}
+        description={t('auth.revokeSessionsConfirm')}
+        onConfirm={handleRevokeSessions}
+        loading={revokeLoading}
+      />
+
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        onOpenChange={setDeleteDialogOpen}
+        title={t('auth.deleteAccount')}
+        description={t('auth.deleteAccountConfirm')}
+        variant="destructive"
+        confirmLabel={t('auth.deleteAccount')}
+        onConfirm={handleDeleteAccount}
+        loading={deleteLoading}
+      />
     </div>
   );
 }

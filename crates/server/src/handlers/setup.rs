@@ -87,10 +87,18 @@ pub async fn setup_initialize(
         ));
     }
 
-    // Double-check from DB (not cache) to prevent race condition
+    // Double-check from DB (not cache) to prevent race condition,
+    // using a PostgreSQL advisory lock to serialize concurrent attempts.
+    let mut tx = state.db.begin().await?;
+
+    // Acquire an advisory lock (key = 1 for setup). This blocks concurrent setup attempts.
+    sqlx::query("SELECT pg_advisory_xact_lock(1)")
+        .execute(&mut *tx)
+        .await?;
+
     let db_initialized: Option<serde_json::Value> =
         sqlx::query_scalar("SELECT value FROM system_settings WHERE key = 'setup.initialized'")
-            .fetch_optional(&state.db)
+            .fetch_optional(&mut *tx)
             .await?;
 
     if db_initialized
@@ -110,8 +118,6 @@ pub async fn setup_initialize(
     if !req.admin.email.contains('@') || !req.admin.email.contains('.') {
         return Err(AppError::BadRequest("Invalid email format".into()));
     }
-
-    let mut tx = state.db.begin().await?;
 
     // 1. Create super_admin user
     let password_hash = password::hash_password(&req.admin.password)?;

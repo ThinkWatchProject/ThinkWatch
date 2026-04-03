@@ -53,6 +53,21 @@ quickwit:
   enabled: true
   url: "http://quickwit:7280"
   index: "audit_logs"
+  storage:
+    # S3-compatible object storage for Quickwit index data.
+    # Default: uses the bundled RustFS instance.
+    # For cloud-native deployments, point to AWS S3, GCS, or Azure Blob:
+    #   uri: "s3://my-bucket/quickwit"
+    #   endpoint: ""                       # omit for real AWS S3
+    #   region: "us-west-2"
+    #   forcePathStyle: false
+    #   accessKeyId / secretAccessKey: use ExternalSecret or IRSA instead
+    uri: "s3://quickwit"
+    endpoint: "http://rustfs:9000"
+    region: "us-east-1"
+    forcePathStyle: true
+    accessKeyId: ""
+    secretAccessKey: ""
 
 syslog:
   enabled: false

@@ -50,11 +50,17 @@ impl DynamicConfig {
     }
 
     /// Update one or more settings in the database and refresh the cache.
+    /// Validates values before persisting.
     pub async fn update(
         &self,
         updates: &HashMap<String, Value>,
         updated_by: Option<uuid::Uuid>,
     ) -> anyhow::Result<()> {
+        // Validate values before persisting
+        for (key, value) in updates {
+            validate_setting(key, value)?;
+        }
+
         let mut tx = self.db.begin().await?;
 
         for (key, value) in updates {
@@ -296,4 +302,90 @@ pub struct SettingEntry {
     pub category: String,
     pub description: Option<String>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Validate a setting value before persisting.
+/// Returns an error if the value is invalid for the given key.
+fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
+    match key {
+        // Integer settings with minimum bounds
+        k if k.ends_with("_secs") || k.ends_with("_days") || k.ends_with("_hours") => {
+            let n = value
+                .as_i64()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected an integer value"))?;
+            if n < 0 {
+                anyhow::bail!("{key}: value must be non-negative, got {n}");
+            }
+        }
+
+        // JWT TTLs need reasonable bounds
+        "auth.jwt_access_ttl_secs" => {
+            let n = value.as_i64().ok_or_else(|| anyhow::anyhow!("{key}: expected integer"))?;
+            if n < 60 || n > 86400 {
+                anyhow::bail!("{key}: must be between 60 and 86400 seconds");
+            }
+        }
+        "auth.jwt_refresh_ttl_days" => {
+            let n = value.as_i64().ok_or_else(|| anyhow::anyhow!("{key}: expected integer"))?;
+            if n < 1 || n > 365 {
+                anyhow::bail!("{key}: must be between 1 and 365 days");
+            }
+        }
+
+        // Budget thresholds must be between 0.0 and 1.0
+        "budget.alert_thresholds" => {
+            let arr = value
+                .as_array()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected an array of numbers"))?;
+            for v in arr {
+                let n = v.as_f64().ok_or_else(|| anyhow::anyhow!("{key}: array elements must be numbers"))?;
+                if !(0.0..=1.0).contains(&n) {
+                    anyhow::bail!("{key}: threshold values must be between 0.0 and 1.0, got {n}");
+                }
+            }
+        }
+
+        // Webhook URL validation
+        "budget.webhook_url" => {
+            if let Some(url) = value.as_str() {
+                if !url.is_empty() && !url.starts_with("http://") && !url.starts_with("https://") {
+                    anyhow::bail!("{key}: must be a valid http/https URL");
+                }
+            }
+        }
+
+        // Boolean settings
+        "setup.initialized" | "auth.allow_registration" => {
+            value
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a boolean value"))?;
+        }
+
+        // String settings — basic non-empty check for critical ones
+        "setup.site_name" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string value"))?;
+            if s.is_empty() || s.len() > 200 {
+                anyhow::bail!("{key}: must be between 1 and 200 characters");
+            }
+        }
+
+        // PII patterns: basic validation (regex compilation checked at gateway layer)
+        "gateway.pii_patterns" => {
+            if let Some(arr) = value.as_array() {
+                for item in arr {
+                    if item.get("regex").and_then(|v| v.as_str()).is_none() {
+                        anyhow::bail!("{key}: each pattern must have a 'regex' string field");
+                    }
+                    if item.get("placeholder_prefix").and_then(|v| v.as_str()).is_none() {
+                        anyhow::bail!("{key}: each pattern must have a 'placeholder_prefix' string field");
+                    }
+                }
+            }
+        }
+
+        _ => {} // Unknown keys pass through — forward-compatible
+    }
+    Ok(())
 }

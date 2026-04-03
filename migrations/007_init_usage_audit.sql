@@ -20,20 +20,7 @@ CREATE INDEX idx_usage_records_user_id ON usage_records(user_id, created_at);
 CREATE INDEX idx_usage_records_team_id ON usage_records(team_id, created_at);
 CREATE INDEX idx_usage_records_api_key_id ON usage_records(api_key_id, created_at);
 
-CREATE TABLE audit_logs (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    user_id     UUID REFERENCES users(id),
-    api_key_id  UUID REFERENCES api_keys(id),
-    action      VARCHAR(100) NOT NULL,
-    resource    VARCHAR(255),
-    detail      JSONB,
-    ip_address  TEXT,
-    user_agent  TEXT,
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX idx_audit_logs_created_at ON audit_logs(created_at);
-CREATE INDEX idx_audit_logs_user_id ON audit_logs(user_id, created_at);
+-- Audit logs are stored in Quickwit only (see deploy/quickwit/audit_logs_index.yaml)
 
 CREATE TABLE budget_alerts (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),

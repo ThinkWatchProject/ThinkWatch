@@ -31,11 +31,10 @@ impl AppConfig {
         dotenvy::dotenv().ok();
 
         Ok(Self {
-            database_url: std::env::var("DATABASE_URL").unwrap_or_else(|_| {
-                "postgres://postgres:postgres@localhost:5432/agent_bastion".into()
-            }),
+            database_url: std::env::var("DATABASE_URL")
+                .expect("DATABASE_URL environment variable is required"),
             redis_url: std::env::var("REDIS_URL")
-                .unwrap_or_else(|_| "redis://localhost:6379".into()),
+                .expect("REDIS_URL environment variable is required"),
             jwt_secret: std::env::var("JWT_SECRET")
                 .expect("JWT_SECRET environment variable is required"),
             encryption_key: std::env::var("ENCRYPTION_KEY")

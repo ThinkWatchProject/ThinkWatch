@@ -165,8 +165,8 @@ Client                Gateway :3000                        Upstream Provider
   |                  - Count input/output tokens (tiktoken)        |
   |                  - Calculate cost from model pricing           |
   |                  - Insert usage_record into PostgreSQL         |
-  |                  - Write audit_log entry                       |
-  |                  - Push audit log to Quickwit (if configured)  |
+  |                  - Push audit log to Quickwit                  |
+  |                  - Forward to log forwarders (syslog/kafka/webhook) |
   |                  - Update rate limit counters in Redis         |
 ```
 

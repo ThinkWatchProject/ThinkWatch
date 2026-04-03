@@ -239,6 +239,7 @@ async fn audit_worker(
             Some(entry) = rx.recv() => {
                 // Forward to all enabled forwarders immediately
                 forward_to_all(&http_client, &registry, &db, &entry).await;
+
                 batch.push(entry);
                 if batch.len() >= 50 {
                     flush_to_quickwit(&http_client, &config, &mut batch).await;

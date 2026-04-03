@@ -22,7 +22,7 @@ tower-http = { version = "0.6", features = [
     "cors", "trace", "compression-gzip", "request-id",
     "limit", "timeout", "catch-panic", "sensitive-headers", "set-header",
 ] }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "sync", "io-util"] }
 
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate", "rust_decimal"] }

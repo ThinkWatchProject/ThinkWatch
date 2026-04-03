@@ -1,4 +1,5 @@
 use crate::providers::traits::{ChatCompletionResponse, ChatMessage};
+use rand::RngExt;
 use regex::Regex;
 use std::collections::HashMap;
 
@@ -27,7 +28,7 @@ struct PiiPattern {
 
 /// Holds the mapping from placeholders back to original PII values.
 pub struct RedactionContext {
-    /// Maps placeholder (e.g. `{{EMAIL_1}}`) to original value.
+    /// Maps placeholder (e.g. `{{EMAIL_a3f1_1}}`) to original value.
     pub replacements: HashMap<String, String>,
 }
 
@@ -101,12 +102,20 @@ impl PiiRedactor {
     ///
     /// Only `user` role messages are redacted; `system` and `assistant` messages
     /// are left unchanged.
+    ///
+    /// Uses a single-pass approach: build a combined regex from all patterns,
+    /// find all matches with positions, sort by position (descending), and
+    /// replace in reverse order to avoid invalidating offsets.
     pub fn redact_messages(
         &self,
         messages: &[ChatMessage],
     ) -> (Vec<ChatMessage>, RedactionContext) {
         let mut counters: HashMap<String, u32> = HashMap::new();
         let mut replacements: HashMap<String, String> = HashMap::new();
+
+        // Per-request random salt to prevent placeholder prediction
+        let salt: u16 = rand::rng().random();
+        let salt_hex = format!("{salt:04x}");
 
         let redacted = messages
             .iter()
@@ -120,27 +129,46 @@ impl PiiRedactor {
                     None => return msg.clone(),
                 };
 
-                let mut redacted_content = content_str;
-
-                for pattern in &self.patterns {
-                    // Collect matches first to avoid borrow issues
-                    let matches: Vec<String> = pattern
-                        .regex
-                        .find_iter(&redacted_content.clone())
-                        .map(|m| m.as_str().to_string())
-                        .collect();
-
-                    for matched_value in matches {
-                        let counter = counters
-                            .entry(pattern.placeholder_prefix.clone())
-                            .or_insert(0);
-                        *counter += 1;
-                        let placeholder =
-                            format!("{{{{{}_{}}}}}", pattern.placeholder_prefix, counter);
-                        replacements.insert(placeholder.clone(), matched_value.clone());
-                        redacted_content =
-                            redacted_content.replacen(&matched_value, &placeholder, 1);
+                // Collect all matches across all patterns with their positions
+                let mut all_matches: Vec<(usize, usize, usize)> = Vec::new(); // (start, end, pattern_idx)
+                for (pattern_idx, pattern) in self.patterns.iter().enumerate() {
+                    for m in pattern.regex.find_iter(&content_str) {
+                        all_matches.push((m.start(), m.end(), pattern_idx));
                     }
+                }
+
+                if all_matches.is_empty() {
+                    return msg.clone();
+                }
+
+                // Sort by start position ascending, then by length descending (prefer longer matches)
+                all_matches.sort_by(|a, b| {
+                    a.0.cmp(&b.0).then_with(|| (b.1 - b.0).cmp(&(a.1 - a.0)))
+                });
+
+                // Remove overlapping matches — keep the longest match at each position
+                let mut filtered: Vec<(usize, usize, usize)> = Vec::new();
+                for m in &all_matches {
+                    // Only add if it doesn't overlap with any already-accepted match
+                    if filtered.iter().all(|f| m.0 >= f.1 || m.1 <= f.0) {
+                        filtered.push(*m);
+                    }
+                }
+                // Sort descending by start for safe replacement
+                filtered.sort_by(|a, b| b.0.cmp(&a.0));
+
+                let mut redacted_content = content_str;
+                for (start, end, pattern_idx) in filtered {
+                    let pattern = &self.patterns[pattern_idx];
+                    let matched_value = &redacted_content[start..end];
+                    let counter = counters
+                        .entry(pattern.placeholder_prefix.clone())
+                        .or_insert(0);
+                    *counter += 1;
+                    let placeholder =
+                        format!("{{{{{}_{}_{}}}}}", pattern.placeholder_prefix, salt_hex, counter);
+                    replacements.insert(placeholder.clone(), matched_value.to_string());
+                    redacted_content.replace_range(start..end, &placeholder);
                 }
 
                 ChatMessage {
@@ -212,6 +240,15 @@ mod tests {
         }
     }
 
+    /// Find the placeholder replacement that maps to the given original value.
+    fn find_placeholder(ctx: &RedactionContext, original: &str) -> String {
+        ctx.replacements
+            .iter()
+            .find(|(_, v)| v.as_str() == original)
+            .map(|(k, _)| k.clone())
+            .unwrap_or_else(|| panic!("no placeholder for {original}"))
+    }
+
     #[test]
     fn redact_email() {
         let redactor = PiiRedactor::new();
@@ -219,9 +256,10 @@ mod tests {
         let (redacted, ctx) = redactor.redact_messages(&messages);
 
         let content = redacted[0].content.as_str().unwrap();
-        assert!(content.contains("{{EMAIL_1}}"), "got: {content}");
+        assert!(content.contains("EMAIL"), "got: {content}");
         assert!(!content.contains("alice@example.com"));
-        assert_eq!(ctx.replacements["{{EMAIL_1}}"], "alice@example.com");
+        let ph = find_placeholder(&ctx, "alice@example.com");
+        assert!(ph.starts_with("{{EMAIL_"), "placeholder format: {ph}");
     }
 
     #[test]
@@ -231,9 +269,10 @@ mod tests {
         let (redacted, ctx) = redactor.redact_messages(&messages);
 
         let content = redacted[0].content.as_str().unwrap();
-        assert!(content.contains("{{PHONE_1}}"), "got: {content}");
+        assert!(content.contains("PHONE"), "got: {content}");
         assert!(!content.contains("13812345678"));
-        assert_eq!(ctx.replacements["{{PHONE_1}}"], "13812345678");
+        let ph = find_placeholder(&ctx, "13812345678");
+        assert!(ph.starts_with("{{PHONE_"), "placeholder format: {ph}");
     }
 
     #[test]
@@ -258,9 +297,10 @@ mod tests {
         let (redacted, ctx) = redactor.redact_messages(&messages);
 
         let content = redacted[0].content.as_str().unwrap();
-        assert!(content.contains("{{CARD_1}}"), "got: {content}");
+        assert!(content.contains("CARD"), "got: {content}");
         assert!(!content.contains("4111"));
-        assert_eq!(ctx.replacements["{{CARD_1}}"], "4111-1111-1111-1111");
+        let ph = find_placeholder(&ctx, "4111-1111-1111-1111");
+        assert!(ph.starts_with("{{CARD_"), "placeholder format: {ph}");
     }
 
     #[test]
@@ -270,9 +310,10 @@ mod tests {
         let (redacted, ctx) = redactor.redact_messages(&messages);
 
         let content = redacted[0].content.as_str().unwrap();
-        assert!(content.contains("{{ID_1}}"), "got: {content}");
+        assert!(content.contains("ID"), "got: {content}");
         assert!(!content.contains("110101199001011234"));
-        assert_eq!(ctx.replacements["{{ID_1}}"], "110101199001011234");
+        let ph = find_placeholder(&ctx, "110101199001011234");
+        assert!(ph.starts_with("{{ID_"), "placeholder format: {ph}");
     }
 
     #[test]
@@ -282,9 +323,10 @@ mod tests {
         let (redacted, ctx) = redactor.redact_messages(&messages);
 
         let content = redacted[0].content.as_str().unwrap();
-        assert!(content.contains("{{IP_1}}"), "got: {content}");
+        assert!(content.contains("IP"), "got: {content}");
         assert!(!content.contains("192.168.1.100"));
-        assert_eq!(ctx.replacements["{{IP_1}}"], "192.168.1.100");
+        let ph = find_placeholder(&ctx, "192.168.1.100");
+        assert!(ph.starts_with("{{IP_"), "placeholder format: {ph}");
     }
 
     #[test]
@@ -301,9 +343,11 @@ mod tests {
     fn restore_response_replaces_placeholders() {
         let redactor = PiiRedactor::new();
         let messages = vec![user_msg("Email alice@example.com and bob@test.org")];
-        let (_, ctx) = redactor.redact_messages(&messages);
+        let (redacted, ctx) = redactor.redact_messages(&messages);
 
-        let mut response = make_response("I found {{EMAIL_1}} and {{EMAIL_2}} in your message.");
+        // Simulate the LLM echoing back the redacted content
+        let redacted_content = redacted[0].content.as_str().unwrap();
+        let mut response = make_response(redacted_content);
         redactor.restore_response(&mut response, &ctx);
 
         let content = response.choices[0].message.content.as_str().unwrap();
@@ -348,9 +392,10 @@ mod tests {
         let (redacted, ctx) = redactor.redact_messages(&messages);
 
         let content = redacted[0].content.as_str().unwrap();
-        assert!(content.contains("{{CUSTOM_EMAIL_1}}"), "got: {content}");
+        assert!(content.contains("CUSTOM_EMAIL"), "got: {content}");
         assert!(!content.contains("test@example.com"));
-        assert_eq!(ctx.replacements["{{CUSTOM_EMAIL_1}}"], "test@example.com");
+        let ph = find_placeholder(&ctx, "test@example.com");
+        assert!(ph.starts_with("{{CUSTOM_EMAIL_"), "placeholder format: {ph}");
     }
 
     #[test]
@@ -374,7 +419,7 @@ mod tests {
         let messages = vec![user_msg("Contact me at alice@test.org")];
         let (redacted, _ctx) = redactor.redact_messages(&messages);
         let content = redacted[0].content.as_str().unwrap();
-        assert!(content.contains("{{EMAIL_1}}"), "got: {content}");
+        assert!(content.contains("EMAIL"), "got: {content}");
         assert!(!content.contains("alice@test.org"));
     }
 }

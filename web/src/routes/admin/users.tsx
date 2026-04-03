@@ -22,8 +22,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus } from 'lucide-react';
+import { Plus, LogOut as LogOutIcon } from 'lucide-react';
 import { api, apiPost } from '@/lib/api';
+import { ConfirmDialog } from '@/components/confirm-dialog';
 
 interface User {
   id: string;
@@ -48,6 +49,27 @@ export function UsersPage() {
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState('developer');
+
+  // Force-logout confirm dialog
+  const [logoutDialogOpen, setLogoutDialogOpen] = useState(false);
+  const [logoutUserId, setLogoutUserId] = useState<string | null>(null);
+  const [logoutLoading, setLogoutLoading] = useState(false);
+  const [logoutError, setLogoutError] = useState('');
+
+  const handleForceLogout = async () => {
+    if (!logoutUserId) return;
+    setLogoutLoading(true);
+    setLogoutError('');
+    try {
+      await apiPost(`/api/admin/users/${logoutUserId}/force-logout`, {});
+      setLogoutDialogOpen(false);
+      setLogoutUserId(null);
+    } catch (err) {
+      setLogoutError(err instanceof Error ? err.message : 'Failed');
+    } finally {
+      setLogoutLoading(false);
+    }
+  };
 
   const fetchUsers = async () => {
     try {
@@ -122,7 +144,7 @@ export function UsersPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="user-password">{t('auth.password')}</Label>
-                <Input id="user-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Minimum 8 characters" required />
+                <Input id="user-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder={t('auth.passwordTooShort')} required />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="user-role">{t('users.role')}</Label>
@@ -132,11 +154,11 @@ export function UsersPage() {
                   onChange={(e) => setRole(e.target.value)}
                   className="flex h-8 w-full rounded-md border border-input bg-background px-3 py-1 text-sm shadow-sm"
                 >
-                  <option value="super_admin">Super Admin</option>
-                  <option value="admin">Admin</option>
-                  <option value="team_manager">Team Manager</option>
-                  <option value="developer">Developer</option>
-                  <option value="viewer">Viewer</option>
+                  <option value="super_admin">{t('users.roleSuperAdmin', 'Super Admin')}</option>
+                  <option value="admin">{t('users.roleAdmin', 'Admin')}</option>
+                  <option value="team_manager">{t('users.roleTeamManager', 'Team Manager')}</option>
+                  <option value="developer">{t('users.roleDeveloper', 'Developer')}</option>
+                  <option value="viewer">{t('users.roleViewer', 'Viewer')}</option>
                 </select>
               </div>
               <DialogFooter>
@@ -207,16 +229,12 @@ export function UsersPage() {
                       <Button
                         variant="outline"
                         size="sm"
-                        onClick={async () => {
-                          if (!confirm(t('users.forceLogoutConfirm'))) return;
-                          try {
-                            await apiPost(`/api/admin/users/${u.id}/force-logout`, {});
-                            alert(t('users.forceLogoutSuccess'));
-                          } catch (err) {
-                            alert(err instanceof Error ? err.message : 'Failed');
-                          }
+                        onClick={() => {
+                          setLogoutUserId(u.id);
+                          setLogoutDialogOpen(true);
                         }}
                       >
+                        <LogOutIcon className="h-3 w-3 mr-1" />
                         {t('users.forceLogout')}
                       </Button>
                     </TableCell>
@@ -227,6 +245,21 @@ export function UsersPage() {
           )}
         </CardContent>
       </Card>
+
+      <ConfirmDialog
+        open={logoutDialogOpen}
+        onOpenChange={(open) => {
+          setLogoutDialogOpen(open);
+          if (!open) { setLogoutUserId(null); setLogoutError(''); }
+        }}
+        title={t('users.forceLogout')}
+        description={t('users.forceLogoutConfirm')}
+        onConfirm={handleForceLogout}
+        loading={logoutLoading}
+      />
+      {logoutError && (
+        <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{logoutError}</div>
+      )}
     </div>
   );
 }

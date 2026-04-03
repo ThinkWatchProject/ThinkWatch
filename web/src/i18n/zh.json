@@ -289,7 +289,12 @@
     "created": "创建时间",
     "forceLogout": "强制下线",
     "forceLogoutConfirm": "确定要强制该用户退出所有会话吗？",
-    "forceLogoutSuccess": "该用户已被强制下线。"
+    "forceLogoutSuccess": "该用户已被强制下线。",
+    "roleSuperAdmin": "超级管理员",
+    "roleAdmin": "管理员",
+    "roleTeamManager": "团队经理",
+    "roleDeveloper": "开发者",
+    "roleViewer": "只读用户"
   },
   "roles": {
     "title": "角色与权限",

@@ -289,7 +289,12 @@
     "created": "Created",
     "forceLogout": "Force Logout",
     "forceLogoutConfirm": "Force logout this user from all sessions?",
-    "forceLogoutSuccess": "User has been logged out from all sessions."
+    "forceLogoutSuccess": "User has been logged out from all sessions.",
+    "roleSuperAdmin": "Super Admin",
+    "roleAdmin": "Admin",
+    "roleTeamManager": "Team Manager",
+    "roleDeveloper": "Developer",
+    "roleViewer": "Viewer"
   },
   "roles": {
     "title": "Roles & Permissions",

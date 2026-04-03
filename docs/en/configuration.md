@@ -146,7 +146,7 @@ Comma-separated list of allowed CORS origins. Each origin must include the schem
 | Default   | —                              |
 | Example   | `http://quickwit:7280`         |
 
-Base URL of the Quickwit instance for audit log indexing and search. If not set, audit log search via the API will be unavailable (entries are still logged to stdout).
+Base URL of the Quickwit instance for audit log storage and search. Audit logs are stored **exclusively** in Quickwit (not in PostgreSQL). If not set, audit log ingestion and search will be unavailable (entries are still logged to stdout and forwarded to configured log forwarders).
 
 ---
 
@@ -155,10 +155,10 @@ Base URL of the Quickwit instance for audit log indexing and search. If not set,
 | Property  | Value                       |
 | --------- | --------------------------- |
 | Required  | No                          |
-| Default   | `agentbastion-audit`        |
-| Example   | `agentbastion-audit-prod`   |
+| Default   | `audit_logs`                |
+| Example   | `audit_logs_prod`           |
 
-Name of the Quickwit index where audit log entries are stored. The index must be created before AgentBastion starts (see the deployment guide for index schema).
+Name of the Quickwit index where audit log entries are stored. AgentBastion automatically creates the index on startup if it does not exist.
 
 ---
 
@@ -170,9 +170,7 @@ Name of the Quickwit index where audit log entries are stored. The index must be
 | Default   | —                            |
 | Example   | `siem.corp.internal:514`     |
 
-UDP address of a syslog receiver for forwarding audit log entries. Format: `host:port`. When set, AgentBastion sends RFC 5424 structured syslog messages for every audit event in addition to Quickwit indexing.
-
-Useful for SIEM integration (Splunk, Elastic SIEM, Microsoft Sentinel).
+> **Deprecated.** Log forwarding is now configured dynamically through the admin Web UI (Admin > Log Forwarders). This environment variable is retained for backward compatibility but has no effect. Use the database-driven log forwarder system instead, which supports UDP/TCP Syslog, Kafka, and HTTP webhooks.
 
 ---
 

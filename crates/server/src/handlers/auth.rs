@@ -51,6 +51,17 @@ pub async fn login(
         ));
     }
 
+    // Progressive lockout: after 5 failures, increase lockout exponentially
+    let lockout_key = format!("auth_lockout:{}", req.email);
+    let lockout_ttl: Option<i64> =
+        fred::interfaces::KeysInterface::ttl(&state.redis, &lockout_key).await.unwrap_or(None);
+    if lockout_ttl.unwrap_or(-2) > 0 {
+        return Err(AppError::BadRequest(
+            "Account temporarily locked due to repeated failed attempts. Please try again later."
+                .into(),
+        ));
+    }
+
     // Constant-time login: always perform Argon2 verify to prevent user enumeration
     let dummy_hash = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -75,6 +86,25 @@ pub async fn login(
     let password_valid = password::verify_password(&req.password, &password_hash).unwrap_or(false);
 
     if !password_valid || user.is_none() {
+        // Progressive lockout: lock account after repeated failures
+        // Lockout duration increases: 5 fails=60s, 8=300s, 10+=900s
+        if count >= 10 {
+            let _: () = fred::interfaces::KeysInterface::set(
+                &state.redis, &lockout_key, "1",
+                Some(fred::types::Expiration::EX(900)), None, false,
+            ).await.unwrap_or(());
+        } else if count >= 8 {
+            let _: () = fred::interfaces::KeysInterface::set(
+                &state.redis, &lockout_key, "1",
+                Some(fred::types::Expiration::EX(300)), None, false,
+            ).await.unwrap_or(());
+        } else if count >= 5 {
+            let _: () = fred::interfaces::KeysInterface::set(
+                &state.redis, &lockout_key, "1",
+                Some(fred::types::Expiration::EX(60)), None, false,
+            ).await.unwrap_or(());
+        }
+
         // Log failed attempt
         state.audit.log(
             AuditEntry::new("auth.login_failed").detail(serde_json::json!({"email": req.email})),
@@ -82,6 +112,14 @@ pub async fn login(
         return Err(AppError::Unauthorized);
     }
     let user = user.unwrap(); // Safe: checked above
+
+    // Clear rate limit and lockout keys on successful login
+    let _: i64 = fred::interfaces::KeysInterface::del(&state.redis, &rate_key)
+        .await
+        .unwrap_or(0);
+    let _: i64 = fred::interfaces::KeysInterface::del(&state.redis, &lockout_key)
+        .await
+        .unwrap_or(0);
 
     // Fetch user roles
     let roles: Vec<String> = sqlx::query_scalar(

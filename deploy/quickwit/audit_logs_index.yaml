@@ -45,3 +45,6 @@ search_settings:
     - action
     - resource
     - user_agent
+retention:
+  period: 90 days
+  schedule: daily

@@ -35,23 +35,8 @@ async fn run_retention_cleanup(db: &PgPool, config: &DynamicConfig) -> anyhow::R
         }
     }
 
-    // 2. Clean up audit logs
-    let audit_days = config.data_retention_days_audit().await;
-    if audit_days > 0 {
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(audit_days);
-        let result = sqlx::query("DELETE FROM audit_logs WHERE created_at < $1")
-            .bind(cutoff)
-            .execute(db)
-            .await?;
-
-        if result.rows_affected() > 0 {
-            tracing::info!(
-                "Purged {} audit logs older than {} days",
-                result.rows_affected(),
-                audit_days
-            );
-        }
-    }
+    // 2. Audit logs are stored in Quickwit only; retention is managed by
+    //    Quickwit's built-in retention policy (see quickwit/audit_logs_index.yaml).
 
     // 3. Purge soft-deleted records older than 30 days
     let soft_delete_cutoff = chrono::Utc::now() - chrono::Duration::days(30);

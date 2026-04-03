@@ -1,10 +1,10 @@
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use agent_bastion_auth::password;
-use agent_bastion_common::dto::UserResponse;
+use agent_bastion_common::dto::{PaginatedResponse, PaginationParams, UserResponse};
 use agent_bastion_common::dynamic_config::{self, SettingEntry};
 use agent_bastion_common::errors::AppError;
 use agent_bastion_common::models::User;
@@ -17,10 +17,22 @@ use crate::middleware::auth_guard::AuthUser;
 pub async fn list_users(
     _auth_user: AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<UserResponse>>, AppError> {
-    let users = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC",
+    Query(pagination): Query<PaginationParams>,
+) -> Result<Json<PaginatedResponse<UserResponse>>, AppError> {
+    let per_page = pagination.per_page();
+    let offset = pagination.offset();
+
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL",
     )
+    .fetch_one(&state.db)
+    .await?;
+
+    let users = sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+    )
+    .bind(per_page as i64)
+    .bind(offset as i64)
     .fetch_all(&state.db)
     .await?;
 
@@ -35,7 +47,12 @@ pub async fn list_users(
         })
         .collect();
 
-    Ok(Json(responses))
+    Ok(Json(PaginatedResponse {
+        data: responses,
+        total,
+        page: pagination.page.unwrap_or(1).max(1),
+        per_page,
+    }))
 }
 
 #[derive(Debug, Deserialize)]

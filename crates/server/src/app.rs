@@ -133,6 +133,7 @@ pub async fn create_gateway_app(
                 thresholds: budget_thresholds,
             },
         ))),
+        cost_tracker: Arc::new(agent_bastion_gateway::cost_tracker::CostTracker::new()),
     };
     let ai_routes = Router::new()
         .route(

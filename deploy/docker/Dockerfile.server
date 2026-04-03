@@ -1,22 +1,37 @@
 # Stage 1: Build
 FROM rust:1.86-bookworm AS builder
 
+ARG TARGETARCH
+
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY migrations/ migrations/
 COPY deploy/quickwit/ deploy/quickwit/
 
-# Static linking via musl for distroless compatibility
+# Install musl toolchains for the target architecture
 RUN apt-get update && apt-get install -y musl-tools && \
-    rustup target add x86_64-unknown-linux-musl
+    if [ "$TARGETARCH" = "arm64" ]; then \
+        apt-get install -y gcc-aarch64-linux-gnu && \
+        rustup target add aarch64-unknown-linux-musl; \
+    else \
+        rustup target add x86_64-unknown-linux-musl; \
+    fi
 
-RUN cargo build --release --target x86_64-unknown-linux-musl -p agent-bastion-server
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc
+
+RUN if [ "$TARGETARCH" = "arm64" ]; then \
+        cargo build --release --target aarch64-unknown-linux-musl -p agent-bastion-server && \
+        cp target/aarch64-unknown-linux-musl/release/agent-bastion-server /agent-bastion-server; \
+    else \
+        cargo build --release --target x86_64-unknown-linux-musl -p agent-bastion-server && \
+        cp target/x86_64-unknown-linux-musl/release/agent-bastion-server /agent-bastion-server; \
+    fi
 
 # Stage 2: Distroless runtime — no shell, no package manager, minimal attack surface
 FROM gcr.io/distroless/static-debian13:nonroot
 
-COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/agent-bastion-server /
+COPY --from=builder /agent-bastion-server /
 COPY --from=builder /app/migrations /migrations
 
 # Gateway port

@@ -21,7 +21,6 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       QUICKWIT_URL: http://quickwit:7280
       QUICKWIT_INDEX: audit_logs
-      SYSLOG_ADDR: ${SYSLOG_ADDR:-}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
@@ -32,6 +31,23 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:3000/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "${SERVER_CPU_LIMIT:-4}"
+          memory: ${SERVER_MEM_LIMIT:-4G}
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    networks:
+      - frontend
+      - backend
     restart: unless-stopped
 
   web:
@@ -39,7 +55,15 @@ services:
     ports:
       - "${WEB_PORT:-80}:80"
     depends_on:
-      - server
+      server:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 256M
+    networks:
+      - frontend
     restart: unless-stopped
 
   postgres:
@@ -55,6 +79,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: ${PG_MEM_LIMIT:-2G}
+    networks:
+      - backend
     restart: unless-stopped
 
   redis:
@@ -67,6 +98,13 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: ${REDIS_MEM_LIMIT:-1G}
+    networks:
+      - backend
     restart: unless-stopped
 
   rustfs:
@@ -82,19 +120,26 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1G
+    networks:
+      - backend
     restart: unless-stopped
 
   quickwit:
     image: quickwit/quickwit:0.8.1
     command: run
     environment:
-      QW_DEFAULT_INDEX_ROOT_URI: s3://quickwit
+      QW_DEFAULT_INDEX_ROOT_URI: ${QW_STORAGE_URI:-s3://quickwit}
       QW_LISTEN_ADDRESS: 0.0.0.0
-      AWS_ACCESS_KEY_ID: ${RUSTFS_USER:-rustfs}
-      AWS_SECRET_ACCESS_KEY: ${RUSTFS_PASSWORD}
-      AWS_ENDPOINT_URL: http://rustfs:9000
-      AWS_REGION: us-east-1
-      AWS_FORCE_PATH_STYLE: "true"
+      AWS_ACCESS_KEY_ID: ${QW_S3_ACCESS_KEY_ID:-${RUSTFS_USER:-rustfs}}
+      AWS_SECRET_ACCESS_KEY: ${QW_S3_SECRET_ACCESS_KEY:-${RUSTFS_PASSWORD}}
+      AWS_ENDPOINT_URL: ${QW_S3_ENDPOINT:-http://rustfs:9000}
+      AWS_REGION: ${QW_S3_REGION:-us-east-1}
+      AWS_FORCE_PATH_STYLE: "${QW_S3_FORCE_PATH_STYLE:-true}"
     volumes:
       - quickwit_data:/quickwit/qwdata
     depends_on:
@@ -105,7 +150,21 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: ${QW_MEM_LIMIT:-2G}
+    networks:
+      - backend
     restart: unless-stopped
+
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true
 
 volumes:
   pgdata:

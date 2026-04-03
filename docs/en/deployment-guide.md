@@ -255,7 +255,36 @@ curl http://localhost:3000/health
 docker compose -f deploy/docker-compose.yml exec server curl http://localhost:3001/api/health
 ```
 
-### 3.5 Set Up a Reverse Proxy
+### 3.5 Quickwit Storage (Cloud-Native S3)
+
+By default, Quickwit stores audit log indexes in the bundled **RustFS** instance (S3-compatible object storage). For cloud-native deployments, you can point Quickwit directly to **AWS S3**, **Google Cloud Storage**, or **Azure Blob Storage** by setting these environment variables in `.env.production`:
+
+```bash
+# Point Quickwit to AWS S3 (or any S3-compatible service)
+QW_STORAGE_URI=s3://my-company-audit-logs/quickwit
+QW_S3_ACCESS_KEY_ID=AKIAXXXXXXXXXXXXXXXX
+QW_S3_SECRET_ACCESS_KEY=wJalrXXXXXXXXXXXXXXXXXXX
+QW_S3_REGION=us-west-2
+QW_S3_FORCE_PATH_STYLE=false    # false for AWS S3, true for MinIO/RustFS
+# QW_S3_ENDPOINT=               # omit for real AWS S3; set for MinIO/RustFS
+```
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `QW_STORAGE_URI` | `s3://quickwit` | S3 URI for index data. Use `s3://bucket/prefix` format. |
+| `QW_S3_ACCESS_KEY_ID` | `${RUSTFS_USER}` | S3 access key. For AWS EKS, use IRSA instead. |
+| `QW_S3_SECRET_ACCESS_KEY` | `${RUSTFS_PASSWORD}` | S3 secret key. |
+| `QW_S3_ENDPOINT` | `http://rustfs:9000` | S3 endpoint URL. Omit for real AWS S3. |
+| `QW_S3_REGION` | `us-east-1` | AWS region. |
+| `QW_S3_FORCE_PATH_STYLE` | `true` | Set `false` for AWS S3 virtual-hosted style. |
+
+When using **AWS EKS with IRSA** (IAM Roles for Service Accounts), you can omit access keys entirely — Quickwit will use the pod's IAM role via the AWS SDK credential chain.
+
+Audit log retention is configured in the Quickwit index definition (`deploy/quickwit/audit_logs_index.yaml`). The default retention period is **90 days** with daily cleanup.
+
+> **Note:** When using external S3, you can remove the `rustfs` service from docker-compose.yml if no other component uses it.
+
+### 3.6 Set Up a Reverse Proxy
 
 In production, place a reverse proxy in front of the Docker services to handle TLS termination. Only the gateway port (3000) and the web UI port (80) need to be reachable by end users.
 

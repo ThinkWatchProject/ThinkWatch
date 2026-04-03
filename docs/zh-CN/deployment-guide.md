@@ -255,7 +255,36 @@ curl http://localhost:3000/health
 docker compose -f deploy/docker-compose.yml exec server curl http://localhost:3001/api/health
 ```
 
-### 3.5 设置反向代理
+### 3.5 Quickwit 存储（云原生 S3）
+
+默认情况下，Quickwit 将审计日志索引存储在内置的 **RustFS** 实例（S3 兼容对象存储）中。对于云原生部署，可以将 Quickwit 直接指向 **AWS S3**、**Google Cloud Storage** 或 **Azure Blob Storage**，在 `.env.production` 中设置以下环境变量：
+
+```bash
+# 将 Quickwit 指向 AWS S3（或任何 S3 兼容服务）
+QW_STORAGE_URI=s3://my-company-audit-logs/quickwit
+QW_S3_ACCESS_KEY_ID=AKIAXXXXXXXXXXXXXXXX
+QW_S3_SECRET_ACCESS_KEY=wJalrXXXXXXXXXXXXXXXXXXX
+QW_S3_REGION=us-west-2
+QW_S3_FORCE_PATH_STYLE=false    # AWS S3 设为 false，MinIO/RustFS 设为 true
+# QW_S3_ENDPOINT=               # AWS S3 无需设置；MinIO/RustFS 需要设置
+```
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `QW_STORAGE_URI` | `s3://quickwit` | 索引数据的 S3 URI。使用 `s3://bucket/prefix` 格式。 |
+| `QW_S3_ACCESS_KEY_ID` | `${RUSTFS_USER}` | S3 访问密钥。AWS EKS 环境建议使用 IRSA。 |
+| `QW_S3_SECRET_ACCESS_KEY` | `${RUSTFS_PASSWORD}` | S3 秘密密钥。 |
+| `QW_S3_ENDPOINT` | `http://rustfs:9000` | S3 端点 URL。AWS S3 无需设置。 |
+| `QW_S3_REGION` | `us-east-1` | AWS 区域。 |
+| `QW_S3_FORCE_PATH_STYLE` | `true` | AWS S3 设为 `false`（虚拟主机样式）。 |
+
+在 **AWS EKS 上使用 IRSA**（IAM Roles for Service Accounts）时，可以完全省略访问密钥——Quickwit 会通过 AWS SDK 凭证链自动使用 Pod 的 IAM 角色。
+
+审计日志保留策略在 Quickwit 索引定义（`deploy/quickwit/audit_logs_index.yaml`）中配置。默认保留期为 **90 天**，每日自动清理。
+
+> **注意：** 使用外部 S3 时，如果没有其他组件使用 RustFS，可以从 docker-compose.yml 中移除 `rustfs` 服务。
+
+### 3.6 设置反向代理
 
 在生产环境中，应在 Docker 服务前放置反向代理来处理 TLS 终止。只有网关端口（3000）和 Web UI 端口（80）需要对终端用户可达。
 

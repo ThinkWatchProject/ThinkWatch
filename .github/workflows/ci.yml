@@ -109,6 +109,9 @@ jobs:
       - name: Set image prefix
         run: echo "IMAGE_PREFIX=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
 
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -118,6 +121,7 @@ jobs:
           context: .
           file: deploy/docker/Dockerfile.server
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE_PREFIX }}/agent-bastion-server:latest
             ${{ env.IMAGE_PREFIX }}/agent-bastion-server:${{ github.sha }}
@@ -130,6 +134,7 @@ jobs:
           context: .
           file: deploy/docker/Dockerfile.web
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             ${{ env.IMAGE_PREFIX }}/agent-bastion-web:latest
             ${{ env.IMAGE_PREFIX }}/agent-bastion-web:${{ github.sha }}

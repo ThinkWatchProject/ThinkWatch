@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use agent_bastion_common::errors::AppError;
 use agent_bastion_common::models::AuditLog;
@@ -23,101 +24,126 @@ pub struct AuditLogResponse {
     pub total: i64,
 }
 
-/// Escape SQL LIKE wildcards in user input.
-fn escape_like(input: &str) -> String {
-    input
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
-
 pub async fn list_audit_logs(
     _auth_user: AuthUser,
     State(state): State<AppState>,
     Query(query): Query<AuditLogQuery>,
 ) -> Result<Json<AuditLogResponse>, AppError> {
-    let limit = query.limit.unwrap_or(50).min(200);
-    let offset = query.offset.unwrap_or(0);
+    let qw_url = state.config.quickwit_url.as_deref().ok_or_else(|| {
+        AppError::Internal(anyhow::anyhow!("Quickwit is not configured"))
+    })?;
+    query_quickwit(qw_url, &state.config.quickwit_index, &query).await
+}
 
-    // Validate and truncate search query
-    let search_pattern = query.q.as_ref().map(|q| {
-        let truncated = if q.len() > 255 { &q[..255] } else { q.as_str() };
-        format!("%{}%", escape_like(truncated))
-    });
+// ---------------------------------------------------------------------------
+// Quickwit search
+// ---------------------------------------------------------------------------
 
-    // Parse optional date range
-    let from_dt = query.from.as_ref().and_then(|s| {
-        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-            .ok()
-            .map(|d| d.and_hms_opt(0, 0, 0).unwrap())
-    });
-    let to_dt = query.to.as_ref().and_then(|s| {
-        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-            .ok()
-            .map(|d| d.and_hms_opt(23, 59, 59).unwrap())
-    });
+/// Quickwit search API response shape.
+#[derive(Debug, Deserialize)]
+struct QwSearchResponse {
+    num_hits: i64,
+    hits: Vec<QwHit>,
+}
 
-    // SAFETY: WHERE clause is built ONLY from hardcoded format strings with $N
-    // parameter placeholders. User input is NEVER interpolated into the SQL string
-    // itself — all values are bound via sqlx parameterized binds below.
-    let has_search = search_pattern.is_some();
-    let has_from = from_dt.is_some();
-    let has_to = to_dt.is_some();
+#[derive(Debug, Deserialize)]
+struct QwHit {
+    id: String,
+    user_id: Option<String>,
+    #[allow(dead_code)]
+    api_key_id: Option<String>,
+    action: String,
+    resource: Option<String>,
+    detail: Option<serde_json::Value>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    created_at: String,
+}
 
-    // Construct WHERE clause parts
-    let mut conditions = Vec::new();
-    let mut param_idx = 1u32;
+async fn query_quickwit(
+    qw_url: &str,
+    qw_index: &str,
+    query: &AuditLogQuery,
+) -> Result<Json<AuditLogResponse>, AppError> {
+    let max_hits = query.limit.unwrap_or(50).min(200);
+    let start_offset = query.offset.unwrap_or(0);
 
-    if has_search {
-        conditions.push(format!(
-            "(action ILIKE ${p} ESCAPE '\\' OR resource ILIKE ${p} ESCAPE '\\')",
-            p = param_idx
-        ));
-        param_idx += 1;
-    }
-    if has_from {
-        conditions.push(format!("created_at >= ${p}::timestamptz", p = param_idx));
-        param_idx += 1;
-    }
-    if has_to {
-        conditions.push(format!("created_at <= ${p}::timestamptz", p = param_idx));
-        param_idx += 1;
-    }
-
-    let where_clause = if conditions.is_empty() {
-        String::new()
+    // Build Quickwit query string
+    let search_query = query.q.as_deref().unwrap_or("*");
+    // Truncate to prevent oversized queries
+    let search_query = if search_query.len() > 255 {
+        &search_query[..255]
     } else {
-        format!("WHERE {}", conditions.join(" AND "))
+        search_query
     };
 
-    let items_sql = format!(
-        "SELECT * FROM audit_logs {where_clause} ORDER BY created_at DESC LIMIT ${} OFFSET ${}",
-        param_idx,
-        param_idx + 1
+    let mut url = format!(
+        "{}/api/v1/{}/search?query={}&max_hits={}&start_offset={}&sort_by_field=-created_at",
+        qw_url,
+        qw_index,
+        urlencoding::encode(search_query),
+        max_hits,
+        start_offset,
     );
-    let count_sql = format!("SELECT COUNT(*) FROM audit_logs {where_clause}");
 
-    // Bind parameters in order
-    let mut items_query = sqlx::query_as::<_, AuditLog>(&items_sql);
-    let mut count_query = sqlx::query_scalar::<_, i64>(&count_sql);
-
-    if let Some(ref pattern) = search_pattern {
-        items_query = items_query.bind(pattern);
-        count_query = count_query.bind(pattern);
+    // Optional timestamp range filters
+    if let Some(ref from) = query.from {
+        if let Ok(dt) = chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d") {
+            let ts = dt.and_hms_opt(0, 0, 0).unwrap();
+            let epoch = ts.and_utc().timestamp();
+            url.push_str(&format!("&start_timestamp={epoch}"));
+        }
     }
-    if let Some(ref dt) = from_dt {
-        items_query = items_query.bind(dt);
-        count_query = count_query.bind(dt);
-    }
-    if let Some(ref dt) = to_dt {
-        items_query = items_query.bind(dt);
-        count_query = count_query.bind(dt);
+    if let Some(ref to) = query.to {
+        if let Ok(dt) = chrono::NaiveDate::parse_from_str(to, "%Y-%m-%d") {
+            let ts = dt.and_hms_opt(23, 59, 59).unwrap();
+            let epoch = ts.and_utc().timestamp();
+            url.push_str(&format!("&end_timestamp={epoch}"));
+        }
     }
 
-    items_query = items_query.bind(limit).bind(offset);
+    let client = reqwest::Client::new();
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Quickwit search request failed: {e}")))?;
 
-    let items = items_query.fetch_all(&state.db).await?;
-    let total = count_query.fetch_one(&state.db).await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body: String = resp.text().await.unwrap_or_default();
+        return Err(AppError::Internal(anyhow::anyhow!(
+            "Quickwit search returned {status}: {body}"
+        )));
+    }
 
-    Ok(Json(AuditLogResponse { items, total }))
+    let qw_resp = resp
+        .json::<QwSearchResponse>()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to parse Quickwit response: {e}")))?;
+
+    let items: Vec<AuditLog> = qw_resp
+        .hits
+        .into_iter()
+        .filter_map(|hit| {
+            Some(AuditLog {
+                id: hit.id.parse().ok()?,
+                user_id: hit.user_id.and_then(|s| s.parse::<Uuid>().ok()),
+                api_key_id: hit.api_key_id.and_then(|s| s.parse::<Uuid>().ok()),
+                action: hit.action,
+                resource: hit.resource,
+                detail: hit.detail,
+                ip_address: hit.ip_address,
+                user_agent: hit.user_agent,
+                created_at: chrono::DateTime::parse_from_rfc3339(&hit.created_at)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|_| chrono::Utc::now()),
+            })
+        })
+        .collect();
+
+    Ok(Json(AuditLogResponse {
+        total: qw_resp.num_hits,
+        items,
+    }))
 }

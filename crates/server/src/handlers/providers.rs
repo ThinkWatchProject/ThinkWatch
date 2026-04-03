@@ -16,23 +16,83 @@ pub(crate) fn validate_url(url_str: &str) -> Result<(), AppError> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(AppError::BadRequest("URL must use http or https".into()));
     }
-    if let Some(host) = parsed.host_str() {
-        let blocked = [
-            "localhost",
-            "127.0.0.1",
-            "0.0.0.0",
-            "169.254.169.254",
-            "[::1]",
-        ];
-        if blocked.contains(&host) {
-            return Err(AppError::BadRequest("URL points to blocked address".into()));
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AppError::BadRequest("URL must contain a host".into()))?;
+
+    // Block well-known loopback / metadata hostnames
+    let blocked_hosts = [
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "169.254.169.254",
+        "[::1]",
+        "metadata.google.internal",
+    ];
+    if blocked_hosts.contains(&host) {
+        return Err(AppError::BadRequest("URL points to blocked address".into()));
+    }
+
+    // Resolve DNS and check all resolved IPs to prevent DNS rebinding
+    if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
+        for addr in addrs {
+            let ip = addr.ip();
+            if ip.is_loopback()
+                || ip.is_unspecified()
+                || is_private_ip(&ip)
+                || is_link_local(&ip)
+            {
+                return Err(AppError::BadRequest(
+                    "URL resolves to a private or loopback address".into(),
+                ));
+            }
         }
-        // Block private IP ranges
-        if host.starts_with("10.") || host.starts_with("192.168.") || host.starts_with("172.") {
+    }
+
+    // Also block obviously private hostnames even if DNS fails
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local(&ip) {
             return Err(AppError::BadRequest("URL points to private network".into()));
         }
     }
+
     Ok(())
+}
+
+/// Check if an IP is in a private range (RFC 1918 + RFC 6598).
+fn is_private_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            // 10.0.0.0/8
+            octets[0] == 10
+            // 172.16.0.0/12
+            || (octets[0] == 172 && (16..=31).contains(&octets[1]))
+            // 192.168.0.0/16
+            || (octets[0] == 192 && octets[1] == 168)
+            // 100.64.0.0/10 (CGNAT / RFC 6598)
+            || (octets[0] == 100 && (64..=127).contains(&octets[1]))
+        }
+        std::net::IpAddr::V6(v6) => {
+            // Unique local addresses fc00::/7
+            let segments = v6.segments();
+            (segments[0] & 0xfe00) == 0xfc00
+        }
+    }
+}
+
+/// Check if an IP is link-local (169.254.0.0/16 or fe80::/10).
+fn is_link_local(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == 169 && octets[1] == 254
+        }
+        std::net::IpAddr::V6(v6) => {
+            let segments = v6.segments();
+            (segments[0] & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 fn encryption_key(state: &AppState) -> Result<[u8; 32], AppError> {

@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
+import { ConfirmDialog } from '@/components/confirm-dialog';
 import {
   Dialog,
   DialogContent,
@@ -86,6 +87,7 @@ export function LogForwardersPage() {
   const { t } = useTranslation();
   const [forwarders, setForwarders] = useState<LogForwarder[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
@@ -113,12 +115,17 @@ export function LogForwardersPage() {
   const [editAuthHeader, setEditAuthHeader] = useState('');
   const [saving, setSaving] = useState(false);
 
+  // Delete confirmation state
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+
   const loadForwarders = useCallback(async () => {
     try {
       const data = await api<LogForwarder[]>('/api/admin/log-forwarders');
       setForwarders(data);
-    } catch {
-      // ignore
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }
@@ -167,22 +174,31 @@ export function LogForwardersPage() {
       setDialogOpen(false);
       resetForm();
       loadForwarders();
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setCreating(false);
     }
   };
 
   const handleToggle = async (id: string) => {
-    await apiPost(`/api/admin/log-forwarders/${id}/toggle`, {});
-    loadForwarders();
+    try {
+      await apiPost(`/api/admin/log-forwarders/${id}/toggle`, {});
+      loadForwarders();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('common.error'));
+    }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm(t('logForwarders.deleteConfirm'))) return;
-    await apiDelete(`/api/admin/log-forwarders/${id}`);
-    loadForwarders();
+    try {
+      await apiDelete(`/api/admin/log-forwarders/${id}`);
+      setDeleteDialogOpen(false);
+      setDeleteTargetId(null);
+      loadForwarders();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('common.error'));
+    }
   };
 
   const handleTest = async (id: string) => {
@@ -199,8 +215,12 @@ export function LogForwardersPage() {
   };
 
   const handleResetStats = async (id: string) => {
-    await apiPost(`/api/admin/log-forwarders/${id}/reset-stats`, {});
-    loadForwarders();
+    try {
+      await apiPost(`/api/admin/log-forwarders/${id}/reset-stats`, {});
+      loadForwarders();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('common.error'));
+    }
   };
 
   const openEditDialog = (f: LogForwarder) => {
@@ -244,8 +264,8 @@ export function LogForwardersPage() {
       setEditDialogOpen(false);
       setEditForwarder(null);
       loadForwarders();
-    } catch {
-      // ignore
+    } catch (err) {
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setSaving(false);
     }
@@ -337,6 +357,16 @@ export function LogForwardersPage() {
           </DialogContent>
         </Dialog>
       </div>
+
+      {/* Error banner */}
+      {error && (
+        <div className="rounded-md bg-destructive/10 p-3 text-sm text-destructive flex items-center justify-between">
+          <span>{error}</span>
+          <Button variant="ghost" size="sm" onClick={() => setError('')}>
+            {t('common.done')}
+          </Button>
+        </div>
+      )}
 
       {/* Test result toast */}
       {testResult && (
@@ -448,7 +478,7 @@ export function LogForwardersPage() {
                           size="icon"
                           className="text-destructive hover:text-destructive"
                           title={t('common.delete')}
-                          onClick={() => handleDelete(f.id)}
+                          onClick={() => { setDeleteTargetId(f.id); setDeleteDialogOpen(true); }}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>
@@ -522,6 +552,16 @@ export function LogForwardersPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        onOpenChange={(open) => { setDeleteDialogOpen(open); if (!open) setDeleteTargetId(null); }}
+        title={t('common.delete')}
+        description={t('logForwarders.deleteConfirm')}
+        variant="destructive"
+        confirmLabel={t('common.delete')}
+        onConfirm={() => { if (deleteTargetId) handleDelete(deleteTargetId); }}
+      />
     </div>
   );
 }

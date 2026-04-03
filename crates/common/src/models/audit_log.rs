@@ -1,9 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
 use uuid::Uuid;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+/// Audit log entry returned from Quickwit search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditLog {
     pub id: Uuid,
     pub user_id: Option<Uuid>,

@@ -85,7 +85,7 @@ AgentBastion 一次部署，全部解决。
 ### 可观测性
 - **Prometheus 指标** — Gateway 端口 (3000) 的 `GET /metrics` 端点，暴露 `gateway_requests_total`、`gateway_request_duration_seconds`、`gateway_tokens_total`、`gateway_rate_limited_total`、`circuit_breaker_state` 等指标
 - **增强健康检查** — `/health/live`（存活探针）、`/health/ready`（就绪探针，检测 PostgreSQL 和 Redis）、`/api/health`（详细延迟和连接池统计）
-- **Quickwit 审计日志** — 全文搜索所有 API 调用和工具调用记录
+- **Quickwit 审计日志** — 全文搜索所有 API 调用和工具调用记录，审计日志仅存储在 Quickwit 中，支持 S3 云原生存储后端（AWS S3、GCS、Azure Blob 或自托管 RustFS/MinIO）
 - **审计日志转发** — 多通道投递：UDP/TCP Syslog (RFC 5424)、Kafka、HTTP Webhook — 将审计事件路由至任意 SIEM、数据湖或告警管道
 - **使用量分析** — 按用户、团队、模型、时间段的 Token 消耗统计
 - **费用分析** — 月度累计支出、预算使用率、按模型费用明细
@@ -99,8 +99,8 @@ AgentBastion 一次部署，全部解决。
 | 前端 | React 19, TypeScript 6, Vite 8, shadcn/ui, Tailwind CSS 4 |
 | 数据库 | PostgreSQL 18 |
 | 缓存与限流 | Redis 8 |
-| 审计日志搜索 | Quickwit 0.8 |
-| 对象存储 | RustFS (S3 兼容) |
+| 审计日志搜索 | Quickwit 0.8 (S3 存储后端，云原生) |
+| 对象存储 | AWS S3 / GCS / Azure Blob / RustFS (S3 兼容) |
 | 单点登录 | Zitadel (或任何 OIDC 提供商) |
 | 容器 | Distroless (2MB 运行镜像), Helm Chart (K8s) |
 
