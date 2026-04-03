@@ -422,6 +422,7 @@
     "supportedEndpoints": "Supported Endpoints",
     "openaiEndpoint": "OpenAI-compatible: /v1/chat/completions",
     "anthropicEndpoint": "Anthropic Messages: /v1/messages",
+    "responsesEndpoint": "OpenAI Responses (new): /v1/responses",
     "modelsEndpoint": "List models: /v1/models"
   },
   "notFound": {

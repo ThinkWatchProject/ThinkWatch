@@ -332,6 +332,156 @@ fn convert_to_anthropic_response(
     })
 }
 
+/// POST /v1/responses
+///
+/// OpenAI Responses API (new format, 2025+). Supports tool use, multi-turn,
+/// and structured outputs natively. AgentBastion proxies this by converting
+/// to internal ChatCompletionRequest format, routing through the same
+/// provider pipeline, then converting the response back.
+///
+/// For providers that support the Responses API natively (OpenAI), this
+/// could be a direct passthrough in the future.
+pub async fn proxy_responses(
+    State(state): State<GatewayState>,
+    _headers: HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<axum::response::Response, GatewayErrorResponse> {
+    let model = body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| GatewayError::TransformError("Missing 'model' field".into()))?
+        .to_string();
+
+    let is_stream = body
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mapped_model = state.model_mapper.map(&model);
+
+    // Extract messages from the "input" field (Responses API format)
+    // Input can be a string or an array of messages
+    let mut messages = Vec::new();
+
+    if let Some(instructions) = body.get("instructions").and_then(|v| v.as_str()) {
+        messages.push(crate::providers::traits::ChatMessage {
+            role: "system".to_string(),
+            content: serde_json::Value::String(instructions.to_string()),
+        });
+    }
+
+    match body.get("input") {
+        Some(serde_json::Value::String(s)) => {
+            messages.push(crate::providers::traits::ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::Value::String(s.clone()),
+            });
+        }
+        Some(serde_json::Value::Array(arr)) => {
+            for item in arr {
+                // Each item can be a message object or a string
+                if let Some(s) = item.as_str() {
+                    messages.push(crate::providers::traits::ChatMessage {
+                        role: "user".to_string(),
+                        content: serde_json::Value::String(s.to_string()),
+                    });
+                } else if let (Some(role), Some(content)) = (
+                    item.get("role").and_then(|v| v.as_str()),
+                    item.get("content"),
+                ) {
+                    messages.push(crate::providers::traits::ChatMessage {
+                        role: role.to_string(),
+                        content: content.clone(),
+                    });
+                }
+            }
+        }
+        _ => {
+            return Err(
+                GatewayError::TransformError("Missing or invalid 'input' field".into()).into(),
+            );
+        }
+    }
+
+    // Content filter
+    if let Err(filter_result) = state.content_filter.check(&messages) {
+        tracing::warn!("Content filter triggered: {filter_result}");
+        return Err(GatewayError::TransformError(format!(
+            "Request blocked by content filter: {filter_result}"
+        ))
+        .into());
+    }
+
+    let max_tokens = body
+        .get("max_output_tokens")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(4096) as u32;
+
+    let request = crate::providers::traits::ChatCompletionRequest {
+        model: mapped_model.clone(),
+        messages,
+        temperature: body.get("temperature").and_then(|v| v.as_f64()),
+        max_tokens: Some(max_tokens),
+        stream: Some(is_stream),
+        extra: serde_json::json!({}),
+    };
+
+    // Route to provider
+    let provider = state.router.route(&mapped_model).ok_or_else(|| {
+        GatewayError::ProviderError(format!("No provider found for model: {mapped_model}"))
+    })?;
+
+    if is_stream {
+        let stream = provider.stream_chat_completion(request);
+        Ok(stream_to_sse(stream).into_response())
+    } else {
+        let response = provider.chat_completion_boxed(request).await?;
+        let responses_format = convert_to_responses_format(&response);
+        Ok(Json(responses_format).into_response())
+    }
+}
+
+/// Convert an internal ChatCompletionResponse to OpenAI Responses API format.
+fn convert_to_responses_format(
+    resp: &crate::providers::traits::ChatCompletionResponse,
+) -> serde_json::Value {
+    let mut output = Vec::new();
+
+    for choice in &resp.choices {
+        let text = choice.message.content.as_str().unwrap_or("").to_string();
+        output.push(serde_json::json!({
+            "type": "message",
+            "id": format!("msg_{}", uuid::Uuid::new_v4()),
+            "status": "completed",
+            "role": "assistant",
+            "content": [{
+                "type": "output_text",
+                "text": text,
+            }],
+        }));
+    }
+
+    let (input_tokens, output_tokens) = resp
+        .usage
+        .as_ref()
+        .map(|u| (u.prompt_tokens, u.completion_tokens))
+        .unwrap_or((0, 0));
+
+    serde_json::json!({
+        "id": resp.id,
+        "object": "response",
+        "created_at": resp.created,
+        "status": "completed",
+        "model": resp.model,
+        "output": output,
+        "usage": {
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        }
+    })
+}
+
 // ---------- Error adapter ----------
 
 /// Newtype wrapper so we can implement `IntoResponse` for `GatewayError`.

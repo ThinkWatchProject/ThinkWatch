@@ -143,6 +143,7 @@ pub async fn create_gateway_app(
             "/v1/messages",
             post(gateway_proxy::proxy_anthropic_messages),
         )
+        .route("/v1/responses", post(gateway_proxy::proxy_responses))
         .route("/v1/models", get(gateway_proxy::list_models_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

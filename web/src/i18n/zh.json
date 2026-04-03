@@ -422,6 +422,7 @@
     "supportedEndpoints": "支持的端点",
     "openaiEndpoint": "OpenAI 兼容：/v1/chat/completions",
     "anthropicEndpoint": "Anthropic Messages：/v1/messages",
+    "responsesEndpoint": "OpenAI Responses（新版）：/v1/responses",
     "modelsEndpoint": "模型列表：/v1/models"
   },
   "notFound": {
