@@ -142,12 +142,16 @@ MCP 工具可以在 API 密钥或用户级别进行限制。当 API 密钥设置
 
 **提供商 API 密钥**
 
-提供商 API 密钥（上游 AI 服务如 OpenAI、Anthropic 的凭证）在存储前进行加密：
+提供商 API 密钥（上游 AI 服务如 OpenAI、Anthropic、Google、Azure OpenAI 和 AWS Bedrock 的凭证）在存储前进行加密：
 
 - 算法：AES-256-GCM
 - Nonce：12 字节，密码学随机生成，每次加密操作独立生成
 - 密钥：从 `ENCRYPTION_KEY` 环境变量派生（32 字节十六进制字符串）
 - 存储格式：`nonce || ciphertext || tag`（base64 编码）
+
+**AWS Bedrock 凭证**
+
+AWS Bedrock 凭证（以 `ACCESS_KEY_ID:SECRET_ACCESS_KEY` 格式存储）使用相同的 AES-256-GCM 方案进行静态加密。在请求时，凭证会被解密并通过官方 `aws-sigv4` Rust crate 用于 AWS SigV4 请求签名。签名过程在内存中执行，凭证不会以明文形式写入磁盘。
 
 **MCP 服务器认证密钥**
 

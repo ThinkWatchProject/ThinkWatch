@@ -25,6 +25,17 @@ The gateway accepts **either** an API key or a JWT. Console management endpoints
 
 ## Gateway Endpoints (port 3000)
 
+The gateway serves three API formats on a single port, allowing clients to use whichever format they prefer:
+
+| Endpoint                    | Format                  | Typical Clients                              |
+| --------------------------- | ----------------------- | -------------------------------------------- |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | Cursor, Continue, Cline, OpenAI SDK          |
+| `POST /v1/messages`         | Anthropic Messages API  | Claude Code, Anthropic SDK                   |
+| `POST /v1/responses`        | OpenAI Responses API    | OpenAI SDK (2025 format)                     |
+| `GET /v1/models`            | OpenAI Models           | All clients                                  |
+
+All three endpoints authenticate identically (API Key or JWT), route through the same model router and rate limiter, and produce the same usage records and audit logs.
+
 ### POST /v1/chat/completions
 
 OpenAI-compatible chat completions endpoint. Proxies requests to the configured upstream provider.
@@ -184,6 +195,195 @@ curl http://localhost:3000/v1/models \
 | Status | Condition            |
 | ------ | -------------------- |
 | 401    | Invalid credentials  |
+
+---
+
+### POST /v1/messages
+
+Anthropic Messages API endpoint. Accepts requests in the native Anthropic format and proxies them to the configured upstream provider. This allows Claude Code and the Anthropic SDK to connect directly without format translation on the client side.
+
+**Authentication:** API Key or JWT
+
+#### Request Body
+
+```json
+{
+  "model": "claude-sonnet-4-20250514",
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello, Claude"
+    }
+  ],
+  "stream": false,
+  "system": "You are a helpful assistant.",
+  "temperature": 0.7
+}
+```
+
+| Field        | Type            | Required | Default | Description                              |
+| ------------ | --------------- | -------- | ------- | ---------------------------------------- |
+| `model`      | string          | Yes      | --      | Model identifier (e.g. `claude-sonnet-4-20250514`) |
+| `max_tokens` | integer         | Yes      | --      | Maximum tokens to generate               |
+| `messages`   | array\<object\> | Yes      | --      | Conversation history                     |
+| `stream`     | boolean         | No       | false   | Enable Server-Sent Events streaming      |
+| `system`     | string          | No       | --      | System prompt                            |
+| `temperature`| number          | No       | 1.0     | Sampling temperature (0.0 -- 1.0)        |
+
+#### Response Body (non-streaming)
+
+```json
+{
+  "id": "msg_abc123",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "Hello! How can I help you today?"
+    }
+  ],
+  "model": "claude-sonnet-4-20250514",
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 10
+  }
+}
+```
+
+#### Response Body (streaming, `stream: true`)
+
+The response is a stream of `text/event-stream` SSE events following the Anthropic streaming format:
+
+```
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_abc123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+```
+
+#### Example
+
+```bash
+curl -X POST http://localhost:3000/v1/messages \
+  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+#### Error Responses
+
+| Status | Condition                        |
+| ------ | -------------------------------- |
+| 401    | Missing/invalid credentials      |
+| 403    | Model not allowed for this key   |
+| 404    | Model not found                  |
+| 429    | Rate limit exceeded              |
+| 502    | Upstream provider error          |
+
+---
+
+### POST /v1/responses
+
+OpenAI Responses API endpoint (2025 format). Accepts requests in the OpenAI Responses format, which supports both simple string inputs and structured message arrays.
+
+**Authentication:** API Key or JWT
+
+#### Request Body
+
+```json
+{
+  "model": "gpt-4o",
+  "input": "What is the capital of France?",
+  "instructions": "You are a helpful geography assistant.",
+  "stream": false,
+  "temperature": 0.7,
+  "max_output_tokens": 4096
+}
+```
+
+The `input` field can be either a simple string or an array of message objects:
+
+```json
+{
+  "model": "gpt-4o",
+  "input": [
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hi there!"},
+    {"role": "user", "content": "What is 2+2?"}
+  ]
+}
+```
+
+| Field              | Type                    | Required | Default | Description                              |
+| ------------------ | ----------------------- | -------- | ------- | ---------------------------------------- |
+| `model`            | string                  | Yes      | --      | Model identifier                         |
+| `input`            | string or array\<object\> | Yes    | --      | Prompt string or conversation messages   |
+| `instructions`     | string                  | No       | --      | System-level instructions                |
+| `stream`           | boolean                 | No       | false   | Enable Server-Sent Events streaming      |
+| `temperature`      | number                  | No       | 0.7     | Sampling temperature                     |
+| `max_output_tokens`| integer                 | No       | --      | Maximum tokens to generate               |
+
+#### Response Body (non-streaming)
+
+```json
+{
+  "id": "resp_abc123",
+  "object": "response",
+  "created_at": 1711929600,
+  "model": "gpt-4o",
+  "output": [
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "The capital of France is Paris."
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 15,
+    "output_tokens": 8,
+    "total_tokens": 23
+  }
+}
+```
+
+#### Example
+
+```bash
+curl -X POST http://localhost:3000/v1/responses \
+  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "input": "What is the capital of France?"
+  }'
+```
+
+#### Error Responses
+
+| Status | Condition                        |
+| ------ | -------------------------------- |
+| 401    | Missing/invalid credentials      |
+| 403    | Model not allowed for this key   |
+| 404    | Model not found                  |
+| 429    | Rate limit exceeded              |
+| 502    | Upstream provider error          |
 
 ---
 
@@ -496,7 +696,7 @@ Perform initial system setup: create the first admin user and optionally configu
 | `provider`               | object | No       | Optional first provider configuration           |
 | `provider.name`          | string | Yes*     | Unique slug identifier (* required if provider set) |
 | `provider.display_name`  | string | Yes*     | Human-readable name                             |
-| `provider.provider_type` | string | Yes*     | One of `openai`, `anthropic`, `azure`, `custom` |
+| `provider.provider_type` | string | Yes*     | One of `openai`, `anthropic`, `google`, `azure`, `bedrock`, `custom` |
 | `provider.base_url`      | string | Yes*     | Provider API base URL                           |
 | `provider.api_key`       | string | Yes*     | Provider API key                                |
 
@@ -1177,7 +1377,7 @@ Register a new upstream AI provider.
 | --------------- | ------ | -------- | ---------------------------------------------------- |
 | `name`          | string | Yes      | Unique slug identifier (e.g. `openai-prod`)          |
 | `display_name`  | string | Yes      | Human-readable name                                  |
-| `provider_type` | string | Yes      | One of `openai`, `anthropic`, `azure`, `custom`      |
+| `provider_type` | string | Yes      | One of `openai`, `anthropic`, `google`, `azure`, `bedrock`, `custom`      |
 | `base_url`      | string | Yes      | Provider API base URL                                |
 | `api_key`       | string | Yes      | Provider API key (encrypted at rest with AES-256-GCM)|
 

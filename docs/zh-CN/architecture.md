@@ -13,7 +13,7 @@ AgentBastion 是一个使用 Rust 构建的企业级 AI API 网关和 MCP（Mode
 - **速率限制** —— 按 API 密钥执行每分钟请求数（RPM）和每分钟 Token 数（TPM）的限制。
 - **审计日志** —— 每个请求都会记录完整上下文，用于合规和调试。
 - **模型访问治理** —— 细粒度权限控制，管理哪些用户、团队和角色可以访问哪些 AI 模型和 MCP 工具。
-- **多提供商抽象** —— 统一的 OpenAI 兼容 API，代理到 OpenAI、Anthropic、Google 及自定义提供商，并自动进行请求/响应格式转换。
+- **多提供商抽象** —— 统一的 API（OpenAI、Anthropic 和 Responses 格式），代理到 OpenAI、Anthropic、Google、Azure OpenAI、AWS Bedrock 及自定义提供商，并自动进行请求/响应格式转换。
 
 ---
 
@@ -71,6 +71,10 @@ AgentBastion 是一个使用 Rust 构建的企业级 AI API 网关和 MCP（Mode
     |   OpenAI   |    |  Anthropic  |    |    Google     |
     |  API       |    |  API        |    |  Gemini API   |
     +------------+    +-------------+    +---------------+
+    +-----+------+    +------+------+
+    | Azure      |    |    AWS      |
+    | OpenAI     |    |  Bedrock    |
+    +------------+    +-------------+
           Upstream AI Providers
 
     +---------------------------------------------+
@@ -92,7 +96,7 @@ AgentBastion 在单个进程中绑定两个独立的 TCP 监听器：
 
 | 端口 | 名称    | 用途                                      | 目标用户           |
 |------|---------|-------------------------------------------|--------------------|
-| 3000 | Gateway | AI API 代理 (`/v1/*`)、MCP 代理 (`/mcp`)、健康检查 (`/health/live`、`/health/ready`)、Prometheus 指标 (`/metrics`) | AI 客户端、代理、监控 |
+| 3000 | Gateway | AI API 代理（`/v1/chat/completions`、`/v1/messages`、`/v1/responses`、`/v1/models`）、MCP 代理 (`/mcp`)、健康检查 (`/health/live`、`/health/ready`)、Prometheus 指标 (`/metrics`) | AI 客户端、代理、监控 |
 | 3001 | Console | 管理 REST API (`/api/*`)、Web UI          | 管理员             |
 
 ### 为什么使用两个端口？
@@ -109,7 +113,7 @@ AgentBastion 在单个进程中绑定两个独立的 TCP 监听器：
 
 ## 4. AI API 网关数据流
 
-当客户端通过网关发送聊天补全请求时，会执行以下步骤：
+当客户端通过网关发送请求时（通过 `/v1/chat/completions`、`/v1/messages` 或 `/v1/responses`），会执行以下步骤：
 
 ```
 Client                Gateway :3000                        Upstream Provider
@@ -131,8 +135,10 @@ Client                Gateway :3000                        Upstream Provider
   |                  - Check allowed_models on the API key         |
   |                        |                                      |
   |               3. Request Transform                            |
-  |                  - If provider is Anthropic: OpenAI -> Claude  |
-  |                  - If provider is Google: OpenAI -> Gemini     |
+  |                  - If provider is Anthropic: -> Claude format  |
+  |                  - If provider is Google: -> Gemini format     |
+  |                  - If provider is Azure: -> Azure OpenAI format|
+  |                  - If provider is Bedrock: -> Converse API     |
   |                  - If provider is OpenAI: pass through         |
   |                        |                                      |
   |               4. Rate Limiter                                 |
@@ -149,8 +155,8 @@ Client                Gateway :3000                        Upstream Provider
   |                        |<--- SSE stream / JSON response ------|
   |                        |                                      |
   |               6. Response Transform                           |
-  |                  - If provider is Anthropic: Claude -> OpenAI  |
-  |                  - If provider is Google: Gemini -> OpenAI     |
+  |                  - 将上游响应转换为客户端格式                  |
+  |                  - Bedrock: 解码二进制 event-stream            |
   |                  - Stream SSE chunks back to client            |
   |                        |                                      |
   |<-- SSE stream ---------|                                      |
@@ -166,9 +172,9 @@ Client                Gateway :3000                        Upstream Provider
 
 ### 关键设计决策
 
-- **流式优先：** 代理使用 `eventsource-stream` 和 `async-stream` 以最小缓冲实时转发 SSE 数据块。Token 计数在流完成后进行。
-- **提供商 API 密钥静态加密存储**，使用 AES-256-GCM。`ENCRYPTION_KEY` 环境变量提供 256 位密钥。
-- **格式转换** 允许所有客户端使用 OpenAI 格式（`/v1/chat/completions`），无论上游提供商是什么。这意味着单个 `ab-` API 密钥可以路由到任何已配置的提供商。
+- **流式优先：** 代理使用 `eventsource-stream` 和 `async-stream` 以最小缓冲实时转发 SSE 数据块。对于 AWS Bedrock，使用原生二进制 event-stream 解码。Token 计数在流完成后进行。
+- **提供商 API 密钥静态加密存储**，使用 AES-256-GCM。`ENCRYPTION_KEY` 环境变量提供 256 位密钥。对于 AWS Bedrock，凭证（`ACCESS_KEY_ID:SECRET_ACCESS_KEY`）使用相同方案加密，并通过官方 `aws-sigv4` crate 用于 SigV4 请求签名。
+- **多格式支持：** 网关接受三种 API 格式：OpenAI Chat Completions（`/v1/chat/completions`）、Anthropic Messages（`/v1/messages`）和 OpenAI Responses（`/v1/responses`）。无论入站格式如何，请求都会通过相同的模型路由器路由并转换为上游提供商的原生格式。这意味着单个 `ab-` API 密钥可以与任何客户端工具配合使用。
 
 ---
 
@@ -279,11 +285,13 @@ AI API 代理引擎。包含：
   - `openai.rs` —— OpenAI 代理（直通）
   - `anthropic.rs` —— Anthropic Claude 代理，带格式转换
   - `google.rs` —— Google Gemini 代理，带格式转换
+  - `azure.rs` —— Azure OpenAI 代理，使用 `api-key` 请求头认证和 `api_version` 查询参数
+  - `bedrock.rs` —— AWS Bedrock 代理，使用 SigV4 签名（官方 `aws-sigv4` crate）、Converse API 和原生二进制 event-stream 流式传输
   - `custom.rs` —— 通用 OpenAI 兼容提供商代理
 - **`proxy.rs`** —— 核心代理逻辑：接收请求、选择提供商、转发、返回响应。
 - **`router.rs`** —— 模型到提供商的路由和权限检查。
 - **`streaming.rs`** —— SSE 流转发和数据块处理。
-- **`transform/`** —— OpenAI、Anthropic 和 Google 格式之间的请求/响应格式转换。
+- **`transform/`** —— OpenAI、Anthropic、Google、Azure 和 Bedrock 格式之间的请求/响应格式转换。
 - **`rate_limiter.rs`** —— 基于 Redis 的 RPM/TPM 速率限制，使用滑动窗口计数器。
 - **`token_counter.rs`** —— 使用 `tiktoken-rs` 进行 Token 计数，用于用量跟踪和 TPM 限制。
 - **`cost_tracker.rs`** —— 基于数据库中模型定价的实时成本计算。
@@ -364,7 +372,7 @@ MCP 代理引擎。包含：
 
 | 表                  | 用途 |
 |---------------------|------|
-| `providers`         | 上游 AI 提供商配置：名称、类型（openai/anthropic/google/custom）、基础 URL 和 AES 加密的 API 密钥。|
+| `providers`         | 上游 AI 提供商配置：名称、类型（openai/anthropic/google/azure/bedrock/custom）、基础 URL、AES 加密的 API 密钥以及可选的 `config_json`（如 Azure 的 `api_version`）。|
 | `models`            | 注册在提供商下的 AI 模型，包含输入/输出 Token 定价。|
 | `model_permissions` | 模型的访问控制规则，可按角色、团队或个人用户授权。|
 

@@ -13,7 +13,7 @@ This architecture provides centralized:
 - **Rate limiting** -- requests-per-minute (RPM) and tokens-per-minute (TPM) enforcement per API key.
 - **Audit logging** -- every request is recorded with full context for compliance and debugging.
 - **Model access governance** -- fine-grained permissions controlling which users, teams, and roles can access which AI models and MCP tools.
-- **Multi-provider abstraction** -- a unified OpenAI-compatible API that proxies to OpenAI, Anthropic, Google, and custom providers with automatic request/response format translation.
+- **Multi-provider abstraction** -- a unified API (OpenAI, Anthropic, and Responses formats) that proxies to OpenAI, Anthropic, Google, Azure OpenAI, AWS Bedrock, and custom providers with automatic request/response format translation.
 
 ---
 
@@ -71,6 +71,10 @@ This architecture provides centralized:
     |   OpenAI   |    |  Anthropic  |    |    Google     |
     |  API       |    |  API        |    |  Gemini API   |
     +------------+    +-------------+    +---------------+
+    +-----+------+    +------+------+
+    | Azure      |    |    AWS      |
+    | OpenAI     |    |  Bedrock    |
+    +------------+    +-------------+
           Upstream AI Providers
 
     +---------------------------------------------+
@@ -92,7 +96,7 @@ AgentBastion binds two separate TCP listeners on a single process:
 
 | Port | Name    | Purpose                                   | Audience           |
 |------|---------|-------------------------------------------|--------------------|
-| 3000 | Gateway | AI API proxy (`/v1/*`), MCP proxy (`/mcp`), health checks (`/health/live`, `/health/ready`), Prometheus metrics (`/metrics`) | AI clients, agents, monitoring |
+| 3000 | Gateway | AI API proxy (`/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`), MCP proxy (`/mcp`), health checks (`/health/live`, `/health/ready`), Prometheus metrics (`/metrics`) | AI clients, agents, monitoring |
 | 3001 | Console | Management REST API (`/api/*`), Web UI    | Administrators     |
 
 ### Why Two Ports?
@@ -109,7 +113,7 @@ AgentBastion binds two separate TCP listeners on a single process:
 
 ## 4. AI API Gateway Data Flow
 
-When a client sends a chat completion request through the gateway, the following steps occur:
+When a client sends a request through the gateway (via `/v1/chat/completions`, `/v1/messages`, or `/v1/responses`), the following steps occur:
 
 ```
 Client                Gateway :3000                        Upstream Provider
@@ -131,8 +135,10 @@ Client                Gateway :3000                        Upstream Provider
   |                  - Check allowed_models on the API key         |
   |                        |                                      |
   |               3. Request Transform                            |
-  |                  - If provider is Anthropic: OpenAI -> Claude  |
-  |                  - If provider is Google: OpenAI -> Gemini     |
+  |                  - If provider is Anthropic: -> Claude format  |
+  |                  - If provider is Google: -> Gemini format     |
+  |                  - If provider is Azure: -> Azure OpenAI format|
+  |                  - If provider is Bedrock: -> Converse API     |
   |                  - If provider is OpenAI: pass through         |
   |                        |                                      |
   |               4. Rate Limiter                                 |
@@ -149,8 +155,8 @@ Client                Gateway :3000                        Upstream Provider
   |                        |<--- SSE stream / JSON response ------|
   |                        |                                      |
   |               6. Response Transform                           |
-  |                  - If provider is Anthropic: Claude -> OpenAI  |
-  |                  - If provider is Google: Gemini -> OpenAI     |
+  |                  - Convert upstream response to client format  |
+  |                  - Bedrock: decode binary event-stream         |
   |                  - Stream SSE chunks back to client            |
   |                        |                                      |
   |<-- SSE stream ---------|                                      |
@@ -166,9 +172,9 @@ Client                Gateway :3000                        Upstream Provider
 
 ### Key Design Decisions
 
-- **Streaming-first:** The proxy uses `eventsource-stream` and `async-stream` to forward SSE chunks in real time with minimal buffering. Token counting happens after the stream completes.
-- **Provider API keys are encrypted at rest** using AES-256-GCM. The `ENCRYPTION_KEY` environment variable provides the 256-bit key.
-- **Format translation** allows all clients to speak the OpenAI format (`/v1/chat/completions`) regardless of the upstream provider. This means a single `ab-` API key can route to any configured provider.
+- **Streaming-first:** The proxy uses `eventsource-stream` and `async-stream` to forward SSE chunks in real time with minimal buffering. For AWS Bedrock, native binary event-stream decoding is used. Token counting happens after the stream completes.
+- **Provider API keys are encrypted at rest** using AES-256-GCM. The `ENCRYPTION_KEY` environment variable provides the 256-bit key. For AWS Bedrock, credentials (`ACCESS_KEY_ID:SECRET_ACCESS_KEY`) are encrypted with the same scheme and used for SigV4 request signing via the official `aws-sigv4` crate.
+- **Multi-format support:** The gateway accepts three API formats: OpenAI Chat Completions (`/v1/chat/completions`), Anthropic Messages (`/v1/messages`), and OpenAI Responses (`/v1/responses`). Regardless of the inbound format, the request is routed through the same model router and translated to the upstream provider's native format. This means a single `ab-` API key can be used with any client tool.
 
 ---
 
@@ -279,11 +285,13 @@ The AI API proxy engine. Contains:
   - `openai.rs` -- OpenAI proxy (passthrough)
   - `anthropic.rs` -- Anthropic Claude proxy with format translation
   - `google.rs` -- Google Gemini proxy with format translation
+  - `azure.rs` -- Azure OpenAI proxy with `api-key` header auth and `api_version` query parameter
+  - `bedrock.rs` -- AWS Bedrock proxy with SigV4 signing (official `aws-sigv4` crate), Converse API, and native binary event-stream streaming
   - `custom.rs` -- Generic OpenAI-compatible provider proxy
 - **`proxy.rs`** -- Core proxy logic: receives request, selects provider, forwards, returns response.
 - **`router.rs`** -- Model-to-provider routing and permission checks.
 - **`streaming.rs`** -- SSE stream forwarding and chunk processing.
-- **`transform/`** -- Request/response format conversion between OpenAI, Anthropic, and Google formats.
+- **`transform/`** -- Request/response format conversion between OpenAI, Anthropic, Google, Azure, and Bedrock formats.
 - **`rate_limiter.rs`** -- Redis-backed RPM/TPM rate limiting with sliding window counters.
 - **`token_counter.rs`** -- Token counting using `tiktoken-rs` for usage tracking and TPM enforcement.
 - **`cost_tracker.rs`** -- Real-time cost calculation based on model pricing from the database.
@@ -364,7 +372,7 @@ The database schema is defined across twelve migration files applied in order on
 
 | Table               | Purpose |
 |---------------------|---------|
-| `providers`         | Upstream AI provider configuration: name, type (openai/anthropic/google/custom), base URL, and AES-encrypted API key. |
+| `providers`         | Upstream AI provider configuration: name, type (openai/anthropic/google/azure/bedrock/custom), base URL, AES-encrypted API key, and optional `config_json` (e.g. `api_version` for Azure). |
 | `models`            | AI models registered under a provider, with input/output token pricing. |
 | `model_permissions` | Access control rules for models, grantable by role, team, or individual user. |
 

@@ -25,6 +25,17 @@
 
 ## Gateway 端点（端口 3000）
 
+网关在单一端口上提供三种 API 格式，客户端可以使用任意偏好的格式：
+
+| 端点                        | 格式                    | 典型客户端                                   |
+| --------------------------- | ----------------------- | -------------------------------------------- |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | Cursor、Continue、Cline、OpenAI SDK          |
+| `POST /v1/messages`         | Anthropic Messages API  | Claude Code、Anthropic SDK                   |
+| `POST /v1/responses`        | OpenAI Responses API    | OpenAI SDK（2025 格式）                      |
+| `GET /v1/models`            | OpenAI Models           | 所有客户端                                   |
+
+三个端点使用相同的认证方式（API Key 或 JWT），经过相同的模型路由器和速率限制器，并生成相同的用量记录和审计日志。
+
 ### POST /v1/chat/completions
 
 OpenAI 兼容的聊天补全端点。将请求代理到已配置的上游提供商。
@@ -184,6 +195,195 @@ curl http://localhost:3000/v1/models \
 | 状态码 | 条件               |
 | ------ | -------------------- |
 | 401    | 无效凭证           |
+
+---
+
+### POST /v1/messages
+
+Anthropic Messages API 端点。接受原生 Anthropic 格式的请求并代理到已配置的上游提供商。这允许 Claude Code 和 Anthropic SDK 直接连接，无需在客户端进行格式转换。
+
+**认证：** API Key 或 JWT
+
+#### 请求体
+
+```json
+{
+  "model": "claude-sonnet-4-20250514",
+  "max_tokens": 1024,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello, Claude"
+    }
+  ],
+  "stream": false,
+  "system": "You are a helpful assistant.",
+  "temperature": 0.7
+}
+```
+
+| 字段         | 类型            | 必填     | 默认值  | 描述                                     |
+| ------------ | --------------- | -------- | ------- | ---------------------------------------- |
+| `model`      | string          | 是       | --      | 模型标识符（如 `claude-sonnet-4-20250514`）|
+| `max_tokens` | integer         | 是       | --      | 最大生成 Token 数                        |
+| `messages`   | array\<object\> | 是       | --      | 对话历史                                 |
+| `stream`     | boolean         | 否       | false   | 启用 Server-Sent Events 流式传输         |
+| `system`     | string          | 否       | --      | 系统提示词                               |
+| `temperature`| number          | 否       | 1.0     | 采样温度（0.0 - 1.0）                   |
+
+#### 响应体（非流式）
+
+```json
+{
+  "id": "msg_abc123",
+  "type": "message",
+  "role": "assistant",
+  "content": [
+    {
+      "type": "text",
+      "text": "Hello! How can I help you today?"
+    }
+  ],
+  "model": "claude-sonnet-4-20250514",
+  "stop_reason": "end_turn",
+  "usage": {
+    "input_tokens": 12,
+    "output_tokens": 10
+  }
+}
+```
+
+#### 响应体（流式，`stream: true`）
+
+响应为遵循 Anthropic 流式格式的 `text/event-stream` SSE 事件流：
+
+```
+event: message_start
+data: {"type":"message_start","message":{"id":"msg_abc123","type":"message","role":"assistant","content":[],"model":"claude-sonnet-4-20250514"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}
+
+event: message_stop
+data: {"type":"message_stop"}
+```
+
+#### 示例
+
+```bash
+curl -X POST http://localhost:3000/v1/messages \
+  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Content-Type: application/json" \
+  -H "anthropic-version: 2023-06-01" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+#### 错误响应
+
+| 状态码 | 条件                             |
+| ------ | -------------------------------- |
+| 401    | 缺失/无效凭证                   |
+| 403    | 该密钥不允许访问此模型           |
+| 404    | 模型未找到                       |
+| 429    | 超出速率限制                     |
+| 502    | 上游提供商错误                   |
+
+---
+
+### POST /v1/responses
+
+OpenAI Responses API 端点（2025 格式）。接受 OpenAI Responses 格式的请求，支持简单字符串输入和结构化消息数组。
+
+**认证：** API Key 或 JWT
+
+#### 请求体
+
+```json
+{
+  "model": "gpt-4o",
+  "input": "What is the capital of France?",
+  "instructions": "You are a helpful geography assistant.",
+  "stream": false,
+  "temperature": 0.7,
+  "max_output_tokens": 4096
+}
+```
+
+`input` 字段可以是简单字符串或消息对象数组：
+
+```json
+{
+  "model": "gpt-4o",
+  "input": [
+    {"role": "user", "content": "Hello"},
+    {"role": "assistant", "content": "Hi there!"},
+    {"role": "user", "content": "What is 2+2?"}
+  ]
+}
+```
+
+| 字段               | 类型                      | 必填     | 默认值  | 描述                                     |
+| ------------------ | ------------------------- | -------- | ------- | ---------------------------------------- |
+| `model`            | string                    | 是       | --      | 模型标识符                               |
+| `input`            | string 或 array\<object\> | 是       | --      | 提示字符串或对话消息                     |
+| `instructions`     | string                    | 否       | --      | 系统级指令                               |
+| `stream`           | boolean                   | 否       | false   | 启用 Server-Sent Events 流式传输         |
+| `temperature`      | number                    | 否       | 0.7     | 采样温度                                 |
+| `max_output_tokens`| integer                   | 否       | --      | 最大生成 Token 数                        |
+
+#### 响应体（非流式）
+
+```json
+{
+  "id": "resp_abc123",
+  "object": "response",
+  "created_at": 1711929600,
+  "model": "gpt-4o",
+  "output": [
+    {
+      "type": "message",
+      "role": "assistant",
+      "content": [
+        {
+          "type": "output_text",
+          "text": "The capital of France is Paris."
+        }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 15,
+    "output_tokens": 8,
+    "total_tokens": 23
+  }
+}
+```
+
+#### 示例
+
+```bash
+curl -X POST http://localhost:3000/v1/responses \
+  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "input": "What is the capital of France?"
+  }'
+```
+
+#### 错误响应
+
+| 状态码 | 条件                             |
+| ------ | -------------------------------- |
+| 401    | 缺失/无效凭证                   |
+| 403    | 该密钥不允许访问此模型           |
+| 404    | 模型未找到                       |
+| 429    | 超出速率限制                     |
+| 502    | 上游提供商错误                   |
 
 ---
 
@@ -496,7 +696,7 @@ curl http://localhost:3001/api/setup/status
 | `provider`               | object | 否       | 可选的首个提供商配置                            |
 | `provider.name`          | string | 是*      | 唯一标识符（* 如设置 provider 则必填）          |
 | `provider.display_name`  | string | 是*      | 人类可读的名称                                  |
-| `provider.provider_type` | string | 是*      | `openai`、`anthropic`、`azure`、`custom` 之一   |
+| `provider.provider_type` | string | 是*      | `openai`、`anthropic`、`google`、`azure`、`bedrock`、`custom` 之一   |
 | `provider.base_url`      | string | 是*      | 提供商 API 基础 URL                             |
 | `provider.api_key`       | string | 是*      | 提供商 API 密钥                                 |
 
@@ -1177,7 +1377,7 @@ curl http://localhost:3001/api/admin/providers \
 | --------------- | ------ | -------- | ---------------------------------------------------- |
 | `name`          | string | 是       | 唯一标识符（如 `openai-prod`）                   |
 | `display_name`  | string | 是       | 人类可读的名称                                   |
-| `provider_type` | string | 是       | `openai`、`anthropic`、`azure`、`custom` 之一    |
+| `provider_type` | string | 是       | `openai`、`anthropic`、`google`、`azure`、`bedrock`、`custom` 之一    |
 | `base_url`      | string | 是       | 提供商 API 基础 URL                              |
 | `api_key`       | string | 是       | 提供商 API 密钥（使用 AES-256-GCM 静态加密存储）|
 

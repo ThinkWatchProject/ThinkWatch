@@ -253,6 +253,80 @@ The full URL that the OIDC provider redirects to after authentication. This must
 
 ---
 
+## Provider Configuration
+
+Providers are configured through the admin Web UI (Admin > Providers) or the `POST /api/admin/providers` API. Each provider type has specific configuration requirements:
+
+### OpenAI
+
+| Field           | Value                              |
+| --------------- | ---------------------------------- |
+| `provider_type` | `openai`                           |
+| `base_url`      | `https://api.openai.com`           |
+| `api_key`       | `sk-...` (OpenAI API key)          |
+
+Models with prefixes `gpt-`, `o1-`, `o3-`, `o4-` are automatically routed to this provider.
+
+### Anthropic
+
+| Field           | Value                              |
+| --------------- | ---------------------------------- |
+| `provider_type` | `anthropic`                        |
+| `base_url`      | `https://api.anthropic.com`        |
+| `api_key`       | `sk-ant-...` (Anthropic API key)   |
+
+Models with prefix `claude-` are automatically routed to this provider.
+
+### Google Gemini
+
+| Field           | Value                                          |
+| --------------- | ---------------------------------------------- |
+| `provider_type` | `google`                                       |
+| `base_url`      | `https://generativelanguage.googleapis.com`    |
+| `api_key`       | Google AI API key                              |
+
+Models with prefix `gemini-` are automatically routed to this provider.
+
+### Azure OpenAI
+
+| Field           | Value                                          |
+| --------------- | ---------------------------------------------- |
+| `provider_type` | `azure`                                        |
+| `base_url`      | `https://{resource}.openai.azure.com`          |
+| `api_key`       | Azure API key                                  |
+| `config_json`   | `{"api_version": "2024-12-01-preview"}`        |
+
+Azure OpenAI uses the `api-key` header (not Bearer token) for authentication. The `api_version` is passed as a query parameter. Azure does not support automatic model routing -- you must explicitly register models via Admin > Models.
+
+### AWS Bedrock
+
+| Field           | Value                                          |
+| --------------- | ---------------------------------------------- |
+| `provider_type` | `bedrock`                                      |
+| `base_url`      | AWS region (e.g. `us-east-1`)                  |
+| `api_key`       | `ACCESS_KEY_ID:SECRET_ACCESS_KEY`              |
+
+AWS Bedrock uses SigV4 request signing via the official `aws-sigv4` Rust crate. The `base_url` field specifies the AWS region, and the `api_key` field contains the IAM credentials in `ACCESS_KEY_ID:SECRET_ACCESS_KEY` format. Streaming uses the native Bedrock binary event-stream protocol (Converse API). Like Azure, Bedrock does not support automatic model routing -- you must explicitly register models via Admin > Models.
+
+### Custom (OpenAI-compatible)
+
+| Field           | Value                                          |
+| --------------- | ---------------------------------------------- |
+| `provider_type` | `custom`                                       |
+| `base_url`      | Any OpenAI-compatible endpoint URL             |
+| `api_key`       | Bearer token for the endpoint                  |
+
+Use this type for self-hosted models (vLLM, Ollama, LiteLLM, etc.) or any third-party service that implements the OpenAI API format.
+
+### Provider Auto-Loading
+
+On startup, AgentBastion loads all active providers from the database and registers them in the model router. Models are routed based on:
+
+1. **Prefix matching** (for OpenAI, Anthropic, Google): Models matching the provider's default prefix are automatically routed.
+2. **Explicit registration** (for Azure, Bedrock, Custom): Models must be registered via the Admin > Models page with a specific provider assignment.
+
+---
+
 ## Configuration Patterns
 
 ### Development vs Production

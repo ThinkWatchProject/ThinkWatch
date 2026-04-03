@@ -631,15 +631,46 @@ These tasks run within the server process and do not require external schedulers
 
 ---
 
-## 8. Upgrading
+## 8. Client Configuration Guide
 
-### 8.1 Database Migrations
+AgentBastion includes a built-in **Configuration Guide** page in the web console at `/gateway/guide`. This page provides copy-paste setup instructions for connecting various AI client tools to your gateway and auto-detects the gateway URL.
+
+### Supported Client Tools
+
+The Configuration Guide provides ready-to-use instructions for:
+
+- **Claude Code** -- set `ANTHROPIC_BASE_URL` to your gateway's `/v1` endpoint (uses the Anthropic Messages API at `/v1/messages`)
+- **Cursor** -- configure the OpenAI-compatible endpoint in Cursor settings (uses `/v1/chat/completions`)
+- **Continue** -- configure the provider in `~/.continue/config.json` (uses `/v1/chat/completions`)
+- **Cline** -- configure the API base URL in Cline settings (uses `/v1/chat/completions`)
+- **OpenAI SDK** -- set `OPENAI_BASE_URL` and `OPENAI_API_KEY` environment variables (uses `/v1/chat/completions` or `/v1/responses`)
+- **Anthropic SDK** -- set `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` environment variables (uses `/v1/messages`)
+- **cURL** -- example commands for all three API formats
+
+### Gateway API Endpoints
+
+The gateway (port 3000) serves three API formats on a single port:
+
+| Endpoint                    | Format                  | Typical Clients                              |
+| --------------------------- | ----------------------- | -------------------------------------------- |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | Cursor, Continue, Cline, OpenAI SDK          |
+| `POST /v1/messages`         | Anthropic Messages API  | Claude Code, Anthropic SDK                   |
+| `POST /v1/responses`        | OpenAI Responses API    | OpenAI SDK (2025 format)                     |
+| `GET /v1/models`            | OpenAI Models list      | All clients                                  |
+
+All endpoints accept `ab-` API keys via the `Authorization: Bearer` header.
+
+---
+
+## 9. Upgrading
+
+### 9.1 Database Migrations
 
 Migrations are run automatically when the server starts. The `sqlx` migrate system tracks which migrations have been applied in a `_sqlx_migrations` table and only runs new ones.
 
 **Important:** Always back up your database before upgrading to a new version that includes schema changes.
 
-### 8.2 Rolling Updates (Kubernetes)
+### 9.2 Rolling Updates (Kubernetes)
 
 The server is stateless, so rolling updates work out of the box:
 
@@ -654,7 +685,7 @@ Kubernetes will perform a rolling update, starting new pods before terminating o
 
 **Tip:** Set `maxSurge: 1` and `maxUnavailable: 0` in your deployment strategy to ensure zero downtime during upgrades.
 
-### 8.3 Docker Compose Updates
+### 9.3 Docker Compose Updates
 
 ```bash
 # Pull new images or rebuild
@@ -664,7 +695,7 @@ docker compose -f deploy/docker-compose.yml --env-file .env.production build
 docker compose -f deploy/docker-compose.yml --env-file .env.production up -d
 ```
 
-### 8.4 Breaking Changes Policy
+### 9.4 Breaking Changes Policy
 
 - **Patch versions** (0.1.x): Bug fixes only. No migration changes. Safe to upgrade without review.
 - **Minor versions** (0.x.0): May include new migrations that add tables or columns. Always backward-compatible. Review the changelog.

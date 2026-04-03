@@ -253,6 +253,80 @@ OIDC 提供商在认证后重定向到的完整 URL。此 URL 必须与在身份
 
 ---
 
+## 提供商配置
+
+提供商通过管理员 Web UI（管理 > 提供商）或 `POST /api/admin/providers` API 进行配置。每种提供商类型有特定的配置要求：
+
+### OpenAI
+
+| 字段            | 值                                 |
+| --------------- | ---------------------------------- |
+| `provider_type` | `openai`                           |
+| `base_url`      | `https://api.openai.com`           |
+| `api_key`       | `sk-...`（OpenAI API 密钥）        |
+
+前缀为 `gpt-`、`o1-`、`o3-`、`o4-` 的模型会自动路由到此提供商。
+
+### Anthropic
+
+| 字段            | 值                                 |
+| --------------- | ---------------------------------- |
+| `provider_type` | `anthropic`                        |
+| `base_url`      | `https://api.anthropic.com`        |
+| `api_key`       | `sk-ant-...`（Anthropic API 密钥） |
+
+前缀为 `claude-` 的模型会自动路由到此提供商。
+
+### Google Gemini
+
+| 字段            | 值                                             |
+| --------------- | ---------------------------------------------- |
+| `provider_type` | `google`                                       |
+| `base_url`      | `https://generativelanguage.googleapis.com`    |
+| `api_key`       | Google AI API 密钥                             |
+
+前缀为 `gemini-` 的模型会自动路由到此提供商。
+
+### Azure OpenAI
+
+| 字段            | 值                                             |
+| --------------- | ---------------------------------------------- |
+| `provider_type` | `azure`                                        |
+| `base_url`      | `https://{resource}.openai.azure.com`          |
+| `api_key`       | Azure API 密钥                                 |
+| `config_json`   | `{"api_version": "2024-12-01-preview"}`        |
+
+Azure OpenAI 使用 `api-key` 请求头（非 Bearer 令牌）进行认证。`api_version` 作为查询参数传递。Azure 不支持自动模型路由——必须通过管理 > 模型页面显式注册模型。
+
+### AWS Bedrock
+
+| 字段            | 值                                             |
+| --------------- | ---------------------------------------------- |
+| `provider_type` | `bedrock`                                      |
+| `base_url`      | AWS 区域（如 `us-east-1`）                     |
+| `api_key`       | `ACCESS_KEY_ID:SECRET_ACCESS_KEY`              |
+
+AWS Bedrock 通过官方 `aws-sigv4` Rust crate 使用 SigV4 请求签名。`base_url` 字段指定 AWS 区域，`api_key` 字段包含格式为 `ACCESS_KEY_ID:SECRET_ACCESS_KEY` 的 IAM 凭证。流式传输使用原生 Bedrock 二进制 event-stream 协议（Converse API）。与 Azure 类似，Bedrock 不支持自动模型路由——必须通过管理 > 模型页面显式注册模型。
+
+### 自定义（OpenAI 兼容）
+
+| 字段            | 值                                             |
+| --------------- | ---------------------------------------------- |
+| `provider_type` | `custom`                                       |
+| `base_url`      | 任何 OpenAI 兼容端点 URL                       |
+| `api_key`       | 端点的 Bearer 令牌                             |
+
+用于自托管模型（vLLM、Ollama、LiteLLM 等）或任何实现了 OpenAI API 格式的第三方服务。
+
+### 提供商自动加载
+
+启动时，AgentBastion 从数据库加载所有活跃提供商并注册到模型路由器。模型路由基于：
+
+1. **前缀匹配**（OpenAI、Anthropic、Google）：匹配提供商默认前缀的模型会自动路由。
+2. **显式注册**（Azure、Bedrock、自定义）：模型必须通过管理 > 模型页面注册，并指定提供商分配。
+
+---
+
 ## 配置模式
 
 ### 开发环境与生产环境对比

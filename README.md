@@ -20,7 +20,7 @@ Just as an SSH bastion host is the single gateway through which all server acces
  Claude Code ──────>│                                      │──> OpenAI
  Cursor ───────────>│    Gateway  :3000                    │──> Anthropic
  Custom Agent ─────>│    AI API + MCP Unified Proxy        │──> Google Gemini
- CI/CD Pipeline ───>│                                      │──> Self-hosted LLMs
+ CI/CD Pipeline ───>│                                      │──> Azure OpenAI / AWS Bedrock
                     └──────────────────────────────────────┘
                     ┌──────────────────────────────────────┐
  Admin Browser ────>│    Console  :3001                    │
@@ -43,9 +43,10 @@ AgentBastion solves all of this with a single deployment.
 ## Key Features
 
 ### AI API Gateway
-- **OpenAI-compatible proxy** — drop-in replacement; point `OPENAI_BASE_URL` at AgentBastion and go
-- **Multi-provider routing** — OpenAI, Anthropic, Google Gemini, Azure, or any OpenAI-compatible endpoint
-- **Automatic format conversion** — Anthropic Messages API, Google Gemini, and more, all behind a single OpenAI-compatible interface
+- **Multi-format API proxy** — natively serves OpenAI Chat Completions (`/v1/chat/completions`), Anthropic Messages (`/v1/messages`), and OpenAI Responses (`/v1/responses`) APIs on a single port; works as a drop-in replacement for Cursor, Continue, Cline, Claude Code, and the OpenAI/Anthropic SDKs
+- **Multi-provider routing** — OpenAI, Anthropic, Google Gemini, Azure OpenAI, AWS Bedrock, or any OpenAI-compatible endpoint
+- **Automatic format conversion** — Anthropic Messages API, Google Gemini, Azure OpenAI, AWS Bedrock Converse API, and more, all behind a unified interface
+- **Provider auto-loading** — active providers are loaded from the database at startup and registered in the model router; default model prefixes (`gpt-`/`o1-`/`o3-`/`o4-` for OpenAI, `claude-` for Anthropic, `gemini-` for Google) route automatically; Azure and Bedrock require explicit model registration
 - **Streaming SSE pass-through** — zero-overhead forwarding with real-time token counting
 - **Virtual API keys** — issue scoped `ab-` keys per team, per project, per developer; revoke in one click
 - **API key lifecycle management** — automatic rotation with grace periods, per-key inactivity timeout, expiry warnings, and background policy enforcement
@@ -77,6 +78,7 @@ AgentBastion solves all of this with a single deployment.
 ### Operations & Configuration
 - **Dynamic configuration** — most settings stored in database (`system_settings` table), configurable via Web UI (Admin > Settings with 7 category tabs)
 - **First-run setup wizard** — guided `/setup` wizard creates the super_admin account, configures the site, and optionally adds the first provider and API key
+- **Configuration Guide** — built-in `/gateway/guide` page in the web console with copy-paste setup instructions for Claude Code, Cursor, Continue, Cline, OpenAI SDK, Anthropic SDK, and cURL; auto-detects the gateway URL
 - **Multi-instance sync** — configuration changes propagated across instances via Redis Pub/Sub
 - **Data retention policies** — configurable retention periods for usage records and audit logs with automatic daily purge
 
@@ -134,7 +136,7 @@ See the **[Deployment Guide](docs/en/deployment-guide.md)** for production setup
 
 | Port | Server | Exposure | Purpose |
 |------|--------|----------|---------|
-| `3000` | Gateway | **Public** — expose to AI clients | `/v1/chat/completions`, `/v1/models`, `/mcp`, `/metrics`, `/health/*` |
+| `3000` | Gateway | **Public** — expose to AI clients | `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`, `/mcp`, `/metrics`, `/health/*` |
 | `3001` | Console | **Internal** — behind VPN/firewall | `/api/*` management endpoints, Web UI |
 
 > In production, **only port 3000** should be reachable from the internet. Port 3001 should be restricted to your admin network.

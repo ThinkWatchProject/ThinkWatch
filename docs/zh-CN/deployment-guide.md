@@ -631,15 +631,46 @@ AgentBastion 运行多个自动执行的后台任务：
 
 ---
 
-## 8. 升级
+## 8. 客户端配置指南
 
-### 8.1 数据库迁移
+AgentBastion 在 Web 控制台中内置了**配置指南**页面，位于 `/gateway/guide`。该页面提供了将各种 AI 客户端工具连接到网关的一键复制配置说明，并自动检测网关 URL。
+
+### 支持的客户端工具
+
+配置指南提供了以下工具的现成配置说明：
+
+- **Claude Code** -- 将 `ANTHROPIC_BASE_URL` 设置为网关的 `/v1` 端点（使用 `/v1/messages` 的 Anthropic Messages API）
+- **Cursor** -- 在 Cursor 设置中配置 OpenAI 兼容端点（使用 `/v1/chat/completions`）
+- **Continue** -- 在 `~/.continue/config.json` 中配置提供商（使用 `/v1/chat/completions`）
+- **Cline** -- 在 Cline 设置中配置 API 基础 URL（使用 `/v1/chat/completions`）
+- **OpenAI SDK** -- 设置 `OPENAI_BASE_URL` 和 `OPENAI_API_KEY` 环境变量（使用 `/v1/chat/completions` 或 `/v1/responses`）
+- **Anthropic SDK** -- 设置 `ANTHROPIC_BASE_URL` 和 `ANTHROPIC_API_KEY` 环境变量（使用 `/v1/messages`）
+- **cURL** -- 三种 API 格式的示例命令
+
+### 网关 API 端点
+
+网关（端口 3000）在单一端口上提供三种 API 格式：
+
+| 端点                        | 格式                    | 典型客户端                                   |
+| --------------------------- | ----------------------- | -------------------------------------------- |
+| `POST /v1/chat/completions` | OpenAI Chat Completions | Cursor、Continue、Cline、OpenAI SDK          |
+| `POST /v1/messages`         | Anthropic Messages API  | Claude Code、Anthropic SDK                   |
+| `POST /v1/responses`        | OpenAI Responses API    | OpenAI SDK（2025 格式）                      |
+| `GET /v1/models`            | OpenAI Models 列表      | 所有客户端                                   |
+
+所有端点通过 `Authorization: Bearer` 请求头接受 `ab-` API 密钥。
+
+---
+
+## 9. 升级
+
+### 9.1 数据库迁移
 
 迁移在服务器启动时自动运行。`sqlx` 迁移系统在 `_sqlx_migrations` 表中跟踪已应用的迁移，仅运行新的迁移。
 
 **重要：** 升级到包含 Schema 变更的新版本前，务必备份数据库。
 
-### 8.2 滚动更新（Kubernetes）
+### 9.2 滚动更新（Kubernetes）
 
 服务器是无状态的，因此滚动更新可以直接使用：
 
@@ -654,7 +685,7 @@ Kubernetes 将执行滚动更新，在终止旧 Pod 之前启动新 Pod。第一
 
 **提示：** 在部署策略中设置 `maxSurge: 1` 和 `maxUnavailable: 0`，以确保升级期间零停机。
 
-### 8.3 Docker Compose 更新
+### 9.3 Docker Compose 更新
 
 ```bash
 # Pull new images or rebuild
@@ -664,7 +695,7 @@ docker compose -f deploy/docker-compose.yml --env-file .env.production build
 docker compose -f deploy/docker-compose.yml --env-file .env.production up -d
 ```
 
-### 8.4 破坏性变更策略
+### 9.4 破坏性变更策略
 
 - **补丁版本**（0.1.x）：仅修复 Bug。无迁移变更。可安全升级，无需审查。
 - **次要版本**（0.x.0）：可能包含新增表或列的迁移。始终向后兼容。请查阅变更日志。

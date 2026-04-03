@@ -142,12 +142,16 @@ MCP tools can be restricted at the API key or user level. When an API key has `a
 
 **Provider API Keys**
 
-Provider API keys (credentials for upstream AI services like OpenAI, Anthropic) are encrypted before storage:
+Provider API keys (credentials for upstream AI services like OpenAI, Anthropic, Google, Azure OpenAI, and AWS Bedrock) are encrypted before storage:
 
 - Algorithm: AES-256-GCM
 - Nonce: 12 bytes, cryptographically random, generated per encryption operation
 - Key: Derived from the `ENCRYPTION_KEY` environment variable (32-byte hex string)
 - Storage format: `nonce || ciphertext || tag` (base64-encoded)
+
+**AWS Bedrock Credentials**
+
+AWS Bedrock credentials (stored in `ACCESS_KEY_ID:SECRET_ACCESS_KEY` format) are encrypted at rest using the same AES-256-GCM scheme. At request time, credentials are decrypted and used for AWS SigV4 request signing via the official `aws-sigv4` Rust crate. The signing process is performed in-memory and credentials are never written to disk in plaintext.
 
 **MCP Server Auth Secrets**
 
