@@ -46,10 +46,10 @@ pub fn require_permission(
 ) -> impl Fn(
     Request<axum::body::Body>,
     Next,
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<Response, StatusCode>> + Send>,
-> + Clone
-       + Send {
+)
+    -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Response, StatusCode>> + Send>>
++ Clone
++ Send {
     move |request: Request<axum::body::Body>, next: Next| {
         Box::pin(async move {
             let auth_user = request

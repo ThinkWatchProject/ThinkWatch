@@ -320,13 +320,17 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
 
         // JWT TTLs need reasonable bounds
         "auth.jwt_access_ttl_secs" => {
-            let n = value.as_i64().ok_or_else(|| anyhow::anyhow!("{key}: expected integer"))?;
+            let n = value
+                .as_i64()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected integer"))?;
             if !(60..=86400).contains(&n) {
                 anyhow::bail!("{key}: must be between 60 and 86400 seconds");
             }
         }
         "auth.jwt_refresh_ttl_days" => {
-            let n = value.as_i64().ok_or_else(|| anyhow::anyhow!("{key}: expected integer"))?;
+            let n = value
+                .as_i64()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected integer"))?;
             if !(1..=365).contains(&n) {
                 anyhow::bail!("{key}: must be between 1 and 365 days");
             }
@@ -338,7 +342,9 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
                 .as_array()
                 .ok_or_else(|| anyhow::anyhow!("{key}: expected an array of numbers"))?;
             for v in arr {
-                let n = v.as_f64().ok_or_else(|| anyhow::anyhow!("{key}: array elements must be numbers"))?;
+                let n = v
+                    .as_f64()
+                    .ok_or_else(|| anyhow::anyhow!("{key}: array elements must be numbers"))?;
                 if !(0.0..=1.0).contains(&n) {
                     anyhow::bail!("{key}: threshold values must be between 0.0 and 1.0, got {n}");
                 }
@@ -380,8 +386,14 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
                     if item.get("regex").and_then(|v| v.as_str()).is_none() {
                         anyhow::bail!("{key}: each pattern must have a 'regex' string field");
                     }
-                    if item.get("placeholder_prefix").and_then(|v| v.as_str()).is_none() {
-                        anyhow::bail!("{key}: each pattern must have a 'placeholder_prefix' string field");
+                    if item
+                        .get("placeholder_prefix")
+                        .and_then(|v| v.as_str())
+                        .is_none()
+                    {
+                        anyhow::bail!(
+                            "{key}: each pattern must have a 'placeholder_prefix' string field"
+                        );
                     }
                 }
             }

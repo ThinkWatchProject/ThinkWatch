@@ -53,8 +53,9 @@ pub async fn login(
 
     // Progressive lockout: after 5 failures, increase lockout exponentially
     let lockout_key = format!("auth_lockout:{}", req.email);
-    let lockout_ttl: Option<i64> =
-        fred::interfaces::KeysInterface::ttl(&state.redis, &lockout_key).await.unwrap_or(None);
+    let lockout_ttl: Option<i64> = fred::interfaces::KeysInterface::ttl(&state.redis, &lockout_key)
+        .await
+        .unwrap_or(None);
     if lockout_ttl.unwrap_or(-2) > 0 {
         return Err(AppError::BadRequest(
             "Account temporarily locked due to repeated failed attempts. Please try again later."
@@ -90,19 +91,37 @@ pub async fn login(
         // Lockout duration increases: 5 fails=60s, 8=300s, 10+=900s
         if count >= 10 {
             let _: () = fred::interfaces::KeysInterface::set(
-                &state.redis, &lockout_key, "1",
-                Some(fred::types::Expiration::EX(900)), None, false,
-            ).await.unwrap_or(());
+                &state.redis,
+                &lockout_key,
+                "1",
+                Some(fred::types::Expiration::EX(900)),
+                None,
+                false,
+            )
+            .await
+            .unwrap_or(());
         } else if count >= 8 {
             let _: () = fred::interfaces::KeysInterface::set(
-                &state.redis, &lockout_key, "1",
-                Some(fred::types::Expiration::EX(300)), None, false,
-            ).await.unwrap_or(());
+                &state.redis,
+                &lockout_key,
+                "1",
+                Some(fred::types::Expiration::EX(300)),
+                None,
+                false,
+            )
+            .await
+            .unwrap_or(());
         } else if count >= 5 {
             let _: () = fred::interfaces::KeysInterface::set(
-                &state.redis, &lockout_key, "1",
-                Some(fred::types::Expiration::EX(60)), None, false,
-            ).await.unwrap_or(());
+                &state.redis,
+                &lockout_key,
+                "1",
+                Some(fred::types::Expiration::EX(60)),
+                None,
+                false,
+            )
+            .await
+            .unwrap_or(());
         }
 
         // Log failed attempt

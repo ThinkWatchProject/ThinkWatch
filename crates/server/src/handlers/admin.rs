@@ -22,11 +22,9 @@ pub async fn list_users(
     let per_page = pagination.per_page();
     let offset = pagination.offset();
 
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL",
-    )
-    .fetch_one(&state.db)
-    .await?;
+    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL")
+        .fetch_one(&state.db)
+        .await?;
 
     let users = sqlx::query_as::<_, User>(
         "SELECT * FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT $1 OFFSET $2",

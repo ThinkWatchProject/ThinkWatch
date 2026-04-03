@@ -59,10 +59,8 @@ impl CostTracker {
         let defaults = Self::default_price_table();
 
         // Custom prices first so they are matched before defaults
-        let mut table: Vec<(String, f64, f64)> = overrides
-            .into_iter()
-            .map(|(k, (i, o))| (k, i, o))
-            .collect();
+        let mut table: Vec<(String, f64, f64)> =
+            overrides.into_iter().map(|(k, (i, o))| (k, i, o)).collect();
         // Sort custom entries by pattern length descending (longer = more specific first)
         table.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
         // Append defaults for any models not overridden
@@ -94,8 +92,7 @@ impl CostTracker {
         let model_lower = model.to_lowercase();
 
         for (pattern, input, output) in &self.price_table {
-            if model_lower.starts_with(pattern.as_str()) || model_lower.contains(pattern.as_str())
-            {
+            if model_lower.starts_with(pattern.as_str()) || model_lower.contains(pattern.as_str()) {
                 return (*input, *output);
             }
         }

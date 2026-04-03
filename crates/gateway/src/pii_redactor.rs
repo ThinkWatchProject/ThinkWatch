@@ -142,9 +142,8 @@ impl PiiRedactor {
                 }
 
                 // Sort by start position ascending, then by length descending (prefer longer matches)
-                all_matches.sort_by(|a, b| {
-                    a.0.cmp(&b.0).then_with(|| (b.1 - b.0).cmp(&(a.1 - a.0)))
-                });
+                all_matches
+                    .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| (b.1 - b.0).cmp(&(a.1 - a.0))));
 
                 // Remove overlapping matches — keep the longest match at each position
                 let mut filtered: Vec<(usize, usize, usize)> = Vec::new();
@@ -165,8 +164,10 @@ impl PiiRedactor {
                         .entry(pattern.placeholder_prefix.clone())
                         .or_insert(0);
                     *counter += 1;
-                    let placeholder =
-                        format!("{{{{{}_{}_{}}}}}", pattern.placeholder_prefix, salt_hex, counter);
+                    let placeholder = format!(
+                        "{{{{{}_{}_{}}}}}",
+                        pattern.placeholder_prefix, salt_hex, counter
+                    );
                     replacements.insert(placeholder.clone(), matched_value.to_string());
                     redacted_content.replace_range(start..end, &placeholder);
                 }
@@ -395,7 +396,10 @@ mod tests {
         assert!(content.contains("CUSTOM_EMAIL"), "got: {content}");
         assert!(!content.contains("test@example.com"));
         let ph = find_placeholder(&ctx, "test@example.com");
-        assert!(ph.starts_with("{{CUSTOM_EMAIL_"), "placeholder format: {ph}");
+        assert!(
+            ph.starts_with("{{CUSTOM_EMAIL_"),
+            "placeholder format: {ph}"
+        );
     }
 
     #[test]

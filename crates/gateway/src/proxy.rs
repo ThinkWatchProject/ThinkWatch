@@ -139,7 +139,9 @@ pub async fn proxy_chat_completion(
                     if let Ok(info) = quota.get_usage(&key).await {
                         let budget_limit = info.limit as f64;
                         let current_spend = info.used as f64;
-                        alert.check_and_alert(&key, current_spend, budget_limit).await;
+                        alert
+                            .check_and_alert(&key, current_spend, budget_limit)
+                            .await;
                     }
                 });
             }

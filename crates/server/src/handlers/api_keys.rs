@@ -5,7 +5,9 @@ use uuid::Uuid;
 
 use agent_bastion_auth::api_key;
 use agent_bastion_common::audit::AuditEntry;
-use agent_bastion_common::dto::{CreateApiKeyRequest, CreateApiKeyResponse, PaginatedResponse, PaginationParams};
+use agent_bastion_common::dto::{
+    CreateApiKeyRequest, CreateApiKeyResponse, PaginatedResponse, PaginationParams,
+};
 use agent_bastion_common::errors::AppError;
 use agent_bastion_common::models::ApiKey;
 

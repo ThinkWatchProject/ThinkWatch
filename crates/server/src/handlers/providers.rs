@@ -37,11 +37,7 @@ pub(crate) fn validate_url(url_str: &str) -> Result<(), AppError> {
     if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
         for addr in addrs {
             let ip = addr.ip();
-            if ip.is_loopback()
-                || ip.is_unspecified()
-                || is_private_ip(&ip)
-                || is_link_local(&ip)
-            {
+            if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local(&ip) {
                 return Err(AppError::BadRequest(
                     "URL resolves to a private or loopback address".into(),
                 ));

@@ -29,9 +29,11 @@ pub async fn list_audit_logs(
     State(state): State<AppState>,
     Query(query): Query<AuditLogQuery>,
 ) -> Result<Json<AuditLogResponse>, AppError> {
-    let qw_url = state.config.quickwit_url.as_deref().ok_or_else(|| {
-        AppError::Internal(anyhow::anyhow!("Quickwit is not configured"))
-    })?;
+    let qw_url = state
+        .config
+        .quickwit_url
+        .as_deref()
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Quickwit is not configured")))?;
     query_quickwit(qw_url, &state.config.quickwit_index, &query).await
 }
 
@@ -103,11 +105,10 @@ async fn query_quickwit(
     }
 
     let client = reqwest::Client::new();
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Quickwit search request failed: {e}")))?;
+    let resp =
+        client.get(&url).send().await.map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("Quickwit search request failed: {e}"))
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -117,10 +118,9 @@ async fn query_quickwit(
         )));
     }
 
-    let qw_resp = resp
-        .json::<QwSearchResponse>()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to parse Quickwit response: {e}")))?;
+    let qw_resp = resp.json::<QwSearchResponse>().await.map_err(|e| {
+        AppError::Internal(anyhow::anyhow!("Failed to parse Quickwit response: {e}"))
+    })?;
 
     let items: Vec<AuditLog> = qw_resp
         .hits
