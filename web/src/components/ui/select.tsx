@@ -38,7 +38,7 @@ function SelectContent({
   ...props
 }: SelectPrimitive.Popup.Props) {
   return (
-    <SelectPrimitive.Positioner className="z-[200]">
+    <SelectPrimitive.Positioner className="z-[200]" style={{ position: 'fixed' }}>
       <SelectPrimitive.Popup
         data-slot="select-content"
         className={cn(

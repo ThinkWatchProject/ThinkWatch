@@ -65,13 +65,14 @@ interface TestResult {
 }
 
 const FORWARDER_TYPES = [
-  { value: 'udp_syslog', label: 'UDP Syslog' },
-  { value: 'tcp_syslog', label: 'TCP Syslog' },
+  { value: 'syslog', label: 'Syslog' },
   { value: 'kafka', label: 'Kafka (REST Proxy)' },
   { value: 'webhook', label: 'Webhook (HTTP)' },
 ];
 
 function typeLabel(type_: string): string {
+  if (type_ === 'udp_syslog') return 'Syslog (UDP)';
+  if (type_ === 'tcp_syslog') return 'Syslog (TCP)';
   return FORWARDER_TYPES.find((t) => t.value === type_)?.label ?? type_;
 }
 
@@ -95,7 +96,8 @@ export function LogForwardersPage() {
 
   // Form state
   const [formName, setFormName] = useState('');
-  const [formType, setFormType] = useState('udp_syslog');
+  const [formType, setFormType] = useState('syslog');
+  const [formSyslogProto, setFormSyslogProto] = useState<'udp' | 'tcp'>('udp');
   const [formAddress, setFormAddress] = useState('');
   const [formFacility, setFormFacility] = useState('16');
   const [formBrokerUrl, setFormBrokerUrl] = useState('');
@@ -140,7 +142,8 @@ export function LogForwardersPage() {
 
   const resetForm = () => {
     setFormName('');
-    setFormType('udp_syslog');
+    setFormType('syslog');
+    setFormSyslogProto('udp');
     setFormAddress('');
     setFormFacility('16');
     setFormBrokerUrl('');
@@ -152,8 +155,7 @@ export function LogForwardersPage() {
 
   const buildConfig = (): Record<string, string> => {
     switch (formType) {
-      case 'udp_syslog':
-      case 'tcp_syslog':
+      case 'syslog':
         return { address: formAddress, facility: formFacility };
       case 'kafka':
         return { broker_url: formBrokerUrl, topic: formTopic };
@@ -172,7 +174,7 @@ export function LogForwardersPage() {
     try {
       await apiPost('/api/admin/log-forwarders', {
         name: formName,
-        forwarder_type: formType,
+        forwarder_type: formType === 'syslog' ? `${formSyslogProto}_syslog` : formType,
         config: buildConfig(),
         log_types: Array.from(formLogTypes),
       });
@@ -316,8 +318,24 @@ export function LogForwardersPage() {
                 </Select>
               </div>
 
-              {(formType === 'udp_syslog' || formType === 'tcp_syslog') && (
+              {formType === 'syslog' && (
                 <>
+                  <div>
+                    <Label>传输协议</Label>
+                    <div className="flex gap-4 mt-1">
+                      {(['udp', 'tcp'] as const).map((proto) => (
+                        <label key={proto} className="flex items-center gap-1.5 text-sm cursor-pointer">
+                          <input
+                            type="radio"
+                            name="syslog-proto"
+                            checked={formSyslogProto === proto}
+                            onChange={() => setFormSyslogProto(proto)}
+                          />
+                          {proto.toUpperCase()}
+                        </label>
+                      ))}
+                    </div>
+                  </div>
                   <div>
                     <Label>{t('logForwarders.address')}</Label>
                     <Input value={formAddress} onChange={(e) => setFormAddress(e.target.value)} placeholder="127.0.0.1:514" />
@@ -535,6 +553,10 @@ export function LogForwardersPage() {
 
             {editForwarder && (editForwarder.forwarder_type === 'udp_syslog' || editForwarder.forwarder_type === 'tcp_syslog') && (
               <>
+                <div>
+                  <Label>传输协议</Label>
+                  <p className="text-sm text-muted-foreground mt-1">{editForwarder.forwarder_type === 'udp_syslog' ? 'UDP' : 'TCP'}</p>
+                </div>
                 <div>
                   <Label>{t('logForwarders.address')}</Label>
                   <Input value={editAddress} onChange={(e) => setEditAddress(e.target.value)} placeholder="127.0.0.1:514" />
