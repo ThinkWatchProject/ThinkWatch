@@ -17,13 +17,6 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
   Table,
   TableBody,
   TableCell,
@@ -308,14 +301,19 @@ export function LogForwardersPage() {
               </div>
               <div>
                 <Label>{t('logForwarders.type')}</Label>
-                <Select value={formType} onValueChange={(v) => { if (v !== null) setFormType(v); }}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {FORWARDER_TYPES.map((ft) => (
-                      <SelectItem key={ft.value} value={ft.value}>{ft.label}</SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
+                <div className="flex gap-2 mt-1">
+                  {FORWARDER_TYPES.map((ft) => (
+                    <Button
+                      key={ft.value}
+                      type="button"
+                      variant={formType === ft.value ? 'default' : 'outline'}
+                      size="sm"
+                      onClick={() => setFormType(ft.value)}
+                    >
+                      {ft.label}
+                    </Button>
+                  ))}
+                </div>
               </div>
 
               {formType === 'syslog' && (
