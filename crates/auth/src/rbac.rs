@@ -190,7 +190,11 @@ fn evaluate_statement(stmt: &Statement, action: &str, resource: &str) -> PolicyR
     if !action_matches {
         return PolicyResult::NoMatch;
     }
-    let resource_matches = stmt.resource.patterns().iter().any(|p| glob_match(p, resource));
+    let resource_matches = stmt
+        .resource
+        .patterns()
+        .iter()
+        .any(|p| glob_match(p, resource));
     if !resource_matches {
         return PolicyResult::NoMatch;
     }
@@ -274,7 +278,9 @@ pub fn validate_policy_document(value: &serde_json::Value) -> Result<PolicyDocum
         }
         for resource in stmt.resource.patterns() {
             if resource.is_empty() {
-                return Err(format!("Statement[{i}]: Resource pattern must not be empty"));
+                return Err(format!(
+                    "Statement[{i}]: Resource pattern must not be empty"
+                ));
             }
         }
     }
@@ -392,8 +398,14 @@ mod tests {
                 condition: None,
             }],
         };
-        assert_eq!(evaluate_policy(&doc, "ai_gateway:use", "*"), PolicyResult::Allow);
-        assert_eq!(evaluate_policy(&doc, "providers:write", "*"), PolicyResult::NoMatch);
+        assert_eq!(
+            evaluate_policy(&doc, "ai_gateway:use", "*"),
+            PolicyResult::Allow
+        );
+        assert_eq!(
+            evaluate_policy(&doc, "providers:write", "*"),
+            PolicyResult::NoMatch
+        );
     }
 
     #[test]
@@ -417,8 +429,14 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(evaluate_policy(&doc, "providers:read", "*"), PolicyResult::Allow);
-        assert_eq!(evaluate_policy(&doc, "providers:write", "*"), PolicyResult::Deny);
+        assert_eq!(
+            evaluate_policy(&doc, "providers:read", "*"),
+            PolicyResult::Allow
+        );
+        assert_eq!(
+            evaluate_policy(&doc, "providers:write", "*"),
+            PolicyResult::Deny
+        );
     }
 
     #[test]
@@ -429,13 +447,25 @@ mod tests {
                 sid: None,
                 effect: Effect::Allow,
                 action: ActionPattern::Single("ai_gateway:use".into()),
-                resource: ResourcePattern::Multiple(vec!["model:gpt-4o".into(), "model:claude-*".into()]),
+                resource: ResourcePattern::Multiple(vec![
+                    "model:gpt-4o".into(),
+                    "model:claude-*".into(),
+                ]),
                 condition: None,
             }],
         };
-        assert_eq!(evaluate_policy(&doc, "ai_gateway:use", "model:gpt-4o"), PolicyResult::Allow);
-        assert_eq!(evaluate_policy(&doc, "ai_gateway:use", "model:claude-sonnet"), PolicyResult::Allow);
-        assert_eq!(evaluate_policy(&doc, "ai_gateway:use", "model:gemini-pro"), PolicyResult::NoMatch);
+        assert_eq!(
+            evaluate_policy(&doc, "ai_gateway:use", "model:gpt-4o"),
+            PolicyResult::Allow
+        );
+        assert_eq!(
+            evaluate_policy(&doc, "ai_gateway:use", "model:claude-sonnet"),
+            PolicyResult::Allow
+        );
+        assert_eq!(
+            evaluate_policy(&doc, "ai_gateway:use", "model:gemini-pro"),
+            PolicyResult::NoMatch
+        );
     }
 
     #[test]
@@ -460,7 +490,11 @@ mod tests {
                 condition: None,
             }],
         };
-        assert!(evaluate_policies(&[allow.clone(), deny.clone()], "providers:read", "*"));
+        assert!(evaluate_policies(
+            &[allow.clone(), deny.clone()],
+            "providers:read",
+            "*"
+        ));
         assert!(!evaluate_policies(&[allow, deny], "system:settings", "*"));
     }
 
@@ -480,9 +514,18 @@ mod tests {
     fn permissions_to_policy_roundtrip() {
         let perms = vec!["ai_gateway:use".into(), "providers:read".into()];
         let doc = permissions_to_policy(&perms);
-        assert_eq!(evaluate_policy(&doc, "ai_gateway:use", "*"), PolicyResult::Allow);
-        assert_eq!(evaluate_policy(&doc, "providers:read", "*"), PolicyResult::Allow);
-        assert_eq!(evaluate_policy(&doc, "system:settings", "*"), PolicyResult::NoMatch);
+        assert_eq!(
+            evaluate_policy(&doc, "ai_gateway:use", "*"),
+            PolicyResult::Allow
+        );
+        assert_eq!(
+            evaluate_policy(&doc, "providers:read", "*"),
+            PolicyResult::Allow
+        );
+        assert_eq!(
+            evaluate_policy(&doc, "system:settings", "*"),
+            PolicyResult::NoMatch
+        );
     }
 
     #[test]
@@ -505,7 +548,13 @@ mod tests {
         });
         let doc = validate_policy_document(&json).expect("should parse");
         assert_eq!(doc.statement.len(), 2);
-        assert_eq!(evaluate_policy(&doc, "ai_gateway:use", "*"), PolicyResult::Allow);
-        assert_eq!(evaluate_policy(&doc, "system:settings", "*"), PolicyResult::Deny);
+        assert_eq!(
+            evaluate_policy(&doc, "ai_gateway:use", "*"),
+            PolicyResult::Allow
+        );
+        assert_eq!(
+            evaluate_policy(&doc, "system:settings", "*"),
+            PolicyResult::Deny
+        );
     }
 }

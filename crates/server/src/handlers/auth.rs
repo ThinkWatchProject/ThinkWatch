@@ -38,13 +38,16 @@ pub async fn login(
 
     // Rate limiting: per-email, max 10 attempts per minute
     let rate_key = format!("auth_rate:{}", req.email);
-    let count: u64 = match fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!("Redis rate-limit check failed (fail-closed): {e}");
-            return Err(AppError::Internal(anyhow::anyhow!("Rate limiting unavailable")));
-        }
-    };
+    let count: u64 =
+        match fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Redis rate-limit check failed (fail-closed): {e}");
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "Rate limiting unavailable"
+                )));
+            }
+        };
     if count == 1 {
         let _: () = fred::interfaces::KeysInterface::expire(&state.redis, &rate_key, 60, None)
             .await
@@ -144,7 +147,8 @@ pub async fn login(
                 // First step: password valid but TOTP needed
                 return Ok(Json(serde_json::json!({
                     "totp_required": true
-                })).into_response());
+                }))
+                .into_response());
             }
             Some(code) => {
                 // Verify TOTP code or recovery code
@@ -152,9 +156,14 @@ pub async fn login(
                     let enc_key = agent_bastion_common::crypto::parse_encryption_key(
                         &state.config.encryption_key,
                     )
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
-                    let secret = agent_bastion_auth::totp::decrypt_secret(encrypted_secret, &enc_key)
-                        .map_err(|e| AppError::Internal(anyhow::anyhow!("TOTP decrypt error: {e}")))?;
+                    .map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("Encryption key error: {e}"))
+                    })?;
+                    let secret =
+                        agent_bastion_auth::totp::decrypt_secret(encrypted_secret, &enc_key)
+                            .map_err(|e| {
+                                AppError::Internal(anyhow::anyhow!("TOTP decrypt error: {e}"))
+                            })?;
                     agent_bastion_auth::totp::verify(&secret, code, &user.email).unwrap_or(false)
                 } else {
                     false
@@ -165,7 +174,8 @@ pub async fn login(
                     let mut recovery_used = false;
                     if let Some(ref codes_json) = user.totp_recovery_codes
                         && let Ok(mut codes) = serde_json::from_str::<Vec<String>>(codes_json)
-                        && let Some(pos) = agent_bastion_auth::totp::find_recovery_code(&codes, code)
+                        && let Some(pos) =
+                            agent_bastion_auth::totp::find_recovery_code(&codes, code)
                     {
                         codes.remove(pos);
                         let updated = serde_json::to_string(&codes).unwrap_or_default();
@@ -554,8 +564,9 @@ pub async fn totp_verify_setup(
             .await
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
 
-    let pending_hex =
-        pending_hex.ok_or(AppError::BadRequest("No pending TOTP setup. Call /totp/setup first.".into()))?;
+    let pending_hex = pending_hex.ok_or(AppError::BadRequest(
+        "No pending TOTP setup. Call /totp/setup first.".into(),
+    ))?;
 
     // Decrypt the pending data from Redis
     let enc_key = agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
@@ -629,10 +640,9 @@ pub async fn totp_disable(
     }
 
     // Verify current password (use old_password field)
-    let hash = user
-        .password_hash
-        .as_ref()
-        .ok_or(AppError::BadRequest("SSO accounts cannot manage TOTP here".into()))?;
+    let hash = user.password_hash.as_ref().ok_or(AppError::BadRequest(
+        "SSO accounts cannot manage TOTP here".into(),
+    ))?;
     if !password::verify_password(&req.old_password, hash)? {
         return Err(AppError::Unauthorized);
     }
@@ -658,12 +668,11 @@ pub async fn totp_status(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let enabled: bool = sqlx::query_scalar(
-        "SELECT totp_enabled FROM users WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(auth_user.claims.sub)
-    .fetch_one(&state.db)
-    .await?;
+    let enabled: bool =
+        sqlx::query_scalar("SELECT totp_enabled FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(auth_user.claims.sub)
+            .fetch_one(&state.db)
+            .await?;
 
     // Check if platform requires TOTP
     let required: bool = state
