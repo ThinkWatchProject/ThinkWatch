@@ -11,6 +11,10 @@ doc_mapping:
       type: text
       tokenizer: raw
       fast: true
+    - name: user_email
+      type: text
+      tokenizer: raw
+      fast: true
     - name: api_key_id
       type: text
       tokenizer: raw

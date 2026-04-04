@@ -23,7 +23,7 @@ pub async fn list_servers(
 }
 
 pub async fn create_server(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Json(req): Json<CreateMcpServerRequest>,
 ) -> Result<Json<McpServer>, AppError> {
@@ -68,6 +68,14 @@ pub async fn create_server(
     .fetch_one(&state.db)
     .await?;
 
+    state.audit.log(
+        auth_user
+            .audit("mcp_server.created")
+            .resource("mcp_server")
+            .resource_id(server.id.to_string())
+            .detail(serde_json::json!({ "name": &req.name })),
+    );
+
     Ok(Json(server))
 }
 
@@ -81,7 +89,7 @@ pub struct UpdateMcpServerRequest {
 }
 
 pub async fn update_server(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateMcpServerRequest>,
@@ -129,6 +137,13 @@ pub async fn update_server(
     .fetch_one(&state.db)
     .await?;
 
+    state.audit.log(
+        auth_user
+            .audit("mcp_server.updated")
+            .resource("mcp_server")
+            .resource_id(id.to_string()),
+    );
+
     Ok(Json(updated))
 }
 
@@ -147,7 +162,7 @@ pub async fn get_server(
 }
 
 pub async fn delete_server(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -155,6 +170,13 @@ pub async fn delete_server(
         .bind(id)
         .execute(&state.db)
         .await?;
+
+    state.audit.log(
+        auth_user
+            .audit("mcp_server.deleted")
+            .resource("mcp_server")
+            .resource_id(id.to_string()),
+    );
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
 }

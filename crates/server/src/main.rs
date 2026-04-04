@@ -142,7 +142,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Gateway listening on {gateway_addr} (AI API + MCP)");
 
     let gateway_handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(gateway_listener, gateway_app).await {
+        if let Err(e) = axum::serve(
+            gateway_listener,
+            gateway_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        {
             tracing::error!("Gateway server crashed: {e}");
         }
     });
@@ -154,7 +159,12 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Console listening on {console_addr} (Web UI + Admin API)");
 
     let console_handle = tokio::spawn(async move {
-        if let Err(e) = axum::serve(console_listener, console_app).await {
+        if let Err(e) = axum::serve(
+            console_listener,
+            console_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        {
             tracing::error!("Console server crashed: {e}");
         }
     });

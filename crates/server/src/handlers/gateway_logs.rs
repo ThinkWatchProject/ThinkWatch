@@ -20,18 +20,30 @@ fn escape_query_value(v: &str) -> String {
 }
 
 fn parse_date_start(s: &str) -> Result<i64, AppError> {
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
+        return Ok(dt.and_utc().timestamp());
+    }
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .map(|dt| dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
         .map_err(|_| {
-            AppError::BadRequest(format!("Invalid date format '{}', expected YYYY-MM-DD", s))
+            AppError::BadRequest(format!(
+                "Invalid date format '{}', expected YYYY-MM-DD or YYYY-MM-DDTHH:mm",
+                s
+            ))
         })
 }
 
 fn parse_date_end(s: &str) -> Result<i64, AppError> {
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
+        return Ok(dt.and_utc().timestamp());
+    }
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .map(|dt| dt.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp())
         .map_err(|_| {
-            AppError::BadRequest(format!("Invalid date format '{}', expected YYYY-MM-DD", s))
+            AppError::BadRequest(format!(
+                "Invalid date format '{}', expected YYYY-MM-DD or YYYY-MM-DDTHH:mm",
+                s
+            ))
         })
 }
 

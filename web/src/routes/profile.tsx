@@ -1,5 +1,6 @@
 import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { QRCodeSVG } from 'qrcode.react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -250,9 +251,15 @@ export function ProfilePage() {
             </div>
           ) : totpSetup ? (
             <div className="space-y-4">
-              <div className="space-y-2">
+              <div className="space-y-3">
                 <p className="text-sm font-medium">{t('auth.totpScanQr')}</p>
-                <code className="block rounded bg-muted p-2 text-xs break-all">{totpSetup.otpauth_uri}</code>
+                <div className="flex justify-center rounded-lg bg-white p-4 w-fit mx-auto">
+                  <QRCodeSVG value={totpSetup.otpauth_uri} size={200} level="M" />
+                </div>
+                <details className="text-xs">
+                  <summary className="cursor-pointer text-muted-foreground hover:text-foreground">{t('auth.totpManualEntry', 'Manual entry')}</summary>
+                  <code className="mt-1 block rounded bg-muted p-2 break-all">{totpSetup.otpauth_uri}</code>
+                </details>
               </div>
               <div className="space-y-2">
                 <p className="text-sm font-medium">{t('auth.totpRecoveryCodes')}</p>

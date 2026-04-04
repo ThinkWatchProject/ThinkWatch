@@ -73,10 +73,10 @@ export function McpToolsPage() {
 
       <div className="flex items-center gap-3">
         <Label>{t('mcpTools.filterByServer')}</Label>
-        <Select value={filterServer} onValueChange={(v) => setFilterServer(v ?? '')}>
+        <Select value={filterServer || '__all__'} onValueChange={(v) => setFilterServer(v === '__all__' ? '' : v)}>
           <SelectTrigger className="w-64"><SelectValue placeholder={t('mcpTools.allServers')} /></SelectTrigger>
           <SelectContent>
-            <SelectItem value="">{t('mcpTools.allServers')}</SelectItem>
+            <SelectItem value="__all__">{t('mcpTools.allServers')}</SelectItem>
             {servers.map((s) => (
               <SelectItem key={s.id} value={s.id}>{s.name}</SelectItem>
             ))}

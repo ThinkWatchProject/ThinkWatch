@@ -72,12 +72,11 @@ services:
     environment:
       QW_DEFAULT_INDEX_ROOT_URI: s3://quickwit
       QW_LISTEN_ADDRESS: 0.0.0.0
+      QW_S3_ENDPOINT: http://rustfs:9000
+      QW_S3_FORCE_PATH_STYLE_ACCESS: "true"
       AWS_ACCESS_KEY_ID: rustfs_admin
       AWS_SECRET_ACCESS_KEY: rustfs_secret
-      AWS_ENDPOINT_URL: http://rustfs:9000
       AWS_REGION: us-east-1
-      # Force path-style for S3 (required for RustFS/MinIO)
-      AWS_FORCE_PATH_STYLE: "true"
     volumes:
       - quickwit_data:/quickwit/qwdata
     depends_on:

@@ -254,6 +254,30 @@ impl DynamicConfig {
             .await
             .unwrap_or(365)
     }
+
+    pub async fn client_ip_source(&self) -> String {
+        self.get_string("security.client_ip_source")
+            .await
+            .unwrap_or_else(|| "xff".to_string())
+    }
+
+    pub async fn client_ip_xff_position(&self) -> String {
+        self.get_string("security.client_ip_xff_position")
+            .await
+            .unwrap_or_else(|| "left".to_string())
+    }
+
+    pub async fn client_ip_xff_depth(&self) -> i64 {
+        self.get_i64("security.client_ip_xff_depth")
+            .await
+            .unwrap_or(1)
+    }
+
+    pub async fn allow_registration(&self) -> bool {
+        self.get_bool("auth.allow_registration")
+            .await
+            .unwrap_or(false)
+    }
 }
 
 /// Publish a config change notification via Redis Pub/Sub.
@@ -367,6 +391,32 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
             value
                 .as_bool()
                 .ok_or_else(|| anyhow::anyhow!("{key}: expected a boolean value"))?;
+        }
+
+        // Client IP settings
+        "security.client_ip_source" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
+            if !["connection", "xff", "x-real-ip"].contains(&s) {
+                anyhow::bail!("{key}: must be \"connection\", \"xff\", or \"x-real-ip\"");
+            }
+        }
+        "security.client_ip_xff_position" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
+            if !["left", "right"].contains(&s) {
+                anyhow::bail!("{key}: must be \"left\" or \"right\"");
+            }
+        }
+        "security.client_ip_xff_depth" => {
+            let n = value
+                .as_i64()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected an integer"))?;
+            if n < 1 || n > 20 {
+                anyhow::bail!("{key}: must be between 1 and 20");
+            }
         }
 
         // String settings — basic non-empty check for critical ones

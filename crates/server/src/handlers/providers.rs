@@ -165,7 +165,7 @@ pub async fn list_providers(
 }
 
 pub async fn create_provider(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Json(req): Json<CreateProviderRequest>,
 ) -> Result<Json<Provider>, AppError> {
@@ -203,6 +203,14 @@ pub async fn create_provider(
     .fetch_one(&state.db)
     .await?;
 
+    state.audit.log(
+        auth_user
+            .audit("provider.created")
+            .resource("provider")
+            .resource_id(provider.id.to_string())
+            .detail(serde_json::json!({ "name": &req.name })),
+    );
+
     Ok(Json(provider))
 }
 
@@ -216,7 +224,7 @@ pub struct UpdateProviderRequest {
 }
 
 pub async fn update_provider(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateProviderRequest>,
@@ -270,6 +278,13 @@ pub async fn update_provider(
     .fetch_one(&state.db)
     .await?;
 
+    state.audit.log(
+        auth_user
+            .audit("provider.updated")
+            .resource("provider")
+            .resource_id(id.to_string()),
+    );
+
     Ok(Json(updated))
 }
 
@@ -290,7 +305,7 @@ pub async fn get_provider(
 }
 
 pub async fn delete_provider(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -298,6 +313,13 @@ pub async fn delete_provider(
         .bind(id)
         .execute(&state.db)
         .await?;
+
+    state.audit.log(
+        auth_user
+            .audit("provider.deleted")
+            .resource("provider")
+            .resource_id(id.to_string()),
+    );
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
 }

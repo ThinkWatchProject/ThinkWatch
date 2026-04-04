@@ -459,7 +459,7 @@ export function RolesPage() {
           <p className="text-muted-foreground">{t('roles.subtitle')}</p>
         </div>
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
-          <DialogTrigger render={<Button onClick={() => setCreateOpen(true)}><Plus className="mr-2 h-4 w-4" />{t('roles.addRole')}</Button>} />
+          <DialogTrigger asChild><Button onClick={() => setCreateOpen(true)}><Plus className="mr-2 h-4 w-4" />{t('roles.addRole')}</Button></DialogTrigger>
           <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
             <form onSubmit={handleCreate}>
               <DialogHeader>

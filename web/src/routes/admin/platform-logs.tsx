@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
+import { DateTimeRangePicker } from '@/components/ui/datetime-picker';
 import {
   Table,
   TableBody,
@@ -19,6 +20,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 interface PlatformLogEntry {
   id: string;
   user_id: string | null;
+  user_email: string | null;
   action: string;
   resource: string | null;
   resource_id: string | null;
@@ -105,12 +107,8 @@ export function PlatformLogsPage() {
               <Input value={resource} onChange={(e) => setResource(e.target.value)} placeholder="user" />
             </div>
             <div>
-              <Label>{t('audit.from')}</Label>
-              <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-            </div>
-            <div>
-              <Label>{t('audit.to')}</Label>
-              <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+              <Label>{t('logs.dateRange', 'Date Range')}</Label>
+              <DateTimeRangePicker from={from} to={to} onFromChange={setFrom} onToChange={setTo} />
             </div>
           </div>
           <Button className="mt-3" onClick={fetchLogs}>
@@ -121,10 +119,11 @@ export function PlatformLogsPage() {
       </Card>
 
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base">
-            {t('platformLogs.logEntries')} ({total})
-          </CardTitle>
+        <CardHeader className="flex flex-row items-center justify-between">
+          <CardTitle className="text-base">{t('platformLogs.logEntries')}</CardTitle>
+          {total > 0 && (
+            <span className="text-sm text-muted-foreground">{t('common.total')}: {total.toLocaleString()}</span>
+          )}
         </CardHeader>
         <CardContent>
           {loading ? (
@@ -161,7 +160,7 @@ export function PlatformLogsPage() {
                     <TableCell className="text-xs whitespace-nowrap">
                       {new Date(log.created_at).toLocaleString()}
                     </TableCell>
-                    <TableCell className="font-mono text-xs">{log.user_id?.slice(0, 8) ?? '—'}</TableCell>
+                    <TableCell className="text-xs">{log.user_email ?? log.user_id?.slice(0, 8) ?? '—'}</TableCell>
                     <TableCell className="text-xs">{log.action}</TableCell>
                     <TableCell className="text-xs">{log.resource ?? '—'}{log.resource_id ? `:${log.resource_id.slice(0, 8)}` : ''}</TableCell>
                     <TableCell className="text-xs text-muted-foreground">{log.ip_address ?? '—'}</TableCell>

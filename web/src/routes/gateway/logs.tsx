@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { DateTimeRangePicker } from '@/components/ui/datetime-picker';
 import {
   Table,
   TableBody,
@@ -133,12 +134,8 @@ export function GatewayLogsPage() {
               <Input placeholder="UUID" value={userId} onChange={(e) => setUserId(e.target.value)} />
             </div>
             <div>
-              <Label className="text-xs">{t('logs.dateFrom')}</Label>
-              <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-            </div>
-            <div>
-              <Label className="text-xs">{t('logs.dateTo')}</Label>
-              <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+              <Label className="text-xs">{t('logs.dateRange', 'Date Range')}</Label>
+              <DateTimeRangePicker from={from} to={to} onFromChange={setFrom} onToChange={setTo} />
             </div>
             <div>
               <Label className="text-xs">{t('logs.sortBy')}</Label>

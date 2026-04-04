@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub struct AuditLog {
     pub id: Uuid,
     pub user_id: Option<Uuid>,
+    pub user_email: Option<String>,
     pub api_key_id: Option<Uuid>,
     pub action: String,
     pub resource: Option<String>,

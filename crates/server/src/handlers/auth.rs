@@ -257,6 +257,11 @@ pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<CreateUserRequest>,
 ) -> Result<Json<UserResponse>, AppError> {
+    // Check if public registration is allowed
+    if !state.dynamic_config.allow_registration().await {
+        return Err(AppError::Forbidden);
+    }
+
     // Input validation
     if req.password.len() < 8 {
         return Err(AppError::BadRequest(

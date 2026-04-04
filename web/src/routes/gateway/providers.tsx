@@ -179,9 +179,11 @@ export function ProvidersPage() {
           <p className="text-muted-foreground">{t('providers.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger render={<Button />}>
-            <Plus className="h-4 w-4" />
-            {t('providers.addProvider')}
+          <DialogTrigger asChild>
+            <Button>
+              <Plus className="h-4 w-4" />
+              {t('providers.addProvider')}
+            </Button>
           </DialogTrigger>
           <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
             <DialogHeader>

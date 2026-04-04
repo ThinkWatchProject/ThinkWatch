@@ -336,8 +336,16 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             get(handlers::admin::list_users).post(handlers::admin::create_user),
         )
         .route(
+            "/api/admin/users/{id}",
+            patch(handlers::admin::update_user).delete(handlers::admin::delete_user),
+        )
+        .route(
             "/api/admin/users/{id}/force-logout",
             post(handlers::admin::force_logout_user),
+        )
+        .route(
+            "/api/admin/users/{id}/reset-password",
+            post(handlers::admin::reset_user_password),
         )
         .route(
             "/api/admin/settings/system",

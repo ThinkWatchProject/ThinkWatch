@@ -21,18 +21,32 @@ fn escape_query_value(v: &str) -> String {
 }
 
 fn parse_date_start(s: &str) -> Result<i64, AppError> {
+    // Accept "YYYY-MM-DDTHH:mm" or "YYYY-MM-DD"
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
+        return Ok(dt.and_utc().timestamp());
+    }
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .map(|dt| dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
         .map_err(|_| {
-            AppError::BadRequest(format!("Invalid date format '{}', expected YYYY-MM-DD", s))
+            AppError::BadRequest(format!(
+                "Invalid date format '{}', expected YYYY-MM-DD or YYYY-MM-DDTHH:mm",
+                s
+            ))
         })
 }
 
 fn parse_date_end(s: &str) -> Result<i64, AppError> {
+    // Accept "YYYY-MM-DDTHH:mm" or "YYYY-MM-DD"
+    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
+        return Ok(dt.and_utc().timestamp());
+    }
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .map(|dt| dt.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp())
         .map_err(|_| {
-            AppError::BadRequest(format!("Invalid date format '{}', expected YYYY-MM-DD", s))
+            AppError::BadRequest(format!(
+                "Invalid date format '{}', expected YYYY-MM-DD or YYYY-MM-DDTHH:mm",
+                s
+            ))
         })
 }
 
@@ -90,6 +104,7 @@ struct QwSearchResponse {
 struct QwHit {
     id: String,
     user_id: Option<String>,
+    user_email: Option<String>,
     #[allow(dead_code)]
     api_key_id: Option<String>,
     action: String,
@@ -188,6 +203,7 @@ async fn query_quickwit(
             Some(AuditLog {
                 id: hit.id.parse().ok()?,
                 user_id: hit.user_id.and_then(|s| s.parse::<Uuid>().ok()),
+                user_email: hit.user_email,
                 api_key_id: hit.api_key_id.and_then(|s| s.parse::<Uuid>().ok()),
                 action: hit.action,
                 resource: hit.resource,

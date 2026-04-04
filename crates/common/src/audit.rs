@@ -55,6 +55,7 @@ pub struct AuditEntry {
     #[serde(skip)]
     pub log_type: LogType,
     pub user_id: Option<String>,
+    pub user_email: Option<String>,
     pub api_key_id: Option<String>,
     pub action: String,
     pub resource: Option<String>,
@@ -71,6 +72,7 @@ impl AuditEntry {
             id: Uuid::new_v4().to_string(),
             log_type: LogType::Audit,
             user_id: None,
+            user_email: None,
             api_key_id: None,
             action: action.into(),
             resource: None,
@@ -110,6 +112,11 @@ impl AuditEntry {
 
     pub fn user_id(mut self, id: Uuid) -> Self {
         self.user_id = Some(id.to_string());
+        self
+    }
+
+    pub fn user_email(mut self, email: impl Into<String>) -> Self {
+        self.user_email = Some(email.into());
         self
     }
 
@@ -564,7 +571,21 @@ async fn send_webhook(
         .header("Content-Type", "application/json")
         .json(entry);
 
-    // Optional auth header
+    // Custom headers (new format: JSON object stored as string)
+    if let Some(headers_val) = config.config.get("custom_headers") {
+        let headers_str = headers_val.as_str().unwrap_or("");
+        if let Ok(headers) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(headers_str)
+        {
+            for (k, v) in headers {
+                if let Some(v_str) = v.as_str() {
+                    req = req.header(k.as_str(), v_str);
+                }
+            }
+        }
+    }
+
+    // Legacy: single auth_header field
     if let Some(token) = config.config.get("auth_header").and_then(|v| v.as_str()) {
         req = req.header("Authorization", token);
     }

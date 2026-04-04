@@ -19,11 +19,11 @@ export function LanguageSwitcher() {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger
-        render={<button className="flex items-center gap-1.5 rounded-md p-1.5 text-sm hover:bg-accent" />}
-      >
-        <Globe className="h-4 w-4" />
-        <span className="hidden md:inline">{currentLabel}</span>
+      <DropdownMenuTrigger asChild>
+        <button className="flex items-center gap-1.5 rounded-md p-1.5 text-sm hover:bg-accent">
+          <Globe className="h-4 w-4" />
+          <span className="hidden md:inline">{currentLabel}</span>
+        </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         {languages.map((lang) => (
