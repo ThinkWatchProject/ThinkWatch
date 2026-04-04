@@ -642,7 +642,11 @@ async fn flush_to_quickwit(
         }
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
-                tracing::debug!("Flushed {} entries to Quickwit index {}", batch.len(), index_id);
+                tracing::debug!(
+                    "Flushed {} entries to Quickwit index {}",
+                    batch.len(),
+                    index_id
+                );
                 batch.clear();
                 return;
             }
@@ -650,18 +654,28 @@ async fn flush_to_quickwit(
                 let status = resp.status();
                 let body = resp.text().await.unwrap_or_default();
                 if attempt < MAX_RETRIES {
-                    tracing::warn!("Quickwit ingest returned {status} (attempt {attempt}/{MAX_RETRIES}): {body}");
-                    tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(attempt))).await;
+                    tracing::warn!(
+                        "Quickwit ingest returned {status} (attempt {attempt}/{MAX_RETRIES}): {body}"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)))
+                        .await;
                 } else {
-                    tracing::error!("Quickwit ingest failed after {MAX_RETRIES} retries ({status}): {body} — dropping {} entries", batch.len());
+                    tracing::error!(
+                        "Quickwit ingest failed after {MAX_RETRIES} retries ({status}): {body} — dropping {} entries",
+                        batch.len()
+                    );
                 }
             }
             Err(e) => {
                 if attempt < MAX_RETRIES {
                     tracing::warn!("Quickwit ingest error (attempt {attempt}/{MAX_RETRIES}): {e}");
-                    tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(attempt))).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)))
+                        .await;
                 } else {
-                    tracing::error!("Quickwit ingest failed after {MAX_RETRIES} retries: {e} — dropping {} entries", batch.len());
+                    tracing::error!(
+                        "Quickwit ingest failed after {MAX_RETRIES} retries: {e} — dropping {} entries",
+                        batch.len()
+                    );
                 }
             }
         }
@@ -671,14 +685,30 @@ async fn flush_to_quickwit(
 }
 
 /// Initialize the Quickwit index (create if not exists). Call once at startup.
-pub async fn ensure_quickwit_index(quickwit_url: &str, _index_id: &str, bearer_token: Option<&str>) {
+pub async fn ensure_quickwit_index(
+    quickwit_url: &str,
+    _index_id: &str,
+    bearer_token: Option<&str>,
+) {
     let client = reqwest::Client::new();
 
     let indices: &[(&str, &str)] = &[
-        ("audit_logs", include_str!("../../../deploy/quickwit/audit_logs_index.yaml")),
-        ("gateway_logs", include_str!("../../../deploy/quickwit/gateway_logs_index.yaml")),
-        ("mcp_logs", include_str!("../../../deploy/quickwit/mcp_logs_index.yaml")),
-        ("platform_logs", include_str!("../../../deploy/quickwit/platform_logs_index.yaml")),
+        (
+            "audit_logs",
+            include_str!("../../../deploy/quickwit/audit_logs_index.yaml"),
+        ),
+        (
+            "gateway_logs",
+            include_str!("../../../deploy/quickwit/gateway_logs_index.yaml"),
+        ),
+        (
+            "mcp_logs",
+            include_str!("../../../deploy/quickwit/mcp_logs_index.yaml"),
+        ),
+        (
+            "platform_logs",
+            include_str!("../../../deploy/quickwit/platform_logs_index.yaml"),
+        ),
     ];
 
     for (index_id, index_config) in indices {

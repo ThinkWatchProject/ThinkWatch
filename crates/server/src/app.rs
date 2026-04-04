@@ -249,22 +249,13 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             post(handlers::auth::revoke_sessions),
         )
         // TOTP management
-        .route(
-            "/api/auth/totp/status",
-            get(handlers::auth::totp_status),
-        )
-        .route(
-            "/api/auth/totp/setup",
-            post(handlers::auth::totp_setup),
-        )
+        .route("/api/auth/totp/status", get(handlers::auth::totp_status))
+        .route("/api/auth/totp/setup", post(handlers::auth::totp_setup))
         .route(
             "/api/auth/totp/verify-setup",
             post(handlers::auth::totp_verify_setup),
         )
-        .route(
-            "/api/auth/totp/disable",
-            post(handlers::auth::totp_disable),
-        )
+        .route("/api/auth/totp/disable", post(handlers::auth::totp_disable))
         .route(
             "/api/keys",
             get(handlers::api_keys::list_keys).post(handlers::api_keys::create_key),

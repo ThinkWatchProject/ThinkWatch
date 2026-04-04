@@ -46,8 +46,7 @@ pub fn find_recovery_code(codes: &[String], candidate: &str) -> Option<usize> {
     for (i, stored) in codes.iter().enumerate() {
         let stored_bytes = stored.as_bytes();
         // Only compare if lengths match (constant-time within same-length strings)
-        if stored_bytes.len() == candidate_bytes.len()
-            && stored_bytes.ct_eq(candidate_bytes).into()
+        if stored_bytes.len() == candidate_bytes.len() && stored_bytes.ct_eq(candidate_bytes).into()
         {
             found_idx = Some(i);
         }
@@ -63,8 +62,7 @@ pub fn encrypt_secret(secret: &str, key: &[u8; 32]) -> anyhow::Result<String> {
 
 /// Decrypt a hex-encoded TOTP secret.
 pub fn decrypt_secret(encrypted_hex: &str, key: &[u8; 32]) -> anyhow::Result<String> {
-    let encrypted = hex::decode(encrypted_hex)
-        .map_err(|e| anyhow::anyhow!("Invalid hex: {e}"))?;
+    let encrypted = hex::decode(encrypted_hex).map_err(|e| anyhow::anyhow!("Invalid hex: {e}"))?;
     let decrypted = agent_bastion_common::crypto::decrypt(&encrypted, key)?;
     String::from_utf8(decrypted).map_err(|e| anyhow::anyhow!("Invalid UTF-8: {e}"))
 }

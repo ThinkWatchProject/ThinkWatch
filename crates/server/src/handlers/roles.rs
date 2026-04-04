@@ -83,18 +83,30 @@ pub async fn list_roles(
 
     let items = rows
         .into_iter()
-        .map(|(id, name, description, is_system, allowed_models, allowed_mcp_servers, policy_document, created_at, updated_at)| RoleResponse {
-            id,
-            name,
-            description,
-            is_system,
-            permissions: perm_map.remove(&id).unwrap_or_default(),
-            allowed_models,
-            allowed_mcp_servers,
-            policy_document,
-            created_at: created_at.to_rfc3339(),
-            updated_at: updated_at.to_rfc3339(),
-        })
+        .map(
+            |(
+                id,
+                name,
+                description,
+                is_system,
+                allowed_models,
+                allowed_mcp_servers,
+                policy_document,
+                created_at,
+                updated_at,
+            )| RoleResponse {
+                id,
+                name,
+                description,
+                is_system,
+                permissions: perm_map.remove(&id).unwrap_or_default(),
+                allowed_models,
+                allowed_mcp_servers,
+                policy_document,
+                created_at: created_at.to_rfc3339(),
+                updated_at: updated_at.to_rfc3339(),
+            },
+        )
         .collect();
 
     Ok(Json(RolesListResponse { items }))
@@ -129,16 +141,13 @@ pub async fn create_role(
 
     // Validate policy document if provided
     if let Some(ref doc) = payload.policy_document {
-        rbac::validate_policy_document(doc)
-            .map_err(AppError::BadRequest)?;
+        rbac::validate_policy_document(doc).map_err(AppError::BadRequest)?;
     }
 
     // Validate permissions
     for perm in &payload.permissions {
         if !ALL_PERMISSIONS.contains(&perm.as_str()) {
-            return Err(AppError::BadRequest(format!(
-                "Invalid permission: {perm}"
-            )));
+            return Err(AppError::BadRequest(format!("Invalid permission: {perm}")));
         }
     }
 
@@ -169,11 +178,13 @@ pub async fn create_role(
     })?;
 
     for perm in &payload.permissions {
-        sqlx::query("INSERT INTO custom_role_permissions (custom_role_id, permission) VALUES ($1, $2)")
-            .bind(row.0)
-            .bind(perm)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "INSERT INTO custom_role_permissions (custom_role_id, permission) VALUES ($1, $2)",
+        )
+        .bind(row.0)
+        .bind(perm)
+        .execute(&mut *tx)
+        .await?;
     }
 
     tx.commit().await?;
@@ -211,13 +222,11 @@ pub async fn update_role(
     Json(payload): Json<UpdateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
     // Prevent editing system roles
-    let existing = sqlx::query_as::<_, (bool,)>(
-        "SELECT is_system FROM custom_roles WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
+    let existing = sqlx::query_as::<_, (bool,)>("SELECT is_system FROM custom_roles WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
 
     if existing.0 {
         return Err(AppError::BadRequest("Cannot modify system roles".into()));
@@ -225,16 +234,13 @@ pub async fn update_role(
 
     // Validate policy document if provided
     if let Some(ref doc) = payload.policy_document {
-        rbac::validate_policy_document(doc)
-            .map_err(AppError::BadRequest)?;
+        rbac::validate_policy_document(doc).map_err(AppError::BadRequest)?;
     }
 
     if let Some(ref perms) = payload.permissions {
         for perm in perms {
             if !ALL_PERMISSIONS.contains(&perm.as_str()) {
-                return Err(AppError::BadRequest(format!(
-                    "Invalid permission: {perm}"
-                )));
+                return Err(AppError::BadRequest(format!("Invalid permission: {perm}")));
             }
         }
     }
@@ -265,29 +271,35 @@ pub async fn update_role(
 
     // Update allowed_models (explicit null clears restriction)
     if payload.allowed_models.is_some() {
-        sqlx::query("UPDATE custom_roles SET allowed_models = $1, updated_at = now() WHERE id = $2")
-            .bind(&payload.allowed_models)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE custom_roles SET allowed_models = $1, updated_at = now() WHERE id = $2",
+        )
+        .bind(&payload.allowed_models)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     }
 
     // Update allowed_mcp_servers
     if payload.allowed_mcp_servers.is_some() {
-        sqlx::query("UPDATE custom_roles SET allowed_mcp_servers = $1, updated_at = now() WHERE id = $2")
-            .bind(&payload.allowed_mcp_servers)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE custom_roles SET allowed_mcp_servers = $1, updated_at = now() WHERE id = $2",
+        )
+        .bind(&payload.allowed_mcp_servers)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     }
 
     // Update policy_document
     if payload.policy_document.is_some() {
-        sqlx::query("UPDATE custom_roles SET policy_document = $1, updated_at = now() WHERE id = $2")
-            .bind(&payload.policy_document)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "UPDATE custom_roles SET policy_document = $1, updated_at = now() WHERE id = $2",
+        )
+        .bind(&payload.policy_document)
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
     }
 
     if let Some(ref perms) = payload.permissions {
@@ -296,11 +308,13 @@ pub async fn update_role(
             .execute(&mut *tx)
             .await?;
         for perm in perms {
-            sqlx::query("INSERT INTO custom_role_permissions (custom_role_id, permission) VALUES ($1, $2)")
-                .bind(id)
-                .bind(perm)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "INSERT INTO custom_role_permissions (custom_role_id, permission) VALUES ($1, $2)",
+            )
+            .bind(id)
+            .bind(perm)
+            .execute(&mut *tx)
+            .await?;
         }
         sqlx::query("UPDATE custom_roles SET updated_at = now() WHERE id = $1")
             .bind(id)
@@ -349,13 +363,11 @@ pub async fn delete_role(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let existing = sqlx::query_as::<_, (bool,)>(
-        "SELECT is_system FROM custom_roles WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
+    let existing = sqlx::query_as::<_, (bool,)>("SELECT is_system FROM custom_roles WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
 
     if existing.0 {
         return Err(AppError::BadRequest("Cannot delete system roles".into()));
@@ -371,8 +383,6 @@ pub async fn delete_role(
 
 // --- List all valid permissions ---
 
-pub async fn list_permissions(
-    _auth_user: AuthUser,
-) -> Json<Vec<&'static str>> {
+pub async fn list_permissions(_auth_user: AuthUser) -> Json<Vec<&'static str>> {
     Json(ALL_PERMISSIONS.to_vec())
 }
