@@ -44,7 +44,8 @@ pub async fn list_users(
     .fetch_all(&state.db)
     .await?;
 
-    let mut roles_map: std::collections::HashMap<uuid::Uuid, Vec<String>> = std::collections::HashMap::new();
+    let mut roles_map: std::collections::HashMap<uuid::Uuid, Vec<String>> =
+        std::collections::HashMap::new();
     for (uid, rname) in role_rows {
         roles_map.entry(uid).or_default().push(rname);
     }

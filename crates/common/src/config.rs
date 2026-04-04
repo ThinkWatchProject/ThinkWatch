@@ -96,13 +96,17 @@ impl AppConfig {
                 && !self.redis_url.starts_with("redis://localhost")
                 && !self.redis_url.starts_with("redis://127.0.0.1");
             if !has_password {
-                tracing::warn!("REDIS_URL does not appear to contain a password — ensure Redis requires authentication in production");
+                tracing::warn!(
+                    "REDIS_URL does not appear to contain a password — ensure Redis requires authentication in production"
+                );
             }
         }
 
         // Quickwit auth warning
         if self.quickwit_url.is_some() && self.quickwit_bearer_token.is_none() {
-            tracing::warn!("QUICKWIT_URL is set without QUICKWIT_BEARER_TOKEN — Quickwit has no authentication. Ensure it is only accessible on a private network");
+            tracing::warn!(
+                "QUICKWIT_URL is set without QUICKWIT_BEARER_TOKEN — Quickwit has no authentication. Ensure it is only accessible on a private network"
+            );
         }
 
         Ok(())

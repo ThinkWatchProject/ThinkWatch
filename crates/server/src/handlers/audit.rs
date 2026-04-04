@@ -23,13 +23,17 @@ fn escape_query_value(v: &str) -> String {
 fn parse_date_start(s: &str) -> Result<i64, AppError> {
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .map(|dt| dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
-        .map_err(|_| AppError::BadRequest(format!("Invalid date format '{}', expected YYYY-MM-DD", s)))
+        .map_err(|_| {
+            AppError::BadRequest(format!("Invalid date format '{}', expected YYYY-MM-DD", s))
+        })
 }
 
 fn parse_date_end(s: &str) -> Result<i64, AppError> {
     chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
         .map(|dt| dt.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp())
-        .map_err(|_| AppError::BadRequest(format!("Invalid date format '{}', expected YYYY-MM-DD", s)))
+        .map_err(|_| {
+            AppError::BadRequest(format!("Invalid date format '{}', expected YYYY-MM-DD", s))
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,7 +66,13 @@ pub async fn list_audit_logs(
         .quickwit_url
         .as_deref()
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Quickwit is not configured")))?;
-    query_quickwit(qw_url, &state.config.quickwit_index, state.config.quickwit_bearer_token.as_deref(), &query).await
+    query_quickwit(
+        qw_url,
+        &state.config.quickwit_index,
+        state.config.quickwit_bearer_token.as_deref(),
+        &query,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -154,10 +164,10 @@ async fn query_quickwit(
     if let Some(token) = bearer_token {
         req = req.header("Authorization", format!("Bearer {token}"));
     }
-    let resp =
-        req.send().await.map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("Quickwit search request failed: {e}"))
-        })?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Quickwit search request failed: {e}")))?;
 
     if !resp.status().is_success() {
         let status = resp.status();
