@@ -833,7 +833,7 @@ mod tests {
     #[test]
     fn validates_boolean_settings() {
         assert!(validate_setting("setup.initialized", &json!(true)).is_ok());
-        assert!(validate_setting("setup.initialized", &json!(false)).is_ok());
+        assert!(validate_setting("setup.initialized", &json!(false)).is_err());
         assert!(validate_setting("setup.initialized", &json!("yes")).is_err());
     }
 }
