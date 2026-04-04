@@ -451,6 +451,18 @@
     "openaiSdk": "OpenAI SDK",
     "anthropicSdk": "Anthropic SDK",
     "curl": "cURL",
+    "aiPrompt": "AI Setup",
+    "recommended": "Recommended",
+    "aiPromptTitle": "AI-Assisted Setup",
+    "aiPromptDesc": "Copy the prompt below and send it to your AI assistant — it will detect your tool and walk you through the configuration.",
+    "mcpPromptTitle": "AI-Assisted Setup",
+    "mcpPromptDesc": "Copy the prompt below and send it to your AI assistant — it will detect your MCP client and walk you through the configuration.",
+    "promptStep": {
+      "copy": "Copy the prompt below",
+      "paste": "Paste it into your AI assistant (ChatGPT, Claude, Copilot, etc.)",
+      "follow": "Follow the AI's instructions to complete the configuration"
+    },
+    "promptTip": "The prompt already includes your gateway URL. The AI assistant will ask for your API Key and generate the configuration automatically.",
     "steps": "Configuration Steps",
     "copyCode": "Copy",
     "copied": "Copied!",

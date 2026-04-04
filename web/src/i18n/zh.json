@@ -451,6 +451,18 @@
     "openaiSdk": "OpenAI SDK",
     "anthropicSdk": "Anthropic SDK",
     "curl": "cURL",
+    "aiPrompt": "AI 配置",
+    "recommended": "推荐",
+    "aiPromptTitle": "AI 辅助配置",
+    "aiPromptDesc": "复制以下提示词发送给您的 AI 助手，它将自动检测您使用的工具并帮您完成配置。",
+    "mcpPromptTitle": "AI 辅助配置",
+    "mcpPromptDesc": "复制以下提示词发送给您的 AI 助手，它将自动检测您使用的 MCP 客户端并帮您完成配置。",
+    "promptStep": {
+      "copy": "复制下方提示词",
+      "paste": "粘贴到您的 AI 助手对话中（如 ChatGPT、Claude、Copilot 等）",
+      "follow": "按照 AI 的指引完成配置"
+    },
+    "promptTip": "提示词中已包含您当前实例的网关地址，AI 助手会要求您提供 API Key 后自动生成配置。",
     "steps": "配置步骤",
     "copyCode": "复制",
     "copied": "已复制！",

@@ -17,6 +17,7 @@ import {
   Server,
   MonitorSmartphone,
   Workflow,
+  Bot,
 } from 'lucide-react';
 
 // ---------------------------------------------------------------------------
@@ -89,6 +90,110 @@ function InfoBox({ children }: { children: React.ReactNode }) {
   return (
     <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-800 dark:border-blue-900 dark:bg-blue-950 dark:text-blue-200">
       {children}
+    </div>
+  );
+}
+
+// ===========================================================================
+// AI Gateway — AI Prompt tab
+// ===========================================================================
+
+function AiGatewayPromptTab({ gatewayUrl }: { gatewayUrl: string }) {
+  const { t } = useTranslation();
+  const prompt = `I need to configure my AI coding tool to use an OpenAI / Anthropic-compatible API gateway called AgentBastion.
+
+Here is the information you need:
+
+Gateway URL: ${gatewayUrl}
+API Key: (ask the user, it starts with "ab-")
+
+AgentBastion supports the following endpoints:
+- OpenAI-compatible: POST ${gatewayUrl}/v1/chat/completions
+- Anthropic Messages: POST ${gatewayUrl}/v1/messages
+- OpenAI Responses: POST ${gatewayUrl}/v1/responses
+- Model list: GET ${gatewayUrl}/v1/models
+
+Configuration rules:
+- For OpenAI-compatible clients (Cursor, Continue, Cline, OpenAI SDK), set the base URL to: ${gatewayUrl}/v1
+- For Anthropic-native clients (Claude Code, Anthropic SDK), set the base URL to: ${gatewayUrl} (no /v1 suffix)
+- The API key should be set as a Bearer token or in the standard API key field
+- Claude Code: set env vars ANTHROPIC_BASE_URL=${gatewayUrl} and ANTHROPIC_API_KEY=<key>
+- Cursor: set in Settings > Models > OpenAI API Key section
+- Continue: edit ~/.continue/config.json, provider "openai", apiBase "${gatewayUrl}/v1"
+- Cline: set in Settings > API Provider > OpenAI Compatible
+
+Please detect which tool I am using and help me configure it step by step.`;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <Bot className="h-5 w-5" />
+        <h3 className="text-lg font-semibold">{t('guide.aiPromptTitle')}</h3>
+        <Badge variant="secondary">{t('guide.recommended')}</Badge>
+      </div>
+      <p className="text-sm text-muted-foreground">{t('guide.aiPromptDesc')}</p>
+      <StepList
+        steps={[
+          t('guide.promptStep.copy'),
+          t('guide.promptStep.paste'),
+          t('guide.promptStep.follow'),
+        ]}
+      />
+      <CodeBlock code={prompt} />
+      <InfoBox>{t('guide.promptTip')}</InfoBox>
+    </div>
+  );
+}
+
+// ===========================================================================
+// MCP Gateway — AI Prompt tab
+// ===========================================================================
+
+function McpPromptTab({ mcpUrl }: { mcpUrl: string }) {
+  const { t } = useTranslation();
+  const prompt = `I need to configure my AI tool's MCP (Model Context Protocol) client to connect to an MCP gateway called AgentBastion.
+
+Here is the information you need:
+
+MCP Endpoint: ${mcpUrl}/mcp
+Transport: Streamable HTTP (protocol version 2025-03-26)
+API Key: (ask the user, it starts with "ab-")
+
+The MCP server configuration should be:
+{
+  "type": "streamableHttp",
+  "url": "${mcpUrl}/mcp",
+  "headers": {
+    "Authorization": "Bearer <API_KEY>"
+  }
+}
+
+Configuration for specific tools:
+- Claude Desktop: add to mcpServers in claude_desktop_config.json (macOS: ~/Library/Application Support/Claude/claude_desktop_config.json, Windows: %APPDATA%\\Claude\\claude_desktop_config.json)
+- Claude Code CLI: run \`claude mcp add agent-bastion --transport streamable-http "${mcpUrl}/mcp" --header "Authorization: Bearer <key>"\`
+- Cursor: add to mcpServers in .cursor/mcp.json (project) or ~/.cursor/mcp.json (global)
+- Cline: add to mcpServers in cline_mcp_settings.json or via Cline Settings > MCP Servers
+- VS Code / Copilot: add to mcpServers in .vscode/mcp.json
+
+Please detect which tool I am using and help me configure it step by step.`;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-2">
+        <Bot className="h-5 w-5" />
+        <h3 className="text-lg font-semibold">{t('guide.mcpPromptTitle')}</h3>
+        <Badge variant="secondary">{t('guide.recommended')}</Badge>
+      </div>
+      <p className="text-sm text-muted-foreground">{t('guide.mcpPromptDesc')}</p>
+      <StepList
+        steps={[
+          t('guide.promptStep.copy'),
+          t('guide.promptStep.paste'),
+          t('guide.promptStep.follow'),
+        ]}
+      />
+      <CodeBlock code={prompt} />
+      <InfoBox>{t('guide.promptTip')}</InfoBox>
     </div>
   );
 }
@@ -727,8 +832,12 @@ export function GuidePage() {
         {/* AI Gateway tool tabs */}
         <Card>
           <CardContent className="pt-6">
-            <Tabs defaultValue="claude-code">
+            <Tabs defaultValue="ai-prompt">
               <TabsList className="flex-wrap">
+                <TabsTrigger value="ai-prompt">
+                  <Bot className="mr-1 h-3.5 w-3.5" />
+                  {t('guide.aiPrompt')}
+                </TabsTrigger>
                 <TabsTrigger value="claude-code">{t('guide.claudeCode')}</TabsTrigger>
                 <TabsTrigger value="cursor">{t('guide.cursor')}</TabsTrigger>
                 <TabsTrigger value="continue">{t('guide.continue')}</TabsTrigger>
@@ -738,6 +847,9 @@ export function GuidePage() {
                 <TabsTrigger value="curl">{t('guide.curl')}</TabsTrigger>
               </TabsList>
 
+              <TabsContent value="ai-prompt" className="mt-4">
+                <AiGatewayPromptTab gatewayUrl={gatewayUrl} />
+              </TabsContent>
               <TabsContent value="claude-code" className="mt-4">
                 <ClaudeCodeTab gatewayUrl={gatewayUrl} />
               </TabsContent>
@@ -797,8 +909,12 @@ export function GuidePage() {
         {/* MCP tool tabs */}
         <Card>
           <CardContent className="pt-6">
-            <Tabs defaultValue="mcp-claude-desktop">
+            <Tabs defaultValue="mcp-prompt">
               <TabsList className="flex-wrap">
+                <TabsTrigger value="mcp-prompt">
+                  <Bot className="mr-1 h-3.5 w-3.5" />
+                  {t('guide.aiPrompt')}
+                </TabsTrigger>
                 <TabsTrigger value="mcp-claude-desktop">{t('guide.claudeDesktop')}</TabsTrigger>
                 <TabsTrigger value="mcp-claude-code">Claude Code</TabsTrigger>
                 <TabsTrigger value="mcp-cursor">Cursor</TabsTrigger>
@@ -807,6 +923,9 @@ export function GuidePage() {
                 <TabsTrigger value="mcp-curl">cURL</TabsTrigger>
               </TabsList>
 
+              <TabsContent value="mcp-prompt" className="mt-4">
+                <McpPromptTab mcpUrl={mcpUrl} />
+              </TabsContent>
               <TabsContent value="mcp-claude-desktop" className="mt-4">
                 <McpClaudeDesktopTab mcpUrl={mcpUrl} />
               </TabsContent>
