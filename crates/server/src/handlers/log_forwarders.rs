@@ -31,7 +31,10 @@ pub struct CreateForwarderRequest {
     pub forwarder_type: String,
     pub config: serde_json::Value,
     pub enabled: Option<bool>,
+    pub log_types: Option<Vec<String>>,
 }
+
+const VALID_LOG_TYPES: &[&str] = &["audit", "gateway", "mcp", "platform"];
 
 pub async fn create_forwarder(
     auth_user: AuthUser,
@@ -49,15 +52,27 @@ pub async fn create_forwarder(
 
     validate_forwarder_config(&req.forwarder_type, &req.config)?;
 
+    let log_types = req.log_types.unwrap_or_else(|| vec!["audit".into()]);
+    for lt in &log_types {
+        if !VALID_LOG_TYPES.contains(&lt.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Invalid log_type '{}'. Allowed: {}",
+                lt,
+                VALID_LOG_TYPES.join(", ")
+            )));
+        }
+    }
+
     let enabled = req.enabled.unwrap_or(true);
     let forwarder = sqlx::query_as::<_, LogForwarder>(
-        r#"INSERT INTO log_forwarders (name, forwarder_type, config, enabled)
-           VALUES ($1, $2, $3, $4) RETURNING *"#,
+        r#"INSERT INTO log_forwarders (name, forwarder_type, config, enabled, log_types)
+           VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
     )
     .bind(&req.name)
     .bind(&req.forwarder_type)
     .bind(&req.config)
     .bind(enabled)
+    .bind(&log_types)
     .fetch_one(&state.db)
     .await?;
 
@@ -79,6 +94,7 @@ pub struct UpdateForwarderRequest {
     pub name: Option<String>,
     pub config: Option<serde_json::Value>,
     pub enabled: Option<bool>,
+    pub log_types: Option<Vec<String>>,
 }
 
 pub async fn update_forwarder(
@@ -97,18 +113,34 @@ pub async fn update_forwarder(
         validate_forwarder_config(&existing.forwarder_type, config)?;
     }
 
+    let log_types = if let Some(ref lts) = req.log_types {
+        for lt in lts {
+            if !VALID_LOG_TYPES.contains(&lt.as_str()) {
+                return Err(AppError::BadRequest(format!(
+                    "Invalid log_type '{}'. Allowed: {}",
+                    lt,
+                    VALID_LOG_TYPES.join(", ")
+                )));
+            }
+        }
+        lts.clone()
+    } else {
+        existing.log_types.clone()
+    };
+
     let name = req.name.as_deref().unwrap_or(&existing.name);
     let config = req.config.as_ref().unwrap_or(&existing.config);
     let enabled = req.enabled.unwrap_or(existing.enabled);
 
     let updated = sqlx::query_as::<_, LogForwarder>(
-        r#"UPDATE log_forwarders SET name = $2, config = $3, enabled = $4, updated_at = now()
+        r#"UPDATE log_forwarders SET name = $2, config = $3, enabled = $4, log_types = $5, updated_at = now()
            WHERE id = $1 RETURNING *"#,
     )
     .bind(id)
     .bind(name)
     .bind(config)
     .bind(enabled)
+    .bind(&log_types)
     .fetch_one(&state.db)
     .await?;
 

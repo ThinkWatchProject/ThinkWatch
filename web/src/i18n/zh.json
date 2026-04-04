@@ -49,6 +49,7 @@
     "roles": "角色",
     "settings": "设置",
     "logForwarders": "日志转发",
+    "platformLogs": "平台日志",
     "configGuide": "配置指南"
   },
   "auth": {
@@ -81,7 +82,21 @@
     "displayName": "显示名称",
     "register": "注册",
     "registering": "注册中...",
-    "passwordTooShort": "密码至少需要 8 个字符"
+    "passwordTooShort": "密码至少需要 8 个字符",
+    "totp": "双因素认证",
+    "totpDescription": "通过 TOTP 双因素认证为账号添加额外的安全保护。",
+    "totpRequiredNotice": "管理员要求启用双因素认证，请立即开启。",
+    "totpEnabledStatus": "双因素认证已启用。",
+    "totpEnable": "启用双因素认证",
+    "totpDisable": "关闭双因素认证",
+    "totpDisableConfirm": "输入密码以关闭双因素认证。",
+    "totpScanQr": "使用身份验证器扫描二维码或复制 URI：",
+    "totpRecoveryCodes": "恢复代码",
+    "totpRecoveryWarning": "请将这些代码保存在安全的地方，每个代码只能使用一次。",
+    "totpCode": "验证码",
+    "totpHint": "输入身份验证器中的 6 位数字代码，或使用恢复代码。",
+    "totpVerify": "验证并启用",
+    "passwordChangeRequired": "您需要修改密码后才能继续使用。"
   },
   "dashboard": {
     "title": "仪表盘",
@@ -300,7 +315,14 @@
     "title": "角色与权限",
     "subtitle": "系统定义的角色及其权限",
     "systemRole": "系统",
-    "permissions": "权限"
+    "permissions": "权限",
+    "systemRoles": "系统角色",
+    "customRoles": "自定义角色",
+    "addRole": "添加角色",
+    "addRoleDescription": "创建具有特定权限的自定义角色。",
+    "editRole": "编辑角色",
+    "noCustomRoles": "尚未创建自定义角色。",
+    "deleteConfirm": "确定要删除此角色吗？"
   },
   "settingsPage": {
     "title": "设置",
@@ -407,7 +429,8 @@
     "noForwarders": "尚未配置日志转发器。",
     "noForwardersHint": "添加转发器以开始将审计日志发送到外部系统。",
     "editForwarder": "编辑转发器",
-    "editDescription": "更新转发器名称和配置。"
+    "editDescription": "更新转发器名称和配置。",
+    "logTypes": "日志类型"
   },
   "guide": {
     "title": "配置指南",
@@ -479,5 +502,19 @@
     },
     "next": "下一步",
     "back": "上一步"
+  },
+  "theme": {
+    "light": "浅色",
+    "dark": "深色",
+    "system": "跟随系统"
+  },
+  "platformLogs": {
+    "title": "平台日志",
+    "subtitle": "平台管理操作审计记录",
+    "filters": "筛选",
+    "searchPlaceholder": "搜索日志...",
+    "userId": "用户ID",
+    "logEntries": "日志条目",
+    "noLogs": "未找到平台日志。"
   }
 }

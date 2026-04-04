@@ -15,6 +15,9 @@ interface LoginResponse {
   token_type: string;
   expires_in: number;
   signing_key: string;
+  password_change_required?: boolean;
+  // When TOTP is required, only this field is returned
+  totp_required?: boolean;
 }
 
 export function useAuth() {
@@ -39,12 +42,18 @@ export function useAuth() {
 
   useEffect(() => { fetchUser(); }, [fetchUser]);
 
-  const login = async (email: string, password: string) => {
-    const res = await apiPost<LoginResponse>('/api/auth/login', { email, password });
+  const login = async (email: string, password: string, totpCode?: string): Promise<LoginResponse> => {
+    const body: Record<string, string> = { email, password };
+    if (totpCode) body.totp_code = totpCode;
+    const res = await apiPost<LoginResponse>('/api/auth/login', body);
+    if (res.totp_required) {
+      return res; // Caller must handle TOTP step
+    }
     localStorage.setItem('access_token', res.access_token);
     localStorage.setItem('refresh_token', res.refresh_token);
     sessionStorage.setItem('signing_key', res.signing_key);
     await fetchUser();
+    return res;
   };
 
   const logout = () => {

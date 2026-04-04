@@ -79,6 +79,7 @@ const navGroups: NavGroup[] = [
     items: [
       { titleKey: 'nav.users', icon: Users, href: '/admin/users' },
       { titleKey: 'nav.roles', icon: Shield, href: '/admin/roles' },
+      { titleKey: 'nav.platformLogs', icon: ClipboardList, href: '/admin/platform-logs' },
       { titleKey: 'nav.logForwarders', icon: Forward, href: '/admin/log-forwarders' },
       { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings' },
     ],

@@ -11,6 +11,7 @@ import {
 import { LogOut, User } from 'lucide-react';
 import { useNavigate } from '@tanstack/react-router';
 import { LanguageSwitcher } from './language-switcher';
+import { ThemeToggle } from './theme-toggle';
 
 interface AppHeaderProps {
   userEmail?: string;
@@ -29,6 +30,7 @@ export function AppHeader({ userEmail, onLogout }: AppHeaderProps) {
       <SidebarTrigger />
       <Separator orientation="vertical" className="h-6" />
       <div className="flex-1" />
+      <ThemeToggle />
       <LanguageSwitcher />
       <DropdownMenu>
         <DropdownMenuTrigger

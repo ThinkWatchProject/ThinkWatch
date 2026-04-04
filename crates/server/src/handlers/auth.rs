@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::extract::State;
-use serde::Deserialize;
+use axum::response::IntoResponse;
+use serde::{Deserialize, Serialize};
 
 use agent_bastion_auth::password;
 use agent_bastion_common::audit::AuditEntry;
@@ -24,7 +25,7 @@ pub struct ChangePasswordRequest {
 pub async fn login(
     State(state): State<AppState>,
     Json(req): Json<LoginRequest>,
-) -> Result<Json<LoginResponse>, AppError> {
+) -> Result<axum::response::Response, AppError> {
     // Input validation
     if req.password.len() < 8 {
         return Err(AppError::BadRequest(
@@ -37,9 +38,13 @@ pub async fn login(
 
     // Rate limiting: per-email, max 10 attempts per minute
     let rate_key = format!("auth_rate:{}", req.email);
-    let count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1)
-        .await
-        .unwrap_or(1);
+    let count: u64 = match fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Redis rate-limit check failed (fail-closed): {e}");
+            return Err(AppError::Internal(anyhow::anyhow!("Rate limiting unavailable")));
+        }
+    };
     if count == 1 {
         let _: () = fred::interfaces::KeysInterface::expire(&state.redis, &rate_key, 60, None)
             .await
@@ -132,6 +137,60 @@ pub async fn login(
     }
     let user = user.unwrap(); // Safe: checked above
 
+    // --- TOTP two-factor check ---
+    if user.totp_enabled {
+        match &req.totp_code {
+            None => {
+                // First step: password valid but TOTP needed
+                return Ok(Json(serde_json::json!({
+                    "totp_required": true
+                })).into_response());
+            }
+            Some(code) => {
+                // Verify TOTP code or recovery code
+                let totp_valid = if let Some(ref encrypted_secret) = user.totp_secret {
+                    let enc_key = agent_bastion_common::crypto::parse_encryption_key(
+                        &state.config.encryption_key,
+                    )
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
+                    let secret = agent_bastion_auth::totp::decrypt_secret(encrypted_secret, &enc_key)
+                        .map_err(|e| AppError::Internal(anyhow::anyhow!("TOTP decrypt error: {e}")))?;
+                    agent_bastion_auth::totp::verify(&secret, code, &user.email).unwrap_or(false)
+                } else {
+                    false
+                };
+
+                // If TOTP code didn't match, try recovery codes (constant-time comparison)
+                if !totp_valid {
+                    let mut recovery_used = false;
+                    if let Some(ref codes_json) = user.totp_recovery_codes {
+                        if let Ok(mut codes) = serde_json::from_str::<Vec<String>>(codes_json) {
+                            if let Some(pos) = agent_bastion_auth::totp::find_recovery_code(&codes, code) {
+                                codes.remove(pos);
+                                let updated = serde_json::to_string(&codes).unwrap_or_default();
+                                sqlx::query("UPDATE users SET totp_recovery_codes = $1 WHERE id = $2")
+                                    .bind(&updated)
+                                    .bind(user.id)
+                                    .execute(&state.db)
+                                    .await?;
+                                recovery_used = true;
+                            }
+                        }
+                    }
+
+                    if !recovery_used {
+                        state.audit.log(
+                            AuditEntry::new("auth.totp_failed")
+                                .user_id(user.id)
+                                .detail(serde_json::json!({"email": req.email})),
+                        );
+                        return Err(AppError::Unauthorized);
+                    }
+                }
+            }
+        }
+    }
+
     // Clear rate limit and lockout keys on successful login
     let _: i64 = fred::interfaces::KeysInterface::del(&state.redis, &rate_key)
         .await
@@ -176,7 +235,13 @@ pub async fn login(
         token_type: "Bearer".into(),
         expires_in: access_ttl,
         signing_key,
-    }))
+        password_change_required: if user.password_change_required {
+            Some(true)
+        } else {
+            None
+        },
+    })
+    .into_response())
 }
 
 pub async fn register(
@@ -275,6 +340,7 @@ pub async fn refresh(
         token_type: "Bearer".into(),
         expires_in: access_ttl,
         signing_key,
+        password_change_required: None,
     }))
 }
 
@@ -330,7 +396,7 @@ pub async fn change_password(
     }
 
     let new_hash = password::hash_password(&req.new_password)?;
-    sqlx::query("UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2")
+    sqlx::query("UPDATE users SET password_hash = $1, password_change_required = false, updated_at = now() WHERE id = $2")
         .bind(&new_hash)
         .bind(user.id)
         .execute(&state.db)
@@ -400,4 +466,216 @@ pub async fn revoke_sessions(
     );
 
     Ok(Json(serde_json::json!({"status": "all_sessions_revoked"})))
+}
+
+// --- TOTP endpoints ---
+
+#[derive(Debug, Serialize)]
+pub struct TotpSetupResponse {
+    secret: String,
+    otpauth_uri: String,
+    recovery_codes: Vec<String>,
+}
+
+/// POST /api/auth/totp/setup — Begin TOTP setup. Returns secret + otpauth URI + recovery codes.
+/// The user must call /totp/verify-setup with a valid code to finalize.
+pub async fn totp_setup(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<TotpSetupResponse>, AppError> {
+    use agent_bastion_auth::totp;
+
+    let user = sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
+    )
+    .bind(auth_user.claims.sub)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound("User not found".into()))?;
+
+    if user.totp_enabled {
+        return Err(AppError::BadRequest("TOTP is already enabled".into()));
+    }
+
+    let secret = totp::generate_secret();
+    let uri = totp::otpauth_uri(&secret, &user.email)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create otpauth URI: {e}")))?;
+    let recovery_codes = totp::generate_recovery_codes(10);
+
+    // Store pending setup in Redis (encrypted, expires in 10 minutes)
+    let pending_key = format!("totp_pending:{}", user.id);
+    let pending_data = serde_json::json!({
+        "secret": secret,
+        "recovery_codes": recovery_codes,
+    });
+    let enc_key = agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
+    let encrypted_pending = agent_bastion_common::crypto::encrypt(
+        serde_json::to_string(&pending_data).unwrap().as_bytes(),
+        &enc_key,
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption error: {e}")))?;
+    let _: () = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &pending_key,
+        hex::encode(encrypted_pending),
+        Some(fred::types::Expiration::EX(600)),
+        None,
+        false,
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
+
+    Ok(Json(TotpSetupResponse {
+        secret,
+        otpauth_uri: uri,
+        recovery_codes,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TotpVerifyRequest {
+    pub code: String,
+}
+
+/// POST /api/auth/totp/verify-setup — Finalize TOTP setup by verifying a code.
+pub async fn totp_verify_setup(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<TotpVerifyRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    use agent_bastion_auth::totp;
+
+    let user_id = auth_user.claims.sub;
+    let user_email = &auth_user.claims.email;
+
+    let pending_key = format!("totp_pending:{user_id}");
+    let pending_hex: Option<String> =
+        fred::interfaces::KeysInterface::get(&state.redis, &pending_key)
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
+
+    let pending_hex =
+        pending_hex.ok_or(AppError::BadRequest("No pending TOTP setup. Call /totp/setup first.".into()))?;
+
+    // Decrypt the pending data from Redis
+    let enc_key = agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
+    let encrypted_bytes = hex::decode(&pending_hex)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid hex from Redis: {e}")))?;
+    let decrypted = agent_bastion_common::crypto::decrypt(&encrypted_bytes, &enc_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Decryption error: {e}")))?;
+    let pending_str = String::from_utf8(decrypted)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid UTF-8: {e}")))?;
+
+    #[derive(Deserialize)]
+    struct PendingData {
+        secret: String,
+        recovery_codes: Vec<String>,
+    }
+    let pending: PendingData = serde_json::from_str(&pending_str)
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("Corrupt pending TOTP data")))?;
+
+    // Verify the code against the pending secret
+    if !totp::verify(&pending.secret, &req.code, user_email).unwrap_or(false) {
+        return Err(AppError::BadRequest("Invalid TOTP code".into()));
+    }
+
+    // Encrypt and store
+    let enc_key = agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
+    let encrypted_secret = totp::encrypt_secret(&pending.secret, &enc_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption error: {e}")))?;
+    let recovery_json = serde_json::to_string(&pending.recovery_codes).unwrap();
+
+    sqlx::query(
+        "UPDATE users SET totp_secret = $1, totp_enabled = true, totp_recovery_codes = $2, updated_at = now() WHERE id = $3",
+    )
+    .bind(&encrypted_secret)
+    .bind(&recovery_json)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+
+    // Clean up pending
+    let _: i64 = fred::interfaces::KeysInterface::del(&state.redis, &pending_key)
+        .await
+        .unwrap_or(0);
+
+    state.audit.log(
+        AuditEntry::new("auth.totp_enabled")
+            .user_id(user_id)
+            .resource("auth"),
+    );
+
+    Ok(Json(serde_json::json!({"status": "totp_enabled"})))
+}
+
+/// POST /api/auth/totp/disable — Disable TOTP (requires current password verification).
+pub async fn totp_disable(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let user = sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
+    )
+    .bind(auth_user.claims.sub)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound("User not found".into()))?;
+
+    if !user.totp_enabled {
+        return Err(AppError::BadRequest("TOTP is not enabled".into()));
+    }
+
+    // Verify current password (use old_password field)
+    let hash = user
+        .password_hash
+        .as_ref()
+        .ok_or(AppError::BadRequest("SSO accounts cannot manage TOTP here".into()))?;
+    if !password::verify_password(&req.old_password, hash)? {
+        return Err(AppError::Unauthorized);
+    }
+
+    sqlx::query(
+        "UPDATE users SET totp_secret = NULL, totp_enabled = false, totp_recovery_codes = NULL, updated_at = now() WHERE id = $1",
+    )
+    .bind(user.id)
+    .execute(&state.db)
+    .await?;
+
+    state.audit.log(
+        AuditEntry::new("auth.totp_disabled")
+            .user_id(user.id)
+            .resource("auth"),
+    );
+
+    Ok(Json(serde_json::json!({"status": "totp_disabled"})))
+}
+
+/// GET /api/auth/totp/status — Check TOTP status for current user.
+pub async fn totp_status(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let enabled: bool = sqlx::query_scalar(
+        "SELECT totp_enabled FROM users WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(auth_user.claims.sub)
+    .fetch_one(&state.db)
+    .await?;
+
+    // Check if platform requires TOTP
+    let required: bool = state
+        .dynamic_config
+        .get_string("security.totp_required")
+        .await
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
+    Ok(Json(serde_json::json!({
+        "enabled": enabled,
+        "required": required,
+    })))
 }

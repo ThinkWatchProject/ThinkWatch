@@ -248,6 +248,23 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             "/api/auth/revoke-sessions",
             post(handlers::auth::revoke_sessions),
         )
+        // TOTP management
+        .route(
+            "/api/auth/totp/status",
+            get(handlers::auth::totp_status),
+        )
+        .route(
+            "/api/auth/totp/setup",
+            post(handlers::auth::totp_setup),
+        )
+        .route(
+            "/api/auth/totp/verify-setup",
+            post(handlers::auth::totp_verify_setup),
+        )
+        .route(
+            "/api/auth/totp/disable",
+            post(handlers::auth::totp_disable),
+        )
         .route(
             "/api/keys",
             get(handlers::api_keys::list_keys).post(handlers::api_keys::create_key),
@@ -374,6 +391,24 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route(
             "/api/admin/log-forwarders/{id}/reset-stats",
             post(handlers::log_forwarders::reset_stats),
+        )
+        // Platform operation logs
+        .route(
+            "/api/admin/platform-logs",
+            get(handlers::platform_logs::list_platform_logs),
+        )
+        // Custom roles CRUD
+        .route(
+            "/api/admin/roles",
+            get(handlers::roles::list_roles).post(handlers::roles::create_role),
+        )
+        .route(
+            "/api/admin/roles/{id}",
+            patch(handlers::roles::update_role).delete(handlers::roles::delete_role),
+        )
+        .route(
+            "/api/admin/permissions",
+            get(handlers::roles::list_permissions),
         )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),

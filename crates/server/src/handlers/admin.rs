@@ -77,24 +77,40 @@ pub async fn list_users(
 pub struct CreateUserByAdminRequest {
     pub email: String,
     pub display_name: String,
-    pub password: String,
+    /// If omitted, a random password is generated and the user must change it on first login.
+    pub password: Option<String>,
     pub role: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateUserByAdminResponse {
+    #[serde(flatten)]
+    pub user: UserResponse,
+    /// Only present when password was auto-generated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generated_password: Option<String>,
 }
 
 pub async fn create_user(
     _auth_user: AuthUser,
     State(state): State<AppState>,
     Json(req): Json<CreateUserByAdminRequest>,
-) -> Result<Json<UserResponse>, AppError> {
-    // Input validation
-    if req.password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "Password must be at least 8 characters".into(),
-        ));
-    }
+) -> Result<Json<CreateUserByAdminResponse>, AppError> {
     if !req.email.contains('@') || !req.email.contains('.') {
         return Err(AppError::BadRequest("Invalid email format".into()));
     }
+
+    let (raw_password, force_change) = match &req.password {
+        Some(p) => {
+            if p.len() < 8 {
+                return Err(AppError::BadRequest(
+                    "Password must be at least 8 characters".into(),
+                ));
+            }
+            (p.clone(), false)
+        }
+        None => (password::generate_random_password(), true),
+    };
 
     // Role escalation prevention
     let role_name = req.role.as_deref().unwrap_or("developer");
@@ -115,15 +131,16 @@ pub async fn create_user(
         return Err(AppError::Conflict("Email already registered".into()));
     }
 
-    let password_hash = password::hash_password(&req.password)?;
+    let password_hash = password::hash_password(&raw_password)?;
 
     let user = sqlx::query_as::<_, User>(
-        r#"INSERT INTO users (email, display_name, password_hash)
-           VALUES ($1, $2, $3) RETURNING *"#,
+        r#"INSERT INTO users (email, display_name, password_hash, password_change_required)
+           VALUES ($1, $2, $3, $4) RETURNING *"#,
     )
     .bind(&req.email)
     .bind(&req.display_name)
     .bind(&password_hash)
+    .bind(force_change)
     .fetch_one(&state.db)
     .await?;
 
@@ -136,14 +153,21 @@ pub async fn create_user(
     .execute(&state.db)
     .await?;
 
-    Ok(Json(UserResponse {
-        id: user.id,
-        email: user.email,
-        display_name: user.display_name,
-        avatar_url: user.avatar_url,
-        is_active: user.is_active,
-        roles: vec![role_name.to_string()],
-        created_at: user.created_at,
+    Ok(Json(CreateUserByAdminResponse {
+        user: UserResponse {
+            id: user.id,
+            email: user.email,
+            display_name: user.display_name,
+            avatar_url: user.avatar_url,
+            is_active: user.is_active,
+            roles: vec![role_name.to_string()],
+            created_at: user.created_at,
+        },
+        generated_password: if force_change {
+            Some(raw_password)
+        } else {
+            None
+        },
     }))
 }
 

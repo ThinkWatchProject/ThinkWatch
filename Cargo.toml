@@ -35,6 +35,8 @@ fred = { version = "10", features = ["subscriber-client", "i-scripts"] }
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
 argon2 = "0.5"
 openidconnect = { version = "4", features = ["reqwest"] }
+totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
+data-encoding = "2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

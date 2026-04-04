@@ -49,6 +49,7 @@ interface LogForwarder {
   name: string;
   forwarder_type: string;
   config: Record<string, string>;
+  log_types: string[];
   enabled: boolean;
   sent_count: number;
   error_count: number;
@@ -101,6 +102,7 @@ export function LogForwardersPage() {
   const [formTopic, setFormTopic] = useState('');
   const [formWebhookUrl, setFormWebhookUrl] = useState('');
   const [formAuthHeader, setFormAuthHeader] = useState('');
+  const [formLogTypes, setFormLogTypes] = useState<Set<string>>(new Set(['audit']));
   const [creating, setCreating] = useState(false);
 
   // Edit state
@@ -113,6 +115,7 @@ export function LogForwardersPage() {
   const [editTopic, setEditTopic] = useState('');
   const [editWebhookUrl, setEditWebhookUrl] = useState('');
   const [editAuthHeader, setEditAuthHeader] = useState('');
+  const [editLogTypes, setEditLogTypes] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
 
   // Delete confirmation state
@@ -144,6 +147,7 @@ export function LogForwardersPage() {
     setFormTopic('');
     setFormWebhookUrl('');
     setFormAuthHeader('');
+    setFormLogTypes(new Set(['audit']));
   };
 
   const buildConfig = (): Record<string, string> => {
@@ -170,6 +174,7 @@ export function LogForwardersPage() {
         name: formName,
         forwarder_type: formType,
         config: buildConfig(),
+        log_types: Array.from(formLogTypes),
       });
       setDialogOpen(false);
       resetForm();
@@ -232,6 +237,7 @@ export function LogForwardersPage() {
     setEditTopic(f.config.topic || '');
     setEditWebhookUrl(f.config.url || '');
     setEditAuthHeader(f.config.auth_header || '');
+    setEditLogTypes(new Set(f.log_types || ['audit']));
     setEditDialogOpen(true);
   };
 
@@ -260,6 +266,7 @@ export function LogForwardersPage() {
       await apiPatch(`/api/admin/log-forwarders/${editForwarder.id}`, {
         name: editName,
         config: buildEditConfig(),
+        log_types: Array.from(editLogTypes),
       });
       setEditDialogOpen(false);
       setEditForwarder(null);
@@ -347,6 +354,27 @@ export function LogForwardersPage() {
                   </div>
                 </>
               )}
+
+              <div>
+                <Label>{t('logForwarders.logTypes')}</Label>
+                <div className="flex flex-wrap gap-2 mt-1">
+                  {['audit', 'gateway', 'mcp', 'platform'].map((lt) => (
+                    <label key={lt} className="flex items-center gap-1.5 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={formLogTypes.has(lt)}
+                        onChange={() => {
+                          const next = new Set(formLogTypes);
+                          if (next.has(lt)) next.delete(lt); else next.add(lt);
+                          setFormLogTypes(next);
+                        }}
+                        className="rounded"
+                      />
+                      {lt}
+                    </label>
+                  ))}
+                </div>
+              </div>
             </div>
             <DialogFooter>
               <Button variant="outline" onClick={() => setDialogOpen(false)}>{t('common.cancel')}</Button>
@@ -543,6 +571,27 @@ export function LogForwardersPage() {
                 </div>
               </>
             )}
+
+            <div>
+              <Label>{t('logForwarders.logTypes')}</Label>
+              <div className="flex flex-wrap gap-2 mt-1">
+                {['audit', 'gateway', 'mcp', 'platform'].map((lt) => (
+                  <label key={lt} className="flex items-center gap-1.5 text-sm cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={editLogTypes.has(lt)}
+                      onChange={() => {
+                        const next = new Set(editLogTypes);
+                        if (next.has(lt)) next.delete(lt); else next.add(lt);
+                        setEditLogTypes(next);
+                      }}
+                      className="rounded"
+                    />
+                    {lt}
+                  </label>
+                ))}
+              </div>
+            </div>
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditDialogOpen(false)}>{t('common.cancel')}</Button>

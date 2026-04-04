@@ -3,6 +3,19 @@ use argon2::{
     password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng},
 };
 
+const RANDOM_PASSWORD_LEN: usize = 16;
+const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%&*";
+
+/// Generate a cryptographically random password.
+pub fn generate_random_password() -> String {
+    let mut bytes = [0u8; RANDOM_PASSWORD_LEN];
+    rand::fill(&mut bytes);
+    bytes
+        .iter()
+        .map(|b| CHARSET[(*b as usize) % CHARSET.len()] as char)
+        .collect()
+}
+
 pub fn hash_password(password: &str) -> anyhow::Result<String> {
     let salt = SaltString::generate(&mut OsRng);
     let argon2 = Argon2::default();

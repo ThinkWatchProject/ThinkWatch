@@ -8,6 +8,8 @@ use uuid::Uuid;
 pub struct LoginRequest {
     pub email: String,
     pub password: String,
+    /// TOTP code for two-factor authentication (required if user has TOTP enabled).
+    pub totp_code: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -19,6 +21,15 @@ pub struct LoginResponse {
     /// Per-session HMAC signing key (hex-encoded, 32 bytes).
     /// Used by the frontend to sign state-changing requests.
     pub signing_key: String,
+    /// If true, the user must change their password before using the platform.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password_change_required: Option<bool>,
+}
+
+/// Returned when login credentials are valid but TOTP verification is needed.
+#[derive(Debug, Serialize)]
+pub struct TotpRequiredResponse {
+    pub totp_required: bool,
 }
 
 #[derive(Debug, Deserialize)]

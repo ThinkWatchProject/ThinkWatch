@@ -14,6 +14,12 @@ pub struct User {
     pub oidc_issuer: Option<String>,
     pub avatar_url: Option<String>,
     pub is_active: bool,
+    #[serde(skip_serializing)]
+    pub totp_secret: Option<String>,
+    pub totp_enabled: bool,
+    #[serde(skip_serializing)]
+    pub totp_recovery_codes: Option<String>,
+    pub password_change_required: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,

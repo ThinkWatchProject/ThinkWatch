@@ -31,44 +31,42 @@ fn parse_date_end(s: &str) -> Result<i64, AppError> {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct McpLogsQuery {
+pub struct PlatformLogsQuery {
     pub q: Option<String>,
     pub user_id: Option<String>,
-    pub server_id: Option<String>,
-    pub tool_name: Option<String>,
-    pub status: Option<String>,
+    pub action: Option<String>,
+    pub resource: Option<String>,
+    pub resource_id: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
-    pub sort_by: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct McpLogEntry {
+pub struct PlatformLogEntry {
     pub id: String,
     pub user_id: Option<String>,
-    pub server_id: Option<String>,
-    pub server_name: Option<String>,
-    pub tool_name: Option<String>,
-    pub duration_ms: Option<i64>,
-    pub status: Option<String>,
-    pub error_message: Option<String>,
+    pub action: String,
+    pub resource: Option<String>,
+    pub resource_id: Option<String>,
+    pub detail: Option<serde_json::Value>,
     pub ip_address: Option<String>,
+    pub user_agent: Option<String>,
     pub created_at: String,
 }
 
 #[derive(Debug, Serialize)]
-pub struct McpLogsResponse {
-    pub items: Vec<McpLogEntry>,
+pub struct PlatformLogsResponse {
+    pub items: Vec<PlatformLogEntry>,
     pub total: i64,
 }
 
-pub async fn list_mcp_logs(
+pub async fn list_platform_logs(
     _auth_user: AuthUser,
     State(state): State<AppState>,
-    Query(params): Query<McpLogsQuery>,
-) -> Result<Json<McpLogsResponse>, AppError> {
+    Query(params): Query<PlatformLogsQuery>,
+) -> Result<Json<PlatformLogsResponse>, AppError> {
     let qw_url = state
         .config
         .quickwit_url
@@ -88,14 +86,14 @@ pub async fn list_mcp_logs(
     if let Some(ref v) = params.user_id {
         parts.push(format!("user_id:{}", escape_query_value(v)));
     }
-    if let Some(ref v) = params.server_id {
-        parts.push(format!("server_id:{}", escape_query_value(v)));
+    if let Some(ref v) = params.action {
+        parts.push(format!("action:{}", escape_query_value(v)));
     }
-    if let Some(ref v) = params.tool_name {
-        parts.push(format!("tool_name:{}", escape_query_value(v)));
+    if let Some(ref v) = params.resource {
+        parts.push(format!("resource:{}", escape_query_value(v)));
     }
-    if let Some(ref v) = params.status {
-        parts.push(format!("status:{}", escape_query_value(v)));
+    if let Some(ref v) = params.resource_id {
+        parts.push(format!("resource_id:{}", escape_query_value(v)));
     }
 
     let search_query = if parts.is_empty() {
@@ -104,18 +102,12 @@ pub async fn list_mcp_logs(
         parts.join(" AND ")
     };
 
-    let sort_field = match params.sort_by.as_deref() {
-        Some("duration_ms") => "-duration_ms",
-        _ => "-created_at",
-    };
-
     let mut url = format!(
-        "{}/api/v1/mcp_logs/search?query={}&max_hits={}&start_offset={}&sort_by_field={}",
+        "{}/api/v1/platform_logs/search?query={}&max_hits={}&start_offset={}&sort_by_field=-created_at",
         qw_url,
         urlencoding::encode(&search_query),
         max_hits,
         start_offset,
-        sort_field,
     );
 
     if let Some(ref from) = params.from {
@@ -143,14 +135,14 @@ pub async fn list_mcp_logs(
     #[derive(Deserialize)]
     struct QwResp {
         num_hits: i64,
-        hits: Vec<McpLogEntry>,
+        hits: Vec<PlatformLogEntry>,
     }
 
     let qw_resp = resp.json::<QwResp>().await.map_err(|e| {
         AppError::Internal(anyhow::anyhow!("Failed to parse Quickwit response: {e}"))
     })?;
 
-    Ok(Json(McpLogsResponse {
+    Ok(Json(PlatformLogsResponse {
         total: qw_resp.num_hits,
         items: qw_resp.hits,
     }))

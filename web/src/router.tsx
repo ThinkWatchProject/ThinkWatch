@@ -27,6 +27,7 @@ import { UsersPage } from '@/routes/admin/users';
 import { RolesPage } from '@/routes/admin/roles';
 import { SettingsPage } from '@/routes/admin/settings';
 import { LogForwardersPage } from '@/routes/admin/log-forwarders';
+import { PlatformLogsPage } from '@/routes/admin/platform-logs';
 import { ProfilePage } from '@/routes/profile';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -220,6 +221,12 @@ const logForwardersRoute = createRoute({
   component: LogForwardersPage,
 });
 
+const platformLogsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/admin/platform-logs',
+  component: PlatformLogsPage,
+});
+
 const profileRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/profile',
@@ -258,6 +265,7 @@ const routeTree = rootRoute.addChildren([
   rolesRoute,
   settingsRoute,
   logForwardersRoute,
+  platformLogsRoute,
   profileRoute,
   registerRoute,
   setupRoute,

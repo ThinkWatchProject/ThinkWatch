@@ -9,11 +9,39 @@ use agent_bastion_common::models::AuditLog;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
+fn escape_query_value(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        if "+-&|!(){}[]^\"~*?:\\/ ".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
+fn parse_date_start(s: &str) -> Result<i64, AppError> {
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map(|dt| dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
+        .map_err(|_| AppError::BadRequest(format!("Invalid date format '{}', expected YYYY-MM-DD", s)))
+}
+
+fn parse_date_end(s: &str) -> Result<i64, AppError> {
+    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map(|dt| dt.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp())
+        .map_err(|_| AppError::BadRequest(format!("Invalid date format '{}', expected YYYY-MM-DD", s)))
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AuditLogQuery {
     pub q: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+    pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
+    pub action: Option<String>,
+    pub resource: Option<String>,
+    pub ip_address: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -70,37 +98,53 @@ async fn query_quickwit(
     let max_hits = query.limit.unwrap_or(50).min(200);
     let start_offset = query.offset.unwrap_or(0);
 
-    // Build Quickwit query string
-    let search_query = query.q.as_deref().unwrap_or("*");
-    // Truncate to prevent oversized queries
-    let search_query = if search_query.len() > 255 {
-        &search_query[..255]
+    // Build Quickwit query string with structured filters
+    let mut parts: Vec<String> = Vec::new();
+
+    if let Some(ref q) = query.q {
+        let q = if q.len() > 255 { &q[..255] } else { q.as_str() };
+        if !q.is_empty() && q != "*" {
+            parts.push(q.to_string());
+        }
+    }
+    if let Some(ref v) = query.user_id {
+        parts.push(format!("user_id:{}", escape_query_value(v)));
+    }
+    if let Some(ref v) = query.api_key_id {
+        parts.push(format!("api_key_id:{}", escape_query_value(v)));
+    }
+    if let Some(ref v) = query.action {
+        parts.push(format!("action:{}", escape_query_value(v)));
+    }
+    if let Some(ref v) = query.resource {
+        parts.push(format!("resource:{}", escape_query_value(v)));
+    }
+    if let Some(ref v) = query.ip_address {
+        parts.push(format!("ip_address:{}", escape_query_value(v)));
+    }
+
+    let search_query = if parts.is_empty() {
+        "*".to_string()
     } else {
-        search_query
+        parts.join(" AND ")
     };
 
     let mut url = format!(
         "{}/api/v1/{}/search?query={}&max_hits={}&start_offset={}&sort_by_field=-created_at",
         qw_url,
         qw_index,
-        urlencoding::encode(search_query),
+        urlencoding::encode(&search_query),
         max_hits,
         start_offset,
     );
 
     // Optional timestamp range filters
-    if let Some(ref from) = query.from
-        && let Ok(dt) = chrono::NaiveDate::parse_from_str(from, "%Y-%m-%d")
-    {
-        let ts = dt.and_hms_opt(0, 0, 0).unwrap();
-        let epoch = ts.and_utc().timestamp();
+    if let Some(ref from) = query.from {
+        let epoch = parse_date_start(from)?;
         url.push_str(&format!("&start_timestamp={epoch}"));
     }
-    if let Some(ref to) = query.to
-        && let Ok(dt) = chrono::NaiveDate::parse_from_str(to, "%Y-%m-%d")
-    {
-        let ts = dt.and_hms_opt(23, 59, 59).unwrap();
-        let epoch = ts.and_utc().timestamp();
+    if let Some(ref to) = query.to {
+        let epoch = parse_date_end(to)?;
         url.push_str(&format!("&end_timestamp={epoch}"));
     }
 

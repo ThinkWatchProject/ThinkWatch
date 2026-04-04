@@ -11,6 +11,8 @@ pub mod mcp_logs;
 pub mod mcp_servers;
 pub mod mcp_tools;
 pub mod metrics;
+pub mod platform_logs;
 pub mod providers;
+pub mod roles;
 pub mod setup;
 pub mod sso;

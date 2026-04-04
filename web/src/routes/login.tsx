@@ -9,7 +9,7 @@ import { Shield } from 'lucide-react';
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
 interface LoginPageProps {
-  onLogin: (email: string, password: string) => Promise<void>;
+  onLogin: (email: string, password: string, totpCode?: string) => Promise<{ totp_required?: boolean; password_change_required?: boolean }>;
 }
 
 export function LoginPage({ onLogin }: LoginPageProps) {
@@ -19,6 +19,8 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [ssoEnabled, setSsoEnabled] = useState(false);
+  const [totpStep, setTotpStep] = useState(false);
+  const [totpCode, setTotpCode] = useState('');
 
   useEffect(() => {
     // Use public endpoint (no auth required)
@@ -33,7 +35,10 @@ export function LoginPage({ onLogin }: LoginPageProps) {
     setError('');
     setLoading(true);
     try {
-      await onLogin(email, password);
+      const res = await onLogin(email, password, totpStep ? totpCode : undefined);
+      if (res.totp_required) {
+        setTotpStep(true);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
     } finally {
@@ -81,8 +86,27 @@ export function LoginPage({ onLogin }: LoginPageProps) {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
+                disabled={totpStep}
               />
             </div>
+            {totpStep && (
+              <div className="space-y-2">
+                <Label htmlFor="totp">{t('auth.totpCode')}</Label>
+                <Input
+                  id="totp"
+                  type="text"
+                  inputMode="numeric"
+                  pattern="[0-9A-Za-z\-]*"
+                  maxLength={10}
+                  placeholder="000000"
+                  value={totpCode}
+                  onChange={(e) => setTotpCode(e.target.value)}
+                  autoFocus
+                  required
+                />
+                <p className="text-xs text-muted-foreground">{t('auth.totpHint')}</p>
+              </div>
+            )}
             <Button type="submit" className="w-full" disabled={loading}>
               {loading ? t('auth.signingIn') : t('auth.signIn')}
             </Button>

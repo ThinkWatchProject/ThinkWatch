@@ -9,14 +9,56 @@ use uuid::Uuid;
 
 use crate::models::LogForwarder;
 
+// ---------------------------------------------------------------------------
+// Log types — each maps to a distinct Quickwit index
+// ---------------------------------------------------------------------------
+
+/// The category of a log entry, determining which Quickwit index it's stored in
+/// and which forwarders will receive it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogType {
+    /// API request audit (gateway usage)
+    Audit,
+    /// Gateway request logs (model calls, tokens, costs)
+    Gateway,
+    /// MCP tool invocation logs
+    Mcp,
+    /// Platform management operations (user/team/provider/settings changes)
+    Platform,
+}
+
+impl LogType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LogType::Audit => "audit",
+            LogType::Gateway => "gateway",
+            LogType::Mcp => "mcp",
+            LogType::Platform => "platform",
+        }
+    }
+
+    pub fn index_id(&self) -> &'static str {
+        match self {
+            LogType::Audit => "audit_logs",
+            LogType::Gateway => "gateway_logs",
+            LogType::Mcp => "mcp_logs",
+            LogType::Platform => "platform_logs",
+        }
+    }
+}
+
 /// Audit log entry sent to Quickwit and dynamically configured forwarders.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEntry {
     pub id: String,
+    #[serde(skip)]
+    pub log_type: LogType,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
     pub action: String,
     pub resource: Option<String>,
+    pub resource_id: Option<String>,
     pub detail: Option<serde_json::Value>,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
@@ -27,15 +69,43 @@ impl AuditEntry {
     pub fn new(action: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
+            log_type: LogType::Audit,
             user_id: None,
             api_key_id: None,
             action: action.into(),
             resource: None,
+            resource_id: None,
             detail: None,
             ip_address: None,
             user_agent: None,
             created_at: Utc::now().to_rfc3339(),
         }
+    }
+
+    /// Create entry for platform management operations.
+    pub fn platform(action: impl Into<String>) -> Self {
+        let mut entry = Self::new(action);
+        entry.log_type = LogType::Platform;
+        entry
+    }
+
+    /// Create entry for gateway request logs.
+    pub fn gateway(action: impl Into<String>) -> Self {
+        let mut entry = Self::new(action);
+        entry.log_type = LogType::Gateway;
+        entry
+    }
+
+    /// Create entry for MCP tool invocation logs.
+    pub fn mcp(action: impl Into<String>) -> Self {
+        let mut entry = Self::new(action);
+        entry.log_type = LogType::Mcp;
+        entry
+    }
+
+    pub fn log_type(mut self, lt: LogType) -> Self {
+        self.log_type = lt;
+        self
     }
 
     pub fn user_id(mut self, id: Uuid) -> Self {
@@ -50,6 +120,11 @@ impl AuditEntry {
 
     pub fn resource(mut self, r: impl Into<String>) -> Self {
         self.resource = Some(r.into());
+        self
+    }
+
+    pub fn resource_id(mut self, r: impl Into<String>) -> Self {
+        self.resource_id = Some(r.into());
         self
     }
 
@@ -88,6 +163,7 @@ mod tests {
             .user_agent("curl/8.0");
 
         assert_eq!(entry.action, "api.request");
+        assert_eq!(entry.log_type, LogType::Audit);
         assert_eq!(
             entry.user_id.as_deref(),
             Some(user_id.to_string()).as_deref()
@@ -103,13 +179,32 @@ mod tests {
         assert!(!entry.id.is_empty());
         assert!(!entry.created_at.is_empty());
     }
+
+    #[test]
+    fn platform_entry_has_correct_type() {
+        let entry = AuditEntry::platform("user.created");
+        assert_eq!(entry.log_type, LogType::Platform);
+        assert_eq!(entry.action, "user.created");
+    }
+
+    #[test]
+    fn gateway_entry_has_correct_type() {
+        let entry = AuditEntry::gateway("chat.completion");
+        assert_eq!(entry.log_type, LogType::Gateway);
+    }
+
+    #[test]
+    fn mcp_entry_has_correct_type() {
+        let entry = AuditEntry::mcp("tool.invoke");
+        assert_eq!(entry.log_type, LogType::Mcp);
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct AuditConfig {
     /// Quickwit ingest endpoint, e.g. "http://localhost:7280"
     pub quickwit_url: Option<String>,
-    /// Quickwit index ID
+    /// Quickwit index ID (for audit_logs)
     pub quickwit_index: String,
 }
 
@@ -230,8 +325,8 @@ async fn audit_worker(
 ) {
     let http_client = reqwest::Client::new();
 
-    // Buffer for batching Quickwit ingests
-    let mut batch: Vec<AuditEntry> = Vec::with_capacity(64);
+    // Separate batches per log type for routing to correct Quickwit index
+    let mut batches: HashMap<&'static str, Vec<AuditEntry>> = HashMap::new();
     let mut flush_interval = tokio::time::interval(std::time::Duration::from_secs(2));
 
     loop {
@@ -240,14 +335,19 @@ async fn audit_worker(
                 // Forward to all enabled forwarders immediately
                 forward_to_all(&http_client, &registry, &db, &entry).await;
 
+                let index_id = entry.log_type.index_id();
+                let batch = batches.entry(index_id).or_insert_with(|| Vec::with_capacity(64));
                 batch.push(entry);
                 if batch.len() >= 50 {
-                    flush_to_quickwit(&http_client, &config, &mut batch).await;
+                    let mut b = std::mem::take(batch);
+                    flush_to_quickwit(&http_client, &config, index_id, &mut b).await;
                 }
             }
             _ = flush_interval.tick() => {
-                if !batch.is_empty() {
-                    flush_to_quickwit(&http_client, &config, &mut batch).await;
+                for (index_id, batch) in batches.iter_mut() {
+                    if !batch.is_empty() {
+                        flush_to_quickwit(&http_client, &config, index_id, batch).await;
+                    }
                 }
             }
             else => break,
@@ -255,16 +355,21 @@ async fn audit_worker(
     }
 }
 
-/// Forward a single entry to all enabled forwarders.
+/// Forward a single entry to all enabled forwarders that match the log type.
 async fn forward_to_all(
     http_client: &reqwest::Client,
     registry: &ForwarderRegistry,
     db: &Option<PgPool>,
     entry: &AuditEntry,
 ) {
+    let log_type_str = entry.log_type.as_str();
     let guard = registry.read().await;
     for (id, runtime) in guard.iter() {
         if !runtime.config.enabled {
+            continue;
+        }
+        // Only forward if the forwarder subscribes to this log type
+        if !runtime.config.log_types.iter().any(|t| t == log_type_str) {
             continue;
         }
         let result = match runtime.config.forwarder_type.as_str() {
@@ -481,16 +586,21 @@ async fn send_webhook(
 
 fn sanitize_detail(detail: &mut Option<serde_json::Value>) {
     if let Some(serde_json::Value::Object(map)) = detail {
-        let sensitive_keys = [
-            "password",
-            "secret",
-            "api_key",
-            "token",
-            "authorization",
-            "key_hash",
-        ];
-        for key in &sensitive_keys {
-            map.remove(*key);
+        let keys_to_redact: Vec<String> = map
+            .keys()
+            .filter(|k| {
+                let lower = k.to_lowercase();
+                lower.contains("password")
+                    || lower.contains("secret")
+                    || lower.contains("token")
+                    || lower.contains("key")
+                    || lower.contains("authorization")
+                    || lower.contains("credential")
+            })
+            .cloned()
+            .collect();
+        for key in keys_to_redact {
+            map.insert(key, serde_json::Value::String("[REDACTED]".to_string()));
         }
     }
 }
@@ -498,6 +608,7 @@ fn sanitize_detail(detail: &mut Option<serde_json::Value>) {
 async fn flush_to_quickwit(
     client: &reqwest::Client,
     config: &AuditConfig,
+    index_id: &str,
     batch: &mut Vec<AuditEntry>,
 ) {
     let Some(ref url) = config.quickwit_url else {
@@ -515,25 +626,40 @@ async fn flush_to_quickwit(
         .collect::<Vec<_>>()
         .join("\n");
 
-    let ingest_url = format!("{}/api/v1/{}/ingest", url, config.quickwit_index);
+    let ingest_url = format!("{}/api/v1/{}/ingest", url, index_id);
 
-    match client
-        .post(&ingest_url)
-        .header("Content-Type", "application/x-ndjson")
-        .body(ndjson)
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            tracing::debug!("Flushed {} audit entries to Quickwit", batch.len());
-        }
-        Ok(resp) => {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            tracing::warn!("Quickwit ingest returned {status}: {body}");
-        }
-        Err(e) => {
-            tracing::warn!("Quickwit ingest failed: {e}");
+    const MAX_RETRIES: u32 = 3;
+    for attempt in 1..=MAX_RETRIES {
+        match client
+            .post(&ingest_url)
+            .header("Content-Type", "application/x-ndjson")
+            .body(ndjson.clone())
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::debug!("Flushed {} entries to Quickwit index {}", batch.len(), index_id);
+                batch.clear();
+                return;
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body = resp.text().await.unwrap_or_default();
+                if attempt < MAX_RETRIES {
+                    tracing::warn!("Quickwit ingest returned {status} (attempt {attempt}/{MAX_RETRIES}): {body}");
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(attempt))).await;
+                } else {
+                    tracing::error!("Quickwit ingest failed after {MAX_RETRIES} retries ({status}): {body} — dropping {} entries", batch.len());
+                }
+            }
+            Err(e) => {
+                if attempt < MAX_RETRIES {
+                    tracing::warn!("Quickwit ingest error (attempt {attempt}/{MAX_RETRIES}): {e}");
+                    tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(attempt))).await;
+                } else {
+                    tracing::error!("Quickwit ingest failed after {MAX_RETRIES} retries: {e} — dropping {} entries", batch.len());
+                }
+            }
         }
     }
 
@@ -541,37 +667,44 @@ async fn flush_to_quickwit(
 }
 
 /// Initialize the Quickwit index (create if not exists). Call once at startup.
-pub async fn ensure_quickwit_index(quickwit_url: &str, index_id: &str) {
+pub async fn ensure_quickwit_index(quickwit_url: &str, _index_id: &str) {
     let client = reqwest::Client::new();
 
-    let check_url = format!("{}/api/v1/indexes/{}", quickwit_url, index_id);
-    match client.get(&check_url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            tracing::info!("Quickwit index '{index_id}' already exists");
-            return;
-        }
-        _ => {}
-    }
+    let indices: &[(&str, &str)] = &[
+        ("audit_logs", include_str!("../../../deploy/quickwit/audit_logs_index.yaml")),
+        ("gateway_logs", include_str!("../../../deploy/quickwit/gateway_logs_index.yaml")),
+        ("mcp_logs", include_str!("../../../deploy/quickwit/mcp_logs_index.yaml")),
+        ("platform_logs", include_str!("../../../deploy/quickwit/platform_logs_index.yaml")),
+    ];
 
-    let index_config = include_str!("../../../deploy/quickwit/audit_logs_index.yaml");
-    let create_url = format!("{}/api/v1/indexes", quickwit_url);
+    for (index_id, index_config) in indices {
+        let check_url = format!("{}/api/v1/indexes/{}", quickwit_url, index_id);
+        match client.get(&check_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("Quickwit index '{index_id}' already exists");
+                continue;
+            }
+            _ => {}
+        }
 
-    match client
-        .post(&create_url)
-        .header("Content-Type", "application/yaml")
-        .body(index_config.to_string())
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            tracing::info!("Created Quickwit index '{index_id}'");
-        }
-        Ok(resp) => {
-            let body = resp.text().await.unwrap_or_default();
-            tracing::warn!("Failed to create Quickwit index: {body}");
-        }
-        Err(e) => {
-            tracing::warn!("Failed to connect to Quickwit: {e}");
+        let create_url = format!("{}/api/v1/indexes", quickwit_url);
+        match client
+            .post(&create_url)
+            .header("Content-Type", "application/yaml")
+            .body(index_config.to_string())
+            .send()
+            .await
+        {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("Created Quickwit index '{index_id}'");
+            }
+            Ok(resp) => {
+                let body = resp.text().await.unwrap_or_default();
+                tracing::warn!("Failed to create Quickwit index '{index_id}': {body}");
+            }
+            Err(e) => {
+                tracing::warn!("Failed to connect to Quickwit for index '{index_id}': {e}");
+            }
         }
     }
 }

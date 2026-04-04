@@ -23,3 +23,5 @@ axum = { workspace = true }
 sqlx = { workspace = true }
 openidconnect = { workspace = true }
 tokio = { workspace = true }
+totp-rs = { workspace = true }
+data-encoding = { workspace = true }
