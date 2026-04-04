@@ -185,14 +185,210 @@ pub async fn force_logout_user(
             .unwrap_or(());
 
     state.audit.log(
-        agent_bastion_common::audit::AuditEntry::new("admin.force_logout")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("admin.force_logout")
             .resource(format!("user:{user_id}")),
     );
 
     Ok(Json(
         serde_json::json!({"status": "user_logged_out", "user_id": user_id}),
     ))
+}
+
+// --- Update user ---
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateUserRequest {
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+/// PATCH /api/admin/users/{id} — update user display_name, role, or active status.
+pub async fn update_user(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(user_id): Path<uuid::Uuid>,
+    Json(req): Json<UpdateUserRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Prevent self-deactivation
+    if req.is_active == Some(false) && user_id == auth_user.claims.sub {
+        return Err(AppError::BadRequest(
+            "Cannot deactivate your own account".into(),
+        ));
+    }
+
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
+    )
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+    if !exists {
+        return Err(AppError::NotFound("User not found".into()));
+    }
+
+    // Apply display_name update
+    if let Some(ref name) = req.display_name {
+        if name.trim().is_empty() {
+            return Err(AppError::BadRequest("Display name cannot be empty".into()));
+        }
+        sqlx::query("UPDATE users SET display_name = $1, updated_at = now() WHERE id = $2")
+            .bind(name.trim())
+            .bind(user_id)
+            .execute(&state.db)
+            .await?;
+    }
+
+    // Apply is_active toggle
+    if let Some(active) = req.is_active {
+        sqlx::query("UPDATE users SET is_active = $1, updated_at = now() WHERE id = $2")
+            .bind(active)
+            .bind(user_id)
+            .execute(&state.db)
+            .await?;
+
+        // If deactivating, also invalidate signing key
+        if !active {
+            let _: () = fred::interfaces::KeysInterface::del(
+                &state.redis,
+                &format!("signing_key:{user_id}"),
+            )
+            .await
+            .unwrap_or(());
+        }
+    }
+
+    // Apply role change
+    if let Some(ref role_name) = req.role {
+        // Check the target role exists
+        let role_id: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+                .bind(role_name)
+                .fetch_optional(&state.db)
+                .await?;
+        let role_id = role_id.ok_or(AppError::BadRequest(format!("Unknown role: {role_name}")))?;
+
+        // Prevent self role-downgrade from super_admin
+        if user_id == auth_user.claims.sub {
+            let is_super: bool = auth_user.claims.roles.contains(&"super_admin".to_string());
+            if is_super && role_name != "super_admin" {
+                return Err(AppError::BadRequest(
+                    "Cannot downgrade your own super_admin role".into(),
+                ));
+            }
+        }
+
+        // Replace all existing roles with the new one
+        sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&state.db)
+            .await?;
+        sqlx::query("INSERT INTO user_roles (user_id, role_id, scope) VALUES ($1, $2, 'global')")
+            .bind(user_id)
+            .bind(role_id)
+            .execute(&state.db)
+            .await?;
+    }
+
+    state.audit.log(
+        auth_user
+            .audit("admin.update_user")
+            .resource(format!("user:{user_id}")),
+    );
+
+    Ok(Json(
+        serde_json::json!({"status": "updated", "user_id": user_id}),
+    ))
+}
+
+/// DELETE /api/admin/users/{id} — soft-delete a user.
+pub async fn delete_user(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(user_id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    // Prevent self-deletion
+    if user_id == auth_user.claims.sub {
+        return Err(AppError::BadRequest(
+            "Cannot delete your own account from admin panel".into(),
+        ));
+    }
+
+    let rows = sqlx::query(
+        "UPDATE users SET deleted_at = now(), is_active = false, updated_at = now() WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&state.db)
+    .await?
+    .rows_affected();
+
+    if rows == 0 {
+        return Err(AppError::NotFound("User not found".into()));
+    }
+
+    // Invalidate signing key
+    let _: () =
+        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_key:{user_id}"))
+            .await
+            .unwrap_or(());
+
+    state.audit.log(
+        auth_user
+            .audit("admin.delete_user")
+            .resource(format!("user:{user_id}")),
+    );
+
+    Ok(Json(
+        serde_json::json!({"status": "deleted", "user_id": user_id}),
+    ))
+}
+
+/// POST /api/admin/users/{id}/reset-password — admin reset user password.
+pub async fn reset_user_password(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(user_id): Path<uuid::Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
+    )
+    .bind(user_id)
+    .fetch_one(&state.db)
+    .await?;
+
+    if !exists {
+        return Err(AppError::NotFound("User not found".into()));
+    }
+
+    let new_password = password::generate_random_password();
+    let hash = password::hash_password(&new_password)?;
+
+    sqlx::query(
+        "UPDATE users SET password_hash = $1, password_change_required = true, updated_at = now() WHERE id = $2",
+    )
+    .bind(&hash)
+    .bind(user_id)
+    .execute(&state.db)
+    .await?;
+
+    // Invalidate signing key to force re-login
+    let _: () =
+        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_key:{user_id}"))
+            .await
+            .unwrap_or(());
+
+    state.audit.log(
+        auth_user
+            .audit("admin.reset_password")
+            .resource(format!("user:{user_id}")),
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "password_reset",
+        "temporary_password": new_password,
+        "user_id": user_id,
+    })))
 }
 
 // --- System settings ---
@@ -325,8 +521,8 @@ pub async fn update_settings(
     dynamic_config::notify_config_changed(&state.redis).await;
 
     state.audit.log(
-        agent_bastion_common::audit::AuditEntry::new("settings.update")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("settings.update")
             .resource("system_settings")
             .detail(serde_json::json!({
                 "keys": req.settings.keys().collect::<Vec<_>>(),
@@ -405,8 +601,52 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
 
         // Boolean settings
         "setup.initialized" => {
+            // Only allow setting to true — prevent resetting initialization
+            let v = value
+                .as_bool()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a boolean")))?;
+            if !v {
+                return Err(AppError::BadRequest(
+                    "Cannot reset setup.initialized to false".into(),
+                ));
+            }
+        }
+
+        "auth.allow_registration" => {
             if !value.is_boolean() {
                 return Err(AppError::BadRequest(format!("{key} must be a boolean")));
+            }
+        }
+
+        // Client IP resolution
+        "security.client_ip_source" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
+            if !["connection", "xff", "x-real-ip"].contains(&s) {
+                return Err(AppError::BadRequest(
+                    "client_ip_source must be \"connection\", \"xff\", or \"x-real-ip\"".into(),
+                ));
+            }
+        }
+        "security.client_ip_xff_position" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
+            if !["left", "right"].contains(&s) {
+                return Err(AppError::BadRequest(
+                    "client_ip_xff_position must be \"left\" or \"right\"".into(),
+                ));
+            }
+        }
+        "security.client_ip_xff_depth" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            if !(1..=20).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "client_ip_xff_depth must be between 1 and 20".into(),
+                ));
             }
         }
 

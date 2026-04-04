@@ -378,9 +378,11 @@ export function ApiKeysPage() {
           <p className="text-muted-foreground">{t('apiKeys.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={handleDialogChange}>
-          <DialogTrigger render={<Button />}>
-            <Plus className="h-4 w-4" />
-            {t('apiKeys.createKey')}
+          <DialogTrigger asChild>
+            <Button>
+              <Plus className="h-4 w-4" />
+              {t('apiKeys.createKey')}
+            </Button>
           </DialogTrigger>
           <DialogContent className="sm:max-w-md">
             <DialogHeader>

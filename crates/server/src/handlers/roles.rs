@@ -189,6 +189,14 @@ pub async fn create_role(
 
     tx.commit().await?;
 
+    state.audit.log(
+        auth_user
+            .audit("role.created")
+            .resource("role")
+            .resource_id(row.0.to_string())
+            .detail(serde_json::json!({ "name": name })),
+    );
+
     Ok(Json(RoleResponse {
         id: row.0,
         name: name.to_string(),
@@ -216,7 +224,7 @@ pub struct UpdateRoleRequest {
 }
 
 pub async fn update_role(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateRoleRequest>,
@@ -324,6 +332,13 @@ pub async fn update_role(
 
     tx.commit().await?;
 
+    state.audit.log(
+        auth_user
+            .audit("role.updated")
+            .resource("role")
+            .resource_id(id.to_string()),
+    );
+
     // Fetch updated role
     let row = sqlx::query_as::<_, (Uuid, String, Option<String>, bool, Option<Vec<String>>, Option<Vec<Uuid>>, Option<serde_json::Value>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
         "SELECT id, name, description, is_system, allowed_models, allowed_mcp_servers, policy_document, created_at, updated_at FROM custom_roles WHERE id = $1",
@@ -359,7 +374,7 @@ pub async fn update_role(
 // --- Delete custom role ---
 
 pub async fn delete_role(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
@@ -377,6 +392,13 @@ pub async fn delete_role(
         .bind(id)
         .execute(&state.db)
         .await?;
+
+    state.audit.log(
+        auth_user
+            .audit("role.deleted")
+            .resource("role")
+            .resource_id(id.to_string()),
+    );
 
     Ok(Json(serde_json::json!({ "deleted": true })))
 }

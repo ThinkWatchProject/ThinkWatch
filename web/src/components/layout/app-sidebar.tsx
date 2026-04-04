@@ -2,6 +2,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Sidebar,
   SidebarContent,
+  SidebarFooter,
   SidebarGroup,
   SidebarGroupContent,
   SidebarGroupLabel,
@@ -9,8 +10,18 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
-  SidebarFooter,
+  SidebarRail,
+  useSidebar,
 } from '@/components/ui/sidebar';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 import {
   LayoutDashboard,
   Plug,
@@ -27,6 +38,9 @@ import {
   Settings,
   Forward,
   BookOpen,
+  ChevronsUpDown,
+  LogOut,
+  User,
 } from 'lucide-react';
 import { useNavigate, useLocation } from '@tanstack/react-router';
 
@@ -35,7 +49,6 @@ interface NavItem {
   icon: typeof LayoutDashboard;
   href: string;
 }
-
 interface NavGroup {
   labelKey: string;
   items: NavItem[];
@@ -77,8 +90,16 @@ const navGroups: NavGroup[] = [
       { titleKey: 'nav.requestLogs', icon: ScrollText, href: '/logs/gateway' },
       { titleKey: 'nav.mcpLogs', icon: ScrollText, href: '/logs/mcp' },
       { titleKey: 'nav.auditLogs', icon: ClipboardList, href: '/logs/audit' },
-      { titleKey: 'nav.platformLogs', icon: ClipboardList, href: '/logs/platform' },
-      { titleKey: 'nav.logForwarders', icon: Forward, href: '/logs/forwarders' },
+      {
+        titleKey: 'nav.platformLogs',
+        icon: ClipboardList,
+        href: '/logs/platform',
+      },
+      {
+        titleKey: 'nav.logForwarders',
+        icon: Forward,
+        href: '/logs/forwarders',
+      },
     ],
   },
   {
@@ -91,22 +112,116 @@ const navGroups: NavGroup[] = [
   },
 ];
 
-export function AppSidebar() {
+function NavUser({
+  userEmail,
+  onLogout,
+}: {
+  userEmail?: string;
+  onLogout: () => void;
+}) {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const { isMobile } = useSidebar();
+  const initials = userEmail
+    ? userEmail.substring(0, 2).toUpperCase()
+    : 'AB';
+
+  return (
+    <SidebarMenu>
+      <SidebarMenuItem>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <SidebarMenuButton
+              size="lg"
+              className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
+            >
+              <Avatar className="h-8 w-8 rounded-lg">
+                <AvatarFallback className="rounded-lg text-xs">
+                  {initials}
+                </AvatarFallback>
+              </Avatar>
+              <div className="grid flex-1 text-left text-sm leading-tight">
+                <span className="truncate font-medium">
+                  {userEmail ?? 'User'}
+                </span>
+                <span className="truncate text-xs text-muted-foreground">
+                  {userEmail}
+                </span>
+              </div>
+              <ChevronsUpDown className="ml-auto size-4" />
+            </SidebarMenuButton>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg"
+            side={isMobile ? 'bottom' : 'right'}
+            align="end"
+            sideOffset={4}
+          >
+            <DropdownMenuLabel className="p-0 font-normal">
+              <div className="flex items-center gap-2 px-1 py-1.5 text-left text-sm">
+                <Avatar className="h-8 w-8 rounded-lg">
+                  <AvatarFallback className="rounded-lg text-xs">
+                    {initials}
+                  </AvatarFallback>
+                </Avatar>
+                <div className="grid flex-1 text-left text-sm leading-tight">
+                  <span className="truncate font-medium">
+                    {userEmail ?? 'User'}
+                  </span>
+                  <span className="truncate text-xs">{userEmail}</span>
+                </div>
+              </div>
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={() => navigate({ to: '/profile' })}>
+              <User />
+              {t('auth.profile')}
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onClick={onLogout}>
+              <LogOut />
+              {t('auth.logout')}
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </SidebarMenuItem>
+    </SidebarMenu>
+  );
+}
+
+export function AppSidebar({
+  userEmail,
+  onLogout,
+}: {
+  userEmail?: string;
+  onLogout: () => void;
+}) {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
   const currentPath = location.pathname;
 
   return (
-    <Sidebar>
-      <SidebarHeader className="p-4">
-        <button
-          onClick={() => navigate({ to: '/' })}
-          className="flex items-center gap-2 hover:opacity-80"
-        >
-          <Shield className="h-6 w-6 text-primary" />
-          <span className="text-lg font-semibold">AgentBastion</span>
-        </button>
+    <Sidebar collapsible="icon">
+      <SidebarHeader>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              size="lg"
+              onClick={() => navigate({ to: '/' })}
+            >
+              <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+                <Shield className="size-4" />
+              </div>
+              <div className="grid flex-1 text-left text-sm leading-tight">
+                <span className="truncate font-semibold">AgentBastion</span>
+                <span className="truncate text-xs text-muted-foreground">
+                  Enterprise
+                </span>
+              </div>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
         {navGroups.map((group) => (
@@ -122,10 +237,13 @@ export function AppSidebar() {
                   return (
                     <SidebarMenuItem key={item.titleKey}>
                       <SidebarMenuButton
+                        tooltip={t(item.titleKey)}
                         isActive={isActive}
-                        onClick={() => navigate({ to: item.href as '/' })}
+                        onClick={() =>
+                          navigate({ to: item.href as '/' })
+                        }
                       >
-                        <item.icon className="h-4 w-4" />
+                        <item.icon />
                         <span>{t(item.titleKey)}</span>
                       </SidebarMenuButton>
                     </SidebarMenuItem>
@@ -136,9 +254,10 @@ export function AppSidebar() {
           </SidebarGroup>
         ))}
       </SidebarContent>
-      <SidebarFooter className="p-4 text-xs text-muted-foreground">
-        AgentBastion v0.1.0
+      <SidebarFooter>
+        <NavUser userEmail={userEmail} onLogout={onLogout} />
       </SidebarFooter>
+      <SidebarRail />
     </Sidebar>
   );
 }

@@ -189,9 +189,11 @@ export function McpServersPage() {
           <p className="text-muted-foreground">{t('mcpServers.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger render={<Button />}>
-            <Plus className="h-4 w-4" />
-            {t('mcpServers.registerServer')}
+          <DialogTrigger asChild>
+            <Button>
+              <Plus className="h-4 w-4" />
+              {t('mcpServers.registerServer')}
+            </Button>
           </DialogTrigger>
           <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
             <DialogHeader>

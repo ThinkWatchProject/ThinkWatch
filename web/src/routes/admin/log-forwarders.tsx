@@ -9,6 +9,7 @@ import { Separator } from '@/components/ui/separator';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Checkbox } from '@/components/ui/checkbox';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import {
   Dialog,
   DialogContent,
@@ -28,6 +29,7 @@ import {
 } from '@/components/ui/table';
 import {
   Plus,
+  X,
   Pause,
   Play,
   Trash2,
@@ -100,8 +102,8 @@ export function LogForwardersPage() {
   const [formBrokerUrl, setFormBrokerUrl] = useState('');
   const [formTopic, setFormTopic] = useState('');
   const [formWebhookUrl, setFormWebhookUrl] = useState('');
-  const [formAuthHeader, setFormAuthHeader] = useState('');
-  const [formLogTypes, setFormLogTypes] = useState<Set<string>>(new Set(['audit']));
+  const [formHeaders, setFormHeaders] = useState<{ key: string; value: string }[]>([]);
+  const [formLogTypes, setFormLogTypes] = useState<Set<string>>(new Set(['audit', 'gateway', 'mcp', 'platform']));
   const [creating, setCreating] = useState(false);
 
   // Edit state
@@ -113,7 +115,7 @@ export function LogForwardersPage() {
   const [editBrokerUrl, setEditBrokerUrl] = useState('');
   const [editTopic, setEditTopic] = useState('');
   const [editWebhookUrl, setEditWebhookUrl] = useState('');
-  const [editAuthHeader, setEditAuthHeader] = useState('');
+  const [editHeaders, setEditHeaders] = useState<{ key: string; value: string }[]>([]);
   const [editLogTypes, setEditLogTypes] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
 
@@ -146,8 +148,8 @@ export function LogForwardersPage() {
     setFormBrokerUrl('');
     setFormTopic('');
     setFormWebhookUrl('');
-    setFormAuthHeader('');
-    setFormLogTypes(new Set(['audit']));
+    setFormHeaders([]);
+    setFormLogTypes(new Set(['audit', 'gateway', 'mcp', 'platform']));
   };
 
   const buildConfig = (): Record<string, string> => {
@@ -158,7 +160,11 @@ export function LogForwardersPage() {
         return { broker_url: formBrokerUrl, topic: formTopic };
       case 'webhook': {
         const cfg: Record<string, string> = { url: formWebhookUrl };
-        if (formAuthHeader) cfg.auth_header = formAuthHeader;
+        const hdrs: Record<string, string> = {};
+        for (const h of formHeaders) {
+          if (h.key.trim() && h.value.trim()) hdrs[h.key.trim()] = h.value.trim();
+        }
+        if (Object.keys(hdrs).length > 0) cfg.custom_headers = JSON.stringify(hdrs);
         return cfg;
       }
       default:
@@ -235,7 +241,20 @@ export function LogForwardersPage() {
     setEditBrokerUrl(f.config.broker_url || '');
     setEditTopic(f.config.topic || '');
     setEditWebhookUrl(f.config.url || '');
-    setEditAuthHeader(f.config.auth_header || '');
+    const rawHeaders = f.config.custom_headers;
+    if (rawHeaders) {
+      try {
+        const parsed = typeof rawHeaders === 'string' ? JSON.parse(rawHeaders) : rawHeaders;
+        const entries = Object.entries(parsed as Record<string, string>).map(([key, value]) => ({ key, value }));
+        setEditHeaders(entries);
+      } catch {
+        setEditHeaders(f.config.auth_header ? [{ key: 'Authorization', value: f.config.auth_header }] : []);
+      }
+    } else if (f.config.auth_header) {
+      setEditHeaders([{ key: 'Authorization', value: f.config.auth_header }]);
+    } else {
+      setEditHeaders([]);
+    }
     setEditLogTypes(new Set(f.log_types || ['audit']));
     setEditDialogOpen(true);
   };
@@ -250,7 +269,11 @@ export function LogForwardersPage() {
         return { broker_url: editBrokerUrl, topic: editTopic };
       case 'webhook': {
         const cfg: Record<string, string> = { url: editWebhookUrl };
-        if (editAuthHeader) cfg.auth_header = editAuthHeader;
+        const hdrs: Record<string, string> = {};
+        for (const h of editHeaders) {
+          if (h.key.trim() && h.value.trim()) hdrs[h.key.trim()] = h.value.trim();
+        }
+        if (Object.keys(hdrs).length > 0) cfg.custom_headers = JSON.stringify(hdrs);
         return cfg;
       }
       default:
@@ -285,14 +308,12 @@ export function LogForwardersPage() {
           <p className="text-muted-foreground">{t('logForwarders.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger
-            render={
-              <Button onClick={() => { resetForm(); setDialogOpen(true); }}>
-                <Plus className="mr-2 h-4 w-4" />
-                {t('logForwarders.addForwarder')}
-              </Button>
-            }
-          />
+          <DialogTrigger asChild>
+            <Button onClick={() => { resetForm(); setDialogOpen(true); }}>
+              <Plus className="mr-2 h-4 w-4" />
+              {t('logForwarders.addForwarder')}
+            </Button>
+          </DialogTrigger>
           <DialogContent className="max-w-md max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>{t('logForwarders.addForwarder')}</DialogTitle>
@@ -305,19 +326,14 @@ export function LogForwardersPage() {
               </div>
               <div>
                 <Label>{t('logForwarders.type')}</Label>
-                <div className="flex gap-2 mt-1">
-                  {FORWARDER_TYPES.map((ft) => (
-                    <Button
-                      key={ft.value}
-                      type="button"
-                      variant={formType === ft.value ? 'default' : 'outline'}
-                      size="sm"
-                      onClick={() => setFormType(ft.value)}
-                    >
-                      {ft.label}
-                    </Button>
-                  ))}
-                </div>
+                <Select value={formType} onValueChange={(v) => setFormType(v ?? 'syslog')}>
+                  <SelectTrigger className="mt-1"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {FORWARDER_TYPES.map((ft) => (
+                      <SelectItem key={ft.value} value={ft.value}>{ft.label}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
               </div>
 
               {formType === 'syslog' && (
@@ -363,9 +379,20 @@ export function LogForwardersPage() {
                     <Label>{t('logForwarders.webhookUrl')}</Label>
                     <Input value={formWebhookUrl} onChange={(e) => setFormWebhookUrl(e.target.value)} placeholder="https://siem.example.com/ingest" />
                   </div>
-                  <div>
-                    <Label>{t('logForwarders.authHeader')}</Label>
-                    <Input value={formAuthHeader} onChange={(e) => setFormAuthHeader(e.target.value)} placeholder="Bearer xxx (optional)" />
+                  <div className="space-y-2">
+                    <Label>{t('logForwarders.customHeaders')}</Label>
+                    {formHeaders.map((h, i) => (
+                      <div key={i} className="flex gap-2 items-center">
+                        <Input className="flex-1" value={h.key} onChange={(e) => { const next = [...formHeaders]; next[i] = { ...h, key: e.target.value }; setFormHeaders(next); }} placeholder={t('logForwarders.headerName')} />
+                        <Input className="flex-1" value={h.value} onChange={(e) => { const next = [...formHeaders]; next[i] = { ...h, value: e.target.value }; setFormHeaders(next); }} placeholder={t('logForwarders.headerValue')} />
+                        <Button type="button" variant="ghost" size="icon-sm" onClick={() => setFormHeaders(formHeaders.filter((_, j) => j !== i))}>
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    ))}
+                    <Button type="button" variant="outline" size="sm" onClick={() => setFormHeaders([...formHeaders, { key: '', value: '' }])}>
+                      <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
+                    </Button>
                   </div>
                 </>
               )}
@@ -597,9 +624,20 @@ export function LogForwardersPage() {
                   <Label>{t('logForwarders.webhookUrl')}</Label>
                   <Input value={editWebhookUrl} onChange={(e) => setEditWebhookUrl(e.target.value)} />
                 </div>
-                <div>
-                  <Label>{t('logForwarders.authHeader')}</Label>
-                  <Input value={editAuthHeader} onChange={(e) => setEditAuthHeader(e.target.value)} />
+                <div className="space-y-2">
+                  <Label>{t('logForwarders.customHeaders')}</Label>
+                  {editHeaders.map((h, i) => (
+                    <div key={i} className="flex gap-2 items-center">
+                      <Input className="flex-1" value={h.key} onChange={(e) => { const next = [...editHeaders]; next[i] = { ...h, key: e.target.value }; setEditHeaders(next); }} placeholder={t('logForwarders.headerName')} />
+                      <Input className="flex-1" value={h.value} onChange={(e) => { const next = [...editHeaders]; next[i] = { ...h, value: e.target.value }; setEditHeaders(next); }} placeholder={t('logForwarders.headerValue')} />
+                      <Button type="button" variant="ghost" size="icon-sm" onClick={() => setEditHeaders(editHeaders.filter((_, j) => j !== i))}>
+                        <X className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                  <Button type="button" variant="outline" size="sm" onClick={() => setEditHeaders([...editHeaders, { key: '', value: '' }])}>
+                    <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
+                  </Button>
                 </div>
               </>
             )}

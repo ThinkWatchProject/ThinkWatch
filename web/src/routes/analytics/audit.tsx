@@ -16,7 +16,9 @@ import { Search, ChevronDown, ChevronRight, FileText, AlertCircle } from 'lucide
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { api } from '@/lib/api';
+import { DateTimeRangePicker } from '@/components/ui/datetime-picker';
 import { Skeleton } from '@/components/ui/skeleton';
+
 import { Pagination, PaginationContent, PaginationItem, PaginationNext, PaginationPrevious } from '@/components/ui/pagination';
 
 interface AuditLog {
@@ -112,12 +114,8 @@ export function AuditPage() {
               <Input placeholder="User UUID" value={userId} onChange={(e) => setUserId(e.target.value)} />
             </div>
             <div>
-              <Label className="text-xs">{t('logs.dateFrom')}</Label>
-              <Input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
-            </div>
-            <div>
-              <Label className="text-xs">{t('logs.dateTo')}</Label>
-              <Input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} />
+              <Label className="text-xs">{t('logs.dateRange', 'Date Range')}</Label>
+              <DateTimeRangePicker from={dateFrom} to={dateTo} onFromChange={setDateFrom} onToChange={setDateTo} />
             </div>
           </div>
           <div className="mt-3 flex justify-end">

@@ -6,12 +6,27 @@ use axum::{
 };
 
 use agent_bastion_auth::jwt::Claims;
+use agent_bastion_common::audit::AuditEntry;
 
 use crate::app::AppState;
 
 #[derive(Debug, Clone)]
 pub struct AuthUser {
     pub claims: Claims,
+    pub ip: Option<String>,
+}
+
+impl AuthUser {
+    /// Build an audit entry pre-filled with user_id, user_email, and ip_address.
+    pub fn audit(&self, action: impl Into<String>) -> AuditEntry {
+        let mut e = AuditEntry::platform(action)
+            .user_id(self.claims.sub)
+            .user_email(&self.claims.email);
+        if let Some(ref ip) = self.ip {
+            e = e.ip_address(ip.clone());
+        }
+        e
+    }
 }
 
 impl<S> FromRequestParts<S> for AuthUser
@@ -59,7 +74,43 @@ pub async fn require_auth(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    request.extensions_mut().insert(AuthUser { claims });
+    // Extract client IP based on dynamic config
+    let ip_source = state.dynamic_config.client_ip_source().await;
+    let ip = match ip_source.as_str() {
+        "xff" => {
+            let position = state.dynamic_config.client_ip_xff_position().await;
+            let depth = state.dynamic_config.client_ip_xff_depth().await.max(1) as usize;
+            request
+                .headers()
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
+                    if parts.is_empty() {
+                        return None;
+                    }
+                    let idx = if position == "right" {
+                        parts.len().checked_sub(depth)
+                    } else {
+                        let i = depth - 1;
+                        if i < parts.len() { Some(i) } else { None }
+                    };
+                    idx.and_then(|i| parts.get(i)).map(|s| s.to_string())
+                })
+        }
+        "x-real-ip" => request
+            .headers()
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string()),
+        // "connection" — use TCP peer address from ConnectInfo
+        _ => request
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip().to_string()),
+    };
+
+    request.extensions_mut().insert(AuthUser { claims, ip });
 
     Ok(next.run(request).await)
 }

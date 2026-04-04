@@ -52,11 +52,8 @@ pub async fn verify_signature(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Only enforce on state-changing methods
-    if matches!(
-        *request.method(),
-        Method::GET | Method::HEAD | Method::OPTIONS
-    ) {
+    // Skip CORS preflight
+    if *request.method() == Method::OPTIONS {
         return Ok(next.run(request).await);
     }
 
@@ -126,8 +123,10 @@ pub async fn verify_signature(
         tracing::warn!("No signing key found for user {user_id}");
         StatusCode::UNAUTHORIZED
     })?;
-    let signing_key =
-        hex::decode(&signing_key_hex).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let signing_key = hex::decode(&signing_key_hex).map_err(|e| {
+        tracing::error!("Failed to hex-decode signing key for user {user_id}: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     // Parse expected signature
     let expected_hex = signature_header
@@ -137,7 +136,12 @@ pub async fn verify_signature(
 
     // Buffer the body to compute hash, then reconstruct
     let method = request.method().clone();
-    let path = request.uri().path().to_string();
+    let path = request
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or(request.uri().path())
+        .to_string();
     let (parts, body) = request.into_parts();
     let body_bytes = axum::body::to_bytes(body, 10 * 1024 * 1024) // 10MB max
         .await
@@ -153,14 +157,10 @@ pub async fn verify_signature(
     use hmac::{Hmac, Mac, digest::KeyInit};
     type HmacSha256 = Hmac<Sha256>;
 
-    if signing_key.len() != 32 {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-    let mac_key: hmac::digest::Key<HmacSha256> = signing_key
-        .as_slice()
-        .try_into()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let mut mac = HmacSha256::new(&mac_key);
+    let mut mac = HmacSha256::new_from_slice(&signing_key).map_err(|e| {
+        tracing::error!("Failed to create HMAC key for user {user_id}: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     mac.update(string_to_sign.as_bytes());
 
     // Constant-time comparison via hmac::Mac::verify_slice

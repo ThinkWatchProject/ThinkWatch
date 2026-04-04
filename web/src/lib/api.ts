@@ -16,9 +16,6 @@ async function signRequest(
   const signingKeyHex = sessionStorage.getItem('signing_key');
   if (!signingKeyHex) return {};
 
-  // Only sign state-changing methods
-  if (['GET', 'HEAD', 'OPTIONS'].includes(method.toUpperCase())) return {};
-
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const nonce = crypto.randomUUID();
 

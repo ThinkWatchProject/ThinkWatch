@@ -16,10 +16,10 @@ export function ThemeToggle() {
 
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger
-        render={<button className="flex items-center gap-1.5 rounded-md p-1.5 text-sm hover:bg-accent" />}
-      >
-        <Icon className="h-4 w-4" />
+      <DropdownMenuTrigger asChild>
+        <button className="flex items-center gap-1.5 rounded-md p-1.5 text-sm hover:bg-accent">
+          <Icon className="h-4 w-4" />
+        </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end">
         <DropdownMenuItem onClick={() => setTheme('light')}>

@@ -1,57 +1,78 @@
 import { useTranslation } from 'react-i18next';
+import { useLocation } from '@tanstack/react-router';
 import { SidebarTrigger } from '@/components/ui/sidebar';
 import { Separator } from '@/components/ui/separator';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
-import { LogOut, User } from 'lucide-react';
-import { useNavigate } from '@tanstack/react-router';
+  Breadcrumb,
+  BreadcrumbItem,
+  BreadcrumbLink,
+  BreadcrumbList,
+  BreadcrumbPage,
+  BreadcrumbSeparator,
+} from '@/components/ui/breadcrumb';
 import { LanguageSwitcher } from './language-switcher';
 import { ThemeToggle } from './theme-toggle';
 
-interface AppHeaderProps {
-  userEmail?: string;
-  onLogout: () => void;
-}
+const breadcrumbMap: Record<string, { sectionKey: string; pageKey: string }> = {
+  '/': { sectionKey: 'nav.overview', pageKey: 'nav.dashboard' },
+  '/guide': { sectionKey: 'nav.overview', pageKey: 'nav.configGuide' },
+  '/gateway/providers': { sectionKey: 'nav.aiGateway', pageKey: 'nav.providers' },
+  '/gateway/models': { sectionKey: 'nav.aiGateway', pageKey: 'nav.models' },
+  '/gateway/api-keys': { sectionKey: 'nav.aiGateway', pageKey: 'nav.apiKeys' },
+  '/mcp/servers': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.mcpServers' },
+  '/mcp/tools': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.tools' },
+  '/analytics/usage': { sectionKey: 'nav.analytics', pageKey: 'nav.usage' },
+  '/analytics/costs': { sectionKey: 'nav.analytics', pageKey: 'nav.costs' },
+  '/logs/gateway': { sectionKey: 'nav.logs', pageKey: 'nav.requestLogs' },
+  '/logs/mcp': { sectionKey: 'nav.logs', pageKey: 'nav.mcpLogs' },
+  '/logs/audit': { sectionKey: 'nav.logs', pageKey: 'nav.auditLogs' },
+  '/logs/platform': { sectionKey: 'nav.logs', pageKey: 'nav.platformLogs' },
+  '/logs/forwarders': { sectionKey: 'nav.logs', pageKey: 'nav.logForwarders' },
+  '/admin/users': { sectionKey: 'nav.admin', pageKey: 'nav.users' },
+  '/admin/roles': { sectionKey: 'nav.admin', pageKey: 'nav.roles' },
+  '/admin/settings': { sectionKey: 'nav.admin', pageKey: 'nav.settings' },
+  '/profile': { sectionKey: 'nav.admin', pageKey: 'auth.profile' },
+};
 
-export function AppHeader({ userEmail, onLogout }: AppHeaderProps) {
+export function AppHeader() {
   const { t } = useTranslation();
-  const navigate = useNavigate();
-  const initials = userEmail
-    ? userEmail.substring(0, 2).toUpperCase()
-    : 'AB';
+  const location = useLocation();
+  const crumb = breadcrumbMap[location.pathname];
 
   return (
-    <header className="flex h-14 items-center gap-2 border-b px-4">
-      <SidebarTrigger />
-      <Separator orientation="vertical" className="h-6" />
-      <div className="flex-1" />
-      <ThemeToggle />
-      <LanguageSwitcher />
-      <DropdownMenu>
-        <DropdownMenuTrigger
-          render={<button className="flex items-center gap-2 rounded-md p-1 hover:bg-accent" />}
-        >
-          <Avatar className="h-8 w-8">
-            <AvatarFallback className="text-xs">{initials}</AvatarFallback>
-          </Avatar>
-          <span className="hidden text-sm md:inline">{userEmail}</span>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="end">
-          <DropdownMenuItem onClick={() => navigate({ to: '/profile' })}>
-            <User className="mr-2 h-4 w-4" />
-            {t('auth.profile')}
-          </DropdownMenuItem>
-          <DropdownMenuItem onClick={onLogout}>
-            <LogOut className="mr-2 h-4 w-4" />
-            {t('auth.logout')}
-          </DropdownMenuItem>
-        </DropdownMenuContent>
-      </DropdownMenu>
+    <header className="flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12">
+      <div className="flex items-center gap-2 px-4">
+        <SidebarTrigger className="-ml-1" />
+        <Separator
+          orientation="vertical"
+          className="mr-2 data-[orientation=vertical]:h-4"
+        />
+        <Breadcrumb>
+          <BreadcrumbList>
+            {crumb ? (
+              <>
+                <BreadcrumbItem className="hidden md:block">
+                  <BreadcrumbLink href="#">
+                    {t(crumb.sectionKey)}
+                  </BreadcrumbLink>
+                </BreadcrumbItem>
+                <BreadcrumbSeparator className="hidden md:block" />
+                <BreadcrumbItem>
+                  <BreadcrumbPage>{t(crumb.pageKey)}</BreadcrumbPage>
+                </BreadcrumbItem>
+              </>
+            ) : (
+              <BreadcrumbItem>
+                <BreadcrumbPage>AgentBastion</BreadcrumbPage>
+              </BreadcrumbItem>
+            )}
+          </BreadcrumbList>
+        </Breadcrumb>
+      </div>
+      <div className="ml-auto flex items-center gap-2 px-4">
+        <ThemeToggle />
+        <LanguageSwitcher />
+      </div>
     </header>
   );
 }

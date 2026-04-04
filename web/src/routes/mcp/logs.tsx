@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { DateTimeRangePicker } from '@/components/ui/datetime-picker';
 import {
   Table,
   TableBody,
@@ -118,10 +119,10 @@ export function McpLogsPage() {
             </div>
             <div>
               <Label className="text-xs">{t('mcpLogs.status')}</Label>
-              <Select value={status} onValueChange={(v) => setStatus(v ?? '')}>
+              <Select value={status || '__all__'} onValueChange={(v) => setStatus(v === '__all__' ? '' : v)}>
                 <SelectTrigger className="h-8"><SelectValue placeholder={t('common.all')} /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="">{t('common.all')}</SelectItem>
+                  <SelectItem value="__all__">{t('common.all')}</SelectItem>
                   <SelectItem value="success">Success</SelectItem>
                   <SelectItem value="error">Error</SelectItem>
                 </SelectContent>
@@ -132,12 +133,8 @@ export function McpLogsPage() {
               <Input placeholder="UUID" value={userId} onChange={(e) => setUserId(e.target.value)} />
             </div>
             <div>
-              <Label className="text-xs">{t('logs.dateFrom')}</Label>
-              <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} />
-            </div>
-            <div>
-              <Label className="text-xs">{t('logs.dateTo')}</Label>
-              <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} />
+              <Label className="text-xs">{t('logs.dateRange', 'Date Range')}</Label>
+              <DateTimeRangePicker from={from} to={to} onFromChange={setFrom} onToChange={setTo} />
             </div>
             <div>
               <Label className="text-xs">{t('logs.sortBy')}</Label>

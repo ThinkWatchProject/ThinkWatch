@@ -24,6 +24,7 @@ import {
 } from '@/components/ui/table';
 import { Settings, Shield, Key, DollarSign, Database, Lock, Plus, Trash2, AlertCircle, CheckCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Switch } from '@/components/ui/switch';
 import { api, apiPatch } from '@/lib/api';
 
 // ---------------------------------------------------------------------------
@@ -77,11 +78,12 @@ interface PiiPattern {
 function getSettingValue(
   settings: Record<string, SettingEntry[]>,
   category: string,
-  key: string,
+  shortKey: string,
 ): unknown {
   const entries = settings[category];
   if (!entries) return undefined;
-  const entry = entries.find((e) => e.key === key);
+  const fullKey = `${category}.${shortKey}`;
+  const entry = entries.find((e) => e.key === fullKey);
   return entry?.value;
 }
 
@@ -161,6 +163,7 @@ export function SettingsPage() {
   const [refreshTtl, setRefreshTtl] = useState(7);
   const [signatureDrift, setSignatureDrift] = useState(300);
   const [nonceTtl, setNonceTtl] = useState(300);
+  const [allowRegistration, setAllowRegistration] = useState(false);
   // Gateway
   const [cacheTtl, setCacheTtl] = useState(0);
   const [requestTimeout, setRequestTimeout] = useState(30);
@@ -168,6 +171,9 @@ export function SettingsPage() {
   // Security
   const [contentFilters, setContentFilters] = useState<ContentFilterPattern[]>([]);
   const [piiPatterns, setPiiPatterns] = useState<PiiPattern[]>([]);
+  const [clientIpSource, setClientIpSource] = useState('xff');
+  const [clientIpXffPosition, setClientIpXffPosition] = useState('left');
+  const [clientIpXffDepth, setClientIpXffDepth] = useState(1);
   // Budget
   const [alertThresholds, setAlertThresholds] = useState('');
   const [webhookUrl, setWebhookUrl] = useState('');
@@ -185,19 +191,23 @@ export function SettingsPage() {
   // ---------------------------------------------------------------------------
 
   const populateForm = useCallback((data: Record<string, SettingEntry[]>) => {
-    setSiteName(str(getSettingValue(data, 'general', 'site_name'), ''));
-    setAccessTtl(num(getSettingValue(data, 'auth', 'jwt_access_ttl_seconds'), 3600));
+    setSiteName(str(getSettingValue(data, 'setup', 'site_name'), ''));
+    setAccessTtl(num(getSettingValue(data, 'auth', 'jwt_access_ttl_secs'), 900));
     setRefreshTtl(num(getSettingValue(data, 'auth', 'jwt_refresh_ttl_days'), 7));
-    setSignatureDrift(num(getSettingValue(data, 'auth', 'signature_drift_seconds'), 300));
-    setNonceTtl(num(getSettingValue(data, 'auth', 'signature_nonce_ttl_seconds'), 300));
-    setCacheTtl(num(getSettingValue(data, 'gateway', 'cache_ttl_seconds'), 0));
-    setRequestTimeout(num(getSettingValue(data, 'gateway', 'request_timeout_seconds'), 30));
-    setBodyLimit(num(getSettingValue(data, 'gateway', 'body_limit_bytes'), 1048576));
+    setSignatureDrift(num(getSettingValue(data, 'security', 'signature_drift_secs'), 300));
+    setNonceTtl(num(getSettingValue(data, 'security', 'signature_nonce_ttl_secs'), 600));
+    setAllowRegistration(getSettingValue(data, 'auth', 'allow_registration') === true);
+    setCacheTtl(num(getSettingValue(data, 'gateway', 'cache_ttl_secs'), 3600));
+    setRequestTimeout(num(getSettingValue(data, 'gateway', 'request_timeout_secs'), 120));
+    setBodyLimit(num(getSettingValue(data, 'gateway', 'body_limit_bytes'), 10485760));
 
     const cf = getSettingValue(data, 'security', 'content_filter_patterns');
     setContentFilters(Array.isArray(cf) ? cf : []);
     const pp = getSettingValue(data, 'security', 'pii_redactor_patterns');
     setPiiPatterns(Array.isArray(pp) ? pp : []);
+    setClientIpSource(str(getSettingValue(data, 'security', 'client_ip_source'), 'xff'));
+    setClientIpXffPosition(str(getSettingValue(data, 'security', 'client_ip_xff_position'), 'left'));
+    setClientIpXffDepth(num(getSettingValue(data, 'security', 'client_ip_xff_depth'), 1));
 
     const th = getSettingValue(data, 'budget', 'alert_thresholds');
     setAlertThresholds(Array.isArray(th) ? th.join(', ') : str(th, ''));
@@ -208,8 +218,8 @@ export function SettingsPage() {
     setRotationPeriod(num(getSettingValue(data, 'api_keys', 'rotation_period_days'), 0));
     setGracePeriod(num(getSettingValue(data, 'api_keys', 'rotation_grace_period_hours'), 24));
 
-    setUsageRetention(num(getSettingValue(data, 'data', 'usage_retention_days'), 90));
-    setAuditRetention(num(getSettingValue(data, 'data', 'audit_retention_days'), 365));
+    setUsageRetention(num(getSettingValue(data, 'data', 'retention_days_usage'), 90));
+    setAuditRetention(num(getSettingValue(data, 'data', 'retention_days_audit'), 365));
   }, []);
 
   useEffect(() => {
@@ -247,24 +257,28 @@ export function SettingsPage() {
 
       await apiPatch('/api/admin/settings', {
         settings: {
-          site_name: siteName,
-          jwt_access_ttl_seconds: accessTtl,
-          jwt_refresh_ttl_days: refreshTtl,
-          signature_drift_seconds: signatureDrift,
-          signature_nonce_ttl_seconds: nonceTtl,
-          cache_ttl_seconds: cacheTtl,
-          request_timeout_seconds: requestTimeout,
-          body_limit_bytes: bodyLimit,
-          content_filter_patterns: contentFilters,
-          pii_redactor_patterns: piiPatterns,
-          alert_thresholds: thresholdsParsed,
-          webhook_url: webhookUrl,
-          default_expiry_days: defaultExpiry,
-          inactivity_timeout_days: inactivityTimeout,
-          rotation_period_days: rotationPeriod,
-          rotation_grace_period_hours: gracePeriod,
-          usage_retention_days: usageRetention,
-          audit_retention_days: auditRetention,
+          'setup.site_name': siteName,
+          'auth.jwt_access_ttl_secs': accessTtl,
+          'auth.jwt_refresh_ttl_days': refreshTtl,
+          'security.signature_drift_secs': signatureDrift,
+          'security.signature_nonce_ttl_secs': nonceTtl,
+          'auth.allow_registration': allowRegistration,
+          'gateway.cache_ttl_secs': cacheTtl,
+          'gateway.request_timeout_secs': requestTimeout,
+          'gateway.body_limit_bytes': bodyLimit,
+          'security.content_filter_patterns': contentFilters,
+          'security.pii_redactor_patterns': piiPatterns,
+          'security.client_ip_source': clientIpSource,
+          'security.client_ip_xff_position': clientIpXffPosition,
+          'security.client_ip_xff_depth': clientIpXffDepth,
+          'budget.alert_thresholds': thresholdsParsed,
+          'budget.webhook_url': webhookUrl,
+          'api_keys.default_expiry_days': defaultExpiry,
+          'api_keys.inactivity_timeout_days': inactivityTimeout,
+          'api_keys.rotation_period_days': rotationPeriod,
+          'api_keys.rotation_grace_period_hours': gracePeriod,
+          'data.retention_days_usage': usageRetention,
+          'data.retention_days_audit': auditRetention,
         },
       });
       setStatusMsg({ type: 'success', text: t('settings.saved') });
@@ -511,6 +525,14 @@ export function SettingsPage() {
                 <NumberField label={t('settings.signatureDrift')} value={signatureDrift} onChange={setSignatureDrift} min={0} max={3600} />
                 <NumberField label={t('settings.nonceTtl')} value={nonceTtl} onChange={setNonceTtl} min={0} max={3600} />
               </div>
+              <Separator className="my-6" />
+              <div className="flex items-center justify-between max-w-2xl">
+                <div>
+                  <Label className="text-sm">{t('settings.allowRegistration')}</Label>
+                  <p className="text-xs text-muted-foreground mt-0.5">{t('settings.allowRegistrationHint')}</p>
+                </div>
+                <Switch checked={allowRegistration} onCheckedChange={setAllowRegistration} />
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
@@ -561,6 +583,55 @@ export function SettingsPage() {
         {/* ---------------------------------------------------------------- */}
         <TabsContent value="security">
           <div className="space-y-6">
+            {/* Client IP resolution */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t('settings.clientIpTitle')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
+                  <div className="space-y-1">
+                    <Label className="text-sm">{t('settings.clientIpSource')}</Label>
+                    <Select value={clientIpSource} onValueChange={setClientIpSource}>
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="connection">{t('settings.ipSourceConnection')}</SelectItem>
+                        <SelectItem value="xff">{t('settings.ipSourceXff')}</SelectItem>
+                        <SelectItem value="x-real-ip">{t('settings.ipSourceXRealIp')}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">{t('settings.clientIpSourceHint')}</p>
+                  </div>
+                  {clientIpSource === 'xff' && (
+                    <>
+                      <div className="space-y-1">
+                        <Label className="text-sm">{t('settings.xffPosition')}</Label>
+                        <Select value={clientIpXffPosition} onValueChange={setClientIpXffPosition}>
+                          <SelectTrigger>
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="left">{t('settings.xffPositionLeft')}</SelectItem>
+                            <SelectItem value="right">{t('settings.xffPositionRight')}</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <NumberField
+                        label={t('settings.xffDepth')}
+                        value={clientIpXffDepth}
+                        onChange={setClientIpXffDepth}
+                        min={1}
+                        max={20}
+                        hint={t('settings.xffDepthHint')}
+                      />
+                    </>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+
             {/* Content filter patterns */}
             <Card>
               <CardHeader>
