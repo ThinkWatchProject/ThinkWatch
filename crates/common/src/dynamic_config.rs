@@ -258,7 +258,7 @@ impl DynamicConfig {
     pub async fn client_ip_source(&self) -> String {
         self.get_string("security.client_ip_source")
             .await
-            .unwrap_or_else(|| "xff".to_string())
+            .unwrap_or_else(|| "connection".to_string())
     }
 
     pub async fn client_ip_xff_position(&self) -> String {
@@ -414,7 +414,7 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
             let n = value
                 .as_i64()
                 .ok_or_else(|| anyhow::anyhow!("{key}: expected an integer"))?;
-            if n < 1 || n > 20 {
+            if !(1..=20).contains(&n) {
                 anyhow::bail!("{key}: must be between 1 and 20");
             }
         }

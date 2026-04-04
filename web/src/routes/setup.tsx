@@ -469,7 +469,7 @@ export function SetupPage() {
             )}
             {renderStepContent()}
             {(showBack || showNext || showSubmit || showSkip) && (
-              <div className="flex items-center justify-between px-6 pb-6">
+              <div className="flex items-center justify-between px-6 pb-6 pt-2">
                 <div>
                   {showBack && (
                     <Button type="button" variant="ghost" onClick={goBack}>
