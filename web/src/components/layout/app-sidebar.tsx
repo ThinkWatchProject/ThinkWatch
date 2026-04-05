@@ -32,7 +32,6 @@ import {
   Wrench,
   BarChart3,
   DollarSign,
-  ClipboardList,
   Users,
   Shield,
   Settings,
