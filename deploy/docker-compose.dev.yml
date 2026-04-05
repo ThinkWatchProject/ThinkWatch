@@ -46,7 +46,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-thinkwatch}"]
       interval: 5s
@@ -133,7 +133,7 @@ services:
       POSTGRES_PASSWORD: ${ZITADEL_PG_PASSWORD:?ZITADEL_PG_PASSWORD is required}
       POSTGRES_DB: zitadel
     volumes:
-      - ./data/zitadel_db:/var/lib/postgresql/data
+      - ./data/zitadel_db:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
