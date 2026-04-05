@@ -130,7 +130,7 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME:-think_watch}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-thinkwatch}"]
       interval: 5s
@@ -149,7 +149,7 @@ services:
     image: redis:8-alpine
     command: redis-server /etc/redis/redis.conf --requirepass ${REDIS_PASSWORD:-}
     volumes:
-      - redisdata:/data
+      - ./data/redis:/data
       - ./redis/redis.conf:/etc/redis/redis.conf:ro
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -173,7 +173,7 @@ services:
       CLICKHOUSE_DB: think_watch
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
+      - ./data/clickhouse:/var/lib/clickhouse
       - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
       - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
@@ -198,7 +198,3 @@ networks:
     driver: bridge
     internal: true
 
-volumes:
-  pgdata:
-  redisdata:
-  clickhouse_data:

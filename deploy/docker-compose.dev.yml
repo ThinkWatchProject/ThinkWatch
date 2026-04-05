@@ -46,7 +46,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - ./data/postgres:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-thinkwatch}"]
       interval: 5s
@@ -59,7 +59,7 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - redisdata:/data
+      - ./data/redis:/data
       - ./redis/redis.conf:/etc/redis/redis.conf:ro
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
@@ -79,7 +79,7 @@ services:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-think_watch}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
-      - clickhouse_data:/var/lib/clickhouse
+      - ./data/clickhouse:/var/lib/clickhouse
       - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
       - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
@@ -133,15 +133,10 @@ services:
       POSTGRES_PASSWORD: ${ZITADEL_PG_PASSWORD:?ZITADEL_PG_PASSWORD is required}
       POSTGRES_DB: zitadel
     volumes:
-      - zitadel_db_data:/var/lib/postgresql/data
+      - ./data/zitadel_db:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
       timeout: 3s
       retries: 10
 
-volumes:
-  pgdata:
-  redisdata:
-  clickhouse_data:
-  zitadel_db_data:
