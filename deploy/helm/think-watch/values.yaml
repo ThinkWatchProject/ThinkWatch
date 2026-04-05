@@ -53,7 +53,7 @@ clickhouse:
   enabled: true
   url: "http://clickhouse:8123"
   db: "think_watch"
-  user: "bastion"
+  user: "thinkwatch"
   password: ""  # stored in Secret, not ConfigMap
   # Deploy optimized ClickHouse config as ConfigMaps
   # Mount these into your ClickHouse StatefulSet / Operator CR

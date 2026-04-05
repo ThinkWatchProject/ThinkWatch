@@ -40,7 +40,7 @@ services:
       - -c
       - log_lock_waits=on
     environment:
-      POSTGRES_USER: ${DB_USER:-bastion}
+      POSTGRES_USER: ${DB_USER:-thinkwatch}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
       POSTGRES_DB: ${DB_NAME:-think_watch}
     ports:
@@ -48,7 +48,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-bastion}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-thinkwatch}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -74,7 +74,7 @@ services:
       - "8123:8123"   # HTTP interface
       - "9000:9000"   # Native TCP
     environment:
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-bastion}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-thinkwatch}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-think_watch}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1

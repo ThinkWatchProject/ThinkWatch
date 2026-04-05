@@ -12,7 +12,7 @@ echo "REDIS_PASSWORD=$(openssl rand -base64 24 | tr -d '=/+')" >> .env.productio
 echo "CLICKHOUSE_PASSWORD=$(openssl rand -base64 24 | tr -d '=/+')" >> .env.production
 echo "" >> .env.production
 
-echo "DATABASE_URL=postgres://bastion:\${DB_PASSWORD}@postgres:5432/think_watch?sslmode=require" >> .env.production
+echo "DATABASE_URL=postgres://thinkwatch:\${DB_PASSWORD}@postgres:5432/think_watch?sslmode=require" >> .env.production
 echo "REDIS_URL=redis://:\${REDIS_PASSWORD}@redis:6379" >> .env.production
 echo "SERVER_HOST=0.0.0.0" >> .env.production
 echo "GATEWAY_PORT=3000" >> .env.production
@@ -23,7 +23,7 @@ echo "" >> .env.production
 echo "# Configure these manually:" >> .env.production
 echo "# CLICKHOUSE_URL=http://clickhouse:8123" >> .env.production
 echo "# CLICKHOUSE_DB=think_watch" >> .env.production
-echo "# CLICKHOUSE_USER=bastion" >> .env.production
+echo "# CLICKHOUSE_USER=thinkwatch" >> .env.production
 echo "# OIDC_ISSUER_URL=" >> .env.production
 echo "# OIDC_CLIENT_ID=" >> .env.production
 echo "# OIDC_CLIENT_SECRET=" >> .env.production

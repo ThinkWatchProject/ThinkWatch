@@ -11,9 +11,9 @@
 
 **[English](README.md) | [中文](README.zh-CN.md)**
 
-**The enterprise-grade bastion host for AI.** Secure, audit, and govern every AI API call and MCP tool invocation across your organization — from a single control plane.
+**The enterprise-grade secure gateway for AI.** Secure, audit, and govern every AI API call and MCP tool invocation across your organization — from a single control plane.
 
-Just as an SSH bastion host is the single gateway through which all server access must flow, ThinkWatch is the single gateway through which all AI access must flow. Every model request. Every tool call. Every token. Authenticated, authorized, rate-limited, logged, and accounted for.
+Just as an SSH secure gateway is the single gateway through which all server access must flow, ThinkWatch is the single gateway through which all AI access must flow. Every model request. Every tool call. Every token. Authenticated, authorized, rate-limited, logged, and accounted for.
 
 ```
                     ┌──────────────────────────────────────┐

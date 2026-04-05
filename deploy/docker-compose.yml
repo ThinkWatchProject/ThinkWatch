@@ -12,7 +12,7 @@ services:
     expose:
       - "3001"   # Console — only accessible within docker network
     environment:
-      DATABASE_URL: postgres://${DB_USER:-bastion}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-think_watch}
+      DATABASE_URL: postgres://${DB_USER:-thinkwatch}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-think_watch}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
@@ -21,7 +21,7 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_DB: think_watch
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-bastion}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-thinkwatch}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
@@ -126,13 +126,13 @@ services:
       - -c
       - log_lock_waits=on
     environment:
-      POSTGRES_USER: ${DB_USER:-bastion}
+      POSTGRES_USER: ${DB_USER:-thinkwatch}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
       POSTGRES_DB: ${DB_NAME:-think_watch}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-bastion}"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-thinkwatch}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -168,7 +168,7 @@ services:
   clickhouse:
     image: clickhouse/clickhouse-server:26.3-alpine
     environment:
-      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-bastion}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-thinkwatch}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       CLICKHOUSE_DB: think_watch
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1

@@ -4,7 +4,7 @@
 
 ## 1. Overview
 
-ThinkWatch is an enterprise AI API gateway and MCP (Model Context Protocol) management platform built in Rust. It acts as a **bastion host** for all AI access within an organization -- every request from developer tools, automated agents, and internal applications flows through a single controlled gateway before reaching upstream AI providers or MCP servers.
+ThinkWatch is an enterprise AI API gateway and MCP (Model Context Protocol) management platform built in Rust. It acts as a **secure gateway** for all AI access within an organization -- every request from developer tools, automated agents, and internal applications flows through a single controlled gateway before reaching upstream AI providers or MCP servers.
 
 This architecture provides centralized:
 
