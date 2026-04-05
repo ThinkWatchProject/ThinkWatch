@@ -44,7 +44,9 @@ pub struct AppState {
     pub config: AppConfig,
     pub dynamic_config: Arc<DynamicConfig>,
     pub audit: AuditLogger,
-    pub oidc: Option<OidcManager>,
+    /// OIDC manager — wrapped in Arc<RwLock> so it can be reloaded when
+    /// SSO settings change via the admin UI without restarting the server.
+    pub oidc: Arc<tokio::sync::RwLock<Option<OidcManager>>>,
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// ClickHouse client for log queries. `None` if ClickHouse is not configured.
     pub clickhouse: Option<clickhouse::Client>,
@@ -379,7 +381,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         )
         .route(
             "/api/admin/settings/oidc",
-            get(handlers::admin::get_oidc_settings),
+            get(handlers::admin::get_oidc_settings).patch(handlers::admin::update_oidc_settings),
         )
         .route(
             "/api/admin/settings/audit",
