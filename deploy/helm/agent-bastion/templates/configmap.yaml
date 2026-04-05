@@ -78,10 +78,10 @@ data:
             <vertical_merge_algorithm_min_columns_to_activate>5</vertical_merge_algorithm_min_columns_to_activate>
         </merge_tree>
 
-        <background_pool_size>2</background_pool_size>
-        <background_schedule_pool_size>2</background_schedule_pool_size>
-        <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
-        <background_move_pool_size>0</background_move_pool_size>
+        <background_pool_size>8</background_pool_size>
+        <background_schedule_pool_size>4</background_schedule_pool_size>
+        <background_merges_mutations_concurrency_ratio>4</background_merges_mutations_concurrency_ratio>
+        <background_move_pool_size>1</background_move_pool_size>
 
         <mark_cache_size>268435456</mark_cache_size>
         <uncompressed_cache_size>0</uncompressed_cache_size>
@@ -160,7 +160,7 @@ data:
         INDEX idx_action    action     TYPE set(100)     GRANULARITY 2,
         INDEX idx_resource  resource   TYPE set(100)     GRANULARITY 2,
         INDEX idx_ip        ip_address TYPE bloom_filter GRANULARITY 4,
-        INDEX idx_search    action     TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+        INDEX idx_search    id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
     ) ENGINE = MergeTree()
     PARTITION BY toYYYYMM(created_at)
     ORDER BY (created_at, id)
@@ -187,7 +187,7 @@ data:
         INDEX idx_model      model_id   TYPE set(200)     GRANULARITY 2,
         INDEX idx_provider   provider   TYPE set(50)      GRANULARITY 2,
         INDEX idx_status     status_code TYPE set(50)     GRANULARITY 2,
-        INDEX idx_search     model_id   TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+        INDEX idx_search     id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
     ) ENGINE = MergeTree()
     PARTITION BY toYYYYMM(created_at)
     ORDER BY (created_at, id)
@@ -195,10 +195,10 @@ data:
     SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
 
     ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_cost (
-        SELECT * ORDER BY cost_usd DESC, created_at DESC
+        SELECT * ORDER BY cost_usd, created_at
     );
     ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_latency (
-        SELECT * ORDER BY latency_ms DESC, created_at DESC
+        SELECT * ORDER BY latency_ms, created_at
     );
 
     CREATE TABLE IF NOT EXISTS mcp_logs (
@@ -217,7 +217,7 @@ data:
         INDEX idx_server_id  server_id  TYPE bloom_filter GRANULARITY 4,
         INDEX idx_tool       tool_name  TYPE set(200)     GRANULARITY 2,
         INDEX idx_status     status     TYPE set(20)      GRANULARITY 2,
-        INDEX idx_search     tool_name  TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+        INDEX idx_search     id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
     ) ENGINE = MergeTree()
     PARTITION BY toYYYYMM(created_at)
     ORDER BY (created_at, id)
@@ -225,7 +225,7 @@ data:
     SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
 
     ALTER TABLE mcp_logs ADD PROJECTION IF NOT EXISTS proj_by_duration (
-        SELECT * ORDER BY duration_ms DESC, created_at DESC
+        SELECT * ORDER BY duration_ms, created_at
     );
 
     CREATE TABLE IF NOT EXISTS platform_logs (
@@ -243,7 +243,7 @@ data:
         INDEX idx_action    action     TYPE set(100)     GRANULARITY 2,
         INDEX idx_resource  resource   TYPE set(100)     GRANULARITY 2,
         INDEX idx_ip        ip_address TYPE bloom_filter GRANULARITY 4,
-        INDEX idx_search    action     TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+        INDEX idx_search    id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
     ) ENGINE = MergeTree()
     PARTITION BY toYYYYMM(created_at)
     ORDER BY (created_at, id)
