@@ -15,19 +15,16 @@ import { DashboardPage } from '@/routes/dashboard';
 import { ProvidersPage } from '@/routes/gateway/providers';
 import { ModelsPage } from '@/routes/gateway/models';
 import { ApiKeysPage } from '@/routes/gateway/api-keys';
-import { GatewayLogsPage } from '@/routes/gateway/logs';
+import { UnifiedLogsPage } from '@/routes/logs';
 import { GuidePage } from '@/routes/guide';
 import { McpServersPage } from '@/routes/mcp/servers';
 import { McpToolsPage } from '@/routes/mcp/tools';
-import { McpLogsPage } from '@/routes/mcp/logs';
 import { UsagePage } from '@/routes/analytics/usage';
 import { CostsPage } from '@/routes/analytics/costs';
-import { AuditPage } from '@/routes/analytics/audit';
 import { UsersPage } from '@/routes/admin/users';
 import { RolesPage } from '@/routes/admin/roles';
 import { SettingsPage } from '@/routes/admin/settings';
 import { LogForwardersPage } from '@/routes/admin/log-forwarders';
-import { PlatformLogsPage } from '@/routes/admin/platform-logs';
 import { ProfilePage } from '@/routes/profile';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -149,10 +146,10 @@ const apiKeysRoute = createRoute({
   component: ApiKeysPage,
 });
 
-const gatewayLogsRoute = createRoute({
+const logsRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: '/logs/gateway',
-  component: GatewayLogsPage,
+  path: '/logs',
+  component: UnifiedLogsPage,
 });
 
 const guideRoute = createRoute({
@@ -173,11 +170,6 @@ const mcpToolsRoute = createRoute({
   component: McpToolsPage,
 });
 
-const mcpLogsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/logs/mcp',
-  component: McpLogsPage,
-});
 
 const usageRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -191,11 +183,6 @@ const costsRoute = createRoute({
   component: CostsPage,
 });
 
-const auditRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/logs/audit',
-  component: AuditPage,
-});
 
 const usersRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -221,11 +208,6 @@ const logForwardersRoute = createRoute({
   component: LogForwardersPage,
 });
 
-const platformLogsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/logs/platform',
-  component: PlatformLogsPage,
-});
 
 const profileRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -253,19 +235,16 @@ const routeTree = rootRoute.addChildren([
   providersRoute,
   modelsRoute,
   apiKeysRoute,
-  gatewayLogsRoute,
+  logsRoute,
   guideRoute,
   mcpServersRoute,
   mcpToolsRoute,
-  mcpLogsRoute,
   usageRoute,
   costsRoute,
-  auditRoute,
   usersRoute,
   rolesRoute,
   settingsRoute,
   logForwardersRoute,
-  platformLogsRoute,
   profileRoute,
   registerRoute,
   setupRoute,

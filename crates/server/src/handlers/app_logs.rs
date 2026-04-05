@@ -54,7 +54,10 @@ pub async fn list_app_logs(
     Query(params): Query<AppLogsQuery>,
 ) -> Result<Json<AppLogsResponse>, AppError> {
     if !ch_available(&state) {
-        return Ok(Json(AppLogsResponse { total: 0, items: vec![] }));
+        return Ok(Json(AppLogsResponse {
+            total: 0,
+            items: vec![],
+        }));
     }
     let ch = ch_client(&state)?;
     let limit = params.limit.unwrap_or(50).min(200);
@@ -69,12 +72,18 @@ pub async fn list_app_logs(
     }
     if let Some(ref v) = params.target {
         conditions.push("target LIKE ?".into());
-        let escaped = v.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = v
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         binds.push(format!("%{escaped}%"));
     }
     if let Some(ref v) = params.q {
         conditions.push("message LIKE ?".into());
-        let escaped = v.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = v
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         binds.push(format!("%{escaped}%"));
     }
     if let Some(ref v) = params.from {
@@ -94,8 +103,12 @@ pub async fn list_app_logs(
 
     let count_sql = format!("SELECT count() FROM app_logs {wc}");
     let mut q = ch.query(&count_sql);
-    for v in &binds { q = q.bind(v.as_str()); }
-    let total: u64 = q.fetch_one().await
+    for v in &binds {
+        q = q.bind(v.as_str());
+    }
+    let total: u64 = q
+        .fetch_one()
+        .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
     let data_sql = format!(
@@ -103,19 +116,26 @@ pub async fn list_app_logs(
          FROM app_logs {wc} ORDER BY created_at DESC LIMIT {limit} OFFSET {offset}"
     );
     let mut q = ch.query(&data_sql);
-    for v in &binds { q = q.bind(v.as_str()); }
-    let rows: Vec<AppLogEntry> = q.fetch_all().await
+    for v in &binds {
+        q = q.bind(v.as_str());
+    }
+    let rows: Vec<AppLogEntry> = q
+        .fetch_all()
+        .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
-    let items = rows.into_iter().map(|r| AppLogEntryResponse {
-        id: r.id,
-        level: r.level,
-        target: r.target,
-        message: r.message,
-        fields: r.fields.and_then(|s| serde_json::from_str(&s).ok()),
-        span: r.span,
-        created_at: r.created_at,
-    }).collect();
+    let items = rows
+        .into_iter()
+        .map(|r| AppLogEntryResponse {
+            id: r.id,
+            level: r.level,
+            target: r.target,
+            message: r.message,
+            fields: r.fields.and_then(|s| serde_json::from_str(&s).ok()),
+            span: r.span,
+            created_at: r.created_at,
+        })
+        .collect();
 
     Ok(Json(AppLogsResponse { total, items }))
 }

@@ -195,10 +195,9 @@ pub async fn verify_signature(
 
     // Session binding: validate that the request IP matches the IP the signing key was issued to
     let ip_key = format!("signing_key_ip:{user_id}");
-    let bound_ip: Option<String> =
-        fred::interfaces::KeysInterface::get(&state.redis, &ip_key)
-            .await
-            .unwrap_or(None);
+    let bound_ip: Option<String> = fred::interfaces::KeysInterface::get(&state.redis, &ip_key)
+        .await
+        .unwrap_or(None);
     if let Some(ref bound) = bound_ip {
         let request_ip = request
             .extensions()

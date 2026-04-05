@@ -141,7 +141,8 @@ pub async fn update_server(
         auth_user
             .audit("mcp_server.updated")
             .resource("mcp_server")
-            .resource_id(id.to_string()),
+            .resource_id(id.to_string())
+            .detail(serde_json::json!({ "name": existing.name })),
     );
 
     Ok(Json(updated))
@@ -166,6 +167,11 @@ pub async fn delete_server(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM mcp_servers WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
+
     sqlx::query("DELETE FROM mcp_servers WHERE id = $1")
         .bind(id)
         .execute(&state.db)
@@ -175,7 +181,8 @@ pub async fn delete_server(
         auth_user
             .audit("mcp_server.deleted")
             .resource("mcp_server")
-            .resource_id(id.to_string()),
+            .resource_id(id.to_string())
+            .detail(serde_json::json!({ "name": name })),
     );
 
     Ok(Json(serde_json::json!({"status": "deleted"})))

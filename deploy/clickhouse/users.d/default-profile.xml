@@ -33,8 +33,6 @@
             <!-- COUNT() optimization: use metadata when no WHERE -->
             <optimize_trivial_count_query>1</optimize_trivial_count_query>
 
-            <!-- Skip-index aware: prune granules using secondary indices -->
-            <force_data_skipping_indices/>  <!-- empty = use when available -->
         </default>
     </profiles>
 </clickhouse>

@@ -49,7 +49,10 @@ pub async fn list_access_logs(
     Query(params): Query<AccessLogsQuery>,
 ) -> Result<Json<AccessLogsResponse>, AppError> {
     if !ch_available(&state) {
-        return Ok(Json(AccessLogsResponse { total: 0, items: vec![] }));
+        return Ok(Json(AccessLogsResponse {
+            total: 0,
+            items: vec![],
+        }));
     }
     let ch = ch_client(&state)?;
     let limit = params.limit.unwrap_or(50).min(200);
@@ -64,7 +67,10 @@ pub async fn list_access_logs(
     }
     if let Some(ref v) = params.path {
         conditions.push("path LIKE ?".into());
-        let escaped = v.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = v
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         binds.push(format!("%{escaped}%"));
     }
     if let Some(ref v) = params.status_code {
@@ -81,7 +87,10 @@ pub async fn list_access_logs(
     }
     if let Some(ref v) = params.q {
         conditions.push("path LIKE ?".into());
-        let escaped = v.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+        let escaped = v
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
         binds.push(format!("%{escaped}%"));
     }
     if let Some(ref v) = params.from {
@@ -101,8 +110,12 @@ pub async fn list_access_logs(
 
     let count_sql = format!("SELECT count() FROM access_logs {wc}");
     let mut q = ch.query(&count_sql);
-    for v in &binds { q = q.bind(v.as_str()); }
-    let total: u64 = q.fetch_one().await
+    for v in &binds {
+        q = q.bind(v.as_str());
+    }
+    let total: u64 = q
+        .fetch_one()
+        .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
     let data_sql = format!(
@@ -111,8 +124,12 @@ pub async fn list_access_logs(
          FROM access_logs {wc} ORDER BY created_at DESC LIMIT {limit} OFFSET {offset}"
     );
     let mut q = ch.query(&data_sql);
-    for v in &binds { q = q.bind(v.as_str()); }
-    let items: Vec<AccessLogEntry> = q.fetch_all().await
+    for v in &binds {
+        q = q.bind(v.as_str());
+    }
+    let items: Vec<AccessLogEntry> = q
+        .fetch_all()
+        .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
     Ok(Json(AccessLogsResponse { total, items }))

@@ -307,7 +307,8 @@ pub async fn update_provider(
         auth_user
             .audit("provider.updated")
             .resource("provider")
-            .resource_id(id.to_string()),
+            .resource_id(id.to_string())
+            .detail(serde_json::json!({ "name": existing.name })),
     );
 
     Ok(Json(updated))
@@ -334,6 +335,11 @@ pub async fn delete_provider(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?;
+
     sqlx::query("UPDATE providers SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL")
         .bind(id)
         .execute(&state.db)
@@ -343,7 +349,8 @@ pub async fn delete_provider(
         auth_user
             .audit("provider.deleted")
             .resource("provider")
-            .resource_id(id.to_string()),
+            .resource_id(id.to_string())
+            .detail(serde_json::json!({ "name": name })),
     );
 
     Ok(Json(serde_json::json!({"status": "deleted"})))

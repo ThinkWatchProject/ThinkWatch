@@ -33,8 +33,6 @@ pub struct McpLogEntry {
     pub status: Option<String>,
     pub error_message: Option<String>,
     pub ip_address: Option<String>,
-    #[serde(skip_deserializing)]
-    #[serde(default)]
     pub created_at: String,
 }
 

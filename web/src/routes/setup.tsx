@@ -17,7 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Shield, Check, Copy, Globe, ArrowRight, ArrowLeft, AlertTriangle, AlertCircle } from 'lucide-react';
+import { Shield, Check, Copy, Globe, ArrowRight, ArrowLeft, AlertTriangle, AlertCircle, Plus, X } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -111,6 +111,7 @@ export function SetupPage() {
   const [providerDisplayName, setProviderDisplayName] = useState('');
   const [providerBaseUrl, setProviderBaseUrl] = useState('');
   const [providerApiKey, setProviderApiKey] = useState('');
+  const [providerHeaders, setProviderHeaders] = useState<[string, string][]>([]);
 
   const [adminErrors, setAdminErrors] = useState<Record<string, string>>({});
 
@@ -169,6 +170,7 @@ export function SetupPage() {
         provider_type: providerType,
         base_url: providerBaseUrl,
         api_key: providerApiKey,
+        custom_headers: Object.fromEntries(providerHeaders.filter(([k, v]) => k && v)),
       };
     }
 
@@ -366,16 +368,51 @@ export function SetupPage() {
                 id="setup-provider-base-url"
                 value={providerBaseUrl}
                 onChange={(e) => setProviderBaseUrl(e.target.value)}
+                placeholder={
+                  providerType === 'azure_openai' ? 'https://your-resource.openai.azure.com' :
+                  providerType === 'bedrock' ? 'us-east-1' :
+                  providerType === 'anthropic' ? 'https://api.anthropic.com' :
+                  providerType === 'google' ? 'https://generativelanguage.googleapis.com' :
+                  'https://api.openai.com'
+                }
               />
+              {providerType === 'bedrock' && (
+                <p className="text-xs text-muted-foreground">{t('providers.bedrockUrlHint', 'Enter AWS region (e.g. us-east-1)')}</p>
+              )}
+              {providerType === 'azure_openai' && (
+                <p className="text-xs text-muted-foreground">{t('providers.azureUrlHint', 'Enter Azure OpenAI resource endpoint')}</p>
+              )}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="setup-provider-api-key">{t('setup.provider.apiKey')}</Label>
+              <Label htmlFor="setup-provider-api-key">{providerType === 'bedrock' ? t('providers.awsCredentials', 'AWS Credentials') : t('setup.provider.apiKey')}</Label>
               <Input
                 id="setup-provider-api-key"
                 type="password"
                 value={providerApiKey}
                 onChange={(e) => setProviderApiKey(e.target.value)}
+                placeholder={providerType === 'bedrock' ? 'ACCESS_KEY_ID:SECRET_ACCESS_KEY' : 'sk-...'}
               />
+              {providerType === 'bedrock' && (
+                <p className="text-xs text-muted-foreground">{t('providers.bedrockKeyHint', 'Format: ACCESS_KEY_ID:SECRET_ACCESS_KEY')}</p>
+              )}
+            </div>
+            <div className="space-y-2">
+              <Label>{t('providers.customHeaders')}</Label>
+              <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
+              {providerHeaders.map(([k, v], i) => (
+                <div key={i} className="flex gap-2 items-center">
+                  <Input className="flex-1" placeholder="Header-Name" value={k}
+                    onChange={(e) => { const next = [...providerHeaders]; next[i] = [e.target.value, v]; setProviderHeaders(next); }} />
+                  <Input className="flex-1" placeholder="value" value={v}
+                    onChange={(e) => { const next = [...providerHeaders]; next[i] = [k, e.target.value]; setProviderHeaders(next); }} />
+                  <Button type="button" variant="ghost" size="icon-sm" onClick={() => setProviderHeaders(providerHeaders.filter((_, j) => j !== i))}>
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+              ))}
+              <Button type="button" variant="outline" size="sm" onClick={() => setProviderHeaders([...providerHeaders, ['', '']])}>
+                <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
+              </Button>
             </div>
           </>
         )}

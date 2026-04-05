@@ -673,6 +673,7 @@ checksum = "9a9a81a1dffadd762ee662635ce409232258ce9beebd7cc0fa227df0b5e7efc0"
 dependencies = [
  "bstr",
  "bytes",
+ "chrono",
  "cityhash-rs",
  "clickhouse-derive",
  "futures",
@@ -3959,7 +3960,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "urlencoding",
  "utoipa",
  "uuid",
 ]

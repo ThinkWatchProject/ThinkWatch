@@ -70,6 +70,7 @@ services:
   # --- ClickHouse (log storage & search) ---
   clickhouse:
     image: clickhouse/clickhouse-server:26.3-alpine
+    command: ["--", "--listen_host=0.0.0.0"]
     ports:
       - "8123:8123"   # HTTP interface
       - "9000:9000"   # Native TCP

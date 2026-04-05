@@ -34,7 +34,7 @@ pub struct CreateForwarderRequest {
     pub log_types: Option<Vec<String>>,
 }
 
-const VALID_LOG_TYPES: &[&str] = &["audit", "gateway", "mcp", "platform"];
+const VALID_LOG_TYPES: &[&str] = &["access", "app", "audit", "gateway", "mcp", "platform"];
 
 pub async fn create_forwarder(
     auth_user: AuthUser,

@@ -589,9 +589,8 @@ pub async fn update_oidc_settings(
                     think_watch_common::crypto::decrypt(&bytes, &encryption_key)
                         .map_err(|e| format!("decrypt: {e}"))
                 })
-                .and_then(|plain| {
-                    String::from_utf8(plain).map_err(|e| format!("utf8: {e}"))
-                }) {
+                .and_then(|plain| String::from_utf8(plain).map_err(|e| format!("utf8: {e}")))
+            {
                 Ok(s) => s,
                 Err(e) => {
                     tracing::error!("Failed to decrypt OIDC client secret: {e}");

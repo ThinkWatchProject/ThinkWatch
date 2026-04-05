@@ -305,9 +305,12 @@ pub async fn login(
             .jwt
             .create_refresh_token_with_ttl(user.id, &user.email, roles, refresh_ttl_days)?;
 
-    let signing_key = verify_signature::create_signing_key(&state.redis, &user.id, Some(&client_ip))
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
+    let signing_key =
+        verify_signature::create_signing_key(&state.redis, &user.id, Some(&client_ip))
+            .await
+            .map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))
+            })?;
 
     state.audit.log(
         AuditEntry::new("auth.login")
@@ -614,11 +617,8 @@ pub async fn totp_setup(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
     let pending_json = serde_json::to_string(&pending_data)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON serialization error: {e}")))?;
-    let encrypted_pending = think_watch_common::crypto::encrypt(
-        pending_json.as_bytes(),
-        &enc_key,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption error: {e}")))?;
+    let encrypted_pending = think_watch_common::crypto::encrypt(pending_json.as_bytes(), &enc_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption error: {e}")))?;
     let _: () = fred::interfaces::KeysInterface::set(
         &state.redis,
         &pending_key,

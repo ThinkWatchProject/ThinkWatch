@@ -46,7 +46,10 @@ impl IntoResponse for AppError {
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
             AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
-            AppError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "internal_error"),
+            AppError::Internal(e) => {
+                tracing::error!("Internal server error: {e:#}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+            }
         };
 
         let body = ErrorResponse {
