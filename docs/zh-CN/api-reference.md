@@ -2014,6 +2014,117 @@ curl "http://localhost:3001/api/audit/logs?q=provider.create&from=2026-03-01T00:
 
 ---
 
+### 访问日志
+
+#### 查询访问日志
+
+`GET /api/admin/access-logs`
+
+Gateway 和 Console 端口的 HTTP 请求日志。
+
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `method` | string | HTTP 方法 (GET, POST 等) |
+| `path` | string | 请求路径（子串匹配） |
+| `status_code` | string | HTTP 状态码 |
+| `port` | string | 端口号 (3000 或 3001) |
+| `user_id` | string | 用户 UUID |
+| `q` | string | 路径全文搜索 |
+| `from` | string | 开始时间 (ISO 8601) |
+| `to` | string | 结束时间 (ISO 8601) |
+| `limit` | integer | 最大返回数 (默认 50，最大 200) |
+| `offset` | integer | 分页偏移量 |
+
+### 应用日志
+
+#### 查询应用日志
+
+`GET /api/admin/app-logs`
+
+应用运行时追踪日志。
+
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `level` | string | 日志级别 (TRACE, DEBUG, INFO, WARN, ERROR) |
+| `target` | string | 模块/目标（子串匹配） |
+| `q` | string | 消息搜索（子串匹配） |
+| `from` | string | 开始时间 (ISO 8601) |
+| `to` | string | 结束时间 (ISO 8601) |
+| `limit` | integer | 最大返回数 (默认 50，最大 200) |
+| `offset` | integer | 分页偏移量 |
+
+### 平台日志
+
+#### 查询平台日志
+
+`GET /api/admin/platform-logs`
+
+平台管理操作审计记录。
+
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `user_id` | string | 用户 UUID |
+| `action` | string | 操作名称 |
+| `resource` | string | 资源类型 |
+| `resource_id` | string | 资源 UUID |
+| `from` | string | 开始时间 (ISO 8601) |
+| `to` | string | 结束时间 (ISO 8601) |
+| `limit` | integer | 最大返回数 (默认 50，最大 200) |
+| `offset` | integer | 分页偏移量 |
+
+### 网关日志
+
+#### 查询网关日志
+
+`GET /api/gateway/logs`
+
+AI API 请求日志，包含模型、Provider、Token 和费用数据。
+
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `model` | string | 模型 ID |
+| `provider` | string | Provider 名称 |
+| `user_id` | string | 用户 UUID |
+| `api_key_id` | string | API Key UUID |
+| `status_code` | integer | HTTP 状态码 |
+| `from` | string | 开始时间 (ISO 8601) |
+| `to` | string | 结束时间 (ISO 8601) |
+| `sort_by` | string | `cost_usd`、`latency_ms` 或 `created_at`（默认） |
+| `limit` | integer | 最大返回数 (默认 50，最大 200) |
+| `offset` | integer | 分页偏移量 |
+
+### MCP 日志
+
+#### 查询 MCP 日志
+
+`GET /api/mcp/logs`
+
+MCP 工具调用日志。
+
+**查询参数：**
+
+| 参数 | 类型 | 说明 |
+|------|------|------|
+| `user_id` | string | 用户 UUID |
+| `server_id` | string | MCP 服务器 UUID |
+| `tool_name` | string | 工具名称 |
+| `status` | string | 调用状态 |
+| `from` | string | 开始时间 (ISO 8601) |
+| `to` | string | 结束时间 (ISO 8601) |
+| `sort_by` | string | `duration_ms` 或 `created_at`（默认） |
+| `limit` | integer | 最大返回数 (默认 50，最大 200) |
+| `offset` | integer | 分页偏移量 |
+
+---
+
 ### 管理员设置
 
 #### GET /api/admin/settings

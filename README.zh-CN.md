@@ -73,6 +73,10 @@ ThinkWatch 一次部署，全部解决。
 - **启动依赖验证** — 启动时校验 PostgreSQL、Redis 和加密密钥是否可用，并输出清晰的错误信息
 - **安全 HTTP 头** — X-Content-Type-Options、X-Frame-Options、CORS 白名单、请求超时
 - **软删除** — 用户、Provider、API Key 使用软删除（`deleted_at` 列），30 天后自动清理
+- **密码复杂度** — 最少 8 字符，必须包含大写字母、小写字母和数字
+- **会话 IP 绑定** — 签名密钥在登录时绑定客户端 IP，来自不同 IP 的请求将被拒绝
+- **ClickHouse 查询参数化** — 所有日志查询使用参数绑定，防止注入攻击
+- **LIKE 通配符转义** — 用户搜索输入自动转义，防止日志查询中的模式注入
 - **Distroless 容器** — 生产环境最小攻击面 (2MB 运行镜像，无 shell)
 
 ### 运维与配置
@@ -81,6 +85,7 @@ ThinkWatch 一次部署，全部解决。
 - **配置指南** — Web 控制台内置 `/gateway/guide` 页面，提供 Claude Code、Cursor、Continue、Cline、OpenAI SDK、Anthropic SDK 和 cURL 的一键复制配置说明；自动检测网关 URL
 - **多实例同步** — 配置变更通过 Redis Pub/Sub 在多个实例间同步
 - **数据保留策略** — 可配置使用记录和审计日志的保留期限，每日自动清理
+- **提交前 CI 对齐** — `make precommit` 执行与 CI 完全相同的检查（cargo check、test、clippy、fmt、pnpm build）
 
 ### 可观测性
 - **Prometheus 指标** — Gateway 端口 (3000) 的 `GET /metrics` 端点，暴露 `gateway_requests_total`、`gateway_request_duration_seconds`、`gateway_tokens_total`、`gateway_rate_limited_total`、`circuit_breaker_state` 等指标
@@ -90,6 +95,9 @@ ThinkWatch 一次部署，全部解决。
 - **使用量分析** — 按用户、团队、模型、时间段的 Token 消耗统计
 - **费用分析** — 月度累计支出、预算使用率、按模型费用明细
 - **健康仪表盘** — PostgreSQL、Redis、ClickHouse 及所有 MCP Server 的实时状态
+- **统一日志查询** — 在单一页面中查询所有日志类型（平台、审计、网关、MCP、访问、应用），支持结构化搜索语法
+- **HTTP 访问日志** — Gateway 和 Console 端口的每个请求记录到 ClickHouse，包含方法、路径、状态码、延迟和客户端 IP
+- **应用追踪日志** — Rust tracing span 捕获并存储到 ClickHouse，用于运行时调试
 
 ## 技术栈
 
@@ -107,11 +115,11 @@ ThinkWatch 一次部署，全部解决。
 
 ```bash
 # 1. 启动基础设施
-docker compose -f deploy/docker-compose.dev.yml up -d
+make infra
 
 # 2. 启动后端 (gateway :3000 + console :3001)
 cp .env.example .env
-cargo run -p think-watch-server
+make dev-backend
 
 # 3. 启动前端开发服务器
 cd web && pnpm install && pnpm dev
@@ -149,7 +157,7 @@ ThinkWatch/
 │   ├── gateway/         # AI API 代理：路由、流式、限流、费用追踪
 │   ├── mcp-gateway/     # MCP 代理：JSON-RPC、工具聚合、访问控制
 │   ├── auth/            # JWT、OIDC、API Key、密码哈希、RBAC
-│   └── common/          # 配置、数据库、模型、加密、审计日志
+│   └── common/          # 配置、数据库、模型、加密、校验、审计日志
 ├── migrations/          # 12 个 PostgreSQL 迁移文件
 ├── web/                 # React 前端 — 约 20 个页面组件
 ├── deploy/

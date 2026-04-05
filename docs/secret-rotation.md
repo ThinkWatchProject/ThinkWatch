@@ -135,13 +135,18 @@ The OIDC client secret is used to authenticate with your identity provider (e.g.
 
 ---
 
-## Redis Signing Keys
+### Redis Signing Keys
 
-Per-user signing keys (for HMAC request signing) are stored in Redis with a 24-hour TTL. They cannot be manually rotated — they are regenerated automatically on each login/token refresh.
+Signing keys are used for HMAC-SHA256 request signature verification on state-changing requests (POST, PUT, PATCH, DELETE). They are:
 
-To force regeneration for a specific user:
-- Use the **Force Logout** admin action (Admin → Users → Force Logout)
-- The user must re-login, which generates a new signing key
+- Auto-generated on login and token refresh (32 random bytes, hex-encoded)
+- Stored in Redis with 24-hour TTL (matching refresh token lifetime)
+- **Bound to client IP** — the IP address at login is stored alongside the key; requests from a different IP are rejected
+- Delivered to the client via httpOnly cookie (`signing_key`)
+
+**Rotation:** Signing keys auto-rotate on every login and token refresh. To force rotation for a specific user, use "Force Logout" in the admin panel, which invalidates all their sessions and signing keys.
+
+No manual rotation is needed.
 
 ---
 
@@ -153,3 +158,4 @@ To force regeneration for a specific user:
 4. **Monitor for errors** after rotation — check `/api/health` and application logs
 5. **Use different secrets per environment** (dev, staging, production)
 6. **Store secrets in a vault** (HashiCorp Vault, AWS Secrets Manager, etc.) rather than plain files
+7. **Log forwarder credentials** — if using Kafka, HTTP webhook, or Syslog with authentication, rotate those credentials via Admin > Log Forwarding and test connectivity after rotation

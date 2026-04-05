@@ -164,6 +164,10 @@ Client                Gateway :3000                        Upstream Provider
   |                  - Push audit log to ClickHouse                |
   |                  - Forward to log forwarders (syslog/kafka/webhook) |
   |                  - Update rate limit counters in Redis         |
+  |                        |                                      |
+  |               8. 访问日志                                      |
+  |                  - 方法、路径、状态码、延迟和客户端 IP          |
+  |                    异步记录到 ClickHouse                        |
 ```
 
 ### 关键设计决策
@@ -329,6 +333,26 @@ MCP 代理引擎。包含：
 - **`errors.rs`** —— 统一的错误类型，带 HTTP 状态码映射。
 - **`crypto.rs`** —— 用于提供商 API 密钥的 AES-256-GCM 加密/解密。
 - **`audit.rs`** —— 审计日志写入器（PostgreSQL + 可选 ClickHouse + 可选 syslog 转发）。
+- **`validation.rs`** —— 密码复杂度校验（8+ 字符，大写、小写、数字）
+
+### 日志存储架构
+
+ThinkWatch 在 ClickHouse 中存储六种类型的日志，每种使用独立的表：
+
+| 表名 | 用途 | TTL |
+|------|------|-----|
+| `audit_logs` | 安全审计轨迹（登录、API Key 操作、设置变更） | 90 天 |
+| `gateway_logs` | AI API 请求日志（模型、Token、费用、延迟） | 90 天 |
+| `mcp_logs` | MCP 工具调用日志（服务器、工具、耗时、状态） | 90 天 |
+| `platform_logs` | 平台管理操作 | 90 天 |
+| `access_logs` | HTTP 访问日志（方法、路径、状态码、延迟） | 30 天 |
+| `app_logs` | 应用运行时追踪（级别、目标、消息、span） | 30 天 |
+
+所有表使用 MergeTree 引擎，按月分区，TTL 自动清理。
+
+**AccessLogLayer** 中间件异步记录每个 HTTP 请求到 ClickHouse，包括方法、路径、状态码、延迟、端口、用户 ID、客户端 IP 和 User Agent。
+
+**ClickHouseLayer** tracing 订阅器捕获 Rust `tracing` span 和事件，转发到 `app_logs` 表用于运行时调试。
 
 ---
 

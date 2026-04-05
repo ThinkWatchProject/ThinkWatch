@@ -355,6 +355,21 @@ AWS Bedrock 通过官方 `aws-sigv4` Rust crate 使用 SigV4 请求签名。`bas
 | `RUST_LOG`        | `thinkwatch=debug,tower_http=debug`        | `info` 或 `thinkwatch=info`               |
 | OIDC 变量         | _（除非测试 SSO 否则未设置）_                | 完整配置                                    |
 
+### 环境文件
+
+ThinkWatch 在项目根目录使用单一 `.env` 文件：
+
+- **开发环境**：`cargo run` 通过 `dotenvy` 自动加载，`docker compose` 通过 Makefile 中的 `--env-file .env` 加载
+- **生产环境**：使用项目根目录的 `.env.production`，通过 `make deploy` 加载
+
+`deploy/` 目录下没有单独的 `.env` 文件。复制 `.env.example` 开始：
+
+```bash
+cp .env.example .env
+# 编辑 .env 填入实际值，或运行：
+# deploy/generate-secrets.sh
+```
+
 ### 使用 .env 文件
 
 本地开发时，在项目根目录创建 `.env` 文件：

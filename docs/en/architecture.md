@@ -164,6 +164,10 @@ Client                Gateway :3000                        Upstream Provider
   |                  - Push audit log to ClickHouse                |
   |                  - Forward to log forwarders (syslog/kafka/webhook) |
   |                  - Update rate limit counters in Redis         |
+  |                        |                                      |
+  |               8. Access logging                                |
+  |                  - method, path, status, latency, and client  |
+  |                    IP recorded to ClickHouse asynchronously    |
 ```
 
 ### Key Design Decisions
@@ -329,10 +333,34 @@ Shared infrastructure used by all other crates. Contains:
 - **`errors.rs`** -- Unified error type with HTTP status code mapping.
 - **`crypto.rs`** -- AES-256-GCM encryption/decryption for provider API keys.
 - **`audit.rs`** -- Audit log writer (PostgreSQL + optional ClickHouse + optional syslog forwarding).
+- **`validation.rs`** -- Password complexity validation (8+ chars, uppercase, lowercase, digit).
 
 ---
 
-## 7. Database Schema Overview
+## 7. Log Exploration Architecture
+
+### Log Storage Architecture
+
+ThinkWatch stores six types of logs in ClickHouse, each in a dedicated table:
+
+| Table | Purpose | TTL |
+|-------|---------|-----|
+| `audit_logs` | Security audit trail (login, API key ops, settings changes) | 90 days |
+| `gateway_logs` | AI API request logs (model, tokens, cost, latency) | 90 days |
+| `mcp_logs` | MCP tool invocation logs (server, tool, duration, status) | 90 days |
+| `platform_logs` | Platform management operations | 90 days |
+| `access_logs` | HTTP access logs for both ports (method, path, status, latency) | 30 days |
+| `app_logs` | Application runtime tracing (level, target, message, spans) | 30 days |
+
+All tables use MergeTree engine with monthly partitioning and TTL-based automatic cleanup.
+
+The **AccessLogLayer** middleware records every HTTP request to ClickHouse asynchronously, capturing method, path, status code, latency, port, user ID, client IP, and user agent.
+
+The **ClickHouseLayer** tracing subscriber captures Rust `tracing` spans and events, forwarding them to the `app_logs` table for runtime debugging.
+
+---
+
+## 8. Database Schema Overview
 
 The database schema is defined across twelve migration files applied in order on startup:
 
@@ -406,7 +434,7 @@ The remaining migrations add:
 
 ---
 
-## 8. Frontend Architecture
+## 9. Frontend Architecture
 
 The web console is a single-page application located in the `web/` directory.
 

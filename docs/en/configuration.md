@@ -371,6 +371,21 @@ RUST_LOG=thinkwatch=debug,tower_http=debug
 
 ThinkWatch loads `.env` automatically via the `dotenvy` crate. The `.env` file should be listed in `.gitignore`.
 
+### Environment File
+
+ThinkWatch uses a single `.env` file at the project root for all environments:
+
+- **Development**: `cargo run` loads via `dotenvy`, `docker compose` loads via `--env-file .env` (configured in Makefile)
+- **Production**: Uses `.env.production` at the project root, loaded via `make deploy`
+
+There is no separate `deploy/.env` file. Copy `.env.example` to get started:
+
+```bash
+cp .env.example .env
+# Edit .env with your values, or run:
+# deploy/generate-secrets.sh
+```
+
 ### Docker / Docker Compose
 
 Pass environment variables through `docker-compose.yml`:

@@ -54,7 +54,7 @@ cd web && pnpm install && cd ..
 ### 2.2 Start Infrastructure Services
 
 ```bash
-docker compose -f deploy/docker-compose.dev.yml up -d
+make infra
 ```
 
 This starts:
@@ -66,7 +66,7 @@ This starts:
 Wait for all services to become healthy:
 
 ```bash
-docker compose -f deploy/docker-compose.dev.yml ps
+make infra-down   # to stop services
 ```
 
 ### 2.3 Start the Server
@@ -272,7 +272,16 @@ CLICKHOUSE_PASSWORD=<your-clickhouse-password>
 | `CLICKHOUSE_USER` | `default` | ClickHouse user for authentication. |
 | `CLICKHOUSE_PASSWORD` | — | ClickHouse password. |
 
-ThinkWatch automatically creates the required tables on startup if they do not exist. Audit log retention is configured via the `data_retention_days` setting in the admin Web UI.
+ThinkWatch creates six tables in ClickHouse:
+
+- `audit_logs` — Security audit trail (90-day TTL)
+- `gateway_logs` — AI API request logs (90-day TTL)
+- `mcp_logs` — MCP tool invocation logs (90-day TTL)
+- `platform_logs` — Platform management operations (90-day TTL)
+- `access_logs` — HTTP access logs (30-day TTL)
+- `app_logs` — Application runtime logs (30-day TTL)
+
+Tables are automatically created on first startup via `deploy/clickhouse/init.sql`.
 
 ### 3.6 Set Up a Reverse Proxy
 

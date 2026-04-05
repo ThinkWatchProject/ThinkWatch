@@ -54,7 +54,7 @@ cd web && pnpm install && cd ..
 ### 2.2 启动基础设施服务
 
 ```bash
-docker compose -f deploy/docker-compose.dev.yml up -d
+make infra
 ```
 
 这将启动：
@@ -272,7 +272,16 @@ CLICKHOUSE_PASSWORD=<your-clickhouse-password>
 | `CLICKHOUSE_USER` | `default` | ClickHouse 认证用户。 |
 | `CLICKHOUSE_PASSWORD` | — | ClickHouse 密码。 |
 
-ThinkWatch 在启动时会自动创建所需的表（如果不存在）。审计日志保留策略可通过管理员 Web UI 中的 `data_retention_days` 设置进行配置。
+ThinkWatch 在 ClickHouse 中创建六张表：
+
+- `audit_logs` — 安全审计轨迹 (90 天 TTL)
+- `gateway_logs` — AI API 请求日志 (90 天 TTL)
+- `mcp_logs` — MCP 工具调用日志 (90 天 TTL)
+- `platform_logs` — 平台管理操作 (90 天 TTL)
+- `access_logs` — HTTP 访问日志 (30 天 TTL)
+- `app_logs` — 应用运行时日志 (30 天 TTL)
+
+表在首次启动时通过 `deploy/clickhouse/init.sql` 自动创建。
 
 ### 3.6 设置反向代理
 

@@ -94,6 +94,12 @@ The gateway middleware attempts authentication in the following order:
 
 This allows both programmatic clients (API keys) and browser-based/console users (JWT) to access the gateway seamlessly.
 
+### 1.5 Session IP Binding
+
+When a user logs in, the signing key is bound to their client IP address. On subsequent requests, the signature verification middleware checks that the request IP matches the IP stored at login time. If the IP differs, the request is rejected with 401 Unauthorized.
+
+This prevents stolen signing keys from being used across different networks.
+
 ---
 
 ## 2. Authorization (RBAC)
@@ -172,11 +178,21 @@ User passwords are hashed using Argon2id with the following parameters:
 
 Argon2id is the recommended algorithm per OWASP guidelines, providing resistance against both GPU and side-channel attacks.
 
-### 3.3 API Key Hashing
+### 3.3 Password Complexity
+
+All password-setting operations (registration, setup wizard, password change, admin user creation) enforce:
+- Minimum 8 characters
+- At least one uppercase letter (A-Z)
+- At least one lowercase letter (a-z)
+- At least one digit (0-9)
+
+Validated by `validate_password()` in `crates/common/src/validation.rs`.
+
+### 3.4 API Key Hashing
 
 API keys are hashed with SHA-256 before storage. This is a one-way operation; the original key cannot be derived from the hash. The raw key is returned to the user exactly once at creation time.
 
-### 3.4 Encryption in Transit
+### 3.5 Encryption in Transit
 
 ThinkWatch itself does not terminate TLS. TLS termination should be handled by a reverse proxy (Nginx, Caddy, Traefik, cloud load balancer). See the hardening checklist in Section 6.
 
@@ -278,7 +294,13 @@ Audit entries are inserted into ClickHouse for SQL-based search and analytics:
 - Entries are sent asynchronously to avoid blocking request processing.
 - The console provides a search UI at `/api/audit/logs` with support for time-range filtering and SQL queries.
 
-### 5.4 Log Forwarder / SIEM Integration
+### 5.4 ClickHouse Query Security
+
+All log query endpoints use parameterized queries with `?` placeholders bound via the ClickHouse client SDK. User input for LIKE-based searches is escaped (`%`, `_`, `\` characters) to prevent wildcard injection.
+
+Sort order fields use a whitelist-based `match` expression with a safe default fallback, preventing SQL injection through ORDER BY clauses.
+
+### 5.5 Log Forwarder / SIEM Integration
 
 For enterprise environments, ThinkWatch can forward audit logs to external systems via the admin Web UI (Admin > Log Forwarders):
 

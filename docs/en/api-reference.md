@@ -2159,6 +2159,125 @@ curl http://localhost:3001/api/admin/settings/category/auth \
 
 ---
 
+### Gateway Logs
+
+#### List Gateway Logs
+
+`GET /api/gateway/logs`
+
+AI API request logs with model, provider, token, and cost data.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `model` | string | Model ID |
+| `provider` | string | Provider name |
+| `user_id` | string | User UUID |
+| `api_key_id` | string | API key UUID |
+| `status_code` | integer | HTTP status code |
+| `from` | string | Start datetime (ISO 8601) |
+| `to` | string | End datetime (ISO 8601) |
+| `sort_by` | string | `cost_usd`, `latency_ms`, or `created_at` (default) |
+| `limit` | integer | Max results (default 50, max 200) |
+| `offset` | integer | Pagination offset |
+
+---
+
+### MCP Logs
+
+#### List MCP Logs
+
+`GET /api/mcp/logs`
+
+MCP tool invocation logs.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `user_id` | string | User UUID |
+| `server_id` | string | MCP server UUID |
+| `tool_name` | string | Tool name |
+| `status` | string | Invocation status |
+| `from` | string | Start datetime (ISO 8601) |
+| `to` | string | End datetime (ISO 8601) |
+| `sort_by` | string | `duration_ms` or `created_at` (default) |
+| `limit` | integer | Max results (default 50, max 200) |
+| `offset` | integer | Pagination offset |
+
+---
+
+### Access Logs
+
+#### List Access Logs
+
+`GET /api/admin/access-logs`
+
+HTTP request logs for both gateway and console ports.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `method` | string | HTTP method (GET, POST, etc.) |
+| `path` | string | Request path (substring match) |
+| `status_code` | string | HTTP status code |
+| `port` | string | Port number (3000 or 3001) |
+| `user_id` | string | User UUID |
+| `q` | string | Free-text path search |
+| `from` | string | Start datetime (ISO 8601) |
+| `to` | string | End datetime (ISO 8601) |
+| `limit` | integer | Max results (default 50, max 200) |
+| `offset` | integer | Pagination offset |
+
+---
+
+### App Logs
+
+#### List App Logs
+
+`GET /api/admin/app-logs`
+
+Application runtime tracing logs.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `level` | string | Log level (TRACE, DEBUG, INFO, WARN, ERROR) |
+| `target` | string | Module/target (substring match) |
+| `q` | string | Message search (substring match) |
+| `from` | string | Start datetime (ISO 8601) |
+| `to` | string | End datetime (ISO 8601) |
+| `limit` | integer | Max results (default 50, max 200) |
+| `offset` | integer | Pagination offset |
+
+---
+
+### Platform Logs
+
+#### List Platform Logs
+
+`GET /api/admin/platform-logs`
+
+Platform management operation audit trail.
+
+**Query Parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `user_id` | string | User UUID |
+| `action` | string | Action name |
+| `resource` | string | Resource type |
+| `resource_id` | string | Resource UUID |
+| `from` | string | Start datetime (ISO 8601) |
+| `to` | string | End datetime (ISO 8601) |
+| `limit` | integer | Max results (default 50, max 200) |
+| `offset` | integer | Pagination offset |
+
+---
+
 ### Console Health
 
 #### GET /api/health
