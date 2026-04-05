@@ -1,5 +1,5 @@
 [package]
-name = "agent-bastion-common"
+name = "think-watch-common"
 version.workspace = true
 edition.workspace = true
 

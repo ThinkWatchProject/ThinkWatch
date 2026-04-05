@@ -44,159 +44,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "agent-bastion-auth"
-version = "0.1.0"
-dependencies = [
- "agent-bastion-common",
- "anyhow",
- "argon2",
- "axum",
- "chrono",
- "data-encoding",
- "fred",
- "hex",
- "hmac 0.13.0",
- "jsonwebtoken",
- "openidconnect",
- "rand 0.10.0",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sqlx",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "totp-rs",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-bastion-common"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "axum",
- "chrono",
- "clickhouse",
- "dotenvy",
- "fred",
- "hex",
- "rand 0.10.0",
- "reqwest 0.13.2",
- "rust_decimal",
- "serde",
- "serde_json",
- "sqlx",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "urlencoding",
- "utoipa",
- "uuid",
-]
-
-[[package]]
-name = "agent-bastion-gateway"
-version = "0.1.0"
-dependencies = [
- "agent-bastion-auth",
- "agent-bastion-common",
- "anyhow",
- "async-stream",
- "aws-credential-types",
- "aws-sigv4",
- "aws-smithy-eventstream",
- "axum",
- "bytes",
- "chrono",
- "fred",
- "futures",
- "http 1.4.0",
- "http-body-util",
- "hyper",
- "hyper-util",
- "metrics",
- "rand 0.10.0",
- "regex",
- "reqwest 0.13.2",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
- "utoipa",
- "uuid",
- "xxhash-rust",
-]
-
-[[package]]
-name = "agent-bastion-mcp-gateway"
-version = "0.1.0"
-dependencies = [
- "agent-bastion-auth",
- "agent-bastion-common",
- "anyhow",
- "axum",
- "chrono",
- "fred",
- "futures",
- "reqwest 0.13.2",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "agent-bastion-server"
-version = "0.1.0"
-dependencies = [
- "agent-bastion-auth",
- "agent-bastion-common",
- "agent-bastion-gateway",
- "agent-bastion-mcp-gateway",
- "anyhow",
- "axum",
- "axum-extra",
- "chrono",
- "clickhouse",
- "dotenvy",
- "fred",
- "hex",
- "hmac 0.13.0",
- "metrics",
- "metrics-exporter-prometheus",
- "openidconnect",
- "rand 0.10.0",
- "regex",
- "reqwest 0.13.2",
- "rust_decimal",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "sqlx",
- "subtle",
- "thiserror 2.0.18",
- "tokio",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "url",
- "urlencoding",
- "utoipa",
- "utoipa-axum",
- "utoipa-swagger-ui",
- "uuid",
-]
-
-[[package]]
 name = "ahash"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4062,6 +3909,159 @@ name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "55937e1799185b12863d447f42597ed69d9928686b8d88a1df17376a097d8369"
+
+[[package]]
+name = "think-watch-auth"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argon2",
+ "axum",
+ "chrono",
+ "data-encoding",
+ "fred",
+ "hex",
+ "hmac 0.13.0",
+ "jsonwebtoken",
+ "openidconnect",
+ "rand 0.10.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "subtle",
+ "think-watch-common",
+ "thiserror 2.0.18",
+ "tokio",
+ "totp-rs",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "think-watch-common"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "axum",
+ "chrono",
+ "clickhouse",
+ "dotenvy",
+ "fred",
+ "hex",
+ "rand 0.10.0",
+ "reqwest 0.13.2",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "utoipa",
+ "uuid",
+]
+
+[[package]]
+name = "think-watch-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "aws-credential-types",
+ "aws-sigv4",
+ "aws-smithy-eventstream",
+ "axum",
+ "bytes",
+ "chrono",
+ "fred",
+ "futures",
+ "http 1.4.0",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "metrics",
+ "rand 0.10.0",
+ "regex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "think-watch-auth",
+ "think-watch-common",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "utoipa",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
+name = "think-watch-mcp-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "fred",
+ "futures",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "think-watch-auth",
+ "think-watch-common",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "think-watch-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "axum-extra",
+ "chrono",
+ "clickhouse",
+ "dotenvy",
+ "fred",
+ "hex",
+ "hmac 0.13.0",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "openidconnect",
+ "rand 0.10.0",
+ "regex",
+ "reqwest 0.13.2",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "sqlx",
+ "subtle",
+ "think-watch-auth",
+ "think-watch-common",
+ "think-watch-gateway",
+ "think-watch-mcp-gateway",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+ "utoipa",
+ "utoipa-axum",
+ "utoipa-swagger-ui",
+ "uuid",
+]
 
 [[package]]
 name = "thiserror"

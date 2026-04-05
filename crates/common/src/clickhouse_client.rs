@@ -8,7 +8,7 @@ pub fn create_client(config: &AuditConfig) -> Option<clickhouse::Client> {
     let mut client = clickhouse::Client::default()
         .with_url(url)
         .with_database(&config.clickhouse_db)
-        .with_product_info("agent-bastion", env!("CARGO_PKG_VERSION"));
+        .with_product_info("think-watch", env!("CARGO_PKG_VERSION"));
 
     if let Some(ref user) = config.clickhouse_user {
         client = client.with_user(user);

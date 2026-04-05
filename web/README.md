@@ -1,6 +1,6 @@
-# AgentBastion Web Console
+# ThinkWatch Web Console
 
-The management console for AgentBastion, built with React 19, TypeScript, and Vite.
+The management console for ThinkWatch, built with React 19, TypeScript, and Vite.
 
 ## Tech Stack
 

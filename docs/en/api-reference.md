@@ -1,8 +1,8 @@
 **[English](../en/api-reference.md) | [中文](../zh-CN/api-reference.md)**
 
-# AgentBastion API Reference
+# ThinkWatch API Reference
 
-This document provides a complete reference for every HTTP endpoint exposed by AgentBastion. The platform runs two servers:
+This document provides a complete reference for every HTTP endpoint exposed by ThinkWatch. The platform runs two servers:
 
 | Server  | Default Port | Purpose                        |
 | ------- | ------------ | ------------------------------ |
@@ -2049,7 +2049,7 @@ Retrieve all settings grouped by category.
   },
   "general": {
     "data_retention_days": 30,
-    "site_name": "AgentBastion"
+    "site_name": "ThinkWatch"
   }
 }
 ```

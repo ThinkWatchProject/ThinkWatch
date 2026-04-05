@@ -183,7 +183,7 @@ impl McpProxy {
                 "prompts": {}
             },
             "serverInfo": {
-                "name": "AgentBastion MCP Gateway",
+                "name": "ThinkWatch MCP Gateway",
                 "version": env!("CARGO_PKG_VERSION")
             }
         });

@@ -1,11 +1,11 @@
 [package]
-name = "agent-bastion-mcp-gateway"
+name = "think-watch-mcp-gateway"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-agent-bastion-common = { workspace = true }
-agent-bastion-auth = { workspace = true }
+think-watch-common = { workspace = true }
+think-watch-auth = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

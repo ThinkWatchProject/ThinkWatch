@@ -38,7 +38,7 @@ impl HealthChecker {
                 "protocolVersion": "2025-03-26",
                 "capabilities": {},
                 "clientInfo": {
-                    "name": "AgentBastion HealthChecker",
+                    "name": "ThinkWatch HealthChecker",
                     "version": env!("CARGO_PKG_VERSION")
                 }
             })),

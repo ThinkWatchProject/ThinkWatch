@@ -1,11 +1,11 @@
-use agent_bastion_auth::oidc::OidcManager;
-use agent_bastion_common::audit::{self, AuditLogger};
-use agent_bastion_common::config::AppConfig;
-use agent_bastion_common::db;
-use agent_bastion_common::dynamic_config::{self, DynamicConfig};
 use fred::prelude::*;
 use fred::types::Builder;
 use std::sync::Arc;
+use think_watch_auth::oidc::OidcManager;
+use think_watch_common::audit::{self, AuditLogger};
+use think_watch_common::config::AppConfig;
+use think_watch_common::db;
+use think_watch_common::dynamic_config::{self, DynamicConfig};
 use tracing_subscriber::EnvFilter;
 
 mod app;
@@ -26,7 +26,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::error!("Configuration validation failed: {e}");
         std::process::exit(1);
     }
-    tracing::info!("Starting AgentBastion");
+    tracing::info!("Starting ThinkWatch");
 
     // Startup dependency validation
     let pool = match db::create_pool(&config.database_url).await {
@@ -80,7 +80,7 @@ async fn main() -> anyhow::Result<()> {
     let oidc_manager = {
         let dc = &dynamic_config;
         let encryption_key =
-            agent_bastion_common::crypto::parse_encryption_key(&config.encryption_key)?;
+            think_watch_common::crypto::parse_encryption_key(&config.encryption_key)?;
 
         // Check if OIDC is already configured in dynamic config (database)
         let db_issuer = dc.oidc_issuer_url().await;
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
             // Seed database from env vars (first-time migration)
             tracing::info!("Seeding OIDC config from environment variables into database");
             let secret_plain = config.oidc_client_secret.as_deref().unwrap_or("");
-            let secret_encrypted = hex::encode(agent_bastion_common::crypto::encrypt(
+            let secret_encrypted = hex::encode(think_watch_common::crypto::encrypt(
                 secret_plain.as_bytes(),
                 &encryption_key,
             )?);
@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 let encrypted_bytes = hex::decode(&secret_enc).unwrap_or_default();
                 String::from_utf8(
-                    agent_bastion_common::crypto::decrypt(&encrypted_bytes, &encryption_key)
+                    think_watch_common::crypto::decrypt(&encrypted_bytes, &encryption_key)
                         .unwrap_or_default(),
                 )
                 .unwrap_or_default()
@@ -175,9 +175,9 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let jwt = Arc::new(agent_bastion_auth::jwt::JwtManager::new(&config.jwt_secret));
+    let jwt = Arc::new(think_watch_auth::jwt::JwtManager::new(&config.jwt_secret));
 
-    let ch_client = agent_bastion_common::clickhouse_client::create_client(&config.audit_config());
+    let ch_client = think_watch_common::clickhouse_client::create_client(&config.audit_config());
     if ch_client.is_some() {
         tracing::info!("ClickHouse client initialized");
     }

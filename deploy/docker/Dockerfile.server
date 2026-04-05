@@ -17,17 +17,17 @@ RUN apt-get update && apt-get install -y musl-tools && \
     fi
 
 RUN if [ "$TARGETARCH" = "arm64" ]; then \
-        cargo build --release --target aarch64-unknown-linux-musl -p agent-bastion-server && \
-        cp target/aarch64-unknown-linux-musl/release/agent-bastion-server /agent-bastion-server; \
+        cargo build --release --target aarch64-unknown-linux-musl -p think-watch-server && \
+        cp target/aarch64-unknown-linux-musl/release/think-watch-server /think-watch-server; \
     else \
-        cargo build --release --target x86_64-unknown-linux-musl -p agent-bastion-server && \
-        cp target/x86_64-unknown-linux-musl/release/agent-bastion-server /agent-bastion-server; \
+        cargo build --release --target x86_64-unknown-linux-musl -p think-watch-server && \
+        cp target/x86_64-unknown-linux-musl/release/think-watch-server /think-watch-server; \
     fi
 
 # Stage 2: Distroless runtime — no shell, no package manager, minimal attack surface
 FROM gcr.io/distroless/static-debian13:nonroot
 
-COPY --from=builder /agent-bastion-server /
+COPY --from=builder /think-watch-server /
 COPY --from=builder /app/migrations /migrations
 
 # Gateway port
@@ -35,6 +35,6 @@ EXPOSE 3000
 # Console port
 EXPOSE 3001
 
-ENV RUST_LOG=info,agent_bastion=debug
+ENV RUST_LOG=info,think_watch=debug
 
-ENTRYPOINT ["/agent-bastion-server"]
+ENTRYPOINT ["/think-watch-server"]

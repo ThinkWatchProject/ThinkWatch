@@ -1,6 +1,6 @@
-use agent_bastion_common::dynamic_config::DynamicConfig;
 use sqlx::PgPool;
 use std::sync::Arc;
+use think_watch_common::dynamic_config::DynamicConfig;
 
 /// Background task that manages API key lifecycle:
 /// - Disables expired keys

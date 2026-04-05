@@ -253,7 +253,7 @@ pub async fn list_models_handler(State(state): State<GatewayState>) -> Json<serd
                 "id": id,
                 "object": "model",
                 "created": 0,
-                "owned_by": "agent-bastion",
+                "owned_by": "think-watch",
             })
         })
         .collect();
@@ -422,7 +422,7 @@ fn convert_to_anthropic_response(
 /// POST /v1/responses
 ///
 /// OpenAI Responses API (new format, 2025+). Supports tool use, multi-turn,
-/// and structured outputs natively. AgentBastion proxies this by converting
+/// and structured outputs natively. ThinkWatch proxies this by converting
 /// to internal ChatCompletionRequest format, routing through the same
 /// provider pipeline, then converting the response back.
 ///

@@ -1,11 +1,11 @@
 [package]
-name = "agent-bastion-gateway"
+name = "think-watch-gateway"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-agent-bastion-common = { workspace = true }
-agent-bastion-auth = { workspace = true }
+think-watch-common = { workspace = true }
+think-watch-auth = { workspace = true }
 reqwest = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }

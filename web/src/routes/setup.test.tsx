@@ -14,7 +14,7 @@ describe('SetupPage', () => {
   it('renders welcome step on mount', () => {
     render(<SetupPage />)
 
-    expect(screen.getByText('Welcome to AgentBastion')).toBeInTheDocument()
+    expect(screen.getByText('Welcome to ThinkWatch')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /get started/i })).toBeInTheDocument()
   })
 

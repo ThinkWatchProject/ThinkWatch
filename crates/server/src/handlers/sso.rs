@@ -2,9 +2,9 @@ use axum::extract::{Query, State};
 use axum::response::Redirect;
 use serde::Deserialize;
 
-use agent_bastion_common::audit::AuditEntry;
-use agent_bastion_common::errors::AppError;
-use agent_bastion_common::models::User;
+use think_watch_common::audit::AuditEntry;
+use think_watch_common::errors::AppError;
+use think_watch_common::models::User;
 
 use crate::app::AppState;
 

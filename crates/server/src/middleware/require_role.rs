@@ -5,7 +5,7 @@ use axum::{
     response::Response,
 };
 
-use agent_bastion_auth::rbac::SystemRole;
+use think_watch_auth::rbac::SystemRole;
 
 use super::auth_guard::AuthUser;
 use crate::app::AppState;

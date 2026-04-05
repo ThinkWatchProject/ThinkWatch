@@ -5,14 +5,14 @@
 
 services:
   server:
-    image: ghcr.io/agentbastion/agent-bastion-server:${IMAGE_TAG:-latest}
+    image: ghcr.io/thinkwatch/think-watch-server:${IMAGE_TAG:-latest}
     ports:
       - "${GATEWAY_PORT:-3000}:3000"   # Gateway — expose to clients
       # Console port NOT exposed externally by default
     expose:
       - "3001"   # Console — only accessible within docker network
     environment:
-      DATABASE_URL: postgres://${DB_USER:-bastion}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-agent_bastion}
+      DATABASE_URL: postgres://${DB_USER:-bastion}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-think_watch}
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
@@ -20,14 +20,14 @@ services:
       CONSOLE_PORT: "3001"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
       CLICKHOUSE_URL: http://clickhouse:8123
-      CLICKHOUSE_DB: agent_bastion
+      CLICKHOUSE_DB: think_watch
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-bastion}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
       OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
-      RUST_LOG: ${RUST_LOG:-info,agent_bastion=info}
+      RUST_LOG: ${RUST_LOG:-info,think_watch=info}
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,7 +53,7 @@ services:
     restart: unless-stopped
 
   web:
-    image: ghcr.io/agentbastion/agent-bastion-web:${IMAGE_TAG:-latest}
+    image: ghcr.io/thinkwatch/think-watch-web:${IMAGE_TAG:-latest}
     ports:
       - "${WEB_PORT:-80}:80"
     depends_on:
@@ -128,7 +128,7 @@ services:
     environment:
       POSTGRES_USER: ${DB_USER:-bastion}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
-      POSTGRES_DB: ${DB_NAME:-agent_bastion}
+      POSTGRES_DB: ${DB_NAME:-think_watch}
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -170,7 +170,7 @@ services:
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-bastion}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      CLICKHOUSE_DB: agent_bastion
+      CLICKHOUSE_DB: think_watch
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse_data:/var/lib/clickhouse

@@ -3,13 +3,13 @@ use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 use uuid::Uuid;
 
-use agent_bastion_auth::api_key;
-use agent_bastion_common::audit::AuditEntry;
-use agent_bastion_common::dto::{
+use think_watch_auth::api_key;
+use think_watch_common::audit::AuditEntry;
+use think_watch_common::dto::{
     CreateApiKeyRequest, CreateApiKeyResponse, PaginatedResponse, PaginationParams,
 };
-use agent_bastion_common::errors::AppError;
-use agent_bastion_common::models::ApiKey;
+use think_watch_common::errors::AppError;
+use think_watch_common::models::ApiKey;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;

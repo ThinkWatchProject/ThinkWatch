@@ -214,7 +214,7 @@ export function AppSidebar({
                 <Shield className="size-4" />
               </div>
               <div className="grid flex-1 text-left text-sm leading-tight">
-                <span className="truncate font-semibold">AgentBastion</span>
+                <span className="truncate font-semibold">ThinkWatch</span>
                 <span className="truncate text-xs text-muted-foreground">
                   Enterprise
                 </span>

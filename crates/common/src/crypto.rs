@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn encrypt_decrypt_roundtrip() {
         let key = test_key();
-        let plaintext = b"Hello, AgentBastion!";
+        let plaintext = b"Hello, ThinkWatch!";
         let encrypted = encrypt(plaintext, &key).expect("encrypt should succeed");
         let decrypted = decrypt(&encrypted, &key).expect("decrypt should succeed");
         assert_eq!(decrypted, plaintext, "decrypted text must match original");

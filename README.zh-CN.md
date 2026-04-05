@@ -7,13 +7,13 @@
   <img src="https://img.shields.io/badge/Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white" />
 </p>
 
-# AgentBastion
+# ThinkWatch
 
 **[English](README.md) | [中文](README.zh-CN.md)**
 
 **企业级 AI 堡垒机。** 在一个统一控制面上，对组织内每一次 AI API 调用和 MCP 工具调用进行安全管控、审计追踪和治理。
 
-如同 SSH 堡垒机是所有服务器访问的唯一入口，AgentBastion 是所有 AI 访问的唯一入口。每一次模型请求、每一次工具调用、每一个 Token —— 全部经过认证、授权、限流、日志记录和费用核算。
+如同 SSH 堡垒机是所有服务器访问的唯一入口，ThinkWatch 是所有 AI 访问的唯一入口。每一次模型请求、每一次工具调用、每一个 Token —— 全部经过认证、授权、限流、日志记录和费用核算。
 
 ```
                     ┌──────────────────────────────────────┐
@@ -28,7 +28,7 @@
                     └──────────────────────────────────────┘
 ```
 
-## 为什么需要 AgentBastion？
+## 为什么需要 ThinkWatch？
 
 随着 AI Agent 在研发团队中的普及，企业面临日益严峻的治理挑战：
 
@@ -38,7 +38,7 @@
 - **合规缺口** — AI 辅助代码生成和数据访问没有审计轨迹
 - **费用失控** — 月底的 AI 账单没人能解释或归因
 
-AgentBastion 一次部署，全部解决。
+ThinkWatch 一次部署，全部解决。
 
 ## 核心功能
 
@@ -111,7 +111,7 @@ docker compose -f deploy/docker-compose.dev.yml up -d
 
 # 2. 启动后端 (gateway :3000 + console :3001)
 cp .env.example .env
-cargo run -p agent-bastion-server
+cargo run -p think-watch-server
 
 # 3. 启动前端开发服务器
 cd web && pnpm install && pnpm dev
@@ -143,7 +143,7 @@ cd web && pnpm install && pnpm dev
 ## 项目结构
 
 ```
-AgentBastion/
+ThinkWatch/
 ├── crates/
 │   ├── server/          # 双端口 Axum 服务器 (gateway + console)
 │   ├── gateway/         # AI API 代理：路由、流式、限流、费用追踪
@@ -156,7 +156,7 @@ AgentBastion/
 │   ├── docker/          # Dockerfile.server (distroless), Dockerfile.web (nginx)
 │   ├── docker-compose.yml       # 生产部署
 │   ├── docker-compose.dev.yml   # 开发环境 (PG + Redis + ClickHouse + Zitadel)
-│   └── helm/agent-bastion/      # Kubernetes Helm Chart
+│   └── helm/think-watch/      # Kubernetes Helm Chart
 └── docs/                # 详细文档
 ```
 
@@ -166,7 +166,7 @@ AgentBastion/
 
 ## 授权协议
 
-AgentBastion 采用 [Business Source License 1.1](LICENSE) 进行源码可见分发。
+ThinkWatch 采用 [Business Source License 1.1](LICENSE) 进行源码可见分发。
 非生产用途可免费使用。生产用途在每个 UTC 自然月内，同时不超过
 `10,000,000` Billable Tokens 且不超过 `10,000` MCP Tool Calls 时可
 免费使用；任一指标超出阈值后，需购买按使用量梯度计费的商业授权。
@@ -177,10 +177,10 @@ AgentBastion 采用 [Business Source License 1.1](LICENSE) 进行源码可见分
 
 ## Star History
 
-<a href="https://www.star-history.com/#AgentBastion/AgentBastion&Date">
+<a href="https://www.star-history.com/#ThinkWatch/ThinkWatch&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=AgentBastion/AgentBastion&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=AgentBastion/AgentBastion&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=AgentBastion/AgentBastion&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ThinkWatch/ThinkWatch&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ThinkWatch/ThinkWatch&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ThinkWatch/ThinkWatch&type=Date" />
  </picture>
 </a>

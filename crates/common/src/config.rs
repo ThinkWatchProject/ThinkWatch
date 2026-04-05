@@ -56,8 +56,7 @@ impl AppConfig {
 
             // ClickHouse
             clickhouse_url: std::env::var("CLICKHOUSE_URL").ok(),
-            clickhouse_db: std::env::var("CLICKHOUSE_DB")
-                .unwrap_or_else(|_| "agent_bastion".into()),
+            clickhouse_db: std::env::var("CLICKHOUSE_DB").unwrap_or_else(|_| "think_watch".into()),
             clickhouse_user: std::env::var("CLICKHOUSE_USER").ok(),
             clickhouse_password: std::env::var("CLICKHOUSE_PASSWORD").ok(),
 

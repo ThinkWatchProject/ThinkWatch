@@ -21,7 +21,7 @@ jobs:
         env:
           POSTGRES_USER: postgres
           POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: agent_bastion_test
+          POSTGRES_DB: think_watch_test
         ports:
           - 5432:5432
         options: >-
@@ -40,7 +40,7 @@ jobs:
           --health-retries 5
 
     env:
-      DATABASE_URL: postgres://postgres:postgres@localhost:5432/agent_bastion_test
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/think_watch_test
       REDIS_URL: redis://localhost:6379
       JWT_SECRET: ci-test-jwt-secret-not-for-production-use-00
       ENCRYPTION_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -113,7 +113,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_PREFIX }}/agent-bastion-server
+          images: ${{ env.IMAGE_PREFIX }}/think-watch-server
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -133,7 +133,7 @@ jobs:
           file: deploy/docker/Dockerfile.server
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          outputs: type=image,"name=${{ env.IMAGE_PREFIX }}/agent-bastion-server",push-by-digest=true,name-canonical=true,push=true
+          outputs: type=image,"name=${{ env.IMAGE_PREFIX }}/think-watch-server",push-by-digest=true,name-canonical=true,push=true
           cache-from: type=gha,scope=server-${{ matrix.platform }}
           cache-to: type=gha,scope=server-${{ matrix.platform }},mode=max
 
@@ -183,7 +183,7 @@ jobs:
       - name: Create and push multi-arch manifest
         working-directory: ${{ runner.temp }}/digests
         run: |
-          IMAGE="${IMAGE_PREFIX}/agent-bastion-server"
+          IMAGE="${IMAGE_PREFIX}/think-watch-server"
           docker buildx imagetools create \
             -t "${IMAGE}:latest" \
             -t "${IMAGE}:${{ github.sha }}" \
@@ -227,7 +227,7 @@ jobs:
           push: true
           platforms: linux/amd64,linux/arm64
           tags: |
-            ${{ env.IMAGE_PREFIX }}/agent-bastion-web:latest
-            ${{ env.IMAGE_PREFIX }}/agent-bastion-web:${{ github.sha }}
+            ${{ env.IMAGE_PREFIX }}/think-watch-web:latest
+            ${{ env.IMAGE_PREFIX }}/think-watch-web:${{ github.sha }}
           cache-from: type=gha,scope=web
           cache-to: type=gha,scope=web,mode=max

@@ -1,10 +1,10 @@
 [package]
-name = "agent-bastion-auth"
+name = "think-watch-auth"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-agent-bastion-common = { workspace = true }
+think-watch-common = { workspace = true }
 jsonwebtoken = { workspace = true }
 argon2 = { workspace = true }
 sha2 = { workspace = true }

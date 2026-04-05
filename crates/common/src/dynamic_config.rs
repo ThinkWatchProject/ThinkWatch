@@ -216,7 +216,7 @@ impl DynamicConfig {
     pub async fn site_name(&self) -> String {
         self.get_string("setup.site_name")
             .await
-            .unwrap_or_else(|| "AgentBastion".to_string())
+            .unwrap_or_else(|| "ThinkWatch".to_string())
     }
 
     pub async fn api_keys_default_expiry_days(&self) -> i64 {

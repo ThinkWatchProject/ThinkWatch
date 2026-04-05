@@ -3,8 +3,8 @@ use axum::extract::{Path, State};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use agent_bastion_common::errors::AppError;
-use agent_bastion_common::models::LogForwarder;
+use think_watch_common::errors::AppError;
+use think_watch_common::models::LogForwarder;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -79,7 +79,7 @@ pub async fn create_forwarder(
     state.audit.reload_forwarders().await;
 
     state.audit.log(
-        agent_bastion_common::audit::AuditEntry::new("log_forwarder.created")
+        think_watch_common::audit::AuditEntry::new("log_forwarder.created")
             .user_id(auth_user.claims.sub)
             .resource(format!("log_forwarder:{}", forwarder.id)),
     );
@@ -168,7 +168,7 @@ pub async fn delete_forwarder(
     state.audit.reload_forwarders().await;
 
     state.audit.log(
-        agent_bastion_common::audit::AuditEntry::new("log_forwarder.deleted")
+        think_watch_common::audit::AuditEntry::new("log_forwarder.deleted")
             .user_id(auth_user.claims.sub)
             .resource(format!("log_forwarder:{id}")),
     );
@@ -200,7 +200,7 @@ pub async fn toggle_forwarder(
         "log_forwarder.paused"
     };
     state.audit.log(
-        agent_bastion_common::audit::AuditEntry::new(action)
+        think_watch_common::audit::AuditEntry::new(action)
             .user_id(auth_user.claims.sub)
             .resource(format!("log_forwarder:{id}")),
     );
@@ -246,7 +246,7 @@ pub async fn test_forwarder(
         .await?
         .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;
 
-    let test_entry = agent_bastion_common::audit::AuditEntry::new("log_forwarder.test")
+    let test_entry = think_watch_common::audit::AuditEntry::new("log_forwarder.test")
         .user_id(auth_user.claims.sub)
         .resource(format!("log_forwarder:{id}"));
 
@@ -271,7 +271,7 @@ pub async fn test_forwarder(
                 .unwrap_or(16);
             let priority = facility * 8 + 6u8;
             let msg = format!(
-                "<{}>1 {} agent-bastion audit - {} [audit@0 test=\"true\"] test message\n",
+                "<{}>1 {} think-watch audit - {} [audit@0 test=\"true\"] test message\n",
                 priority, &test_entry.created_at, test_entry.action,
             );
             if forwarder.forwarder_type == "udp_syslog" {

@@ -5,8 +5,8 @@ use axum::{
     response::Response,
 };
 
-use agent_bastion_auth::jwt::Claims;
-use agent_bastion_common::audit::AuditEntry;
+use think_watch_auth::jwt::Claims;
+use think_watch_common::audit::AuditEntry;
 
 use crate::app::AppState;
 
@@ -69,8 +69,8 @@ pub async fn require_auth(
     }
 
     // Check JWT blacklist (revoked tokens)
-    let token_hash = agent_bastion_auth::jwt::sha2_hash(token);
-    if agent_bastion_auth::jwt::is_revoked(&state.redis, &token_hash).await {
+    let token_hash = think_watch_auth::jwt::sha2_hash(token);
+    if think_watch_auth::jwt::is_revoked(&state.redis, &token_hash).await {
         return Err(StatusCode::UNAUTHORIZED);
     }
 

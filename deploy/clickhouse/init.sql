@@ -1,4 +1,4 @@
--- ClickHouse schema for AgentBastion log storage
+-- ClickHouse schema for ThinkWatch log storage
 -- Optimised for append-heavy, time-range + filter query workload.
 --
 -- Encoding strategy:

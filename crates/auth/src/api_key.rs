@@ -9,7 +9,7 @@ const KEY_LENGTH: usize = 48;
 /// Server-side HMAC key for API key hashing.
 /// This ensures API key hashes cannot be brute-forced without the server secret,
 /// and prevents hash collisions between different server instances.
-const HMAC_DOMAIN_KEY: &[u8] = b"agent-bastion-api-key-v1";
+const HMAC_DOMAIN_KEY: &[u8] = b"think-watch-api-key-v1";
 
 pub struct GeneratedApiKey {
     pub plaintext: String,

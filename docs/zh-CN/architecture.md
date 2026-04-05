@@ -1,10 +1,10 @@
 **[English](../en/architecture.md) | [中文](../zh-CN/architecture.md)**
 
-# AgentBastion 架构设计
+# ThinkWatch 架构设计
 
 ## 1. 概述
 
-AgentBastion 是一个使用 Rust 构建的企业级 AI API 网关和 MCP（Model Context Protocol）管理平台。它作为组织内所有 AI 访问的**堡垒主机** —— 来自开发工具、自动化代理和内部应用的每个请求都通过单一受控网关流转，然后才到达上游 AI 提供商或 MCP 服务器。
+ThinkWatch 是一个使用 Rust 构建的企业级 AI API 网关和 MCP（Model Context Protocol）管理平台。它作为组织内所有 AI 访问的**堡垒主机** —— 来自开发工具、自动化代理和内部应用的每个请求都通过单一受控网关流转，然后才到达上游 AI 提供商或 MCP 服务器。
 
 该架构提供集中化的：
 
@@ -88,7 +88,7 @@ AgentBastion 是一个使用 Rust 构建的企业级 AI API 网关和 MCP（Mode
 
 ## 3. 双端口架构
 
-AgentBastion 在单个进程中绑定两个独立的 TCP 监听器：
+ThinkWatch 在单个进程中绑定两个独立的 TCP 监听器：
 
 | 端口 | 名称    | 用途                                      | 目标用户           |
 |------|---------|-------------------------------------------|--------------------|
@@ -236,7 +236,7 @@ MCP Client              MCP Gateway :3000/mcp            Upstream MCP Server
 
 ## 6. Crate 架构
 
-AgentBastion 采用 Cargo workspace 结构，包含五个 crate：
+ThinkWatch 采用 Cargo workspace 结构，包含五个 crate：
 
 ```
 crates/

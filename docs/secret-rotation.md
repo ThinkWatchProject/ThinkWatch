@@ -1,6 +1,6 @@
 # Secret Rotation Guide
 
-This document describes procedures for rotating the various secrets used by AgentBastion.
+This document describes procedures for rotating the various secrets used by ThinkWatch.
 
 ## JWT Secret Rotation
 
@@ -20,7 +20,7 @@ The JWT secret (`JWT_SECRET`) is used to sign and verify access/refresh tokens.
    JWT_SECRET=<new-secret>
    ```
 
-4. **Restart all AgentBastion server instances** simultaneously.
+4. **Restart all ThinkWatch server instances** simultaneously.
 
 5. **Users will need to re-login** — existing access and refresh tokens become invalid.
 
@@ -126,7 +126,7 @@ The OIDC client secret is used to authenticate with your identity provider (e.g.
    OIDC_CLIENT_SECRET=<new-secret>
    ```
 
-3. **Restart all AgentBastion instances** — OIDC discovery runs at startup.
+3. **Restart all ThinkWatch instances** — OIDC discovery runs at startup.
 
 ### Impact
 - SSO logins may fail briefly during the restart

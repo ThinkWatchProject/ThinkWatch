@@ -1,10 +1,10 @@
-use agent_bastion_auth::{api_key, password};
-use agent_bastion_common::audit::AuditEntry;
-use agent_bastion_common::dynamic_config;
-use agent_bastion_common::errors::AppError;
 use axum::Json;
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
+use think_watch_auth::{api_key, password};
+use think_watch_common::audit::AuditEntry;
+use think_watch_common::dynamic_config;
+use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 
@@ -151,10 +151,10 @@ pub async fn setup_initialize(
     let mut provider_id = None;
     if let Some(ref provider) = req.provider {
         let encryption_key =
-            agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
+            think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))?;
         let encrypted_api_key =
-            agent_bastion_common::crypto::encrypt(provider.api_key.as_bytes(), &encryption_key)
+            think_watch_common::crypto::encrypt(provider.api_key.as_bytes(), &encryption_key)
                 .map_err(|e| {
                     AppError::Internal(anyhow::anyhow!("Failed to encrypt API key: {e}"))
                 })?;
@@ -188,7 +188,7 @@ pub async fn setup_initialize(
     .await?;
 
     // 4. Mark as initialized
-    let site_name = req.site_name.as_deref().unwrap_or("AgentBastion");
+    let site_name = req.site_name.as_deref().unwrap_or("ThinkWatch");
     sqlx::query(
         "UPDATE system_settings SET value = $1, updated_at = now() WHERE key = 'setup.initialized'",
     )

@@ -1,4 +1,4 @@
-use agent_bastion_common::errors::AppError;
+use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 
