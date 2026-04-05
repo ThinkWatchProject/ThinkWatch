@@ -278,6 +278,56 @@ impl DynamicConfig {
             .await
             .unwrap_or(false)
     }
+
+    // --- OIDC / SSO ---
+
+    pub async fn oidc_enabled(&self) -> bool {
+        self.get_bool("oidc.enabled").await.unwrap_or(false)
+    }
+
+    pub async fn oidc_issuer_url(&self) -> Option<String> {
+        self.get_string("oidc.issuer_url").await
+    }
+
+    pub async fn oidc_client_id(&self) -> Option<String> {
+        self.get_string("oidc.client_id").await
+    }
+
+    /// Returns the encrypted client secret (hex). Caller must decrypt.
+    pub async fn oidc_client_secret_encrypted(&self) -> Option<String> {
+        self.get_string("oidc.client_secret_encrypted").await
+    }
+
+    pub async fn oidc_redirect_url(&self) -> Option<String> {
+        self.get_string("oidc.redirect_url").await
+    }
+
+    /// Insert or update a setting, creating the row if it doesn't exist.
+    pub async fn upsert(
+        &self,
+        key: &str,
+        value: &Value,
+        category: &str,
+        description: Option<&str>,
+        updated_by: Option<uuid::Uuid>,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"INSERT INTO system_settings (key, value, category, description, updated_by, updated_at)
+               VALUES ($1, $2, $3, $4, $5, now())
+               ON CONFLICT (key) DO UPDATE
+               SET value = $2, updated_by = $5, updated_at = now()"#,
+        )
+        .bind(key)
+        .bind(value)
+        .bind(category)
+        .bind(description)
+        .bind(updated_by)
+        .execute(&self.db)
+        .await?;
+
+        self.reload().await?;
+        Ok(())
+    }
 }
 
 /// Publish a config change notification via Redis Pub/Sub.
@@ -447,6 +497,32 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+
+        // OIDC settings
+        "oidc.enabled" => {
+            value
+                .as_bool()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a boolean value"))?;
+        }
+        "oidc.issuer_url" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
+            if !s.is_empty() && !s.starts_with("https://") && !s.starts_with("http://") {
+                anyhow::bail!("{key}: must be a valid http/https URL");
+            }
+        }
+        "oidc.client_id" | "oidc.redirect_url" => {
+            value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
+        }
+        "oidc.client_secret_encrypted" => {
+            // Encrypted value — just check it's a string
+            value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
         }
 
         _ => {} // Unknown keys pass through — forward-compatible

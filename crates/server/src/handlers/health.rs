@@ -43,8 +43,9 @@ pub async fn readiness(State(state): State<AppState>) -> Response {
 
 /// GET /api/auth/sso/status — public, returns whether SSO is enabled (no auth required).
 pub async fn sso_status(State(state): State<AppState>) -> Json<Value> {
+    let enabled = state.oidc.read().await.is_some();
     Json(json!({
-        "enabled": state.config.oidc_enabled(),
+        "enabled": enabled,
     }))
 }
 

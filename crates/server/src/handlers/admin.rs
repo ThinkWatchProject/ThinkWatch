@@ -449,24 +449,184 @@ pub struct OidcConfigResponse {
     pub issuer_url: Option<String>,
     pub client_id: Option<String>,
     pub redirect_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_secret: Option<bool>,
 }
 
 pub async fn get_oidc_settings(
     _auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Json<OidcConfigResponse> {
+    let dc = &state.dynamic_config;
+    let enabled = dc.oidc_enabled().await;
+    let issuer_url = dc.oidc_issuer_url().await;
+    let client_id = dc.oidc_client_id().await;
+    let redirect_url = dc.oidc_redirect_url().await;
+    let has_secret = dc
+        .oidc_client_secret_encrypted()
+        .await
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
     Json(OidcConfigResponse {
-        enabled: state.config.oidc_enabled(),
-        issuer_url: state.config.oidc_issuer_url.clone(),
-        client_id: state.config.oidc_client_id.as_ref().map(|id| {
+        enabled,
+        issuer_url,
+        client_id: client_id.as_ref().map(|id| {
             if id.len() > 8 {
                 format!("{}...{}", &id[..4], &id[id.len() - 4..])
             } else {
                 "****".to_string()
             }
         }),
-        redirect_url: state.config.oidc_redirect_url.clone(),
+        redirect_url,
+        has_secret: Some(has_secret),
     })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateOidcRequest {
+    pub enabled: Option<bool>,
+    pub issuer_url: Option<String>,
+    pub client_id: Option<String>,
+    /// Plaintext client secret — will be encrypted before storage.
+    /// Send empty string to keep existing secret unchanged.
+    pub client_secret: Option<String>,
+    pub redirect_url: Option<String>,
+}
+
+/// PATCH /api/admin/settings/oidc — update OIDC/SSO configuration.
+/// Client secret is encrypted with AES-256-GCM before storage.
+/// Triggers OIDC provider re-discovery if settings change.
+pub async fn update_oidc_settings(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<UpdateOidcRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let dc = &state.dynamic_config;
+    let encryption_key =
+        agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
+    let user_id = Some(auth_user.claims.sub);
+
+    // Update each field if provided
+    if let Some(enabled) = req.enabled {
+        dc.upsert(
+            "oidc.enabled",
+            &serde_json::json!(enabled),
+            "oidc",
+            Some("SSO enabled"),
+            user_id,
+        )
+        .await
+        .map_err(AppError::Internal)?;
+    }
+    if let Some(ref issuer_url) = req.issuer_url {
+        dc.upsert(
+            "oidc.issuer_url",
+            &serde_json::json!(issuer_url),
+            "oidc",
+            Some("OIDC issuer URL"),
+            user_id,
+        )
+        .await
+        .map_err(AppError::Internal)?;
+    }
+    if let Some(ref client_id) = req.client_id {
+        dc.upsert(
+            "oidc.client_id",
+            &serde_json::json!(client_id),
+            "oidc",
+            Some("OIDC client ID"),
+            user_id,
+        )
+        .await
+        .map_err(AppError::Internal)?;
+    }
+    // Encrypt and store client secret (skip if empty = keep existing)
+    if let Some(ref client_secret) = req.client_secret
+        && !client_secret.is_empty()
+    {
+        let encrypted =
+            agent_bastion_common::crypto::encrypt(client_secret.as_bytes(), &encryption_key)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption failed: {e}")))?;
+        let encrypted_hex = hex::encode(encrypted);
+        dc.upsert(
+            "oidc.client_secret_encrypted",
+            &serde_json::json!(encrypted_hex),
+            "oidc",
+            Some("OIDC client secret (encrypted)"),
+            user_id,
+        )
+        .await
+        .map_err(AppError::Internal)?;
+    }
+    if let Some(ref redirect_url) = req.redirect_url {
+        dc.upsert(
+            "oidc.redirect_url",
+            &serde_json::json!(redirect_url),
+            "oidc",
+            Some("OIDC redirect URL"),
+            user_id,
+        )
+        .await
+        .map_err(AppError::Internal)?;
+    }
+
+    // Notify other instances
+    agent_bastion_common::dynamic_config::notify_config_changed(&state.redis).await;
+
+    // Re-discover OIDC provider with updated settings
+    let enabled = dc.oidc_enabled().await;
+    if enabled {
+        let issuer = dc.oidc_issuer_url().await.unwrap_or_default();
+        let client_id = dc.oidc_client_id().await.unwrap_or_default();
+        let secret_enc = dc.oidc_client_secret_encrypted().await.unwrap_or_default();
+        let redirect = dc.oidc_redirect_url().await.unwrap_or_default();
+
+        let client_secret = if secret_enc.is_empty() {
+            String::new()
+        } else {
+            let bytes = hex::decode(&secret_enc).unwrap_or_default();
+            String::from_utf8(
+                agent_bastion_common::crypto::decrypt(&bytes, &encryption_key).unwrap_or_default(),
+            )
+            .unwrap_or_default()
+        };
+
+        if !issuer.is_empty() && !client_id.is_empty() && !client_secret.is_empty() {
+            match agent_bastion_auth::oidc::OidcManager::discover(
+                &issuer,
+                &client_id,
+                &client_secret,
+                &redirect,
+            )
+            .await
+            {
+                Ok(mgr) => {
+                    tracing::info!("OIDC provider re-discovered after settings update");
+                    *state.oidc.write().await = Some(mgr);
+                }
+                Err(e) => {
+                    tracing::error!("OIDC discovery failed after settings update: {e}");
+                    return Err(AppError::BadRequest(format!(
+                        "OIDC discovery failed: {e}. Settings saved but SSO is not active."
+                    )));
+                }
+            }
+        } else {
+            *state.oidc.write().await = None;
+        }
+    } else {
+        *state.oidc.write().await = None;
+    }
+
+    state
+        .audit
+        .log(auth_user.audit("settings.oidc_updated").resource("oidc"));
+
+    Ok(Json(
+        serde_json::json!({"status": "updated", "sso_active": state.oidc.read().await.is_some()}),
+    ))
 }
 
 #[derive(Debug, Serialize)]

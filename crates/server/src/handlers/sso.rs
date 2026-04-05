@@ -10,8 +10,8 @@ use crate::app::AppState;
 
 /// GET /api/auth/sso/authorize — redirect to OIDC provider.
 pub async fn sso_authorize(State(state): State<AppState>) -> Result<Redirect, AppError> {
-    let oidc = state
-        .oidc
+    let oidc_guard = state.oidc.read().await;
+    let oidc = oidc_guard
         .as_ref()
         .ok_or(AppError::BadRequest("SSO is not configured".into()))?;
 
@@ -48,8 +48,8 @@ pub async fn sso_callback(
     State(state): State<AppState>,
     Query(params): Query<SsoCallbackParams>,
 ) -> Result<Redirect, AppError> {
-    let oidc = state
-        .oidc
+    let oidc_guard = state.oidc.read().await;
+    let oidc = oidc_guard
         .as_ref()
         .ok_or(AppError::BadRequest("SSO is not configured".into()))?;
 

@@ -75,42 +75,104 @@ async fn main() -> anyhow::Result<()> {
 
     let audit_logger = AuditLogger::new(config.audit_config(), Some(pool.clone()));
 
-    // Initialize OIDC if configured (all fields validated by oidc_enabled())
-    let oidc_manager = if config.oidc_enabled() {
-        let issuer = config
-            .oidc_issuer_url
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("OIDC_ISSUER_URL required when OIDC is enabled"))?;
-        let client_id = config
-            .oidc_client_id
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("OIDC_CLIENT_ID required when OIDC is enabled"))?;
-        let client_secret = config
-            .oidc_client_secret
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("OIDC_CLIENT_SECRET required when OIDC is enabled"))?;
-        let default_redirect = format!(
-            "http://{}:{}/api/auth/sso/callback",
-            config.server_host, config.console_port
-        );
-        let redirect = config
-            .oidc_redirect_url
-            .as_deref()
-            .unwrap_or(&default_redirect);
+    // Initialize OIDC — prefer dynamic config (database), fall back to env vars.
+    // If OIDC env vars are set but no DB config exists yet, seed the DB from env.
+    let oidc_manager = {
+        let dc = &dynamic_config;
+        let encryption_key =
+            agent_bastion_common::crypto::parse_encryption_key(&config.encryption_key)?;
 
-        match OidcManager::discover(issuer, client_id, client_secret, redirect).await {
-            Ok(mgr) => {
-                tracing::info!("OIDC provider discovered successfully");
-                Some(mgr)
-            }
-            Err(e) => {
-                tracing::warn!("OIDC discovery failed, SSO disabled: {e}");
-                None
+        // Check if OIDC is already configured in dynamic config (database)
+        let db_issuer = dc.oidc_issuer_url().await;
+
+        if db_issuer.is_none() && config.oidc_enabled() {
+            // Seed database from env vars (first-time migration)
+            tracing::info!("Seeding OIDC config from environment variables into database");
+            let secret_plain = config.oidc_client_secret.as_deref().unwrap_or("");
+            let secret_encrypted = hex::encode(agent_bastion_common::crypto::encrypt(
+                secret_plain.as_bytes(),
+                &encryption_key,
+            )?);
+            let default_redirect = format!(
+                "http://{}:{}/api/auth/sso/callback",
+                config.server_host, config.console_port
+            );
+
+            for (k, v, desc) in [
+                ("oidc.enabled", serde_json::json!(true), "SSO enabled"),
+                (
+                    "oidc.issuer_url",
+                    serde_json::json!(config.oidc_issuer_url.as_deref().unwrap_or("")),
+                    "OIDC issuer URL",
+                ),
+                (
+                    "oidc.client_id",
+                    serde_json::json!(config.oidc_client_id.as_deref().unwrap_or("")),
+                    "OIDC client ID",
+                ),
+                (
+                    "oidc.client_secret_encrypted",
+                    serde_json::json!(secret_encrypted),
+                    "OIDC client secret (encrypted)",
+                ),
+                (
+                    "oidc.redirect_url",
+                    serde_json::json!(
+                        config
+                            .oidc_redirect_url
+                            .as_deref()
+                            .unwrap_or(&default_redirect)
+                    ),
+                    "OIDC redirect URL",
+                ),
+            ] {
+                dc.upsert(k, &v, "oidc", Some(desc), None).await.ok();
             }
         }
-    } else {
-        tracing::info!("OIDC not configured, SSO disabled");
-        None
+
+        // Now load OIDC from dynamic config
+        if dc.oidc_enabled().await {
+            let issuer = dc.oidc_issuer_url().await.unwrap_or_default();
+            let client_id = dc.oidc_client_id().await.unwrap_or_default();
+            let secret_enc = dc.oidc_client_secret_encrypted().await.unwrap_or_default();
+            let redirect = dc.oidc_redirect_url().await.unwrap_or_else(|| {
+                format!(
+                    "http://{}:{}/api/auth/sso/callback",
+                    config.server_host, config.console_port
+                )
+            });
+
+            // Decrypt client secret
+            let client_secret = if secret_enc.is_empty() {
+                String::new()
+            } else {
+                let encrypted_bytes = hex::decode(&secret_enc).unwrap_or_default();
+                String::from_utf8(
+                    agent_bastion_common::crypto::decrypt(&encrypted_bytes, &encryption_key)
+                        .unwrap_or_default(),
+                )
+                .unwrap_or_default()
+            };
+
+            if !issuer.is_empty() && !client_id.is_empty() && !client_secret.is_empty() {
+                match OidcManager::discover(&issuer, &client_id, &client_secret, &redirect).await {
+                    Ok(mgr) => {
+                        tracing::info!("OIDC provider discovered successfully");
+                        Some(mgr)
+                    }
+                    Err(e) => {
+                        tracing::warn!("OIDC discovery failed, SSO disabled: {e}");
+                        None
+                    }
+                }
+            } else {
+                tracing::info!("OIDC configured but fields incomplete, SSO disabled");
+                None
+            }
+        } else {
+            tracing::info!("OIDC not configured, SSO disabled");
+            None
+        }
     };
 
     let jwt = Arc::new(agent_bastion_auth::jwt::JwtManager::new(&config.jwt_secret));
@@ -127,7 +189,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         dynamic_config,
         audit: audit_logger,
-        oidc: oidc_manager,
+        oidc: Arc::new(tokio::sync::RwLock::new(oidc_manager)),
         started_at: chrono::Utc::now(),
         clickhouse: ch_client,
     };

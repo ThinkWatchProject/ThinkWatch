@@ -41,9 +41,11 @@ interface SystemInfo {
 }
 
 interface OidcConfig {
-  issuer_url: string;
-  client_id: string;
+  issuer_url: string | null;
+  client_id: string | null;
+  redirect_url: string | null;
   enabled: boolean;
+  has_secret?: boolean;
 }
 
 interface AuditConfig {
@@ -145,7 +147,7 @@ export function SettingsPage() {
 
   // Read-only state from dedicated endpoints
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
-  const [oidcConfig, setOidcConfig] = useState<OidcConfig | null>(null);
+  const [, setOidcConfig] = useState<OidcConfig | null>(null);
   const [auditConfig, setAuditConfig] = useState<AuditConfig | null>(null);
 
   // Editable settings from GET /api/admin/settings
@@ -185,6 +187,14 @@ export function SettingsPage() {
   // Data retention
   const [usageRetention, setUsageRetention] = useState(90);
   const [auditRetention, setAuditRetention] = useState(365);
+  // OIDC
+  const [oidcEnabled, setOidcEnabled] = useState(false);
+  const [oidcIssuerUrl, setOidcIssuerUrl] = useState('');
+  const [oidcClientId, setOidcClientId] = useState('');
+  const [oidcClientSecret, setOidcClientSecret] = useState('');
+  const [oidcRedirectUrl, setOidcRedirectUrl] = useState('');
+  const [oidcHasSecret, setOidcHasSecret] = useState(false);
+  const [oidcSaving, setOidcSaving] = useState(false);
 
   // ---------------------------------------------------------------------------
   // Load
@@ -232,6 +242,13 @@ export function SettingsPage() {
       .then(([sys, oidc, audit, settings]) => {
         setSystemInfo(sys);
         setOidcConfig(oidc);
+        if (oidc) {
+          setOidcEnabled(oidc.enabled);
+          setOidcIssuerUrl(oidc.issuer_url ?? '');
+          setOidcClientId(oidc.client_id ?? '');
+          setOidcRedirectUrl(oidc.redirect_url ?? '');
+          setOidcHasSecret(oidc.has_secret ?? false);
+        }
         setAuditConfig(audit);
         const s = settings ?? {};
         setAllSettings(s);
@@ -436,34 +453,96 @@ export function SettingsPage() {
               </CardContent>
             </Card>
 
-            {/* OIDC — read-only */}
+            {/* OIDC / SSO — editable */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">{t('settingsPage.oidcTitle')}</CardTitle>
+                <div className="flex items-center justify-between">
+                  <CardTitle className="text-base">{t('settingsPage.oidcTitle')}</CardTitle>
+                  <Button
+                    size="sm"
+                    disabled={oidcSaving}
+                    onClick={async () => {
+                      setOidcSaving(true);
+                      setStatusMsg(null);
+                      try {
+                        await apiPatch('/api/admin/settings/oidc', {
+                          enabled: oidcEnabled,
+                          issuer_url: oidcIssuerUrl,
+                          client_id: oidcClientId,
+                          client_secret: oidcClientSecret || undefined,
+                          redirect_url: oidcRedirectUrl,
+                        });
+                        setOidcClientSecret('');
+                        // Refresh OIDC status
+                        const updated = await api<OidcConfig>('/api/admin/settings/oidc').catch(() => null);
+                        if (updated) {
+                          setOidcConfig(updated);
+                          setOidcHasSecret(updated.has_secret ?? false);
+                        }
+                        setStatusMsg({ type: 'success', text: 'SSO settings saved' });
+                      } catch (err) {
+                        setStatusMsg({
+                          type: 'error',
+                          text: `SSO save failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
+                        });
+                      } finally {
+                        setOidcSaving(false);
+                      }
+                    }}
+                  >
+                    {oidcSaving ? t('common.loading') : t('common.save')}
+                  </Button>
+                </div>
               </CardHeader>
               <CardContent>
                 {loading ? (
                   <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
                 ) : (
-                  <div className="space-y-4">
+                  <div className="space-y-4 max-w-lg">
                     <div className="flex items-center justify-between">
-                      <Label className="text-sm">{t('common.status')}</Label>
-                      <Badge variant={oidcConfig?.enabled ? 'default' : 'secondary'}>
-                        {oidcConfig?.enabled ? t('common.enabled') : t('common.disabled')}
-                      </Badge>
+                      <div>
+                        <Label className="text-sm">Enable SSO</Label>
+                        <p className="text-xs text-muted-foreground mt-0.5">Allow users to log in via OIDC provider</p>
+                      </div>
+                      <Switch checked={oidcEnabled} onCheckedChange={setOidcEnabled} />
                     </div>
                     <Separator />
-                    <div>
-                      <Label className="text-xs text-muted-foreground">{t('settingsPage.issuerUrl')}</Label>
-                      <p className="mt-1 font-mono text-sm">{oidcConfig?.issuer_url ?? '—'}</p>
+                    <div className="space-y-1">
+                      <Label className="text-sm">{t('settingsPage.issuerUrl')}</Label>
+                      <Input
+                        value={oidcIssuerUrl}
+                        onChange={(e) => setOidcIssuerUrl(e.target.value)}
+                        placeholder="https://auth.example.com"
+                      />
                     </div>
-                    <div>
-                      <Label className="text-xs text-muted-foreground">{t('settingsPage.clientId')}</Label>
-                      <p className="mt-1 font-mono text-sm">
-                        {oidcConfig?.client_id
-                          ? `${oidcConfig.client_id.slice(0, 8)}${'*'.repeat(Math.max(0, oidcConfig.client_id.length - 8))}`
-                          : '—'}
-                      </p>
+                    <div className="space-y-1">
+                      <Label className="text-sm">{t('settingsPage.clientId')}</Label>
+                      <Input
+                        value={oidcClientId}
+                        onChange={(e) => setOidcClientId(e.target.value)}
+                        placeholder="your-client-id"
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-sm">Client Secret</Label>
+                      <Input
+                        type="password"
+                        value={oidcClientSecret}
+                        onChange={(e) => setOidcClientSecret(e.target.value)}
+                        placeholder={oidcHasSecret ? '••••••• (leave empty to keep current)' : 'Enter client secret'}
+                      />
+                      {oidcHasSecret && (
+                        <p className="text-xs text-muted-foreground">Secret is configured. Leave empty to keep unchanged.</p>
+                      )}
+                    </div>
+                    <div className="space-y-1">
+                      <Label className="text-sm">Redirect URL</Label>
+                      <Input
+                        value={oidcRedirectUrl}
+                        onChange={(e) => setOidcRedirectUrl(e.target.value)}
+                        placeholder="https://bastion.example.com/api/auth/sso/callback"
+                      />
+                      <p className="text-xs text-muted-foreground">Must match the callback URL registered with your OIDC provider</p>
                     </div>
                   </div>
                 )}
