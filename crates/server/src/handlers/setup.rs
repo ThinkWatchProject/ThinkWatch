@@ -5,6 +5,7 @@ use think_watch_auth::{api_key, password};
 use think_watch_common::audit::AuditEntry;
 use think_watch_common::dynamic_config;
 use think_watch_common::errors::AppError;
+use think_watch_common::validation::validate_password;
 
 use crate::app::AppState;
 
@@ -110,11 +111,7 @@ pub async fn setup_initialize(
     }
 
     // Validate inputs
-    if req.admin.password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "Password must be at least 8 characters".into(),
-        ));
-    }
+    validate_password(&req.admin.password)?;
     if !req.admin.email.contains('@') || !req.admin.email.contains('.') {
         return Err(AppError::BadRequest("Invalid email format".into()));
     }

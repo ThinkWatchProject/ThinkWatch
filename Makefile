@@ -5,10 +5,10 @@ dev: infra dev-backend dev-frontend
 
 # Start infrastructure (PG, Redis, ClickHouse, Zitadel)
 infra:
-	docker compose -f deploy/docker-compose.dev.yml up -d
+	docker compose -f deploy/docker-compose.dev.yml --env-file .env up -d
 
 infra-down:
-	docker compose -f deploy/docker-compose.dev.yml down
+	docker compose -f deploy/docker-compose.dev.yml --env-file .env down
 
 # Start backend (gateway :3000 + console :3001)
 dev-backend:

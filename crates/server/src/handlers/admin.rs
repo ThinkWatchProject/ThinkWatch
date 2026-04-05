@@ -8,6 +8,7 @@ use think_watch_common::dto::{PaginatedResponse, PaginationParams, UserResponse}
 use think_watch_common::dynamic_config::{self, SettingEntry};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
+use think_watch_common::validation::validate_password;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -103,11 +104,7 @@ pub async fn create_user(
 
     let (raw_password, force_change) = match &req.password {
         Some(p) => {
-            if p.len() < 8 {
-                return Err(AppError::BadRequest(
-                    "Password must be at least 8 characters".into(),
-                ));
-            }
+            validate_password(p)?;
             (p.clone(), false)
         }
         None => (password::generate_random_password(), true),
@@ -586,11 +583,21 @@ pub async fn update_oidc_settings(
         let client_secret = if secret_enc.is_empty() {
             String::new()
         } else {
-            let bytes = hex::decode(&secret_enc).unwrap_or_default();
-            String::from_utf8(
-                think_watch_common::crypto::decrypt(&bytes, &encryption_key).unwrap_or_default(),
-            )
-            .unwrap_or_default()
+            match hex::decode(&secret_enc)
+                .map_err(|e| format!("hex decode: {e}"))
+                .and_then(|bytes| {
+                    think_watch_common::crypto::decrypt(&bytes, &encryption_key)
+                        .map_err(|e| format!("decrypt: {e}"))
+                })
+                .and_then(|plain| {
+                    String::from_utf8(plain).map_err(|e| format!("utf8: {e}"))
+                }) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::error!("Failed to decrypt OIDC client secret: {e}");
+                    String::new()
+                }
+            }
         };
 
         if !issuer.is_empty() && !client_id.is_empty() && !client_secret.is_empty() {
@@ -633,15 +640,22 @@ pub async fn update_oidc_settings(
 pub struct AuditConfigResponse {
     pub clickhouse_url: Option<String>,
     pub clickhouse_db: String,
+    pub connected: bool,
 }
 
 pub async fn get_audit_settings(
     _auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Json<AuditConfigResponse> {
+    let connected = if let Some(ref ch) = state.clickhouse {
+        ch.query("SELECT 1").fetch_one::<u8>().await.is_ok()
+    } else {
+        false
+    };
     Json(AuditConfigResponse {
         clickhouse_url: state.config.clickhouse_url.clone(),
         clickhouse_db: state.config.clickhouse_db.clone(),
+        connected,
     })
 }
 

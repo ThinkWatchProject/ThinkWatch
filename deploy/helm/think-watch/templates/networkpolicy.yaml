@@ -1,0 +1,106 @@
+{{- if .Values.networkPolicy.enabled }}
+# Server pod: allow ingress on gateway (3000) and console (3001) ports,
+# and egress to PostgreSQL, Redis, ClickHouse, and DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-server
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/component: server
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Gateway port — from ingress controller or any namespace
+    - ports:
+        - port: {{ .Values.service.gateway.port }}
+          protocol: TCP
+    # Console port — only from web pods and same namespace
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/component: web
+      ports:
+        - port: {{ .Values.service.console.port }}
+          protocol: TCP
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # PostgreSQL
+    - ports:
+        - port: 5432
+          protocol: TCP
+    # Redis
+    - ports:
+        - port: 6379
+          protocol: TCP
+    # ClickHouse HTTP
+    - ports:
+        - port: 8123
+          protocol: TCP
+    # ClickHouse native
+    - ports:
+        - port: 9000
+          protocol: TCP
+    # OIDC provider (HTTPS)
+    - ports:
+        - port: 443
+          protocol: TCP
+---
+# Web pod: allow ingress on port 80, egress only to server console port and DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-web
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/component: web
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/component: web
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - port: 80
+          protocol: TCP
+  egress:
+    # DNS
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Server console API (reverse proxy)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/component: server
+      ports:
+        - port: {{ .Values.service.console.port }}
+          protocol: TCP
+    # Server gateway API (reverse proxy)
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Chart.Name }}
+              app.kubernetes.io/component: server
+      ports:
+        - port: {{ .Values.service.gateway.port }}
+          protocol: TCP
+{{- end }}

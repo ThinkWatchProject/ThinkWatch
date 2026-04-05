@@ -7,3 +7,4 @@ pub mod dto;
 pub mod dynamic_config;
 pub mod errors;
 pub mod models;
+pub mod validation;

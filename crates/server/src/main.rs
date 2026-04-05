@@ -6,19 +6,26 @@ use think_watch_common::audit::{self, AuditLogger};
 use think_watch_common::config::AppConfig;
 use think_watch_common::db;
 use think_watch_common::dynamic_config::{self, DynamicConfig};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod app;
 mod error;
 mod handlers;
 mod middleware;
 mod tasks;
+mod tracing_ch;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
-        .json()
+    // Phase 1: stdout-only tracing (before ClickHouse is available).
+    // The CH layer slot starts as None and gets swapped in after AuditLogger init.
+    let (ch_layer, ch_layer_reload) =
+        tracing_subscriber::reload::Layer::new(None::<tracing_ch::ClickHouseLayer>);
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into());
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(tracing_subscriber::fmt::layer().json())
+        .with(ch_layer)
         .init();
 
     let config = AppConfig::from_env()?;
@@ -54,11 +61,16 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!("Redis connected");
 
+    let ch_client = think_watch_common::clickhouse_client::create_client(&config.audit_config());
+    if ch_client.is_some() {
+        tracing::info!("ClickHouse client initialized");
+    }
+
     // Initialize ClickHouse tables with retry (best-effort, non-blocking)
-    if config.clickhouse_url.is_some() {
-        let audit_config = config.audit_config();
+    {
+        let ch = ch_client.clone();
         tokio::spawn(async move {
-            audit::ensure_clickhouse_tables(&audit_config).await;
+            audit::ensure_clickhouse_tables(&ch).await;
         });
     }
 
@@ -73,7 +85,11 @@ async fn main() -> anyhow::Result<()> {
     sub_redis.init().await?;
     dynamic_config::spawn_config_subscriber(sub_redis, dynamic_config.clone());
 
-    let audit_logger = AuditLogger::new(config.audit_config(), Some(pool.clone()));
+    let audit_logger = AuditLogger::new(config.audit_config(), Some(pool.clone()), ch_client.clone());
+
+    // Phase 2: swap in ClickHouse tracing layer now that AuditLogger is ready
+    let _ = ch_layer_reload.modify(|layer| *layer = Some(tracing_ch::ClickHouseLayer::new(audit_logger.clone())));
+    tracing::info!("ClickHouse tracing layer activated");
 
     // Initialize OIDC — prefer dynamic config (database), fall back to env vars.
     // If OIDC env vars are set but no DB config exists yet, seed the DB from env.
@@ -146,12 +162,21 @@ async fn main() -> anyhow::Result<()> {
             let client_secret = if secret_enc.is_empty() {
                 String::new()
             } else {
-                let encrypted_bytes = hex::decode(&secret_enc).unwrap_or_default();
-                String::from_utf8(
-                    think_watch_common::crypto::decrypt(&encrypted_bytes, &encryption_key)
-                        .unwrap_or_default(),
-                )
-                .unwrap_or_default()
+                match hex::decode(&secret_enc)
+                    .map_err(|e| format!("hex decode: {e}"))
+                    .and_then(|bytes| {
+                        think_watch_common::crypto::decrypt(&bytes, &encryption_key)
+                            .map_err(|e| format!("decrypt: {e}"))
+                    })
+                    .and_then(|plain| {
+                        String::from_utf8(plain).map_err(|e| format!("utf8: {e}"))
+                    }) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::error!("Failed to decrypt OIDC client secret at startup: {e}");
+                        String::new()
+                    }
+                }
             };
 
             if !issuer.is_empty() && !client_id.is_empty() && !client_secret.is_empty() {
@@ -176,11 +201,6 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let jwt = Arc::new(think_watch_auth::jwt::JwtManager::new(&config.jwt_secret));
-
-    let ch_client = think_watch_common::clickhouse_client::create_client(&config.audit_config());
-    if ch_client.is_some() {
-        tracing::info!("ClickHouse client initialized");
-    }
 
     let state = app::AppState {
         db: pool,

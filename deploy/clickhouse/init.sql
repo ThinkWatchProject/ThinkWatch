@@ -17,6 +17,58 @@
 --
 -- Partitioning: monthly.  ttl_only_drop_parts = 1 → whole-part TTL drops.
 
+CREATE DATABASE IF NOT EXISTS think_watch;
+USE think_watch;
+
+-- ================================================================
+--  app_logs  (runtime tracing: info / warn / error / debug)
+-- ================================================================
+CREATE TABLE IF NOT EXISTS app_logs (
+    id               String,
+    level            LowCardinality(String),
+    target           LowCardinality(String),
+    message          String CODEC(ZSTD(3)),
+    fields           Nullable(String) CODEC(ZSTD(3)),
+    span             Nullable(String) CODEC(ZSTD(3)),
+    created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
+
+    INDEX idx_level   level  TYPE set(10)    GRANULARITY 2,
+    INDEX idx_target  target TYPE set(200)   GRANULARITY 2,
+    INDEX idx_msg     message TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(created_at)
+ORDER BY (created_at, id)
+TTL toDateTime(created_at) + INTERVAL 30 DAY
+SETTINGS index_granularity = 8192,
+         ttl_only_drop_parts = 1;
+
+-- ================================================================
+--  access_logs  (HTTP access log for gateway + console)
+-- ================================================================
+CREATE TABLE IF NOT EXISTS access_logs (
+    id               String,
+    method           LowCardinality(String),
+    path             String,
+    status_code      UInt16,
+    latency_ms       Int64 CODEC(Delta(8), ZSTD(1)),
+    port             UInt16,
+    user_id          LowCardinality(Nullable(String)),
+    ip_address       Nullable(String),
+    user_agent       Nullable(String) CODEC(ZSTD(3)),
+    created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
+
+    INDEX idx_method    method      TYPE set(10)       GRANULARITY 2,
+    INDEX idx_status    status_code TYPE set(100)      GRANULARITY 2,
+    INDEX idx_port      port        TYPE set(4)        GRANULARITY 2,
+    INDEX idx_user_id   user_id     TYPE bloom_filter  GRANULARITY 4,
+    INDEX idx_path      path        TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(created_at)
+ORDER BY (created_at, id)
+TTL toDateTime(created_at) + INTERVAL 30 DAY
+SETTINGS index_granularity = 8192,
+         ttl_only_drop_parts = 1;
+
 -- ================================================================
 --  audit_logs
 -- ================================================================
