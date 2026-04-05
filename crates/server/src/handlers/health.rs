@@ -82,11 +82,7 @@ pub async fn api_health_check(State(state): State<AppState>) -> Response {
     // ClickHouse — use SDK client if available
     let (ch_ok, ch_latency) = if let Some(ref ch) = state.clickhouse {
         let ch_start = std::time::Instant::now();
-        let ok = ch
-            .query("SELECT 1")
-            .fetch_one::<u8>()
-            .await
-            .is_ok();
+        let ok = ch.query("SELECT 1").fetch_one::<u8>().await.is_ok();
         (ok, Some(ch_start.elapsed().as_millis() as i64))
     } else {
         (false, None)

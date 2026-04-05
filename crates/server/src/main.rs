@@ -115,8 +115,7 @@ async fn main() -> anyhow::Result<()> {
 
     let jwt = Arc::new(agent_bastion_auth::jwt::JwtManager::new(&config.jwt_secret));
 
-    let ch_client =
-        agent_bastion_common::clickhouse_client::create_client(&config.audit_config());
+    let ch_client = agent_bastion_common::clickhouse_client::create_client(&config.audit_config());
     if ch_client.is_some() {
         tracing::info!("ClickHouse client initialized");
     }

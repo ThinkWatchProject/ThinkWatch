@@ -169,7 +169,9 @@ pub async fn sso_callback(
         .first()
         .map(|s| s.as_str())
         .unwrap_or_else(|| {
-            tracing::warn!("No CORS_ORIGINS configured for SSO redirect, falling back to console address");
+            tracing::warn!(
+                "No CORS_ORIGINS configured for SSO redirect, falling back to console address"
+            );
             // No hardcoded localhost — fail clearly if misconfigured
             "/"
         });

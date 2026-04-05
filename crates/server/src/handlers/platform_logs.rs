@@ -64,7 +64,10 @@ pub async fn list_platform_logs(
     Query(params): Query<PlatformLogsQuery>,
 ) -> Result<Json<PlatformLogsResponse>, AppError> {
     if !ch_available(&state) {
-        return Ok(Json(PlatformLogsResponse { total: 0, items: vec![] }));
+        return Ok(Json(PlatformLogsResponse {
+            total: 0,
+            items: vec![],
+        }));
     }
     let ch = ch_client(&state)?;
     let limit = params.limit.unwrap_or(50).min(200);
@@ -73,27 +76,59 @@ pub async fn list_platform_logs(
     let mut conditions: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
 
-    if let Some(ref v) = params.user_id { conditions.push("user_id = ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = params.action { conditions.push("action = ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = params.resource { conditions.push("resource = ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = params.resource_id { conditions.push("resource_id = ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = params.from { conditions.push("created_at >= ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = params.to { conditions.push("created_at <= ?".into()); binds.push(v.clone()); }
+    if let Some(ref v) = params.user_id {
+        conditions.push("user_id = ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = params.action {
+        conditions.push("action = ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = params.resource {
+        conditions.push("resource = ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = params.resource_id {
+        conditions.push("resource_id = ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = params.from {
+        conditions.push("created_at >= ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = params.to {
+        conditions.push("created_at <= ?".into());
+        binds.push(v.clone());
+    }
 
-    let wc = if conditions.is_empty() { String::new() } else { format!("WHERE {}", conditions.join(" AND ")) };
+    let wc = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
 
     let count_sql = format!("SELECT count() FROM platform_logs {wc}");
     let mut q = ch.query(&count_sql);
-    for v in &binds { q = q.bind(v.as_str()); }
-    let total: u64 = q.fetch_one().await.map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
+    for v in &binds {
+        q = q.bind(v.as_str());
+    }
+    let total: u64 = q
+        .fetch_one()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
     let data_sql = format!(
         "SELECT id, user_id, user_email, action, resource, resource_id, detail, ip_address, user_agent, toString(created_at) as created_at \
          FROM platform_logs {wc} ORDER BY created_at DESC LIMIT {limit} OFFSET {offset}"
     );
     let mut q = ch.query(&data_sql);
-    for v in &binds { q = q.bind(v.as_str()); }
-    let rows: Vec<PlatformLogEntry> = q.fetch_all().await.map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
+    for v in &binds {
+        q = q.bind(v.as_str());
+    }
+    let rows: Vec<PlatformLogEntry> = q
+        .fetch_all()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
     let items = rows
         .into_iter()

@@ -17,15 +17,11 @@ pub fn ch_available(state: &AppState) -> bool {
 
 /// Helper: execute a count query and return the total.
 #[allow(dead_code)]
-pub async fn ch_count(
-    client: &clickhouse::Client,
-    query: &str,
-) -> Result<u64, AppError> {
-    let total: u64 = client
-        .query(query)
-        .fetch_one()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse count query failed: {e}")))?;
+pub async fn ch_count(client: &clickhouse::Client, query: &str) -> Result<u64, AppError> {
+    let total: u64 =
+        client.query(query).fetch_one().await.map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("ClickHouse count query failed: {e}"))
+        })?;
     Ok(total)
 }
 

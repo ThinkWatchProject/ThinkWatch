@@ -117,7 +117,11 @@ return total
 "#;
         let deleted: i64 = self
             .redis
-            .eval(LUA_INVALIDATE, Vec::<String>::new(), vec!["llm_cache:*".to_string()])
+            .eval(
+                LUA_INVALIDATE,
+                Vec::<String>::new(),
+                vec!["llm_cache:*".to_string()],
+            )
             .await
             .unwrap_or(0);
         metrics::counter!("gateway_cache_invalidations_total").increment(1);

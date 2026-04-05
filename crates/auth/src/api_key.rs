@@ -34,8 +34,7 @@ pub fn generate_api_key() -> GeneratedApiKey {
 }
 
 pub fn hash_api_key(key: &str) -> String {
-    let mut mac =
-        HmacSha256::new_from_slice(HMAC_DOMAIN_KEY).expect("HMAC accepts any key length");
+    let mut mac = HmacSha256::new_from_slice(HMAC_DOMAIN_KEY).expect("HMAC accepts any key length");
     mac.update(key.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }

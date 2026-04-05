@@ -56,7 +56,10 @@ pub async fn list_gateway_logs(
     Query(params): Query<GatewayLogsQuery>,
 ) -> Result<Json<GatewayLogsResponse>, AppError> {
     if !ch_available(&state) {
-        return Ok(Json(GatewayLogsResponse { total: 0, items: vec![] }));
+        return Ok(Json(GatewayLogsResponse {
+            total: 0,
+            items: vec![],
+        }));
     }
     let ch = ch_client(&state)?;
     let limit = params.limit.unwrap_or(50).min(200);

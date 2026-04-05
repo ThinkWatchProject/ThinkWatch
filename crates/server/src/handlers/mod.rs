@@ -1,9 +1,9 @@
 pub mod admin;
-pub(crate) mod clickhouse_util;
 pub mod analytics;
 pub mod api_keys;
 pub mod audit;
 pub mod auth;
+pub(crate) mod clickhouse_util;
 pub mod dashboard;
 pub mod gateway_logs;
 pub mod health;
