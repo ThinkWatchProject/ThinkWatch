@@ -22,3 +22,4 @@ Thumbs.db
 
 # AI
 /.claude
+deploy/clickhouse/users.d/default-user.xml
