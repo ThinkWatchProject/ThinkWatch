@@ -676,10 +676,7 @@ async fn flush_to_clickhouse(
                 && !detail.is_null()
             {
                 let detail_str = detail.to_string();
-                obj.insert(
-                    "detail".to_string(),
-                    serde_json::Value::String(detail_str),
-                );
+                obj.insert("detail".to_string(), serde_json::Value::String(detail_str));
             }
             serde_json::to_string(&map).ok()
         })

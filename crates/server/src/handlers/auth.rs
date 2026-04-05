@@ -106,10 +106,9 @@ pub async fn login(
     }
 
     // Per-IP rate limit: max 30 attempts per minute across all emails (fail-open)
-    let ip_count: u64 =
-        fred::interfaces::KeysInterface::incr_by(&state.redis, &ip_rate_key, 1)
-            .await
-            .unwrap_or_default();
+    let ip_count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &ip_rate_key, 1)
+        .await
+        .unwrap_or_default();
     if ip_count == 1 {
         let _: () = fred::interfaces::KeysInterface::expire(&state.redis, &ip_rate_key, 60, None)
             .await
@@ -315,10 +314,9 @@ pub async fn login(
         },
     })
     .into_response();
-    response.headers_mut().insert(
-        axum::http::header::SET_COOKIE,
-        cookie.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
     Ok(response)
 }
 
@@ -432,10 +430,9 @@ pub async fn refresh(
         password_change_required: None,
     })
     .into_response();
-    response.headers_mut().insert(
-        axum::http::header::SET_COOKIE,
-        cookie.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
     Ok(response)
 }
 

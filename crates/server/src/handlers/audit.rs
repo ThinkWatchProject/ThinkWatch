@@ -50,7 +50,10 @@ pub async fn list_audit_logs(
     Query(query): Query<AuditLogQuery>,
 ) -> Result<Json<AuditLogResponse>, AppError> {
     if !ch_available(&state) {
-        return Ok(Json(AuditLogResponse { total: 0, items: vec![] }));
+        return Ok(Json(AuditLogResponse {
+            total: 0,
+            items: vec![],
+        }));
     }
     let ch = ch_client(&state)?;
     let limit = query.limit.unwrap_or(50).min(200);
@@ -59,28 +62,63 @@ pub async fn list_audit_logs(
     let mut conditions: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
 
-    if let Some(ref v) = query.user_id { conditions.push("user_id = ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = query.api_key_id { conditions.push("api_key_id = ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = query.action { conditions.push("action = ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = query.resource { conditions.push("resource = ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = query.ip_address { conditions.push("ip_address = ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = query.from { conditions.push("created_at >= ?".into()); binds.push(v.clone()); }
-    if let Some(ref v) = query.to { conditions.push("created_at <= ?".into()); binds.push(v.clone()); }
+    if let Some(ref v) = query.user_id {
+        conditions.push("user_id = ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = query.api_key_id {
+        conditions.push("api_key_id = ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = query.action {
+        conditions.push("action = ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = query.resource {
+        conditions.push("resource = ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = query.ip_address {
+        conditions.push("ip_address = ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = query.from {
+        conditions.push("created_at >= ?".into());
+        binds.push(v.clone());
+    }
+    if let Some(ref v) = query.to {
+        conditions.push("created_at <= ?".into());
+        binds.push(v.clone());
+    }
 
-    let wc = if conditions.is_empty() { String::new() } else { format!("WHERE {}", conditions.join(" AND ")) };
+    let wc = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
 
     let count_sql = format!("SELECT count() FROM audit_logs {wc}");
     let mut q = ch.query(&count_sql);
-    for v in &binds { q = q.bind(v.as_str()); }
-    let total: u64 = q.fetch_one().await.map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
+    for v in &binds {
+        q = q.bind(v.as_str());
+    }
+    let total: u64 = q
+        .fetch_one()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
     let data_sql = format!(
         "SELECT id, user_id, user_email, api_key_id, action, resource, detail, ip_address, user_agent, toString(created_at) as created_at \
          FROM audit_logs {wc} ORDER BY created_at DESC LIMIT {limit} OFFSET {offset}"
     );
     let mut q = ch.query(&data_sql);
-    for v in &binds { q = q.bind(v.as_str()); }
-    let rows: Vec<ChAuditRow> = q.fetch_all().await.map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
+    for v in &binds {
+        q = q.bind(v.as_str());
+    }
+    let rows: Vec<ChAuditRow> = q
+        .fetch_all()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
     let items: Vec<AuditLog> = rows
         .into_iter()
@@ -95,10 +133,16 @@ pub async fn list_audit_logs(
                 detail: hit.detail.and_then(|s| serde_json::from_str(&s).ok()),
                 ip_address: hit.ip_address,
                 user_agent: hit.user_agent,
-                created_at: chrono::DateTime::parse_from_str(&hit.created_at, "%Y-%m-%d %H:%M:%S%.f")
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .or_else(|_| chrono::DateTime::parse_from_rfc3339(&hit.created_at).map(|dt| dt.with_timezone(&chrono::Utc)))
-                    .unwrap_or_else(|_| chrono::Utc::now()),
+                created_at: chrono::DateTime::parse_from_str(
+                    &hit.created_at,
+                    "%Y-%m-%d %H:%M:%S%.f",
+                )
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .or_else(|_| {
+                    chrono::DateTime::parse_from_rfc3339(&hit.created_at)
+                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                })
+                .unwrap_or_else(|_| chrono::Utc::now()),
             })
         })
         .collect();

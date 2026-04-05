@@ -127,7 +127,9 @@ pub(crate) fn validate_url(url_str: &str) -> Result<(), AppError> {
     }
 
     if first_ips.is_empty() && second_ips.is_empty() {
-        return Err(AppError::BadRequest("URL host could not be resolved".into()));
+        return Err(AppError::BadRequest(
+            "URL host could not be resolved".into(),
+        ));
     }
 
     Ok(())
@@ -395,7 +397,10 @@ mod tests {
     #[test]
     fn validate_custom_headers_rejects_crlf_injection() {
         let mut headers = HashMap::new();
-        headers.insert("X-Custom".to_string(), "value\r\nInjected: true".to_string());
+        headers.insert(
+            "X-Custom".to_string(),
+            "value\r\nInjected: true".to_string(),
+        );
         assert!(validate_custom_headers(&headers).is_err());
     }
 

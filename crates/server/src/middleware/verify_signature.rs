@@ -39,9 +39,7 @@ pub async fn create_signing_key(
 
 /// Build an httpOnly cookie header value for the signing key.
 pub fn signing_key_cookie(key: &str, max_age_secs: i64) -> String {
-    format!(
-        "signing_key={key}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age_secs}"
-    )
+    format!("signing_key={key}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age_secs}")
 }
 
 /// Extract signing key from the `signing_key` httpOnly cookie, falling back
@@ -50,7 +48,11 @@ pub fn extract_signing_key_from_request(
     request: &axum::http::Request<axum::body::Body>,
 ) -> Option<String> {
     // 1. Try httpOnly cookie
-    if let Some(cookie_header) = request.headers().get("cookie").and_then(|v| v.to_str().ok()) {
+    if let Some(cookie_header) = request
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())
+    {
         for cookie in cookie_header.split(';') {
             let cookie = cookie.trim();
             if let Some(value) = cookie.strip_prefix("signing_key=")
@@ -256,9 +258,7 @@ mod tests {
 
     #[test]
     fn extract_signing_key_no_cookie_header() {
-        let request = Request::builder()
-            .body(axum::body::Body::empty())
-            .unwrap();
+        let request = Request::builder().body(axum::body::Body::empty()).unwrap();
         assert!(extract_signing_key_from_request(&request).is_none());
     }
 
