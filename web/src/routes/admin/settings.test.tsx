@@ -24,7 +24,7 @@ const systemInfo = {
 
 const settingsData: Record<string, Array<{ key: string; value: unknown; category: string; description: string; updated_at: string }>> = {
   general: [
-    { key: 'site_name', value: 'TestBastion', category: 'general', description: '', updated_at: '' },
+    { key: 'site_name', value: 'TestThinkWatch', category: 'general', description: '', updated_at: '' },
   ],
   auth: [],
   gateway: [],
@@ -90,7 +90,7 @@ describe('SettingsPage', () => {
 
     expect(mockApiPatch).toHaveBeenCalledWith('/api/admin/settings', expect.objectContaining({
       settings: expect.objectContaining({
-        site_name: 'TestBastion',
+        site_name: 'TestThinkWatch',
       }),
     }))
 

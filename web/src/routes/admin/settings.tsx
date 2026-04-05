@@ -540,7 +540,7 @@ export function SettingsPage() {
                       <Input
                         value={oidcRedirectUrl}
                         onChange={(e) => setOidcRedirectUrl(e.target.value)}
-                        placeholder="https://bastion.example.com/api/auth/sso/callback"
+                        placeholder="https://thinkwatch.example.com/api/auth/sso/callback"
                       />
                       <p className="text-xs text-muted-foreground">Must match the callback URL registered with your OIDC provider</p>
                     </div>

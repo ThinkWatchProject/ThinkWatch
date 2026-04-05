@@ -176,7 +176,7 @@ Create a `.env.production` file with real secrets. **Never commit this file to v
 
 ```bash
 # Database
-DB_USER=bastion
+DB_USER=thinkwatch
 DB_PASSWORD=<generate-a-strong-password>
 DB_NAME=think_watch
 
@@ -356,7 +356,7 @@ No authentication is needed — the packages are public.
 helm install think-watch deploy/helm/think-watch \
   --set secrets.jwtSecret=$(openssl rand -hex 32) \
   --set secrets.encryptionKey=$(openssl rand -hex 32) \
-  --set secrets.databaseUrl="postgres://bastion:password@postgres:5432/think_watch" \
+  --set secrets.databaseUrl="postgres://thinkwatch:password@postgres:5432/think_watch" \
   --set secrets.redisUrl="redis://:password@redis:6379" \
   --set config.corsOrigins="https://console.internal.example.com"
 ```
@@ -508,10 +508,10 @@ PostgreSQL contains all critical application state: users, API keys, provider co
 
 ```bash
 # Daily backup
-pg_dump -h localhost -U bastion -d think_watch -Fc > backup_$(date +%Y%m%d).dump
+pg_dump -h localhost -U thinkwatch -d think_watch -Fc > backup_$(date +%Y%m%d).dump
 
 # Restore
-pg_restore -h localhost -U bastion -d think_watch -c backup_20260401.dump
+pg_restore -h localhost -U thinkwatch -d think_watch -c backup_20260401.dump
 ```
 
 **WAL archiving (point-in-time recovery):**
