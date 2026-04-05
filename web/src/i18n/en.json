@@ -383,7 +383,7 @@
     "issuerUrl": "Issuer URL",
     "clientId": "Client ID",
     "auditTitle": "Audit Configuration",
-    "quickwit": "Quickwit",
+    "clickhouse": "ClickHouse",
     "logForwarding": "Log Forwarding",
     "logForwardingHint": "Syslog, Kafka, Webhook destinations are configured via the Log Forwarding page.",
     "manage": "Manage",

@@ -49,25 +49,16 @@ secrets:
   oidcIssuerUrl: ""
   oidcRedirectUrl: ""
 
-quickwit:
+clickhouse:
   enabled: true
-  url: "http://quickwit:7280"
-  index: "audit_logs"
-  storage:
-    # S3-compatible object storage for Quickwit index data.
-    # Default: uses the bundled RustFS instance.
-    # For cloud-native deployments, point to AWS S3, GCS, or Azure Blob:
-    #   uri: "s3://my-bucket/quickwit"
-    #   endpoint: ""                       # omit for real AWS S3
-    #   region: "us-west-2"
-    #   forcePathStyle: false
-    #   accessKeyId / secretAccessKey: use ExternalSecret or IRSA instead
-    uri: "s3://quickwit"
-    endpoint: "http://rustfs:9000"
-    region: "us-east-1"
-    forcePathStyle: true
-    accessKeyId: ""
-    secretAccessKey: ""
+  url: "http://clickhouse:8123"
+  db: "agent_bastion"
+  user: "bastion"
+  password: ""  # stored in Secret, not ConfigMap
+  # Deploy optimized ClickHouse config as ConfigMaps
+  # Mount these into your ClickHouse StatefulSet / Operator CR
+  configMaps:
+    enabled: true
 
 autoscaling:
   enabled: false
@@ -75,14 +66,33 @@ autoscaling:
   maxReplicas: 5
   targetCPUUtilizationPercentage: 70
 
+# Pod disruption budget (enabled when replicaCount > 1 or autoscaling)
+podDisruptionBudget:
+  enabled: false
+  minAvailable: 1
+
+# Graceful shutdown
+terminationGracePeriodSeconds: 30
+
+# Pod scheduling
+podAntiAffinity:
+  enabled: true
+  # preferred (soft) or required (hard)
+  type: preferred
+
+topologySpreadConstraints:
+  enabled: false
+  maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+
 resources:
   server:
     requests:
-      cpu: 250m
-      memory: 256Mi
-    limits:
-      cpu: "1"
+      cpu: 500m
       memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 1Gi
   web:
     requests:
       cpu: 50m

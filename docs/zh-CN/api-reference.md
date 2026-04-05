@@ -1945,7 +1945,7 @@ curl http://localhost:3001/api/analytics/costs/stats \
 
 #### GET /api/audit/logs
 
-搜索审计日志条目。由 Quickwit 支持全文搜索。
+搜索审计日志条目。由 ClickHouse 支持 SQL 查询和分析。
 
 **认证：** JWT（管理员）
 
@@ -2174,14 +2174,14 @@ curl http://localhost:3001/api/admin/settings/category/auth \
   "status": "ok",
   "pg_latency_ms": 2.5,
   "redis_latency_ms": 0.8,
-  "quickwit_latency_ms": 5.1,
+  "clickhouse_latency_ms": 5.1,
   "pool_idle": 8,
   "pool_active": 2,
   "uptime_seconds": 86400,
   "services": {
     "postgres": "ok",
     "redis": "ok",
-    "quickwit": "ok"
+    "clickhouse": "ok"
   }
 }
 ```
@@ -2195,14 +2195,14 @@ curl http://localhost:3001/api/admin/settings/category/auth \
   "status": "degraded",
   "pg_latency_ms": null,
   "redis_latency_ms": 0.8,
-  "quickwit_latency_ms": 5.1,
+  "clickhouse_latency_ms": 5.1,
   "pool_idle": 0,
   "pool_active": 0,
   "uptime_seconds": 86400,
   "services": {
     "postgres": "error",
     "redis": "ok",
-    "quickwit": "ok"
+    "clickhouse": "ok"
   }
 }
 ```
@@ -2212,7 +2212,7 @@ curl http://localhost:3001/api/admin/settings/category/auth \
 | `status`             | string  | `ok` 或 `degraded`                       |
 | `pg_latency_ms`      | number  | PostgreSQL 延迟（不可达时为 null）       |
 | `redis_latency_ms`   | number  | Redis 延迟（不可达时为 null）            |
-| `quickwit_latency_ms`| number  | Quickwit 延迟（不可达时为 null）         |
+| `clickhouse_latency_ms`| number  | ClickHouse 延迟（不可达时为 null）       |
 | `pool_idle`          | integer | 空闲数据库连接数                         |
 | `pool_active`        | integer | 活跃数据库连接数                         |
 | `uptime_seconds`     | integer | 服务器运行时间（秒）                     |

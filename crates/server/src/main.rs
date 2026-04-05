@@ -54,13 +54,11 @@ async fn main() -> anyhow::Result<()> {
     }
     tracing::info!("Redis connected");
 
-    // Initialize Quickwit audit index (best-effort, non-blocking)
-    if let Some(ref qw_url) = config.quickwit_url {
-        let qw_url = qw_url.clone();
-        let qw_index = config.quickwit_index.clone();
-        let qw_token = config.quickwit_bearer_token.clone();
+    // Initialize ClickHouse tables with retry (best-effort, non-blocking)
+    if config.clickhouse_url.is_some() {
+        let audit_config = config.audit_config();
         tokio::spawn(async move {
-            audit::ensure_quickwit_index(&qw_url, &qw_index, qw_token.as_deref()).await;
+            audit::ensure_clickhouse_tables(&audit_config).await;
         });
     }
 
@@ -91,10 +89,14 @@ async fn main() -> anyhow::Result<()> {
             .oidc_client_secret
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("OIDC_CLIENT_SECRET required when OIDC is enabled"))?;
+        let default_redirect = format!(
+            "http://{}:{}/api/auth/sso/callback",
+            config.server_host, config.console_port
+        );
         let redirect = config
             .oidc_redirect_url
             .as_deref()
-            .unwrap_or("http://localhost:3001/api/auth/sso/callback");
+            .unwrap_or(&default_redirect);
 
         match OidcManager::discover(issuer, client_id, client_secret, redirect).await {
             Ok(mgr) => {
@@ -113,6 +115,12 @@ async fn main() -> anyhow::Result<()> {
 
     let jwt = Arc::new(agent_bastion_auth::jwt::JwtManager::new(&config.jwt_secret));
 
+    let ch_client =
+        agent_bastion_common::clickhouse_client::create_client(&config.audit_config());
+    if ch_client.is_some() {
+        tracing::info!("ClickHouse client initialized");
+    }
+
     let state = app::AppState {
         db: pool,
         redis,
@@ -122,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         audit: audit_logger,
         oidc: oidc_manager,
         started_at: chrono::Utc::now(),
+        clickhouse: ch_client,
     };
 
     // --- Start background tasks ---

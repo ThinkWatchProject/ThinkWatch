@@ -39,15 +39,31 @@ pub fn generate_recovery_codes(count: usize) -> Vec<String> {
 
 /// Constant-time comparison of a recovery code against a stored list.
 /// Returns the index of the matching code if found.
+///
+/// All codes are padded/truncated to a fixed 16-byte buffer before comparison
+/// so that the length check does not leak timing information.
 pub fn find_recovery_code(codes: &[String], candidate: &str) -> Option<usize> {
     use subtle::ConstantTimeEq;
-    let candidate_bytes = candidate.as_bytes();
+
+    const FIXED_LEN: usize = 16;
+
+    fn pad_to_fixed(s: &[u8]) -> [u8; FIXED_LEN] {
+        let mut buf = [0u8; FIXED_LEN];
+        let copy_len = s.len().min(FIXED_LEN);
+        buf[..copy_len].copy_from_slice(&s[..copy_len]);
+        buf
+    }
+
+    let candidate_padded = pad_to_fixed(candidate.as_bytes());
+    let candidate_len = candidate.len();
     let mut found_idx: Option<usize> = None;
+
     for (i, stored) in codes.iter().enumerate() {
-        let stored_bytes = stored.as_bytes();
-        // Only compare if lengths match (constant-time within same-length strings)
-        if stored_bytes.len() == candidate_bytes.len() && stored_bytes.ct_eq(candidate_bytes).into()
-        {
+        let stored_padded = pad_to_fixed(stored.as_bytes());
+        // Both length and content are compared in constant time
+        let len_match = (stored.len() as u8).ct_eq(&(candidate_len as u8));
+        let content_match = stored_padded.ct_eq(&candidate_padded);
+        if (len_match & content_match).into() {
             found_idx = Some(i);
         }
     }

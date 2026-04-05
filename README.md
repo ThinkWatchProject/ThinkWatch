@@ -85,11 +85,11 @@ AgentBastion solves all of this with a single deployment.
 ### Observability
 - **Prometheus metrics** — `GET /metrics` endpoint on the gateway port (3000) exposing `gateway_requests_total`, `gateway_request_duration_seconds`, `gateway_tokens_total`, `gateway_rate_limited_total`, `circuit_breaker_state`, and more
 - **Enhanced health checks** — `/health/live` (liveness probe), `/health/ready` (readiness probe with PostgreSQL and Redis checks), `/api/health` (detailed latency and pool statistics)
-- **Quickwit-powered audit logs** — full-text search across all API calls and tool invocations, stored exclusively in Quickwit with S3-backed cloud-native storage (AWS S3, GCS, Azure Blob, or self-hosted RustFS/MinIO)
+- **ClickHouse-powered audit logs** — SQL-queryable audit logs across all API calls and tool invocations, stored in ClickHouse for high-performance columnar analytics
 - **Audit log forwarding** — multi-channel delivery: UDP/TCP Syslog (RFC 5424), Kafka, and HTTP webhooks — route audit events to any SIEM, data lake, or alerting pipeline
 - **Usage analytics** — token consumption by user, team, model, and time period
 - **Cost analytics** — MTD spend, budget utilization, per-model cost breakdown
-- **Health dashboard** — real-time status of PostgreSQL, Redis, Quickwit, and all MCP servers
+- **Health dashboard** — real-time status of PostgreSQL, Redis, ClickHouse, and all MCP servers
 
 ## Tech Stack
 
@@ -99,8 +99,7 @@ AgentBastion solves all of this with a single deployment.
 | Frontend | React 19, TypeScript 6, Vite 8, shadcn/ui, Tailwind CSS 4 |
 | Database | PostgreSQL 18 |
 | Cache & Rate Limiting | Redis 8 |
-| Audit Log Search | Quickwit 0.8 (S3-backed, cloud-native) |
-| Object Storage | AWS S3 / GCS / Azure Blob / RustFS (S3-compatible) |
+| Audit Log Storage | ClickHouse (columnar OLAP database) |
 | SSO | Zitadel (or any OIDC provider) |
 | Containers | Distroless (2MB runtime), Helm Chart for K8s |
 
@@ -156,7 +155,7 @@ AgentBastion/
 ├── deploy/
 │   ├── docker/          # Dockerfile.server (distroless), Dockerfile.web (nginx)
 │   ├── docker-compose.yml       # Production deployment
-│   ├── docker-compose.dev.yml   # Development (PG + Redis + RustFS + Quickwit + Zitadel)
+│   ├── docker-compose.dev.yml   # Development (PG + Redis + ClickHouse + Zitadel)
 │   └── helm/agent-bastion/      # Kubernetes Helm chart
 └── docs/                # Detailed documentation
 ```

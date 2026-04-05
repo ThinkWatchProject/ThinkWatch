@@ -1945,7 +1945,7 @@ curl http://localhost:3001/api/analytics/costs/stats \
 
 #### GET /api/audit/logs
 
-Search audit log entries. Backed by Quickwit for full-text search.
+Search audit log entries. Backed by ClickHouse for SQL-based search and analytics.
 
 **Authentication:** JWT (Admin)
 
@@ -2174,14 +2174,14 @@ Detailed health check reporting connectivity to backing services, latency metric
   "status": "ok",
   "pg_latency_ms": 2.5,
   "redis_latency_ms": 0.8,
-  "quickwit_latency_ms": 5.1,
+  "clickhouse_latency_ms": 5.1,
   "pool_idle": 8,
   "pool_active": 2,
   "uptime_seconds": 86400,
   "services": {
     "postgres": "ok",
     "redis": "ok",
-    "quickwit": "ok"
+    "clickhouse": "ok"
   }
 }
 ```
@@ -2195,14 +2195,14 @@ If a critical dependency (PostgreSQL or Redis) is unreachable, the endpoint retu
   "status": "degraded",
   "pg_latency_ms": null,
   "redis_latency_ms": 0.8,
-  "quickwit_latency_ms": 5.1,
+  "clickhouse_latency_ms": 5.1,
   "pool_idle": 0,
   "pool_active": 0,
   "uptime_seconds": 86400,
   "services": {
     "postgres": "error",
     "redis": "ok",
-    "quickwit": "ok"
+    "clickhouse": "ok"
   }
 }
 ```
@@ -2212,7 +2212,7 @@ If a critical dependency (PostgreSQL or Redis) is unreachable, the endpoint retu
 | `status`             | string  | `ok` or `degraded`                           |
 | `pg_latency_ms`      | number  | PostgreSQL ping latency (null if unreachable) |
 | `redis_latency_ms`   | number  | Redis ping latency (null if unreachable)     |
-| `quickwit_latency_ms`| number  | Quickwit ping latency (null if unreachable)  |
+| `clickhouse_latency_ms`| number  | ClickHouse ping latency (null if unreachable)  |
 | `pool_idle`          | integer | Number of idle database connections          |
 | `pool_active`        | integer | Number of active database connections        |
 | `uptime_seconds`     | integer | Server uptime in seconds                     |

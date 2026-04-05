@@ -13,6 +13,11 @@ async function signRequest(
   path: string,
   bodyStr: string | undefined,
 ): Promise<Record<string, string>> {
+  // Signing key is delivered via httpOnly cookie (primary) and also stored
+  // in sessionStorage as fallback for the client-side HMAC computation.
+  // The httpOnly cookie is sent automatically by the browser for signature
+  // verification on the server side, but we still need the hex value
+  // client-side to compute the HMAC signature.
   const signingKeyHex = sessionStorage.getItem('signing_key');
   if (!signingKeyHex) return {};
 

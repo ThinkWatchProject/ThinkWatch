@@ -5,6 +5,12 @@ use axum::response::IntoResponse;
 use std::sync::Arc;
 
 use crate::budget_alert::BudgetAlertManager;
+use crate::rate_limiter::RateLimiter;
+use std::sync::LazyLock;
+
+/// Semaphore to limit concurrent spawned budget-alert tasks.
+static BUDGET_ALERT_SEMAPHORE: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(50));
 use crate::cache::ResponseCache;
 use crate::content_filter::ContentFilter;
 use crate::cost_tracker::CostTracker;
@@ -27,6 +33,18 @@ pub struct GatewayState {
     pub pii_redactor: Arc<PiiRedactor>,
     pub budget_alert: Option<Arc<BudgetAlertManager>>,
     pub cost_tracker: Arc<CostTracker>,
+    pub rate_limiter: Arc<RateLimiter>,
+}
+
+/// Identity information extracted from the auth middleware.
+/// Used to enforce per-key model restrictions and rate limits.
+#[derive(Debug, Clone, Default)]
+pub struct GatewayRequestIdentity {
+    pub user_id: Option<String>,
+    pub api_key_id: Option<String>,
+    pub allowed_models: Option<Vec<String>>,
+    pub rate_limit_rpm: Option<i32>,
+    pub rate_limit_tpm: Option<i32>,
 }
 
 /// POST /v1/chat/completions
@@ -37,20 +55,56 @@ pub struct GatewayState {
 ///
 /// Request pipeline:
 /// 1. Model mapping (aliases)
-/// 2. Content filter (prompt injection detection)
-/// 3. Token quota check
-/// 4. Cache lookup (non-streaming only)
-/// 5. Route to provider
-/// 6. On success: consume quota, store cache, return response
+/// 2. Enforce allowed_models from API key (if set)
+/// 3. Content filter (prompt injection detection)
+/// 4. Token quota check
+/// 5. Cache lookup (non-streaming only)
+/// 6. Route to provider
+/// 7. On success: consume quota, store cache, return response
 pub async fn proxy_chat_completion(
     State(state): State<GatewayState>,
     headers: HeaderMap,
+    axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     Json(mut request): Json<ChatCompletionRequest>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     // 1. Apply model mapping
     request.model = state.model_mapper.map(&request.model);
 
-    // 2. Extract per-request metadata from headers and body
+    // 2. Enforce allowed_models from API key
+    if let Some(ref allowed) = identity.allowed_models
+        && !allowed.is_empty()
+        && !allowed
+            .iter()
+            .any(|m| request.model == *m || request.model.starts_with(m))
+    {
+        return Err(GatewayError::TransformError(format!(
+            "Model '{}' is not allowed for this API key",
+            request.model
+        ))
+        .into());
+    }
+
+    // 3. Per-key RPM/TPM rate limiting (if API key has limits configured)
+    if let Some(rpm) = identity.rate_limit_rpm
+        && rpm > 0
+    {
+        let rate_key = identity
+            .api_key_id
+            .as_deref()
+            .unwrap_or_else(|| identity.user_id.as_deref().unwrap_or("global"));
+        state
+            .rate_limiter
+            .check_rate_limit(
+                rate_key,
+                rpm as u32,
+                identity.rate_limit_tpm.filter(|&t| t > 0).map(|t| t as u32),
+                None, // estimated tokens not known yet
+            )
+            .await
+            .map_err(|_| GatewayError::UpstreamRateLimited)?;
+    }
+
+    // 4. Extract per-request metadata from headers and body
     let metadata = RequestMetadata::extract(&headers, &request);
     tracing::info!(
         request_id = %metadata.request_id,
@@ -59,7 +113,7 @@ pub async fn proxy_chat_completion(
         "Request metadata extracted"
     );
 
-    // 3. Content filter — check for prompt injection
+    // 4. Content filter — check for prompt injection
     if let Err(filter_result) = state.content_filter.check(&request.messages) {
         tracing::warn!("Content filter triggered: {filter_result}");
         return Err(GatewayError::TransformError(format!(
@@ -68,13 +122,17 @@ pub async fn proxy_chat_completion(
         .into());
     }
 
-    // 4. PII redaction — redact user messages before sending upstream
+    // 5. PII redaction — redact user messages before sending upstream
     let (redacted_messages, redaction_ctx) = state.pii_redactor.redact_messages(&request.messages);
     request.messages = redacted_messages;
 
-    // 5. Check token quota (using model name as quota key for now;
-    //    in production this would be a user/team key from auth middleware)
-    let quota_key = request.model.clone();
+    // 6. Check token quota — use user/api_key as quota key when available
+    let quota_key = identity
+        .user_id
+        .as_deref()
+        .or(identity.api_key_id.as_deref())
+        .map(|id| format!("{id}:{}", request.model))
+        .unwrap_or_else(|| request.model.clone());
     if let Err(e) = state.quota.check_quota(&quota_key).await {
         tracing::warn!("Quota exceeded for {quota_key}: {e}");
         return Err(GatewayError::ProviderError(format!("Quota exceeded: {e}")).into());
@@ -82,8 +140,9 @@ pub async fn proxy_chat_completion(
 
     let is_stream = request.stream.unwrap_or(false);
 
-    // 6. Cache lookup (non-streaming only)
+    // Cache lookup (non-streaming only)
     if !is_stream && let Some(cached) = state.cache.get(&request).await {
+        metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
         tracing::debug!(model = %request.model, "Cache HIT");
         let mut response = Json(&cached).into_response();
         response
@@ -96,7 +155,11 @@ pub async fn proxy_chat_completion(
         return Ok(response);
     }
 
-    // 7. Route to provider
+    if !is_stream {
+        metrics::counter!("gateway_cache_total", "result" => "miss").increment(1);
+    }
+
+    // Route to provider
     let provider = state.router.route(&request.model).ok_or_else(|| {
         GatewayError::ProviderError(format!("No provider found for model: {}", request.model))
     })?;
@@ -135,6 +198,14 @@ pub async fn proxy_chat_completion(
                 let key = quota_key.clone();
                 let quota = state.quota.clone();
                 tokio::spawn(async move {
+                    // Limit concurrent budget alert tasks to prevent unbounded spawning
+                    let _permit = match BUDGET_ALERT_SEMAPHORE.try_acquire() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            tracing::debug!("Budget alert task skipped (backpressure)");
+                            return;
+                        }
+                    };
                     // Get monthly spend from quota tracker
                     if let Ok(info) = quota.get_usage(&key).await {
                         let budget_limit = info.limit as f64;

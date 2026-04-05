@@ -6,12 +6,21 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<PgPool> {
         tracing::warn!("DATABASE_URL does not specify sslmode. Use sslmode=require in production.");
     }
 
+    let max_connections: u32 = std::env::var("DB_MAX_CONNECTIONS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(40);
+
     let pool = PgPoolOptions::new()
-        .max_connections(20)
+        .max_connections(max_connections)
+        .acquire_timeout(std::time::Duration::from_secs(5))
         .connect(database_url)
         .await?;
 
-    tracing::info!("Database connection pool created");
+    // sqlx emits query timings via tracing when RUST_LOG includes sqlx=info.
+    // For slow-query visibility, set RUST_LOG=sqlx::query=warn to see queries > 1s.
+
+    tracing::info!(max_connections, "Database connection pool created");
     Ok(pool)
 }
 

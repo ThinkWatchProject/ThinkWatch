@@ -25,16 +25,41 @@ pub struct McpSession {
 }
 
 /// Manages the lifecycle of client-facing MCP sessions.
+///
+/// Uses Redis as the backing store for multi-instance deployments.
+/// Falls back to in-memory storage if Redis is not provided.
 #[derive(Clone)]
 pub struct SessionManager {
-    sessions: Arc<RwLock<HashMap<String, McpSession>>>,
+    /// In-memory fallback (used when Redis is not available, or for local caching)
+    local: Arc<RwLock<HashMap<String, McpSession>>>,
+    /// Optional Redis client for persistent session storage
+    redis: Option<fred::clients::Client>,
+    /// Session TTL in seconds
+    ttl_secs: i64,
 }
+
+const SESSION_PREFIX: &str = "mcp_session:";
 
 impl SessionManager {
     pub fn new() -> Self {
         Self {
-            sessions: Arc::new(RwLock::new(HashMap::new())),
+            local: Arc::new(RwLock::new(HashMap::new())),
+            redis: None,
+            ttl_secs: 3600, // 1 hour default
         }
+    }
+
+    /// Create a SessionManager backed by Redis for multi-instance persistence.
+    pub fn with_redis(redis: fred::clients::Client) -> Self {
+        Self {
+            local: Arc::new(RwLock::new(HashMap::new())),
+            redis: Some(redis),
+            ttl_secs: 3600,
+        }
+    }
+
+    fn redis_key(id: &str) -> String {
+        format!("{SESSION_PREFIX}{id}")
     }
 
     /// Create a new session for the given user, returning the session ID.
@@ -48,22 +73,77 @@ impl SessionManager {
             last_active: now,
             upstream_sessions: HashMap::new(),
         };
-        let mut sessions = self.sessions.write().await;
+
+        if let Some(ref redis) = self.redis
+            && let Ok(json) = serde_json::to_string(&session)
+        {
+            let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+                redis,
+                Self::redis_key(&id),
+                json,
+                Some(fred::types::Expiration::EX(self.ttl_secs)),
+                None,
+                false,
+            )
+            .await;
+        }
+
+        // Also store locally for fast lookups
+        let mut sessions = self.local.write().await;
         sessions.insert(id.clone(), session);
         id
     }
 
     /// Retrieve a session by its ID.
     pub async fn get_session(&self, id: &str) -> Option<McpSession> {
-        let sessions = self.sessions.read().await;
-        sessions.get(id).cloned()
+        // Check local cache first
+        {
+            let sessions = self.local.read().await;
+            if let Some(s) = sessions.get(id) {
+                return Some(s.clone());
+            }
+        }
+
+        // Fall back to Redis
+        if let Some(ref redis) = self.redis {
+            let json: Option<String> =
+                fred::interfaces::KeysInterface::get(redis, Self::redis_key(id))
+                    .await
+                    .ok()
+                    .flatten();
+            if let Some(json) = json
+                && let Ok(session) = serde_json::from_str::<McpSession>(&json)
+            {
+                // Populate local cache
+                let mut local = self.local.write().await;
+                local.insert(id.to_string(), session.clone());
+                return Some(session);
+            }
+        }
+
+        None
     }
 
     /// Touch the `last_active` timestamp on a session.
     pub async fn update_activity(&self, id: &str) {
-        let mut sessions = self.sessions.write().await;
+        let mut sessions = self.local.write().await;
         if let Some(session) = sessions.get_mut(id) {
             session.last_active = Utc::now();
+
+            // Sync to Redis
+            if let Some(ref redis) = self.redis
+                && let Ok(json) = serde_json::to_string(session)
+            {
+                let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+                    redis,
+                    Self::redis_key(id),
+                    json,
+                    Some(fred::types::Expiration::EX(self.ttl_secs)),
+                    None,
+                    false,
+                )
+                .await;
+            }
         }
     }
 
@@ -74,27 +154,44 @@ impl SessionManager {
         server_id: Uuid,
         upstream_session_id: String,
     ) {
-        let mut sessions = self.sessions.write().await;
+        let mut sessions = self.local.write().await;
         if let Some(session) = sessions.get_mut(session_id) {
             session
                 .upstream_sessions
                 .insert(server_id, upstream_session_id);
+
+            // Sync to Redis
+            if let Some(ref redis) = self.redis
+                && let Ok(json) = serde_json::to_string(session)
+            {
+                let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+                    redis,
+                    Self::redis_key(session_id),
+                    json,
+                    Some(fred::types::Expiration::EX(self.ttl_secs)),
+                    None,
+                    false,
+                )
+                .await;
+            }
         }
     }
 
     /// Get the upstream session ID for a given server within a client session.
     pub async fn get_upstream_session(&self, session_id: &str, server_id: Uuid) -> Option<String> {
-        let sessions = self.sessions.read().await;
-        sessions
-            .get(session_id)?
-            .upstream_sessions
-            .get(&server_id)
-            .cloned()
+        let session = self.get_session(session_id).await?;
+        session.upstream_sessions.get(&server_id).cloned()
     }
 
     /// Remove a session (e.g. on `DELETE /mcp`).
     pub async fn remove_session(&self, id: &str) -> Option<McpSession> {
-        let mut sessions = self.sessions.write().await;
+        // Remove from Redis
+        if let Some(ref redis) = self.redis {
+            let _: Result<i64, _> =
+                fred::interfaces::KeysInterface::del(redis, Self::redis_key(id)).await;
+        }
+
+        let mut sessions = self.local.write().await;
         sessions.remove(id)
     }
 
@@ -102,8 +199,21 @@ impl SessionManager {
     pub async fn cleanup_expired(&self, max_age: Duration) {
         let cutoff =
             Utc::now() - chrono::Duration::from_std(max_age).unwrap_or(chrono::Duration::hours(1));
-        let mut sessions = self.sessions.write().await;
-        sessions.retain(|_, s| s.last_active > cutoff);
+        let mut sessions = self.local.write().await;
+        let expired: Vec<String> = sessions
+            .iter()
+            .filter(|(_, s)| s.last_active <= cutoff)
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for id in &expired {
+            sessions.remove(id);
+            // Also remove from Redis
+            if let Some(ref redis) = self.redis {
+                let _: Result<i64, _> =
+                    fred::interfaces::KeysInterface::del(redis, Self::redis_key(id)).await;
+            }
+        }
     }
 
     /// Spawn a background task that periodically cleans up expired sessions.

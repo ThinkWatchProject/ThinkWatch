@@ -19,8 +19,10 @@ services:
       GATEWAY_PORT: "3000"
       CONSOLE_PORT: "3001"
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
-      QUICKWIT_URL: http://quickwit:7280
-      QUICKWIT_INDEX: audit_logs
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DB: agent_bastion
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-bastion}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
       OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
@@ -43,8 +45,8 @@ services:
           cpus: "${SERVER_CPU_LIMIT:-4}"
           memory: ${SERVER_MEM_LIMIT:-4G}
         reservations:
-          cpus: "0.5"
-          memory: 512M
+          cpus: "1"
+          memory: 1G
     networks:
       - frontend
       - backend
@@ -68,6 +70,61 @@ services:
 
   postgres:
     image: postgres:18-alpine
+    command:
+      - postgres
+      # --- Memory ---
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - wal_buffers=16MB
+      # --- WAL / Checkpoints ---
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - min_wal_size=256MB
+      - -c
+      - max_wal_size=1GB
+      - -c
+      - wal_compression=zstd
+      # --- I/O ---
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      # --- Parallel query ---
+      - -c
+      - max_parallel_workers_per_gather=2
+      - -c
+      - max_parallel_workers=4
+      - -c
+      - max_worker_processes=8
+      # --- Connections & safety ---
+      - -c
+      - max_connections=100
+      - -c
+      - idle_in_transaction_session_timeout=30s
+      - -c
+      - statement_timeout=60s
+      # --- Planner ---
+      - -c
+      - default_statistics_target=200
+      - -c
+      - huge_pages=off
+      - -c
+      - jit=off
+      # --- Slow query log ---
+      - -c
+      - log_min_duration_statement=500
+      - -c
+      - log_checkpoints=on
+      - -c
+      - log_lock_waits=on
     environment:
       POSTGRES_USER: ${DB_USER:-bastion}
       POSTGRES_PASSWORD: ${DB_PASSWORD}
@@ -90,9 +147,10 @@ services:
 
   redis:
     image: redis:8-alpine
-    command: redis-server --requirepass ${REDIS_PASSWORD:-}
+    command: redis-server /etc/redis/redis.conf --requirepass ${REDIS_PASSWORD:-}
     volumes:
       - redisdata:/data
+      - ./redis/redis.conf:/etc/redis/redis.conf:ro
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -107,48 +165,20 @@ services:
       - backend
     restart: unless-stopped
 
-  rustfs:
-    image: rustfs/rustfs:1.0.0-alpha.90
-    command: server /data --console-address ":9001"
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3-alpine
     environment:
-      RUSTFS_ACCESS_KEY: ${RUSTFS_USER:-rustfs}
-      RUSTFS_SECRET_KEY: ${RUSTFS_PASSWORD}
-      RUSTFS_CONSOLE_ENABLE: "true"
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-bastion}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DB: agent_bastion
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
-      - rustfs_data:/data
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
+      - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: 1G
-    networks:
-      - backend
-    restart: unless-stopped
-
-  quickwit:
-    image: quickwit/quickwit:0.8.1
-    command: run
-    environment:
-      QW_DEFAULT_INDEX_ROOT_URI: ${QW_STORAGE_URI:-s3://quickwit}
-      QW_LISTEN_ADDRESS: 0.0.0.0
-      AWS_ACCESS_KEY_ID: ${QW_S3_ACCESS_KEY_ID:-${RUSTFS_USER:-rustfs}}
-      AWS_SECRET_ACCESS_KEY: ${QW_S3_SECRET_ACCESS_KEY:-${RUSTFS_PASSWORD}}
-      AWS_ENDPOINT_URL: ${QW_S3_ENDPOINT:-http://rustfs:9000}
-      AWS_REGION: ${QW_S3_REGION:-us-east-1}
-      AWS_FORCE_PATH_STYLE: "${QW_S3_FORCE_PATH_STYLE:-true}"
-    volumes:
-      - quickwit_data:/quickwit/qwdata
-    depends_on:
-      rustfs:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7280/health/readyz"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -156,7 +186,7 @@ services:
       resources:
         limits:
           cpus: "2"
-          memory: ${QW_MEM_LIMIT:-2G}
+          memory: ${CLICKHOUSE_MEM_LIMIT:-2G}
     networks:
       - backend
     restart: unless-stopped
@@ -171,5 +201,4 @@ networks:
 volumes:
   pgdata:
   redisdata:
-  rustfs_data:
-  quickwit_data:
+  clickhouse_data:

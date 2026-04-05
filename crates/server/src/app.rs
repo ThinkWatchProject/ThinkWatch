@@ -46,6 +46,8 @@ pub struct AppState {
     pub audit: AuditLogger,
     pub oidc: Option<OidcManager>,
     pub started_at: chrono::DateTime<chrono::Utc>,
+    /// ClickHouse client for log queries. `None` if ClickHouse is not configured.
+    pub clickhouse: Option<clickhouse::Client>,
 }
 
 /// Common security layers applied to both servers.
@@ -61,7 +63,7 @@ fn security_layers<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Route
         ))
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::HeaderName::from_static("strict-transport-security"),
-            HeaderValue::from_static("max-age=31536000; includeSubDomains"),
+            HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
         ))
         .layer(CatchPanicLayer::new())
         .layer(TraceLayer::new_for_http())
@@ -134,6 +136,9 @@ pub async fn create_gateway_app(
             },
         ))),
         cost_tracker: Arc::new(agent_bastion_gateway::cost_tracker::CostTracker::new()),
+        rate_limiter: Arc::new(agent_bastion_gateway::rate_limiter::RateLimiter::new(
+            state.redis.clone(),
+        )),
     };
     let ai_routes = Router::new()
         .route(
@@ -157,7 +162,7 @@ pub async fn create_gateway_app(
     let access_controller = AccessController::new();
     let pool = ConnectionPool::new();
     let mcp_proxy = McpProxy::new(registry, access_controller, pool);
-    let session_manager = SessionManager::new();
+    let session_manager = SessionManager::with_redis(state.redis.clone());
     let mcp_state = Arc::new(McpGatewayState {
         proxy: mcp_proxy,
         sessions: session_manager,
@@ -183,6 +188,21 @@ pub async fn create_gateway_app(
         .route("/metrics", get(handlers::metrics::prometheus_metrics))
         .with_state(prom_handle);
 
+    // CORS for gateway — allow configured origins (same as console)
+    let gateway_cors = {
+        let origins: Vec<HeaderValue> = _config
+            .cors_origins
+            .iter()
+            .filter_map(|o| o.parse().ok())
+            .collect();
+
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+            .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+            .allow_credentials(true)
+    };
+
     let app = Router::new()
         .merge(health)
         .merge(metrics_route)
@@ -192,6 +212,12 @@ pub async fn create_gateway_app(
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
             std::time::Duration::from_secs(120), // longer timeout for streaming
+        ))
+        .layer(gateway_cors)
+        // CSP header for gateway API responses
+        .layer(SetResponseHeaderLayer::overriding(
+            axum::http::HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
         ))
         .with_state(state.clone());
 

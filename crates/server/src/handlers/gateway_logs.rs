@@ -7,48 +7,12 @@ use agent_bastion_common::errors::AppError;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-/// Escape special Tantivy/Quickwit query syntax characters in a field value.
-fn escape_query_value(v: &str) -> String {
-    let mut out = String::with_capacity(v.len());
-    for c in v.chars() {
-        if "+-&|!(){}[]^\"~*?:\\/ ".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
-fn parse_date_start(s: &str) -> Result<i64, AppError> {
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
-        return Ok(dt.and_utc().timestamp());
-    }
-    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .map(|dt| dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
-        .map_err(|_| {
-            AppError::BadRequest(format!(
-                "Invalid date format '{}', expected YYYY-MM-DD or YYYY-MM-DDTHH:mm",
-                s
-            ))
-        })
-}
-
-fn parse_date_end(s: &str) -> Result<i64, AppError> {
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
-        return Ok(dt.and_utc().timestamp());
-    }
-    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .map(|dt| dt.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp())
-        .map_err(|_| {
-            AppError::BadRequest(format!(
-                "Invalid date format '{}', expected YYYY-MM-DD or YYYY-MM-DDTHH:mm",
-                s
-            ))
-        })
-}
+use super::clickhouse_util::*;
 
 #[derive(Debug, Deserialize)]
 pub struct GatewayLogsQuery {
+    /// Free-text search (reserved for future ngramSearch implementation)
+    #[allow(dead_code)]
     pub q: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
@@ -62,7 +26,7 @@ pub struct GatewayLogsQuery {
     pub offset: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, clickhouse::Row)]
 pub struct GatewayLogEntry {
     pub id: String,
     pub user_id: Option<String>,
@@ -75,13 +39,15 @@ pub struct GatewayLogEntry {
     pub latency_ms: Option<i64>,
     pub status_code: Option<i64>,
     pub ip_address: Option<String>,
+    #[serde(skip_deserializing)]
+    #[serde(default)]
     pub created_at: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct GatewayLogsResponse {
     pub items: Vec<GatewayLogEntry>,
-    pub total: i64,
+    pub total: u64,
 }
 
 pub async fn list_gateway_logs(
@@ -89,99 +55,86 @@ pub async fn list_gateway_logs(
     State(state): State<AppState>,
     Query(params): Query<GatewayLogsQuery>,
 ) -> Result<Json<GatewayLogsResponse>, AppError> {
-    let qw_url = state
-        .config
-        .quickwit_url
-        .as_deref()
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Quickwit is not configured")))?;
-
-    let max_hits = params.limit.unwrap_or(50).min(200);
-    let start_offset = params.offset.unwrap_or(0);
-
-    // Build structured query
-    let mut parts: Vec<String> = Vec::new();
-    if let Some(ref q) = params.q {
-        let q = if q.len() > 255 { &q[..255] } else { q.as_str() };
-        if !q.is_empty() && q != "*" {
-            parts.push(q.to_string());
-        }
+    if !ch_available(&state) {
+        return Ok(Json(GatewayLogsResponse { total: 0, items: vec![] }));
     }
+    let ch = ch_client(&state)?;
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
+
+    // Build dynamic WHERE conditions
+    let mut conditions: Vec<String> = Vec::new();
+    let mut bind_values: Vec<String> = Vec::new();
+
+    // ClickHouse SDK uses ? for bind params in order
     if let Some(ref v) = params.model {
-        parts.push(format!("model_id:{}", escape_query_value(v)));
+        conditions.push("model_id = ?".to_string());
+        bind_values.push(v.clone());
     }
     if let Some(ref v) = params.provider {
-        parts.push(format!("provider:{}", escape_query_value(v)));
+        conditions.push("provider = ?".to_string());
+        bind_values.push(v.clone());
     }
     if let Some(ref v) = params.user_id {
-        parts.push(format!("user_id:{}", escape_query_value(v)));
+        conditions.push("user_id = ?".to_string());
+        bind_values.push(v.clone());
     }
     if let Some(ref v) = params.api_key_id {
-        parts.push(format!("api_key_id:{}", escape_query_value(v)));
+        conditions.push("api_key_id = ?".to_string());
+        bind_values.push(v.clone());
     }
     if let Some(v) = params.status_code {
-        parts.push(format!("status_code:{v}"));
+        conditions.push(format!("status_code = {v}"));
     }
-
-    let search_query = if parts.is_empty() {
-        "*".to_string()
-    } else {
-        parts.join(" AND ")
-    };
-
-    let sort_field = match params.sort_by.as_deref() {
-        Some("cost_usd") => "-cost_usd",
-        Some("latency_ms") => "-latency_ms",
-        _ => "-created_at",
-    };
-
-    let mut url = format!(
-        "{}/api/v1/gateway_logs/search?query={}&max_hits={}&start_offset={}&sort_by_field={}",
-        qw_url,
-        urlencoding::encode(&search_query),
-        max_hits,
-        start_offset,
-        sort_field,
-    );
-
     if let Some(ref from) = params.from {
-        let epoch = parse_date_start(from)?;
-        url.push_str(&format!("&start_timestamp={epoch}"));
+        conditions.push("created_at >= ?".to_string());
+        bind_values.push(from.clone());
     }
     if let Some(ref to) = params.to {
-        let epoch = parse_date_end(to)?;
-        url.push_str(&format!("&end_timestamp={epoch}"));
+        conditions.push("created_at <= ?".to_string());
+        bind_values.push(to.clone());
     }
+    // Free-text search cannot use bind params with ILIKE in ClickHouse SDK,
+    // so we skip the `q` filter for now (TODO: use hasToken() or ngramSearch)
 
-    let client = reqwest::Client::new();
-    let mut req = client.get(&url);
-    if let Some(ref token) = state.config.quickwit_bearer_token {
-        req = req.header("Authorization", format!("Bearer {token}"));
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    };
+
+    let order_by = match params.sort_by.as_deref() {
+        Some("cost_usd") => "cost_usd DESC",
+        Some("latency_ms") => "latency_ms DESC",
+        _ => "created_at DESC",
+    };
+
+    // Count query
+    let count_sql = format!("SELECT count() FROM gateway_logs {where_clause}");
+    let mut count_query = ch.query(&count_sql);
+    for v in &bind_values {
+        count_query = count_query.bind(v.as_str());
     }
-    let resp = req
-        .send()
+    let total: u64 = count_query
+        .fetch_one()
         .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Quickwit search failed: {e}")))?;
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse query failed: {e}")))?;
 
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "Quickwit search returned {status}: {body}"
-        )));
+    // Data query
+    let data_sql = format!(
+        "SELECT id, user_id, api_key_id, model_id, provider, input_tokens, output_tokens, \
+         cost_usd, latency_ms, status_code, ip_address, \
+         toString(created_at) as created_at \
+         FROM gateway_logs {where_clause} ORDER BY {order_by} LIMIT {limit} OFFSET {offset}"
+    );
+    let mut data_query = ch.query(&data_sql);
+    for v in &bind_values {
+        data_query = data_query.bind(v.as_str());
     }
+    let items: Vec<GatewayLogEntry> = data_query
+        .fetch_all()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse query failed: {e}")))?;
 
-    #[derive(Deserialize)]
-    struct QwResp {
-        num_hits: i64,
-        hits: Vec<GatewayLogEntry>,
-    }
-
-    let qw_resp = resp.json::<QwResp>().await.map_err(|e| {
-        AppError::Internal(anyhow::anyhow!("Failed to parse Quickwit response: {e}"))
-    })?;
-
-    Ok(Json(GatewayLogsResponse {
-        total: qw_resp.num_hits,
-        items: qw_resp.hits,
-    }))
+    Ok(Json(GatewayLogsResponse { total, items }))
 }

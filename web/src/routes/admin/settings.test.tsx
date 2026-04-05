@@ -40,7 +40,7 @@ beforeEach(() => {
   mockApi.mockImplementation((path: string) => {
     if (path === '/api/admin/settings/system') return Promise.resolve(systemInfo)
     if (path === '/api/admin/settings/oidc') return Promise.resolve({ issuer_url: '', client_id: '', enabled: false })
-    if (path === '/api/admin/settings/audit') return Promise.resolve({ quickwit_url: '', quickwit_index: '' })
+    if (path === '/api/admin/settings/audit') return Promise.resolve({ clickhouse_url: '', clickhouse_db: '' })
     if (path === '/api/admin/settings') return Promise.resolve(settingsData)
     return Promise.resolve({})
   })

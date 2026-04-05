@@ -270,13 +270,13 @@ Each audit log entry contains:
 }
 ```
 
-### 5.3 Quickwit Integration
+### 5.3 ClickHouse Integration
 
-Audit entries are indexed into Quickwit for full-text search and analytics:
+Audit entries are inserted into ClickHouse for SQL-based search and analytics:
 
-- Index: Configurable via `QUICKWIT_INDEX` (default: `agentbastion-audit`)
+- Database: Configurable via `CLICKHOUSE_DB` (default: `agent_bastion`)
 - Entries are sent asynchronously to avoid blocking request processing.
-- The console provides a search UI at `/api/audit/logs` with support for time-range filtering and full-text queries.
+- The console provides a search UI at `/api/audit/logs` with support for time-range filtering and SQL queries.
 
 ### 5.4 Log Forwarder / SIEM Integration
 
@@ -304,7 +304,7 @@ Validated at startup:
 - PostgreSQL is reachable and responds to a test query
 - Redis is reachable and responds to a PING
 - OIDC variables are either all set or all absent (partial configuration is rejected)
-- Quickwit connectivity (if configured; logs a warning but does not block startup)
+- ClickHouse connectivity (if configured; logs a warning but does not block startup)
 
 ---
 
@@ -386,7 +386,7 @@ Use this checklist when preparing AgentBastion for production deployment.
 ### Audit and Monitoring
 
 - [ ] Set up log rotation for application logs
-- [ ] Verify Quickwit audit index is being populated
+- [ ] Verify ClickHouse audit tables are being populated
 - [ ] Configure log forwarders to your SIEM via Admin > Log Forwarders if applicable
 - [ ] Set up alerts for `auth.login_failed` spikes (potential brute-force)
 - [ ] Monitor the `/api/health`, `/health/live`, and `/health/ready` endpoints with your infrastructure monitoring system

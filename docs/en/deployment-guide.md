@@ -13,7 +13,7 @@
 | Disk     | 20 GB SSD        | 50+ GB SSD           |
 | Network  | 100 Mbps         | 1 Gbps               |
 
-The server process itself is lightweight (Rust binary, ~50 MB RSS typical). Most resource consumption comes from PostgreSQL, Redis, and Quickwit.
+The server process itself is lightweight (Rust binary, ~50 MB RSS typical). Most resource consumption comes from PostgreSQL, Redis, and ClickHouse.
 
 ### Software Requirements
 
@@ -60,8 +60,7 @@ docker compose -f deploy/docker-compose.dev.yml up -d
 This starts:
 - **PostgreSQL** on port 5432 (user: `postgres`, password: `postgres`, db: `agent_bastion`)
 - **Redis** on port 6379
-- **RustFS** (S3-compatible storage) on ports 9000/9001
-- **Quickwit** (audit log search) on port 7280
+- **ClickHouse** (audit log storage) on port 8123 (HTTP) / 9000 (native TCP)
 - **Zitadel** (OIDC SSO) on port 8080
 
 Wait for all services to become healthy:
@@ -192,9 +191,9 @@ WEB_PORT=80
 # CORS — set to your actual console domain
 CORS_ORIGINS=https://console.yourdomain.com
 
-# RustFS (S3 storage for Quickwit)
-RUSTFS_USER=rustfs
-RUSTFS_PASSWORD=<generate-a-strong-password>
+# ClickHouse
+CLICKHOUSE_USER=default
+CLICKHOUSE_PASSWORD=<generate-a-strong-password>
 
 # Redis
 REDIS_PASSWORD=<generate-a-strong-password>
@@ -242,8 +241,7 @@ This starts:
 - **web** -- nginx serving the built React SPA (port 80)
 - **postgres** -- PostgreSQL 18 with persistent volume
 - **redis** -- Redis 8 with persistent volume
-- **rustfs** -- S3-compatible storage with persistent volume
-- **quickwit** -- Audit log search engine
+- **clickhouse** -- ClickHouse columnar database for audit logs
 
 ### 3.4 Verify Health
 
@@ -255,34 +253,26 @@ curl http://localhost:3000/health
 docker compose -f deploy/docker-compose.yml exec server curl http://localhost:3001/api/health
 ```
 
-### 3.5 Quickwit Storage (Cloud-Native S3)
+### 3.5 ClickHouse Configuration
 
-By default, Quickwit stores audit log indexes in the bundled **RustFS** instance (S3-compatible object storage). For cloud-native deployments, you can point Quickwit directly to **AWS S3**, **Google Cloud Storage**, or **Azure Blob Storage** by setting these environment variables in `.env.production`:
+ClickHouse stores audit logs in a columnar format optimized for analytical queries. Configure the connection via these environment variables in `.env.production`:
 
 ```bash
-# Point Quickwit to AWS S3 (or any S3-compatible service)
-QW_STORAGE_URI=s3://my-company-audit-logs/quickwit
-QW_S3_ACCESS_KEY_ID=AKIAXXXXXXXXXXXXXXXX
-QW_S3_SECRET_ACCESS_KEY=wJalrXXXXXXXXXXXXXXXXXXX
-QW_S3_REGION=us-west-2
-QW_S3_FORCE_PATH_STYLE=false    # false for AWS S3, true for MinIO/RustFS
-# QW_S3_ENDPOINT=               # omit for real AWS S3; set for MinIO/RustFS
+# ClickHouse connection
+CLICKHOUSE_URL=http://clickhouse:8123
+CLICKHOUSE_DB=agent_bastion
+CLICKHOUSE_USER=default
+CLICKHOUSE_PASSWORD=<your-clickhouse-password>
 ```
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QW_STORAGE_URI` | `s3://quickwit` | S3 URI for index data. Use `s3://bucket/prefix` format. |
-| `QW_S3_ACCESS_KEY_ID` | `${RUSTFS_USER}` | S3 access key. For AWS EKS, use IRSA instead. |
-| `QW_S3_SECRET_ACCESS_KEY` | `${RUSTFS_PASSWORD}` | S3 secret key. |
-| `QW_S3_ENDPOINT` | `http://rustfs:9000` | S3 endpoint URL. Omit for real AWS S3. |
-| `QW_S3_REGION` | `us-east-1` | AWS region. |
-| `QW_S3_FORCE_PATH_STYLE` | `true` | Set `false` for AWS S3 virtual-hosted style. |
+| `CLICKHOUSE_URL` | `http://clickhouse:8123` | ClickHouse HTTP interface URL. |
+| `CLICKHOUSE_DB` | `agent_bastion` | Database name for audit log tables. |
+| `CLICKHOUSE_USER` | `default` | ClickHouse user for authentication. |
+| `CLICKHOUSE_PASSWORD` | — | ClickHouse password. |
 
-When using **AWS EKS with IRSA** (IAM Roles for Service Accounts), you can omit access keys entirely — Quickwit will use the pod's IAM role via the AWS SDK credential chain.
-
-Audit log retention is configured in the Quickwit index definition (`deploy/quickwit/audit_logs_index.yaml`). The default retention period is **90 days** with daily cleanup.
-
-> **Note:** When using external S3, you can remove the `rustfs` service from docker-compose.yml if no other component uses it.
+AgentBastion automatically creates the required tables on startup if they do not exist. Audit log retention is configured via the `data_retention_days` setting in the admin Web UI.
 
 ### 3.6 Set Up a Reverse Proxy
 
@@ -544,13 +534,13 @@ appendfsync everysec
 
 The Docker Compose files mount a persistent volume for Redis data by default.
 
-### 6.3 Quickwit / RustFS
+### 6.3 ClickHouse
 
-Quickwit stores indexed audit logs, backed by RustFS (S3-compatible storage). The Docker Compose files mount persistent volumes for both.
+ClickHouse stores audit logs in columnar tables. The Docker Compose files mount a persistent volume for ClickHouse data.
 
 For disaster recovery:
-- Back up the RustFS data volume, which contains the S3 bucket used by Quickwit.
-- Alternatively, since audit logs are also written to PostgreSQL (`audit_logs` table), Quickwit data can be reindexed from the primary database if needed.
+- Back up the ClickHouse data volume, or use `clickhouse-client` to export data.
+- Since audit logs are also written to PostgreSQL (`audit_logs` table), ClickHouse data can be re-inserted from the primary database if needed.
 
 ---
 
@@ -621,7 +611,7 @@ Configure via the admin console at **Admin > Log Forwarding**:
 - Built-in connection testing and delivery statistics
 - Automatic retry with error counting
 
-Audit events are always written to PostgreSQL and Quickwit (if configured). Forwarding channels provide additional delivery to external systems.
+Audit events are always written to PostgreSQL and ClickHouse (if configured). Forwarding channels provide additional delivery to external systems.
 
 ### 7.4 Prometheus Metrics
 

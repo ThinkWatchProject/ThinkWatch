@@ -9,57 +9,17 @@ use agent_bastion_common::models::AuditLog;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-fn escape_query_value(v: &str) -> String {
-    let mut out = String::with_capacity(v.len());
-    for c in v.chars() {
-        if "+-&|!(){}[]^\"~*?:\\/ ".contains(c) {
-            out.push('\\');
-        }
-        out.push(c);
-    }
-    out
-}
-
-fn parse_date_start(s: &str) -> Result<i64, AppError> {
-    // Accept "YYYY-MM-DDTHH:mm" or "YYYY-MM-DD"
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
-        return Ok(dt.and_utc().timestamp());
-    }
-    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .map(|dt| dt.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp())
-        .map_err(|_| {
-            AppError::BadRequest(format!(
-                "Invalid date format '{}', expected YYYY-MM-DD or YYYY-MM-DDTHH:mm",
-                s
-            ))
-        })
-}
-
-fn parse_date_end(s: &str) -> Result<i64, AppError> {
-    // Accept "YYYY-MM-DDTHH:mm" or "YYYY-MM-DD"
-    if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M") {
-        return Ok(dt.and_utc().timestamp());
-    }
-    chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
-        .map(|dt| dt.and_hms_opt(23, 59, 59).unwrap().and_utc().timestamp())
-        .map_err(|_| {
-            AppError::BadRequest(format!(
-                "Invalid date format '{}', expected YYYY-MM-DD or YYYY-MM-DDTHH:mm",
-                s
-            ))
-        })
-}
+use super::clickhouse_util::*;
 
 #[derive(Debug, Deserialize)]
 pub struct AuditLogQuery {
-    pub q: Option<String>,
-    pub from: Option<String>,
-    pub to: Option<String>,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
     pub action: Option<String>,
     pub resource: Option<String>,
     pub ip_address: Option<String>,
+    pub from: Option<String>,
+    pub to: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -67,7 +27,21 @@ pub struct AuditLogQuery {
 #[derive(Debug, Serialize)]
 pub struct AuditLogResponse {
     pub items: Vec<AuditLog>,
-    pub total: i64,
+    pub total: u64,
+}
+
+#[derive(Debug, Deserialize, clickhouse::Row)]
+struct ChAuditRow {
+    id: String,
+    user_id: Option<String>,
+    user_email: Option<String>,
+    api_key_id: Option<String>,
+    action: String,
+    resource: Option<String>,
+    detail: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    created_at: String,
 }
 
 pub async fn list_audit_logs(
@@ -75,129 +49,40 @@ pub async fn list_audit_logs(
     State(state): State<AppState>,
     Query(query): Query<AuditLogQuery>,
 ) -> Result<Json<AuditLogResponse>, AppError> {
-    let qw_url = state
-        .config
-        .quickwit_url
-        .as_deref()
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Quickwit is not configured")))?;
-    query_quickwit(
-        qw_url,
-        &state.config.quickwit_index,
-        state.config.quickwit_bearer_token.as_deref(),
-        &query,
-    )
-    .await
-}
-
-// ---------------------------------------------------------------------------
-// Quickwit search
-// ---------------------------------------------------------------------------
-
-/// Quickwit search API response shape.
-#[derive(Debug, Deserialize)]
-struct QwSearchResponse {
-    num_hits: i64,
-    hits: Vec<QwHit>,
-}
-
-#[derive(Debug, Deserialize)]
-struct QwHit {
-    id: String,
-    user_id: Option<String>,
-    user_email: Option<String>,
-    #[allow(dead_code)]
-    api_key_id: Option<String>,
-    action: String,
-    resource: Option<String>,
-    detail: Option<serde_json::Value>,
-    ip_address: Option<String>,
-    user_agent: Option<String>,
-    created_at: String,
-}
-
-async fn query_quickwit(
-    qw_url: &str,
-    qw_index: &str,
-    bearer_token: Option<&str>,
-    query: &AuditLogQuery,
-) -> Result<Json<AuditLogResponse>, AppError> {
-    let max_hits = query.limit.unwrap_or(50).min(200);
-    let start_offset = query.offset.unwrap_or(0);
-
-    // Build Quickwit query string with structured filters
-    let mut parts: Vec<String> = Vec::new();
-
-    if let Some(ref q) = query.q {
-        let q = if q.len() > 255 { &q[..255] } else { q.as_str() };
-        if !q.is_empty() && q != "*" {
-            parts.push(q.to_string());
-        }
+    if !ch_available(&state) {
+        return Ok(Json(AuditLogResponse { total: 0, items: vec![] }));
     }
-    if let Some(ref v) = query.user_id {
-        parts.push(format!("user_id:{}", escape_query_value(v)));
-    }
-    if let Some(ref v) = query.api_key_id {
-        parts.push(format!("api_key_id:{}", escape_query_value(v)));
-    }
-    if let Some(ref v) = query.action {
-        parts.push(format!("action:{}", escape_query_value(v)));
-    }
-    if let Some(ref v) = query.resource {
-        parts.push(format!("resource:{}", escape_query_value(v)));
-    }
-    if let Some(ref v) = query.ip_address {
-        parts.push(format!("ip_address:{}", escape_query_value(v)));
-    }
+    let ch = ch_client(&state)?;
+    let limit = query.limit.unwrap_or(50).min(200);
+    let offset = query.offset.unwrap_or(0);
 
-    let search_query = if parts.is_empty() {
-        "*".to_string()
-    } else {
-        parts.join(" AND ")
-    };
+    let mut conditions: Vec<String> = Vec::new();
+    let mut binds: Vec<String> = Vec::new();
 
-    let mut url = format!(
-        "{}/api/v1/{}/search?query={}&max_hits={}&start_offset={}&sort_by_field=-created_at",
-        qw_url,
-        qw_index,
-        urlencoding::encode(&search_query),
-        max_hits,
-        start_offset,
+    if let Some(ref v) = query.user_id { conditions.push("user_id = ?".into()); binds.push(v.clone()); }
+    if let Some(ref v) = query.api_key_id { conditions.push("api_key_id = ?".into()); binds.push(v.clone()); }
+    if let Some(ref v) = query.action { conditions.push("action = ?".into()); binds.push(v.clone()); }
+    if let Some(ref v) = query.resource { conditions.push("resource = ?".into()); binds.push(v.clone()); }
+    if let Some(ref v) = query.ip_address { conditions.push("ip_address = ?".into()); binds.push(v.clone()); }
+    if let Some(ref v) = query.from { conditions.push("created_at >= ?".into()); binds.push(v.clone()); }
+    if let Some(ref v) = query.to { conditions.push("created_at <= ?".into()); binds.push(v.clone()); }
+
+    let wc = if conditions.is_empty() { String::new() } else { format!("WHERE {}", conditions.join(" AND ")) };
+
+    let count_sql = format!("SELECT count() FROM audit_logs {wc}");
+    let mut q = ch.query(&count_sql);
+    for v in &binds { q = q.bind(v.as_str()); }
+    let total: u64 = q.fetch_one().await.map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
+
+    let data_sql = format!(
+        "SELECT id, user_id, user_email, api_key_id, action, resource, detail, ip_address, user_agent, toString(created_at) as created_at \
+         FROM audit_logs {wc} ORDER BY created_at DESC LIMIT {limit} OFFSET {offset}"
     );
+    let mut q = ch.query(&data_sql);
+    for v in &binds { q = q.bind(v.as_str()); }
+    let rows: Vec<ChAuditRow> = q.fetch_all().await.map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
-    // Optional timestamp range filters
-    if let Some(ref from) = query.from {
-        let epoch = parse_date_start(from)?;
-        url.push_str(&format!("&start_timestamp={epoch}"));
-    }
-    if let Some(ref to) = query.to {
-        let epoch = parse_date_end(to)?;
-        url.push_str(&format!("&end_timestamp={epoch}"));
-    }
-
-    let client = reqwest::Client::new();
-    let mut req = client.get(&url);
-    if let Some(token) = bearer_token {
-        req = req.header("Authorization", format!("Bearer {token}"));
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Quickwit search request failed: {e}")))?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body: String = resp.text().await.unwrap_or_default();
-        return Err(AppError::Internal(anyhow::anyhow!(
-            "Quickwit search returned {status}: {body}"
-        )));
-    }
-
-    let qw_resp = resp.json::<QwSearchResponse>().await.map_err(|e| {
-        AppError::Internal(anyhow::anyhow!("Failed to parse Quickwit response: {e}"))
-    })?;
-
-    let items: Vec<AuditLog> = qw_resp
-        .hits
+    let items: Vec<AuditLog> = rows
         .into_iter()
         .filter_map(|hit| {
             Some(AuditLog {
@@ -207,18 +92,16 @@ async fn query_quickwit(
                 api_key_id: hit.api_key_id.and_then(|s| s.parse::<Uuid>().ok()),
                 action: hit.action,
                 resource: hit.resource,
-                detail: hit.detail,
+                detail: hit.detail.and_then(|s| serde_json::from_str(&s).ok()),
                 ip_address: hit.ip_address,
                 user_agent: hit.user_agent,
-                created_at: chrono::DateTime::parse_from_rfc3339(&hit.created_at)
+                created_at: chrono::DateTime::parse_from_str(&hit.created_at, "%Y-%m-%d %H:%M:%S%.f")
                     .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .or_else(|_| chrono::DateTime::parse_from_rfc3339(&hit.created_at).map(|dt| dt.with_timezone(&chrono::Utc)))
                     .unwrap_or_else(|_| chrono::Utc::now()),
             })
         })
         .collect();
 
-    Ok(Json(AuditLogResponse {
-        total: qw_resp.num_hits,
-        items,
-    }))
+    Ok(Json(AuditLogResponse { total, items }))
 }

@@ -74,8 +74,43 @@ pub async fn require_auth(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Extract client IP based on dynamic config
+    // Extract client IP based on dynamic config.
+    // When using header-based IP sources (xff, x-real-ip), validate that
+    // the direct connection comes from a trusted proxy if configured.
     let ip_source = state.dynamic_config.client_ip_source().await;
+    let connection_ip = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string());
+
+    if ip_source != "connection" {
+        // Check trusted proxy whitelist (comma-separated IPs/CIDRs in dynamic config)
+        if let Some(trusted_proxies) = state
+            .dynamic_config
+            .get_string("security.trusted_proxies")
+            .await
+            && !trusted_proxies.is_empty()
+        {
+            let conn_ip = connection_ip.as_deref().unwrap_or("");
+            let is_trusted = trusted_proxies
+                .split(',')
+                .map(|s| s.trim())
+                .any(|proxy| proxy == conn_ip || proxy == "*");
+            if !is_trusted {
+                tracing::warn!(
+                    connection_ip = conn_ip,
+                    "Request from untrusted proxy, falling back to connection IP"
+                );
+                // Fall back to connection IP instead of trusting the header
+                request.extensions_mut().insert(AuthUser {
+                    claims,
+                    ip: connection_ip,
+                });
+                return Ok(next.run(request).await);
+            }
+        }
+    }
+
     let ip = match ip_source.as_str() {
         "xff" => {
             let position = state.dynamic_config.client_ip_xff_position().await;

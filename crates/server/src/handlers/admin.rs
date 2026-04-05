@@ -134,6 +134,8 @@ pub async fn create_user(
 
     let password_hash = password::hash_password(&raw_password)?;
 
+    let mut tx = state.db.begin().await?;
+
     let user = sqlx::query_as::<_, User>(
         r#"INSERT INTO users (email, display_name, password_hash, password_change_required)
            VALUES ($1, $2, $3, $4) RETURNING *"#,
@@ -142,7 +144,7 @@ pub async fn create_user(
     .bind(&req.display_name)
     .bind(&password_hash)
     .bind(force_change)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
 
     sqlx::query(
@@ -151,8 +153,10 @@ pub async fn create_user(
     )
     .bind(user.id)
     .bind(role_name)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(Json(CreateUserByAdminResponse {
         user: UserResponse {
@@ -279,16 +283,18 @@ pub async fn update_user(
             }
         }
 
-        // Replace all existing roles with the new one
+        // Replace all existing roles with the new one (atomic)
+        let mut tx = state.db.begin().await?;
         sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
             .bind(user_id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("INSERT INTO user_roles (user_id, role_id, scope) VALUES ($1, $2, 'global')")
             .bind(user_id)
             .bind(role_id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
     }
 
     state.audit.log(
@@ -384,10 +390,15 @@ pub async fn reset_user_password(
             .resource(format!("user:{user_id}")),
     );
 
+    // NOTE: The temporary password is returned here so the admin can securely
+    // communicate it to the user. The audit log does NOT record this value
+    // (sanitize_detail redacts any field containing "password").
+    // The user is forced to change it on first login (password_change_required=true).
     Ok(Json(serde_json::json!({
         "status": "password_reset",
         "temporary_password": new_password,
         "user_id": user_id,
+        "password_change_required": true,
     })))
 }
 
@@ -460,8 +471,8 @@ pub async fn get_oidc_settings(
 
 #[derive(Debug, Serialize)]
 pub struct AuditConfigResponse {
-    pub quickwit_url: Option<String>,
-    pub quickwit_index: String,
+    pub clickhouse_url: Option<String>,
+    pub clickhouse_db: String,
 }
 
 pub async fn get_audit_settings(
@@ -469,8 +480,8 @@ pub async fn get_audit_settings(
     State(state): State<AppState>,
 ) -> Json<AuditConfigResponse> {
     Json(AuditConfigResponse {
-        quickwit_url: state.config.quickwit_url.clone(),
-        quickwit_index: state.config.quickwit_index.clone(),
+        clickhouse_url: state.config.clickhouse_url.clone(),
+        clickhouse_db: state.config.clickhouse_db.clone(),
     })
 }
 

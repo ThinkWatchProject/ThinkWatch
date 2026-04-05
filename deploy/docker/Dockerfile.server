@@ -1,11 +1,11 @@
 # Stage 1: Build
-FROM rust:1.86-bookworm AS builder
+FROM rust:1.93-bookworm AS builder
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
 COPY migrations/ migrations/
-COPY deploy/quickwit/ deploy/quickwit/
+COPY deploy/clickhouse/ deploy/clickhouse/
 
 # Determine musl target from the native build arch
 ARG TARGETARCH

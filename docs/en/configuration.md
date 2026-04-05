@@ -138,27 +138,55 @@ Comma-separated list of allowed CORS origins. Each origin must include the schem
 
 ### Observability
 
-#### `QUICKWIT_URL`
+#### `CLICKHOUSE_URL`
 
 | Property  | Value                          |
 | --------- | ------------------------------ |
 | Required  | No                             |
 | Default   | —                              |
-| Example   | `http://quickwit:7280`         |
+| Example   | `http://clickhouse:8123`       |
 
-Base URL of the Quickwit instance for audit log storage and search. Audit logs are stored **exclusively** in Quickwit (not in PostgreSQL). If not set, audit log ingestion and search will be unavailable (entries are still logged to stdout and forwarded to configured log forwarders).
+Base URL of the ClickHouse HTTP interface for audit log storage and search. If not set, audit log ingestion to ClickHouse will be unavailable (entries are still logged to stdout and forwarded to configured log forwarders).
 
 ---
 
-#### `QUICKWIT_INDEX`
+#### `CLICKHOUSE_DB`
 
 | Property  | Value                       |
 | --------- | --------------------------- |
 | Required  | No                          |
-| Default   | `audit_logs`                |
-| Example   | `audit_logs_prod`           |
+| Default   | `agent_bastion`             |
+| Example   | `agent_bastion_prod`        |
 
-Name of the Quickwit index where audit log entries are stored. AgentBastion automatically creates the index on startup if it does not exist.
+Name of the ClickHouse database where audit log tables are stored. AgentBastion automatically creates the database and tables on startup if they do not exist.
+
+---
+
+#### `CLICKHOUSE_USER`
+
+| Property  | Value                       |
+| --------- | --------------------------- |
+| Required  | No                          |
+| Default   | `default`                   |
+| Example   | `agentbastion`              |
+
+ClickHouse user for authentication.
+
+---
+
+#### `CLICKHOUSE_PASSWORD`
+
+| Property  | Value                       |
+| --------- | --------------------------- |
+| Required  | No                          |
+| Default   | —                           |
+| Example   | `your-clickhouse-password`  |
+
+ClickHouse password for authentication.
+
+**Security notes:**
+- In production, always set a strong password for ClickHouse.
+- Store in a secrets manager, not in plaintext files.
 
 ---
 
@@ -357,7 +385,7 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       CORS_ORIGINS: https://console.example.com
-      QUICKWIT_URL: http://quickwit:7280
+      CLICKHOUSE_URL: http://clickhouse:8123
       RUST_LOG: info
     ports:
       - "3000:3000"
@@ -402,8 +430,8 @@ spec:
               value: "3000"
             - name: CONSOLE_PORT
               value: "3001"
-            - name: QUICKWIT_URL
-              value: "http://quickwit:7280"
+            - name: CLICKHOUSE_URL
+              value: "http://clickhouse:8123"
             - name: RUST_LOG
               value: "info"
 ```
@@ -493,6 +521,6 @@ Additionally, the server performs dependency health checks at startup:
 
 - **PostgreSQL:** Verifies the connection and runs a test query
 - **Redis:** Verifies the connection with a PING command
-- **Quickwit:** If configured, verifies the index exists (non-blocking -- logs a warning if unavailable)
+- **ClickHouse:** If configured, verifies the connection and tables exist (non-blocking -- logs a warning if unavailable)
 
 Check the application logs if the server fails to start. Missing or invalid configuration will be reported with clear error messages.

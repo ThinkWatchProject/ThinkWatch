@@ -1,9 +1,64 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::access_control::AccessController;
 use crate::pool::ConnectionPool;
 use crate::registry::Registry;
+
+/// Per-user sliding window rate limiter for MCP tool calls.
+#[derive(Clone)]
+pub struct McpRateLimiter {
+    /// user_id -> list of call timestamps (unix millis)
+    windows: Arc<RwLock<HashMap<Uuid, Vec<i64>>>>,
+    /// Maximum tool calls per user per minute
+    max_calls_per_minute: u32,
+}
+
+impl McpRateLimiter {
+    pub fn new(max_calls_per_minute: u32) -> Self {
+        Self {
+            windows: Arc::new(RwLock::new(HashMap::new())),
+            max_calls_per_minute,
+        }
+    }
+
+    /// Check if the user is within rate limits. Returns Ok if allowed.
+    pub async fn check(&self, user_id: Uuid) -> Result<(), String> {
+        let now = chrono::Utc::now().timestamp_millis();
+        let window_start = now - 60_000;
+
+        let mut windows = self.windows.write().await;
+        let timestamps = windows.entry(user_id).or_default();
+
+        // Remove expired entries
+        timestamps.retain(|&ts| ts > window_start);
+
+        if timestamps.len() >= self.max_calls_per_minute as usize {
+            return Err(format!(
+                "MCP tool call rate limit exceeded: {}/{} per minute",
+                timestamps.len(),
+                self.max_calls_per_minute
+            ));
+        }
+
+        timestamps.push(now);
+        Ok(())
+    }
+
+    /// Periodic cleanup of stale user entries.
+    pub async fn cleanup(&self) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let window_start = now - 60_000;
+        let mut windows = self.windows.write().await;
+        windows.retain(|_, timestamps| {
+            timestamps.retain(|&ts| ts > window_start);
+            !timestamps.is_empty()
+        });
+    }
+}
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -83,6 +138,7 @@ pub struct McpProxy {
     pub registry: Registry,
     pub access_controller: AccessController,
     pub pool: ConnectionPool,
+    pub rate_limiter: McpRateLimiter,
 }
 
 impl McpProxy {
@@ -91,10 +147,12 @@ impl McpProxy {
         access_controller: AccessController,
         pool: ConnectionPool,
     ) -> Self {
+        let rate_limiter = McpRateLimiter::new(60); // 60 tool calls per user per minute
         Self {
             registry,
             access_controller,
             pool,
+            rate_limiter,
         }
     }
 
@@ -170,6 +228,12 @@ impl McpProxy {
     // -----------------------------------------------------------------------
 
     async fn handle_tools_call(&self, user_id: Uuid, request: JsonRpcRequest) -> JsonRpcResponse {
+        // Per-user rate limiting for tool calls
+        if let Err(msg) = self.rate_limiter.check(user_id).await {
+            tracing::warn!(user_id = %user_id, "{msg}");
+            return err_response(request.id, INVALID_REQUEST, msg);
+        }
+
         let params = match &request.params {
             Some(p) => p,
             None => {

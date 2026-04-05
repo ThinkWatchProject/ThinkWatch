@@ -47,8 +47,8 @@ interface OidcConfig {
 }
 
 interface AuditConfig {
-  quickwit_url: string;
-  quickwit_index: string;
+  clickhouse_url: string;
+  clickhouse_db: string;
 }
 
 interface SettingEntry {
@@ -482,13 +482,13 @@ export function SettingsPage() {
                   <div className="space-y-4">
                     <div className="flex items-center justify-between">
                       <div>
-                        <Label className="text-sm">{t('settingsPage.quickwit')}</Label>
+                        <Label className="text-sm">{t('settingsPage.clickhouse')}</Label>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                          {auditConfig?.quickwit_url || '—'}
+                          {auditConfig?.clickhouse_url || '—'}
                         </p>
                       </div>
-                      <Badge variant={auditConfig?.quickwit_url ? 'default' : 'secondary'}>
-                        {auditConfig?.quickwit_url ? t('settingsPage.connected') : t('settingsPage.disconnected')}
+                      <Badge variant={auditConfig?.clickhouse_url ? 'default' : 'secondary'}>
+                        {auditConfig?.clickhouse_url ? t('settingsPage.connected') : t('settingsPage.disconnected')}
                       </Badge>
                     </div>
                     <Separator />

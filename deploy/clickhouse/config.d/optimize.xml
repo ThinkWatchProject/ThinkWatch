@@ -1,0 +1,68 @@
+<?xml version="1.0"?>
+<clickhouse>
+    <!-- ============ Telemetry: fully disabled ============ -->
+    <send_crash_reports>
+        <enabled>false</enabled>
+    </send_crash_reports>
+
+    <!-- ============ Disable unnecessary system tables ============ -->
+    <metric_log remove="1"/>
+    <asynchronous_metric_log remove="1"/>
+    <query_thread_log remove="1"/>
+    <trace_log remove="1"/>
+    <text_log remove="1"/>
+    <opentelemetry_span_log remove="1"/>
+    <session_log remove="1"/>
+    <part_log remove="1"/>
+    <processors_profile_log remove="1"/>
+    <asynchronous_insert_log remove="1"/>
+    <backup_log remove="1"/>
+    <s3_queue_log remove="1"/>
+    <blob_storage_log remove="1"/>
+
+    <!-- Keep query_log with short retention for debugging -->
+    <query_log>
+        <database>system</database>
+        <table>query_log</table>
+        <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+        <ttl>event_date + INTERVAL 3 DAY</ttl>
+    </query_log>
+
+    <!-- ============ Server-level memory guard ============ -->
+    <max_server_memory_usage_to_ram_ratio>0.8</max_server_memory_usage_to_ram_ratio>
+    <max_concurrent_queries>50</max_concurrent_queries>
+
+    <!-- ============ MergeTree engine (global defaults) ============ -->
+    <merge_tree>
+        <parts_to_throw_insert>600</parts_to_throw_insert>
+        <parts_to_delay_insert>450</parts_to_delay_insert>
+        <max_bytes_to_merge_at_max_space_in_pool>5368709120</max_bytes_to_merge_at_max_space_in_pool>
+        <!-- Wide format for parts > 512 rows — better for log tables with many columns -->
+        <min_rows_for_wide_part>512</min_rows_for_wide_part>
+        <min_bytes_for_wide_part>0</min_bytes_for_wide_part>
+        <!-- Vertical merges: merge large columns independently — saves RAM during merges -->
+        <enable_vertical_merge_algorithm>1</enable_vertical_merge_algorithm>
+        <vertical_merge_algorithm_min_rows_to_activate>1048576</vertical_merge_algorithm_min_rows_to_activate>
+        <vertical_merge_algorithm_min_columns_to_activate>5</vertical_merge_algorithm_min_columns_to_activate>
+    </merge_tree>
+
+    <!-- ============ Background pools (sized for 2 CPU) ============ -->
+    <background_pool_size>2</background_pool_size>
+    <background_schedule_pool_size>2</background_schedule_pool_size>
+    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+    <background_move_pool_size>0</background_move_pool_size>  <!-- no tiered storage -->
+
+    <!-- ============ Caches (sized for 2 GB container) ============ -->
+    <mark_cache_size>268435456</mark_cache_size>          <!-- 256 MB -->
+    <uncompressed_cache_size>0</uncompressed_cache_size>  <!-- logs rarely re-read -->
+
+    <!-- ============ Global compression policy ============ -->
+    <compression>
+        <case>
+            <min_part_size>10485760</min_part_size>
+            <min_part_size_ratio>0.01</min_part_size_ratio>
+            <method>zstd</method>
+            <level>1</level>
+        </case>
+    </compression>
+</clickhouse>

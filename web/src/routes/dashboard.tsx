@@ -16,7 +16,7 @@ import { api } from '@/lib/api';
 interface HealthStatus {
   postgres: boolean;
   redis: boolean;
-  quickwit: boolean;
+  clickhouse: boolean;
 }
 
 interface AuditEntry {
@@ -37,7 +37,7 @@ interface DashboardStats {
 const serviceList: { name: string; key: keyof HealthStatus; icon: typeof Database }[] = [
   { name: 'PostgreSQL', key: 'postgres', icon: Database },
   { name: 'Redis', key: 'redis', icon: MemoryStick },
-  { name: 'Quickwit', key: 'quickwit', icon: Search },
+  { name: 'ClickHouse', key: 'clickhouse', icon: Search },
 ];
 
 export function DashboardPage() {

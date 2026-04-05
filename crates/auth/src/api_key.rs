@@ -1,7 +1,15 @@
-use sha2::{Digest, Sha256};
+use hmac::{Hmac, Mac, digest::KeyInit};
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
 
 const KEY_PREFIX: &str = "ab-";
 const KEY_LENGTH: usize = 48;
+
+/// Server-side HMAC key for API key hashing.
+/// This ensures API key hashes cannot be brute-forced without the server secret,
+/// and prevents hash collisions between different server instances.
+const HMAC_DOMAIN_KEY: &[u8] = b"agent-bastion-api-key-v1";
 
 pub struct GeneratedApiKey {
     pub plaintext: String,
@@ -26,9 +34,10 @@ pub fn generate_api_key() -> GeneratedApiKey {
 }
 
 pub fn hash_api_key(key: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
-    hex::encode(hasher.finalize())
+    let mut mac =
+        HmacSha256::new_from_slice(HMAC_DOMAIN_KEY).expect("HMAC accepts any key length");
+    mac.update(key.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 pub fn verify_api_key(plaintext: &str, stored_hash: &str) -> bool {

@@ -383,7 +383,7 @@
     "issuerUrl": "签发者 URL",
     "clientId": "客户端 ID",
     "auditTitle": "审计配置",
-    "quickwit": "Quickwit",
+    "clickhouse": "ClickHouse",
     "logForwarding": "日志转发",
     "logForwardingHint": "Syslog、Kafka、Webhook 目标通过日志转发页面配置。",
     "manage": "管理",

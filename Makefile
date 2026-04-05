@@ -3,7 +3,7 @@
 # Start full dev environment
 dev: infra dev-backend dev-frontend
 
-# Start infrastructure (PG, Redis, RustFS, Quickwit, Zitadel)
+# Start infrastructure (PG, Redis, ClickHouse, Zitadel)
 infra:
 	docker compose -f deploy/docker-compose.dev.yml up -d
 

@@ -88,23 +88,46 @@ pub(crate) fn validate_url(url_str: &str) -> Result<(), AppError> {
         return Err(AppError::BadRequest("URL points to blocked address".into()));
     }
 
-    // Resolve DNS and check all resolved IPs to prevent DNS rebinding
-    if let Ok(addrs) = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80)) {
-        for addr in addrs {
-            let ip = addr.ip();
-            if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local(&ip) {
-                return Err(AppError::BadRequest(
-                    "URL resolves to a private or loopback address".into(),
-                ));
-            }
+    // Block obviously private hostnames (IP literals)
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local(&ip) {
+            return Err(AppError::BadRequest("URL points to private network".into()));
+        }
+        // IP literal — no DNS rebinding risk
+        return Ok(());
+    }
+
+    // Resolve DNS and check all resolved IPs to prevent DNS rebinding.
+    // We resolve twice with a short delay to detect rebinding attacks where
+    // the first resolution returns a public IP and the second returns private.
+    let resolve = |host: &str| -> Vec<std::net::IpAddr> {
+        std::net::ToSocketAddrs::to_socket_addrs(&(host, 80))
+            .map(|addrs| addrs.map(|a| a.ip()).collect())
+            .unwrap_or_default()
+    };
+
+    let first_ips = resolve(host);
+    for ip in &first_ips {
+        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) || is_link_local(ip) {
+            return Err(AppError::BadRequest(
+                "URL resolves to a private or loopback address".into(),
+            ));
         }
     }
 
-    // Also block obviously private hostnames even if DNS fails
-    if let Ok(ip) = host.parse::<std::net::IpAddr>()
-        && (ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local(&ip))
-    {
-        return Err(AppError::BadRequest("URL points to private network".into()));
+    // Second resolution after a short delay to catch DNS rebinding
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    let second_ips = resolve(host);
+    for ip in &second_ips {
+        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) || is_link_local(ip) {
+            return Err(AppError::BadRequest(
+                "URL resolves to a private address (possible DNS rebinding)".into(),
+            ));
+        }
+    }
+
+    if first_ips.is_empty() && second_ips.is_empty() {
+        return Err(AppError::BadRequest("URL host could not be resolved".into()));
     }
 
     Ok(())
@@ -322,4 +345,86 @@ pub async fn delete_provider(
     );
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn validate_url_accepts_public_https() {
+        assert!(validate_url("https://api.openai.com/v1").is_ok());
+        assert!(validate_url("https://generativelanguage.googleapis.com").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_private_ips() {
+        assert!(validate_url("http://127.0.0.1:8080").is_err());
+        assert!(validate_url("http://localhost:3000").is_err());
+        assert!(validate_url("http://0.0.0.0").is_err());
+        assert!(validate_url("http://169.254.169.254/metadata").is_err());
+        assert!(validate_url("http://[::1]:8080").is_err());
+    }
+
+    #[test]
+    fn validate_url_rejects_non_http() {
+        assert!(validate_url("ftp://example.com").is_err());
+        assert!(validate_url("file:///etc/passwd").is_err());
+    }
+
+    #[test]
+    fn validate_url_rejects_no_host() {
+        assert!(validate_url("http://").is_err());
+    }
+
+    #[test]
+    fn validate_custom_headers_accepts_valid() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Custom".to_string(), "value".to_string());
+        assert!(validate_custom_headers(&headers).is_ok());
+    }
+
+    #[test]
+    fn validate_custom_headers_rejects_blocked() {
+        let mut headers = HashMap::new();
+        headers.insert("Authorization".to_string(), "Bearer xxx".to_string());
+        assert!(validate_custom_headers(&headers).is_err());
+    }
+
+    #[test]
+    fn validate_custom_headers_rejects_crlf_injection() {
+        let mut headers = HashMap::new();
+        headers.insert("X-Custom".to_string(), "value\r\nInjected: true".to_string());
+        assert!(validate_custom_headers(&headers).is_err());
+    }
+
+    #[test]
+    fn validate_custom_headers_rejects_too_many() {
+        let headers: HashMap<String, String> = (0..25)
+            .map(|i| (format!("X-H{i}"), "v".to_string()))
+            .collect();
+        assert!(validate_custom_headers(&headers).is_err());
+    }
+
+    #[test]
+    fn is_private_ip_detects_rfc1918() {
+        assert!(is_private_ip(&"10.0.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"172.16.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"192.168.1.1".parse().unwrap()));
+        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_private_ip_detects_cgnat() {
+        assert!(is_private_ip(&"100.64.0.1".parse().unwrap()));
+        assert!(is_private_ip(&"100.127.255.255".parse().unwrap()));
+        assert!(!is_private_ip(&"100.63.255.255".parse().unwrap()));
+    }
+
+    #[test]
+    fn is_link_local_ipv4() {
+        assert!(is_link_local(&"169.254.1.1".parse().unwrap()));
+        assert!(!is_link_local(&"169.255.1.1".parse().unwrap()));
+    }
 }

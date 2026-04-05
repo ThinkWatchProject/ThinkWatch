@@ -27,6 +27,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 # Database
 sqlx = { version = "0.8", features = ["runtime-tokio", "postgres", "uuid", "chrono", "json", "migrate", "rust_decimal"] }
 rust_decimal = { version = "1", features = ["serde"] }
+clickhouse = { version = "0.13", features = ["time"] }
 
 # Redis
 fred = { version = "10", features = ["subscriber-client", "i-scripts"] }
@@ -78,11 +79,16 @@ utoipa-axum = "0.2"
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
 
 # AWS (Bedrock)
+# NOTE: "hardcoded-credentials" is the AWS SDK feature name for constructing
+# Credentials from explicit access_key/secret_key values (as opposed to the
+# default credential chain). This does NOT embed credentials in the binary —
+# they are loaded at runtime from encrypted provider config in the database.
 aws-sigv4 = "1"
 aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
 aws-smithy-eventstream = "0.60"
 
 # Utils
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"

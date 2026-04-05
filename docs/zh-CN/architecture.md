@@ -54,16 +54,12 @@ AgentBastion 是一个使用 Rust 构建的企业级 AI API 网关和 MCP（Mode
           +-------------------+-------------------+
           |                   |                   |
     +-----+------+    +------+------+    +-------+-------+
-    | PostgreSQL  |    |    Redis    |    |   Quickwit    |
-    | users, keys |    | rate limits |    | audit search  |
+    | PostgreSQL  |    |    Redis    |    |  ClickHouse   |
+    | users, keys |    | rate limits |    | audit logs    |
     | providers   |    | sessions    |    |               |
     | settings    |    | config sync |    |               |
-    | usage, RBAC |    | OIDC state  |    +-------+-------+
-    +-------------+    +-------------+            |
-                                           +------+------+
-                                           |   RustFS    |
-                                           | (S3 storage)|
-                                           +-------------+
+    | usage, RBAC |    | OIDC state  |    +---------------+
+    +-------------+    +-------------+
 
           +-------------------+-------------------+
           |                   |                   |
@@ -165,7 +161,7 @@ Client                Gateway :3000                        Upstream Provider
   |                  - Count input/output tokens (tiktoken)        |
   |                  - Calculate cost from model pricing           |
   |                  - Insert usage_record into PostgreSQL         |
-  |                  - Push audit log to Quickwit                  |
+  |                  - Push audit log to ClickHouse                |
   |                  - Forward to log forwarders (syslog/kafka/webhook) |
   |                  - Update rate limit counters in Redis         |
 ```
@@ -332,7 +328,7 @@ MCP 代理引擎。包含：
 - **`dto/`** —— 用于 API 请求/响应序列化的数据传输对象。
 - **`errors.rs`** —— 统一的错误类型，带 HTTP 状态码映射。
 - **`crypto.rs`** —— 用于提供商 API 密钥的 AES-256-GCM 加密/解密。
-- **`audit.rs`** —— 审计日志写入器（PostgreSQL + 可选 Quickwit + 可选 syslog 转发）。
+- **`audit.rs`** —— 审计日志写入器（PostgreSQL + 可选 ClickHouse + 可选 syslog 转发）。
 
 ---
 

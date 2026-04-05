@@ -11,9 +11,10 @@ data:
   CONSOLE_PORT: "3001"
   CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
   RUST_LOG: {{ .Values.config.rustLog | quote }}
-  {{- if .Values.quickwit.enabled }}
-  QUICKWIT_URL: {{ .Values.quickwit.url | quote }}
-  QUICKWIT_INDEX: {{ .Values.quickwit.index | quote }}
+  {{- if .Values.clickhouse.enabled }}
+  CLICKHOUSE_URL: {{ .Values.clickhouse.url | quote }}
+  CLICKHOUSE_DB: {{ .Values.clickhouse.db | quote }}
+  CLICKHOUSE_USER: {{ .Values.clickhouse.user | quote }}
   {{- end }}
   {{- if .Values.secrets.oidcIssuerUrl }}
   OIDC_ISSUER_URL: {{ .Values.secrets.oidcIssuerUrl | quote }}
@@ -21,3 +22,231 @@ data:
   {{- if .Values.secrets.oidcRedirectUrl }}
   OIDC_REDIRECT_URL: {{ .Values.secrets.oidcRedirectUrl | quote }}
   {{- end }}
+{{- if and .Values.clickhouse.enabled .Values.clickhouse.configMaps.enabled }}
+---
+# ClickHouse optimized config — mount into your ClickHouse pod at /etc/clickhouse-server/config.d/
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-clickhouse-config
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: clickhouse
+data:
+  optimize.xml: |
+    <?xml version="1.0"?>
+    <clickhouse>
+        <!-- Telemetry: fully disabled -->
+        <send_crash_reports>
+            <enabled>false</enabled>
+        </send_crash_reports>
+
+        <!-- Disable unnecessary system tables -->
+        <metric_log remove="1"/>
+        <asynchronous_metric_log remove="1"/>
+        <query_thread_log remove="1"/>
+        <trace_log remove="1"/>
+        <text_log remove="1"/>
+        <opentelemetry_span_log remove="1"/>
+        <session_log remove="1"/>
+        <part_log remove="1"/>
+        <processors_profile_log remove="1"/>
+        <asynchronous_insert_log remove="1"/>
+        <backup_log remove="1"/>
+        <s3_queue_log remove="1"/>
+        <blob_storage_log remove="1"/>
+
+        <query_log>
+            <database>system</database>
+            <table>query_log</table>
+            <flush_interval_milliseconds>7500</flush_interval_milliseconds>
+            <ttl>event_date + INTERVAL 3 DAY</ttl>
+        </query_log>
+
+        <max_server_memory_usage_to_ram_ratio>0.8</max_server_memory_usage_to_ram_ratio>
+        <max_concurrent_queries>50</max_concurrent_queries>
+
+        <merge_tree>
+            <parts_to_throw_insert>600</parts_to_throw_insert>
+            <parts_to_delay_insert>450</parts_to_delay_insert>
+            <max_bytes_to_merge_at_max_space_in_pool>5368709120</max_bytes_to_merge_at_max_space_in_pool>
+            <min_rows_for_wide_part>512</min_rows_for_wide_part>
+            <min_bytes_for_wide_part>0</min_bytes_for_wide_part>
+            <enable_vertical_merge_algorithm>1</enable_vertical_merge_algorithm>
+            <vertical_merge_algorithm_min_rows_to_activate>1048576</vertical_merge_algorithm_min_rows_to_activate>
+            <vertical_merge_algorithm_min_columns_to_activate>5</vertical_merge_algorithm_min_columns_to_activate>
+        </merge_tree>
+
+        <background_pool_size>2</background_pool_size>
+        <background_schedule_pool_size>2</background_schedule_pool_size>
+        <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
+        <background_move_pool_size>0</background_move_pool_size>
+
+        <mark_cache_size>268435456</mark_cache_size>
+        <uncompressed_cache_size>0</uncompressed_cache_size>
+
+        <compression>
+            <case>
+                <min_part_size>10485760</min_part_size>
+                <min_part_size_ratio>0.01</min_part_size_ratio>
+                <method>zstd</method>
+                <level>1</level>
+            </case>
+        </compression>
+    </clickhouse>
+---
+# ClickHouse user profile — mount into your ClickHouse pod at /etc/clickhouse-server/users.d/
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-clickhouse-users
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: clickhouse
+data:
+  default-profile.xml: |
+    <?xml version="1.0"?>
+    <clickhouse>
+        <profiles>
+            <default>
+                <max_memory_usage>1073741824</max_memory_usage>
+                <max_execution_time>30</max_execution_time>
+                <max_threads>2</max_threads>
+                <max_bytes_before_external_group_by>536870912</max_bytes_before_external_group_by>
+                <max_bytes_before_external_sort>536870912</max_bytes_before_external_sort>
+                <max_result_rows>100000</max_result_rows>
+                <result_overflow_mode>break</result_overflow_mode>
+                <use_uncompressed_cache>0</use_uncompressed_cache>
+                <join_use_nulls>1</join_use_nulls>
+                <async_insert>1</async_insert>
+                <wait_for_async_insert>0</wait_for_async_insert>
+                <async_insert_max_data_size>10485760</async_insert_max_data_size>
+                <async_insert_busy_timeout_ms>1000</async_insert_busy_timeout_ms>
+                <optimize_read_in_order>1</optimize_read_in_order>
+                <optimize_trivial_count_query>1</optimize_trivial_count_query>
+                <force_data_skipping_indices/>
+            </default>
+        </profiles>
+    </clickhouse>
+---
+# ClickHouse init SQL — mount as /docker-entrypoint-initdb.d/init.sql
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-clickhouse-init
+  labels:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: clickhouse
+data:
+  init.sql: |
+    -- Optimised schema: LowCardinality, DoubleDelta, Delta, ZSTD, skip indices, projections
+    CREATE TABLE IF NOT EXISTS audit_logs (
+        id               String,
+        user_id          LowCardinality(Nullable(String)),
+        user_email       LowCardinality(Nullable(String)),
+        api_key_id       LowCardinality(Nullable(String)),
+        action           LowCardinality(String),
+        resource         LowCardinality(Nullable(String)),
+        resource_id      Nullable(String),
+        detail           Nullable(String) CODEC(ZSTD(3)),
+        ip_address       Nullable(String),
+        user_agent       Nullable(String) CODEC(ZSTD(3)),
+        created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
+        INDEX idx_user_id   user_id   TYPE bloom_filter GRANULARITY 4,
+        INDEX idx_api_key   api_key_id TYPE bloom_filter GRANULARITY 4,
+        INDEX idx_action    action     TYPE set(100)     GRANULARITY 2,
+        INDEX idx_resource  resource   TYPE set(100)     GRANULARITY 2,
+        INDEX idx_ip        ip_address TYPE bloom_filter GRANULARITY 4,
+        INDEX idx_search    action     TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+    ) ENGINE = MergeTree()
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (created_at, id)
+    TTL toDateTime(created_at) + INTERVAL 90 DAY
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+    CREATE TABLE IF NOT EXISTS gateway_logs (
+        id               String,
+        user_id          LowCardinality(Nullable(String)),
+        api_key_id       LowCardinality(Nullable(String)),
+        model_id         LowCardinality(Nullable(String)),
+        provider         LowCardinality(Nullable(String)),
+        input_tokens     Nullable(Int64)   CODEC(Delta, ZSTD(1)),
+        output_tokens    Nullable(Int64)   CODEC(Delta, ZSTD(1)),
+        cost_usd         Nullable(Float64) CODEC(Delta, ZSTD(1)),
+        latency_ms       Nullable(Int64)   CODEC(Delta, ZSTD(1)),
+        status_code      Nullable(Int64),
+        ip_address       Nullable(String),
+        user_agent       Nullable(String) CODEC(ZSTD(3)),
+        detail           Nullable(String) CODEC(ZSTD(3)),
+        created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
+        INDEX idx_user_id    user_id    TYPE bloom_filter GRANULARITY 4,
+        INDEX idx_api_key    api_key_id TYPE bloom_filter GRANULARITY 4,
+        INDEX idx_model      model_id   TYPE set(200)     GRANULARITY 2,
+        INDEX idx_provider   provider   TYPE set(50)      GRANULARITY 2,
+        INDEX idx_status     status_code TYPE set(50)     GRANULARITY 2,
+        INDEX idx_search     model_id   TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+    ) ENGINE = MergeTree()
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (created_at, id)
+    TTL toDateTime(created_at) + INTERVAL 90 DAY
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+    ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_cost (
+        SELECT * ORDER BY cost_usd DESC, created_at DESC
+    );
+    ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_latency (
+        SELECT * ORDER BY latency_ms DESC, created_at DESC
+    );
+
+    CREATE TABLE IF NOT EXISTS mcp_logs (
+        id               String,
+        user_id          LowCardinality(Nullable(String)),
+        server_id        LowCardinality(Nullable(String)),
+        server_name      LowCardinality(Nullable(String)),
+        tool_name        LowCardinality(Nullable(String)),
+        duration_ms      Nullable(Int64) CODEC(Delta, ZSTD(1)),
+        status           LowCardinality(Nullable(String)),
+        error_message    Nullable(String) CODEC(ZSTD(3)),
+        ip_address       Nullable(String),
+        detail           Nullable(String) CODEC(ZSTD(3)),
+        created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
+        INDEX idx_user_id    user_id    TYPE bloom_filter GRANULARITY 4,
+        INDEX idx_server_id  server_id  TYPE bloom_filter GRANULARITY 4,
+        INDEX idx_tool       tool_name  TYPE set(200)     GRANULARITY 2,
+        INDEX idx_status     status     TYPE set(20)      GRANULARITY 2,
+        INDEX idx_search     tool_name  TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+    ) ENGINE = MergeTree()
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (created_at, id)
+    TTL toDateTime(created_at) + INTERVAL 90 DAY
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+    ALTER TABLE mcp_logs ADD PROJECTION IF NOT EXISTS proj_by_duration (
+        SELECT * ORDER BY duration_ms DESC, created_at DESC
+    );
+
+    CREATE TABLE IF NOT EXISTS platform_logs (
+        id               String,
+        user_id          LowCardinality(Nullable(String)),
+        user_email       LowCardinality(Nullable(String)),
+        action           LowCardinality(String),
+        resource         LowCardinality(Nullable(String)),
+        resource_id      Nullable(String),
+        detail           Nullable(String) CODEC(ZSTD(3)),
+        ip_address       Nullable(String),
+        user_agent       Nullable(String) CODEC(ZSTD(3)),
+        created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
+        INDEX idx_user_id   user_id    TYPE bloom_filter GRANULARITY 4,
+        INDEX idx_action    action     TYPE set(100)     GRANULARITY 2,
+        INDEX idx_resource  resource   TYPE set(100)     GRANULARITY 2,
+        INDEX idx_ip        ip_address TYPE bloom_filter GRANULARITY 4,
+        INDEX idx_search    action     TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+    ) ENGINE = MergeTree()
+    PARTITION BY toYYYYMM(created_at)
+    ORDER BY (created_at, id)
+    TTL toDateTime(created_at) + INTERVAL 90 DAY
+    SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+{{- end }}

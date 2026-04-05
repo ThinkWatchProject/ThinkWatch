@@ -54,16 +54,12 @@ This architecture provides centralized:
           +-------------------+-------------------+
           |                   |                   |
     +-----+------+    +------+------+    +-------+-------+
-    | PostgreSQL  |    |    Redis    |    |   Quickwit    |
-    | users, keys |    | rate limits |    | audit search  |
+    | PostgreSQL  |    |    Redis    |    |  ClickHouse   |
+    | users, keys |    | rate limits |    | audit logs    |
     | providers   |    | sessions    |    |               |
     | settings    |    | config sync |    |               |
-    | usage, RBAC |    | OIDC state  |    +-------+-------+
-    +-------------+    +-------------+            |
-                                           +------+------+
-                                           |   RustFS    |
-                                           | (S3 storage)|
-                                           +-------------+
+    | usage, RBAC |    | OIDC state  |    +---------------+
+    +-------------+    +-------------+
 
           +-------------------+-------------------+
           |                   |                   |
@@ -165,7 +161,7 @@ Client                Gateway :3000                        Upstream Provider
   |                  - Count input/output tokens (tiktoken)        |
   |                  - Calculate cost from model pricing           |
   |                  - Insert usage_record into PostgreSQL         |
-  |                  - Push audit log to Quickwit                  |
+  |                  - Push audit log to ClickHouse                |
   |                  - Forward to log forwarders (syslog/kafka/webhook) |
   |                  - Update rate limit counters in Redis         |
 ```
@@ -332,7 +328,7 @@ Shared infrastructure used by all other crates. Contains:
 - **`dto/`** -- Data transfer objects for API request/response serialization.
 - **`errors.rs`** -- Unified error type with HTTP status code mapping.
 - **`crypto.rs`** -- AES-256-GCM encryption/decryption for provider API keys.
-- **`audit.rs`** -- Audit log writer (PostgreSQL + optional Quickwit + optional syslog forwarding).
+- **`audit.rs`** -- Audit log writer (PostgreSQL + optional ClickHouse + optional syslog forwarding).
 
 ---
 

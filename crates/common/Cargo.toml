@@ -22,3 +22,5 @@ reqwest = { workspace = true }
 aes-gcm = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
+urlencoding = { workspace = true }
+clickhouse = { workspace = true }

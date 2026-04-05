@@ -51,10 +51,20 @@ pub struct UsageRow {
     pub total_cost: rust_decimal::Decimal,
 }
 
+#[derive(Debug, serde::Deserialize)]
+pub struct AnalyticsQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
 pub async fn get_usage(
     _auth_user: AuthUser,
     State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<AnalyticsQuery>,
 ) -> Result<Json<Vec<UsageRow>>, AppError> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
+
     let rows = sqlx::query_as::<_, UsageRow>(
         r#"SELECT
             created_at::date as date,
@@ -66,8 +76,10 @@ pub async fn get_usage(
            FROM usage_records
            GROUP BY created_at::date, model_id
            ORDER BY date DESC
-           LIMIT 100"#,
+           LIMIT $1 OFFSET $2"#,
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
@@ -131,7 +143,10 @@ pub struct CostRow {
 pub async fn get_costs(
     _auth_user: AuthUser,
     State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<AnalyticsQuery>,
 ) -> Result<Json<Vec<CostRow>>, AppError> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    let offset = params.offset.unwrap_or(0);
     let month_start = chrono::Utc::now()
         .date_naive()
         .with_day(1)
@@ -147,9 +162,12 @@ pub async fn get_costs(
            FROM usage_records
            WHERE created_at::date >= $1
            GROUP BY model_id
-           ORDER BY total_cost DESC"#,
+           ORDER BY total_cost DESC
+           LIMIT $2 OFFSET $3"#,
     )
     .bind(month_start)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 

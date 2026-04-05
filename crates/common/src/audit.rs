@@ -10,10 +10,10 @@ use uuid::Uuid;
 use crate::models::LogForwarder;
 
 // ---------------------------------------------------------------------------
-// Log types — each maps to a distinct Quickwit index
+// Log types — each maps to a distinct ClickHouse table
 // ---------------------------------------------------------------------------
 
-/// The category of a log entry, determining which Quickwit index it's stored in
+/// The category of a log entry, determining which ClickHouse table it's stored in
 /// and which forwarders will receive it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,7 +48,7 @@ impl LogType {
     }
 }
 
-/// Audit log entry sent to Quickwit and dynamically configured forwarders.
+/// Audit log entry sent to ClickHouse and dynamically configured forwarders.
 #[derive(Debug, Clone, Serialize)]
 pub struct AuditEntry {
     pub id: String,
@@ -209,20 +209,23 @@ mod tests {
 
 #[derive(Debug, Clone)]
 pub struct AuditConfig {
-    /// Quickwit ingest endpoint, e.g. "http://localhost:7280"
-    pub quickwit_url: Option<String>,
-    /// Quickwit index ID (for audit_logs)
-    pub quickwit_index: String,
-    /// Optional bearer token for Quickwit authentication
-    pub quickwit_bearer_token: Option<String>,
+    /// ClickHouse HTTP endpoint, e.g. "http://localhost:8123"
+    pub clickhouse_url: Option<String>,
+    /// ClickHouse database name
+    pub clickhouse_db: String,
+    /// ClickHouse user for authentication
+    pub clickhouse_user: Option<String>,
+    /// ClickHouse password for authentication
+    pub clickhouse_password: Option<String>,
 }
 
 impl Default for AuditConfig {
     fn default() -> Self {
         Self {
-            quickwit_url: None,
-            quickwit_index: "audit_logs".into(),
-            quickwit_bearer_token: None,
+            clickhouse_url: None,
+            clickhouse_db: "agent_bastion".into(),
+            clickhouse_user: None,
+            clickhouse_password: None,
         }
     }
 }
@@ -240,7 +243,7 @@ struct ForwarderRuntime {
 type ForwarderRegistry = Arc<RwLock<HashMap<Uuid, ForwarderRuntime>>>;
 
 /// Async audit log dispatcher. Receives entries via a bounded channel,
-/// writes to Quickwit + DB-configured forwarders (syslog, kafka, webhook).
+/// writes to ClickHouse + DB-configured forwarders (syslog, kafka, webhook).
 #[derive(Clone)]
 pub struct AuditLogger {
     tx: mpsc::Sender<AuditEntry>,
@@ -335,7 +338,7 @@ async fn audit_worker(
 ) {
     let http_client = reqwest::Client::new();
 
-    // Separate batches per log type for routing to correct Quickwit index
+    // Separate batches per log type for routing to correct ClickHouse table
     let mut batches: HashMap<&'static str, Vec<AuditEntry>> = HashMap::new();
     let mut flush_interval = tokio::time::interval(std::time::Duration::from_secs(2));
 
@@ -345,18 +348,18 @@ async fn audit_worker(
                 // Forward to all enabled forwarders immediately
                 forward_to_all(&http_client, &registry, &db, &entry).await;
 
-                let index_id = entry.log_type.index_id();
-                let batch = batches.entry(index_id).or_insert_with(|| Vec::with_capacity(64));
+                let table = entry.log_type.index_id();
+                let batch = batches.entry(table).or_insert_with(|| Vec::with_capacity(64));
                 batch.push(entry);
                 if batch.len() >= 50 {
                     let mut b = std::mem::take(batch);
-                    flush_to_quickwit(&http_client, &config, index_id, &mut b).await;
+                    flush_to_clickhouse(&http_client, &config, table, &mut b).await;
                 }
             }
             _ = flush_interval.tick() => {
-                for (index_id, batch) in batches.iter_mut() {
+                for (table, batch) in batches.iter_mut() {
                     if !batch.is_empty() {
-                        flush_to_quickwit(&http_client, &config, index_id, batch).await;
+                        flush_to_clickhouse(&http_client, &config, table, batch).await;
                     }
                 }
             }
@@ -605,7 +608,7 @@ async fn send_webhook(
 }
 
 // ---------------------------------------------------------------------------
-// Quickwit (unchanged)
+// ClickHouse ingest
 // ---------------------------------------------------------------------------
 
 fn sanitize_detail(detail: &mut Option<serde_json::Value>) {
@@ -629,13 +632,32 @@ fn sanitize_detail(detail: &mut Option<serde_json::Value>) {
     }
 }
 
-async fn flush_to_quickwit(
+/// Build ClickHouse HTTP request with authentication query params.
+fn clickhouse_url(config: &AuditConfig, query: &str) -> Option<String> {
+    let base = config.clickhouse_url.as_deref()?;
+    let mut url = format!(
+        "{}/?database={}&query={}",
+        base.trim_end_matches('/'),
+        urlencoding::encode(&config.clickhouse_db),
+        urlencoding::encode(query),
+    );
+    if let Some(ref user) = config.clickhouse_user {
+        url.push_str(&format!("&user={}", urlencoding::encode(user)));
+    }
+    if let Some(ref password) = config.clickhouse_password {
+        url.push_str(&format!("&password={}", urlencoding::encode(password)));
+    }
+    Some(url)
+}
+
+async fn flush_to_clickhouse(
     client: &reqwest::Client,
     config: &AuditConfig,
-    index_id: &str,
+    table: &str,
     batch: &mut Vec<AuditEntry>,
 ) {
-    let Some(ref url) = config.quickwit_url else {
+    let query = format!("INSERT INTO {} FORMAT JSONEachRow", table);
+    let Some(url) = clickhouse_url(config, &query) else {
         batch.clear();
         return;
     };
@@ -644,29 +666,38 @@ async fn flush_to_quickwit(
         sanitize_detail(&mut entry.detail);
     }
 
+    // Convert detail from Value to JSON string for ClickHouse String column
     let ndjson: String = batch
         .iter()
-        .filter_map(|e| serde_json::to_string(e).ok())
+        .filter_map(|e| {
+            let mut map = serde_json::to_value(e).ok()?;
+            if let Some(obj) = map.as_object_mut()
+                && let Some(detail) = obj.get("detail")
+                && !detail.is_null()
+            {
+                let detail_str = detail.to_string();
+                obj.insert(
+                    "detail".to_string(),
+                    serde_json::Value::String(detail_str),
+                );
+            }
+            serde_json::to_string(&map).ok()
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
-    let ingest_url = format!("{}/api/v1/{}/ingest", url, index_id);
-
     const MAX_RETRIES: u32 = 3;
     for attempt in 1..=MAX_RETRIES {
-        let mut req = client
-            .post(&ingest_url)
+        let req = client
+            .post(&url)
             .header("Content-Type", "application/x-ndjson")
             .body(ndjson.clone());
-        if let Some(ref token) = config.quickwit_bearer_token {
-            req = req.header("Authorization", format!("Bearer {token}"));
-        }
         match req.send().await {
             Ok(resp) if resp.status().is_success() => {
                 tracing::debug!(
-                    "Flushed {} entries to Quickwit index {}",
+                    "Flushed {} entries to ClickHouse table {}",
                     batch.len(),
-                    index_id
+                    table
                 );
                 batch.clear();
                 return;
@@ -676,25 +707,27 @@ async fn flush_to_quickwit(
                 let body = resp.text().await.unwrap_or_default();
                 if attempt < MAX_RETRIES {
                     tracing::warn!(
-                        "Quickwit ingest returned {status} (attempt {attempt}/{MAX_RETRIES}): {body}"
+                        "ClickHouse insert returned {status} (attempt {attempt}/{MAX_RETRIES}): {body}"
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)))
                         .await;
                 } else {
                     tracing::error!(
-                        "Quickwit ingest failed after {MAX_RETRIES} retries ({status}): {body} — dropping {} entries",
+                        "ClickHouse insert failed after {MAX_RETRIES} retries ({status}): {body} — dropping {} entries",
                         batch.len()
                     );
                 }
             }
             Err(e) => {
                 if attempt < MAX_RETRIES {
-                    tracing::warn!("Quickwit ingest error (attempt {attempt}/{MAX_RETRIES}): {e}");
+                    tracing::warn!(
+                        "ClickHouse insert error (attempt {attempt}/{MAX_RETRIES}): {e}"
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)))
                         .await;
                 } else {
                     tracing::error!(
-                        "Quickwit ingest failed after {MAX_RETRIES} retries: {e} — dropping {} entries",
+                        "ClickHouse insert failed after {MAX_RETRIES} retries: {e} — dropping {} entries",
                         batch.len()
                     );
                 }
@@ -705,66 +738,45 @@ async fn flush_to_quickwit(
     batch.clear();
 }
 
-/// Initialize the Quickwit index (create if not exists). Call once at startup.
-pub async fn ensure_quickwit_index(
-    quickwit_url: &str,
-    _index_id: &str,
-    bearer_token: Option<&str>,
-) {
+/// Ensure ClickHouse tables exist. Call once at startup.
+pub async fn ensure_clickhouse_tables(config: &AuditConfig) {
+    let Some(ref base_url) = config.clickhouse_url else {
+        return;
+    };
+
     let client = reqwest::Client::new();
+    let init_sql = include_str!("../../../deploy/clickhouse/init.sql");
 
-    let indices: &[(&str, &str)] = &[
-        (
-            "audit_logs",
-            include_str!("../../../deploy/quickwit/audit_logs_index.yaml"),
-        ),
-        (
-            "gateway_logs",
-            include_str!("../../../deploy/quickwit/gateway_logs_index.yaml"),
-        ),
-        (
-            "mcp_logs",
-            include_str!("../../../deploy/quickwit/mcp_logs_index.yaml"),
-        ),
-        (
-            "platform_logs",
-            include_str!("../../../deploy/quickwit/platform_logs_index.yaml"),
-        ),
-    ];
-
-    for (index_id, index_config) in indices {
-        let check_url = format!("{}/api/v1/indexes/{}", quickwit_url, index_id);
-        let mut req = client.get(&check_url);
-        if let Some(token) = bearer_token {
-            req = req.header("Authorization", format!("Bearer {token}"));
-        }
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("Quickwit index '{index_id}' already exists");
-                continue;
-            }
-            _ => {}
+    // Execute each statement separately
+    for statement in init_sql.split(';') {
+        let stmt = statement.trim();
+        if stmt.is_empty() || stmt.starts_with("--") {
+            continue;
         }
 
-        let create_url = format!("{}/api/v1/indexes", quickwit_url);
-        let mut req = client
-            .post(&create_url)
-            .header("Content-Type", "application/yaml")
-            .body(index_config.to_string());
-        if let Some(token) = bearer_token {
-            req = req.header("Authorization", format!("Bearer {token}"));
+        let mut url = format!(
+            "{}/?database={}",
+            base_url.trim_end_matches('/'),
+            urlencoding::encode(&config.clickhouse_db),
+        );
+        if let Some(ref user) = config.clickhouse_user {
+            url.push_str(&format!("&user={}", urlencoding::encode(user)));
         }
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::info!("Created Quickwit index '{index_id}'");
-            }
+        if let Some(ref password) = config.clickhouse_password {
+            url.push_str(&format!("&password={}", urlencoding::encode(password)));
+        }
+
+        match client.post(&url).body(stmt.to_string()).send().await {
+            Ok(resp) if resp.status().is_success() => {}
             Ok(resp) => {
                 let body = resp.text().await.unwrap_or_default();
-                tracing::warn!("Failed to create Quickwit index '{index_id}': {body}");
+                tracing::warn!("ClickHouse init statement failed: {body}");
             }
             Err(e) => {
-                tracing::warn!("Failed to connect to Quickwit for index '{index_id}': {e}");
+                tracing::warn!("Failed to connect to ClickHouse: {e}");
+                return;
             }
         }
     }
+    tracing::info!("ClickHouse tables initialized");
 }

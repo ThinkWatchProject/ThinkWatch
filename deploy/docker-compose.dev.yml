@@ -1,6 +1,44 @@
 services:
   postgres:
     image: postgres:18-alpine
+    command:
+      - postgres
+      # --- Memory ---
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - maintenance_work_mem=64MB
+      - -c
+      - wal_buffers=8MB
+      # --- WAL / Checkpoints ---
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_compression=zstd
+      # --- I/O ---
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      # --- Connections & safety ---
+      - -c
+      - idle_in_transaction_session_timeout=30s
+      - -c
+      - statement_timeout=60s
+      # --- Planner ---
+      - -c
+      - default_statistics_target=200
+      - -c
+      - jit=off
+      # --- Slow query log (dev: log everything > 200ms) ---
+      - -c
+      - log_min_duration_statement=200
+      - -c
+      - log_lock_waits=on
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -17,73 +55,36 @@ services:
 
   redis:
     image: redis:8-alpine
-    command: redis-server --requirepass devredispass
+    command: redis-server /etc/redis/redis.conf --requirepass devredispass
     ports:
       - "6379:6379"
     volumes:
       - redisdata:/data
+      - ./redis/redis.conf:/etc/redis/redis.conf:ro
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "devredispass", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # --- S3-compatible storage for Quickwit ---
-  rustfs:
-    image: rustfs/rustfs:1.0.0-alpha.90
-    command: server /data --console-address ":9001"
+  # --- ClickHouse (log storage & search) ---
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3-alpine
     ports:
-      - "9000:9000"
-      - "9001:9001"
+      - "8123:8123"   # HTTP interface
+      - "9000:9000"   # Native TCP
     environment:
-      RUSTFS_ACCESS_KEY: rustfs_admin
-      RUSTFS_SECRET_KEY: rustfs_secret
-      RUSTFS_CONSOLE_ENABLE: "true"
+      CLICKHOUSE_USER: bastion
+      CLICKHOUSE_PASSWORD: bastion_dev
+      CLICKHOUSE_DB: agent_bastion
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
-      - rustfs_data:/data
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
+      - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/:ro
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-
-  # Create the quickwit bucket on startup
-  rustfs-init:
-    image: rustfs/rustfs:1.0.0-alpha.90
-    entrypoint: /bin/sh
-    command: >
-      -c "
-      until curl -sf http://rustfs:9000/health; do sleep 1; done;
-      rustfs-client alias set local http://rustfs:9000 rustfs_admin rustfs_secret;
-      rustfs-client mb local/quickwit --ignore-existing;
-      echo 'Bucket quickwit created';
-      "
-    depends_on:
-      rustfs:
-        condition: service_healthy
-
-  # --- Quickwit (audit log search engine) ---
-  quickwit:
-    image: quickwit/quickwit:0.8.1
-    command: run
-    ports:
-      - "7280:7280"
-    environment:
-      QW_DEFAULT_INDEX_ROOT_URI: s3://quickwit
-      QW_LISTEN_ADDRESS: 0.0.0.0
-      QW_S3_ENDPOINT: http://rustfs:9000
-      QW_S3_FORCE_PATH_STYLE_ACCESS: "true"
-      AWS_ACCESS_KEY_ID: rustfs_admin
-      AWS_SECRET_ACCESS_KEY: rustfs_secret
-      AWS_REGION: us-east-1
-    volumes:
-      - quickwit_data:/quickwit/qwdata
-    depends_on:
-      rustfs:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:7280/health/readyz"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -108,6 +109,7 @@ services:
       ZITADEL_EXTERNALSECURE: "false"
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: "admin"
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: "Admin1234!"
+      ZITADEL_TELEMETRY_ENABLED: "false"
     ports:
       - "8080:8080"
     depends_on:
@@ -116,6 +118,16 @@ services:
 
   zitadel_db:
     image: postgres:18-alpine
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - effective_cache_size=384MB
+      - -c
+      - work_mem=4MB
+      - -c
+      - jit=off
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -131,6 +143,5 @@ services:
 volumes:
   pgdata:
   redisdata:
-  rustfs_data:
-  quickwit_data:
+  clickhouse_data:
   zitadel_db_data:

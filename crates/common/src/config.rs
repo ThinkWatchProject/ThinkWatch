@@ -15,10 +15,11 @@ pub struct AppConfig {
 
     pub cors_origins: Vec<String>,
 
-    // Quickwit (audit log search engine)
-    pub quickwit_url: Option<String>,
-    pub quickwit_index: String,
-    pub quickwit_bearer_token: Option<String>,
+    // ClickHouse (audit log storage & search)
+    pub clickhouse_url: Option<String>,
+    pub clickhouse_db: String,
+    pub clickhouse_user: Option<String>,
+    pub clickhouse_password: Option<String>,
 
     // OIDC / SSO (e.g. Zitadel)
     pub oidc_issuer_url: Option<String>,
@@ -53,10 +54,12 @@ impl AppConfig {
                 .map(|s| s.trim().to_string())
                 .collect(),
 
-            // Quickwit
-            quickwit_url: std::env::var("QUICKWIT_URL").ok(),
-            quickwit_index: std::env::var("QUICKWIT_INDEX").unwrap_or_else(|_| "audit_logs".into()),
-            quickwit_bearer_token: std::env::var("QUICKWIT_BEARER_TOKEN").ok(),
+            // ClickHouse
+            clickhouse_url: std::env::var("CLICKHOUSE_URL").ok(),
+            clickhouse_db: std::env::var("CLICKHOUSE_DB")
+                .unwrap_or_else(|_| "agent_bastion".into()),
+            clickhouse_user: std::env::var("CLICKHOUSE_USER").ok(),
+            clickhouse_password: std::env::var("CLICKHOUSE_PASSWORD").ok(),
 
             // OIDC
             oidc_issuer_url: std::env::var("OIDC_ISSUER_URL").ok(),
@@ -88,24 +91,37 @@ impl AppConfig {
             return Err("JWT_SECRET must not consist of a single repeated character".into());
         }
 
-        // Redis must have a password
-        if !self.redis_url.contains("://default:") && !self.redis_url.contains("://redis:") {
-            // Accept password in userinfo or query param
-            let has_password = self.redis_url.contains('@')
-                && !self.redis_url.starts_with("redis://@")
-                && !self.redis_url.starts_with("redis://localhost")
-                && !self.redis_url.starts_with("redis://127.0.0.1");
-            if !has_password {
-                tracing::warn!(
-                    "REDIS_URL does not appear to contain a password — ensure Redis requires authentication in production"
-                );
+        // Redis password validation via proper URL parsing
+        {
+            let is_local = self.redis_url.contains("localhost")
+                || self.redis_url.contains("127.0.0.1")
+                || self.redis_url.contains("[::1]");
+            if !is_local {
+                // Parse as a generic URL to extract password from userinfo
+                let has_password = if let Some(at_pos) = self.redis_url.find('@') {
+                    // Extract userinfo (between :// and @)
+                    let scheme_end = self.redis_url.find("://").map(|p| p + 3).unwrap_or(0);
+                    let userinfo = &self.redis_url[scheme_end..at_pos];
+                    // Password is after the first colon in userinfo
+                    userinfo
+                        .split_once(':')
+                        .map(|(_, pwd)| !pwd.is_empty())
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                if !has_password {
+                    tracing::warn!(
+                        "REDIS_URL does not appear to contain a password — ensure Redis requires authentication in production"
+                    );
+                }
             }
         }
 
-        // Quickwit auth warning
-        if self.quickwit_url.is_some() && self.quickwit_bearer_token.is_none() {
+        // ClickHouse auth warning
+        if self.clickhouse_url.is_some() && self.clickhouse_password.is_none() {
             tracing::warn!(
-                "QUICKWIT_URL is set without QUICKWIT_BEARER_TOKEN — Quickwit has no authentication. Ensure it is only accessible on a private network"
+                "CLICKHOUSE_URL is set without CLICKHOUSE_PASSWORD — ensure ClickHouse has authentication configured"
             );
         }
 
@@ -131,9 +147,10 @@ impl AppConfig {
             gateway_port: 3000,
             console_port: 3001,
             cors_origins: vec!["http://localhost".into()],
-            quickwit_url: None,
-            quickwit_index: "test".into(),
-            quickwit_bearer_token: None,
+            clickhouse_url: None,
+            clickhouse_db: "test".into(),
+            clickhouse_user: None,
+            clickhouse_password: None,
             oidc_issuer_url: None,
             oidc_client_id: None,
             oidc_client_secret: None,
@@ -141,11 +158,16 @@ impl AppConfig {
         }
     }
 
+    pub fn clickhouse_enabled(&self) -> bool {
+        self.clickhouse_url.is_some()
+    }
+
     pub fn audit_config(&self) -> crate::audit::AuditConfig {
         crate::audit::AuditConfig {
-            quickwit_url: self.quickwit_url.clone(),
-            quickwit_index: self.quickwit_index.clone(),
-            quickwit_bearer_token: self.quickwit_bearer_token.clone(),
+            clickhouse_url: self.clickhouse_url.clone(),
+            clickhouse_db: self.clickhouse_db.clone(),
+            clickhouse_user: self.clickhouse_user.clone(),
+            clickhouse_password: self.clickhouse_password.clone(),
         }
     }
 

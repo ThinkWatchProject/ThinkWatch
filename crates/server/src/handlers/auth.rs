@@ -24,8 +24,53 @@ pub struct ChangePasswordRequest {
 
 pub async fn login(
     State(state): State<AppState>,
-    Json(req): Json<LoginRequest>,
+    request: axum::extract::Request,
 ) -> Result<axum::response::Response, AppError> {
+    // Extract client IP for composite rate limiting
+    let client_ip = {
+        let ip_source = state.dynamic_config.client_ip_source().await;
+        match ip_source.as_str() {
+            "xff" => {
+                let depth = state.dynamic_config.client_ip_xff_depth().await.max(1) as usize;
+                let position = state.dynamic_config.client_ip_xff_position().await;
+                request
+                    .headers()
+                    .get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| {
+                        let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
+                        if parts.is_empty() {
+                            return None;
+                        }
+                        let idx = if position == "right" {
+                            parts.len().checked_sub(depth)
+                        } else {
+                            let i = depth - 1;
+                            if i < parts.len() { Some(i) } else { None }
+                        };
+                        idx.and_then(|i| parts.get(i)).map(|s| s.to_string())
+                    })
+            }
+            "x-real-ip" => request
+                .headers()
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.trim().to_string()),
+            _ => request
+                .extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string()),
+        }
+        .unwrap_or_else(|| "unknown".to_string())
+    };
+
+    // Parse body
+    let body_bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| AppError::BadRequest("Invalid request body".into()))?;
+    let req: LoginRequest = serde_json::from_slice(&body_bytes)
+        .map_err(|_| AppError::BadRequest("Invalid JSON".into()))?;
+
     // Input validation
     if req.password.len() < 8 {
         return Err(AppError::BadRequest(
@@ -36,8 +81,9 @@ pub async fn login(
         return Err(AppError::BadRequest("Invalid email format".into()));
     }
 
-    // Rate limiting: per-email, max 10 attempts per minute
-    let rate_key = format!("auth_rate:{}", req.email);
+    // Composite rate limiting: per-email AND per-IP
+    let rate_key = format!("auth_rate:{}:{}", client_ip, req.email);
+    let ip_rate_key = format!("auth_rate_ip:{}", client_ip);
     let count: u64 =
         match fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1).await {
             Ok(c) => c,
@@ -56,6 +102,22 @@ pub async fn login(
     if count > 10 {
         return Err(AppError::BadRequest(
             "Too many login attempts. Please try again later.".into(),
+        ));
+    }
+
+    // Per-IP rate limit: max 30 attempts per minute across all emails (fail-open)
+    let ip_count: u64 =
+        fred::interfaces::KeysInterface::incr_by(&state.redis, &ip_rate_key, 1)
+            .await
+            .unwrap_or_default();
+    if ip_count == 1 {
+        let _: () = fred::interfaces::KeysInterface::expire(&state.redis, &ip_rate_key, 60, None)
+            .await
+            .unwrap_or(());
+    }
+    if ip_count > 30 {
+        return Err(AppError::BadRequest(
+            "Too many login attempts from this address. Please try again later.".into(),
         ));
     }
 
@@ -238,7 +300,9 @@ pub async fn login(
             .resource("auth"),
     );
 
-    Ok(Json(LoginResponse {
+    // Set signing key as httpOnly cookie (primary) + response body (backward compat)
+    let cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
+    let mut response = Json(LoginResponse {
         access_token,
         refresh_token,
         token_type: "Bearer".into(),
@@ -250,7 +314,12 @@ pub async fn login(
             None
         },
     })
-    .into_response())
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        cookie.parse().unwrap(),
+    );
+    Ok(response)
 }
 
 pub async fn register(
@@ -285,6 +354,9 @@ pub async fn register(
 
     let password_hash = password::hash_password(&req.password)?;
 
+    // Use a transaction to ensure user creation + role assignment are atomic
+    let mut tx = state.db.begin().await?;
+
     let user = sqlx::query_as::<_, User>(
         r#"INSERT INTO users (email, display_name, password_hash)
            VALUES ($1, $2, $3) RETURNING *"#,
@@ -292,7 +364,7 @@ pub async fn register(
     .bind(&req.email)
     .bind(&req.display_name)
     .bind(&password_hash)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
 
     // Assign default "developer" role
@@ -301,8 +373,10 @@ pub async fn register(
            SELECT $1, id, 'global' FROM roles WHERE name = 'developer'"#,
     )
     .bind(user.id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(Json(UserResponse {
         id: user.id,
@@ -318,7 +392,7 @@ pub async fn register(
 pub async fn refresh(
     State(state): State<AppState>,
     Json(req): Json<RefreshRequest>,
-) -> Result<Json<LoginResponse>, AppError> {
+) -> Result<axum::response::Response, AppError> {
     let claims = state
         .jwt
         .verify_token(&req.refresh_token)
@@ -348,14 +422,21 @@ pub async fn refresh(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
 
-    Ok(Json(LoginResponse {
+    let cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
+    let mut response = Json(LoginResponse {
         access_token,
         refresh_token,
         token_type: "Bearer".into(),
         expires_in: access_ttl,
         signing_key,
         password_change_required: None,
-    }))
+    })
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        cookie.parse().unwrap(),
+    );
+    Ok(response)
 }
 
 pub async fn me(
@@ -436,16 +517,17 @@ pub async fn delete_account(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user_id = auth_user.claims.sub;
 
-    // Soft-delete: mark as deleted instead of hard-deleting
-    // Records are purged after 30 days by the data retention task
+    // Soft-delete in a transaction: mark keys + user as deleted atomically
+    let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE api_keys SET is_active = false, deleted_at = now(), disabled_reason = 'account_deleted' WHERE user_id = $1")
         .bind(user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     sqlx::query("UPDATE users SET is_active = false, deleted_at = now() WHERE id = $1")
         .bind(user_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    tx.commit().await?;
 
     // Revoke all sessions
     let _: () =

@@ -168,7 +168,11 @@ pub async fn sso_callback(
         .cors_origins
         .first()
         .map(|s| s.as_str())
-        .unwrap_or("http://localhost:5173");
+        .unwrap_or_else(|| {
+            tracing::warn!("No CORS_ORIGINS configured for SSO redirect, falling back to console address");
+            // No hardcoded localhost — fail clearly if misconfigured
+            "/"
+        });
 
     let redirect_url = format!(
         "{}/#access_token={}&refresh_token={}&signing_key={}&expires_in=900",

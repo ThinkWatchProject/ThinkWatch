@@ -6,10 +6,12 @@ use axum::{
 };
 
 use agent_bastion_auth::api_key;
+use agent_bastion_gateway::proxy::GatewayRequestIdentity;
 
 use crate::app::AppState;
 
 /// Authenticated identity for gateway requests (via `ab-` API key).
+/// Inserted into request extensions for use by downstream middleware/handlers.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct GatewayIdentity {
@@ -69,11 +71,22 @@ pub async fn require_api_key_or_jwt(
         let db = state.db.clone();
         let key_id = row.id;
         tokio::spawn(async move {
-            let _ = sqlx::query("UPDATE api_keys SET last_used_at = now() WHERE id = $1")
+            if let Err(e) = sqlx::query("UPDATE api_keys SET last_used_at = now() WHERE id = $1")
                 .bind(key_id)
                 .execute(&db)
-                .await;
+                .await
+            {
+                tracing::warn!("Failed to update api_key last_used_at: {e}");
+            }
         });
+
+        let gateway_identity = GatewayRequestIdentity {
+            user_id: row.user_id.map(|u| u.to_string()),
+            api_key_id: Some(row.id.to_string()),
+            allowed_models: row.allowed_models.clone(),
+            rate_limit_rpm: row.rate_limit_rpm,
+            rate_limit_tpm: row.rate_limit_tpm,
+        };
 
         let identity = GatewayIdentity {
             api_key_id: row.id,
@@ -85,6 +98,7 @@ pub async fn require_api_key_or_jwt(
         };
 
         request.extensions_mut().insert(identity);
+        request.extensions_mut().insert(gateway_identity);
     } else {
         // Try JWT fallback
         let claims = state
@@ -96,6 +110,14 @@ pub async fn require_api_key_or_jwt(
             return Err(StatusCode::UNAUTHORIZED);
         }
 
+        let gateway_identity = GatewayRequestIdentity {
+            user_id: Some(claims.sub.to_string()),
+            api_key_id: None,
+            allowed_models: None,
+            rate_limit_rpm: None,
+            rate_limit_tpm: None,
+        };
+
         let identity = GatewayIdentity {
             api_key_id: uuid::Uuid::nil(),
             user_id: Some(claims.sub),
@@ -106,6 +128,7 @@ pub async fn require_api_key_or_jwt(
         };
 
         request.extensions_mut().insert(identity);
+        request.extensions_mut().insert(gateway_identity);
     }
 
     Ok(next.run(request).await)

@@ -40,3 +40,4 @@ url = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 regex = "1"
+clickhouse = { workspace = true }

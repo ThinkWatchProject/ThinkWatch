@@ -35,8 +35,8 @@ async fn run_retention_cleanup(db: &PgPool, config: &DynamicConfig) -> anyhow::R
         }
     }
 
-    // 2. Audit logs are stored in Quickwit only; retention is managed by
-    //    Quickwit's built-in retention policy (see quickwit/audit_logs_index.yaml).
+    // 2. Audit logs are stored in ClickHouse only; retention is managed by
+    //    ClickHouse TTL (see deploy/clickhouse/init.sql).
 
     // 3. Purge soft-deleted records older than 30 days
     let soft_delete_cutoff = chrono::Utc::now() - chrono::Duration::days(30);

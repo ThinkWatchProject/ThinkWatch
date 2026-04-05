@@ -20,7 +20,6 @@ pub struct PiiRedactor {
 
 #[derive(Clone)]
 struct PiiPattern {
-    #[allow(dead_code)]
     name: String,
     regex: Regex,
     placeholder_prefix: String,
@@ -156,6 +155,12 @@ impl PiiRedactor {
                 // Sort descending by start for safe replacement
                 filtered.sort_by(|a, b| b.0.cmp(&a.0));
 
+                // Collect pattern names for logging before consuming filtered
+                let redacted_pattern_names: Vec<String> = filtered
+                    .iter()
+                    .map(|(_, _, idx)| self.patterns[*idx].name.clone())
+                    .collect();
+
                 let mut redacted_content = content_str;
                 for (start, end, pattern_idx) in filtered {
                     let pattern = &self.patterns[pattern_idx];
@@ -170,6 +175,14 @@ impl PiiRedactor {
                     );
                     replacements.insert(placeholder.clone(), matched_value.to_string());
                     redacted_content.replace_range(start..end, &placeholder);
+                }
+
+                if !redacted_pattern_names.is_empty() {
+                    tracing::debug!(
+                        patterns = ?redacted_pattern_names,
+                        count = redacted_pattern_names.len(),
+                        "PII redacted from user message"
+                    );
                 }
 
                 ChatMessage {
