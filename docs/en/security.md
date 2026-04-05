@@ -1,18 +1,18 @@
 **[English](../en/security.md) | [中文](../zh-CN/security.md)**
 
-# AgentBastion Security Documentation
+# ThinkWatch Security Documentation
 
-This document describes the security architecture, mechanisms, and hardening practices for AgentBastion.
+This document describes the security architecture, mechanisms, and hardening practices for ThinkWatch.
 
 ---
 
 ## 1. Authentication
 
-AgentBastion supports three authentication mechanisms. The gateway accepts any of them; the console management API requires JWT.
+ThinkWatch supports three authentication mechanisms. The gateway accepts any of them; the console management API requires JWT.
 
 ### 1.1 JWT Tokens
 
-AgentBastion issues two JWT tokens upon successful authentication:
+ThinkWatch issues two JWT tokens upon successful authentication:
 
 | Token          | Default Lifetime | Purpose                                      |
 | -------------- | ---------------- | -------------------------------------------- |
@@ -25,7 +25,7 @@ Both TTL values are configurable via the admin Web UI (`jwt_access_ttl_seconds` 
 
 **Secret requirements:**
 - `JWT_SECRET` must be at least 32 characters long.
-- At startup, AgentBastion performs an entropy check and rejects secrets that are trivially weak (e.g., all identical characters, common patterns).
+- At startup, ThinkWatch performs an entropy check and rejects secrets that are trivially weak (e.g., all identical characters, common patterns).
 - Generate a strong secret with: `openssl rand -hex 32`
 
 **Clock skew tolerance:** A 30-second leeway is applied when validating token expiration (`exp`) and not-before (`nbf`) claims, accommodating minor clock differences between distributed services.
@@ -39,7 +39,7 @@ Both TTL values are configurable via the admin Web UI (`jwt_access_ttl_seconds` 
   "role": "admin",
   "exp": 1711930500,
   "iat": 1711929600,
-  "iss": "agentbastion"
+  "iss": "thinkwatch"
 }
 ```
 
@@ -73,7 +73,7 @@ API keys now support a full lifecycle with the following capabilities:
 
 ### 1.3 OIDC / SSO
 
-AgentBastion supports OpenID Connect for single sign-on with enterprise identity providers (Entra ID, Okta, Keycloak, Auth0, etc.).
+ThinkWatch supports OpenID Connect for single sign-on with enterprise identity providers (Entra ID, Okta, Keycloak, Auth0, etc.).
 
 **Flow: Authorization Code**
 
@@ -81,7 +81,7 @@ AgentBastion supports OpenID Connect for single sign-on with enterprise identity
 2. The server generates a cryptographically random `state` and `nonce`, stores both in Redis with a 10-minute TTL, and redirects the browser to the OIDC provider's authorization endpoint.
 3. After authentication, the IdP redirects back to `GET /api/auth/sso/callback?code=...&state=...`.
 4. The server validates the `state` against Redis (CSRF protection), exchanges the authorization code for tokens, verifies the ID token signature and `nonce`, and provisions or updates the local user record.
-5. AgentBastion JWT tokens are returned to the client.
+5. ThinkWatch JWT tokens are returned to the client.
 
 **CSRF protection:** The `state` parameter is a one-time random value stored in Redis. It is consumed (deleted) on callback, preventing replay attacks.
 
@@ -98,7 +98,7 @@ This allows both programmatic clients (API keys) and browser-based/console users
 
 ## 2. Authorization (RBAC)
 
-AgentBastion implements role-based access control with five system roles.
+ThinkWatch implements role-based access control with five system roles.
 
 ### 2.1 Role Hierarchy
 
@@ -178,7 +178,7 @@ API keys are hashed with SHA-256 before storage. This is a one-way operation; th
 
 ### 3.4 Encryption in Transit
 
-AgentBastion itself does not terminate TLS. TLS termination should be handled by a reverse proxy (Nginx, Caddy, Traefik, cloud load balancer). See the hardening checklist in Section 6.
+ThinkWatch itself does not terminate TLS. TLS termination should be handled by a reverse proxy (Nginx, Caddy, Traefik, cloud load balancer). See the hardening checklist in Section 6.
 
 ---
 
@@ -186,7 +186,7 @@ AgentBastion itself does not terminate TLS. TLS termination should be handled by
 
 ### 4.1 Dual-Port Architecture
 
-AgentBastion separates concerns across two ports:
+ThinkWatch separates concerns across two ports:
 
 | Port | Server  | Exposure                               |
 | ---- | ------- | -------------------------------------- |
@@ -274,20 +274,20 @@ Each audit log entry contains:
 
 Audit entries are inserted into ClickHouse for SQL-based search and analytics:
 
-- Database: Configurable via `CLICKHOUSE_DB` (default: `agent_bastion`)
+- Database: Configurable via `CLICKHOUSE_DB` (default: `think_watch`)
 - Entries are sent asynchronously to avoid blocking request processing.
 - The console provides a search UI at `/api/audit/logs` with support for time-range filtering and SQL queries.
 
 ### 5.4 Log Forwarder / SIEM Integration
 
-For enterprise environments, AgentBastion can forward audit logs to external systems via the admin Web UI (Admin > Log Forwarders):
+For enterprise environments, ThinkWatch can forward audit logs to external systems via the admin Web UI (Admin > Log Forwarders):
 
 - **Supported transports:** UDP Syslog, TCP Syslog (RFC 5424), Kafka, HTTP Webhook
 - **Configuration:** Managed dynamically through the database — no restart required
 - **Format:** RFC 5424 structured data for syslog transports:
 
 ```
-<14>1 2026-03-28T09:15:00.000Z agentbastion - - - [agentbastion@0 action="provider.create" user="admin@example.com" resource_type="provider" resource_id="uuid"] Provider created: openai-prod
+<14>1 2026-03-28T09:15:00.000Z thinkwatch - - - [thinkwatch@0 action="provider.create" user="admin@example.com" resource_type="provider" resource_id="uuid"] Provider created: openai-prod
 ```
 
 This allows integration with SIEM platforms such as Splunk, Elastic SIEM, Microsoft Sentinel, and others.
@@ -296,7 +296,7 @@ This allows integration with SIEM platforms such as Splunk, Elastic SIEM, Micros
 
 ## 6. Startup Validation
 
-AgentBastion validates all secrets and dependencies before starting the server. If any critical requirement is not met, the process exits with a clear error message rather than running in a degraded state.
+ThinkWatch validates all secrets and dependencies before starting the server. If any critical requirement is not met, the process exits with a clear error message rather than running in a degraded state.
 
 Validated at startup:
 - `JWT_SECRET` is present, at least 32 characters, and passes an entropy check
@@ -320,7 +320,7 @@ The `POST /api/setup/initialize` endpoint allows creating the first admin user w
 
 ## 8. Soft-Delete and Data Retention
 
-AgentBastion uses soft-delete for critical resources:
+ThinkWatch uses soft-delete for critical resources:
 
 | Resource     | Behavior                                                                          |
 | ------------ | --------------------------------------------------------------------------------- |
@@ -337,7 +337,7 @@ AgentBastion uses soft-delete for critical resources:
 
 ## 9. Hardening Checklist
 
-Use this checklist when preparing AgentBastion for production deployment.
+Use this checklist when preparing ThinkWatch for production deployment.
 
 ### Secrets and Cryptography
 
@@ -373,7 +373,7 @@ Use this checklist when preparing AgentBastion for production deployment.
 - [ ] Configure PostgreSQL to require TLS (`sslmode=require` in `DATABASE_URL`)
 - [ ] Enable Redis authentication (`requirepass` directive)
 - [ ] Use Redis TLS if available (`rediss://` scheme)
-- [ ] Restrict PostgreSQL access to only the AgentBastion service account
+- [ ] Restrict PostgreSQL access to only the ThinkWatch service account
 - [ ] Run database migrations only from a privileged CI/CD pipeline, not from the application at runtime
 
 ### API Key Lifecycle

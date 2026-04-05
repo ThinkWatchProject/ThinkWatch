@@ -1,6 +1,6 @@
 use totp_rs::{Algorithm, Secret, TOTP};
 
-const ISSUER: &str = "AgentBastion";
+const ISSUER: &str = "ThinkWatch";
 const DIGITS: usize = 6;
 const STEP: u64 = 30;
 const SKEW: u8 = 1;
@@ -72,14 +72,14 @@ pub fn find_recovery_code(codes: &[String], candidate: &str) -> Option<usize> {
 
 /// Encrypt TOTP secret with AES-256-GCM and return hex-encoded ciphertext.
 pub fn encrypt_secret(secret: &str, key: &[u8; 32]) -> anyhow::Result<String> {
-    let encrypted = agent_bastion_common::crypto::encrypt(secret.as_bytes(), key)?;
+    let encrypted = think_watch_common::crypto::encrypt(secret.as_bytes(), key)?;
     Ok(hex::encode(encrypted))
 }
 
 /// Decrypt a hex-encoded TOTP secret.
 pub fn decrypt_secret(encrypted_hex: &str, key: &[u8; 32]) -> anyhow::Result<String> {
     let encrypted = hex::decode(encrypted_hex).map_err(|e| anyhow::anyhow!("Invalid hex: {e}"))?;
-    let decrypted = agent_bastion_common::crypto::decrypt(&encrypted, key)?;
+    let decrypted = think_watch_common::crypto::decrypt(&encrypted, key)?;
     String::from_utf8(decrypted).map_err(|e| anyhow::anyhow!("Invalid UTF-8: {e}"))
 }
 
@@ -120,7 +120,7 @@ mod tests {
         let secret = generate_secret();
         let uri = otpauth_uri(&secret, "user@test.com").unwrap();
         assert!(uri.starts_with("otpauth://totp/"));
-        assert!(uri.contains("AgentBastion"));
+        assert!(uri.contains("ThinkWatch"));
         assert!(uri.contains("user%40test.com") || uri.contains("user@test.com"));
     }
 

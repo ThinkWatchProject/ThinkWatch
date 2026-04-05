@@ -63,7 +63,7 @@ export function AppHeader() {
               </>
             ) : (
               <BreadcrumbItem>
-                <BreadcrumbPage>AgentBastion</BreadcrumbPage>
+                <BreadcrumbPage>ThinkWatch</BreadcrumbPage>
               </BreadcrumbItem>
             )}
           </BreadcrumbList>

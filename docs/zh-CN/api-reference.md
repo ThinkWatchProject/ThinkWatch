@@ -1,8 +1,8 @@
 **[English](../en/api-reference.md) | [中文](../zh-CN/api-reference.md)**
 
-# AgentBastion API 参考
+# ThinkWatch API 参考
 
-本文档提供 AgentBastion 所有 HTTP 端点的完整参考。平台运行两个服务器：
+本文档提供 ThinkWatch 所有 HTTP 端点的完整参考。平台运行两个服务器：
 
 | 服务器  | 默认端口 | 用途                           |
 | ------- | -------- | ------------------------------ |
@@ -2049,7 +2049,7 @@ curl "http://localhost:3001/api/audit/logs?q=provider.create&from=2026-03-01T00:
   },
   "general": {
     "data_retention_days": 30,
-    "site_name": "AgentBastion"
+    "site_name": "ThinkWatch"
   }
 }
 ```

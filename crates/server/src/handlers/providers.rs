@@ -2,10 +2,10 @@ use axum::Json;
 use axum::extract::{Path, State};
 use uuid::Uuid;
 
-use agent_bastion_common::crypto;
-use agent_bastion_common::dto::CreateProviderRequest;
-use agent_bastion_common::errors::AppError;
-use agent_bastion_common::models::Provider;
+use think_watch_common::crypto;
+use think_watch_common::dto::CreateProviderRequest;
+use think_watch_common::errors::AppError;
+use think_watch_common::models::Provider;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;

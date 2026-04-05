@@ -1,10 +1,10 @@
 **[English](../en/architecture.md) | [中文](../zh-CN/architecture.md)**
 
-# AgentBastion Architecture
+# ThinkWatch Architecture
 
 ## 1. Overview
 
-AgentBastion is an enterprise AI API gateway and MCP (Model Context Protocol) management platform built in Rust. It acts as a **bastion host** for all AI access within an organization -- every request from developer tools, automated agents, and internal applications flows through a single controlled gateway before reaching upstream AI providers or MCP servers.
+ThinkWatch is an enterprise AI API gateway and MCP (Model Context Protocol) management platform built in Rust. It acts as a **bastion host** for all AI access within an organization -- every request from developer tools, automated agents, and internal applications flows through a single controlled gateway before reaching upstream AI providers or MCP servers.
 
 This architecture provides centralized:
 
@@ -88,7 +88,7 @@ This architecture provides centralized:
 
 ## 3. Dual-Port Architecture
 
-AgentBastion binds two separate TCP listeners on a single process:
+ThinkWatch binds two separate TCP listeners on a single process:
 
 | Port | Name    | Purpose                                   | Audience           |
 |------|---------|-------------------------------------------|--------------------|
@@ -236,7 +236,7 @@ MCP Client              MCP Gateway :3000/mcp            Upstream MCP Server
 
 ## 6. Crate Architecture
 
-AgentBastion is structured as a Cargo workspace with five crates:
+ThinkWatch is structured as a Cargo workspace with five crates:
 
 ```
 crates/

@@ -223,7 +223,7 @@ impl Default for AuditConfig {
     fn default() -> Self {
         Self {
             clickhouse_url: None,
-            clickhouse_db: "agent_bastion".into(),
+            clickhouse_db: "think_watch".into(),
             clickhouse_user: None,
             clickhouse_password: None,
         }
@@ -447,7 +447,7 @@ fn send_udp_syslog(runtime: &ForwarderRuntime, entry: &AuditEntry) -> Result<(),
 
     let severity = 6u8; // informational
     let priority = facility * 8 + severity;
-    let hostname = "agent-bastion";
+    let hostname = "think-watch";
     let app_name = "audit";
     let msg_id = &entry.action;
 
@@ -502,7 +502,7 @@ async fn send_tcp_syslog(config: &LogForwarder, entry: &AuditEntry) -> Result<()
     );
 
     let message = format!(
-        "<{priority}>1 {ts} agent-bastion audit - {action} {sd} {action} on {resource}\n",
+        "<{priority}>1 {ts} think-watch audit - {action} {sd} {action} on {resource}\n",
         priority = priority,
         ts = &entry.created_at,
         action = entry.action,

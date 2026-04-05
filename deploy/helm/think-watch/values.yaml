@@ -2,11 +2,11 @@ replicaCount: 1
 
 image:
   server:
-    repository: ghcr.io/agentbastion/agent-bastion-server
+    repository: ghcr.io/thinkwatch/think-watch-server
     tag: latest
     pullPolicy: Always
   web:
-    repository: ghcr.io/agentbastion/agent-bastion-web
+    repository: ghcr.io/thinkwatch/think-watch-web
     tag: latest
     pullPolicy: Always
 
@@ -36,7 +36,7 @@ ingress:
 
 config:
   corsOrigins: "https://console.internal.example.com"
-  rustLog: "info,agent_bastion=info"
+  rustLog: "info,think_watch=info"
 
 # External secrets — provide via --set or external secrets operator
 secrets:
@@ -52,7 +52,7 @@ secrets:
 clickhouse:
   enabled: true
   url: "http://clickhouse:8123"
-  db: "agent_bastion"
+  db: "think_watch"
   user: "bastion"
   password: ""  # stored in Secret, not ConfigMap
   # Deploy optimized ClickHouse config as ConfigMaps

@@ -1,6 +1,6 @@
-use agent_bastion_common::errors::AppError;
 use fred::clients::Client;
 use fred::interfaces::LuaInterface;
+use think_watch_common::errors::AppError;
 
 /// Sliding-window rate limiter backed by Redis sorted sets + Lua scripts.
 ///

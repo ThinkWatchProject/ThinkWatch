@@ -2,8 +2,8 @@ use axum::Json;
 use axum::extract::State;
 use serde::Deserialize;
 
-use agent_bastion_common::errors::AppError;
-use agent_bastion_common::models::McpTool;
+use think_watch_common::errors::AppError;
+use think_watch_common::models::McpTool;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -39,7 +39,7 @@ pub async fn discover_tools(
     State(state): State<AppState>,
     axum::extract::Path(server_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let server = sqlx::query_as::<_, agent_bastion_common::models::McpServer>(
+    let server = sqlx::query_as::<_, think_watch_common::models::McpServer>(
         "SELECT * FROM mcp_servers WHERE id = $1",
     )
     .bind(server_id)
@@ -69,8 +69,8 @@ pub async fn discover_tools(
     if let Some(ref auth_type) = server.auth_type
         && let Some(ref encrypted) = server.auth_secret_encrypted
         && let Ok(key) =
-            agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
-        && let Ok(secret) = agent_bastion_common::crypto::decrypt(encrypted, &key)
+            think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
+        && let Ok(secret) = think_watch_common::crypto::decrypt(encrypted, &key)
     {
         let secret_str = String::from_utf8_lossy(&secret);
         match auth_type.as_str() {

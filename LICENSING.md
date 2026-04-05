@@ -1,6 +1,6 @@
 # Licensing
 
-AgentBastion is distributed under the [Business Source License 1.1](LICENSE)
+ThinkWatch is distributed under the [Business Source License 1.1](LICENSE)
 as source-available software.
 
 ## Summary

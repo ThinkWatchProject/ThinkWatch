@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
-use agent_bastion_common::errors::AppError;
+use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;

@@ -103,7 +103,7 @@ export function SetupPage() {
   const [confirmPassword, setConfirmPassword] = useState('');
 
   // Settings form
-  const [siteName, setSiteName] = useState('AgentBastion');
+  const [siteName, setSiteName] = useState('ThinkWatch');
 
   // Provider form
   const [providerType, setProviderType] = useState('');
@@ -159,7 +159,7 @@ export function SetupPage() {
     const body: Record<string, unknown> = {
       admin: { email, display_name: displayName, password },
     };
-    if (siteName && siteName !== 'AgentBastion') {
+    if (siteName && siteName !== 'ThinkWatch') {
       body.site_name = siteName;
     }
     if (!skipProvider && providerType && providerName && providerBaseUrl && providerApiKey) {

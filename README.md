@@ -7,13 +7,13 @@
   <img src="https://img.shields.io/badge/Kubernetes-326CE5?style=for-the-badge&logo=kubernetes&logoColor=white" />
 </p>
 
-# AgentBastion
+# ThinkWatch
 
 **[English](README.md) | [中文](README.zh-CN.md)**
 
 **The enterprise-grade bastion host for AI.** Secure, audit, and govern every AI API call and MCP tool invocation across your organization — from a single control plane.
 
-Just as an SSH bastion host is the single gateway through which all server access must flow, AgentBastion is the single gateway through which all AI access must flow. Every model request. Every tool call. Every token. Authenticated, authorized, rate-limited, logged, and accounted for.
+Just as an SSH bastion host is the single gateway through which all server access must flow, ThinkWatch is the single gateway through which all AI access must flow. Every model request. Every tool call. Every token. Authenticated, authorized, rate-limited, logged, and accounted for.
 
 ```
                     ┌──────────────────────────────────────┐
@@ -28,7 +28,7 @@ Just as an SSH bastion host is the single gateway through which all server acces
                     └──────────────────────────────────────┘
 ```
 
-## Why AgentBastion?
+## Why ThinkWatch?
 
 As AI agents proliferate across engineering teams, organizations face a growing governance challenge:
 
@@ -38,7 +38,7 @@ As AI agents proliferate across engineering teams, organizations face a growing 
 - **Compliance gaps** — no audit trail for AI-assisted code generation or data access
 - **Cost surprises** — monthly AI bills that nobody can explain or attribute
 
-AgentBastion solves all of this with a single deployment.
+ThinkWatch solves all of this with a single deployment.
 
 ## Key Features
 
@@ -111,7 +111,7 @@ docker compose -f deploy/docker-compose.dev.yml up -d
 
 # 2. Start backend (gateway :3000 + console :3001)
 cp .env.example .env
-cargo run -p agent-bastion-server
+cargo run -p think-watch-server
 
 # 3. Start frontend dev server
 cd web && pnpm install && pnpm dev
@@ -143,7 +143,7 @@ See the **[Deployment Guide](docs/en/deployment-guide.md)** for production setup
 ## Project Structure
 
 ```
-AgentBastion/
+ThinkWatch/
 ├── crates/
 │   ├── server/          # Dual-port Axum server (gateway + console)
 │   ├── gateway/         # AI API proxy: routing, streaming, rate limiting, cost tracking
@@ -156,7 +156,7 @@ AgentBastion/
 │   ├── docker/          # Dockerfile.server (distroless), Dockerfile.web (nginx)
 │   ├── docker-compose.yml       # Production deployment
 │   ├── docker-compose.dev.yml   # Development (PG + Redis + ClickHouse + Zitadel)
-│   └── helm/agent-bastion/      # Kubernetes Helm chart
+│   └── helm/think-watch/      # Kubernetes Helm chart
 └── docs/                # Detailed documentation
 ```
 
@@ -166,7 +166,7 @@ Contributions are welcome. Please open an issue to discuss before submitting a P
 
 ## License
 
-AgentBastion is source-available under the [Business Source License 1.1](LICENSE).
+ThinkWatch is source-available under the [Business Source License 1.1](LICENSE).
 Non-production use is free. Production use is free up to both `10,000,000`
 Billable Tokens and `10,000` MCP Tool Calls per UTC calendar month; above
 either threshold, a commercial license is required and priced by usage tiers.
@@ -177,10 +177,10 @@ changeover to `GPL-2.0-or-later`.
 
 ## Star History
 
-<a href="https://www.star-history.com/#AgentBastion/AgentBastion&Date">
+<a href="https://www.star-history.com/#ThinkWatch/ThinkWatch&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=AgentBastion/AgentBastion&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=AgentBastion/AgentBastion&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=AgentBastion/AgentBastion&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ThinkWatch/ThinkWatch&type=Date&theme=dark" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ThinkWatch/ThinkWatch&type=Date" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ThinkWatch/ThinkWatch&type=Date" />
  </picture>
 </a>

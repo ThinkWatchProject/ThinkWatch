@@ -1,13 +1,13 @@
 [package]
-name = "agent-bastion-server"
+name = "think-watch-server"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
-agent-bastion-common = { workspace = true }
-agent-bastion-auth = { workspace = true }
-agent-bastion-gateway = { workspace = true }
-agent-bastion-mcp-gateway = { workspace = true }
+think-watch-common = { workspace = true }
+think-watch-auth = { workspace = true }
+think-watch-gateway = { workspace = true }
+think-watch-mcp-gateway = { workspace = true }
 axum = { workspace = true }
 axum-extra = { workspace = true }
 tower = { workspace = true }

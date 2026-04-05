@@ -100,7 +100,7 @@ function InfoBox({ children }: { children: React.ReactNode }) {
 
 function McpPromptTab({ mcpUrl }: { mcpUrl: string }) {
   const { t } = useTranslation();
-  const prompt = `I need to configure my AI tool's MCP (Model Context Protocol) client to connect to an MCP gateway called AgentBastion.
+  const prompt = `I need to configure my AI tool's MCP (Model Context Protocol) client to connect to an MCP gateway called ThinkWatch.
 
 Here is the information you need:
 
@@ -119,7 +119,7 @@ The MCP server configuration should be:
 
 Configuration for specific tools:
 - Claude Desktop: add to mcpServers in claude_desktop_config.json (macOS: ~/Library/Application Support/Claude/claude_desktop_config.json, Windows: %APPDATA%\\Claude\\claude_desktop_config.json)
-- Claude Code CLI: run \`claude mcp add agent-bastion --transport streamable-http "${mcpUrl}/mcp" --header "Authorization: Bearer <key>"\`
+- Claude Code CLI: run \`claude mcp add think-watch --transport streamable-http "${mcpUrl}/mcp" --header "Authorization: Bearer <key>"\`
 - Cursor: add to mcpServers in .cursor/mcp.json (project) or ~/.cursor/mcp.json (global)
 - Cline: add to mcpServers in cline_mcp_settings.json or via Cline Settings > MCP Servers
 - VS Code / Copilot: add to mcpServers in .vscode/mcp.json
@@ -152,7 +152,7 @@ Please detect which tool I am using and help me configure it step by step.`;
 // ===========================================================================
 
 function ClaudeCodeTab({ gatewayUrl }: { gatewayUrl: string }) {
-  const code = `# Set AgentBastion as Anthropic API proxy
+  const code = `# Set ThinkWatch as Anthropic API proxy
 export ANTHROPIC_BASE_URL=${gatewayUrl}
 export ANTHROPIC_API_KEY=ab-your-api-key-here
 
@@ -168,11 +168,11 @@ claude`;
       </div>
       <p className="text-sm text-muted-foreground">
         Claude Code connects using the Anthropic native format. Set environment variables to route
-        all requests through AgentBastion.
+        all requests through ThinkWatch.
       </p>
       <StepList
         steps={[
-          'Set ANTHROPIC_BASE_URL to your AgentBastion gateway URL',
+          'Set ANTHROPIC_BASE_URL to your ThinkWatch gateway URL',
           'Set ANTHROPIC_API_KEY to your ab- prefixed API key',
           'Run claude as usual — all requests are proxied through the gateway',
         ]}
@@ -180,7 +180,7 @@ claude`;
       <CodeBlock code={code} />
       <InfoBox>
         <strong>Endpoint:</strong> /v1/messages (Anthropic native format).
-        AgentBastion translates internally and supports all Claude models.
+        ThinkWatch translates internally and supports all Claude models.
       </InfoBox>
     </div>
   );
@@ -207,13 +207,13 @@ function CursorTab({ gatewayUrl }: { gatewayUrl: string }) {
           'Navigate to Models > OpenAI API Key',
           `Set Base URL to: ${gatewayUrl}/v1`,
           'Set API Key to your ab- prefixed API key',
-          'Select any model configured in AgentBastion',
+          'Select any model configured in ThinkWatch',
         ]}
       />
       <CodeBlock code={code} />
       <InfoBox>
         <strong>Endpoint:</strong> /v1/chat/completions (OpenAI-compatible).
-        Supports all models routed through AgentBastion.
+        Supports all models routed through ThinkWatch.
       </InfoBox>
     </div>
   );
@@ -223,7 +223,7 @@ function ContinueTab({ gatewayUrl }: { gatewayUrl: string }) {
   const code = `// ~/.continue/config.json
 {
   "models": [{
-    "title": "AgentBastion Proxy",
+    "title": "ThinkWatch Proxy",
     "provider": "openai",
     "model": "gpt-4o",
     "apiBase": "${gatewayUrl}/v1",
@@ -240,7 +240,7 @@ function ContinueTab({ gatewayUrl }: { gatewayUrl: string }) {
       </div>
       <p className="text-sm text-muted-foreground">
         Continue connects as an OpenAI-compatible provider. Edit the config file to point at
-        AgentBastion.
+        ThinkWatch.
       </p>
       <StepList
         steps={[
@@ -248,7 +248,7 @@ function ContinueTab({ gatewayUrl }: { gatewayUrl: string }) {
           'Add a new model entry with provider set to "openai"',
           `Set apiBase to: ${gatewayUrl}/v1`,
           'Set apiKey to your ab- prefixed API key',
-          'Choose any model name configured in AgentBastion',
+          'Choose any model name configured in ThinkWatch',
         ]}
       />
       <CodeBlock code={code} />
@@ -260,7 +260,7 @@ function ClineTab({ gatewayUrl }: { gatewayUrl: string }) {
   const code = `// Cline Settings > API Provider > OpenAI Compatible
 // Base URL: ${gatewayUrl}/v1
 // API Key: ab-your-api-key-here
-// Model: gpt-4o (or any model configured in AgentBastion)`;
+// Model: gpt-4o (or any model configured in ThinkWatch)`;
 
   return (
     <div className="space-y-4">
@@ -278,7 +278,7 @@ function ClineTab({ gatewayUrl }: { gatewayUrl: string }) {
           'Select API Provider > OpenAI Compatible',
           `Set Base URL to: ${gatewayUrl}/v1`,
           'Set API Key to your ab- prefixed API key',
-          'Enter a model name (e.g. gpt-4o) configured in AgentBastion',
+          'Enter a model name (e.g. gpt-4o) configured in ThinkWatch',
         ]}
       />
       <CodeBlock code={code} />
@@ -307,14 +307,14 @@ response = client.chat.completions.create(
         <Badge variant="outline">Python</Badge>
       </div>
       <p className="text-sm text-muted-foreground">
-        Use the official OpenAI Python SDK with AgentBastion as a drop-in replacement.
+        Use the official OpenAI Python SDK with ThinkWatch as a drop-in replacement.
       </p>
       <StepList
         steps={[
           'Install the OpenAI SDK: pip install openai',
           `Set base_url to: ${gatewayUrl}/v1`,
           'Set api_key to your ab- prefixed API key',
-          'Use any model configured in AgentBastion',
+          'Use any model configured in ThinkWatch',
         ]}
       />
       <CodeBlock code={code} />
@@ -344,14 +344,14 @@ message = client.messages.create(
         <Badge variant="outline">Python</Badge>
       </div>
       <p className="text-sm text-muted-foreground">
-        Use the official Anthropic Python SDK by pointing it at AgentBastion.
+        Use the official Anthropic Python SDK by pointing it at ThinkWatch.
       </p>
       <StepList
         steps={[
           'Install the Anthropic SDK: pip install anthropic',
           `Set base_url to: ${gatewayUrl} (no /v1 suffix)`,
           'Set api_key to your ab- prefixed API key',
-          'Use any Claude model configured in AgentBastion',
+          'Use any Claude model configured in ThinkWatch',
         ]}
       />
       <CodeBlock code={code} />
@@ -413,7 +413,7 @@ function McpClaudeDesktopTab({ mcpUrl }: { mcpUrl: string }) {
 // Windows: %APPDATA%\\Claude\\claude_desktop_config.json
 {
   "mcpServers": {
-    "agent-bastion": {
+    "think-watch": {
       "type": "streamableHttp",
       "url": "${mcpUrl}/mcp",
       "headers": {
@@ -451,8 +451,8 @@ function McpClaudeDesktopTab({ mcpUrl }: { mcpUrl: string }) {
 
 function McpClaudeCodeTab({ mcpUrl }: { mcpUrl: string }) {
   const { t } = useTranslation();
-  const code = `# Add AgentBastion as an MCP server in Claude Code
-claude mcp add agent-bastion \\
+  const code = `# Add ThinkWatch as an MCP server in Claude Code
+claude mcp add think-watch \\
   --transport streamable-http \\
   "${mcpUrl}/mcp" \\
   --header "Authorization: Bearer ab-your-api-key-here"
@@ -461,7 +461,7 @@ claude mcp add agent-bastion \\
 claude mcp list
 
 # Remove if needed
-claude mcp remove agent-bastion`;
+claude mcp remove think-watch`;
 
   return (
     <div className="space-y-4">
@@ -490,7 +490,7 @@ function McpCursorTab({ mcpUrl }: { mcpUrl: string }) {
   const code = `// .cursor/mcp.json (project-level) or ~/.cursor/mcp.json (global)
 {
   "mcpServers": {
-    "agent-bastion": {
+    "think-watch": {
       "type": "streamableHttp",
       "url": "${mcpUrl}/mcp",
       "headers": {
@@ -529,7 +529,7 @@ function McpClineTab({ mcpUrl }: { mcpUrl: string }) {
 // Or in cline_mcp_settings.json:
 {
   "mcpServers": {
-    "agent-bastion": {
+    "think-watch": {
       "type": "streamableHttp",
       "url": "${mcpUrl}/mcp",
       "headers": {

@@ -95,7 +95,7 @@ thiserror = "2"
 anyhow = "1"
 
 # Workspace crates
-agent-bastion-common = { path = "crates/common" }
-agent-bastion-auth = { path = "crates/auth" }
-agent-bastion-gateway = { path = "crates/gateway" }
-agent-bastion-mcp-gateway = { path = "crates/mcp-gateway" }
+think-watch-common = { path = "crates/common" }
+think-watch-auth = { path = "crates/auth" }
+think-watch-gateway = { path = "crates/gateway" }
+think-watch-mcp-gateway = { path = "crates/mcp-gateway" }

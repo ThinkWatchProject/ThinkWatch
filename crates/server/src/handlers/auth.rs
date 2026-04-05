@@ -3,13 +3,13 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
 
-use agent_bastion_auth::password;
-use agent_bastion_common::audit::AuditEntry;
-use agent_bastion_common::dto::{
+use think_watch_auth::password;
+use think_watch_common::audit::AuditEntry;
+use think_watch_common::dto::{
     CreateUserRequest, LoginRequest, LoginResponse, RefreshRequest, UserResponse,
 };
-use agent_bastion_common::errors::AppError;
-use agent_bastion_common::models::User;
+use think_watch_common::errors::AppError;
+use think_watch_common::models::User;
 
 use crate::middleware::verify_signature;
 
@@ -214,18 +214,17 @@ pub async fn login(
             Some(code) => {
                 // Verify TOTP code or recovery code
                 let totp_valid = if let Some(ref encrypted_secret) = user.totp_secret {
-                    let enc_key = agent_bastion_common::crypto::parse_encryption_key(
+                    let enc_key = think_watch_common::crypto::parse_encryption_key(
                         &state.config.encryption_key,
                     )
                     .map_err(|e| {
                         AppError::Internal(anyhow::anyhow!("Encryption key error: {e}"))
                     })?;
-                    let secret =
-                        agent_bastion_auth::totp::decrypt_secret(encrypted_secret, &enc_key)
-                            .map_err(|e| {
-                                AppError::Internal(anyhow::anyhow!("TOTP decrypt error: {e}"))
-                            })?;
-                    agent_bastion_auth::totp::verify(&secret, code, &user.email).unwrap_or(false)
+                    let secret = think_watch_auth::totp::decrypt_secret(encrypted_secret, &enc_key)
+                        .map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("TOTP decrypt error: {e}"))
+                        })?;
+                    think_watch_auth::totp::verify(&secret, code, &user.email).unwrap_or(false)
                 } else {
                     false
                 };
@@ -235,8 +234,7 @@ pub async fn login(
                     let mut recovery_used = false;
                     if let Some(ref codes_json) = user.totp_recovery_codes
                         && let Ok(mut codes) = serde_json::from_str::<Vec<String>>(codes_json)
-                        && let Some(pos) =
-                            agent_bastion_auth::totp::find_recovery_code(&codes, code)
+                        && let Some(pos) = think_watch_auth::totp::find_recovery_code(&codes, code)
                     {
                         codes.remove(pos);
                         let updated = serde_json::to_string(&codes).unwrap_or_default();
@@ -576,7 +574,7 @@ pub async fn totp_setup(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<TotpSetupResponse>, AppError> {
-    use agent_bastion_auth::totp;
+    use think_watch_auth::totp;
 
     let user = sqlx::query_as::<_, User>(
         "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
@@ -601,9 +599,9 @@ pub async fn totp_setup(
         "secret": secret,
         "recovery_codes": recovery_codes,
     });
-    let enc_key = agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
+    let enc_key = think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
-    let encrypted_pending = agent_bastion_common::crypto::encrypt(
+    let encrypted_pending = think_watch_common::crypto::encrypt(
         serde_json::to_string(&pending_data).unwrap().as_bytes(),
         &enc_key,
     )
@@ -637,7 +635,7 @@ pub async fn totp_verify_setup(
     State(state): State<AppState>,
     Json(req): Json<TotpVerifyRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    use agent_bastion_auth::totp;
+    use think_watch_auth::totp;
 
     let user_id = auth_user.claims.sub;
     let user_email = &auth_user.claims.email;
@@ -653,11 +651,11 @@ pub async fn totp_verify_setup(
     ))?;
 
     // Decrypt the pending data from Redis
-    let enc_key = agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
+    let enc_key = think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
     let encrypted_bytes = hex::decode(&pending_hex)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid hex from Redis: {e}")))?;
-    let decrypted = agent_bastion_common::crypto::decrypt(&encrypted_bytes, &enc_key)
+    let decrypted = think_watch_common::crypto::decrypt(&encrypted_bytes, &enc_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Decryption error: {e}")))?;
     let pending_str = String::from_utf8(decrypted)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid UTF-8: {e}")))?;
@@ -676,7 +674,7 @@ pub async fn totp_verify_setup(
     }
 
     // Encrypt and store
-    let enc_key = agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
+    let enc_key = think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
     let encrypted_secret = totp::encrypt_secret(&pending.secret, &enc_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption error: {e}")))?;

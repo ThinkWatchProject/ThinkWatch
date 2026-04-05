@@ -13,25 +13,25 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
 
-use agent_bastion_auth::jwt::JwtManager;
-use agent_bastion_auth::oidc::OidcManager;
-use agent_bastion_common::audit::AuditLogger;
-use agent_bastion_common::config::AppConfig;
-use agent_bastion_common::dynamic_config::DynamicConfig;
-use agent_bastion_gateway::budget_alert::{BudgetAlertConfig, BudgetAlertManager};
-use agent_bastion_gateway::cache::ResponseCache;
-use agent_bastion_gateway::content_filter::ContentFilter;
-use agent_bastion_gateway::model_mapping::ModelMapper;
-use agent_bastion_gateway::pii_redactor::PiiRedactor;
-use agent_bastion_gateway::proxy::{self as gateway_proxy, GatewayState};
-use agent_bastion_gateway::quota::QuotaManager;
-use agent_bastion_gateway::router::ModelRouter;
-use agent_bastion_mcp_gateway::access_control::AccessController;
-use agent_bastion_mcp_gateway::pool::ConnectionPool;
-use agent_bastion_mcp_gateway::proxy::McpProxy;
-use agent_bastion_mcp_gateway::registry::Registry;
-use agent_bastion_mcp_gateway::session::SessionManager;
-use agent_bastion_mcp_gateway::transport::streamable_http::{self, McpGatewayState};
+use think_watch_auth::jwt::JwtManager;
+use think_watch_auth::oidc::OidcManager;
+use think_watch_common::audit::AuditLogger;
+use think_watch_common::config::AppConfig;
+use think_watch_common::dynamic_config::DynamicConfig;
+use think_watch_gateway::budget_alert::{BudgetAlertConfig, BudgetAlertManager};
+use think_watch_gateway::cache::ResponseCache;
+use think_watch_gateway::content_filter::ContentFilter;
+use think_watch_gateway::model_mapping::ModelMapper;
+use think_watch_gateway::pii_redactor::PiiRedactor;
+use think_watch_gateway::proxy::{self as gateway_proxy, GatewayState};
+use think_watch_gateway::quota::QuotaManager;
+use think_watch_gateway::router::ModelRouter;
+use think_watch_mcp_gateway::access_control::AccessController;
+use think_watch_mcp_gateway::pool::ConnectionPool;
+use think_watch_mcp_gateway::proxy::McpProxy;
+use think_watch_mcp_gateway::registry::Registry;
+use think_watch_mcp_gateway::session::SessionManager;
+use think_watch_mcp_gateway::transport::streamable_http::{self, McpGatewayState};
 
 use crate::handlers;
 
@@ -90,7 +90,7 @@ pub async fn create_gateway_app(
     let content_filter = match dc.get_json("security.content_filter_patterns").await {
         Some(v) => {
             if let Ok(patterns) = serde_json::from_value::<
-                Vec<agent_bastion_gateway::content_filter::DenyPatternConfig>,
+                Vec<think_watch_gateway::content_filter::DenyPatternConfig>,
             >(v)
             {
                 ContentFilter::from_config(&patterns)
@@ -105,7 +105,7 @@ pub async fn create_gateway_app(
     let pii_redactor = match dc.get_json("security.pii_redactor_patterns").await {
         Some(v) => {
             if let Ok(patterns) = serde_json::from_value::<
-                Vec<agent_bastion_gateway::pii_redactor::PiiPatternConfig>,
+                Vec<think_watch_gateway::pii_redactor::PiiPatternConfig>,
             >(v)
             {
                 PiiRedactor::from_config(&patterns)
@@ -137,8 +137,8 @@ pub async fn create_gateway_app(
                 thresholds: budget_thresholds,
             },
         ))),
-        cost_tracker: Arc::new(agent_bastion_gateway::cost_tracker::CostTracker::new()),
-        rate_limiter: Arc::new(agent_bastion_gateway::rate_limiter::RateLimiter::new(
+        cost_tracker: Arc::new(think_watch_gateway::cost_tracker::CostTracker::new()),
+        rate_limiter: Arc::new(think_watch_gateway::rate_limiter::RateLimiter::new(
             state.redis.clone(),
         )),
     };
@@ -504,26 +504,26 @@ async fn load_providers_into_router(
     state: &AppState,
     router: &mut ModelRouter,
 ) -> anyhow::Result<()> {
-    use agent_bastion_gateway::providers::{
+    use think_watch_gateway::providers::{
         anthropic::AnthropicProvider, azure_openai::AzureOpenAiProvider, bedrock::BedrockProvider,
         custom::CustomProvider, google::GoogleProvider, openai::OpenAiProvider,
     };
 
-    let providers = sqlx::query_as::<_, agent_bastion_common::models::Provider>(
+    let providers = sqlx::query_as::<_, think_watch_common::models::Provider>(
         "SELECT * FROM providers WHERE is_active = true AND deleted_at IS NULL",
     )
     .fetch_all(&state.db)
     .await?;
 
     let encryption_key =
-        agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)?;
+        think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)?;
 
     for provider in &providers {
         let api_key_bytes =
-            agent_bastion_common::crypto::decrypt(&provider.api_key_encrypted, &encryption_key)?;
+            think_watch_common::crypto::decrypt(&provider.api_key_encrypted, &encryption_key)?;
         let api_key = String::from_utf8(api_key_bytes)?;
 
-        let dyn_provider: Arc<dyn agent_bastion_gateway::providers::DynAiProvider> =
+        let dyn_provider: Arc<dyn think_watch_gateway::providers::DynAiProvider> =
             match provider.provider_type.as_str() {
                 "openai" => Arc::new(OpenAiProvider::new(provider.base_url.clone(), api_key)),
                 "anthropic" => Arc::new(AnthropicProvider::new(provider.base_url.clone(), api_key)),

@@ -3,11 +3,11 @@ use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use agent_bastion_auth::password;
-use agent_bastion_common::dto::{PaginatedResponse, PaginationParams, UserResponse};
-use agent_bastion_common::dynamic_config::{self, SettingEntry};
-use agent_bastion_common::errors::AppError;
-use agent_bastion_common::models::User;
+use think_watch_auth::password;
+use think_watch_common::dto::{PaginatedResponse, PaginationParams, UserResponse};
+use think_watch_common::dynamic_config::{self, SettingEntry};
+use think_watch_common::errors::AppError;
+use think_watch_common::models::User;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -504,7 +504,7 @@ pub async fn update_oidc_settings(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let dc = &state.dynamic_config;
     let encryption_key =
-        agent_bastion_common::crypto::parse_encryption_key(&state.config.encryption_key)
+        think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
     let user_id = Some(auth_user.claims.sub);
 
@@ -547,7 +547,7 @@ pub async fn update_oidc_settings(
         && !client_secret.is_empty()
     {
         let encrypted =
-            agent_bastion_common::crypto::encrypt(client_secret.as_bytes(), &encryption_key)
+            think_watch_common::crypto::encrypt(client_secret.as_bytes(), &encryption_key)
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption failed: {e}")))?;
         let encrypted_hex = hex::encode(encrypted);
         dc.upsert(
@@ -573,7 +573,7 @@ pub async fn update_oidc_settings(
     }
 
     // Notify other instances
-    agent_bastion_common::dynamic_config::notify_config_changed(&state.redis).await;
+    think_watch_common::dynamic_config::notify_config_changed(&state.redis).await;
 
     // Re-discover OIDC provider with updated settings
     let enabled = dc.oidc_enabled().await;
@@ -588,13 +588,13 @@ pub async fn update_oidc_settings(
         } else {
             let bytes = hex::decode(&secret_enc).unwrap_or_default();
             String::from_utf8(
-                agent_bastion_common::crypto::decrypt(&bytes, &encryption_key).unwrap_or_default(),
+                think_watch_common::crypto::decrypt(&bytes, &encryption_key).unwrap_or_default(),
             )
             .unwrap_or_default()
         };
 
         if !issuer.is_empty() && !client_id.is_empty() && !client_secret.is_empty() {
-            match agent_bastion_auth::oidc::OidcManager::discover(
+            match think_watch_auth::oidc::OidcManager::discover(
                 &issuer,
                 &client_id,
                 &client_secret,

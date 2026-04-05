@@ -447,7 +447,7 @@ export function SettingsPage() {
                   <Input
                     value={siteName}
                     onChange={(e) => setSiteName(e.target.value)}
-                    placeholder="AgentBastion"
+                    placeholder="ThinkWatch"
                   />
                 </div>
               </CardContent>

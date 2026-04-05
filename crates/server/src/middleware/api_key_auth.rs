@@ -5,8 +5,8 @@ use axum::{
     response::Response,
 };
 
-use agent_bastion_auth::api_key;
-use agent_bastion_gateway::proxy::GatewayRequestIdentity;
+use think_watch_auth::api_key;
+use think_watch_gateway::proxy::GatewayRequestIdentity;
 
 use crate::app::AppState;
 
@@ -45,7 +45,7 @@ pub async fn require_api_key_or_jwt(
         let key_hash = api_key::hash_api_key(token);
 
         // Query active keys OR keys within their rotation grace period
-        let row = sqlx::query_as::<_, agent_bastion_common::models::ApiKey>(
+        let row = sqlx::query_as::<_, think_watch_common::models::ApiKey>(
             r#"SELECT * FROM api_keys
                WHERE key_hash = $1
                  AND deleted_at IS NULL

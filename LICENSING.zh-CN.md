@@ -1,6 +1,6 @@
 # 授权与商业条款
 
-AgentBastion 采用 [Business Source License 1.1](LICENSE) 进行源码可见分发。
+ThinkWatch 采用 [Business Source License 1.1](LICENSE) 进行源码可见分发。
 
 ## 摘要
 

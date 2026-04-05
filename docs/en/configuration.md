@@ -1,8 +1,8 @@
 **[English](../en/configuration.md) | [中文](../zh-CN/configuration.md)**
 
-# AgentBastion Configuration Reference
+# ThinkWatch Configuration Reference
 
-This document provides a complete reference for all configuration options in AgentBastion. Configuration is managed through a combination of environment variables (for infrastructure and secrets) and database-backed dynamic settings (configurable via the admin Web UI).
+This document provides a complete reference for all configuration options in ThinkWatch. Configuration is managed through a combination of environment variables (for infrastructure and secrets) and database-backed dynamic settings (configurable via the admin Web UI).
 
 ---
 
@@ -16,9 +16,9 @@ This document provides a complete reference for all configuration options in Age
 | --------- | ---------------------------------------------------------- |
 | Required  | Yes                                                        |
 | Default   | —                                                          |
-| Example   | `postgres://agentbastion:password@localhost:5432/agentbastion` |
+| Example   | `postgres://thinkwatch:password@localhost:5432/thinkwatch` |
 
-PostgreSQL connection string. AgentBastion requires PostgreSQL 15 or later.
+PostgreSQL connection string. ThinkWatch requires PostgreSQL 15 or later.
 
 **Security notes:**
 - In production, use `sslmode=require` to enforce encrypted connections: `postgres://user:pass@host:5432/db?sslmode=require`
@@ -53,7 +53,7 @@ Redis connection string. Used for rate limiting, OIDC state/nonce storage, and s
 | Default   | —                                                  |
 | Example   | `a3f8c1e0b9d74...` (64-character hex string)       |
 
-Shared secret used for HS256 JWT signing and verification. Must be at least 32 characters long, and at least 256 bits (32 bytes / 64 hex characters) is recommended for adequate security. At startup, AgentBastion performs an entropy check on this value and will refuse to start if it does not meet the minimum length requirement.
+Shared secret used for HS256 JWT signing and verification. Must be at least 32 characters long, and at least 256 bits (32 bytes / 64 hex characters) is recommended for adequate security. At startup, ThinkWatch performs an entropy check on this value and will refuse to start if it does not meet the minimum length requirement.
 
 **Security notes:**
 - Generate with: `openssl rand -hex 32`
@@ -155,10 +155,10 @@ Base URL of the ClickHouse HTTP interface for audit log storage and search. If n
 | Property  | Value                       |
 | --------- | --------------------------- |
 | Required  | No                          |
-| Default   | `agent_bastion`             |
-| Example   | `agent_bastion_prod`        |
+| Default   | `think_watch`             |
+| Example   | `think_watch_prod`        |
 
-Name of the ClickHouse database where audit log tables are stored. AgentBastion automatically creates the database and tables on startup if they do not exist.
+Name of the ClickHouse database where audit log tables are stored. ThinkWatch automatically creates the database and tables on startup if they do not exist.
 
 ---
 
@@ -168,7 +168,7 @@ Name of the ClickHouse database where audit log tables are stored. AgentBastion 
 | --------- | --------------------------- |
 | Required  | No                          |
 | Default   | `default`                   |
-| Example   | `agentbastion`              |
+| Example   | `thinkwatch`              |
 
 ClickHouse user for authentication.
 
@@ -196,7 +196,7 @@ ClickHouse password for authentication.
 | --------- | -------------------------------------------------------- |
 | Required  | No                                                       |
 | Default   | `info`                                                   |
-| Example   | `agentbastion=debug,tower_http=debug,sqlx=warn`         |
+| Example   | `thinkwatch=debug,tower_http=debug,sqlx=warn`         |
 
 Controls log verbosity using the [`tracing-subscriber` `EnvFilter` syntax](https://docs.rs/tracing-subscriber/latest/tracing_subscriber/filter/struct.EnvFilter.html). Accepts comma-separated directives of the form `target=level`.
 
@@ -204,9 +204,9 @@ Common configurations:
 
 | Use Case              | Value                                              |
 | --------------------- | -------------------------------------------------- |
-| Production            | `info` or `agentbastion=info,tower_http=warn`      |
-| Debugging HTTP        | `agentbastion=debug,tower_http=debug`              |
-| Debugging SQL         | `agentbastion=debug,sqlx=debug`                    |
+| Production            | `info` or `thinkwatch=info,tower_http=warn`      |
+| Debugging HTTP        | `thinkwatch=debug,tower_http=debug`              |
+| Debugging SQL         | `thinkwatch=debug,sqlx=debug`                    |
 | Minimal output        | `warn`                                             |
 
 ---
@@ -223,7 +223,7 @@ All four OIDC variables must be set together to enable SSO. If any are missing, 
 | Default   | —                                                                |
 | Example   | `https://login.microsoftonline.com/tenant-id/v2.0`              |
 
-The OIDC issuer URL. AgentBastion fetches the `.well-known/openid-configuration` document from this URL at startup to discover endpoints.
+The OIDC issuer URL. ThinkWatch fetches the `.well-known/openid-configuration` document from this URL at startup to discover endpoints.
 
 ---
 
@@ -334,7 +334,7 @@ Use this type for self-hosted models (vLLM, Ollama, LiteLLM, etc.) or any third-
 
 ### Provider Auto-Loading
 
-On startup, AgentBastion loads all active providers from the database and registers them in the model router. Models are routed based on:
+On startup, ThinkWatch loads all active providers from the database and registers them in the model router. Models are routed based on:
 
 1. **Prefix matching** (for OpenAI, Anthropic, Google): Models matching the provider's default prefix are automatically routed.
 2. **Explicit registration** (for Azure, Bedrock, Custom): Models must be registered via the Admin > Models page with a specific provider assignment.
@@ -352,7 +352,7 @@ On startup, AgentBastion loads all active providers from the database and regist
 | `JWT_SECRET`      | Any stable value for dev convenience         | Cryptographically random 256-bit key        |
 | `ENCRYPTION_KEY`  | Any stable 32-byte hex for dev convenience   | Cryptographically random, stored in HSM     |
 | `CORS_ORIGINS`    | `http://localhost:5173`                      | `https://console.yourdomain.com`            |
-| `RUST_LOG`        | `agentbastion=debug,tower_http=debug`        | `info` or `agentbastion=info`               |
+| `RUST_LOG`        | `thinkwatch=debug,tower_http=debug`        | `info` or `thinkwatch=info`               |
 | OIDC variables    | _(unset unless testing SSO)_                 | Fully configured                            |
 
 ### Using .env Files
@@ -361,15 +361,15 @@ For local development, create a `.env` file in the project root:
 
 ```bash
 # .env (DO NOT commit this file)
-DATABASE_URL=postgres://agentbastion:devpass@localhost:5432/agentbastion
+DATABASE_URL=postgres://thinkwatch:devpass@localhost:5432/thinkwatch
 REDIS_URL=redis://localhost:6379
 JWT_SECRET=dev-only-jwt-secret-do-not-use-in-production-000000
 ENCRYPTION_KEY=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 CORS_ORIGINS=http://localhost:5173
-RUST_LOG=agentbastion=debug,tower_http=debug
+RUST_LOG=thinkwatch=debug,tower_http=debug
 ```
 
-AgentBastion loads `.env` automatically via the `dotenvy` crate. The `.env` file should be listed in `.gitignore`.
+ThinkWatch loads `.env` automatically via the `dotenvy` crate. The `.env` file should be listed in `.gitignore`.
 
 ### Docker / Docker Compose
 
@@ -377,10 +377,10 @@ Pass environment variables through `docker-compose.yml`:
 
 ```yaml
 services:
-  agentbastion:
-    image: agentbastion:latest
+  thinkwatch:
+    image: thinkwatch:latest
     environment:
-      DATABASE_URL: postgres://agentbastion:${DB_PASSWORD}@postgres:5432/agentbastion
+      DATABASE_URL: postgres://thinkwatch:${DB_PASSWORD}@postgres:5432/thinkwatch
       REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
@@ -399,10 +399,10 @@ Use a `.env` file or shell exports to provide `${DB_PASSWORD}`, `${JWT_SECRET}`,
 Create a Kubernetes Secret for sensitive values:
 
 ```bash
-kubectl create secret generic agentbastion-secrets \
+kubectl create secret generic thinkwatch-secrets \
   --from-literal=JWT_SECRET="$(openssl rand -hex 32)" \
   --from-literal=ENCRYPTION_KEY="$(openssl rand -hex 32)" \
-  --from-literal=DATABASE_URL="postgres://user:pass@pg-host:5432/agentbastion?sslmode=require" \
+  --from-literal=DATABASE_URL="postgres://user:pass@pg-host:5432/thinkwatch?sslmode=require" \
   --from-literal=REDIS_URL="rediss://:password@redis-host:6380" \
   --from-literal=OIDC_CLIENT_SECRET="your-oidc-secret"
 ```
@@ -413,16 +413,16 @@ Reference the secret in your Deployment:
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agentbastion
+  name: thinkwatch
 spec:
   template:
     spec:
       containers:
-        - name: agentbastion
-          image: agentbastion:latest
+        - name: thinkwatch
+          image: thinkwatch:latest
           envFrom:
             - secretRef:
-                name: agentbastion-secrets
+                name: thinkwatch-secrets
           env:
             - name: CORS_ORIGINS
               value: "https://console.example.com"
@@ -502,13 +502,13 @@ Changes to dynamic settings take effect immediately without requiring a server r
 | Setting                | Default          | Description                                      |
 | ---------------------- | ---------------- | ------------------------------------------------ |
 | `data_retention_days`  | `30`             | Days to retain soft-deleted records before purge |
-| `site_name`            | `AgentBastion`   | Site name displayed in the Web UI                |
+| `site_name`            | `ThinkWatch`   | Site name displayed in the Web UI                |
 
 ---
 
 ## Startup Validation
 
-AgentBastion validates all configuration and dependencies at startup and will refuse to start if:
+ThinkWatch validates all configuration and dependencies at startup and will refuse to start if:
 
 - `DATABASE_URL` is missing or the database is unreachable
 - `REDIS_URL` is missing or Redis is unreachable

@@ -12,7 +12,7 @@ infra-down:
 
 # Start backend (gateway :3000 + console :3001)
 dev-backend:
-	cargo run -p agent-bastion-server
+	cargo run -p think-watch-server
 
 # Start frontend dev server (:5173)
 dev-frontend:
@@ -29,7 +29,7 @@ test:
 
 # Build release
 build:
-	cargo build --release -p agent-bastion-server
+	cargo build --release -p think-watch-server
 	cd web && pnpm build
 
 # Lint
@@ -43,8 +43,8 @@ fmt:
 
 # Docker build (production)
 docker-build:
-	docker build -f deploy/docker/Dockerfile.server -t agent-bastion-server .
-	docker build -f deploy/docker/Dockerfile.web -t agent-bastion-web .
+	docker build -f deploy/docker/Dockerfile.server -t think-watch-server .
+	docker build -f deploy/docker/Dockerfile.web -t think-watch-web .
 
 # Production deploy
 deploy:

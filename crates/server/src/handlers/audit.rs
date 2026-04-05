@@ -3,8 +3,8 @@ use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use agent_bastion_common::errors::AppError;
-use agent_bastion_common::models::AuditLog;
+use think_watch_common::errors::AppError;
+use think_watch_common::models::AuditLog;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;

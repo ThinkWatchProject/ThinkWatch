@@ -42,7 +42,7 @@ services:
     environment:
       POSTGRES_USER: ${DB_USER:-bastion}
       POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
-      POSTGRES_DB: ${DB_NAME:-agent_bastion}
+      POSTGRES_DB: ${DB_NAME:-think_watch}
     ports:
       - "5432:5432"
     volumes:
@@ -76,7 +76,7 @@ services:
     environment:
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-bastion}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
-      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-agent_bastion}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-think_watch}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse_data:/var/lib/clickhouse

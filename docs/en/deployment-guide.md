@@ -1,6 +1,6 @@
 **[English](../en/deployment-guide.md) | [中文](../zh-CN/deployment-guide.md)**
 
-# AgentBastion Deployment Guide
+# ThinkWatch Deployment Guide
 
 ## 1. Prerequisites
 
@@ -41,8 +41,8 @@ The server process itself is lightweight (Rust binary, ~50 MB RSS typical). Most
 ### 2.1 Clone and Install Dependencies
 
 ```bash
-git clone <repository-url> AgentBastion
-cd AgentBastion
+git clone <repository-url> ThinkWatch
+cd ThinkWatch
 
 # Install Rust toolchain (reads from rust-toolchain.toml)
 rustup show
@@ -58,7 +58,7 @@ docker compose -f deploy/docker-compose.dev.yml up -d
 ```
 
 This starts:
-- **PostgreSQL** on port 5432 (user: `postgres`, password: `postgres`, db: `agent_bastion`)
+- **PostgreSQL** on port 5432 (user: `postgres`, password: `postgres`, db: `think_watch`)
 - **Redis** on port 6379
 - **ClickHouse** (audit log storage) on port 8123 (HTTP) / 9000 (native TCP)
 - **Zitadel** (OIDC SSO) on port 8080
@@ -93,7 +93,7 @@ The Vite dev server starts on `http://localhost:5173` and proxies API requests t
 
 ### 2.5 Creating the First Admin User (Setup Wizard)
 
-On a fresh database, AgentBastion provides a setup wizard accessible through the Web UI or the API. The setup wizard creates the first admin user and optionally configures the first AI provider in a single step.
+On a fresh database, ThinkWatch provides a setup wizard accessible through the Web UI or the API. The setup wizard creates the first admin user and optionally configures the first AI provider in a single step.
 
 **Via the Web UI:**
 
@@ -178,7 +178,7 @@ Create a `.env.production` file with real secrets. **Never commit this file to v
 # Database
 DB_USER=bastion
 DB_PASSWORD=<generate-a-strong-password>
-DB_NAME=agent_bastion
+DB_NAME=think_watch
 
 # Authentication
 JWT_SECRET=<generate-a-64-char-hex-string>
@@ -205,7 +205,7 @@ OIDC_CLIENT_SECRET=<client-secret>
 OIDC_REDIRECT_URL=https://console.yourdomain.com/api/auth/oidc/callback
 
 # Logging
-RUST_LOG=info,agent_bastion=info
+RUST_LOG=info,think_watch=info
 ```
 
 ### 3.2 Generate Secure Secrets
@@ -237,7 +237,7 @@ IMAGE_TAG=<git-sha> docker compose -f deploy/docker-compose.yml --env-file .env.
 ```
 
 This starts:
-- **server** -- The AgentBastion Rust binary (gateway on port 3000, console on port 3001 internal only)
+- **server** -- The ThinkWatch Rust binary (gateway on port 3000, console on port 3001 internal only)
 - **web** -- nginx serving the built React SPA (port 80)
 - **postgres** -- PostgreSQL 18 with persistent volume
 - **redis** -- Redis 8 with persistent volume
@@ -260,7 +260,7 @@ ClickHouse stores audit logs in a columnar format optimized for analytical queri
 ```bash
 # ClickHouse connection
 CLICKHOUSE_URL=http://clickhouse:8123
-CLICKHOUSE_DB=agent_bastion
+CLICKHOUSE_DB=think_watch
 CLICKHOUSE_USER=default
 CLICKHOUSE_PASSWORD=<your-clickhouse-password>
 ```
@@ -268,11 +268,11 @@ CLICKHOUSE_PASSWORD=<your-clickhouse-password>
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CLICKHOUSE_URL` | `http://clickhouse:8123` | ClickHouse HTTP interface URL. |
-| `CLICKHOUSE_DB` | `agent_bastion` | Database name for audit log tables. |
+| `CLICKHOUSE_DB` | `think_watch` | Database name for audit log tables. |
 | `CLICKHOUSE_USER` | `default` | ClickHouse user for authentication. |
 | `CLICKHOUSE_PASSWORD` | — | ClickHouse password. |
 
-AgentBastion automatically creates the required tables on startup if they do not exist. Audit log retention is configured via the `data_retention_days` setting in the admin Web UI.
+ThinkWatch automatically creates the required tables on startup if they do not exist. Audit log retention is configured via the `data_retention_days` setting in the admin Web UI.
 
 ### 3.6 Set Up a Reverse Proxy
 
@@ -334,18 +334,18 @@ Add labels to the `server` and `web` services in your compose override to config
 
 ## 4. Kubernetes Deployment
 
-A Helm chart is provided at `deploy/helm/agent-bastion/`.
+A Helm chart is provided at `deploy/helm/think-watch/`.
 
 ### 4.1 Images
 
 Pre-built images are published automatically to GitHub Container Registry on every push to `main`:
 
 ```
-ghcr.io/agentbastion/agent-bastion-server:latest
-ghcr.io/agentbastion/agent-bastion-server:<git-sha>
+ghcr.io/thinkwatch/think-watch-server:latest
+ghcr.io/thinkwatch/think-watch-server:<git-sha>
 
-ghcr.io/agentbastion/agent-bastion-web:latest
-ghcr.io/agentbastion/agent-bastion-web:<git-sha>
+ghcr.io/thinkwatch/think-watch-web:latest
+ghcr.io/thinkwatch/think-watch-web:<git-sha>
 ```
 
 No authentication is needed — the packages are public.
@@ -353,10 +353,10 @@ No authentication is needed — the packages are public.
 ### 4.2 Install with Helm
 
 ```bash
-helm install agent-bastion deploy/helm/agent-bastion \
+helm install think-watch deploy/helm/think-watch \
   --set secrets.jwtSecret=$(openssl rand -hex 32) \
   --set secrets.encryptionKey=$(openssl rand -hex 32) \
-  --set secrets.databaseUrl="postgres://bastion:password@postgres:5432/agent_bastion" \
+  --set secrets.databaseUrl="postgres://bastion:password@postgres:5432/think_watch" \
   --set secrets.redisUrl="redis://:password@redis:6379" \
   --set config.corsOrigins="https://console.internal.example.com"
 ```
@@ -364,7 +364,7 @@ helm install agent-bastion deploy/helm/agent-bastion \
 To deploy a specific image tag:
 
 ```bash
-helm install agent-bastion deploy/helm/agent-bastion \
+helm install think-watch deploy/helm/think-watch \
   --set image.server.tag=<git-sha> \
   --set image.web.tag=<git-sha> \
   ...
@@ -409,27 +409,27 @@ For production, use the External Secrets Operator instead of passing secrets via
 apiVersion: external-secrets.io/v1beta1
 kind: ExternalSecret
 metadata:
-  name: agent-bastion
+  name: think-watch
 spec:
   refreshInterval: 1h
   secretStoreRef:
     name: vault-backend  # or aws-secrets-manager, etc.
     kind: SecretStore
   target:
-    name: agent-bastion-secrets
+    name: think-watch-secrets
   data:
     - secretKey: jwt-secret
       remoteRef:
-        key: agent-bastion/jwt-secret
+        key: think-watch/jwt-secret
     - secretKey: encryption-key
       remoteRef:
-        key: agent-bastion/encryption-key
+        key: think-watch/encryption-key
     - secretKey: database-url
       remoteRef:
-        key: agent-bastion/database-url
+        key: think-watch/database-url
     - secretKey: redis-url
       remoteRef:
-        key: agent-bastion/redis-url
+        key: think-watch/redis-url
 ```
 
 ### 4.5 Horizontal Pod Autoscaling
@@ -452,7 +452,7 @@ The server is stateless (all state is in PostgreSQL and Redis), so it scales hor
 
 ### Using Let's Encrypt with a Reverse Proxy
 
-The recommended approach is to terminate TLS at the reverse proxy layer. AgentBastion itself serves plain HTTP on ports 3000 and 3001.
+The recommended approach is to terminate TLS at the reverse proxy layer. ThinkWatch itself serves plain HTTP on ports 3000 and 3001.
 
 **With certbot (standalone nginx):**
 
@@ -508,10 +508,10 @@ PostgreSQL contains all critical application state: users, API keys, provider co
 
 ```bash
 # Daily backup
-pg_dump -h localhost -U bastion -d agent_bastion -Fc > backup_$(date +%Y%m%d).dump
+pg_dump -h localhost -U bastion -d think_watch -Fc > backup_$(date +%Y%m%d).dump
 
 # Restore
-pg_restore -h localhost -U bastion -d agent_bastion -c backup_20260401.dump
+pg_restore -h localhost -U bastion -d think_watch -c backup_20260401.dump
 ```
 
 **WAL archiving (point-in-time recovery):**
@@ -577,17 +577,17 @@ Use `/health/live` for liveness probes (restart the pod if the process is stuck)
 
 ### 7.2 Structured Logging
 
-AgentBastion uses `tracing` with configurable output via the `RUST_LOG` environment variable:
+ThinkWatch uses `tracing` with configurable output via the `RUST_LOG` environment variable:
 
 ```bash
 # Default: info level
-RUST_LOG=info,agent_bastion=info
+RUST_LOG=info,think_watch=info
 
-# Debug for AgentBastion crates, info for dependencies
-RUST_LOG=info,agent_bastion=debug
+# Debug for ThinkWatch crates, info for dependencies
+RUST_LOG=info,think_watch=debug
 
 # Trace-level for detailed request/response debugging
-RUST_LOG=info,agent_bastion=trace
+RUST_LOG=info,think_watch=trace
 
 # JSON-formatted logs (configured in tracing-subscriber setup)
 ```
@@ -596,7 +596,7 @@ Logs are written to stdout and can be collected by any log aggregation system (D
 
 ### 7.3 Audit Log Forwarding
 
-AgentBastion supports real-time forwarding of audit events to external systems via four channels:
+ThinkWatch supports real-time forwarding of audit events to external systems via four channels:
 
 | Channel | Protocol | Use Case |
 |---------|----------|----------|
@@ -615,7 +615,7 @@ Audit events are always written to PostgreSQL and ClickHouse (if configured). Fo
 
 ### 7.4 Prometheus Metrics
 
-AgentBastion exposes Prometheus-compatible metrics at `GET /metrics` on the gateway port (3000). This endpoint is unauthenticated to allow standard Prometheus scraping.
+ThinkWatch exposes Prometheus-compatible metrics at `GET /metrics` on the gateway port (3000). This endpoint is unauthenticated to allow standard Prometheus scraping.
 
 Available metrics include:
 - **Request latency histograms** (`http_request_duration_seconds`) -- by endpoint, method, and status
@@ -627,10 +627,10 @@ Available metrics include:
 
 ```yaml
 scrape_configs:
-  - job_name: 'agentbastion'
+  - job_name: 'thinkwatch'
     scrape_interval: 15s
     static_configs:
-      - targets: ['agentbastion:3000']
+      - targets: ['thinkwatch:3000']
     metrics_path: /metrics
 ```
 
@@ -638,7 +638,7 @@ scrape_configs:
 
 ### 7.5 Background Tasks
 
-AgentBastion runs several background tasks that operate automatically:
+ThinkWatch runs several background tasks that operate automatically:
 
 | Task                          | Interval   | Description                                                  |
 |-------------------------------|------------|--------------------------------------------------------------|
@@ -652,7 +652,7 @@ These tasks run within the server process and do not require external schedulers
 
 ## 8. Client Configuration Guide
 
-AgentBastion includes a built-in **Configuration Guide** page in the web console at `/gateway/guide`. This page provides copy-paste setup instructions for connecting various AI client tools to your gateway and auto-detects the gateway URL.
+ThinkWatch includes a built-in **Configuration Guide** page in the web console at `/gateway/guide`. This page provides copy-paste setup instructions for connecting various AI client tools to your gateway and auto-detects the gateway URL.
 
 ### Supported Client Tools
 
@@ -695,7 +695,7 @@ The server is stateless, so rolling updates work out of the box:
 
 ```bash
 # Update the image tag
-helm upgrade agent-bastion deploy/helm/agent-bastion \
+helm upgrade think-watch deploy/helm/think-watch \
   --set image.server.tag=0.2.0 \
   --reuse-values
 ```

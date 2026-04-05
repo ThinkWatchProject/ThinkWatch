@@ -1,5 +1,5 @@
 -- ============================================================================
--- AgentBastion — Consolidated Schema
+-- ThinkWatch — Consolidated Schema
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
@@ -409,4 +409,4 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 -- Setup
 INSERT INTO system_settings (key, value, category, description) VALUES
 ('setup.initialized', 'false',         'setup', 'Whether initial setup has been completed'),
-('setup.site_name',   '"AgentBastion"', 'setup', 'Site display name');
+('setup.site_name',   '"ThinkWatch"', 'setup', 'Site display name');

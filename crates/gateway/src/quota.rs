@@ -1,6 +1,6 @@
-use agent_bastion_common::errors::AppError;
 use fred::clients::Client;
 use fred::interfaces::{KeysInterface, LuaInterface};
+use think_watch_common::errors::AppError;
 
 /// Per-user/team token quota information.
 #[derive(Debug, Clone)]

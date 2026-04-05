@@ -69,7 +69,7 @@ impl BedrockProvider {
             &self.secret_access_key,
             None,
             None,
-            "agent-bastion",
+            "think-watch",
         );
 
         let identity = credentials.into();
