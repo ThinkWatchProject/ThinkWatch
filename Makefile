@@ -1,4 +1,4 @@
-.PHONY: dev dev-backend dev-frontend infra infra-down check test build clean
+.PHONY: dev dev-backend dev-frontend infra infra-down check precommit test build clean
 
 # Start full dev environment
 dev: infra dev-backend dev-frontend
@@ -18,10 +18,18 @@ dev-backend:
 dev-frontend:
 	cd web && pnpm dev
 
-# Check everything compiles
+# Quick compile check
 check:
 	cargo check --workspace
 	cd web && pnpm exec tsc --noEmit
+
+# Pre-commit: mirrors CI exactly (cargo check + test + clippy + fmt + pnpm build)
+precommit:
+	cargo check --workspace
+	cargo test --workspace
+	cargo clippy --workspace -- -D warnings
+	cargo fmt --all -- --check
+	cd web && pnpm build
 
 # Run all tests
 test:
