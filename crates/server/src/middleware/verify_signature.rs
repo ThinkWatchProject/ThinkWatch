@@ -13,10 +13,12 @@ const HEADER_NONCE: &str = "x-signature-nonce";
 const HEADER_SIGNATURE: &str = "x-signature";
 
 /// Generate a random 32-byte signing key and store it in Redis keyed by user_id.
+/// Also stores the client IP for session binding validation.
 /// Returns the hex-encoded key.
 pub async fn create_signing_key(
     redis: &fred::clients::Client,
     user_id: &uuid::Uuid,
+    client_ip: Option<&str>,
 ) -> anyhow::Result<String> {
     let mut key_bytes = [0u8; 32];
     rand::fill(&mut key_bytes);
@@ -33,6 +35,20 @@ pub async fn create_signing_key(
         false,
     )
     .await?;
+
+    // Store the IP the signing key was issued to for session binding
+    if let Some(ip) = client_ip {
+        let ip_key = format!("signing_key_ip:{user_id}");
+        fred::interfaces::KeysInterface::set::<(), _, _>(
+            redis,
+            &ip_key,
+            ip,
+            Some(fred::types::Expiration::EX(86400)),
+            None,
+            false,
+        )
+        .await?;
+    }
 
     Ok(hex_key)
 }
@@ -176,6 +192,26 @@ pub async fn verify_signature(
         tracing::error!("Failed to hex-decode signing key for user {user_id}: {e}");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Session binding: validate that the request IP matches the IP the signing key was issued to
+    let ip_key = format!("signing_key_ip:{user_id}");
+    let bound_ip: Option<String> =
+        fred::interfaces::KeysInterface::get(&state.redis, &ip_key)
+            .await
+            .unwrap_or(None);
+    if let Some(ref bound) = bound_ip {
+        let request_ip = request
+            .extensions()
+            .get::<super::auth_guard::AuthUser>()
+            .and_then(|u| u.ip.clone())
+            .unwrap_or_default();
+        if !request_ip.is_empty() && bound != &request_ip {
+            tracing::warn!(
+                "Signing key IP mismatch for user {user_id}: bound={bound}, request={request_ip}"
+            );
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
 
     // Parse expected signature
     let expected_hex = signature_header

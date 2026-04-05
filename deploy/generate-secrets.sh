@@ -29,6 +29,30 @@ echo "# OIDC_CLIENT_ID=" >> .env.production
 echo "# OIDC_CLIENT_SECRET=" >> .env.production
 echo "# OIDC_REDIRECT_URL=" >> .env.production
 
+# Generate ClickHouse user XML from environment password
+CH_PASS=$(grep '^CLICKHOUSE_PASSWORD=' .env.production | cut -d= -f2)
+if [ -n "$CH_PASS" ]; then
+  mkdir -p clickhouse/users.d
+  cat > clickhouse/users.d/default-user.xml <<CHEOF
+<clickhouse>
+  <users>
+    <default remove="remove">
+    </default>
+    <thinkwatch>
+      <profile>default</profile>
+      <networks>
+        <ip>::/0</ip>
+      </networks>
+      <password><![CDATA[${CH_PASS}]]></password>
+      <quota>default</quota>
+      <access_management>1</access_management>
+    </thinkwatch>
+  </users>
+</clickhouse>
+CHEOF
+  echo "Generated clickhouse/users.d/default-user.xml"
+fi
+
 echo ""
 echo "Generated .env.production with random secrets."
 echo "Review and configure remaining settings before deployment."

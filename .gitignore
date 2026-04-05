@@ -4,7 +4,9 @@
 
 # Environment
 .env
+.env.*
 !.env.example
+!.env.production.example
 
 # Node
 web/node_modules

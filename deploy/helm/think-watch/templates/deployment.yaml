@@ -148,5 +148,11 @@ spec:
               port: http
             initialDelaySeconds: 5
             periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
           resources:
             {{- toYaml .Values.resources.web | nindent 12 }}

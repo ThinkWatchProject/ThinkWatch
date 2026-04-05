@@ -51,16 +51,16 @@ export function DashboardPage() {
   useEffect(() => {
     api<DashboardStats>('/api/dashboard/stats')
       .then(setStats)
-      .catch(() => {});
+      .catch((e) => console.error('Failed to load dashboard stats:', e));
 
     api<HealthStatus>('/api/health')
       .then(setHealth)
-      .catch(() => setHealth(null))
+      .catch((e) => { console.error('Failed to load health:', e); setHealth(null); })
       .finally(() => setLoadingHealth(false));
 
     api<{ items: AuditEntry[] }>('/api/audit/logs?limit=5')
       .then((res) => setRecentActivity(res.items ?? []))
-      .catch(() => setRecentActivity([]))
+      .catch((e) => { console.error('Failed to load activity:', e); setRecentActivity([]); })
       .finally(() => setLoadingActivity(false));
   }, []);
 

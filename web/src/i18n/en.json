@@ -18,11 +18,8 @@
     "enabled": "Enabled",
     "disabled": "Disabled",
     "healthy": "Healthy",
-    "unhealthy": "Unhealthy",
     "error": "Error",
-    "success": "Success",
     "revoke": "Revoke",
-    "copy": "Copy",
     "copied": "Copied!",
     "done": "Done",
     "edit": "Edit",
@@ -30,9 +27,6 @@
     "all": "All",
     "none": "None",
     "deleteSuccess": "Deleted successfully",
-    "saveSuccess": "Saved successfully",
-    "copySuccess": "Copied to clipboard",
-    "operationSuccess": "Operation completed",
     "operationFailed": "Operation failed"
   },
   "nav": {
@@ -56,6 +50,7 @@
     "users": "Users",
     "roles": "Roles",
     "settings": "Settings",
+    "logExplorer": "Log Explorer",
     "logForwarders": "Log Forwarding",
     "platformLogs": "Platform Logs",
     "configGuide": "Configuration Guide"
@@ -79,10 +74,8 @@
     "passwordMismatch": "Passwords do not match",
     "revokeSessions": "Revoke All Sessions",
     "revokeSessionsConfirm": "This will log you out from all devices. Continue?",
-    "sessionsRevoked": "All sessions have been revoked. Please log in again.",
     "deleteAccount": "Delete Account",
     "deleteAccountConfirm": "This will permanently delete your account and all associated data. This action cannot be undone. Type your email to confirm:",
-    "accountDeleted": "Account deleted.",
     "noAccount": "Don't have an account? Register",
     "haveAccount": "Already have an account? Sign in",
     "registerTitle": "Create Account",
@@ -104,8 +97,7 @@
     "totpRecoveryWarning": "Save these codes in a safe place. Each code can only be used once.",
     "totpCode": "Authentication Code",
     "totpHint": "Enter the 6-digit code from your authenticator app, or a recovery code.",
-    "totpVerify": "Verify & Enable",
-    "passwordChangeRequired": "You must change your password before continuing."
+    "totpVerify": "Verify & Enable"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -136,10 +128,8 @@
     "providerType": "Provider Type",
     "baseUrl": "Base URL",
     "apiKey": "API Key",
-    "selectType": "Select provider type",
     "deleteConfirm": "Are you sure you want to delete this provider?",
     "allProviders": "All Providers",
-    "loadingProviders": "Loading providers...",
     "noProviders": "No providers configured yet.",
     "noProvidersHint": "Add a provider to get started.",
     "dialogDescription": "Configure a new AI provider connection.",
@@ -170,7 +160,6 @@
     "keyCreatedHint": "Copy this key now. It will not be shown again.",
     "revokeConfirm": "Are you sure you want to revoke this API key?",
     "allKeys": "All API Keys",
-    "loadingKeys": "Loading keys...",
     "noKeys": "No API keys created yet.",
     "noKeysHint": "Create a key to start making requests through the gateway.",
     "dialogDescription": "Generate a new API key for the gateway.",
@@ -195,8 +184,7 @@
     "subtitle": "Available models across all configured providers",
     "noModels": "No models available.",
     "noModelsHint": "Configure a provider first to see available models.",
-    "owner": "Owned by",
-    "loadingModels": "Loading models..."
+    "owner": "Owned by"
   },
   "mcpServers": {
     "title": "MCP Servers",
@@ -211,7 +199,6 @@
     "discoverTools": "Discover Tools",
     "deleteConfirm": "Are you sure you want to delete this MCP server?",
     "allServers": "All MCP Servers",
-    "loadingServers": "Loading servers...",
     "noServers": "No MCP servers registered yet.",
     "noServersHint": "Register a server to start using MCP tools.",
     "dialogTitle": "Register MCP Server",
@@ -229,13 +216,11 @@
     "noTools": "No tools discovered yet.",
     "noToolsHint": "Use \"Discover Tools\" on a server to populate this list.",
     "inputSchema": "Input Schema",
-    "loadingTools": "Loading tools...",
     "noDescription": "No description"
   },
   "mcpLogs": {
     "title": "MCP Call Logs",
     "subtitle": "MCP tool invocation history",
-    "comingSoon": "Coming in Phase 5",
     "allCalls": "All MCP Calls",
     "timestamp": "Timestamp",
     "tool": "Tool",
@@ -243,8 +228,6 @@
     "user": "User",
     "duration": "Duration",
     "status": "Status",
-    "placeholder": "MCP call logging will be available in Phase 5.",
-    "placeholderHint": "Logs will include tool invocations, durations, and error tracking.",
     "noLogs": "No MCP call logs yet.",
     "noLogsHint": "Logs will appear here as MCP tools are invoked.",
     "searchPlaceholder": "Search MCP logs..."
@@ -255,7 +238,6 @@
     "totalTokensToday": "Total Tokens Today",
     "totalRequestsToday": "Total Requests Today",
     "tokenUsageOverTime": "Token Usage Over Time",
-    "chartPlaceholder": "Chart visualization coming soon",
     "usageBreakdown": "Usage Breakdown",
     "date": "Date",
     "model": "Model",
@@ -263,7 +245,6 @@
     "inputTokens": "Input Tokens",
     "outputTokens": "Output Tokens",
     "totalCost": "Total Cost",
-    "loadingUsage": "Loading usage data...",
     "noUsage": "No usage data available yet."
   },
   "analyticsCosts": {
@@ -272,7 +253,6 @@
     "totalCostMtd": "Total Cost (MTD)",
     "budgetUsage": "Budget Usage",
     "costTrend": "Cost Trend",
-    "chartPlaceholder": "Chart visualization coming soon",
     "costByModel": "Cost by Model",
     "percentOfTotal": "% of Total",
     "model": "Model",
@@ -280,21 +260,17 @@
     "inputTokens": "Input Tokens",
     "outputTokens": "Output Tokens",
     "totalCost": "Total Cost",
-    "loadingCosts": "Loading cost data...",
     "noCosts": "No cost data available yet."
   },
   "audit": {
     "title": "Audit Logs",
     "subtitle": "System-wide audit trail",
     "searchPlaceholder": "Search logs...",
-    "from": "From",
-    "to": "to",
     "timestamp": "Timestamp",
     "ipAddress": "IP Address",
     "detail": "Detail",
     "noLogs": "No audit logs found.",
     "logEntries": "Log Entries",
-    "loadingLogs": "Loading audit logs...",
     "user": "User",
     "action": "Action",
     "resource": "Resource"
@@ -306,9 +282,7 @@
     "displayName": "Display Name",
     "role": "Role",
     "sso": "SSO",
-    "selectRole": "Select role",
     "allUsers": "All Users",
-    "loadingUsers": "Loading users...",
     "noUsers": "No users found.",
     "dialogDescription": "Create a new user account.",
     "creating": "Creating...",
@@ -317,7 +291,6 @@
     "created": "Created",
     "forceLogout": "Force Logout",
     "forceLogoutConfirm": "Force logout this user from all sessions?",
-    "forceLogoutSuccess": "User has been logged out from all sessions.",
     "roleSuperAdmin": "Super Admin",
     "roleAdmin": "Admin",
     "roleTeamManager": "Team Manager",
@@ -336,7 +309,6 @@
     "activate": "Activate",
     "deactivateConfirm": "Deactivate this user? They will not be able to log in.",
     "activateConfirm": "Activate this user?",
-    "updating": "Updating...",
     "saving": "Saving..."
   },
   "roles": {
@@ -368,9 +340,7 @@
   "settingsPage": {
     "title": "Settings",
     "subtitle": "System configuration and integrations",
-    "general": "General",
     "oidc": "OIDC / SSO",
-    "auditConfig": "Audit",
     "serverInfo": "Server Information",
     "version": "Version",
     "uptime": "Uptime",
@@ -379,7 +349,6 @@
     "gatewayPort": "Gateway Port",
     "consolePort": "Console Port",
     "oidcTitle": "OpenID Connect / SSO",
-    "oidcEnabled": "OIDC Enabled",
     "issuerUrl": "Issuer URL",
     "clientId": "Client ID",
     "auditTitle": "Audit Configuration",
@@ -387,11 +356,9 @@
     "logForwarding": "Log Forwarding",
     "logForwardingHint": "Syslog, Kafka, Webhook destinations are configured via the Log Forwarding page.",
     "manage": "Manage",
-    "connected": "Connected",
-    "disconnected": "Disconnected"
+    "connected": "Connected"
   },
   "settings": {
-    "title": "Settings",
     "general": "General",
     "auth": "Authentication",
     "gateway": "Gateway",
@@ -442,7 +409,6 @@
   "logs": {
     "title": "Request Logs",
     "subtitle": "Gateway request and response logs",
-    "comingSoon": "Coming in Phase 5",
     "allRequests": "All Requests",
     "timestamp": "Timestamp",
     "model": "Model",
@@ -451,9 +417,6 @@
     "cost": "Cost",
     "latency": "Latency",
     "status": "Status",
-    "placeholder": "Request logging will be available in Phase 5.",
-    "placeholderHint": "Logs will include token usage, cost tracking, and latency metrics.",
-    "filterModel": "Filter by model...",
     "noLogs": "No gateway request logs yet.",
     "searchPlaceholder": "Search logs...",
     "dateFrom": "From",
@@ -484,7 +447,6 @@
     "brokerUrl": "Broker URL (REST Proxy)",
     "topic": "Topic",
     "webhookUrl": "Webhook URL",
-    "authHeader": "Authorization Header",
     "customHeaders": "Custom Headers",
     "headerName": "Header Name",
     "headerValue": "Value",
@@ -528,8 +490,6 @@
     "curl": "cURL",
     "aiPrompt": "AI Setup",
     "recommended": "Recommended",
-    "aiPromptTitle": "AI-Assisted Setup",
-    "aiPromptDesc": "Copy the prompt below and send it to your AI assistant — it will detect your tool and walk you through the configuration.",
     "mcpPromptTitle": "AI-Assisted Setup",
     "mcpPromptDesc": "Copy the prompt below and send it to your AI assistant — it will detect your MCP client and walk you through the configuration.",
     "promptStep": {
@@ -640,5 +600,17 @@
     "userId": "User ID",
     "logEntries": "Log Entries",
     "noLogs": "No platform logs found."
+  },
+  "unifiedLogs": {
+    "title": "Log Explorer",
+    "subtitle": "Unified log query and search",
+    "platform": "Platform",
+    "audit": "Audit",
+    "gateway": "Gateway",
+    "mcp": "MCP",
+    "access": "Access",
+    "app": "App",
+    "results": "Results",
+    "noLogs": "No logs found."
   }
 }

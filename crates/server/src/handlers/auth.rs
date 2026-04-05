@@ -10,6 +10,7 @@ use think_watch_common::dto::{
 };
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
+use think_watch_common::validation::validate_password;
 
 use crate::middleware::verify_signature;
 
@@ -77,8 +78,18 @@ pub async fn login(
             "Password must be at least 8 characters".into(),
         ));
     }
-    if !req.email.contains('@') || !req.email.contains('.') {
-        return Err(AppError::BadRequest("Invalid email format".into()));
+    {
+        let email = req.email.trim();
+        let parts: Vec<&str> = email.splitn(2, '@').collect();
+        if parts.len() != 2
+            || parts[0].is_empty()
+            || parts[1].len() < 3
+            || !parts[1].contains('.')
+            || parts[1].starts_with('.')
+            || parts[1].ends_with('.')
+        {
+            return Err(AppError::BadRequest("Invalid email format".into()));
+        }
     }
 
     // Composite rate limiting: per-email AND per-IP
@@ -105,10 +116,17 @@ pub async fn login(
         ));
     }
 
-    // Per-IP rate limit: max 30 attempts per minute across all emails (fail-open)
-    let ip_count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &ip_rate_key, 1)
-        .await
-        .unwrap_or_default();
+    // Per-IP rate limit: max 30 attempts per minute across all emails (fail-closed)
+    let ip_count: u64 =
+        match fred::interfaces::KeysInterface::incr_by(&state.redis, &ip_rate_key, 1).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Redis IP rate-limit check failed (fail-closed): {e}");
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "Rate limiting unavailable"
+                )));
+            }
+        };
     if ip_count == 1 {
         let _: () = fred::interfaces::KeysInterface::expire(&state.redis, &ip_rate_key, 60, None)
             .await
@@ -287,7 +305,7 @@ pub async fn login(
             .jwt
             .create_refresh_token_with_ttl(user.id, &user.email, roles, refresh_ttl_days)?;
 
-    let signing_key = verify_signature::create_signing_key(&state.redis, &user.id)
+    let signing_key = verify_signature::create_signing_key(&state.redis, &user.id, Some(&client_ip))
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
 
@@ -312,9 +330,11 @@ pub async fn login(
         },
     })
     .into_response();
-    response
-        .headers_mut()
-        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
+    if let Ok(cookie_value) = cookie.parse() {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, cookie_value);
+    }
     Ok(response)
 }
 
@@ -328,40 +348,33 @@ pub async fn register(
     }
 
     // Input validation
-    if req.password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "Password must be at least 8 characters".into(),
-        ));
-    }
-    if !req.email.contains('@') || !req.email.contains('.') {
-        return Err(AppError::BadRequest("Invalid email format".into()));
-    }
-
-    // Check if user already exists
-    let exists =
-        sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)")
-            .bind(&req.email)
-            .fetch_one(&state.db)
-            .await?;
-
-    if exists {
-        return Err(AppError::Conflict("Email already registered".into()));
-    }
+    validate_password(&req.password)?;
 
     let password_hash = password::hash_password(&req.password)?;
 
     // Use a transaction to ensure user creation + role assignment are atomic
     let mut tx = state.db.begin().await?;
 
+    // Use INSERT ... ON CONFLICT to avoid leaking whether email exists (user enumeration)
     let user = sqlx::query_as::<_, User>(
         r#"INSERT INTO users (email, display_name, password_hash)
-           VALUES ($1, $2, $3) RETURNING *"#,
+           VALUES ($1, $2, $3)
+           ON CONFLICT (email) DO NOTHING
+           RETURNING *"#,
     )
     .bind(&req.email)
     .bind(&req.display_name)
     .bind(&password_hash)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
+
+    let user = match user {
+        Some(u) => u,
+        None => {
+            tx.rollback().await?;
+            return Err(AppError::Conflict("Email already registered".into()));
+        }
+    };
 
     // Assign default "developer" role
     sqlx::query(
@@ -414,7 +427,7 @@ pub async fn refresh(
         refresh_ttl_days,
     )?;
 
-    let signing_key = verify_signature::create_signing_key(&state.redis, &claims.sub)
+    let signing_key = verify_signature::create_signing_key(&state.redis, &claims.sub, None)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
 
@@ -428,9 +441,11 @@ pub async fn refresh(
         password_change_required: None,
     })
     .into_response();
-    response
-        .headers_mut()
-        .insert(axum::http::header::SET_COOKIE, cookie.parse().unwrap());
+    if let Ok(cookie_value) = cookie.parse() {
+        response
+            .headers_mut()
+            .insert(axum::http::header::SET_COOKIE, cookie_value);
+    }
     Ok(response)
 }
 
@@ -462,11 +477,7 @@ pub async fn change_password(
     State(state): State<AppState>,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    if req.new_password.len() < 8 {
-        return Err(AppError::BadRequest(
-            "New password must be at least 8 characters".into(),
-        ));
-    }
+    validate_password(&req.new_password)?;
 
     let user = sqlx::query_as::<_, User>(
         "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
@@ -601,8 +612,10 @@ pub async fn totp_setup(
     });
     let enc_key = think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
+    let pending_json = serde_json::to_string(&pending_data)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON serialization error: {e}")))?;
     let encrypted_pending = think_watch_common::crypto::encrypt(
-        serde_json::to_string(&pending_data).unwrap().as_bytes(),
+        pending_json.as_bytes(),
         &enc_key,
     )
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption error: {e}")))?;
@@ -678,7 +691,8 @@ pub async fn totp_verify_setup(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
     let encrypted_secret = totp::encrypt_secret(&pending.secret, &enc_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption error: {e}")))?;
-    let recovery_json = serde_json::to_string(&pending.recovery_codes).unwrap();
+    let recovery_json = serde_json::to_string(&pending.recovery_codes)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON serialization error: {e}")))?;
 
     sqlx::query(
         "UPDATE users SET totp_secret = $1, totp_enabled = true, totp_recovery_codes = $2, updated_at = now() WHERE id = $3",

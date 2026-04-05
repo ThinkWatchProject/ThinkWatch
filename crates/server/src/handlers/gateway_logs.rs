@@ -39,8 +39,6 @@ pub struct GatewayLogEntry {
     pub latency_ms: Option<i64>,
     pub status_code: Option<i64>,
     pub ip_address: Option<String>,
-    #[serde(skip_deserializing)]
-    #[serde(default)]
     pub created_at: String,
 }
 
@@ -87,7 +85,8 @@ pub async fn list_gateway_logs(
         bind_values.push(v.clone());
     }
     if let Some(v) = params.status_code {
-        conditions.push(format!("status_code = {v}"));
+        conditions.push("status_code = ?".to_string());
+        bind_values.push(v.to_string());
     }
     if let Some(ref from) = params.from {
         conditions.push("created_at >= ?".to_string());

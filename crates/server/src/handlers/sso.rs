@@ -156,7 +156,7 @@ pub async fn sso_callback(
 
     // Create signing key for HMAC request signing
     let signing_key =
-        crate::middleware::verify_signature::create_signing_key(&state.redis, &user.id)
+        crate::middleware::verify_signature::create_signing_key(&state.redis, &user.id, None)
             .await
             .map_err(|e| {
                 AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))

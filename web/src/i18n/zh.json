@@ -18,11 +18,8 @@
     "enabled": "已启用",
     "disabled": "已禁用",
     "healthy": "健康",
-    "unhealthy": "异常",
     "error": "错误",
-    "success": "成功",
     "revoke": "撤销",
-    "copy": "复制",
     "copied": "已复制！",
     "done": "完成",
     "edit": "编辑",
@@ -30,9 +27,6 @@
     "all": "全部",
     "none": "无",
     "deleteSuccess": "删除成功",
-    "saveSuccess": "保存成功",
-    "copySuccess": "已复制到剪贴板",
-    "operationSuccess": "操作成功",
     "operationFailed": "操作失败"
   },
   "nav": {
@@ -56,6 +50,7 @@
     "users": "用户",
     "roles": "角色",
     "settings": "设置",
+    "logExplorer": "日志查询",
     "logForwarders": "日志转发",
     "platformLogs": "平台日志",
     "configGuide": "配置指南"
@@ -79,10 +74,8 @@
     "passwordMismatch": "两次输入的密码不一致",
     "revokeSessions": "注销所有会话",
     "revokeSessionsConfirm": "此操作将退出所有设备上的登录状态。是否继续？",
-    "sessionsRevoked": "所有会话已注销，请重新登录。",
     "deleteAccount": "删除账号",
     "deleteAccountConfirm": "此操作将永久删除您的账号及所有关联数据，且不可恢复。请输入您的邮箱以确认：",
-    "accountDeleted": "账号已删除。",
     "noAccount": "没有账号？注册",
     "haveAccount": "已有账号？登录",
     "registerTitle": "创建账号",
@@ -104,8 +97,7 @@
     "totpRecoveryWarning": "请将这些代码保存在安全的地方，每个代码只能使用一次。",
     "totpCode": "验证码",
     "totpHint": "输入身份验证器中的 6 位数字代码，或使用恢复代码。",
-    "totpVerify": "验证并启用",
-    "passwordChangeRequired": "您需要修改密码后才能继续使用。"
+    "totpVerify": "验证并启用"
   },
   "dashboard": {
     "title": "仪表盘",
@@ -136,10 +128,8 @@
     "providerType": "提供商类型",
     "baseUrl": "基础 URL",
     "apiKey": "API 密钥",
-    "selectType": "选择提供商类型",
     "deleteConfirm": "确定要删除此提供商吗？",
     "allProviders": "所有提供商",
-    "loadingProviders": "正在加载提供商...",
     "noProviders": "尚未配置任何提供商。",
     "noProvidersHint": "添加提供商以开始使用。",
     "dialogDescription": "配置新的 AI 提供商连接。",
@@ -170,7 +160,6 @@
     "keyCreatedHint": "请立即复制此密钥，它将不会再次显示。",
     "revokeConfirm": "确定要撤销此 API 密钥吗？",
     "allKeys": "所有 API 密钥",
-    "loadingKeys": "正在加载密钥...",
     "noKeys": "尚未创建任何 API 密钥。",
     "noKeysHint": "创建密钥以开始通过网关发送请求。",
     "dialogDescription": "为网关生成新的 API 密钥。",
@@ -195,8 +184,7 @@
     "subtitle": "所有已配置提供商的可用模型",
     "noModels": "暂无可用模型。",
     "noModelsHint": "请先配置提供商以查看可用模型。",
-    "owner": "所有者",
-    "loadingModels": "正在加载模型..."
+    "owner": "所有者"
   },
   "mcpServers": {
     "title": "MCP 服务器",
@@ -211,7 +199,6 @@
     "discoverTools": "发现工具",
     "deleteConfirm": "确定要删除此 MCP 服务器吗？",
     "allServers": "所有 MCP 服务器",
-    "loadingServers": "正在加载服务器...",
     "noServers": "尚未注册任何 MCP 服务器。",
     "noServersHint": "注册服务器以开始使用 MCP 工具。",
     "dialogTitle": "注册 MCP 服务器",
@@ -229,13 +216,11 @@
     "noTools": "尚未发现任何工具。",
     "noToolsHint": "在服务器上使用「发现工具」来填充此列表。",
     "inputSchema": "输入模式",
-    "loadingTools": "正在加载工具...",
     "noDescription": "无描述"
   },
   "mcpLogs": {
     "title": "MCP 调用日志",
     "subtitle": "MCP 工具调用历史",
-    "comingSoon": "即将在第 5 阶段推出",
     "allCalls": "所有 MCP 调用",
     "timestamp": "时间戳",
     "tool": "工具",
@@ -243,8 +228,6 @@
     "user": "用户",
     "duration": "耗时",
     "status": "状态",
-    "placeholder": "MCP 调用日志将在第 5 阶段提供。",
-    "placeholderHint": "日志将包含工具调用、耗时和错误追踪。",
     "noLogs": "暂无 MCP 调用日志。",
     "noLogsHint": "MCP 工具被调用后日志将显示在此处。",
     "searchPlaceholder": "搜索 MCP 日志..."
@@ -255,7 +238,6 @@
     "totalTokensToday": "今日总令牌数",
     "totalRequestsToday": "今日总请求数",
     "tokenUsageOverTime": "令牌使用趋势",
-    "chartPlaceholder": "图表可视化即将推出",
     "usageBreakdown": "用量明细",
     "date": "日期",
     "model": "模型",
@@ -263,7 +245,6 @@
     "inputTokens": "输入令牌",
     "outputTokens": "输出令牌",
     "totalCost": "总成本",
-    "loadingUsage": "正在加载用量数据...",
     "noUsage": "暂无用量数据。"
   },
   "analyticsCosts": {
@@ -272,7 +253,6 @@
     "totalCostMtd": "本月累计成本",
     "budgetUsage": "预算使用率",
     "costTrend": "成本趋势",
-    "chartPlaceholder": "图表可视化即将推出",
     "costByModel": "按模型成本",
     "percentOfTotal": "占比",
     "model": "模型",
@@ -280,21 +260,17 @@
     "inputTokens": "输入令牌",
     "outputTokens": "输出令牌",
     "totalCost": "总成本",
-    "loadingCosts": "正在加载成本数据...",
     "noCosts": "暂无成本数据。"
   },
   "audit": {
     "title": "审计日志",
     "subtitle": "系统审计追踪",
     "searchPlaceholder": "搜索日志...",
-    "from": "从",
-    "to": "至",
     "timestamp": "时间戳",
     "ipAddress": "IP 地址",
     "detail": "详情",
     "noLogs": "未找到审计日志。",
     "logEntries": "日志条目",
-    "loadingLogs": "正在加载审计日志...",
     "user": "用户",
     "action": "操作",
     "resource": "资源"
@@ -306,9 +282,7 @@
     "displayName": "显示名称",
     "role": "角色",
     "sso": "SSO",
-    "selectRole": "选择角色",
     "allUsers": "所有用户",
-    "loadingUsers": "正在加载用户...",
     "noUsers": "未找到用户。",
     "dialogDescription": "创建新的用户账户。",
     "creating": "创建中...",
@@ -317,7 +291,6 @@
     "created": "创建时间",
     "forceLogout": "强制下线",
     "forceLogoutConfirm": "确定要强制该用户退出所有会话吗？",
-    "forceLogoutSuccess": "该用户已被强制下线。",
     "roleSuperAdmin": "超级管理员",
     "roleAdmin": "管理员",
     "roleTeamManager": "团队经理",
@@ -336,7 +309,6 @@
     "activate": "启用",
     "deactivateConfirm": "确定要禁用此用户吗？该用户将无法登录。",
     "activateConfirm": "确定要启用此用户吗？",
-    "updating": "更新中...",
     "saving": "保存中..."
   },
   "roles": {
@@ -368,9 +340,7 @@
   "settingsPage": {
     "title": "设置",
     "subtitle": "系统配置和集成",
-    "general": "通用",
     "oidc": "OIDC / SSO",
-    "auditConfig": "审计",
     "serverInfo": "服务器信息",
     "version": "版本",
     "uptime": "运行时间",
@@ -379,7 +349,6 @@
     "gatewayPort": "网关端口",
     "consolePort": "控制台端口",
     "oidcTitle": "OpenID Connect / SSO",
-    "oidcEnabled": "OIDC 已启用",
     "issuerUrl": "签发者 URL",
     "clientId": "客户端 ID",
     "auditTitle": "审计配置",
@@ -387,11 +356,9 @@
     "logForwarding": "日志转发",
     "logForwardingHint": "Syslog、Kafka、Webhook 目标通过日志转发页面配置。",
     "manage": "管理",
-    "connected": "已连接",
-    "disconnected": "已断开"
+    "connected": "已连接"
   },
   "settings": {
-    "title": "设置",
     "general": "通用",
     "auth": "认证",
     "gateway": "网关",
@@ -442,7 +409,6 @@
   "logs": {
     "title": "请求日志",
     "subtitle": "网关请求和响应日志",
-    "comingSoon": "即将在第 5 阶段推出",
     "allRequests": "所有请求",
     "timestamp": "时间戳",
     "model": "模型",
@@ -451,9 +417,6 @@
     "cost": "成本",
     "latency": "延迟",
     "status": "状态",
-    "placeholder": "请求日志将在第 5 阶段提供。",
-    "placeholderHint": "日志将包含令牌使用、成本追踪和延迟指标。",
-    "filterModel": "按模型筛选...",
     "noLogs": "暂无网关请求日志。",
     "searchPlaceholder": "搜索日志...",
     "dateFrom": "开始日期",
@@ -484,7 +447,6 @@
     "brokerUrl": "Broker URL（REST 代理）",
     "topic": "主题",
     "webhookUrl": "Webhook URL",
-    "authHeader": "授权头",
     "customHeaders": "自定义请求头",
     "headerName": "Header 名称",
     "headerValue": "值",
@@ -528,8 +490,6 @@
     "curl": "cURL",
     "aiPrompt": "AI 配置",
     "recommended": "推荐",
-    "aiPromptTitle": "AI 辅助配置",
-    "aiPromptDesc": "复制以下提示词发送给您的 AI 助手，它将自动检测您使用的工具并帮您完成配置。",
     "mcpPromptTitle": "AI 辅助配置",
     "mcpPromptDesc": "复制以下提示词发送给您的 AI 助手，它将自动检测您使用的 MCP 客户端并帮您完成配置。",
     "promptStep": {
@@ -640,5 +600,17 @@
     "userId": "用户ID",
     "logEntries": "日志条目",
     "noLogs": "未找到平台日志。"
+  },
+  "unifiedLogs": {
+    "title": "日志查询",
+    "subtitle": "统一日志查询与搜索",
+    "platform": "平台",
+    "audit": "审计",
+    "gateway": "网关",
+    "mcp": "MCP",
+    "access": "访问",
+    "app": "应用",
+    "results": "查询结果",
+    "noLogs": "未找到日志。"
   }
 }
