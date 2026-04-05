@@ -40,29 +40,29 @@ services:
       - -c
       - log_lock_waits=on
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: agent_bastion
+      POSTGRES_USER: ${DB_USER:-bastion}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      POSTGRES_DB: ${DB_NAME:-agent_bastion}
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-bastion}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
   redis:
     image: redis:8-alpine
-    command: redis-server /etc/redis/redis.conf --requirepass devredispass
+    command: redis-server /etc/redis/redis.conf --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     ports:
       - "6379:6379"
     volumes:
       - redisdata:/data
       - ./redis/redis.conf:/etc/redis/redis.conf:ro
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "devredispass", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -74,9 +74,9 @@ services:
       - "8123:8123"   # HTTP interface
       - "9000:9000"   # Native TCP
     environment:
-      CLICKHOUSE_USER: bastion
-      CLICKHOUSE_PASSWORD: bastion_dev
-      CLICKHOUSE_DB: agent_bastion
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-bastion}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-agent_bastion}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - clickhouse_data:/var/lib/clickhouse
@@ -94,15 +94,15 @@ services:
     image: ghcr.io/zitadel/zitadel:v4.13.1
     command: start-from-init --masterkeyFromEnv --tlsMode disabled
     environment:
-      ZITADEL_MASTERKEY: "agent_bastion_dev_masterkey1XXXX" # exactly 32 chars
+      ZITADEL_MASTERKEY: "${ZITADEL_MASTERKEY:?ZITADEL_MASTERKEY is required (32 chars)}"
       ZITADEL_DATABASE_POSTGRES_HOST: zitadel_db
       ZITADEL_DATABASE_POSTGRES_PORT: 5432
       ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
       ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
-      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${ZITADEL_PG_PASSWORD:?ZITADEL_PG_PASSWORD is required}
       ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
       ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: postgres
-      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${ZITADEL_PG_PASSWORD}
       ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
       ZITADEL_EXTERNALDOMAIN: localhost
       ZITADEL_EXTERNALPORT: 8080
@@ -130,7 +130,7 @@ services:
       - jit=off
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${ZITADEL_PG_PASSWORD:?ZITADEL_PG_PASSWORD is required}
       POSTGRES_DB: zitadel
     volumes:
       - zitadel_db_data:/var/lib/postgresql/data

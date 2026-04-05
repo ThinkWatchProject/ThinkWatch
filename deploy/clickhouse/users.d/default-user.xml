@@ -10,7 +10,7 @@
       <networks>
         <ip>::/0</ip>
       </networks>
-      <password><![CDATA[bastion_dev]]></password>
+      <password><![CDATA[c693ded3da8388c7b6a4288dac91a2ad]]></password>
       <quota>default</quota>
       <access_management>1</access_management>
     </bastion>
