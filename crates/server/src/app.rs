@@ -68,7 +68,23 @@ fn security_layers<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Route
             HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
         ))
         .layer(CatchPanicLayer::new())
-        .layer(TraceLayer::new_for_http())
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(|request: &axum::http::Request<_>| {
+                    tracing::info_span!(
+                        "http",
+                        method = %request.method(),
+                        path = %request.uri().path(),
+                    )
+                })
+                .on_failure(
+                    |error: tower_http::classify::ServerErrorsFailureClass,
+                     latency: std::time::Duration,
+                     _span: &tracing::Span| {
+                        tracing::error!(%error, latency_ms = latency.as_millis(), "request failed");
+                    },
+                ),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -216,10 +232,14 @@ pub async fn create_gateway_app(
             std::time::Duration::from_secs(120), // longer timeout for streaming
         ))
         .layer(gateway_cors)
-        // CSP header for gateway API responses
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::HeaderName::from_static("content-security-policy"),
             HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'"),
+        ))
+        .layer(crate::middleware::access_log::AccessLogLayer::new(
+            state.audit.clone(),
+            state.dynamic_config.clone(),
+            _config.gateway_port,
         ))
         .with_state(state.clone());
 
@@ -424,6 +444,16 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             "/api/admin/platform-logs",
             get(handlers::platform_logs::list_platform_logs),
         )
+        // Access logs
+        .route(
+            "/api/admin/access-logs",
+            get(handlers::access_logs::list_access_logs),
+        )
+        // Application runtime logs
+        .route(
+            "/api/admin/app-logs",
+            get(handlers::app_logs::list_app_logs),
+        )
         // Custom roles CRUD
         .route(
             "/api/admin/roles",
@@ -470,13 +500,13 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             std::time::Duration::from_secs(30),
         ))
         .layer(cors)
-        // CSP header for console
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::HeaderName::from_static("content-security-policy"),
             HeaderValue::from_static(
                 "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
             ),
         ))
+        .layer(crate::middleware::access_log::AccessLogLayer::new(state.audit.clone(), state.dynamic_config.clone(), config.console_port))
         .with_state(state);
 
     security_layers(app)

@@ -51,6 +51,7 @@ interface OidcConfig {
 interface AuditConfig {
   clickhouse_url: string;
   clickhouse_db: string;
+  connected: boolean;
 }
 
 interface SettingEntry {
@@ -566,8 +567,8 @@ export function SettingsPage() {
                           {auditConfig?.clickhouse_url || '—'}
                         </p>
                       </div>
-                      <Badge variant={auditConfig?.clickhouse_url ? 'default' : 'secondary'}>
-                        {auditConfig?.clickhouse_url ? t('settingsPage.connected') : t('settingsPage.disconnected')}
+                      <Badge variant={auditConfig?.connected ? 'default' : 'destructive'}>
+                        {auditConfig?.connected ? t('settingsPage.connected') : t('dashboard.unreachable')}
                       </Badge>
                     </div>
                     <Separator />

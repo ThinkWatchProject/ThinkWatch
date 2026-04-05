@@ -18,6 +18,10 @@ use crate::models::LogForwarder;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogType {
+    /// HTTP access log (both gateway & console)
+    Access,
+    /// Runtime application logs (info/warn/error/debug)
+    App,
     /// API request audit (gateway usage)
     Audit,
     /// Gateway request logs (model calls, tokens, costs)
@@ -31,6 +35,8 @@ pub enum LogType {
 impl LogType {
     pub fn as_str(&self) -> &'static str {
         match self {
+            LogType::Access => "access",
+            LogType::App => "app",
             LogType::Audit => "audit",
             LogType::Gateway => "gateway",
             LogType::Mcp => "mcp",
@@ -40,6 +46,8 @@ impl LogType {
 
     pub fn index_id(&self) -> &'static str {
         match self {
+            LogType::Access => "access_logs",
+            LogType::App => "app_logs",
             LogType::Audit => "audit_logs",
             LogType::Gateway => "gateway_logs",
             LogType::Mcp => "mcp_logs",
@@ -64,6 +72,131 @@ pub struct AuditEntry {
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
     pub created_at: String,
+}
+
+// ---------------------------------------------------------------------------
+// Per-table Row structs for ClickHouse SDK insert
+// ---------------------------------------------------------------------------
+
+/// audit_logs — API key usage audit
+#[derive(Debug, clickhouse::Row, Serialize)]
+struct ChAuditRow {
+    id: String,
+    user_id: Option<String>,
+    user_email: Option<String>,
+    api_key_id: Option<String>,
+    action: String,
+    resource: Option<String>,
+    resource_id: Option<String>,
+    detail: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
+    created_at: chrono::DateTime<Utc>,
+}
+
+/// platform_logs — admin/management operations (no api_key_id)
+#[derive(Debug, clickhouse::Row, Serialize)]
+struct ChPlatformRow {
+    id: String,
+    user_id: Option<String>,
+    user_email: Option<String>,
+    action: String,
+    resource: Option<String>,
+    resource_id: Option<String>,
+    detail: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
+    created_at: chrono::DateTime<Utc>,
+}
+
+/// gateway_logs — model request logs
+#[derive(Debug, clickhouse::Row, Serialize)]
+struct ChGatewayRow {
+    id: String,
+    user_id: Option<String>,
+    api_key_id: Option<String>,
+    model_id: Option<String>,
+    provider: Option<String>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cost_usd: Option<f64>,
+    latency_ms: Option<i64>,
+    status_code: Option<i64>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    detail: Option<String>,
+    #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
+    created_at: chrono::DateTime<Utc>,
+}
+
+/// mcp_logs — MCP tool invocation logs
+#[derive(Debug, clickhouse::Row, Serialize)]
+struct ChMcpRow {
+    id: String,
+    user_id: Option<String>,
+    server_id: Option<String>,
+    server_name: Option<String>,
+    tool_name: Option<String>,
+    duration_ms: Option<i64>,
+    status: Option<String>,
+    error_message: Option<String>,
+    ip_address: Option<String>,
+    detail: Option<String>,
+    #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
+    created_at: chrono::DateTime<Utc>,
+}
+
+/// app_logs — runtime tracing logs
+#[derive(Debug, clickhouse::Row, Serialize)]
+struct ChAppLogRow {
+    id: String,
+    level: String,
+    target: String,
+    message: String,
+    fields: Option<String>,
+    span: Option<String>,
+    #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
+    created_at: chrono::DateTime<Utc>,
+}
+
+/// access_logs — HTTP access log
+#[derive(Debug, clickhouse::Row, Serialize)]
+struct ChAccessRow {
+    id: String,
+    method: String,
+    path: String,
+    status_code: u16,
+    latency_ms: i64,
+    port: u16,
+    user_id: Option<String>,
+    ip_address: Option<String>,
+    user_agent: Option<String>,
+    #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
+    created_at: chrono::DateTime<Utc>,
+}
+
+/// Parse RFC3339 string to DateTime<Utc>, fallback to now.
+fn parse_created_at(s: &str) -> chrono::DateTime<Utc> {
+    chrono::DateTime::parse_from_rfc3339(s)
+        .map(|dt| dt.with_timezone(&Utc))
+        .unwrap_or_else(|_| Utc::now())
+}
+
+fn detail_str(detail: &mut Option<serde_json::Value>) -> Option<String> {
+    sanitize_detail(detail);
+    detail.as_ref().map(|v| v.to_string())
+}
+
+fn detail_field<T: serde::de::DeserializeOwned>(
+    detail: &Option<serde_json::Value>,
+    key: &str,
+) -> Option<T> {
+    detail
+        .as_ref()?
+        .get(key)
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 
 impl AuditEntry {
@@ -252,12 +385,12 @@ pub struct AuditLogger {
 }
 
 impl AuditLogger {
-    pub fn new(config: AuditConfig, db: Option<PgPool>) -> Self {
+    pub fn new(_config: AuditConfig, db: Option<PgPool>, ch: Option<clickhouse::Client>) -> Self {
         let (tx, rx) = mpsc::channel(10_000);
         let registry: ForwarderRegistry = Arc::new(RwLock::new(HashMap::new()));
 
         // Spawn the background worker
-        tokio::spawn(audit_worker(config, rx, db.clone(), registry.clone()));
+        tokio::spawn(audit_worker(ch, rx, db.clone(), registry.clone()));
 
         // Spawn periodic forwarder reload (every 10s)
         if let Some(pool) = &db {
@@ -331,7 +464,7 @@ async fn reload_forwarders(db: &PgPool, registry: &ForwarderRegistry) {
 // ---------------------------------------------------------------------------
 
 async fn audit_worker(
-    config: AuditConfig,
+    ch: Option<clickhouse::Client>,
     mut rx: mpsc::Receiver<AuditEntry>,
     db: Option<PgPool>,
     registry: ForwarderRegistry,
@@ -353,13 +486,13 @@ async fn audit_worker(
                 batch.push(entry);
                 if batch.len() >= 50 {
                     let mut b = std::mem::take(batch);
-                    flush_to_clickhouse(&http_client, &config, table, &mut b).await;
+                    flush_to_clickhouse(&ch, table, &mut b).await;
                 }
             }
             _ = flush_interval.tick() => {
                 for (table, batch) in batches.iter_mut() {
                     if !batch.is_empty() {
-                        flush_to_clickhouse(&http_client, &config, table, batch).await;
+                        flush_to_clickhouse(&ch, table, batch).await;
                     }
                 }
             }
@@ -632,116 +765,205 @@ fn sanitize_detail(detail: &mut Option<serde_json::Value>) {
     }
 }
 
-/// Build ClickHouse HTTP request with authentication query params.
-fn clickhouse_url(config: &AuditConfig, query: &str) -> Option<String> {
-    let base = config.clickhouse_url.as_deref()?;
-    let mut url = format!(
-        "{}/?database={}&query={}",
-        base.trim_end_matches('/'),
-        urlencoding::encode(&config.clickhouse_db),
-        urlencoding::encode(query),
-    );
-    if let Some(ref user) = config.clickhouse_user {
-        url.push_str(&format!("&user={}", urlencoding::encode(user)));
-    }
-    if let Some(ref password) = config.clickhouse_password {
-        url.push_str(&format!("&password={}", urlencoding::encode(password)));
-    }
-    Some(url)
-}
-
 async fn flush_to_clickhouse(
-    client: &reqwest::Client,
-    config: &AuditConfig,
+    ch: &Option<clickhouse::Client>,
     table: &str,
     batch: &mut Vec<AuditEntry>,
 ) {
-    let query = format!("INSERT INTO {} FORMAT JSONEachRow", table);
-    let Some(url) = clickhouse_url(config, &query) else {
+    let Some(client) = ch else {
         batch.clear();
         return;
     };
 
-    for entry in batch.iter_mut() {
-        sanitize_detail(&mut entry.detail);
-    }
+    let count = batch.len();
 
-    // Convert detail from Value to JSON string for ClickHouse String column
-    let ndjson: String = batch
-        .iter()
-        .filter_map(|e| {
-            let mut map = serde_json::to_value(e).ok()?;
-            if let Some(obj) = map.as_object_mut()
-                && let Some(detail) = obj.get("detail")
-                && !detail.is_null()
-            {
-                let detail_str = detail.to_string();
-                obj.insert("detail".to_string(), serde_json::Value::String(detail_str));
-            }
-            serde_json::to_string(&map).ok()
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
+    // Determine log type from first entry (all entries in a batch share the same table)
+    let log_type = batch.first().map(|e| e.log_type);
+    let result = match log_type {
+        Some(LogType::Access) => flush_access(client, table, batch).await,
+        Some(LogType::App) => flush_app(client, table, batch).await,
+        Some(LogType::Audit) => flush_audit(client, table, batch).await,
+        Some(LogType::Platform) => flush_platform(client, table, batch).await,
+        Some(LogType::Gateway) => flush_gateway(client, table, batch).await,
+        Some(LogType::Mcp) => flush_mcp(client, table, batch).await,
+        None => {
+            batch.clear();
+            return;
+        }
+    };
 
-    const MAX_RETRIES: u32 = 3;
-    for attempt in 1..=MAX_RETRIES {
-        let req = client
-            .post(&url)
-            .header("Content-Type", "application/x-ndjson")
-            .body(ndjson.clone());
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => {
-                tracing::debug!(
-                    "Flushed {} entries to ClickHouse table {}",
-                    batch.len(),
-                    table
-                );
-                batch.clear();
-                return;
-            }
-            Ok(resp) => {
-                let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                if attempt < MAX_RETRIES {
-                    tracing::warn!(
-                        "ClickHouse insert returned {status} (attempt {attempt}/{MAX_RETRIES}): {body}"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)))
-                        .await;
-                } else {
-                    tracing::error!(
-                        "ClickHouse insert failed after {MAX_RETRIES} retries ({status}): {body} — dropping {} entries",
-                        batch.len()
-                    );
-                }
-            }
-            Err(e) => {
-                if attempt < MAX_RETRIES {
-                    tracing::warn!(
-                        "ClickHouse insert error (attempt {attempt}/{MAX_RETRIES}): {e}"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(500 * u64::from(attempt)))
-                        .await;
-                } else {
-                    tracing::error!(
-                        "ClickHouse insert failed after {MAX_RETRIES} retries: {e} — dropping {} entries",
-                        batch.len()
-                    );
-                }
-            }
+    match result {
+        Ok(()) => tracing::debug!("Flushed {count} entries to ClickHouse table {table}"),
+        Err(e) => {
+            tracing::error!("ClickHouse insert failed for {table}: {e} — dropped {count} entries")
         }
     }
-
     batch.clear();
 }
 
+async fn flush_app(
+    client: &clickhouse::Client,
+    table: &str,
+    batch: &mut Vec<AuditEntry>,
+) -> Result<(), clickhouse::error::Error> {
+    let mut insert = client.insert::<ChAppLogRow>(table)?;
+    for entry in batch.drain(..) {
+        let ts = parse_created_at(&entry.created_at);
+        insert
+            .write(&ChAppLogRow {
+                id: entry.id,
+                level: entry.action, // we store level in action field
+                target: entry.resource.unwrap_or_default(),
+                message: entry.resource_id.unwrap_or_default(),
+                fields: entry.detail.map(|v| v.to_string()),
+                span: entry.user_agent, // repurpose user_agent for span info
+                created_at: ts,
+            })
+            .await?;
+    }
+    insert.end().await
+}
+
+async fn flush_access(
+    client: &clickhouse::Client,
+    table: &str,
+    batch: &mut Vec<AuditEntry>,
+) -> Result<(), clickhouse::error::Error> {
+    let mut insert = client.insert::<ChAccessRow>(table)?;
+    for entry in batch.drain(..) {
+        let ts = parse_created_at(&entry.created_at);
+        insert
+            .write(&ChAccessRow {
+                id: entry.id,
+                method: detail_field(&entry.detail, "method").unwrap_or_default(),
+                path: detail_field(&entry.detail, "path").unwrap_or_default(),
+                status_code: detail_field(&entry.detail, "status_code").unwrap_or(0),
+                latency_ms: detail_field(&entry.detail, "latency_ms").unwrap_or(0),
+                port: detail_field(&entry.detail, "port").unwrap_or(0),
+                user_id: entry.user_id,
+                ip_address: entry.ip_address,
+                user_agent: entry.user_agent,
+                created_at: ts,
+            })
+            .await?;
+    }
+    insert.end().await
+}
+
+async fn flush_audit(
+    client: &clickhouse::Client,
+    table: &str,
+    batch: &mut Vec<AuditEntry>,
+) -> Result<(), clickhouse::error::Error> {
+    let mut insert = client.insert::<ChAuditRow>(table)?;
+    for mut entry in batch.drain(..) {
+        let ts = parse_created_at(&entry.created_at);
+        insert
+            .write(&ChAuditRow {
+                id: entry.id,
+                user_id: entry.user_id,
+                user_email: entry.user_email,
+                api_key_id: entry.api_key_id,
+                action: entry.action,
+                resource: entry.resource,
+                resource_id: entry.resource_id,
+                detail: detail_str(&mut entry.detail),
+                ip_address: entry.ip_address,
+                user_agent: entry.user_agent,
+                created_at: ts,
+            })
+            .await?;
+    }
+    insert.end().await
+}
+
+async fn flush_platform(
+    client: &clickhouse::Client,
+    table: &str,
+    batch: &mut Vec<AuditEntry>,
+) -> Result<(), clickhouse::error::Error> {
+    let mut insert = client.insert::<ChPlatformRow>(table)?;
+    for mut entry in batch.drain(..) {
+        let ts = parse_created_at(&entry.created_at);
+        insert
+            .write(&ChPlatformRow {
+                id: entry.id,
+                user_id: entry.user_id,
+                user_email: entry.user_email,
+                action: entry.action,
+                resource: entry.resource,
+                resource_id: entry.resource_id,
+                detail: detail_str(&mut entry.detail),
+                ip_address: entry.ip_address,
+                user_agent: entry.user_agent,
+                created_at: ts,
+            })
+            .await?;
+    }
+    insert.end().await
+}
+
+async fn flush_gateway(
+    client: &clickhouse::Client,
+    table: &str,
+    batch: &mut Vec<AuditEntry>,
+) -> Result<(), clickhouse::error::Error> {
+    let mut insert = client.insert::<ChGatewayRow>(table)?;
+    for mut entry in batch.drain(..) {
+        let ts = parse_created_at(&entry.created_at);
+        let row = ChGatewayRow {
+            id: entry.id,
+            user_id: entry.user_id,
+            api_key_id: entry.api_key_id,
+            model_id: detail_field(&entry.detail, "model_id"),
+            provider: detail_field(&entry.detail, "provider"),
+            input_tokens: detail_field(&entry.detail, "input_tokens"),
+            output_tokens: detail_field(&entry.detail, "output_tokens"),
+            cost_usd: detail_field(&entry.detail, "cost_usd"),
+            latency_ms: detail_field(&entry.detail, "latency_ms"),
+            status_code: detail_field(&entry.detail, "status_code"),
+            ip_address: entry.ip_address,
+            user_agent: entry.user_agent,
+            detail: detail_str(&mut entry.detail),
+            created_at: ts,
+        };
+        insert.write(&row).await?;
+    }
+    insert.end().await
+}
+
+async fn flush_mcp(
+    client: &clickhouse::Client,
+    table: &str,
+    batch: &mut Vec<AuditEntry>,
+) -> Result<(), clickhouse::error::Error> {
+    let mut insert = client.insert::<ChMcpRow>(table)?;
+    for mut entry in batch.drain(..) {
+        let ts = parse_created_at(&entry.created_at);
+        let row = ChMcpRow {
+            id: entry.id,
+            user_id: entry.user_id,
+            server_id: detail_field(&entry.detail, "server_id"),
+            server_name: detail_field(&entry.detail, "server_name"),
+            tool_name: detail_field(&entry.detail, "tool_name"),
+            duration_ms: detail_field(&entry.detail, "duration_ms"),
+            status: detail_field(&entry.detail, "status"),
+            error_message: detail_field(&entry.detail, "error_message"),
+            ip_address: entry.ip_address,
+            detail: detail_str(&mut entry.detail),
+            created_at: ts,
+        };
+        insert.write(&row).await?;
+    }
+    insert.end().await
+}
+
 /// Ensure ClickHouse tables exist. Call once at startup.
-pub async fn ensure_clickhouse_tables(config: &AuditConfig) {
-    let Some(ref base_url) = config.clickhouse_url else {
+pub async fn ensure_clickhouse_tables(ch: &Option<clickhouse::Client>) {
+    let Some(client) = ch else {
         return;
     };
 
-    let client = reqwest::Client::new();
     let init_sql = include_str!("../../../deploy/clickhouse/init.sql");
 
     // Execute each statement separately
@@ -751,28 +973,9 @@ pub async fn ensure_clickhouse_tables(config: &AuditConfig) {
             continue;
         }
 
-        let mut url = format!(
-            "{}/?database={}",
-            base_url.trim_end_matches('/'),
-            urlencoding::encode(&config.clickhouse_db),
-        );
-        if let Some(ref user) = config.clickhouse_user {
-            url.push_str(&format!("&user={}", urlencoding::encode(user)));
-        }
-        if let Some(ref password) = config.clickhouse_password {
-            url.push_str(&format!("&password={}", urlencoding::encode(password)));
-        }
-
-        match client.post(&url).body(stmt.to_string()).send().await {
-            Ok(resp) if resp.status().is_success() => {}
-            Ok(resp) => {
-                let body = resp.text().await.unwrap_or_default();
-                tracing::warn!("ClickHouse init statement failed: {body}");
-            }
-            Err(e) => {
-                tracing::warn!("Failed to connect to ClickHouse: {e}");
-                return;
-            }
+        if let Err(e) = client.query(stmt).execute().await {
+            tracing::warn!("ClickHouse init statement failed: {e}");
+            return;
         }
     }
     tracing::info!("ClickHouse tables initialized");

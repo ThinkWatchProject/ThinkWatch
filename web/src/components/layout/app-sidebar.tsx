@@ -87,14 +87,7 @@ const navGroups: NavGroup[] = [
   {
     labelKey: 'nav.logs',
     items: [
-      { titleKey: 'nav.requestLogs', icon: ScrollText, href: '/logs/gateway' },
-      { titleKey: 'nav.mcpLogs', icon: ScrollText, href: '/logs/mcp' },
-      { titleKey: 'nav.auditLogs', icon: ClipboardList, href: '/logs/audit' },
-      {
-        titleKey: 'nav.platformLogs',
-        icon: ClipboardList,
-        href: '/logs/platform',
-      },
+      { titleKey: 'nav.logExplorer', icon: ScrollText, href: '/logs' },
       {
         titleKey: 'nav.logForwarders',
         icon: Forward,

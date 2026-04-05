@@ -1,6 +1,8 @@
+pub mod access_logs;
 pub mod admin;
 pub mod analytics;
 pub mod api_keys;
+pub mod app_logs;
 pub mod audit;
 pub mod auth;
 pub(crate) mod clickhouse_util;

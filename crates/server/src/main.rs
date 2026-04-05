@@ -6,7 +6,7 @@ use think_watch_common::audit::{self, AuditLogger};
 use think_watch_common::config::AppConfig;
 use think_watch_common::db;
 use think_watch_common::dynamic_config::{self, DynamicConfig};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod app;
 mod error;
@@ -85,10 +85,12 @@ async fn main() -> anyhow::Result<()> {
     sub_redis.init().await?;
     dynamic_config::spawn_config_subscriber(sub_redis, dynamic_config.clone());
 
-    let audit_logger = AuditLogger::new(config.audit_config(), Some(pool.clone()), ch_client.clone());
+    let audit_logger =
+        AuditLogger::new(config.audit_config(), Some(pool.clone()), ch_client.clone());
 
     // Phase 2: swap in ClickHouse tracing layer now that AuditLogger is ready
-    let _ = ch_layer_reload.modify(|layer| *layer = Some(tracing_ch::ClickHouseLayer::new(audit_logger.clone())));
+    let _ = ch_layer_reload
+        .modify(|layer| *layer = Some(tracing_ch::ClickHouseLayer::new(audit_logger.clone())));
     tracing::info!("ClickHouse tracing layer activated");
 
     // Initialize OIDC — prefer dynamic config (database), fall back to env vars.
@@ -168,9 +170,8 @@ async fn main() -> anyhow::Result<()> {
                         think_watch_common::crypto::decrypt(&bytes, &encryption_key)
                             .map_err(|e| format!("decrypt: {e}"))
                     })
-                    .and_then(|plain| {
-                        String::from_utf8(plain).map_err(|e| format!("utf8: {e}"))
-                    }) {
+                    .and_then(|plain| String::from_utf8(plain).map_err(|e| format!("utf8: {e}")))
+                {
                     Ok(s) => s,
                     Err(e) => {
                         tracing::error!("Failed to decrypt OIDC client secret at startup: {e}");

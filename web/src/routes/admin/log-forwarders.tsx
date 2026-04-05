@@ -103,7 +103,7 @@ export function LogForwardersPage() {
   const [formTopic, setFormTopic] = useState('');
   const [formWebhookUrl, setFormWebhookUrl] = useState('');
   const [formHeaders, setFormHeaders] = useState<{ key: string; value: string }[]>([]);
-  const [formLogTypes, setFormLogTypes] = useState<Set<string>>(new Set(['audit', 'gateway', 'mcp', 'platform']));
+  const [formLogTypes, setFormLogTypes] = useState<Set<string>>(new Set(['access', 'app', 'audit', 'gateway', 'mcp', 'platform']));
   const [creating, setCreating] = useState(false);
 
   // Edit state
@@ -149,7 +149,7 @@ export function LogForwardersPage() {
     setFormTopic('');
     setFormWebhookUrl('');
     setFormHeaders([]);
-    setFormLogTypes(new Set(['audit', 'gateway', 'mcp', 'platform']));
+    setFormLogTypes(new Set(['access', 'app', 'audit', 'gateway', 'mcp', 'platform']));
   };
 
   const buildConfig = (): Record<string, string> => {
@@ -400,7 +400,7 @@ export function LogForwardersPage() {
               <div>
                 <Label>{t('logForwarders.logTypes')}</Label>
                 <div className="flex flex-wrap gap-3 mt-1">
-                  {['audit', 'gateway', 'mcp', 'platform'].map((lt) => (
+                  {['access', 'app', 'audit', 'gateway', 'mcp', 'platform'].map((lt) => (
                     <label key={lt} className="flex items-center gap-1.5 text-sm cursor-pointer">
                       <Checkbox
                         checked={formLogTypes.has(lt)}
@@ -645,7 +645,7 @@ export function LogForwardersPage() {
             <div>
               <Label>{t('logForwarders.logTypes')}</Label>
               <div className="flex flex-wrap gap-3 mt-1">
-                {['audit', 'gateway', 'mcp', 'platform'].map((lt) => (
+                {['access', 'app', 'audit', 'gateway', 'mcp', 'platform'].map((lt) => (
                   <label key={lt} className="flex items-center gap-1.5 text-sm cursor-pointer">
                     <Checkbox
                       checked={editLogTypes.has(lt)}

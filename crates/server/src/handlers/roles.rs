@@ -230,11 +230,13 @@ pub async fn update_role(
     Json(payload): Json<UpdateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
     // Prevent editing system roles
-    let existing = sqlx::query_as::<_, (bool,)>("SELECT is_system FROM custom_roles WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
+    let existing = sqlx::query_as::<_, (bool, String)>(
+        "SELECT is_system, name FROM custom_roles WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
 
     if existing.0 {
         return Err(AppError::BadRequest("Cannot modify system roles".into()));
@@ -336,7 +338,8 @@ pub async fn update_role(
         auth_user
             .audit("role.updated")
             .resource("role")
-            .resource_id(id.to_string()),
+            .resource_id(id.to_string())
+            .detail(serde_json::json!({ "name": existing.1 })),
     );
 
     // Fetch updated role
@@ -378,15 +381,19 @@ pub async fn delete_role(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let existing = sqlx::query_as::<_, (bool,)>("SELECT is_system FROM custom_roles WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
+    let existing = sqlx::query_as::<_, (bool, String)>(
+        "SELECT is_system, name FROM custom_roles WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
 
     if existing.0 {
         return Err(AppError::BadRequest("Cannot delete system roles".into()));
     }
+
+    let role_name = existing.1;
 
     sqlx::query("DELETE FROM custom_roles WHERE id = $1")
         .bind(id)
@@ -397,7 +404,8 @@ pub async fn delete_role(
         auth_user
             .audit("role.deleted")
             .resource("role")
-            .resource_id(id.to_string()),
+            .resource_id(id.to_string())
+            .detail(serde_json::json!({ "name": role_name })),
     );
 
     Ok(Json(serde_json::json!({ "deleted": true })))

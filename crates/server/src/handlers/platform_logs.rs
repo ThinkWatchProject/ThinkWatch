@@ -33,8 +33,6 @@ pub struct PlatformLogEntry {
     pub detail: Option<String>,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
-    #[serde(skip_deserializing)]
-    #[serde(default)]
     pub created_at: String,
 }
 
