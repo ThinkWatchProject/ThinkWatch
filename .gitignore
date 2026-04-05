@@ -11,6 +11,7 @@
 # Node
 web/node_modules
 web/dist
+web/stats.html
 
 # IDE
 .idea
