@@ -82,7 +82,7 @@ services:
       - clickhouse_data:/var/lib/clickhouse
       - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
-      - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/:ro
+      - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
       interval: 5s
@@ -94,7 +94,7 @@ services:
     image: ghcr.io/zitadel/zitadel:v4.13.1
     command: start-from-init --masterkeyFromEnv --tlsMode disabled
     environment:
-      ZITADEL_MASTERKEY: "agent_bastion_dev_masterkey1" # exactly 32 chars
+      ZITADEL_MASTERKEY: "agent_bastion_dev_masterkey1XXXX" # exactly 32 chars
       ZITADEL_DATABASE_POSTGRES_HOST: zitadel_db
       ZITADEL_DATABASE_POSTGRES_PORT: 5432
       ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel

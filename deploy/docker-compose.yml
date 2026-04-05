@@ -176,7 +176,7 @@ services:
       - clickhouse_data:/var/lib/clickhouse
       - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
       - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
-      - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/:ro
+      - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
       interval: 10s

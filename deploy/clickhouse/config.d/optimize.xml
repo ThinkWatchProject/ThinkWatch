@@ -46,11 +46,11 @@
         <vertical_merge_algorithm_min_columns_to_activate>5</vertical_merge_algorithm_min_columns_to_activate>
     </merge_tree>
 
-    <!-- ============ Background pools (sized for 2 CPU) ============ -->
-    <background_pool_size>2</background_pool_size>
-    <background_schedule_pool_size>2</background_schedule_pool_size>
-    <background_merges_mutations_concurrency_ratio>2</background_merges_mutations_concurrency_ratio>
-    <background_move_pool_size>0</background_move_pool_size>  <!-- no tiered storage -->
+    <!-- ============ Background pools (sized for small dev/prod) ============ -->
+    <background_pool_size>8</background_pool_size>
+    <background_schedule_pool_size>4</background_schedule_pool_size>
+    <background_merges_mutations_concurrency_ratio>4</background_merges_mutations_concurrency_ratio>
+    <background_move_pool_size>1</background_move_pool_size>
 
     <!-- ============ Caches (sized for 2 GB container) ============ -->
     <mark_cache_size>268435456</mark_cache_size>          <!-- 256 MB -->

@@ -40,8 +40,8 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     INDEX idx_resource  resource   TYPE set(100)     GRANULARITY 2,
     INDEX idx_ip        ip_address TYPE bloom_filter GRANULARITY 4,
 
-    -- Skip index: ILIKE substring search
-    INDEX idx_search action TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+    -- Skip index: substring search on id column (String type, not LowCardinality)
+    INDEX idx_search id TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (created_at, id)
@@ -74,7 +74,7 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     INDEX idx_model      model_id   TYPE set(200)     GRANULARITY 2,
     INDEX idx_provider   provider   TYPE set(50)      GRANULARITY 2,
     INDEX idx_status     status_code TYPE set(50)     GRANULARITY 2,
-    INDEX idx_search     model_id   TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+    INDEX idx_search     id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (created_at, id)
@@ -82,14 +82,14 @@ TTL toDateTime(created_at) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192,
          ttl_only_drop_parts = 1;
 
--- Projection: ORDER BY cost_usd DESC (for "top cost" queries)
+-- Projection: ORDER BY cost_usd (for "top cost" queries)
 ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_cost (
-    SELECT * ORDER BY cost_usd DESC, created_at DESC
+    SELECT * ORDER BY cost_usd, created_at
 );
 
--- Projection: ORDER BY latency_ms DESC (for "slowest" queries)
+-- Projection: ORDER BY latency_ms (for "slowest" queries)
 ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_latency (
-    SELECT * ORDER BY latency_ms DESC, created_at DESC
+    SELECT * ORDER BY latency_ms, created_at
 );
 
 -- ================================================================
@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS mcp_logs (
     INDEX idx_server_id  server_id  TYPE bloom_filter GRANULARITY 4,
     INDEX idx_tool       tool_name  TYPE set(200)     GRANULARITY 2,
     INDEX idx_status     status     TYPE set(20)      GRANULARITY 2,
-    INDEX idx_search     tool_name  TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+    INDEX idx_search     id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (created_at, id)
@@ -121,9 +121,9 @@ TTL toDateTime(created_at) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192,
          ttl_only_drop_parts = 1;
 
--- Projection: ORDER BY duration_ms DESC (for "slowest tool" queries)
+-- Projection: ORDER BY duration_ms (for "slowest tool" queries)
 ALTER TABLE mcp_logs ADD PROJECTION IF NOT EXISTS proj_by_duration (
-    SELECT * ORDER BY duration_ms DESC, created_at DESC
+    SELECT * ORDER BY duration_ms, created_at
 );
 
 -- ================================================================
@@ -146,7 +146,7 @@ CREATE TABLE IF NOT EXISTS platform_logs (
     INDEX idx_action    action     TYPE set(100)     GRANULARITY 2,
     INDEX idx_resource  resource   TYPE set(100)     GRANULARITY 2,
     INDEX idx_ip        ip_address TYPE bloom_filter GRANULARITY 4,
-    INDEX idx_search    action     TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
+    INDEX idx_search    id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(created_at)
 ORDER BY (created_at, id)
