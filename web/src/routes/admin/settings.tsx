@@ -201,7 +201,6 @@ export function SettingsPage() {
   const [oidcClientSecret, setOidcClientSecret] = useState('');
   const [oidcRedirectUrl, setOidcRedirectUrl] = useState('');
   const [oidcHasSecret, setOidcHasSecret] = useState(false);
-  const [oidcSaving, setOidcSaving] = useState(false);
 
   // ---------------------------------------------------------------------------
   // Load
@@ -311,6 +310,23 @@ export function SettingsPage() {
           'data.retention_days_audit': auditRetention,
         },
       });
+
+      // OIDC settings use a dedicated endpoint because saving triggers
+      // provider re-discovery and encrypted secret handling.
+      await apiPatch('/api/admin/settings/oidc', {
+        enabled: oidcEnabled,
+        issuer_url: oidcIssuerUrl,
+        client_id: oidcClientId,
+        client_secret: oidcClientSecret || undefined,
+        redirect_url: oidcRedirectUrl,
+      });
+      setOidcClientSecret('');
+      const updatedOidc = await api<OidcConfig>('/api/admin/settings/oidc').catch(() => null);
+      if (updatedOidc) {
+        setOidcConfig(updatedOidc);
+        setOidcHasSecret(updatedOidc.has_secret ?? false);
+      }
+
       setStatusMsg({ type: 'success', text: t('settings.saved') });
     } catch (err) {
       setStatusMsg({
@@ -545,46 +561,10 @@ export function SettingsPage() {
               </CardContent>
             </Card>
 
-            {/* OIDC / SSO — editable */}
+            {/* OIDC / SSO — editable (saved together with the global Save button) */}
             <Card>
               <CardHeader>
-                <div className="flex items-center justify-between">
-                  <CardTitle className="text-base">{t('settingsPage.oidcTitle')}</CardTitle>
-                  <Button
-                    size="sm"
-                    disabled={oidcSaving}
-                    onClick={async () => {
-                      setOidcSaving(true);
-                      setStatusMsg(null);
-                      try {
-                        await apiPatch('/api/admin/settings/oidc', {
-                          enabled: oidcEnabled,
-                          issuer_url: oidcIssuerUrl,
-                          client_id: oidcClientId,
-                          client_secret: oidcClientSecret || undefined,
-                          redirect_url: oidcRedirectUrl,
-                        });
-                        setOidcClientSecret('');
-                        // Refresh OIDC status
-                        const updated = await api<OidcConfig>('/api/admin/settings/oidc').catch(() => null);
-                        if (updated) {
-                          setOidcConfig(updated);
-                          setOidcHasSecret(updated.has_secret ?? false);
-                        }
-                        setStatusMsg({ type: 'success', text: 'SSO settings saved' });
-                      } catch (err) {
-                        setStatusMsg({
-                          type: 'error',
-                          text: `SSO save failed: ${err instanceof Error ? err.message : 'Unknown error'}`,
-                        });
-                      } finally {
-                        setOidcSaving(false);
-                      }
-                    }}
-                  >
-                    {oidcSaving ? t('common.loading') : t('common.save')}
-                  </Button>
-                </div>
+                <CardTitle className="text-base">{t('settingsPage.oidcTitle')}</CardTitle>
               </CardHeader>
               <CardContent>
                 {loading ? (
