@@ -186,8 +186,6 @@ All password-setting operations (registration, setup wizard, password change, ad
 - At least one lowercase letter (a-z)
 - At least one digit (0-9)
 
-Validated by `validate_password()` in `crates/common/src/validation.rs`.
-
 ### 3.4 API Key Hashing
 
 API keys are hashed with SHA-256 before storage. This is a one-way operation; the original key cannot be derived from the hash. The raw key is returned to the user exactly once at creation time.
@@ -294,13 +292,7 @@ Audit entries are inserted into ClickHouse for SQL-based search and analytics:
 - Entries are sent asynchronously to avoid blocking request processing.
 - The console provides a search UI at `/api/audit/logs` with support for time-range filtering and SQL queries.
 
-### 5.4 ClickHouse Query Security
-
-All log query endpoints use parameterized queries with `?` placeholders bound via the ClickHouse client SDK. User input for LIKE-based searches is escaped (`%`, `_`, `\` characters) to prevent wildcard injection.
-
-Sort order fields use a whitelist-based `match` expression with a safe default fallback, preventing SQL injection through ORDER BY clauses.
-
-### 5.5 Log Forwarder / SIEM Integration
+### 5.4 Log Forwarder / SIEM Integration
 
 For enterprise environments, ThinkWatch can forward audit logs to external systems via the admin Web UI (Admin > Log Forwarders):
 

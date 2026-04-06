@@ -73,10 +73,8 @@ ThinkWatch solves all of this with a single deployment.
 - **Startup dependency validation** — verifies PostgreSQL, Redis, and encryption key availability with clear error messages before accepting traffic
 - **Security headers** — X-Content-Type-Options, X-Frame-Options, CORS whitelisting, request timeouts
 - **Soft-delete** — users, providers, and API keys use soft-delete (`deleted_at` column) with automatic purge after 30 days
-- **Password complexity enforcement** — minimum 8 characters with required uppercase, lowercase, and digit
-- **Session IP binding** — signing keys bound to client IP at login; requests from different IPs are rejected
-- **ClickHouse query parameterization** — all log queries use parameterized bindings to prevent injection
-- **LIKE wildcard escaping** — user search input escaped to prevent pattern injection in log queries
+- **Password complexity** — minimum 8 characters with required uppercase, lowercase, and digit
+- **Session IP binding** — admin sessions bound to client IP; stolen tokens cannot be replayed from a different network
 - **Distroless containers** — minimal attack surface in production (2MB runtime image, no shell)
 
 ### Operations & Configuration
@@ -85,7 +83,6 @@ ThinkWatch solves all of this with a single deployment.
 - **Configuration Guide** — built-in `/gateway/guide` page in the web console with copy-paste setup instructions for Claude Code, Cursor, Continue, Cline, OpenAI SDK, Anthropic SDK, and cURL; auto-detects the gateway URL
 - **Multi-instance sync** — configuration changes propagated across instances via Redis Pub/Sub
 - **Data retention policies** — configurable retention periods for usage records and audit logs with automatic daily purge
-- **Pre-commit CI parity** — `make precommit` runs the exact same checks as CI (cargo check, test, clippy, fmt, pnpm build)
 
 ### Observability
 - **Prometheus metrics** — `GET /metrics` endpoint on the gateway port (3000) exposing `gateway_requests_total`, `gateway_request_duration_seconds`, `gateway_tokens_total`, `gateway_rate_limited_total`, `circuit_breaker_state`, and more
@@ -95,9 +92,7 @@ ThinkWatch solves all of this with a single deployment.
 - **Usage analytics** — token consumption by user, team, model, and time period
 - **Cost analytics** — MTD spend, budget utilization, per-model cost breakdown
 - **Health dashboard** — real-time status of PostgreSQL, Redis, ClickHouse, and all MCP servers
-- **Unified log explorer** — query all log types (platform, audit, gateway, MCP, access, app) from a single page with structured search syntax
-- **HTTP access logs** — every request to both gateway and console ports logged to ClickHouse with method, path, status, latency, and client IP
-- **Application tracing logs** — Rust tracing spans captured and stored in ClickHouse for runtime debugging
+- **Unified log explorer** — search across audit, gateway, MCP, access, and platform logs from a single page with structured query syntax
 
 ## Tech Stack
 
