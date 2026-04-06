@@ -84,6 +84,7 @@
     "register": "注册",
     "registering": "注册中...",
     "passwordTooShort": "密码至少需要 8 个字符",
+    "passwordComplexity": "密码必须包含至少一个大写字母、一个小写字母和一个数字",
     "totp": "双因素认证",
     "totpDescription": "通过 TOTP 双因素认证为账号添加额外的安全保护。",
     "totpRequiredNotice": "管理员要求启用双因素认证，请立即开启。",
@@ -663,7 +664,9 @@
       "password": "密码",
       "confirmPassword": "确认密码",
       "passwordMismatch": "两次密码不一致",
-      "passwordTooShort": "密码至少 8 个字符"
+      "passwordTooShort": "密码至少 8 个字符",
+      "passwordComplexity": "密码必须包含至少一个大写字母、一个小写字母和一个数字",
+      "passwordHint": "至少 8 个字符，包含大写字母、小写字母和数字。"
     },
     "settings": {
       "title": "站点设置",

@@ -108,6 +108,10 @@ export function ProfilePage() {
       setPwError(t('auth.passwordTooShort'));
       return;
     }
+    if (!/[A-Z]/.test(newPassword) || !/[a-z]/.test(newPassword) || !/\d/.test(newPassword)) {
+      setPwError(t('auth.passwordComplexity'));
+      return;
+    }
 
     setPwLoading(true);
     try {
