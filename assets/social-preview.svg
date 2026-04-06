@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" fill="none">
+  <!-- gradient background -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0B1220"/>
+      <stop offset="100%" stop-color="#1E2A4A"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#3DDBD9" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#3DDBD9" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="1280" height="640" fill="url(#bg)"/>
+
+  <!-- soft glow behind icon -->
+  <circle cx="320" cy="320" r="240" fill="url(#glow)"/>
+
+  <!-- icon block, scaled up -->
+  <g transform="translate(160 160) scale(1.6)">
+    <rect width="200" height="200" rx="40" fill="#1E2A4A"/>
+    <rect x="32" y="32" width="136" height="136" rx="28"
+          fill="none" stroke="#3DDBD9" stroke-width="10"/>
+    <line x1="62" y1="68" x2="138" y2="68"
+          stroke="#3DDBD9" stroke-width="12" stroke-linecap="round"/>
+    <line x1="100" y1="68" x2="100" y2="104"
+          stroke="#3DDBD9" stroke-width="12" stroke-linecap="round"/>
+    <polyline points="62,104 80,140 100,104"
+              fill="none" stroke="#3DDBD9" stroke-width="12"
+              stroke-linecap="round" stroke-linejoin="round"/>
+    <polyline points="100,104 120,140 138,104"
+              fill="none" stroke="#3DDBD9" stroke-width="12"
+              stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- wordmark + tagline -->
+  <text x="560" y="290"
+        font-family="Geist, 'Inter Display', Inter, system-ui, -apple-system, sans-serif"
+        font-size="108"
+        letter-spacing="-3"
+        fill="#F8FAFC">
+    <tspan font-weight="500">Think</tspan><tspan font-weight="700">Watch</tspan>
+  </text>
+  <text x="560" y="370"
+        font-family="Geist, 'Inter Display', Inter, system-ui, -apple-system, sans-serif"
+        font-size="36"
+        font-weight="500"
+        letter-spacing="-0.5"
+        fill="#3DDBD9">
+    The enterprise-grade secure gateway for AI
+  </text>
+  <text x="560" y="430"
+        font-family="Geist, 'Inter Display', Inter, system-ui, -apple-system, sans-serif"
+        font-size="26"
+        font-weight="400"
+        fill="#94A3B8">
+    Secure · Audit · Govern every AI API call and MCP tool invocation
+  </text>
+
+  <!-- bottom badges -->
+  <g transform="translate(560 490)">
+    <rect width="138" height="40" rx="8" fill="#1E2A4A" stroke="#3DDBD9" stroke-width="1"/>
+    <text x="69" y="26" font-family="Geist, sans-serif" font-size="16" font-weight="600"
+          text-anchor="middle" fill="#3DDBD9">AI API Gateway</text>
+
+    <rect x="154" width="138" height="40" rx="8" fill="#1E2A4A" stroke="#3DDBD9" stroke-width="1"/>
+    <text x="223" y="26" font-family="Geist, sans-serif" font-size="16" font-weight="600"
+          text-anchor="middle" fill="#3DDBD9">MCP Gateway</text>
+
+    <rect x="308" width="138" height="40" rx="8" fill="#1E2A4A" stroke="#3DDBD9" stroke-width="1"/>
+    <text x="377" y="26" font-family="Geist, sans-serif" font-size="16" font-weight="600"
+          text-anchor="middle" fill="#3DDBD9">Audit &amp; RBAC</text>
+  </g>
+</svg>

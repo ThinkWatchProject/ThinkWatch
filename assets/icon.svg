@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200" fill="none">
+  <!-- background -->
+  <rect width="200" height="200" rx="40" fill="#1E2A4A"/>
+
+  <!-- shield outline (audit boundary) -->
+  <rect x="32" y="32" width="136" height="136" rx="28"
+        fill="none" stroke="#3DDBD9" stroke-width="10"/>
+
+  <!-- T — horizontal bar -->
+  <line x1="62" y1="68" x2="138" y2="68"
+        stroke="#3DDBD9" stroke-width="12" stroke-linecap="round"/>
+  <!-- T — central stem -->
+  <line x1="100" y1="68" x2="100" y2="104"
+        stroke="#3DDBD9" stroke-width="12" stroke-linecap="round"/>
+
+  <!-- W — left V -->
+  <polyline points="62,104 80,140 100,104"
+            fill="none" stroke="#3DDBD9" stroke-width="12"
+            stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- W — right V -->
+  <polyline points="100,104 120,140 138,104"
+            fill="none" stroke="#3DDBD9" stroke-width="12"
+            stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
