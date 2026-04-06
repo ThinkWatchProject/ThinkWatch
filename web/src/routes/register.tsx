@@ -32,6 +32,10 @@ export function RegisterPage({ onRegistered }: RegisterPageProps) {
       setError(t('auth.passwordTooShort'));
       return;
     }
+    if (!/[A-Z]/.test(password) || !/[a-z]/.test(password) || !/\d/.test(password)) {
+      setError(t('auth.passwordComplexity'));
+      return;
+    }
     setLoading(true);
     try {
       await apiPost('/api/auth/register', { email, display_name: displayName, password });

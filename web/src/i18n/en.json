@@ -84,6 +84,7 @@
     "register": "Register",
     "registering": "Registering...",
     "passwordTooShort": "Password must be at least 8 characters",
+    "passwordComplexity": "Password must contain at least one uppercase letter, one lowercase letter, and one digit",
     "totp": "Two-Factor Authentication",
     "totpDescription": "Add an extra layer of security with TOTP-based two-factor authentication.",
     "totpRequiredNotice": "Your administrator requires two-factor authentication. Please enable it now.",
@@ -663,7 +664,9 @@
       "password": "Password",
       "confirmPassword": "Confirm Password",
       "passwordMismatch": "Passwords do not match",
-      "passwordTooShort": "Password must be at least 8 characters"
+      "passwordTooShort": "Password must be at least 8 characters",
+      "passwordComplexity": "Password must contain at least one uppercase letter, one lowercase letter, and one digit",
+      "passwordHint": "At least 8 characters with one uppercase letter, one lowercase letter, and one digit."
     },
     "settings": {
       "title": "Site Settings",

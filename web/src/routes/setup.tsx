@@ -119,7 +119,15 @@ export function SetupPage() {
     const errors: Record<string, string> = {};
     if (!email.trim()) errors.email = 'Required';
     if (!displayName.trim()) errors.displayName = 'Required';
-    if (password.length < 8) errors.password = t('setup.admin.passwordTooShort');
+    if (password.length < 8) {
+      errors.password = t('setup.admin.passwordTooShort');
+    } else if (
+      !/[A-Z]/.test(password) ||
+      !/[a-z]/.test(password) ||
+      !/\d/.test(password)
+    ) {
+      errors.password = t('setup.admin.passwordComplexity');
+    }
     if (password !== confirmPassword) errors.confirmPassword = t('setup.admin.passwordMismatch');
     setAdminErrors(errors);
     return Object.keys(errors).length === 0;
@@ -282,6 +290,9 @@ export function SetupPage() {
             onChange={(e) => setPassword(e.target.value)}
             required
           />
+          <p className="text-xs text-muted-foreground">
+            {t('setup.admin.passwordHint')}
+          </p>
           {adminErrors.password && (
             <p className="text-xs text-destructive">{adminErrors.password}</p>
           )}
