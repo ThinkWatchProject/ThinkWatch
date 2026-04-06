@@ -961,7 +961,7 @@ export function SettingsPage() {
                           {t('settingsPage.logForwardingHint')}
                         </p>
                       </div>
-                      <a href="/admin/log-forwarders" className="text-sm text-primary hover:underline">
+                      <a href="/logs/forwarders" className="text-sm text-primary hover:underline">
                         {t('settingsPage.manage')}
                       </a>
                     </div>
