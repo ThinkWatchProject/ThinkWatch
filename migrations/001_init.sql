@@ -410,3 +410,10 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 INSERT INTO system_settings (key, value, category, description) VALUES
 ('setup.initialized', 'false',         'setup', 'Whether initial setup has been completed'),
 ('setup.site_name',   '"ThinkWatch"', 'setup', 'Site display name');
+
+-- General — gateway public URL (used in the configuration guide)
+-- Empty/zero values mean "auto-detect from the user's browser request".
+INSERT INTO system_settings (key, value, category, description) VALUES
+('general.public_protocol', '""', 'general', 'Public gateway protocol: "http", "https", or empty for auto-detect from browser'),
+('general.public_host',     '""', 'general', 'Public gateway host (empty = auto-detect from browser)'),
+('general.public_port',     '0',  'general', 'Public gateway port (0 = use the gateway listening port)');

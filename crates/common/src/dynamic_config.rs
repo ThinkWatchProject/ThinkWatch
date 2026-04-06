@@ -469,6 +469,36 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
             }
         }
 
+        // General — public gateway URL components (used by configuration guide)
+        "general.public_protocol" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
+            if !s.is_empty() && s != "http" && s != "https" {
+                anyhow::bail!("{key}: must be \"http\", \"https\", or empty for auto-detect");
+            }
+        }
+        "general.public_host" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
+            if s.len() > 253 {
+                anyhow::bail!("{key}: host too long");
+            }
+            // Reject schemes / paths — host is just a hostname or IP
+            if s.contains("://") || s.contains('/') {
+                anyhow::bail!("{key}: must be a hostname only (no scheme or path)");
+            }
+        }
+        "general.public_port" => {
+            let n = value
+                .as_i64()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected an integer"))?;
+            if !(0..=65535).contains(&n) {
+                anyhow::bail!("{key}: must be between 0 and 65535 (0 = auto)");
+            }
+        }
+
         // String settings — basic non-empty check for critical ones
         "setup.site_name" => {
             let s = value

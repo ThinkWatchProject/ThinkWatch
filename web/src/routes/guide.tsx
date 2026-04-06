@@ -1,5 +1,6 @@
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { api } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -24,11 +25,35 @@ import {
 // Helpers
 // ---------------------------------------------------------------------------
 
+interface PublicGatewayConfig {
+  gateway_port: number;
+  public_protocol: string;
+  public_host: string;
+  public_port: number;
+}
+
 function useGatewayUrl(): string {
-  return useMemo(() => {
-    const { protocol, hostname } = window.location;
-    return `${protocol}//${hostname}:3000`;
+  const [config, setConfig] = useState<PublicGatewayConfig | null>(null);
+
+  useEffect(() => {
+    api<PublicGatewayConfig>('/api/admin/settings/system')
+      .then(setConfig)
+      .catch((e) => console.error('Failed to load gateway public config:', e));
   }, []);
+
+  return useMemo(() => {
+    const browserProto = window.location.protocol.replace(':', '');
+    const browserHost = window.location.hostname;
+    const protocol = config?.public_protocol || browserProto || 'http';
+    const host = config?.public_host || browserHost || 'localhost';
+    const port = config?.public_port && config.public_port > 0
+      ? config.public_port
+      : config?.gateway_port || 3000;
+    // Omit the port suffix for the standard port of the chosen protocol
+    const isStandardPort =
+      (protocol === 'http' && port === 80) || (protocol === 'https' && port === 443);
+    return isStandardPort ? `${protocol}://${host}` : `${protocol}://${host}:${port}`;
+  }, [config]);
 }
 
 function CopyButton({ text }: { text: string }) {

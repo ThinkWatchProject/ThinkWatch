@@ -409,6 +409,12 @@ pub struct SystemInfo {
     pub server_host: String,
     pub gateway_port: u16,
     pub console_port: u16,
+    /// Configured public protocol ("", "http", or "https"). Empty means auto-detect.
+    pub public_protocol: String,
+    /// Configured public host. Empty means auto-detect from browser.
+    pub public_host: String,
+    /// Configured public port. 0 means use the gateway listening port.
+    pub public_port: i64,
 }
 
 fn format_uptime(dur: chrono::TimeDelta) -> String {
@@ -430,6 +436,7 @@ pub async fn get_system_settings(
     State(state): State<AppState>,
 ) -> Json<SystemInfo> {
     let uptime = chrono::Utc::now() - state.started_at;
+    let dc = &state.dynamic_config;
     Json(SystemInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime: format_uptime(uptime),
@@ -437,6 +444,15 @@ pub async fn get_system_settings(
         server_host: state.config.server_host.clone(),
         gateway_port: state.config.gateway_port,
         console_port: state.config.console_port,
+        public_protocol: dc
+            .get_string("general.public_protocol")
+            .await
+            .unwrap_or_default(),
+        public_host: dc
+            .get_string("general.public_host")
+            .await
+            .unwrap_or_default(),
+        public_port: dc.get_i64("general.public_port").await.unwrap_or(0),
     })
 }
 
@@ -830,6 +846,41 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             if !(1..=20).contains(&v) {
                 return Err(AppError::BadRequest(
                     "client_ip_xff_depth must be between 1 and 20".into(),
+                ));
+            }
+        }
+
+        // General — public gateway URL components
+        "general.public_protocol" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
+            if !s.is_empty() && s != "http" && s != "https" {
+                return Err(AppError::BadRequest(
+                    "public_protocol must be \"http\", \"https\", or empty".into(),
+                ));
+            }
+        }
+        "general.public_host" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
+            if s.len() > 253 {
+                return Err(AppError::BadRequest("public_host too long".into()));
+            }
+            if s.contains("://") || s.contains('/') {
+                return Err(AppError::BadRequest(
+                    "public_host must be a hostname only (no scheme or path)".into(),
+                ));
+            }
+        }
+        "general.public_port" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            if !(0..=65535).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "public_port must be between 0 and 65535".into(),
                 ));
             }
         }

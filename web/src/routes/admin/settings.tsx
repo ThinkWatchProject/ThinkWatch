@@ -38,6 +38,9 @@ interface SystemInfo {
   server_host: string;
   gateway_port: number;
   console_port: number;
+  public_protocol: string;
+  public_host: string;
+  public_port: number;
 }
 
 interface OidcConfig {
@@ -161,6 +164,9 @@ export function SettingsPage() {
   // --- Editable form state ---
   // General
   const [siteName, setSiteName] = useState('');
+  const [publicProtocol, setPublicProtocol] = useState('');
+  const [publicHost, setPublicHost] = useState('');
+  const [publicPort, setPublicPort] = useState(0);
   // Auth
   const [accessTtl, setAccessTtl] = useState(3600);
   const [refreshTtl, setRefreshTtl] = useState(7);
@@ -203,6 +209,9 @@ export function SettingsPage() {
 
   const populateForm = useCallback((data: Record<string, SettingEntry[]>) => {
     setSiteName(str(getSettingValue(data, 'setup', 'site_name'), ''));
+    setPublicProtocol(str(getSettingValue(data, 'general', 'public_protocol'), ''));
+    setPublicHost(str(getSettingValue(data, 'general', 'public_host'), ''));
+    setPublicPort(num(getSettingValue(data, 'general', 'public_port'), 0));
     setAccessTtl(num(getSettingValue(data, 'auth', 'jwt_access_ttl_secs'), 900));
     setRefreshTtl(num(getSettingValue(data, 'auth', 'jwt_refresh_ttl_days'), 7));
     setSignatureDrift(num(getSettingValue(data, 'security', 'signature_drift_secs'), 300));
@@ -276,6 +285,9 @@ export function SettingsPage() {
       await apiPatch('/api/admin/settings', {
         settings: {
           'setup.site_name': siteName,
+          'general.public_protocol': publicProtocol,
+          'general.public_host': publicHost,
+          'general.public_port': publicPort,
           'auth.jwt_access_ttl_secs': accessTtl,
           'auth.jwt_refresh_ttl_days': refreshTtl,
           'security.signature_drift_secs': signatureDrift,
@@ -450,6 +462,55 @@ export function SettingsPage() {
                     onChange={(e) => setSiteName(e.target.value)}
                     placeholder="ThinkWatch"
                   />
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Public Gateway URL — editable */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t('settings.publicGatewayUrl')}</CardTitle>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {t('settings.publicGatewayUrlHint')}
+                </p>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-4 sm:grid-cols-3">
+                  <div>
+                    <Label className="text-sm">{t('settings.publicProtocol')}</Label>
+                    <Select value={publicProtocol || 'auto'} onValueChange={(v) => setPublicProtocol(v === 'auto' ? '' : v)}>
+                      <SelectTrigger className="mt-1">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="auto">{t('settings.auto')}</SelectItem>
+                        <SelectItem value="http">http</SelectItem>
+                        <SelectItem value="https">https</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label className="text-sm">{t('settings.publicHost')}</Label>
+                    <Input
+                      className="mt-1"
+                      value={publicHost}
+                      onChange={(e) => setPublicHost(e.target.value)}
+                      placeholder={t('settings.publicHostPlaceholder')}
+                    />
+                  </div>
+                  <div>
+                    <Label className="text-sm">{t('settings.publicPort')}</Label>
+                    <Input
+                      className="mt-1"
+                      type="number"
+                      min={0}
+                      max={65535}
+                      value={publicPort}
+                      onChange={(e) => setPublicPort(Number(e.target.value) || 0)}
+                      placeholder="0"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">{t('settings.publicPortHint')}</p>
+                  </div>
                 </div>
               </CardContent>
             </Card>
