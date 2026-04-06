@@ -176,7 +176,6 @@ claude`;
         ]}
       />
       <CodeBlock code={code} />
-      <InfoBox>{t('guide.claudeCodeEndpointNote')}</InfoBox>
     </div>
   );
 }

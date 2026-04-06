@@ -537,7 +537,6 @@
       "toolsAppear": "MCP tools will appear automatically in Cline's tool list"
     },
     "claudeCodeDesc": "Claude Code connects using the Anthropic native format. Set environment variables to route all requests through ThinkWatch.",
-    "claudeCodeEndpointNote": "Endpoint: /v1/messages (Anthropic native format). ThinkWatch translates internally and supports all Claude models.",
     "cursorDesc": "Cursor uses the OpenAI-compatible API format. Configure it in the editor settings.",
     "cursorEndpointNote": "Endpoint: /v1/chat/completions (OpenAI-compatible). Supports all models routed through ThinkWatch.",
     "continueDesc": "Continue connects as an OpenAI-compatible provider. Edit the config file to point at ThinkWatch.",
