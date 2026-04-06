@@ -525,7 +525,7 @@
     "mcpStep": {
       "openConfig": "Open the Claude Desktop configuration file",
       "addServer": "Add an mcpServers entry for ThinkWatch",
-      "setApiKey": "Set the Authorization header with your ab- prefixed API key",
+      "setApiKey": "Set the Authorization header with your tw- prefixed API key",
       "restartApp": "Restart the application to load the new MCP server",
       "runAdd": "Run claude mcp add with the Streamable HTTP transport",
       "verifyList": "Verify with claude mcp list that the server is registered",
@@ -549,7 +549,7 @@
     "endpoint": "Endpoint",
     "note": "Note",
     "aiStep": {
-      "createKey": "Create an API key in AI Gateway > API Keys (it starts with ab-)",
+      "createKey": "Create an API key in AI Gateway > API Keys (it starts with tw-)",
       "claudeCodeBaseUrl": "Set ANTHROPIC_BASE_URL to your ThinkWatch gateway URL",
       "claudeCodeApiKey": "Set ANTHROPIC_API_KEY to the key you just created",
       "claudeCodeRun": "Run claude as usual — all requests are proxied through the gateway",

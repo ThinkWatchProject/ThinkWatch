@@ -51,7 +51,7 @@ API keys provide long-lived authentication for programmatic access to the gatewa
 
 | Property        | Detail                                           |
 | --------------- | ------------------------------------------------ |
-| Format          | Prefixed with `ab-` (e.g. `ab-sk-a1b2c3d4...`)  |
+| Format          | Prefixed with `tw-` (e.g. `tw-sk-a1b2c3d4...`)  |
 | Storage         | SHA-256 hash stored in PostgreSQL                |
 | Validation      | Middleware hashes the incoming key and looks it up (filters `deleted_at IS NULL`) |
 | Scoping         | Optional `allowed_models` restriction            |
@@ -89,7 +89,7 @@ ThinkWatch supports OpenID Connect for single sign-on with enterprise identity p
 
 The gateway middleware attempts authentication in the following order:
 
-1. If the `Authorization` header contains a token starting with `ab-`, validate it as an API key.
+1. If the `Authorization` header contains a token starting with `tw-`, validate it as an API key.
 2. Otherwise, validate it as a JWT Bearer token.
 
 This allows both programmatic clients (API keys) and browser-based/console users (JWT) to access the gateway seamlessly.

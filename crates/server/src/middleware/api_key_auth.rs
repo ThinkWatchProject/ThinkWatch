@@ -10,7 +10,7 @@ use think_watch_gateway::proxy::GatewayRequestIdentity;
 
 use crate::app::AppState;
 
-/// Authenticated identity for gateway requests (via `ab-` API key).
+/// Authenticated identity for gateway requests (via `tw-` API key).
 /// Inserted into request extensions for use by downstream middleware/handlers.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
@@ -23,7 +23,8 @@ pub struct GatewayIdentity {
     pub rate_limit_tpm: Option<i32>,
 }
 
-/// Middleware that authenticates requests via `ab-` prefixed API keys
+/// Middleware that authenticates requests via `tw-` prefixed API keys
+/// (legacy `ab-` prefix is also accepted for backward compatibility)
 /// OR falls back to JWT Bearer tokens (for admin/testing convenience).
 pub async fn require_api_key_or_jwt(
     State(state): State<AppState>,
@@ -40,8 +41,8 @@ pub async fn require_api_key_or_jwt(
         .strip_prefix("Bearer ")
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // Check if this is an ab- API key
-    if token.starts_with("ab-") {
+    // Check if this is a ThinkWatch API key (tw- or legacy ab- prefix)
+    if api_key::is_api_key(token) {
         let key_hash = api_key::hash_api_key(token);
 
         // Query active keys OR keys within their rotation grace period

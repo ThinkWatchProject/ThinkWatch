@@ -686,7 +686,7 @@ The gateway (port 3000) serves three API formats on a single port:
 | `POST /v1/responses`        | OpenAI Responses API    | OpenAI SDK (2025 format)                     |
 | `GET /v1/models`            | OpenAI Models list      | All clients                                  |
 
-All endpoints accept `ab-` API keys via the `Authorization: Bearer` header.
+All endpoints accept `tw-` API keys via the `Authorization: Bearer` header.
 
 ---
 

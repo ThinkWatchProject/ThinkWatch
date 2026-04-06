@@ -27,7 +27,7 @@ The JWT secret (`JWT_SECRET`) is used to sign and verify access/refresh tokens.
 ### Impact
 - All active sessions are terminated
 - API consumers using JWT tokens must re-authenticate
-- API keys (Bearer `ab-*`) are **not affected** (they use hash-based auth)
+- API keys (Bearer `tw-*`) are **not affected** (they use hash-based auth)
 
 ---
 
@@ -90,9 +90,9 @@ curl -X POST /api/keys/{key_id}/rotate \
 # Response includes the new plaintext key
 {
   "id": "new-key-uuid",
-  "key": "ab-...",
+  "key": "tw-...",
   "name": "My Key (rotated)",
-  "key_prefix": "ab-..."
+  "key_prefix": "tw-..."
 }
 ```
 

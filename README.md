@@ -48,7 +48,7 @@ ThinkWatch solves all of this with a single deployment.
 - **Automatic format conversion** — Anthropic Messages API, Google Gemini, Azure OpenAI, AWS Bedrock Converse API, and more, all behind a unified interface
 - **Provider auto-loading** — active providers are loaded from the database at startup and registered in the model router; default model prefixes (`gpt-`/`o1-`/`o3-`/`o4-` for OpenAI, `claude-` for Anthropic, `gemini-` for Google) route automatically; Azure and Bedrock require explicit model registration
 - **Streaming SSE pass-through** — zero-overhead forwarding with real-time token counting
-- **Virtual API keys** — issue scoped `ab-` keys per team, per project, per developer; revoke in one click
+- **Virtual API keys** — issue scoped `tw-` keys per team, per project, per developer; revoke in one click
 - **API key lifecycle management** — automatic rotation with grace periods, per-key inactivity timeout, expiry warnings, and background policy enforcement
 - **Sliding-window rate limiting** — RPM and TPM limits via Redis, per key or per user
 - **Circuit breaker** — three-state (Closed/Open/HalfOpen) circuit breaker with configurable failure threshold and recovery period

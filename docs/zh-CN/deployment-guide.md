@@ -686,7 +686,7 @@ ThinkWatch 在 Web 控制台中内置了**配置指南**页面，位于 `/gatewa
 | `POST /v1/responses`        | OpenAI Responses API    | OpenAI SDK（2025 格式）                      |
 | `GET /v1/models`            | OpenAI Models 列表      | 所有客户端                                   |
 
-所有端点通过 `Authorization: Bearer` 请求头接受 `ab-` API 密钥。
+所有端点通过 `Authorization: Bearer` 请求头接受 `tw-` API 密钥。
 
 ---
 

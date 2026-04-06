@@ -15,7 +15,7 @@
 
 | 方案     | 请求头                          | 使用者             |
 | -------- | ------------------------------- | ------------------ |
-| API Key  | `Authorization: Bearer ab-...`  | Gateway 和 Console |
+| API Key  | `Authorization: Bearer tw-...`  | Gateway 和 Console |
 | JWT      | `Authorization: Bearer <token>` | Console 和 Gateway |
 | 公开     | _（无）_                        | 健康检查端点       |
 
@@ -120,7 +120,7 @@ data: [DONE]
 ```bash
 # Non-streaming
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o",
@@ -129,7 +129,7 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 # Streaming
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -N \
   -d '{
@@ -187,7 +187,7 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 ```bash
 curl http://localhost:3000/v1/models \
-  -H "Authorization: Bearer ab-your-api-key"
+  -H "Authorization: Bearer tw-your-api-key"
 ```
 
 #### 错误响应
@@ -272,7 +272,7 @@ data: {"type":"message_stop"}
 
 ```bash
 curl -X POST http://localhost:3000/v1/messages \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
@@ -367,7 +367,7 @@ OpenAI Responses API 端点（2025 格式）。接受 OpenAI Responses 格式的
 
 ```bash
 curl -X POST http://localhost:3000/v1/responses \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o",
@@ -448,7 +448,7 @@ MCP（Model Context Protocol）Streamable HTTP 传输端点。接受 JSON-RPC 2.
 ```bash
 # Initialize session
 curl -X POST http://localhost:3000/mcp \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -463,7 +463,7 @@ curl -X POST http://localhost:3000/mcp \
 
 # Call a tool (include session ID from initialize response)
 curl -X POST http://localhost:3000/mcp \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -H "Mcp-Session-Id: session-uuid-here" \
   -d '{
@@ -507,7 +507,7 @@ HTTP/1.1 204 No Content
 
 ```bash
 curl -X DELETE http://localhost:3000/mcp \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Mcp-Session-Id: session-uuid-here"
 ```
 
@@ -1012,7 +1012,7 @@ curl http://localhost:3001/api/auth/me \
   {
     "id": "uuid",
     "name": "Production Key",
-    "prefix": "ab-prod",
+    "prefix": "tw-prod",
     "allowed_models": ["gpt-4o", "claude-sonnet-4-20250514"],
     "rate_limit_rpm": 60,
     "expires_at": "2026-06-01T00:00:00Z",
@@ -1063,7 +1063,7 @@ curl http://localhost:3001/api/keys \
 {
   "id": "uuid",
   "name": "Production Key",
-  "key": "ab-sk-a1b2c3d4e5f6...",
+  "key": "tw-sk-a1b2c3d4e5f6...",
   "allowed_models": ["gpt-4o"],
   "rate_limit_rpm": 60,
   "expires_at": "2026-06-01T00:00:00Z",
@@ -1114,7 +1114,7 @@ curl -X POST http://localhost:3001/api/keys \
 {
   "id": "uuid",
   "name": "Production Key",
-  "prefix": "ab-prod",
+  "prefix": "tw-prod",
   "allowed_models": ["gpt-4o"],
   "rate_limit_rpm": 60,
   "expires_at": "2026-06-01T00:00:00Z",
@@ -1204,7 +1204,7 @@ curl -X DELETE http://localhost:3001/api/keys/550e8400-e29b-41d4-a716-4466554400
 {
   "id": "uuid",
   "name": "Production Key",
-  "prefix": "ab-prod",
+  "prefix": "tw-prod",
   "allowed_models": ["gpt-4o", "claude-sonnet-4-20250514"],
   "rate_limit_rpm": 120,
   "expires_at": "2026-08-01T00:00:00Z",
@@ -1254,7 +1254,7 @@ curl -X PATCH http://localhost:3001/api/keys/550e8400-e29b-41d4-a716-44665544000
 {
   "id": "uuid",
   "name": "Production Key",
-  "key": "ab-sk-newkey123456...",
+  "key": "tw-sk-newkey123456...",
   "grace_period_ends_at": "2026-04-02T10:00:00Z",
   "rotated_at": "2026-04-01T10:00:00Z"
 }
@@ -1297,7 +1297,7 @@ curl -X POST http://localhost:3001/api/keys/550e8400-e29b-41d4-a716-446655440000
   {
     "id": "uuid",
     "name": "Production Key",
-    "prefix": "ab-prod",
+    "prefix": "tw-prod",
     "expires_at": "2026-04-07T00:00:00Z",
     "days_remaining": 5,
     "owner_email": "user@example.com"

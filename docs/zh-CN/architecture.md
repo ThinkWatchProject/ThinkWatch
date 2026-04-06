@@ -26,7 +26,7 @@ ThinkWatch 是一个使用 Rust 构建的企业级 AI API 网关和 MCP（Model 
             |  (MCP client)  |  | (OpenAI-compat)|  | (API / MCP)    |
             +-------+--------+  +-------+--------+  +-------+--------+
                     |                    |                    |
-                    |   ab-xxx API key   |   JWT / API key   |
+                    |   tw-xxx API key   |   JWT / API key   |
                     +--------------------+--------------------+
                                          |
                               +----------+-----------+
@@ -115,11 +115,11 @@ ThinkWatch 在单个进程中绑定两个独立的 TCP 监听器：
 Client                Gateway :3000                        Upstream Provider
   |                        |                                      |
   |  POST /v1/chat/completions                                    |
-  |  Authorization: Bearer ab-xxxx                                |
+  |  Authorization: Bearer tw-xxxx                                |
   |----------------------->|                                      |
   |                        |                                      |
   |               1. API Key Auth Middleware                       |
-  |                  - Extract key prefix (ab-xxxx)               |
+  |                  - Extract key prefix (tw-xxxx)               |
   |                  - Hash key, lookup in PostgreSQL              |
   |                  - Validate: active, not expired, budget ok    |
   |                  - Attach user_id, team_id, scopes to request |
@@ -174,7 +174,7 @@ Client                Gateway :3000                        Upstream Provider
 
 - **流式优先：** 代理使用 `eventsource-stream` 和 `async-stream` 以最小缓冲实时转发 SSE 数据块。对于 AWS Bedrock，使用原生二进制 event-stream 解码。Token 计数在流完成后进行。
 - **提供商 API 密钥静态加密存储**，使用 AES-256-GCM。`ENCRYPTION_KEY` 环境变量提供 256 位密钥。对于 AWS Bedrock，凭证（`ACCESS_KEY_ID:SECRET_ACCESS_KEY`）使用相同方案加密，并通过官方 `aws-sigv4` crate 用于 SigV4 请求签名。
-- **多格式支持：** 网关接受三种 API 格式：OpenAI Chat Completions（`/v1/chat/completions`）、Anthropic Messages（`/v1/messages`）和 OpenAI Responses（`/v1/responses`）。无论入站格式如何，请求都会通过相同的模型路由器路由并转换为上游提供商的原生格式。这意味着单个 `ab-` API 密钥可以与任何客户端工具配合使用。
+- **多格式支持：** 网关接受三种 API 格式：OpenAI Chat Completions（`/v1/chat/completions`）、Anthropic Messages（`/v1/messages`）和 OpenAI Responses（`/v1/responses`）。无论入站格式如何，请求都会通过相同的模型路由器路由并转换为上游提供商的原生格式。这意味着单个 `tw-` API 密钥可以与任何客户端工具配合使用。
 
 ---
 
@@ -187,7 +187,7 @@ MCP Client              MCP Gateway :3000/mcp            Upstream MCP Server
   |                           |                                  |
   |  POST /mcp                |                                  |
   |  Authorization: Bearer <JWT>                                 |
-  |  (or ab-xxx API key)      |                                  |
+  |  (or tw-xxx API key)      |                                  |
   |-------------------------->|                                  |
   |                           |                                  |
   |               1. Authentication                              |
@@ -272,7 +272,7 @@ crates/
   - `health.rs` —— 健康检查端点（`/health/live`、`/health/ready`、`/api/health`）
   - `metrics.rs` —— Prometheus 指标端点（`GET /metrics`）
 - **`middleware/`** —— Axum 中间件层：
-  - `api_key_auth.rs` —— 为网关路由提取和验证 `ab-` API 密钥
+  - `api_key_auth.rs` —— 为网关路由提取和验证 `tw-` API 密钥
   - `auth_guard.rs` —— 为控制台路由验证 JWT 令牌
   - `require_role.rs` —— RBAC 强制执行中间件
 
@@ -316,7 +316,7 @@ MCP 代理引擎。包含：
 认证与授权库。包含：
 
 - **`jwt.rs`** —— 使用 `jsonwebtoken` 进行 JWT 令牌创建和验证。
-- **`api_key.rs`** —— API 密钥生成（`ab-` 前缀）、哈希和验证。
+- **`api_key.rs`** —— API 密钥生成（`tw-` 前缀）、哈希和验证。
 - **`password.rs`** —— 使用 Argon2 进行密码哈希和验证。
 - **`oidc.rs`** —— 用于与 Zitadel 或任何 OIDC 提供商进行 SSO 的 OpenID Connect 客户端。处理授权 URL 生成、回调处理和用户配置。
 - **`rbac.rs`** —— 基于角色的访问控制：权限加载、角色层级和授权检查。
@@ -384,7 +384,7 @@ ThinkWatch 在 ClickHouse 中存储六种类型的日志，每种使用独立的
 
 | 表         | 用途 |
 |------------|------|
-| `api_keys` | 颁发给用户或团队的虚拟 API 密钥（`ab-` 前缀）。每个密钥存储：哈希密钥、允许的模型、速率限制（RPM/TPM）、月度预算、过期时间和权限范围。|
+| `api_keys` | 颁发给用户或团队的虚拟 API 密钥（`tw-` 前缀）。每个密钥存储：哈希密钥、允许的模型、速率限制（RPM/TPM）、月度预算、过期时间和权限范围。|
 
 ### 005_init_providers —— AI 提供商配置
 

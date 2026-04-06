@@ -74,7 +74,7 @@ describe('SetupPage', () => {
       json: () => Promise.resolve({
         admin_id: '123',
         admin_email: 'admin@test.com',
-        api_key: 'ab-test-key-123',
+        api_key: 'tw-test-key-123',
         message: 'Setup complete',
       }),
     })
@@ -114,7 +114,7 @@ describe('SetupPage', () => {
       json: () => Promise.resolve({
         admin_id: '123',
         admin_email: 'admin@test.com',
-        api_key: 'ab-test-key-xyz789',
+        api_key: 'tw-test-key-xyz789',
         message: 'Setup complete',
       }),
     })
@@ -141,6 +141,6 @@ describe('SetupPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Setup Complete!')).toBeInTheDocument()
     })
-    expect(screen.getByDisplayValue('ab-test-key-xyz789')).toBeInTheDocument()
+    expect(screen.getByDisplayValue('tw-test-key-xyz789')).toBeInTheDocument()
   })
 })

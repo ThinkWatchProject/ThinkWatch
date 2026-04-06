@@ -48,7 +48,7 @@ ThinkWatch 一次部署，全部解决。
 - **自动格式转换** — Anthropic Messages API、Google Gemini、Azure OpenAI、AWS Bedrock Converse API 等，统一在同一接口之后
 - **Provider 自动加载** — 启动时从数据库加载所有活跃 Provider 并注册到模型路由器；默认模型前缀（`gpt-`/`o1-`/`o3-`/`o4-` 对应 OpenAI，`claude-` 对应 Anthropic，`gemini-` 对应 Google）自动路由；Azure 和 Bedrock 需要显式注册模型
 - **SSE 流式透传** — 零开销转发，实时 Token 计数
-- **虚拟 API Key** — 按团队、项目、开发者签发 `ab-` 前缀的作用域密钥，一键吊销
+- **虚拟 API Key** — 按团队、项目、开发者签发 `tw-` 前缀的作用域密钥，一键吊销
 - **API Key 生命周期管理** — 自动轮换并支持宽限期、按 Key 的闲置超时、到期预警、后台策略执行
 - **滑动窗口限流** — 基于 Redis 的 RPM/TPM 限制，按 Key 或按用户
 - **断路器** — 三态（Closed/Open/HalfOpen）断路器，可配置故障阈值和恢复周期

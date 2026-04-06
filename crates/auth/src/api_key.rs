@@ -3,8 +3,15 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const KEY_PREFIX: &str = "ab-";
+const KEY_PREFIX: &str = "tw-";
 const KEY_LENGTH: usize = 48;
+
+/// Returns true if the given token looks like a ThinkWatch API key.
+/// Accepts both the current `tw-` prefix and the legacy `ab-` prefix
+/// for backward compatibility with keys issued before the project rename.
+pub fn is_api_key(token: &str) -> bool {
+    token.starts_with(KEY_PREFIX) || token.starts_with("ab-")
+}
 
 /// Server-side HMAC key for API key hashing.
 /// This ensures API key hashes cannot be brute-forced without the server secret,
@@ -23,7 +30,7 @@ pub fn generate_api_key() -> GeneratedApiKey {
     let encoded = hex::encode(&random_bytes);
 
     let plaintext = format!("{KEY_PREFIX}{encoded}");
-    let prefix = plaintext[..11].to_string(); // "ab-" + 8 chars
+    let prefix = plaintext[..11].to_string(); // "tw-" + 8 chars
     let hash = hash_api_key(&plaintext);
 
     GeneratedApiKey {
@@ -53,19 +60,19 @@ mod tests {
     fn generate_api_key_has_correct_prefix() {
         let key = generate_api_key();
         assert!(
-            key.plaintext.starts_with("ab-"),
-            "key should start with ab- prefix"
+            key.plaintext.starts_with("tw-"),
+            "key should start with tw- prefix"
         );
         assert!(
-            key.prefix.starts_with("ab-"),
-            "prefix should start with ab-"
+            key.prefix.starts_with("tw-"),
+            "prefix should start with tw-"
         );
-        assert_eq!(key.prefix.len(), 11, "prefix should be 11 chars (ab- + 8)");
+        assert_eq!(key.prefix.len(), 11, "prefix should be 11 chars (tw- + 8)");
     }
 
     #[test]
     fn hash_api_key_is_deterministic() {
-        let input = "ab-deadbeef12345678";
+        let input = "tw-deadbeef12345678";
         let h1 = hash_api_key(input);
         let h2 = hash_api_key(input);
         assert_eq!(h1, h2, "same input must produce same hash");
@@ -84,8 +91,15 @@ mod tests {
     fn verify_api_key_rejects_wrong_key() {
         let key = generate_api_key();
         assert!(
-            !verify_api_key("ab-wrong_key", &key.hash),
+            !verify_api_key("tw-wrong_key", &key.hash),
             "wrong plaintext should not verify"
         );
+    }
+
+    #[test]
+    fn is_api_key_accepts_both_prefixes() {
+        assert!(is_api_key("tw-anything"));
+        assert!(is_api_key("ab-legacy"));
+        assert!(!is_api_key("eyJhbGciOi"));
     }
 }

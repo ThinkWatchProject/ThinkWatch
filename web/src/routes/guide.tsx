@@ -106,7 +106,7 @@ Here is the information you need:
 
 MCP Endpoint: ${mcpUrl}/mcp
 Transport: Streamable HTTP (protocol version 2025-03-26)
-API Key: (ask the user, it starts with "ab-")
+API Key: (ask the user, it starts with "tw-")
 
 The MCP server configuration should be:
 {
@@ -155,7 +155,7 @@ function ClaudeCodeTab({ gatewayUrl }: { gatewayUrl: string }) {
   const { t } = useTranslation();
   const code = `# Set ThinkWatch as Anthropic API proxy
 export ANTHROPIC_BASE_URL=${gatewayUrl}
-export ANTHROPIC_API_KEY=ab-your-api-key-here
+export ANTHROPIC_API_KEY=tw-your-api-key-here
 
 # Then use claude normally
 claude`;
@@ -185,7 +185,7 @@ function CursorTab({ gatewayUrl }: { gatewayUrl: string }) {
   const { t } = useTranslation();
   const code = `// In Cursor Settings > Models > OpenAI API Key
 // Base URL: ${gatewayUrl}/v1
-// API Key: ab-your-api-key-here`;
+// API Key: tw-your-api-key-here`;
 
   return (
     <div className="space-y-4">
@@ -219,7 +219,7 @@ function ContinueTab({ gatewayUrl }: { gatewayUrl: string }) {
     "provider": "openai",
     "model": "gpt-4o",
     "apiBase": "${gatewayUrl}/v1",
-    "apiKey": "ab-your-api-key-here"
+    "apiKey": "tw-your-api-key-here"
   }]
 }`;
 
@@ -250,7 +250,7 @@ function ClineTab({ gatewayUrl }: { gatewayUrl: string }) {
   const { t } = useTranslation();
   const code = `// Cline Settings > API Provider > OpenAI Compatible
 // Base URL: ${gatewayUrl}/v1
-// API Key: ab-your-api-key-here
+// API Key: tw-your-api-key-here
 // Model: gpt-4o (or any model configured in ThinkWatch)`;
 
   return (
@@ -281,7 +281,7 @@ function OpenAiSdkTab({ gatewayUrl }: { gatewayUrl: string }) {
 
 client = OpenAI(
     base_url="${gatewayUrl}/v1",
-    api_key="ab-your-api-key-here",
+    api_key="tw-your-api-key-here",
 )
 
 response = client.chat.completions.create(
@@ -317,7 +317,7 @@ function AnthropicSdkTab({ gatewayUrl }: { gatewayUrl: string }) {
 
 client = anthropic.Anthropic(
     base_url="${gatewayUrl}",
-    api_key="ab-your-api-key-here",
+    api_key="tw-your-api-key-here",
 )
 
 message = client.messages.create(
@@ -355,7 +355,7 @@ function CurlTab({ gatewayUrl }: { gatewayUrl: string }) {
   const { t } = useTranslation();
   const openaiCode = `# OpenAI-compatible format
 curl ${gatewayUrl}/v1/chat/completions \\
-  -H "Authorization: Bearer ab-your-api-key-here" \\
+  -H "Authorization: Bearer tw-your-api-key-here" \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "gpt-4o",
@@ -364,7 +364,7 @@ curl ${gatewayUrl}/v1/chat/completions \\
 
   const anthropicCode = `# Anthropic Messages format
 curl ${gatewayUrl}/v1/messages \\
-  -H "Authorization: Bearer ab-your-api-key-here" \\
+  -H "Authorization: Bearer tw-your-api-key-here" \\
   -H "Content-Type: application/json" \\
   -d '{
     "model": "claude-sonnet-4-20250514",
@@ -403,7 +403,7 @@ function McpClaudeDesktopTab({ mcpUrl }: { mcpUrl: string }) {
       "type": "streamableHttp",
       "url": "${mcpUrl}/mcp",
       "headers": {
-        "Authorization": "Bearer ab-your-api-key-here"
+        "Authorization": "Bearer tw-your-api-key-here"
       }
     }
   }
@@ -441,7 +441,7 @@ function McpClaudeCodeTab({ mcpUrl }: { mcpUrl: string }) {
 claude mcp add think-watch \\
   --transport streamable-http \\
   "${mcpUrl}/mcp" \\
-  --header "Authorization: Bearer ab-your-api-key-here"
+  --header "Authorization: Bearer tw-your-api-key-here"
 
 # List registered MCP servers
 claude mcp list
@@ -480,7 +480,7 @@ function McpCursorTab({ mcpUrl }: { mcpUrl: string }) {
       "type": "streamableHttp",
       "url": "${mcpUrl}/mcp",
       "headers": {
-        "Authorization": "Bearer ab-your-api-key-here"
+        "Authorization": "Bearer tw-your-api-key-here"
       }
     }
   }
@@ -519,7 +519,7 @@ function McpClineTab({ mcpUrl }: { mcpUrl: string }) {
       "type": "streamableHttp",
       "url": "${mcpUrl}/mcp",
       "headers": {
-        "Authorization": "Bearer ab-your-api-key-here"
+        "Authorization": "Bearer tw-your-api-key-here"
       }
     }
   }
@@ -560,7 +560,7 @@ const transport = new StreamableHTTPClientTransport(
   {
     requestInit: {
       headers: {
-        Authorization: "Bearer ab-your-api-key-here",
+        Authorization: "Bearer tw-your-api-key-here",
       },
     },
   }
@@ -583,7 +583,7 @@ from mcp.client.streamable_http import streamablehttp_client
 
 async with streamablehttp_client(
     "${mcpUrl}/mcp",
-    headers={"Authorization": "Bearer ab-your-api-key-here"},
+    headers={"Authorization": "Bearer tw-your-api-key-here"},
 ) as (read, write, _):
     async with ClientSession(read, write) as session:
         await session.initialize()
@@ -617,7 +617,7 @@ function McpCurlTab({ mcpUrl }: { mcpUrl: string }) {
   const { t } = useTranslation();
   const initCode = `# Initialize MCP session
 curl -X POST ${mcpUrl}/mcp \\
-  -H "Authorization: Bearer ab-your-api-key-here" \\
+  -H "Authorization: Bearer tw-your-api-key-here" \\
   -H "Content-Type: application/json" \\
   -d '{
     "jsonrpc": "2.0",
@@ -632,7 +632,7 @@ curl -X POST ${mcpUrl}/mcp \\
 
   const toolsCode = `# List available tools (use Mcp-Session-Id from init response)
 curl -X POST ${mcpUrl}/mcp \\
-  -H "Authorization: Bearer ab-your-api-key-here" \\
+  -H "Authorization: Bearer tw-your-api-key-here" \\
   -H "Content-Type: application/json" \\
   -H "Mcp-Session-Id: <session-id>" \\
   -d '{

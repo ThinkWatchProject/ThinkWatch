@@ -525,7 +525,7 @@
     "mcpStep": {
       "openConfig": "打开 Claude Desktop 配置文件",
       "addServer": "添加 ThinkWatch 的 mcpServers 条目",
-      "setApiKey": "设置 Authorization 头，使用您的 ab- 前缀 API Key",
+      "setApiKey": "设置 Authorization 头，使用您的 tw- 前缀 API Key",
       "restartApp": "重启应用以加载新的 MCP 服务器",
       "runAdd": "运行 claude mcp add 命令，使用 Streamable HTTP 传输",
       "verifyList": "运行 claude mcp list 验证服务器已注册",
@@ -549,7 +549,7 @@
     "endpoint": "端点",
     "note": "注意",
     "aiStep": {
-      "createKey": "在 AI 网关 > API Keys 中创建一个 API Key（以 ab- 开头）",
+      "createKey": "在 AI 网关 > API Keys 中创建一个 API Key（以 tw- 开头）",
       "claudeCodeBaseUrl": "将 ANTHROPIC_BASE_URL 设置为你的 ThinkWatch 网关地址",
       "claudeCodeApiKey": "将 ANTHROPIC_API_KEY 设置为刚刚创建的 API Key",
       "claudeCodeRun": "正常运行 claude — 所有请求将通过网关代理",

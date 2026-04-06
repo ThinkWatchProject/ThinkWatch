@@ -17,7 +17,7 @@ const mockApi = vi.mocked(api)
 const makeKey = (overrides: Record<string, unknown> = {}) => ({
   id: 'key-1',
   name: 'test-key',
-  key_prefix: 'ab_test_',
+  key_prefix: 'tw_test_',
   team_name: 'team-a',
   user_id: 'user-1',
   team_id: 'team-1',

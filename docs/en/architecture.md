@@ -26,7 +26,7 @@ This architecture provides centralized:
             |  (MCP client)  |  | (OpenAI-compat)|  | (API / MCP)    |
             +-------+--------+  +-------+--------+  +-------+--------+
                     |                    |                    |
-                    |   ab-xxx API key   |   JWT / API key   |
+                    |   tw-xxx API key   |   JWT / API key   |
                     +--------------------+--------------------+
                                          |
                               +----------+-----------+
@@ -115,11 +115,11 @@ When a client sends a request through the gateway (via `/v1/chat/completions`, `
 Client                Gateway :3000                        Upstream Provider
   |                        |                                      |
   |  POST /v1/chat/completions                                    |
-  |  Authorization: Bearer ab-xxxx                                |
+  |  Authorization: Bearer tw-xxxx                                |
   |----------------------->|                                      |
   |                        |                                      |
   |               1. API Key Auth Middleware                       |
-  |                  - Extract key prefix (ab-xxxx)               |
+  |                  - Extract key prefix (tw-xxxx)               |
   |                  - Hash key, lookup in PostgreSQL              |
   |                  - Validate: active, not expired, budget ok    |
   |                  - Attach user_id, team_id, scopes to request |
@@ -174,7 +174,7 @@ Client                Gateway :3000                        Upstream Provider
 
 - **Streaming-first:** The proxy uses `eventsource-stream` and `async-stream` to forward SSE chunks in real time with minimal buffering. For AWS Bedrock, native binary event-stream decoding is used. Token counting happens after the stream completes.
 - **Provider API keys are encrypted at rest** using AES-256-GCM. The `ENCRYPTION_KEY` environment variable provides the 256-bit key. For AWS Bedrock, credentials (`ACCESS_KEY_ID:SECRET_ACCESS_KEY`) are encrypted with the same scheme and used for SigV4 request signing via the official `aws-sigv4` crate.
-- **Multi-format support:** The gateway accepts three API formats: OpenAI Chat Completions (`/v1/chat/completions`), Anthropic Messages (`/v1/messages`), and OpenAI Responses (`/v1/responses`). Regardless of the inbound format, the request is routed through the same model router and translated to the upstream provider's native format. This means a single `ab-` API key can be used with any client tool.
+- **Multi-format support:** The gateway accepts three API formats: OpenAI Chat Completions (`/v1/chat/completions`), Anthropic Messages (`/v1/messages`), and OpenAI Responses (`/v1/responses`). Regardless of the inbound format, the request is routed through the same model router and translated to the upstream provider's native format. This means a single `tw-` API key can be used with any client tool.
 
 ---
 
@@ -187,7 +187,7 @@ MCP Client              MCP Gateway :3000/mcp            Upstream MCP Server
   |                           |                                  |
   |  POST /mcp                |                                  |
   |  Authorization: Bearer <JWT>                                 |
-  |  (or ab-xxx API key)      |                                  |
+  |  (or tw-xxx API key)      |                                  |
   |-------------------------->|                                  |
   |                           |                                  |
   |               1. Authentication                              |
@@ -272,7 +272,7 @@ The application entry point. Contains:
   - `health.rs` -- Health check endpoints (`/health/live`, `/health/ready`, `/api/health`)
   - `metrics.rs` -- Prometheus metrics endpoint (`GET /metrics`)
 - **`middleware/`** -- Axum middleware layers:
-  - `api_key_auth.rs` -- Extracts and validates `ab-` API keys for gateway routes
+  - `api_key_auth.rs` -- Extracts and validates `tw-` API keys for gateway routes
   - `auth_guard.rs` -- Validates JWT tokens for console routes
   - `require_role.rs` -- RBAC enforcement middleware
 
@@ -316,7 +316,7 @@ The MCP proxy engine. Contains:
 Authentication and authorization library. Contains:
 
 - **`jwt.rs`** -- JWT token creation and validation using `jsonwebtoken`.
-- **`api_key.rs`** -- API key generation (`ab-` prefixed), hashing, and validation.
+- **`api_key.rs`** -- API key generation (`tw-` prefixed), hashing, and validation.
 - **`password.rs`** -- Password hashing and verification using Argon2.
 - **`oidc.rs`** -- OpenID Connect client for SSO with Zitadel or any OIDC provider. Handles authorization URL generation, callback processing, and user provisioning.
 - **`rbac.rs`** -- Role-based access control: permission loading, role hierarchy, and authorization checks.
@@ -388,7 +388,7 @@ The database schema is defined across twelve migration files applied in order on
 
 | Table      | Purpose |
 |------------|---------|
-| `api_keys` | Virtual API keys (`ab-` prefixed) issued to users or teams. Each key stores: hashed key, allowed models, rate limits (RPM/TPM), monthly budget, expiration, and scopes. |
+| `api_keys` | Virtual API keys (`tw-` prefixed) issued to users or teams. Each key stores: hashed key, allowed models, rate limits (RPM/TPM), monthly budget, expiration, and scopes. |
 
 ### 005_init_providers -- AI Provider Configuration
 

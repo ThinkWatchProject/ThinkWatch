@@ -15,7 +15,7 @@ This document provides a complete reference for every HTTP endpoint exposed by T
 
 | Scheme   | Header                          | Used By            |
 | -------- | ------------------------------- | ------------------ |
-| API Key  | `Authorization: Bearer ab-...`  | Gateway & Console  |
+| API Key  | `Authorization: Bearer tw-...`  | Gateway & Console  |
 | JWT      | `Authorization: Bearer <token>` | Console & Gateway  |
 | Public   | _(none)_                        | Health endpoints   |
 
@@ -120,7 +120,7 @@ data: [DONE]
 ```bash
 # Non-streaming
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o",
@@ -129,7 +129,7 @@ curl -X POST http://localhost:3000/v1/chat/completions \
 
 # Streaming
 curl -X POST http://localhost:3000/v1/chat/completions \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -N \
   -d '{
@@ -187,7 +187,7 @@ No request body. No query parameters.
 
 ```bash
 curl http://localhost:3000/v1/models \
-  -H "Authorization: Bearer ab-your-api-key"
+  -H "Authorization: Bearer tw-your-api-key"
 ```
 
 #### Error Responses
@@ -272,7 +272,7 @@ data: {"type":"message_stop"}
 
 ```bash
 curl -X POST http://localhost:3000/v1/messages \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -H "anthropic-version: 2023-06-01" \
   -d '{
@@ -367,7 +367,7 @@ The `input` field can be either a simple string or an array of message objects:
 
 ```bash
 curl -X POST http://localhost:3000/v1/responses \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "model": "gpt-4o",
@@ -448,7 +448,7 @@ Common methods:
 ```bash
 # Initialize session
 curl -X POST http://localhost:3000/mcp \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -d '{
     "jsonrpc": "2.0",
@@ -463,7 +463,7 @@ curl -X POST http://localhost:3000/mcp \
 
 # Call a tool (include session ID from initialize response)
 curl -X POST http://localhost:3000/mcp \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Content-Type: application/json" \
   -H "Mcp-Session-Id: session-uuid-here" \
   -d '{
@@ -507,7 +507,7 @@ HTTP/1.1 204 No Content
 
 ```bash
 curl -X DELETE http://localhost:3000/mcp \
-  -H "Authorization: Bearer ab-your-api-key" \
+  -H "Authorization: Bearer tw-your-api-key" \
   -H "Mcp-Session-Id: session-uuid-here"
 ```
 
@@ -1012,7 +1012,7 @@ List all API keys belonging to the authenticated user.
   {
     "id": "uuid",
     "name": "Production Key",
-    "prefix": "ab-prod",
+    "prefix": "tw-prod",
     "allowed_models": ["gpt-4o", "claude-sonnet-4-20250514"],
     "rate_limit_rpm": 60,
     "expires_at": "2026-06-01T00:00:00Z",
@@ -1063,7 +1063,7 @@ Create a new API key.
 {
   "id": "uuid",
   "name": "Production Key",
-  "key": "ab-sk-a1b2c3d4e5f6...",
+  "key": "tw-sk-a1b2c3d4e5f6...",
   "allowed_models": ["gpt-4o"],
   "rate_limit_rpm": 60,
   "expires_at": "2026-06-01T00:00:00Z",
@@ -1114,7 +1114,7 @@ Retrieve details for a specific API key.
 {
   "id": "uuid",
   "name": "Production Key",
-  "prefix": "ab-prod",
+  "prefix": "tw-prod",
   "allowed_models": ["gpt-4o"],
   "rate_limit_rpm": 60,
   "expires_at": "2026-06-01T00:00:00Z",
@@ -1204,7 +1204,7 @@ Update settings for an existing API key.
 {
   "id": "uuid",
   "name": "Production Key",
-  "prefix": "ab-prod",
+  "prefix": "tw-prod",
   "allowed_models": ["gpt-4o", "claude-sonnet-4-20250514"],
   "rate_limit_rpm": 120,
   "expires_at": "2026-08-01T00:00:00Z",
@@ -1254,7 +1254,7 @@ Rotate an API key. Generates a new key value and returns it. The old key enters 
 {
   "id": "uuid",
   "name": "Production Key",
-  "key": "ab-sk-newkey123456...",
+  "key": "tw-sk-newkey123456...",
   "grace_period_ends_at": "2026-04-02T10:00:00Z",
   "rotated_at": "2026-04-01T10:00:00Z"
 }
@@ -1297,7 +1297,7 @@ List API keys that are expiring within the specified number of days.
   {
     "id": "uuid",
     "name": "Production Key",
-    "prefix": "ab-prod",
+    "prefix": "tw-prod",
     "expires_at": "2026-04-07T00:00:00Z",
     "days_remaining": 5,
     "owner_email": "user@example.com"
