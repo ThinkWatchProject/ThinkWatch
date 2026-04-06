@@ -1,16 +1,11 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
-  <!-- background -->
   <rect width="32" height="32" rx="7" fill="#1E2A4A"/>
-  <!-- shield outline -->
-  <rect x="6" y="8" width="20" height="16" rx="5"
-        fill="none" stroke="#3DDBD9" stroke-width="2"/>
-  <!-- 3 inflow stripes -->
-  <line x1="0" y1="12" x2="6" y2="12" stroke="#3DDBD9" stroke-width="2" stroke-linecap="round"/>
-  <line x1="0" y1="16" x2="6" y2="16" stroke="#3DDBD9" stroke-width="2" stroke-linecap="round"/>
-  <line x1="0" y1="20" x2="6" y2="20" stroke="#3DDBD9" stroke-width="2" stroke-linecap="round"/>
-  <!-- single outflow -->
-  <line x1="26" y1="16" x2="32" y2="16" stroke="#3DDBD9" stroke-width="2" stroke-linecap="round"/>
-  <!-- AI packet pupil -->
-  <rect x="12.5" y="12.5" width="7" height="7" rx="0.8"
+  <rect x="6" y="6" width="20" height="20" rx="5"
+        fill="none" stroke="#3DDBD9" stroke-width="2.4"/>
+  <line x1="0" y1="11" x2="6" y2="11" stroke="#3DDBD9" stroke-width="2.2" stroke-linecap="round"/>
+  <line x1="0" y1="16" x2="6" y2="16" stroke="#3DDBD9" stroke-width="2.2" stroke-linecap="round"/>
+  <line x1="0" y1="21" x2="6" y2="21" stroke="#3DDBD9" stroke-width="2.2" stroke-linecap="round"/>
+  <line x1="26" y1="16" x2="32" y2="16" stroke="#3DDBD9" stroke-width="2.2" stroke-linecap="round"/>
+  <rect x="11.5" y="11.5" width="9" height="9" rx="1"
         fill="#3DDBD9" transform="rotate(45 16 16)"/>
 </svg>
