@@ -729,11 +729,11 @@ export function GuidePage() {
               </p>
               <p>
                 <Badge variant="outline" className="mr-2 font-mono text-xs">POST</Badge>
-                {t('guide.anthropicEndpoint')}
+                {t('guide.responsesEndpoint')}
               </p>
               <p>
                 <Badge variant="outline" className="mr-2 font-mono text-xs">POST</Badge>
-                {t('guide.responsesEndpoint')}
+                {t('guide.anthropicEndpoint')}
               </p>
               <p>
                 <Badge variant="outline" className="mr-2 font-mono text-xs">GET</Badge>
