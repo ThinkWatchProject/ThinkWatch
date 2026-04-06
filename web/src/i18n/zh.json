@@ -365,6 +365,7 @@
     "security": "安全",
     "budget": "预算告警",
     "apiKeysConfig": "API Key 策略",
+    "auditConfig": "审计配置",
     "dataRetention": "数据保留",
     "saved": "设置保存成功",
     "saveError": "保存设置失败",
