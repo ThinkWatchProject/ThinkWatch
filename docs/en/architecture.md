@@ -352,11 +352,9 @@ ThinkWatch stores six types of logs in ClickHouse, each in a dedicated table:
 | `access_logs` | HTTP access logs for both ports (method, path, status, latency) | 30 days |
 | `app_logs` | Application runtime tracing (level, target, message, spans) | 30 days |
 
-All tables use MergeTree engine with monthly partitioning and TTL-based automatic cleanup.
+All tables use MergeTree engine with monthly partitioning and TTL-based automatic cleanup. HTTP access logs and application traces are written asynchronously to avoid blocking request processing.
 
-The **AccessLogLayer** middleware records every HTTP request to ClickHouse asynchronously, capturing method, path, status code, latency, port, user ID, client IP, and user agent.
-
-The **ClickHouseLayer** tracing subscriber captures Rust `tracing` spans and events, forwarding them to the `app_logs` table for runtime debugging.
+All log types are queryable from a single **Log Explorer** page in the admin console with structured query syntax.
 
 ---
 

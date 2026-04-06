@@ -348,11 +348,9 @@ ThinkWatch 在 ClickHouse 中存储六种类型的日志，每种使用独立的
 | `access_logs` | HTTP 访问日志（方法、路径、状态码、延迟） | 30 天 |
 | `app_logs` | 应用运行时追踪（级别、目标、消息、span） | 30 天 |
 
-所有表使用 MergeTree 引擎，按月分区，TTL 自动清理。
+所有表使用 MergeTree 引擎，按月分区，TTL 自动清理。HTTP 访问日志和应用追踪以异步方式写入，不会阻塞请求处理。
 
-**AccessLogLayer** 中间件异步记录每个 HTTP 请求到 ClickHouse，包括方法、路径、状态码、延迟、端口、用户 ID、客户端 IP 和 User Agent。
-
-**ClickHouseLayer** tracing 订阅器捕获 Rust `tracing` span 和事件，转发到 `app_logs` 表用于运行时调试。
+管理控制台提供统一的**日志查询**页面，支持结构化查询语法跨所有日志类型搜索。
 
 ---
 
