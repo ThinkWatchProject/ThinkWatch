@@ -204,7 +204,7 @@ export function AppSidebar({
               onClick={() => navigate({ to: '/' })}
             >
               <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                <ThinkWatchMark className="size-5" />
+                <ThinkWatchMark className="size-7" />
               </div>
               <div className="grid flex-1 text-left text-sm leading-tight">
                 <span className="truncate font-semibold">ThinkWatch</span>
