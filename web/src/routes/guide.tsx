@@ -152,6 +152,7 @@ Please detect which tool I am using and help me configure it step by step.`;
 // ===========================================================================
 
 function ClaudeCodeTab({ gatewayUrl }: { gatewayUrl: string }) {
+  const { t } = useTranslation();
   const code = `# Set ThinkWatch as Anthropic API proxy
 export ANTHROPIC_BASE_URL=${gatewayUrl}
 export ANTHROPIC_API_KEY=ab-your-api-key-here
@@ -166,27 +167,22 @@ claude`;
         <h3 className="text-lg font-semibold">Claude Code</h3>
         <Badge variant="outline">Anthropic CLI</Badge>
       </div>
-      <p className="text-sm text-muted-foreground">
-        Claude Code connects using the Anthropic native format. Set environment variables to route
-        all requests through ThinkWatch.
-      </p>
+      <p className="text-sm text-muted-foreground">{t('guide.claudeCodeDesc')}</p>
       <StepList
         steps={[
-          'Set ANTHROPIC_BASE_URL to your ThinkWatch gateway URL',
-          'Set ANTHROPIC_API_KEY to your ab- prefixed API key',
-          'Run claude as usual — all requests are proxied through the gateway',
+          t('guide.aiStep.claudeCodeBaseUrl'),
+          t('guide.aiStep.claudeCodeApiKey'),
+          t('guide.aiStep.claudeCodeRun'),
         ]}
       />
       <CodeBlock code={code} />
-      <InfoBox>
-        <strong>Endpoint:</strong> /v1/messages (Anthropic native format).
-        ThinkWatch translates internally and supports all Claude models.
-      </InfoBox>
+      <InfoBox>{t('guide.claudeCodeEndpointNote')}</InfoBox>
     </div>
   );
 }
 
 function CursorTab({ gatewayUrl }: { gatewayUrl: string }) {
+  const { t } = useTranslation();
   const code = `// In Cursor Settings > Models > OpenAI API Key
 // Base URL: ${gatewayUrl}/v1
 // API Key: ab-your-api-key-here`;
@@ -198,28 +194,24 @@ function CursorTab({ gatewayUrl }: { gatewayUrl: string }) {
         <h3 className="text-lg font-semibold">Cursor</h3>
         <Badge variant="outline">IDE</Badge>
       </div>
-      <p className="text-sm text-muted-foreground">
-        Cursor uses the OpenAI-compatible API format. Configure it in the editor settings.
-      </p>
+      <p className="text-sm text-muted-foreground">{t('guide.cursorDesc')}</p>
       <StepList
         steps={[
-          'Open Cursor Settings',
-          'Navigate to Models > OpenAI API Key',
-          `Set Base URL to: ${gatewayUrl}/v1`,
-          'Set API Key to your ab- prefixed API key',
-          'Select any model configured in ThinkWatch',
+          t('guide.aiStep.cursorOpen'),
+          t('guide.aiStep.cursorNavigate'),
+          t('guide.aiStep.cursorBaseUrl', { url: `${gatewayUrl}/v1` }),
+          t('guide.aiStep.cursorApiKey'),
+          t('guide.aiStep.cursorSelectModel'),
         ]}
       />
       <CodeBlock code={code} />
-      <InfoBox>
-        <strong>Endpoint:</strong> /v1/chat/completions (OpenAI-compatible).
-        Supports all models routed through ThinkWatch.
-      </InfoBox>
+      <InfoBox>{t('guide.cursorEndpointNote')}</InfoBox>
     </div>
   );
 }
 
 function ContinueTab({ gatewayUrl }: { gatewayUrl: string }) {
+  const { t } = useTranslation();
   const code = `// ~/.continue/config.json
 {
   "models": [{
@@ -238,17 +230,14 @@ function ContinueTab({ gatewayUrl }: { gatewayUrl: string }) {
         <h3 className="text-lg font-semibold">Continue</h3>
         <Badge variant="outline">VS Code Extension</Badge>
       </div>
-      <p className="text-sm text-muted-foreground">
-        Continue connects as an OpenAI-compatible provider. Edit the config file to point at
-        ThinkWatch.
-      </p>
+      <p className="text-sm text-muted-foreground">{t('guide.continueDesc')}</p>
       <StepList
         steps={[
-          'Open ~/.continue/config.json (or use the Continue settings UI)',
-          'Add a new model entry with provider set to "openai"',
-          `Set apiBase to: ${gatewayUrl}/v1`,
-          'Set apiKey to your ab- prefixed API key',
-          'Choose any model name configured in ThinkWatch',
+          t('guide.aiStep.continueOpen'),
+          t('guide.aiStep.continueAdd'),
+          t('guide.aiStep.continueApiBase', { url: `${gatewayUrl}/v1` }),
+          t('guide.aiStep.continueApiKey'),
+          t('guide.aiStep.continueChooseModel'),
         ]}
       />
       <CodeBlock code={code} />
@@ -257,6 +246,7 @@ function ContinueTab({ gatewayUrl }: { gatewayUrl: string }) {
 }
 
 function ClineTab({ gatewayUrl }: { gatewayUrl: string }) {
+  const { t } = useTranslation();
   const code = `// Cline Settings > API Provider > OpenAI Compatible
 // Base URL: ${gatewayUrl}/v1
 // API Key: ab-your-api-key-here
@@ -269,16 +259,14 @@ function ClineTab({ gatewayUrl }: { gatewayUrl: string }) {
         <h3 className="text-lg font-semibold">Cline</h3>
         <Badge variant="outline">VS Code Extension</Badge>
       </div>
-      <p className="text-sm text-muted-foreground">
-        Cline supports OpenAI-compatible providers. Configure it through the extension settings.
-      </p>
+      <p className="text-sm text-muted-foreground">{t('guide.clineDesc')}</p>
       <StepList
         steps={[
-          'Open Cline Settings in VS Code',
-          'Select API Provider > OpenAI Compatible',
-          `Set Base URL to: ${gatewayUrl}/v1`,
-          'Set API Key to your ab- prefixed API key',
-          'Enter a model name (e.g. gpt-4o) configured in ThinkWatch',
+          t('guide.aiStep.clineOpen'),
+          t('guide.aiStep.clineSelect'),
+          t('guide.aiStep.clineBaseUrl', { url: `${gatewayUrl}/v1` }),
+          t('guide.aiStep.clineApiKey'),
+          t('guide.aiStep.clineModel'),
         ]}
       />
       <CodeBlock code={code} />
@@ -287,6 +275,7 @@ function ClineTab({ gatewayUrl }: { gatewayUrl: string }) {
 }
 
 function OpenAiSdkTab({ gatewayUrl }: { gatewayUrl: string }) {
+  const { t } = useTranslation();
   const code = `from openai import OpenAI
 
 client = OpenAI(
@@ -306,15 +295,13 @@ response = client.chat.completions.create(
         <h3 className="text-lg font-semibold">OpenAI SDK</h3>
         <Badge variant="outline">Python</Badge>
       </div>
-      <p className="text-sm text-muted-foreground">
-        Use the official OpenAI Python SDK with ThinkWatch as a drop-in replacement.
-      </p>
+      <p className="text-sm text-muted-foreground">{t('guide.openaiSdkDesc')}</p>
       <StepList
         steps={[
-          'Install the OpenAI SDK: pip install openai',
-          `Set base_url to: ${gatewayUrl}/v1`,
-          'Set api_key to your ab- prefixed API key',
-          'Use any model configured in ThinkWatch',
+          t('guide.aiStep.openaiSdkInstall'),
+          t('guide.aiStep.openaiSdkBaseUrl', { url: `${gatewayUrl}/v1` }),
+          t('guide.aiStep.openaiSdkApiKey'),
+          t('guide.aiStep.openaiSdkModel'),
         ]}
       />
       <CodeBlock code={code} />
@@ -323,6 +310,7 @@ response = client.chat.completions.create(
 }
 
 function AnthropicSdkTab({ gatewayUrl }: { gatewayUrl: string }) {
+  const { t } = useTranslation();
   const code = `import anthropic
 
 client = anthropic.Anthropic(
@@ -343,27 +331,25 @@ message = client.messages.create(
         <h3 className="text-lg font-semibold">Anthropic SDK</h3>
         <Badge variant="outline">Python</Badge>
       </div>
-      <p className="text-sm text-muted-foreground">
-        Use the official Anthropic Python SDK by pointing it at ThinkWatch.
-      </p>
+      <p className="text-sm text-muted-foreground">{t('guide.anthropicSdkDesc')}</p>
       <StepList
         steps={[
-          'Install the Anthropic SDK: pip install anthropic',
-          `Set base_url to: ${gatewayUrl} (no /v1 suffix)`,
-          'Set api_key to your ab- prefixed API key',
-          'Use any Claude model configured in ThinkWatch',
+          t('guide.aiStep.anthropicSdkInstall'),
+          t('guide.aiStep.anthropicSdkBaseUrl', { url: gatewayUrl }),
+          t('guide.aiStep.anthropicSdkApiKey'),
+          t('guide.aiStep.anthropicSdkModel'),
         ]}
       />
       <CodeBlock code={code} />
       <InfoBox>
-        <strong>Note:</strong> The Anthropic SDK uses the base URL without the /v1 suffix, unlike
-        OpenAI-compatible clients.
+        <strong>{t('guide.note')}:</strong> {t('guide.anthropicSdkNote')}
       </InfoBox>
     </div>
   );
 }
 
 function CurlTab({ gatewayUrl }: { gatewayUrl: string }) {
+  const { t } = useTranslation();
   const openaiCode = `# OpenAI-compatible format
 curl ${gatewayUrl}/v1/chat/completions \\
   -H "Authorization: Bearer ab-your-api-key-here" \\
@@ -390,13 +376,10 @@ curl ${gatewayUrl}/v1/messages \\
         <h3 className="text-lg font-semibold">cURL</h3>
         <Badge variant="outline">Command Line</Badge>
       </div>
-      <p className="text-sm text-muted-foreground">
-        Test the gateway directly with cURL. Both OpenAI-compatible and Anthropic message formats
-        are supported.
-      </p>
-      <h4 className="text-sm font-medium">OpenAI-compatible format</h4>
+      <p className="text-sm text-muted-foreground">{t('guide.curlDesc')}</p>
+      <h4 className="text-sm font-medium">{t('guide.curlOpenaiFormat')}</h4>
       <CodeBlock code={openaiCode} />
-      <h4 className="text-sm font-medium">Anthropic Messages format</h4>
+      <h4 className="text-sm font-medium">{t('guide.curlAnthropicFormat')}</h4>
       <CodeBlock code={anthropicCode} />
     </div>
   );
