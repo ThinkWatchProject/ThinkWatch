@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 36" fill="none">
+  <!-- icon block -->
+  <rect width="36" height="36" rx="8" fill="#1E2A4A"/>
+  <rect x="7" y="10" width="22" height="16" rx="4.5"
+        fill="none" stroke="#3DDBD9" stroke-width="2.2"/>
+  <line x1="2"  y1="14" x2="7" y2="14" stroke="#3DDBD9" stroke-width="1.8" stroke-linecap="round"/>
+  <line x1="2"  y1="18" x2="7" y2="18" stroke="#3DDBD9" stroke-width="1.8" stroke-linecap="round"/>
+  <line x1="2"  y1="22" x2="7" y2="22" stroke="#3DDBD9" stroke-width="1.8" stroke-linecap="round"/>
+  <line x1="29" y1="18" x2="34" y2="18" stroke="#3DDBD9" stroke-width="1.8" stroke-linecap="round"/>
+  <rect x="14.5" y="14.5" width="7" height="7" rx="0.7"
+        fill="#3DDBD9" transform="rotate(45 18 18)"/>
+
+  <!-- wordmark -->
+  <text x="48" y="24"
+        font-family="Geist, 'Inter Display', Inter, system-ui, -apple-system, sans-serif"
+        font-size="18"
+        letter-spacing="-0.3"
+        fill="currentColor">
+    <tspan font-weight="500">Think</tspan><tspan font-weight="700">Watch</tspan>
+  </text>
+</svg>

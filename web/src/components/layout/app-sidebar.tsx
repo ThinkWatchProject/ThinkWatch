@@ -42,6 +42,7 @@ import {
   User,
 } from 'lucide-react';
 import { useNavigate, useLocation } from '@tanstack/react-router';
+import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 
 interface NavItem {
   titleKey: string;
@@ -203,7 +204,7 @@ export function AppSidebar({
               onClick={() => navigate({ to: '/' })}
             >
               <div className="flex aspect-square size-8 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                <Shield className="size-4" />
+                <ThinkWatchMark className="size-5" />
               </div>
               <div className="grid flex-1 text-left text-sm leading-tight">
                 <span className="truncate font-semibold">ThinkWatch</span>
