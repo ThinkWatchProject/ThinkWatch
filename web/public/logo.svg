@@ -1,14 +1,13 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 40" fill="none">
   <!-- icon block (deep indigo background) -->
   <rect width="40" height="40" rx="9" fill="#1E2A4A"/>
-  <rect x="4" y="4" width="32" height="32" rx="7"
-        fill="none" stroke="#3DDBD9" stroke-width="2.2"/>
-  <!-- T -->
-  <line x1="11" y1="12" x2="29" y2="12" stroke="#3DDBD9" stroke-width="2.6" stroke-linecap="round"/>
-  <line x1="20" y1="12" x2="20" y2="20" stroke="#3DDBD9" stroke-width="2.6" stroke-linecap="round"/>
-  <!-- W -->
-  <polyline points="11,20 15,28 20,20" fill="none" stroke="#3DDBD9" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-  <polyline points="20,20 25,28 29,20" fill="none" stroke="#3DDBD9" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- eye outline -->
+  <path d="M4 20 Q 20 7, 36 20 Q 20 33, 4 20 Z"
+        fill="none" stroke="#3DDBD9" stroke-width="2.2" stroke-linejoin="round"/>
+  <!-- lowercase w pupil -->
+  <polyline points="11,16 15,25 20,18 25,25 29,16"
+            fill="none" stroke="#3DDBD9" stroke-width="2.6"
+            stroke-linecap="round" stroke-linejoin="round"/>
 
   <!-- wordmark -->
   <text x="52" y="27"
