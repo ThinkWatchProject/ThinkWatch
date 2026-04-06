@@ -170,10 +170,10 @@ claude`;
       <p className="text-sm text-muted-foreground">{t('guide.claudeCodeDesc')}</p>
       <StepList
         steps={[
+          t('guide.aiStep.createKey'),
           t('guide.aiStep.claudeCodeBaseUrl'),
           t('guide.aiStep.claudeCodeApiKey'),
           t('guide.aiStep.claudeCodeRun'),
-          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -197,12 +197,11 @@ function CursorTab({ gatewayUrl }: { gatewayUrl: string }) {
       <p className="text-sm text-muted-foreground">{t('guide.cursorDesc')}</p>
       <StepList
         steps={[
+          t('guide.aiStep.createKey'),
           t('guide.aiStep.cursorOpen'),
-          t('guide.aiStep.cursorNavigate'),
           t('guide.aiStep.cursorBaseUrl', { url: `${gatewayUrl}/v1` }),
           t('guide.aiStep.cursorApiKey'),
           t('guide.aiStep.cursorSelectModel'),
-          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -234,12 +233,12 @@ function ContinueTab({ gatewayUrl }: { gatewayUrl: string }) {
       <p className="text-sm text-muted-foreground">{t('guide.continueDesc')}</p>
       <StepList
         steps={[
+          t('guide.aiStep.createKey'),
           t('guide.aiStep.continueOpen'),
           t('guide.aiStep.continueAdd'),
           t('guide.aiStep.continueApiBase', { url: `${gatewayUrl}/v1` }),
           t('guide.aiStep.continueApiKey'),
           t('guide.aiStep.continueChooseModel'),
-          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -264,12 +263,11 @@ function ClineTab({ gatewayUrl }: { gatewayUrl: string }) {
       <p className="text-sm text-muted-foreground">{t('guide.clineDesc')}</p>
       <StepList
         steps={[
+          t('guide.aiStep.createKey'),
           t('guide.aiStep.clineOpen'),
-          t('guide.aiStep.clineSelect'),
           t('guide.aiStep.clineBaseUrl', { url: `${gatewayUrl}/v1` }),
           t('guide.aiStep.clineApiKey'),
           t('guide.aiStep.clineModel'),
-          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -302,10 +300,10 @@ response = client.chat.completions.create(
       <StepList
         steps={[
           t('guide.aiStep.openaiSdkInstall'),
+          t('guide.aiStep.createKey'),
           t('guide.aiStep.openaiSdkBaseUrl', { url: `${gatewayUrl}/v1` }),
           t('guide.aiStep.openaiSdkApiKey'),
           t('guide.aiStep.openaiSdkModel'),
-          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -339,10 +337,10 @@ message = client.messages.create(
       <StepList
         steps={[
           t('guide.aiStep.anthropicSdkInstall'),
+          t('guide.aiStep.createKey'),
           t('guide.aiStep.anthropicSdkBaseUrl', { url: gatewayUrl }),
           t('guide.aiStep.anthropicSdkApiKey'),
           t('guide.aiStep.anthropicSdkModel'),
-          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
