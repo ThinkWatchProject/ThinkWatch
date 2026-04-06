@@ -44,7 +44,7 @@ beforeEach(() => {
 
 describe('ApiKeysPage', () => {
   it('renders API keys table', async () => {
-    mockApi.mockResolvedValue([makeKey()])
+    mockApi.mockResolvedValue({ data: [makeKey()], total: 1, page: 1, page_size: 20 })
 
     render(<ApiKeysPage />)
 
@@ -62,11 +62,16 @@ describe('ApiKeysPage', () => {
   })
 
   it('shows status badges for active and expired keys', async () => {
-    mockApi.mockResolvedValue([
-      makeKey({ id: 'key-1', name: 'active-key', disabled_reason: null, is_active: true }),
-      makeKey({ id: 'key-2', name: 'expired-key', disabled_reason: 'expired', is_active: false }),
-      makeKey({ id: 'key-3', name: 'revoked-key', disabled_reason: 'revoked', is_active: false }),
-    ])
+    mockApi.mockResolvedValue({
+      data: [
+        makeKey({ id: 'key-1', name: 'active-key', disabled_reason: null, is_active: true }),
+        makeKey({ id: 'key-2', name: 'expired-key', disabled_reason: 'expired', is_active: false }),
+        makeKey({ id: 'key-3', name: 'revoked-key', disabled_reason: 'revoked', is_active: false }),
+      ],
+      total: 3,
+      page: 1,
+      page_size: 20,
+    })
 
     render(<ApiKeysPage />)
 
@@ -82,9 +87,12 @@ describe('ApiKeysPage', () => {
   it('shows expiry warning for keys expiring soon', async () => {
     const threeDaysFromNow = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString()
 
-    mockApi.mockResolvedValue([
-      makeKey({ id: 'key-1', name: 'expiring-key', expires_at: threeDaysFromNow }),
-    ])
+    mockApi.mockResolvedValue({
+      data: [makeKey({ id: 'key-1', name: 'expiring-key', expires_at: threeDaysFromNow })],
+      total: 1,
+      page: 1,
+      page_size: 20,
+    })
 
     render(<ApiKeysPage />)
 
@@ -97,7 +105,7 @@ describe('ApiKeysPage', () => {
   })
 
   it('create key dialog opens on button click', async () => {
-    mockApi.mockResolvedValue([])
+    mockApi.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 20 })
 
     const user = userEvent.setup()
     render(<ApiKeysPage />)

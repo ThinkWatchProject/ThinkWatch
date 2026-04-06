@@ -11,7 +11,6 @@ import {
 } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Search, FileText, ChevronDown, ChevronRight } from 'lucide-react';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -196,6 +195,17 @@ function defaultToLocal(): string {
   return format(new Date(), "yyyy-MM-dd'T'HH:mm");
 }
 
+// "Highlight" fields rendered above the raw JSON in the per-row expansion.
+// Order matters; the first listed fields show first.
+const DETAIL_HIGHLIGHTS: Record<LogCategory, string[]> = {
+  gateway: ['model_id', 'provider', 'input_tokens', 'output_tokens', 'cost_usd', 'latency_ms', 'status_code', 'user_id', 'api_key_id', 'ip_address'],
+  mcp: ['tool_name', 'server_name', 'duration_ms', 'status', 'error_message', 'user_id', 'ip_address'],
+  audit: ['action', 'resource', 'resource_id', 'user_email', 'user_id', 'ip_address', 'user_agent'],
+  platform: ['action', 'resource', 'resource_id', 'user_email', 'user_id', 'ip_address', 'user_agent'],
+  access: ['method', 'path', 'status_code', 'latency_ms', 'port', 'user_id', 'ip_address', 'user_agent'],
+  app: ['level', 'target', 'message', 'span', 'fields'],
+};
+
 // ClickHouse `toString(DateTime64)` returns naive timestamps like
 // "2026-04-06 09:21:00.000" without a timezone marker. Browsers parse such
 // strings as local time, which is wrong — the value is always UTC. Append a
@@ -215,6 +225,73 @@ function formatBackendTimestamp(raw: string): string {
 
 // Backend returns DateTime64 strings without a timezone suffix, e.g.
 // "2026-04-06 09:21:00.000". They are UTC. Without an explicit suffix the
+// ---------------------------------------------------------------------------
+// LogDetail — per-row expansion content
+//
+// Renders the most relevant fields for the given log category as a 2-column
+// key/value grid, then a collapsible section with the raw JSON for power
+// users. The grid uses the DETAIL_HIGHLIGHTS map to decide which keys to
+// surface and in what order.
+// ---------------------------------------------------------------------------
+
+function formatDetailValue(key: string, raw: unknown): React.ReactNode {
+  if (raw === null || raw === undefined || raw === '') return <span className="text-muted-foreground">—</span>;
+  if (key === 'cost_usd') return `$${parseFloat(String(raw)).toFixed(6)}`;
+  if (key === 'latency_ms' || key === 'duration_ms') return `${raw}ms`;
+  if (key === 'created_at' || key === 'timestamp') return formatBackendTimestamp(String(raw));
+  if (typeof raw === 'object') {
+    return <code className="font-mono text-xs">{JSON.stringify(raw)}</code>;
+  }
+  const s = String(raw);
+  // Long text (e.g. message, span, fields, user_agent) breaks the 2-column
+  // grid. Render as preformatted block instead of in a single cell.
+  if (s.length > 80) {
+    return (
+      <pre className="font-mono text-xs whitespace-pre-wrap break-all max-h-40 overflow-y-auto">
+        {s}
+      </pre>
+    );
+  }
+  return <span className="font-mono text-xs">{s}</span>;
+}
+
+function LogDetail({
+  log,
+  category,
+  timeKey,
+}: {
+  log: LogEntry;
+  category: LogCategory;
+  timeKey: string;
+}) {
+  const highlights = DETAIL_HIGHLIGHTS[category];
+  // Always include the timestamp first, then the highlight fields, deduped.
+  const fields = [timeKey, ...highlights.filter((k) => k !== timeKey)];
+
+  return (
+    <div className="space-y-3 p-3">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
+        {fields.map((key) => (
+          <div key={key} className="flex items-baseline gap-2 text-sm min-w-0">
+            <span className="text-xs uppercase tracking-wide text-muted-foreground shrink-0 w-28">
+              {key}
+            </span>
+            <div className="flex-1 min-w-0">{formatDetailValue(key, log[key])}</div>
+          </div>
+        ))}
+      </div>
+      <details className="text-xs">
+        <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
+          Raw JSON
+        </summary>
+        <pre className="mt-2 rounded bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
+          {JSON.stringify(log, null, 2)}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -344,12 +421,12 @@ export function UnifiedLogsPage() {
   const timeKey = getTimeKey(category);
 
   const placeholders: Record<LogCategory, string> = {
-    gateway: 'model:gpt-4o status_code:200 provider:openai',
-    mcp: 'tool_name:search status:error server_id:xxx',
+    gateway: 'model:gpt-4o status_code:200 provider:openai  (or just: gpt-4o)',
+    mcp: 'tool_name:search status:error  (or just: search)',
     audit: 'action:create resource:provider user_id:xxx',
     platform: 'action:role.deleted resource:role user_id:xxx',
-    access: 'method:POST path:/api/admin status_code:500 port:3001',
-    app: 'level:error target:audit message text',
+    access: 'method:POST path:/api/admin status_code:500  (or just: /admin)',
+    app: 'level:error target:auth  (or any text from the message)',
   };
 
   return (
@@ -466,12 +543,8 @@ export function UnifiedLogsPage() {
                         </TableRow>
                         {expandedRow === log.id && (
                           <TableRow key={`${log.id}-detail`}>
-                            <TableCell colSpan={columns.length + 1}>
-                              <ScrollArea className="max-h-64">
-                                <pre className="rounded bg-muted p-3 text-xs whitespace-pre-wrap">
-                                  {JSON.stringify(log, null, 2)}
-                                </pre>
-                              </ScrollArea>
+                            <TableCell colSpan={columns.length + 1} className="bg-muted/30">
+                              <LogDetail log={log} category={category} timeKey={timeKey} />
                             </TableCell>
                           </TableRow>
                         )}

@@ -3,29 +3,34 @@ import {
   createRouter,
   createRootRoute,
   createRoute,
+  lazyRouteComponent,
   Outlet,
 } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/hooks/use-auth';
 import { AppShell } from '@/components/layout/app-shell';
+
+// Eagerly loaded — entry/auth screens that the user always hits first.
 import { LoginPage } from '@/routes/login';
-import { RegisterPage } from '@/routes/register';
 import { SetupPage } from '@/routes/setup';
 import { DashboardPage } from '@/routes/dashboard';
-import { ProvidersPage } from '@/routes/gateway/providers';
-import { ModelsPage } from '@/routes/gateway/models';
-import { ApiKeysPage } from '@/routes/gateway/api-keys';
-import { UnifiedLogsPage } from '@/routes/logs';
-import { GuidePage } from '@/routes/guide';
-import { McpServersPage } from '@/routes/mcp/servers';
-import { McpToolsPage } from '@/routes/mcp/tools';
-import { UsagePage } from '@/routes/analytics/usage';
-import { CostsPage } from '@/routes/analytics/costs';
-import { UsersPage } from '@/routes/admin/users';
-import { RolesPage } from '@/routes/admin/roles';
-import { SettingsPage } from '@/routes/admin/settings';
-import { LogForwardersPage } from '@/routes/admin/log-forwarders';
-import { ProfilePage } from '@/routes/profile';
+
+// Lazy-loaded — split into separate chunks so the initial bundle stays small.
+const RegisterPage = lazyRouteComponent(() => import('@/routes/register'), 'RegisterPage');
+const ProvidersPage = lazyRouteComponent(() => import('@/routes/gateway/providers'), 'ProvidersPage');
+const ModelsPage = lazyRouteComponent(() => import('@/routes/gateway/models'), 'ModelsPage');
+const ApiKeysPage = lazyRouteComponent(() => import('@/routes/gateway/api-keys'), 'ApiKeysPage');
+const UnifiedLogsPage = lazyRouteComponent(() => import('@/routes/logs'), 'UnifiedLogsPage');
+const GuidePage = lazyRouteComponent(() => import('@/routes/guide'), 'GuidePage');
+const McpServersPage = lazyRouteComponent(() => import('@/routes/mcp/servers'), 'McpServersPage');
+const McpToolsPage = lazyRouteComponent(() => import('@/routes/mcp/tools'), 'McpToolsPage');
+const UsagePage = lazyRouteComponent(() => import('@/routes/analytics/usage'), 'UsagePage');
+const CostsPage = lazyRouteComponent(() => import('@/routes/analytics/costs'), 'CostsPage');
+const UsersPage = lazyRouteComponent(() => import('@/routes/admin/users'), 'UsersPage');
+const RolesPage = lazyRouteComponent(() => import('@/routes/admin/roles'), 'RolesPage');
+const SettingsPage = lazyRouteComponent(() => import('@/routes/admin/settings'), 'SettingsPage');
+const LogForwardersPage = lazyRouteComponent(() => import('@/routes/admin/log-forwarders'), 'LogForwardersPage');
+const ProfilePage = lazyRouteComponent(() => import('@/routes/profile'), 'ProfilePage');
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 

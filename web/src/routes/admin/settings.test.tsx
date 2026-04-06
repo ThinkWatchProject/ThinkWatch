@@ -23,9 +23,10 @@ const systemInfo = {
 }
 
 const settingsData: Record<string, Array<{ key: string; value: unknown; category: string; description: string; updated_at: string }>> = {
-  general: [
-    { key: 'site_name', value: 'TestThinkWatch', category: 'general', description: '', updated_at: '' },
+  setup: [
+    { key: 'setup.site_name', value: 'TestThinkWatch', category: 'setup', description: '', updated_at: '' },
   ],
+  general: [],
   auth: [],
   gateway: [],
   security: [],
@@ -60,7 +61,7 @@ describe('SettingsPage', () => {
     expect(screen.getByRole('tab', { name: /security/i })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /budget/i })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: /api key policies/i })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /data retention/i })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: /audit/i })).toBeInTheDocument()
   })
 
   it('loads and displays system info', async () => {
@@ -90,7 +91,7 @@ describe('SettingsPage', () => {
 
     expect(mockApiPatch).toHaveBeenCalledWith('/api/admin/settings', expect.objectContaining({
       settings: expect.objectContaining({
-        site_name: 'TestThinkWatch',
+        'setup.site_name': 'TestThinkWatch',
       }),
     }))
 

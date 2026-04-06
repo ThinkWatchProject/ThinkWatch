@@ -356,6 +356,160 @@ pub async fn delete_provider(
     Ok(Json(serde_json::json!({"status": "deleted"})))
 }
 
+// ---------------------------------------------------------------------------
+// Test connection — used by the setup wizard and Add Provider dialog so
+// admins can verify base URL + API key + custom headers without persisting.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+pub struct TestProviderRequest {
+    pub provider_type: String,
+    pub base_url: String,
+    pub api_key: String,
+    pub custom_headers: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct TestProviderResponse {
+    pub success: bool,
+    pub message: String,
+    /// HTTP status code returned by upstream, if a response was received.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status_code: Option<u16>,
+    /// Round-trip latency in milliseconds.
+    pub latency_ms: u64,
+    /// Number of models returned by the upstream `/v1/models` (where applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_count: Option<usize>,
+}
+
+/// Authenticated route — used by the providers admin page.
+pub async fn test_provider(
+    _auth_user: AuthUser,
+    State(_state): State<AppState>,
+    Json(req): Json<TestProviderRequest>,
+) -> Result<Json<TestProviderResponse>, AppError> {
+    run_provider_test(req).await
+}
+
+/// Unauthenticated route — used by the setup wizard before any user exists.
+/// Gated by an extra check that setup is not yet complete, so anonymous
+/// callers can't probe arbitrary URLs against an installed instance.
+pub async fn test_provider_unauthenticated(
+    State(state): State<AppState>,
+    Json(req): Json<TestProviderRequest>,
+) -> Result<Json<TestProviderResponse>, AppError> {
+    if state.dynamic_config.is_initialized().await {
+        return Err(AppError::Forbidden);
+    }
+    run_provider_test(req).await
+}
+
+async fn run_provider_test(
+    req: TestProviderRequest,
+) -> Result<Json<TestProviderResponse>, AppError> {
+    if req.base_url.is_empty() || req.api_key.is_empty() {
+        return Err(AppError::BadRequest(
+            "base_url and api_key are required".into(),
+        ));
+    }
+    validate_url(&req.base_url)?;
+    if let Some(headers) = &req.custom_headers {
+        validate_custom_headers(headers)?;
+    }
+
+    // Provider-specific probe URL + auth header. We always hit a cheap,
+    // read-only endpoint that requires auth so a wrong key is detected too.
+    let url = match req.provider_type.as_str() {
+        "anthropic" => format!("{}/v1/models", req.base_url.trim_end_matches('/')),
+        "google" => format!(
+            "{}/v1beta/models?key={}",
+            req.base_url.trim_end_matches('/'),
+            urlencoding::encode(&req.api_key)
+        ),
+        // openai / azure / custom — all OpenAI-compatible /v1/models
+        _ => format!("{}/v1/models", req.base_url.trim_end_matches('/')),
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {e}")))?;
+
+    let mut builder = client.get(&url);
+    match req.provider_type.as_str() {
+        "anthropic" => {
+            builder = builder
+                .header("x-api-key", &req.api_key)
+                .header("anthropic-version", "2023-06-01");
+        }
+        "google" => {
+            // key is in the query string already
+        }
+        _ => {
+            builder = builder.bearer_auth(&req.api_key);
+        }
+    }
+    if let Some(headers) = req.custom_headers.as_ref() {
+        for (k, v) in headers {
+            builder = builder.header(k, v);
+        }
+    }
+
+    let started = std::time::Instant::now();
+    let result = builder.send().await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(resp) => {
+            let status = resp.status();
+            let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+            if status.is_success() {
+                // Try to count models from the standard shape: { "data": [...] }
+                // or anthropic's { "data": [...] } / google's { "models": [...] }.
+                let model_count = body
+                    .get("data")
+                    .and_then(|v| v.as_array().map(|a| a.len()))
+                    .or_else(|| {
+                        body.get("models")
+                            .and_then(|v| v.as_array().map(|a| a.len()))
+                    });
+                Ok(Json(TestProviderResponse {
+                    success: true,
+                    message: match model_count {
+                        Some(n) => format!("Connected successfully — {n} models available"),
+                        None => "Connected successfully".to_string(),
+                    },
+                    status_code: Some(status.as_u16()),
+                    latency_ms,
+                    model_count,
+                }))
+            } else {
+                let upstream_err = body
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| status.canonical_reason().unwrap_or("error").to_string());
+                Ok(Json(TestProviderResponse {
+                    success: false,
+                    message: format!("HTTP {}: {upstream_err}", status.as_u16()),
+                    status_code: Some(status.as_u16()),
+                    latency_ms,
+                    model_count: None,
+                }))
+            }
+        }
+        Err(e) => Ok(Json(TestProviderResponse {
+            success: false,
+            message: format!("Request failed: {e}"),
+            status_code: None,
+            latency_ms,
+            model_count: None,
+        })),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -143,7 +143,11 @@
     "apiKeyUnchanged": "Leave blank to keep current key",
     "customHeaders": "Custom Headers",
     "customHeadersDesc": "Custom HTTP headers forwarded with requests",
-    "addHeader": "Add Header"
+    "addHeader": "Add Header",
+    "awsCredentials": "AWS Credentials",
+    "bedrockUrlHint": "Enter AWS region (e.g. us-east-1)",
+    "bedrockKeyHint": "Format: ACCESS_KEY_ID:SECRET_ACCESS_KEY",
+    "azureUrlHint": "Enter Azure OpenAI resource endpoint"
   },
   "apiKeys": {
     "title": "API Keys",
@@ -698,7 +702,8 @@
       "name": "Name",
       "displayName": "Display Name",
       "baseUrl": "Base URL",
-      "apiKey": "API Key"
+      "apiKey": "API Key",
+      "testConnection": "Test connection"
     },
     "complete": {
       "title": "Setup Complete!",

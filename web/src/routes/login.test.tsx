@@ -38,14 +38,14 @@ describe('LoginPage', () => {
 
   it('calls onLogin with email and password on submit', async () => {
     const user = userEvent.setup()
-    const onLogin = vi.fn().mockResolvedValue(undefined)
+    const onLogin = vi.fn().mockResolvedValue({})
     render(<LoginPage onLogin={onLogin} />)
 
     await user.type(screen.getByLabelText(/email/i), 'test@example.com')
     await user.type(screen.getByLabelText(/password/i), 'secretpass')
     await user.click(screen.getByRole('button', { name: /sign in$/i }))
 
-    expect(onLogin).toHaveBeenCalledWith('test@example.com', 'secretpass')
+    expect(onLogin).toHaveBeenCalledWith('test@example.com', 'secretpass', undefined)
   })
 
   it('displays error when login fails', async () => {

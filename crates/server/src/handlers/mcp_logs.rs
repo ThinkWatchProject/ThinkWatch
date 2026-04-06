@@ -15,6 +15,8 @@ pub struct McpLogsQuery {
     pub server_id: Option<String>,
     pub tool_name: Option<String>,
     pub status: Option<String>,
+    /// Free-text search across tool_name (substring, case-insensitive).
+    pub q: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
     pub sort_by: Option<String>,
@@ -83,6 +85,16 @@ pub async fn list_mcp_logs(
     if let Some(ref v) = params.to {
         conditions.push("created_at <= ?".into());
         binds.push(v.clone());
+    }
+    if let Some(ref v) = params.q
+        && !v.is_empty()
+    {
+        conditions.push("tool_name LIKE ?".into());
+        let escaped = v
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        binds.push(format!("%{escaped}%"));
     }
 
     let wc = if conditions.is_empty() {

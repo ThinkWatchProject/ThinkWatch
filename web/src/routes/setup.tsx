@@ -113,6 +113,13 @@ export function SetupPage() {
   const [providerBaseUrl, setProviderBaseUrl] = useState('');
   const [providerApiKey, setProviderApiKey] = useState('');
   const [providerHeaders, setProviderHeaders] = useState<[string, string][]>([]);
+  // Provider connection test state
+  const [providerTesting, setProviderTesting] = useState(false);
+  const [providerTestResult, setProviderTestResult] = useState<{
+    success: boolean;
+    message: string;
+    latency_ms: number;
+  } | null>(null);
 
   const [adminErrors, setAdminErrors] = useState<Record<string, string>>({});
 
@@ -151,9 +158,49 @@ export function SetupPage() {
     }
   };
 
+  const handleTestProvider = async () => {
+    setProviderTesting(true);
+    setProviderTestResult(null);
+    try {
+      const customHeaders: Record<string, string> = {};
+      for (const [k, v] of providerHeaders) {
+        if (k && v) customHeaders[k] = v;
+      }
+      const res = await fetch(`${API_BASE}/api/setup/test-provider`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider_type: providerType,
+          base_url: providerBaseUrl,
+          api_key: providerApiKey,
+          custom_headers: Object.keys(customHeaders).length > 0 ? customHeaders : undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setProviderTestResult({
+          success: false,
+          message: data.error?.message || `HTTP ${res.status}`,
+          latency_ms: 0,
+        });
+      } else {
+        setProviderTestResult(data);
+      }
+    } catch (err) {
+      setProviderTestResult({
+        success: false,
+        message: err instanceof Error ? err.message : 'Network error',
+        latency_ms: 0,
+      });
+    } finally {
+      setProviderTesting(false);
+    }
+  };
+
   const handleProviderTypeChange = (value: string | null) => {
     if (value === null) return;
     setProviderType(value);
+    setProviderTestResult(null); // reset test status when type changes
     const found = PROVIDER_TYPES.find((pt) => pt.value === value);
     if (found) {
       setProviderBaseUrl(found.baseUrl);
@@ -425,6 +472,36 @@ export function SetupPage() {
               <Button type="button" variant="outline" size="sm" onClick={() => setProviderHeaders([...providerHeaders, ['', '']])}>
                 <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
               </Button>
+            </div>
+
+            {/* Test connection */}
+            <div className="space-y-2 pt-2 border-t">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={providerTesting || !providerBaseUrl || !providerApiKey}
+                onClick={handleTestProvider}
+              >
+                {providerTesting ? t('common.loading') : t('setup.provider.testConnection')}
+              </Button>
+              {providerTestResult && (
+                <Alert variant={providerTestResult.success ? 'default' : 'destructive'}>
+                  {providerTestResult.success ? (
+                    <Check className="h-4 w-4" />
+                  ) : (
+                    <AlertCircle className="h-4 w-4" />
+                  )}
+                  <AlertDescription>
+                    {providerTestResult.message}
+                    {providerTestResult.latency_ms > 0 && (
+                      <span className="text-xs text-muted-foreground ml-2">
+                        ({providerTestResult.latency_ms}ms)
+                      </span>
+                    )}
+                  </AlertDescription>
+                </Alert>
+              )}
             </div>
           </>
         )}

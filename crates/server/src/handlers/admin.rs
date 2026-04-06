@@ -710,6 +710,49 @@ const RETENTION_TABLES: &[(&str, &str)] = &[
     ("data.retention_days_app", "app_logs"),
 ];
 
+/// Maximum retention window we will accept, in days. Anything bigger is
+/// almost certainly a typo and risks accidentally turning the window off.
+const MAX_RETENTION_DAYS: i64 = 36500; // 100 years
+
+/// Whitelist of valid ClickHouse log table identifiers. Used as a
+/// belt-and-braces guard so we never inject anything we don't already
+/// know about into a `ALTER TABLE ...` statement, even though all call
+/// sites today only pass &'static str literals from RETENTION_TABLES.
+const VALID_LOG_TABLES: &[&str] = &[
+    "audit_logs",
+    "gateway_logs",
+    "mcp_logs",
+    "platform_logs",
+    "access_logs",
+    "app_logs",
+];
+
+/// Issue a single `ALTER TABLE ... MODIFY TTL` against ClickHouse.
+/// Validates `table` against an explicit whitelist and clamps `days`
+/// into a sane range. Returns `false` if the call was skipped or failed.
+async fn apply_single_ttl(ch: &clickhouse::Client, table: &str, days: i64) -> bool {
+    if !VALID_LOG_TABLES.contains(&table) {
+        tracing::error!(table, "refusing TTL update for unknown table");
+        return false;
+    }
+    if !(1..=MAX_RETENTION_DAYS).contains(&days) {
+        tracing::error!(table, days, "refusing TTL update: days out of range");
+        return false;
+    }
+    let sql =
+        format!("ALTER TABLE {table} MODIFY TTL toDateTime(created_at) + INTERVAL {days} DAY");
+    match ch.query(&sql).execute().await {
+        Ok(()) => {
+            tracing::info!(table, days, "ClickHouse TTL updated");
+            true
+        }
+        Err(e) => {
+            tracing::error!(table, days, "Failed to update ClickHouse TTL: {e}");
+            false
+        }
+    }
+}
+
 /// Issue `ALTER TABLE ... MODIFY TTL` for every retention setting included in
 /// the update. Failures are logged but not surfaced — the setting is already
 /// persisted, and ClickHouse may be temporarily unavailable.
@@ -725,13 +768,7 @@ async fn apply_clickhouse_ttls(state: &AppState, settings: &HashMap<String, serd
         if days <= 0 {
             continue;
         }
-        let sql =
-            format!("ALTER TABLE {table} MODIFY TTL toDateTime(created_at) + INTERVAL {days} DAY");
-        if let Err(e) = ch.query(&sql).execute().await {
-            tracing::error!(table, days, "Failed to update ClickHouse TTL: {e}");
-        } else {
-            tracing::info!(table, days, "ClickHouse TTL updated");
-        }
+        apply_single_ttl(ch, table, days).await;
     }
 }
 
@@ -755,11 +792,7 @@ pub async fn reconcile_clickhouse_ttls(state: &AppState) {
         if days <= 0 {
             continue;
         }
-        let sql =
-            format!("ALTER TABLE {table} MODIFY TTL toDateTime(created_at) + INTERVAL {days} DAY");
-        if let Err(e) = ch.query(&sql).execute().await {
-            tracing::warn!(table, days, "Startup TTL reconcile failed: {e}");
-        }
+        apply_single_ttl(ch, table, days).await;
     }
 }
 
@@ -993,8 +1026,10 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             let v = value
                 .as_i64()
                 .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
-            if v < 0 {
-                return Err(AppError::BadRequest(format!("{key} must be >= 0")));
+            if !(0..=MAX_RETENTION_DAYS).contains(&v) {
+                return Err(AppError::BadRequest(format!(
+                    "{key} must be between 0 and {MAX_RETENTION_DAYS}"
+                )));
             }
         }
 

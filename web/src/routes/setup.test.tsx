@@ -88,8 +88,8 @@ describe('SetupPage', () => {
     // Fill admin form
     await user.type(screen.getByLabelText(/email/i), 'admin@test.com')
     await user.type(screen.getByLabelText(/display name/i), 'Admin')
-    await user.type(screen.getByLabelText(/^password$/i), 'password123')
-    await user.type(screen.getByLabelText(/confirm password/i), 'password123')
+    await user.type(screen.getByLabelText(/^password$/i), 'Password123')
+    await user.type(screen.getByLabelText(/confirm password/i), 'Password123')
     await user.click(screen.getByRole('button', { name: /next/i }))
 
     // Settings step -> Next
@@ -127,8 +127,8 @@ describe('SetupPage', () => {
 
     await user.type(screen.getByLabelText(/email/i), 'admin@test.com')
     await user.type(screen.getByLabelText(/display name/i), 'Admin')
-    await user.type(screen.getByLabelText(/^password$/i), 'password123')
-    await user.type(screen.getByLabelText(/confirm password/i), 'password123')
+    await user.type(screen.getByLabelText(/^password$/i), 'Password123')
+    await user.type(screen.getByLabelText(/confirm password/i), 'Password123')
     await user.click(screen.getByRole('button', { name: /next/i }))
 
     // Settings

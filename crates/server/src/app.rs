@@ -280,6 +280,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route(
             "/api/setup/initialize",
             post(handlers::setup::setup_initialize),
+        )
+        .route(
+            "/api/setup/test-provider",
+            post(handlers::providers::test_provider_unauthenticated),
         );
 
     // User-level routes (any authenticated user)
@@ -354,6 +358,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route(
             "/api/admin/providers",
             get(handlers::providers::list_providers).post(handlers::providers::create_provider),
+        )
+        .route(
+            "/api/admin/providers/test",
+            post(handlers::providers::test_provider),
         )
         .route(
             "/api/admin/providers/{id}",

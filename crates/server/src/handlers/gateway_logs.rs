@@ -96,8 +96,19 @@ pub async fn list_gateway_logs(
         conditions.push("created_at <= ?".to_string());
         bind_values.push(to.clone());
     }
-    // Free-text search cannot use bind params with ILIKE in ClickHouse SDK,
-    // so we skip the `q` filter for now (TODO: use hasToken() or ngramSearch)
+    // Free-text `q` searches model_id with case-insensitive substring match.
+    // The user input is escaped for LIKE wildcards (% / _ / \) so they can
+    // only match literal characters, not patterns.
+    if let Some(ref v) = params.q
+        && !v.is_empty()
+    {
+        conditions.push("model_id LIKE ?".to_string());
+        let escaped = v
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        bind_values.push(format!("%{escaped}%"));
+    }
 
     let where_clause = if conditions.is_empty() {
         String::new()

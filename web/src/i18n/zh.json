@@ -143,7 +143,11 @@
     "apiKeyUnchanged": "留空以保留当前密钥",
     "customHeaders": "自定义请求头",
     "customHeadersDesc": "随请求转发的自定义 HTTP 头",
-    "addHeader": "添加请求头"
+    "addHeader": "添加请求头",
+    "awsCredentials": "AWS 凭证",
+    "bedrockUrlHint": "输入 AWS 区域（如 us-east-1）",
+    "bedrockKeyHint": "格式：ACCESS_KEY_ID:SECRET_ACCESS_KEY",
+    "azureUrlHint": "输入 Azure OpenAI 资源端点"
   },
   "apiKeys": {
     "title": "API 密钥",
@@ -698,7 +702,8 @@
       "name": "名称",
       "displayName": "显示名称",
       "baseUrl": "Base URL",
-      "apiKey": "API Key"
+      "apiKey": "API Key",
+      "testConnection": "测试连接"
     },
     "complete": {
       "title": "配置完成！",
