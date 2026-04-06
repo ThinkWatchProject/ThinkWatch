@@ -267,6 +267,12 @@ async fn main() -> anyhow::Result<()> {
     );
     tracing::info!("Background tasks started");
 
+    // Reconcile ClickHouse log table TTLs with the persisted settings on
+    // startup. This ensures retention values configured via the admin UI
+    // survive server restarts even if the table was created with different
+    // defaults.
+    handlers::admin::reconcile_clickhouse_ttls(&state).await;
+
     // --- Start Gateway server (AI API + MCP) ---
     let gateway_app = app::create_gateway_app(&config, state.clone(), jwt).await;
     let gateway_addr = config.gateway_addr();

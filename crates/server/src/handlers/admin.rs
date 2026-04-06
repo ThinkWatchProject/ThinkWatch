@@ -700,6 +700,69 @@ pub struct UpdateSettingsRequest {
     pub settings: HashMap<String, serde_json::Value>,
 }
 
+/// Map of `data.retention_days_*` setting keys to their ClickHouse table name.
+const RETENTION_TABLES: &[(&str, &str)] = &[
+    ("data.retention_days_audit", "audit_logs"),
+    ("data.retention_days_gateway", "gateway_logs"),
+    ("data.retention_days_mcp", "mcp_logs"),
+    ("data.retention_days_platform", "platform_logs"),
+    ("data.retention_days_access", "access_logs"),
+    ("data.retention_days_app", "app_logs"),
+];
+
+/// Issue `ALTER TABLE ... MODIFY TTL` for every retention setting included in
+/// the update. Failures are logged but not surfaced — the setting is already
+/// persisted, and ClickHouse may be temporarily unavailable.
+async fn apply_clickhouse_ttls(state: &AppState, settings: &HashMap<String, serde_json::Value>) {
+    let Some(ch) = state.clickhouse.as_ref() else {
+        return;
+    };
+    for (key, table) in RETENTION_TABLES {
+        let Some(value) = settings.get(*key) else {
+            continue;
+        };
+        let Some(days) = value.as_i64() else { continue };
+        if days <= 0 {
+            continue;
+        }
+        let sql =
+            format!("ALTER TABLE {table} MODIFY TTL toDateTime(created_at) + INTERVAL {days} DAY");
+        if let Err(e) = ch.query(&sql).execute().await {
+            tracing::error!(table, days, "Failed to update ClickHouse TTL: {e}");
+        } else {
+            tracing::info!(table, days, "ClickHouse TTL updated");
+        }
+    }
+}
+
+/// Apply current persisted retention settings to all ClickHouse log tables.
+/// Called once at server startup so settings survive restarts. Silently no-ops
+/// if ClickHouse is not configured.
+pub async fn reconcile_clickhouse_ttls(state: &AppState) {
+    let Some(ch) = state.clickhouse.as_ref() else {
+        return;
+    };
+    let dc = &state.dynamic_config;
+    let pairs: [(i64, &str); 6] = [
+        (dc.data_retention_days_audit().await, "audit_logs"),
+        (dc.data_retention_days_gateway().await, "gateway_logs"),
+        (dc.data_retention_days_mcp().await, "mcp_logs"),
+        (dc.data_retention_days_platform().await, "platform_logs"),
+        (dc.data_retention_days_access().await, "access_logs"),
+        (dc.data_retention_days_app().await, "app_logs"),
+    ];
+    for (days, table) in pairs {
+        if days <= 0 {
+            continue;
+        }
+        let sql =
+            format!("ALTER TABLE {table} MODIFY TTL toDateTime(created_at) + INTERVAL {days} DAY");
+        if let Err(e) = ch.query(&sql).execute().await {
+            tracing::warn!(table, days, "Startup TTL reconcile failed: {e}");
+        }
+    }
+}
+
 /// PATCH /api/admin/settings — update one or more settings.
 pub async fn update_settings(
     auth_user: AuthUser,
@@ -730,6 +793,11 @@ pub async fn update_settings(
         let pii = crate::app::load_pii_redactor(&state.dynamic_config).await;
         state.pii_redactor.store(std::sync::Arc::new(pii));
     }
+
+    // Apply ClickHouse TTL changes for any retention setting that was updated.
+    // ClickHouse runs the cleanup asynchronously in its merge worker, so this
+    // returns immediately.
+    apply_clickhouse_ttls(&state, &req.settings).await;
 
     // Notify other instances via Redis Pub/Sub
     dynamic_config::notify_config_changed(&state.redis).await;
@@ -916,7 +984,12 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
         | "api_keys.inactivity_timeout_days"
         | "api_keys.rotation_period_days"
         | "data.retention_days_usage"
-        | "data.retention_days_audit" => {
+        | "data.retention_days_audit"
+        | "data.retention_days_gateway"
+        | "data.retention_days_mcp"
+        | "data.retention_days_platform"
+        | "data.retention_days_access"
+        | "data.retention_days_app" => {
             let v = value
                 .as_i64()
                 .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
