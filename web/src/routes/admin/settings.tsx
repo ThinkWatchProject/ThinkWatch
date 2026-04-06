@@ -396,9 +396,9 @@ export function SettingsPage() {
             <Key className="h-4 w-4" />
             {t('settings.apiKeysConfig')}
           </TabsTrigger>
-          <TabsTrigger value="data">
+          <TabsTrigger value="audit">
             <Database className="h-4 w-4" />
-            {t('settings.dataRetention')}
+            {t('settings.auditConfig')}
           </TabsTrigger>
         </TabsList>
 
@@ -515,6 +515,36 @@ export function SettingsPage() {
               </CardContent>
             </Card>
 
+          </div>
+        </TabsContent>
+
+        {/* ---------------------------------------------------------------- */}
+        {/* Auth Tab                                                          */}
+        {/* ---------------------------------------------------------------- */}
+        <TabsContent value="auth">
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t('settings.auth')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
+                  <NumberField label={t('settings.accessTtl')} value={accessTtl} onChange={setAccessTtl} min={60} max={86400} />
+                  <NumberField label={t('settings.refreshTtl')} value={refreshTtl} onChange={setRefreshTtl} min={1} max={365} />
+                  <NumberField label={t('settings.signatureDrift')} value={signatureDrift} onChange={setSignatureDrift} min={0} max={3600} />
+                  <NumberField label={t('settings.nonceTtl')} value={nonceTtl} onChange={setNonceTtl} min={0} max={3600} />
+                </div>
+                <Separator className="my-6" />
+                <div className="flex items-center justify-between max-w-2xl">
+                  <div>
+                    <Label className="text-sm">{t('settings.allowRegistration')}</Label>
+                    <p className="text-xs text-muted-foreground mt-0.5">{t('settings.allowRegistrationHint')}</p>
+                  </div>
+                  <Switch checked={allowRegistration} onCheckedChange={setAllowRegistration} />
+                </div>
+              </CardContent>
+            </Card>
+
             {/* OIDC / SSO — editable */}
             <Card>
               <CardHeader>
@@ -610,72 +640,7 @@ export function SettingsPage() {
                 )}
               </CardContent>
             </Card>
-
-            {/* Audit — read-only */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">{t('settingsPage.auditTitle')}</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {loading ? (
-                  <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <Label className="text-sm">{t('settingsPage.clickhouse')}</Label>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {auditConfig?.clickhouse_url || '—'}
-                        </p>
-                      </div>
-                      <Badge variant={auditConfig?.connected ? 'default' : 'destructive'}>
-                        {auditConfig?.connected ? t('settingsPage.connected') : t('dashboard.unreachable')}
-                      </Badge>
-                    </div>
-                    <Separator />
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <Label className="text-sm">{t('settingsPage.logForwarding')}</Label>
-                        <p className="text-xs text-muted-foreground mt-0.5">
-                          {t('settingsPage.logForwardingHint')}
-                        </p>
-                      </div>
-                      <a href="/admin/log-forwarders" className="text-sm text-primary hover:underline">
-                        {t('settingsPage.manage')}
-                      </a>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
           </div>
-        </TabsContent>
-
-        {/* ---------------------------------------------------------------- */}
-        {/* Auth Tab                                                          */}
-        {/* ---------------------------------------------------------------- */}
-        <TabsContent value="auth">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">{t('settings.auth')}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
-                <NumberField label={t('settings.accessTtl')} value={accessTtl} onChange={setAccessTtl} min={60} max={86400} />
-                <NumberField label={t('settings.refreshTtl')} value={refreshTtl} onChange={setRefreshTtl} min={1} max={365} />
-                <NumberField label={t('settings.signatureDrift')} value={signatureDrift} onChange={setSignatureDrift} min={0} max={3600} />
-                <NumberField label={t('settings.nonceTtl')} value={nonceTtl} onChange={setNonceTtl} min={0} max={3600} />
-              </div>
-              <Separator className="my-6" />
-              <div className="flex items-center justify-between max-w-2xl">
-                <div>
-                  <Label className="text-sm">{t('settings.allowRegistration')}</Label>
-                  <p className="text-xs text-muted-foreground mt-0.5">{t('settings.allowRegistrationHint')}</p>
-                </div>
-                <Switch checked={allowRegistration} onCheckedChange={setAllowRegistration} />
-              </div>
-            </CardContent>
-          </Card>
         </TabsContent>
 
         {/* ---------------------------------------------------------------- */}
@@ -963,20 +928,61 @@ export function SettingsPage() {
         </TabsContent>
 
         {/* ---------------------------------------------------------------- */}
-        {/* Data Retention Tab                                                */}
+        {/* Audit Tab                                                         */}
         {/* ---------------------------------------------------------------- */}
-        <TabsContent value="data">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">{t('settings.dataRetention')}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
-                <NumberField label={t('settings.usageRetention')} value={usageRetention} onChange={setUsageRetention} min={1} max={3650} />
-                <NumberField label={t('settings.auditRetention')} value={auditRetention} onChange={setAuditRetention} min={1} max={3650} />
-              </div>
-            </CardContent>
-          </Card>
+        <TabsContent value="audit">
+          <div className="space-y-6">
+            {/* ClickHouse status — read-only */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t('settingsPage.auditTitle')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {loading ? (
+                  <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <Label className="text-sm">{t('settingsPage.clickhouse')}</Label>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {auditConfig?.clickhouse_url || '—'}
+                        </p>
+                      </div>
+                      <Badge variant={auditConfig?.connected ? 'default' : 'destructive'}>
+                        {auditConfig?.connected ? t('settingsPage.connected') : t('dashboard.unreachable')}
+                      </Badge>
+                    </div>
+                    <Separator />
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <Label className="text-sm">{t('settingsPage.logForwarding')}</Label>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          {t('settingsPage.logForwardingHint')}
+                        </p>
+                      </div>
+                      <a href="/admin/log-forwarders" className="text-sm text-primary hover:underline">
+                        {t('settingsPage.manage')}
+                      </a>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* Retention */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t('settings.dataRetention')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
+                  <NumberField label={t('settings.usageRetention')} value={usageRetention} onChange={setUsageRetention} min={1} max={3650} />
+                  <NumberField label={t('settings.auditRetention')} value={auditRetention} onChange={setAuditRetention} min={1} max={3650} />
+                </div>
+              </CardContent>
+            </Card>
+          </div>
         </TabsContent>
       </Tabs>
     </div>

@@ -365,6 +365,7 @@
     "security": "Security",
     "budget": "Budget Alerts",
     "apiKeysConfig": "API Key Policies",
+    "auditConfig": "Audit",
     "dataRetention": "Data Retention",
     "saved": "Settings saved successfully",
     "saveError": "Failed to save settings",
