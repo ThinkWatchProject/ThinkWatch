@@ -129,17 +129,20 @@ cd web && pnpm install && pnpm dev
 # 4. Complete the setup wizard at http://localhost:5173/setup
 ```
 
-See the **[Deployment Guide](docs/en/deployment-guide.md)** for production setup with Docker Compose or Kubernetes.
+See the **[Deployment Guide](https://thinkwat.ch/docs/deployment-guide)** for production setup with Docker Compose or Kubernetes.
 
 ## Documentation
 
+Full documentation: **[thinkwat.ch/docs](https://thinkwat.ch/docs)**
+
 | Document | Description |
 |----------|-------------|
-| **[Architecture](docs/en/architecture.md)** | System design, dual-port model, data flow diagrams |
-| **[Deployment Guide](docs/en/deployment-guide.md)** | Docker Compose, Kubernetes Helm, SSL, production hardening |
-| **[API Reference](docs/en/api-reference.md)** | Complete endpoint documentation for Gateway and Console |
-| **[Security](docs/en/security.md)** | Auth model, encryption, RBAC, threat model, hardening checklist |
-| **[Configuration](docs/en/configuration.md)** | All environment variables and their effects |
+| **[Architecture](https://thinkwat.ch/docs/architecture)** | System design, dual-port model, data flow diagrams |
+| **[Deployment Guide](https://thinkwat.ch/docs/deployment-guide)** | Docker Compose, Kubernetes Helm, SSL, production hardening |
+| **[Configuration](https://thinkwat.ch/docs/configuration)** | All environment variables and their effects |
+| **[API Reference](https://thinkwat.ch/docs/api-reference)** | Complete endpoint documentation for Gateway and Console |
+| **[Security](https://thinkwat.ch/docs/security)** | Auth model, encryption, RBAC, threat model, hardening checklist |
+| **[Secret Rotation](https://thinkwat.ch/docs/secret-rotation)** | Rotating provider keys, JWT secrets, and admin credentials |
 
 ## Port Architecture
 
@@ -167,8 +170,10 @@ ThinkWatch/
 │   ├── docker-compose.yml       # Production deployment
 │   ├── docker-compose.dev.yml   # Development (PG + Redis + ClickHouse + Zitadel)
 │   └── helm/think-watch/      # Kubernetes Helm chart
-└── docs/                # Detailed documentation
+└── ...
 ```
+
+> Documentation: **[thinkwat.ch/docs](https://thinkwat.ch/docs)**
 
 ## Contributing
 
