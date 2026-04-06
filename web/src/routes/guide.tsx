@@ -173,6 +173,7 @@ claude`;
           t('guide.aiStep.claudeCodeBaseUrl'),
           t('guide.aiStep.claudeCodeApiKey'),
           t('guide.aiStep.claudeCodeRun'),
+          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -201,6 +202,7 @@ function CursorTab({ gatewayUrl }: { gatewayUrl: string }) {
           t('guide.aiStep.cursorBaseUrl', { url: `${gatewayUrl}/v1` }),
           t('guide.aiStep.cursorApiKey'),
           t('guide.aiStep.cursorSelectModel'),
+          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -237,6 +239,7 @@ function ContinueTab({ gatewayUrl }: { gatewayUrl: string }) {
           t('guide.aiStep.continueApiBase', { url: `${gatewayUrl}/v1` }),
           t('guide.aiStep.continueApiKey'),
           t('guide.aiStep.continueChooseModel'),
+          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -266,6 +269,7 @@ function ClineTab({ gatewayUrl }: { gatewayUrl: string }) {
           t('guide.aiStep.clineBaseUrl', { url: `${gatewayUrl}/v1` }),
           t('guide.aiStep.clineApiKey'),
           t('guide.aiStep.clineModel'),
+          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -301,6 +305,7 @@ response = client.chat.completions.create(
           t('guide.aiStep.openaiSdkBaseUrl', { url: `${gatewayUrl}/v1` }),
           t('guide.aiStep.openaiSdkApiKey'),
           t('guide.aiStep.openaiSdkModel'),
+          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -337,6 +342,7 @@ message = client.messages.create(
           t('guide.aiStep.anthropicSdkBaseUrl', { url: gatewayUrl }),
           t('guide.aiStep.anthropicSdkApiKey'),
           t('guide.aiStep.anthropicSdkModel'),
+          t('guide.apiKeyNote'),
         ]}
       />
       <CodeBlock code={code} />
@@ -716,11 +722,6 @@ export function GuidePage() {
             <p className="mt-2 text-xs text-muted-foreground">{t('guide.mcpEndpointDesc')}</p>
           </CardContent>
         </Card>
-      </div>
-
-      {/* API key reminder */}
-      <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-200">
-        {t('guide.apiKeyNote')}
       </div>
 
       {/* ============================================================= */}
