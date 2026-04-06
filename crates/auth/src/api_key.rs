@@ -3,15 +3,8 @@ use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
 
-const KEY_PREFIX: &str = "tw-";
+pub const KEY_PREFIX: &str = "tw-";
 const KEY_LENGTH: usize = 48;
-
-/// Returns true if the given token looks like a ThinkWatch API key.
-/// Accepts both the current `tw-` prefix and the legacy `ab-` prefix
-/// for backward compatibility with keys issued before the project rename.
-pub fn is_api_key(token: &str) -> bool {
-    token.starts_with(KEY_PREFIX) || token.starts_with("ab-")
-}
 
 /// Server-side HMAC key for API key hashing.
 /// This ensures API key hashes cannot be brute-forced without the server secret,
@@ -94,12 +87,5 @@ mod tests {
             !verify_api_key("tw-wrong_key", &key.hash),
             "wrong plaintext should not verify"
         );
-    }
-
-    #[test]
-    fn is_api_key_accepts_both_prefixes() {
-        assert!(is_api_key("tw-anything"));
-        assert!(is_api_key("ab-legacy"));
-        assert!(!is_api_key("eyJhbGciOi"));
     }
 }
