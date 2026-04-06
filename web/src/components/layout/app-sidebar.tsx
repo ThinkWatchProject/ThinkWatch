@@ -222,10 +222,9 @@ export function AppSidebar({
             <SidebarGroupContent>
               <SidebarMenu>
                 {group.items.map((item) => {
-                  const isActive =
-                    item.href === '/'
-                      ? currentPath === '/'
-                      : currentPath.startsWith(item.href);
+                  // Exact match only. Sub-paths are not auto-highlighted to
+                  // avoid sibling collisions like /logs vs /logs/forwarders.
+                  const isActive = currentPath === item.href;
                   return (
                     <SidebarMenuItem key={item.titleKey}>
                       <SidebarMenuButton
