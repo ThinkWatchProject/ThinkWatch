@@ -398,10 +398,18 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 ('api_keys.rotation_period_days',        '0',  'api_keys', 'Auto-rotation period in days (0 = disabled)'),
 ('api_keys.rotation_grace_period_hours', '24', 'api_keys', 'Grace period for old key after rotation');
 
--- Data retention
+-- Data retention — usage records (PostgreSQL) + per-log-type ClickHouse retention.
+-- Audit/Gateway/MCP/Platform default to 90 days; Access/App default to 30 days.
+-- Changing these via the admin UI issues `ALTER TABLE ... MODIFY TTL` against
+-- the corresponding ClickHouse table, so the value here is the seed default only.
 INSERT INTO system_settings (key, value, category, description) VALUES
-('data.retention_days_usage', '90',  'data', 'Days to keep usage records (0 = forever)'),
-('data.retention_days_audit', '365', 'data', 'Days to keep audit logs (0 = forever)');
+('data.retention_days_usage',    '90', 'data', 'Days to keep usage records in PostgreSQL (0 = forever)'),
+('data.retention_days_audit',    '90', 'data', 'Days to keep audit logs in ClickHouse'),
+('data.retention_days_gateway',  '90', 'data', 'Days to keep AI gateway request logs in ClickHouse'),
+('data.retention_days_mcp',      '90', 'data', 'Days to keep MCP tool invocation logs in ClickHouse'),
+('data.retention_days_platform', '90', 'data', 'Days to keep platform management logs in ClickHouse'),
+('data.retention_days_access',   '30', 'data', 'Days to keep HTTP access logs in ClickHouse'),
+('data.retention_days_app',      '30', 'data', 'Days to keep application runtime logs in ClickHouse');
 
 -- Setup
 INSERT INTO system_settings (key, value, category, description) VALUES

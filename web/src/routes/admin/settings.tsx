@@ -253,7 +253,12 @@ export function SettingsPage() {
   const [gracePeriod, setGracePeriod] = useState(24);
   // Data retention
   const [usageRetention, setUsageRetention] = useState(90);
-  const [auditRetention, setAuditRetention] = useState(365);
+  const [auditRetention, setAuditRetention] = useState(90);
+  const [gatewayRetention, setGatewayRetention] = useState(90);
+  const [mcpRetention, setMcpRetention] = useState(90);
+  const [platformRetention, setPlatformRetention] = useState(90);
+  const [accessRetention, setAccessRetention] = useState(30);
+  const [appRetention, setAppRetention] = useState(30);
   // OIDC
   const [oidcEnabled, setOidcEnabled] = useState(false);
   const [oidcIssuerUrl, setOidcIssuerUrl] = useState('');
@@ -298,7 +303,12 @@ export function SettingsPage() {
     setGracePeriod(num(getSettingValue(data, 'api_keys', 'rotation_grace_period_hours'), 24));
 
     setUsageRetention(num(getSettingValue(data, 'data', 'retention_days_usage'), 90));
-    setAuditRetention(num(getSettingValue(data, 'data', 'retention_days_audit'), 365));
+    setAuditRetention(num(getSettingValue(data, 'data', 'retention_days_audit'), 90));
+    setGatewayRetention(num(getSettingValue(data, 'data', 'retention_days_gateway'), 90));
+    setMcpRetention(num(getSettingValue(data, 'data', 'retention_days_mcp'), 90));
+    setPlatformRetention(num(getSettingValue(data, 'data', 'retention_days_platform'), 90));
+    setAccessRetention(num(getSettingValue(data, 'data', 'retention_days_access'), 30));
+    setAppRetention(num(getSettingValue(data, 'data', 'retention_days_app'), 30));
   }, []);
 
   useEffect(() => {
@@ -368,6 +378,11 @@ export function SettingsPage() {
           'api_keys.rotation_grace_period_hours': gracePeriod,
           'data.retention_days_usage': usageRetention,
           'data.retention_days_audit': auditRetention,
+          'data.retention_days_gateway': gatewayRetention,
+          'data.retention_days_mcp': mcpRetention,
+          'data.retention_days_platform': platformRetention,
+          'data.retention_days_access': accessRetention,
+          'data.retention_days_app': appRetention,
         },
       });
 
@@ -1158,12 +1173,82 @@ export function SettingsPage() {
             {/* Retention */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">{t('settings.dataRetention')}</CardTitle>
+                <CardTitle className="text-base">{t('settings.retention.title')}</CardTitle>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {t('settings.retention.intro')}
+                </p>
               </CardHeader>
-              <CardContent>
-                <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
-                  <NumberField label={t('settings.usageRetention')} value={usageRetention} onChange={setUsageRetention} min={1} max={3650} />
-                  <NumberField label={t('settings.auditRetention')} value={auditRetention} onChange={setAuditRetention} min={1} max={3650} />
+              <CardContent className="space-y-6">
+                <div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground mb-3 block">
+                    {t('settings.retention.postgresGroup')}
+                  </Label>
+                  <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
+                    <NumberField
+                      label={t('settings.retention.usage')}
+                      hint={t('settings.retention.usageHint')}
+                      value={usageRetention}
+                      onChange={setUsageRetention}
+                      min={1}
+                      max={3650}
+                    />
+                  </div>
+                </div>
+                <Separator />
+                <div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground mb-3 block">
+                    {t('settings.retention.clickhouseGroup')}
+                  </Label>
+                  <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 max-w-3xl">
+                    <NumberField
+                      label={t('settings.retention.audit')}
+                      hint={t('settings.retention.auditHint')}
+                      value={auditRetention}
+                      onChange={setAuditRetention}
+                      min={1}
+                      max={3650}
+                    />
+                    <NumberField
+                      label={t('settings.retention.gateway')}
+                      hint={t('settings.retention.gatewayHint')}
+                      value={gatewayRetention}
+                      onChange={setGatewayRetention}
+                      min={1}
+                      max={3650}
+                    />
+                    <NumberField
+                      label={t('settings.retention.mcp')}
+                      hint={t('settings.retention.mcpHint')}
+                      value={mcpRetention}
+                      onChange={setMcpRetention}
+                      min={1}
+                      max={3650}
+                    />
+                    <NumberField
+                      label={t('settings.retention.platform')}
+                      hint={t('settings.retention.platformHint')}
+                      value={platformRetention}
+                      onChange={setPlatformRetention}
+                      min={1}
+                      max={3650}
+                    />
+                    <NumberField
+                      label={t('settings.retention.access')}
+                      hint={t('settings.retention.accessHint')}
+                      value={accessRetention}
+                      onChange={setAccessRetention}
+                      min={1}
+                      max={3650}
+                    />
+                    <NumberField
+                      label={t('settings.retention.app')}
+                      hint={t('settings.retention.appHint')}
+                      value={appRetention}
+                      onChange={setAppRetention}
+                      min={1}
+                      max={3650}
+                    />
+                  </div>
                 </div>
               </CardContent>
             </Card>

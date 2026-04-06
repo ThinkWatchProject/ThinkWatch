@@ -252,7 +252,33 @@ impl DynamicConfig {
     pub async fn data_retention_days_audit(&self) -> i64 {
         self.get_i64("data.retention_days_audit")
             .await
-            .unwrap_or(365)
+            .unwrap_or(90)
+    }
+
+    pub async fn data_retention_days_gateway(&self) -> i64 {
+        self.get_i64("data.retention_days_gateway")
+            .await
+            .unwrap_or(90)
+    }
+
+    pub async fn data_retention_days_mcp(&self) -> i64 {
+        self.get_i64("data.retention_days_mcp").await.unwrap_or(90)
+    }
+
+    pub async fn data_retention_days_platform(&self) -> i64 {
+        self.get_i64("data.retention_days_platform")
+            .await
+            .unwrap_or(90)
+    }
+
+    pub async fn data_retention_days_access(&self) -> i64 {
+        self.get_i64("data.retention_days_access")
+            .await
+            .unwrap_or(30)
+    }
+
+    pub async fn data_retention_days_app(&self) -> i64 {
+        self.get_i64("data.retention_days_app").await.unwrap_or(30)
     }
 
     pub async fn client_ip_source(&self) -> String {
