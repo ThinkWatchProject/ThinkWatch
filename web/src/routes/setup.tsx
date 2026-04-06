@@ -17,7 +17,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Shield, Check, Copy, Globe, ArrowRight, ArrowLeft, AlertTriangle, AlertCircle, Plus, X } from 'lucide-react';
+import { Check, Copy, Globe, ArrowRight, ArrowLeft, AlertTriangle, AlertCircle, Plus, X } from 'lucide-react';
+import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -218,7 +219,7 @@ export function SetupPage() {
     <>
       <CardHeader className="text-center">
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-          <Shield className="h-7 w-7" />
+          <ThinkWatchMark className="h-9 w-9" />
         </div>
         <CardTitle className="text-2xl">{t('setup.title')}</CardTitle>
         <CardDescription>{t('setup.subtitle')}</CardDescription>
