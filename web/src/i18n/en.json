@@ -491,6 +491,7 @@
     "recommended": "Recommended",
     "mcpPromptTitle": "AI-Assisted Setup",
     "mcpPromptDesc": "Copy the prompt below and send it to your AI assistant — it will detect your MCP client and walk you through the configuration.",
+    "mcpPromptTemplate": "I need to configure my AI tool's MCP (Model Context Protocol) client to connect to an MCP gateway called ThinkWatch.\n\nHere is the information you need:\n\nMCP Endpoint: {{mcpUrl}}/mcp\nTransport: Streamable HTTP (protocol version 2025-03-26)\nAPI Key: (ask the user, it starts with \"tw-\")\n\nThe MCP server configuration should be:\n{\n  \"type\": \"streamableHttp\",\n  \"url\": \"{{mcpUrl}}/mcp\",\n  \"headers\": {\n    \"Authorization\": \"Bearer <API_KEY>\"\n  }\n}\n\nConfiguration for specific tools:\n- Claude Desktop: add to mcpServers in claude_desktop_config.json (macOS: ~/Library/Application Support/Claude/claude_desktop_config.json, Windows: %APPDATA%\\\\Claude\\\\claude_desktop_config.json)\n- Claude Code CLI: run `claude mcp add think-watch --transport streamable-http \"{{mcpUrl}}/mcp\" --header \"Authorization: Bearer <key>\"`\n- Cursor: add to mcpServers in .cursor/mcp.json (project) or ~/.cursor/mcp.json (global)\n- Cline: add to mcpServers in cline_mcp_settings.json or via Cline Settings > MCP Servers\n- VS Code / Copilot: add to mcpServers in .vscode/mcp.json\n\nPlease detect which tool I am using and help me configure it step by step.",
     "promptStep": {
       "copy": "Copy the prompt below",
       "paste": "Paste it into your AI assistant (ChatGPT, Claude, Copilot, etc.)",

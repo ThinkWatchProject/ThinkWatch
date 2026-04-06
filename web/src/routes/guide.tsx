@@ -100,31 +100,7 @@ function InfoBox({ children }: { children: React.ReactNode }) {
 
 function McpPromptTab({ mcpUrl }: { mcpUrl: string }) {
   const { t } = useTranslation();
-  const prompt = `I need to configure my AI tool's MCP (Model Context Protocol) client to connect to an MCP gateway called ThinkWatch.
-
-Here is the information you need:
-
-MCP Endpoint: ${mcpUrl}/mcp
-Transport: Streamable HTTP (protocol version 2025-03-26)
-API Key: (ask the user, it starts with "tw-")
-
-The MCP server configuration should be:
-{
-  "type": "streamableHttp",
-  "url": "${mcpUrl}/mcp",
-  "headers": {
-    "Authorization": "Bearer <API_KEY>"
-  }
-}
-
-Configuration for specific tools:
-- Claude Desktop: add to mcpServers in claude_desktop_config.json (macOS: ~/Library/Application Support/Claude/claude_desktop_config.json, Windows: %APPDATA%\\Claude\\claude_desktop_config.json)
-- Claude Code CLI: run \`claude mcp add think-watch --transport streamable-http "${mcpUrl}/mcp" --header "Authorization: Bearer <key>"\`
-- Cursor: add to mcpServers in .cursor/mcp.json (project) or ~/.cursor/mcp.json (global)
-- Cline: add to mcpServers in cline_mcp_settings.json or via Cline Settings > MCP Servers
-- VS Code / Copilot: add to mcpServers in .vscode/mcp.json
-
-Please detect which tool I am using and help me configure it step by step.`;
+  const prompt = t('guide.mcpPromptTemplate', { mcpUrl });
 
   return (
     <div className="space-y-4">

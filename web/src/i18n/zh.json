@@ -491,6 +491,7 @@
     "recommended": "推荐",
     "mcpPromptTitle": "AI 辅助配置",
     "mcpPromptDesc": "复制以下提示词发送给您的 AI 助手，它将自动检测您使用的 MCP 客户端并帮您完成配置。",
+    "mcpPromptTemplate": "我需要配置我的 AI 工具的 MCP（Model Context Protocol）客户端，以连接到一个名为 ThinkWatch 的 MCP 网关。\n\n以下是你需要的信息：\n\nMCP 端点：{{mcpUrl}}/mcp\n传输方式：Streamable HTTP（协议版本 2025-03-26）\nAPI Key：（向用户索要，以 \"tw-\" 开头）\n\nMCP 服务器配置应该是：\n{\n  \"type\": \"streamableHttp\",\n  \"url\": \"{{mcpUrl}}/mcp\",\n  \"headers\": {\n    \"Authorization\": \"Bearer <API_KEY>\"\n  }\n}\n\n各工具的配置位置：\n- Claude Desktop：添加到 claude_desktop_config.json 的 mcpServers 字段（macOS：~/Library/Application Support/Claude/claude_desktop_config.json，Windows：%APPDATA%\\\\Claude\\\\claude_desktop_config.json）\n- Claude Code CLI：运行 `claude mcp add think-watch --transport streamable-http \"{{mcpUrl}}/mcp\" --header \"Authorization: Bearer <key>\"`\n- Cursor：添加到 .cursor/mcp.json（项目级）或 ~/.cursor/mcp.json（全局）的 mcpServers 字段\n- Cline：添加到 cline_mcp_settings.json 的 mcpServers 字段，或通过 Cline 设置 > MCP Servers 配置\n- VS Code / Copilot：添加到 .vscode/mcp.json 的 mcpServers 字段\n\n请检测我正在使用的工具，并一步步帮我完成配置。",
     "promptStep": {
       "copy": "复制下方提示词",
       "paste": "粘贴到您的 AI 助手对话中（如 ChatGPT、Claude、Copilot 等）",
