@@ -129,17 +129,20 @@ cd web && pnpm install && pnpm dev
 # 4. 在 http://localhost:5173/setup 完成设置向导
 ```
 
-生产部署请参阅 **[部署指南](docs/zh-CN/deployment-guide.md)**。
+生产部署请参阅 **[部署指南](https://thinkwat.ch/zh-CN/docs/deployment-guide)**。
 
 ## 文档
 
+完整文档：**[thinkwat.ch/zh-CN/docs](https://thinkwat.ch/zh-CN/docs)**
+
 | 文档 | 说明 |
 |------|------|
-| **[架构设计](docs/zh-CN/architecture.md)** | 系统设计、双端口模型、数据流图 |
-| **[部署指南](docs/zh-CN/deployment-guide.md)** | Docker Compose、Kubernetes Helm、SSL、生产加固 |
-| **[API 参考](docs/zh-CN/api-reference.md)** | Gateway 和 Console 的完整端点文档 |
-| **[安全](docs/zh-CN/security.md)** | 认证模型、加密、RBAC、威胁模型、加固清单 |
-| **[配置](docs/zh-CN/configuration.md)** | 所有环境变量及其作用 |
+| **[架构设计](https://thinkwat.ch/zh-CN/docs/architecture)** | 系统设计、双端口模型、数据流图 |
+| **[部署指南](https://thinkwat.ch/zh-CN/docs/deployment-guide)** | Docker Compose、Kubernetes Helm、SSL、生产加固 |
+| **[配置说明](https://thinkwat.ch/zh-CN/docs/configuration)** | 所有环境变量及其作用 |
+| **[API 参考](https://thinkwat.ch/zh-CN/docs/api-reference)** | Gateway 和 Console 的完整端点文档 |
+| **[安全模型](https://thinkwat.ch/zh-CN/docs/security)** | 认证模型、加密、RBAC、威胁模型、加固清单 |
+| **[密钥轮换](https://thinkwat.ch/docs/secret-rotation)** | 在生产环境中轮换 Provider 密钥、JWT secret 和管理员凭据（仅英文）|
 
 ## 端口架构
 
@@ -167,8 +170,10 @@ ThinkWatch/
 │   ├── docker-compose.yml       # 生产部署
 │   ├── docker-compose.dev.yml   # 开发环境 (PG + Redis + ClickHouse + Zitadel)
 │   └── helm/think-watch/      # Kubernetes Helm Chart
-└── docs/                # 详细文档
+└── ...
 ```
+
+> 文档：**[thinkwat.ch/zh-CN/docs](https://thinkwat.ch/zh-CN/docs)**
 
 ## 贡献
 
