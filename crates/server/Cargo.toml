@@ -40,4 +40,5 @@ url = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 regex = "1"
+arc-swap = { workspace = true }
 clickhouse = { workspace = true }

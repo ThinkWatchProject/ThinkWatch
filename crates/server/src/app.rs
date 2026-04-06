@@ -50,6 +50,31 @@ pub struct AppState {
     pub started_at: chrono::DateTime<chrono::Utc>,
     /// ClickHouse client for log queries. `None` if ClickHouse is not configured.
     pub clickhouse: Option<clickhouse::Client>,
+    /// Hot-swappable content filter — admin updates trigger a reload via
+    /// `reload_content_filter()` without restarting the server.
+    pub content_filter: Arc<arc_swap::ArcSwap<ContentFilter>>,
+    /// Hot-swappable PII redactor.
+    pub pii_redactor: Arc<arc_swap::ArcSwap<PiiRedactor>>,
+}
+
+/// Build a `ContentFilter` from the current `system_settings` value.
+pub async fn load_content_filter(dc: &DynamicConfig) -> ContentFilter {
+    let configs: Vec<think_watch_gateway::content_filter::DenyRuleConfig> = dc
+        .get_json("security.content_filter_patterns")
+        .await
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    ContentFilter::from_config(&configs)
+}
+
+/// Build a `PiiRedactor` from the current `system_settings` value.
+pub async fn load_pii_redactor(dc: &DynamicConfig) -> PiiRedactor {
+    let configs: Vec<think_watch_gateway::pii_redactor::PiiPatternConfig> = dc
+        .get_json("security.pii_redactor_patterns")
+        .await
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    PiiRedactor::from_config(&configs)
 }
 
 /// Common security layers applied to both servers.
@@ -102,36 +127,6 @@ pub async fn create_gateway_app(
     let budget_thresholds = dc.budget_alert_thresholds().await;
     let budget_webhook = dc.budget_webhook_url().await;
 
-    // Load content filter patterns from dynamic config
-    let content_filter = match dc.get_json("security.content_filter_patterns").await {
-        Some(v) => {
-            if let Ok(patterns) = serde_json::from_value::<
-                Vec<think_watch_gateway::content_filter::DenyPatternConfig>,
-            >(v)
-            {
-                ContentFilter::from_config(&patterns)
-            } else {
-                ContentFilter::new()
-            }
-        }
-        None => ContentFilter::new(),
-    };
-
-    // Load PII redactor patterns from dynamic config
-    let pii_redactor = match dc.get_json("security.pii_redactor_patterns").await {
-        Some(v) => {
-            if let Ok(patterns) = serde_json::from_value::<
-                Vec<think_watch_gateway::pii_redactor::PiiPatternConfig>,
-            >(v)
-            {
-                PiiRedactor::from_config(&patterns)
-            } else {
-                PiiRedactor::new()
-            }
-        }
-        None => PiiRedactor::new(),
-    };
-
     // AI Gateway: /v1/*
     // Load providers from database and register them in the model router
     let mut model_router = ModelRouter::new();
@@ -142,10 +137,11 @@ pub async fn create_gateway_app(
     let gateway_state = GatewayState {
         router: model_router,
         model_mapper: Arc::new(ModelMapper::new()),
-        content_filter: Arc::new(content_filter),
+        // Share the hot-swappable filter handles with the gateway state.
+        content_filter: state.content_filter.clone(),
         quota: Arc::new(QuotaManager::new(state.redis.clone())),
         cache: Arc::new(ResponseCache::new(state.redis.clone(), cache_ttl)),
-        pii_redactor: Arc::new(pii_redactor),
+        pii_redactor: state.pii_redactor.clone(),
         budget_alert: Some(Arc::new(BudgetAlertManager::new(
             state.redis.clone(),
             BudgetAlertConfig {
@@ -415,6 +411,20 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route(
             "/api/admin/settings/category/{category}",
             get(handlers::admin::get_settings_by_category),
+        )
+        // Content filter sandbox & presets
+        .route(
+            "/api/admin/settings/content-filter/test",
+            post(handlers::admin::test_content_filter),
+        )
+        .route(
+            "/api/admin/settings/content-filter/presets",
+            get(handlers::admin::list_content_filter_presets),
+        )
+        // PII redactor sandbox
+        .route(
+            "/api/admin/settings/pii-redactor/test",
+            post(handlers::admin::test_pii_redactor),
         )
         // Log forwarders CRUD
         .route(

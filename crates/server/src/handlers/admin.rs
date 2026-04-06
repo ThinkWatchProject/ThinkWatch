@@ -717,6 +717,20 @@ pub async fn update_settings(
         .await
         .map_err(AppError::Internal)?;
 
+    // Hot-reload content filter / PII redactor immediately on this instance
+    // (other instances pick it up via the Redis Pub/Sub subscriber).
+    if req
+        .settings
+        .contains_key("security.content_filter_patterns")
+    {
+        let cf = crate::app::load_content_filter(&state.dynamic_config).await;
+        state.content_filter.store(std::sync::Arc::new(cf));
+    }
+    if req.settings.contains_key("security.pii_redactor_patterns") {
+        let pii = crate::app::load_pii_redactor(&state.dynamic_config).await;
+        state.pii_redactor.store(std::sync::Arc::new(pii));
+    }
+
     // Notify other instances via Redis Pub/Sub
     dynamic_config::notify_config_changed(&state.redis).await;
 
@@ -732,6 +746,144 @@ pub async fn update_settings(
     Ok(Json(
         serde_json::json!({"status": "updated", "count": req.settings.len()}),
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Content filter — test sandbox & presets
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct ContentFilterTestRequest {
+    /// User text to test against the supplied rules.
+    pub text: String,
+    /// Rules to test (the unsaved rules currently in the UI).
+    pub rules: Vec<think_watch_gateway::content_filter::DenyRuleConfig>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContentFilterTestMatch {
+    pub name: String,
+    pub pattern: String,
+    pub match_type: String,
+    pub action: String,
+    pub matched_snippet: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContentFilterTestResponse {
+    pub matches: Vec<ContentFilterTestMatch>,
+}
+
+/// POST /api/admin/settings/content-filter/test — try the supplied rules
+/// against a sample of user text and return every rule that fires.
+pub async fn test_content_filter(
+    _auth_user: AuthUser,
+    Json(req): Json<ContentFilterTestRequest>,
+) -> Result<Json<ContentFilterTestResponse>, AppError> {
+    use think_watch_gateway::content_filter::ContentFilter;
+    let filter = ContentFilter::from_config(&req.rules);
+    let matches = filter
+        .check_text_all(&req.text)
+        .into_iter()
+        .map(|m| ContentFilterTestMatch {
+            name: m.name,
+            pattern: m.pattern,
+            match_type: m.match_type.to_string(),
+            action: m.action.to_string(),
+            matched_snippet: m.matched_snippet,
+        })
+        .collect();
+    Ok(Json(ContentFilterTestResponse { matches }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ContentFilterPreset {
+    pub id: String,
+    pub rules: Vec<think_watch_gateway::content_filter::DenyRuleConfig>,
+}
+
+/// GET /api/admin/settings/content-filter/presets — return built-in rule groups
+/// (basic / strict / chinese). UI labels are localized on the frontend.
+pub async fn list_content_filter_presets(_auth_user: AuthUser) -> Json<Vec<ContentFilterPreset>> {
+    let groups = think_watch_gateway::content_filter::presets()
+        .into_iter()
+        .map(|g| ContentFilterPreset {
+            id: g.id.to_string(),
+            rules: g.rules,
+        })
+        .collect();
+    Json(groups)
+}
+
+// ---------------------------------------------------------------------------
+// PII redactor — test sandbox
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct PiiRedactorTestRequest {
+    pub text: String,
+    pub patterns: Vec<think_watch_gateway::pii_redactor::PiiPatternConfig>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PiiRedactorTestMatch {
+    pub name: String,
+    pub original: String,
+    pub placeholder: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PiiRedactorTestResponse {
+    pub redacted_text: String,
+    pub matches: Vec<PiiRedactorTestMatch>,
+}
+
+/// POST /api/admin/settings/pii-redactor/test — apply the supplied PII patterns
+/// to a text sample and return the redacted version with the substitution map.
+pub async fn test_pii_redactor(
+    _auth_user: AuthUser,
+    Json(req): Json<PiiRedactorTestRequest>,
+) -> Result<Json<PiiRedactorTestResponse>, AppError> {
+    use think_watch_gateway::pii_redactor::PiiRedactor;
+    use think_watch_gateway::providers::traits::ChatMessage;
+
+    let redactor = PiiRedactor::from_config(&req.patterns);
+    let messages = vec![ChatMessage {
+        role: "user".to_string(),
+        content: serde_json::Value::String(req.text.clone()),
+    }];
+    let (redacted, ctx) = redactor.redact_messages(&messages);
+
+    let redacted_text = redacted
+        .first()
+        .and_then(|m| m.content.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    let matches = ctx
+        .replacements
+        .into_iter()
+        .map(|(placeholder, original)| {
+            // Extract pattern name from placeholder format "{{NAME_salt_n}}"
+            let name = placeholder
+                .trim_start_matches("{{")
+                .trim_end_matches("}}")
+                .split('_')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            PiiRedactorTestMatch {
+                name,
+                original,
+                placeholder,
+            }
+        })
+        .collect();
+
+    Ok(Json(PiiRedactorTestResponse {
+        redacted_text,
+        matches,
+    }))
 }
 
 /// Validate a setting value based on its key.
@@ -897,14 +1049,15 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
-        // JSON array settings (patterns) — with size limits and regex validation
+        // Content filter rules — accept both new (action/match_type/name)
+        // and legacy (severity/category) field names for backward compatibility.
         "security.content_filter_patterns" => {
             let arr = value
                 .as_array()
                 .ok_or_else(|| AppError::BadRequest(format!("{key} must be a JSON array")))?;
             if arr.len() > 500 {
                 return Err(AppError::BadRequest(
-                    "Content filter patterns: max 500 rules".into(),
+                    "Content filter rules: max 500 rules".into(),
                 ));
             }
             for (i, item) in arr.iter().enumerate() {
@@ -912,27 +1065,49 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                     .get("pattern")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
-                        AppError::BadRequest(format!("Pattern {i}: missing 'pattern' string"))
+                        AppError::BadRequest(format!("Rule {i}: missing 'pattern' string"))
                     })?;
                 if pattern.len() > 500 {
                     return Err(AppError::BadRequest(format!(
-                        "Pattern {i}: max 500 characters"
+                        "Rule {i}: pattern max 500 characters"
                     )));
                 }
-                let severity = item
-                    .get("severity")
+                // match_type: optional, defaults to "contains"
+                if let Some(mt) = item.get("match_type").and_then(|v| v.as_str()) {
+                    if !["contains", "regex"].contains(&mt) {
+                        return Err(AppError::BadRequest(format!(
+                            "Rule {i}: match_type must be 'contains' or 'regex'"
+                        )));
+                    }
+                    if mt == "regex" && regex::Regex::new(pattern).is_err() {
+                        return Err(AppError::BadRequest(format!(
+                            "Rule {i}: invalid regex pattern"
+                        )));
+                    }
+                }
+                // action (or legacy severity)
+                let action = item
+                    .get("action")
+                    .or_else(|| item.get("severity"))
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| {
-                        AppError::BadRequest(format!("Pattern {i}: missing 'severity' string"))
+                        AppError::BadRequest(format!("Rule {i}: missing 'action' field"))
                     })?;
-                if !["critical", "high", "medium", "low"].contains(&severity) {
+                if !["block", "warn", "log", "critical", "high", "medium", "low"].contains(&action)
+                {
                     return Err(AppError::BadRequest(format!(
-                        "Pattern {i}: severity must be critical/high/medium/low"
+                        "Rule {i}: action must be 'block', 'warn', or 'log'"
                     )));
                 }
-                if item.get("category").and_then(|v| v.as_str()).is_none() {
+                // name (or legacy category) — required
+                if item
+                    .get("name")
+                    .or_else(|| item.get("category"))
+                    .and_then(|v| v.as_str())
+                    .is_none()
+                {
                     return Err(AppError::BadRequest(format!(
-                        "Pattern {i}: missing 'category' string"
+                        "Rule {i}: missing 'name' field"
                     )));
                 }
             }
@@ -1032,7 +1207,7 @@ mod tests {
     fn validates_content_filter_patterns() {
         // Empty array is valid
         assert!(validate_setting("security.content_filter_patterns", &json!([])).is_ok());
-        // Valid pattern with all required fields
+        // Legacy schema (severity + category) still accepted
         assert!(
             validate_setting(
                 "security.content_filter_patterns",
@@ -1040,21 +1215,53 @@ mod tests {
             )
             .is_ok()
         );
-        // Missing severity → rejected
+        // New schema (action + name + match_type)
         assert!(
             validate_setting(
                 "security.content_filter_patterns",
-                &json!([{"pattern": "test"}])
+                &json!([{"pattern": "test", "action": "block", "name": "Test", "match_type": "contains"}])
+            )
+            .is_ok()
+        );
+        // Regex match_type with valid pattern
+        assert!(
+            validate_setting(
+                "security.content_filter_patterns",
+                &json!([{"pattern": "\\d{4}", "action": "warn", "name": "Test", "match_type": "regex"}])
+            )
+            .is_ok()
+        );
+        // Regex match_type with invalid regex → rejected
+        assert!(
+            validate_setting(
+                "security.content_filter_patterns",
+                &json!([{"pattern": "[invalid((", "action": "block", "name": "T", "match_type": "regex"}])
+            )
+            .is_err()
+        );
+        // Missing action → rejected
+        assert!(
+            validate_setting(
+                "security.content_filter_patterns",
+                &json!([{"pattern": "test", "name": "T"}])
+            )
+            .is_err()
+        );
+        // Missing name → rejected
+        assert!(
+            validate_setting(
+                "security.content_filter_patterns",
+                &json!([{"pattern": "test", "action": "block"}])
             )
             .is_err()
         );
         // Not an array → rejected
         assert!(validate_setting("security.content_filter_patterns", &json!("not array")).is_err());
-        // Invalid severity value → rejected
+        // Invalid action value → rejected
         assert!(
             validate_setting(
                 "security.content_filter_patterns",
-                &json!([{"pattern": "test", "severity": "invalid", "category": "x"}])
+                &json!([{"pattern": "test", "action": "invalid", "name": "x"}])
             )
             .is_err()
         );

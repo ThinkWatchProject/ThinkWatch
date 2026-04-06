@@ -3969,6 +3969,7 @@ name = "think-watch-gateway"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "async-stream",
  "aws-credential-types",
  "aws-sigv4",
@@ -4025,6 +4026,7 @@ name = "think-watch-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "arc-swap",
  "axum",
  "axum-extra",
  "chrono",

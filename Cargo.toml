@@ -88,6 +88,7 @@ aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
 aws-smithy-eventstream = "0.60"
 
 # Utils
+arc-swap = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

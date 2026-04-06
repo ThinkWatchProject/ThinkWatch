@@ -203,6 +203,12 @@ async fn main() -> anyhow::Result<()> {
 
     let jwt = Arc::new(think_watch_auth::jwt::JwtManager::new(&config.jwt_secret));
 
+    // Build initial content filter and PII redactor from current dynamic config
+    let initial_content_filter = app::load_content_filter(&dynamic_config).await;
+    let initial_pii_redactor = app::load_pii_redactor(&dynamic_config).await;
+    let content_filter = Arc::new(arc_swap::ArcSwap::from_pointee(initial_content_filter));
+    let pii_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(initial_pii_redactor));
+
     let state = app::AppState {
         db: pool,
         redis,
@@ -213,7 +219,42 @@ async fn main() -> anyhow::Result<()> {
         oidc: Arc::new(tokio::sync::RwLock::new(oidc_manager)),
         started_at: chrono::Utc::now(),
         clickhouse: ch_client,
+        content_filter,
+        pii_redactor,
     };
+
+    // --- Hot reload of content filter / PII redactor on config change ---
+    // Subscribes to the same `config:changed` channel so updates from any
+    // instance trigger a reload of the in-memory rule sets.
+    {
+        let sub_redis_filters_config = Config::from_url(&config.redis_url)?;
+        let sub_redis_filters: fred::clients::SubscriberClient =
+            Builder::from_config(sub_redis_filters_config).build_subscriber_client()?;
+        sub_redis_filters.init().await?;
+        let dc_clone = state.dynamic_config.clone();
+        let cf_clone = state.content_filter.clone();
+        let pii_clone = state.pii_redactor.clone();
+        tokio::spawn(async move {
+            use fred::interfaces::{EventInterface, PubsubInterface};
+            let mut rx = sub_redis_filters.message_rx();
+            if let Err(e) = sub_redis_filters.subscribe("config:changed").await {
+                tracing::warn!("Filter reload subscriber failed: {e}");
+                return;
+            }
+            while let Ok(msg) = rx.recv().await {
+                if msg.channel == "config:changed" {
+                    // DynamicConfig has its own subscriber that reloads the cache
+                    // first; we wait briefly so we read the fresh value.
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    let new_filter = app::load_content_filter(&dc_clone).await;
+                    cf_clone.store(Arc::new(new_filter));
+                    let new_pii = app::load_pii_redactor(&dc_clone).await;
+                    pii_clone.store(Arc::new(new_pii));
+                    tracing::info!("Content filter and PII redactor reloaded");
+                }
+            }
+        });
+    }
 
     // --- Start background tasks ---
     tasks::api_key_lifecycle::spawn_api_key_lifecycle_task(

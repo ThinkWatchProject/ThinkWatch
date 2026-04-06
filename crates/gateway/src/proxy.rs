@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
@@ -12,7 +13,7 @@ use std::sync::LazyLock;
 static BUDGET_ALERT_SEMAPHORE: LazyLock<tokio::sync::Semaphore> =
     LazyLock::new(|| tokio::sync::Semaphore::new(50));
 use crate::cache::ResponseCache;
-use crate::content_filter::ContentFilter;
+use crate::content_filter::{Action, ContentFilter};
 use crate::cost_tracker::CostTracker;
 use crate::metadata::RequestMetadata;
 use crate::model_mapping::ModelMapper;
@@ -27,10 +28,12 @@ use crate::streaming::stream_to_sse;
 pub struct GatewayState {
     pub router: Arc<ModelRouter>,
     pub model_mapper: Arc<ModelMapper>,
-    pub content_filter: Arc<ContentFilter>,
+    /// Hot-swappable so admins can update rules without restarting the gateway.
+    pub content_filter: Arc<ArcSwap<ContentFilter>>,
     pub quota: Arc<QuotaManager>,
     pub cache: Arc<ResponseCache>,
-    pub pii_redactor: Arc<PiiRedactor>,
+    /// Hot-swappable so admins can update PII patterns without restarting.
+    pub pii_redactor: Arc<ArcSwap<PiiRedactor>>,
     pub budget_alert: Option<Arc<BudgetAlertManager>>,
     pub cost_tracker: Arc<CostTracker>,
     pub rate_limiter: Arc<RateLimiter>,
@@ -114,16 +117,28 @@ pub async fn proxy_chat_completion(
     );
 
     // 4. Content filter — check for prompt injection
-    if let Err(filter_result) = state.content_filter.check(&request.messages) {
-        tracing::warn!("Content filter triggered: {filter_result}");
-        return Err(GatewayError::TransformError(format!(
-            "Request blocked by content filter: {filter_result}"
-        ))
-        .into());
+    let content_filter = state.content_filter.load();
+    if let Some(m) = content_filter.check(&request.messages) {
+        match m.action {
+            Action::Block => {
+                tracing::warn!("Content filter blocked request: {m}");
+                return Err(GatewayError::TransformError(format!(
+                    "Request blocked by content filter: {m}"
+                ))
+                .into());
+            }
+            Action::Warn => {
+                tracing::warn!("Content filter warning (request allowed): {m}");
+            }
+            Action::Log => {
+                tracing::info!("Content filter log: {m}");
+            }
+        }
     }
 
     // 5. PII redaction — redact user messages before sending upstream
-    let (redacted_messages, redaction_ctx) = state.pii_redactor.redact_messages(&request.messages);
+    let pii_redactor = state.pii_redactor.load();
+    let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&request.messages);
     request.messages = redacted_messages;
 
     // 6. Check token quota — use user/api_key as quota key when available
@@ -171,9 +186,7 @@ pub async fn proxy_chat_completion(
         let mut response = provider.chat_completion_boxed(request.clone()).await?;
 
         // 8a. Restore PII in the response
-        state
-            .pii_redactor
-            .restore_response(&mut response, &redaction_ctx);
+        pii_redactor.restore_response(&mut response, &redaction_ctx);
 
         // 8b. Consume quota based on actual token usage
         if let Some(ref usage) = response.usage {
@@ -304,12 +317,19 @@ pub async fn proxy_anthropic_messages(
             })
             .collect();
 
-        if let Err(filter_result) = state.content_filter.check(&chat_messages) {
-            tracing::warn!("Content filter triggered: {filter_result}");
-            return Err(GatewayError::TransformError(format!(
-                "Request blocked by content filter: {filter_result}"
-            ))
-            .into());
+        let content_filter = state.content_filter.load();
+        if let Some(m) = content_filter.check(&chat_messages) {
+            match m.action {
+                Action::Block => {
+                    tracing::warn!("Content filter blocked request: {m}");
+                    return Err(GatewayError::TransformError(format!(
+                        "Request blocked by content filter: {m}"
+                    ))
+                    .into());
+                }
+                Action::Warn => tracing::warn!("Content filter warning: {m}"),
+                Action::Log => tracing::info!("Content filter log: {m}"),
+            }
         }
     }
 
@@ -491,12 +511,19 @@ pub async fn proxy_responses(
     }
 
     // Content filter
-    if let Err(filter_result) = state.content_filter.check(&messages) {
-        tracing::warn!("Content filter triggered: {filter_result}");
-        return Err(GatewayError::TransformError(format!(
-            "Request blocked by content filter: {filter_result}"
-        ))
-        .into());
+    let content_filter = state.content_filter.load();
+    if let Some(m) = content_filter.check(&messages) {
+        match m.action {
+            Action::Block => {
+                tracing::warn!("Content filter blocked request: {m}");
+                return Err(GatewayError::TransformError(format!(
+                    "Request blocked by content filter: {m}"
+                ))
+                .into());
+            }
+            Action::Warn => tracing::warn!("Content filter warning: {m}"),
+            Action::Log => tracing::info!("Content filter log: {m}"),
+        }
     }
 
     let max_tokens = body
