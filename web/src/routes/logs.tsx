@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate, useSearch } from '@tanstack/react-router';
 import { subHours, format } from 'date-fns';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -164,22 +165,133 @@ function getTimeKey(cat: LogCategory): string {
 }
 
 // ---------------------------------------------------------------------------
+// Local <-> UTC time conversion
+//
+// The DateTimeRangePicker emits "yyyy-MM-ddTHH:mm" strings in the browser's
+// local time zone (no offset suffix). The backend stores everything as UTC.
+// We need to convert between the two:
+//   - localToUtcQuery: turn "2026-04-06T17:21" (local) into the
+//     "2026-04-06 09:21:00" (UTC) string the backend expects
+//   - utcQueryToLocal: reverse, used when reading the value back from the URL
+// ---------------------------------------------------------------------------
+
+// Local "yyyy-MM-ddTHH:mm" → UTC "yyyy-MM-dd HH:mm:ss" string for the backend.
+function localToUtcQuery(local: string): string {
+  if (!local) return '';
+  const d = new Date(local);
+  if (Number.isNaN(d.getTime())) return '';
+  // d represents the local wall-clock time. Convert to UTC components.
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` +
+    ` ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`
+  );
+}
+
+function defaultFromLocal(): string {
+  return format(subHours(new Date(), 1), "yyyy-MM-dd'T'HH:mm");
+}
+
+function defaultToLocal(): string {
+  return format(new Date(), "yyyy-MM-dd'T'HH:mm");
+}
+
+// ClickHouse `toString(DateTime64)` returns naive timestamps like
+// "2026-04-06 09:21:00.000" without a timezone marker. Browsers parse such
+// strings as local time, which is wrong — the value is always UTC. Append a
+// "Z" so Date interprets it as UTC, then render in the user's locale.
+function formatBackendTimestamp(raw: string): string {
+  if (!raw) return '—';
+  // Already has timezone info? Use as-is.
+  if (/[Zz]|[+-]\d{2}:?\d{2}$/.test(raw)) {
+    const d = new Date(raw);
+    return Number.isNaN(d.getTime()) ? raw : d.toLocaleString();
+  }
+  // Naive "YYYY-MM-DD HH:mm:ss[.fff]" — treat as UTC.
+  const iso = raw.replace(' ', 'T') + 'Z';
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? raw : d.toLocaleString();
+}
+
+// Backend returns DateTime64 strings without a timezone suffix, e.g.
+// "2026-04-06 09:21:00.000". They are UTC. Without an explicit suffix the
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
+function isLogCategory(v: string | undefined): v is LogCategory {
+  return (
+    v === 'gateway' ||
+    v === 'mcp' ||
+    v === 'audit' ||
+    v === 'platform' ||
+    v === 'access' ||
+    v === 'app'
+  );
+}
+
 export function UnifiedLogsPage() {
   const { t } = useTranslation();
-  const [category, setCategory] = useState<LogCategory>('platform');
-  const [searchInput, setSearchInput] = useState('');
-  const [activeQuery, setActiveQuery] = useState('');
-  const [from, setFrom] = useState(() => format(subHours(new Date(), 1), "yyyy-MM-dd'T'HH:mm"));
-  const [to, setTo] = useState(() => format(new Date(), "yyyy-MM-dd'T'HH:mm"));
+  // URL search params are the source of truth for category, query, time
+  // range, and page so refreshing or sharing the URL preserves the view.
+  const navigate = useNavigate({ from: '/logs' });
+  const search = useSearch({ from: '/logs' }) as {
+    category?: string;
+    q?: string;
+    from?: string;
+    to?: string;
+    page?: number;
+  };
+
+  const category: LogCategory = isLogCategory(search.category)
+    ? search.category
+    : 'platform';
+  const activeQuery = search.q ?? '';
+  const from = search.from ?? defaultFromLocal();
+  const to = search.to ?? defaultToLocal();
+  const page = search.page ?? 0;
+
+  // Local-only state: the search input box (committed to URL on Enter / click)
+  // and the expanded-row toggle.
+  const [searchInput, setSearchInput] = useState(activeQuery);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [page, setPage] = useState(0);
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
+
+  // Keep the search input box in sync if the URL changes externally.
+  useEffect(() => {
+    setSearchInput(activeQuery);
+  }, [activeQuery]);
+
+  const updateSearch = useCallback(
+    (
+      patch: Partial<{
+        category: LogCategory;
+        q: string;
+        from: string;
+        to: string;
+        page: number;
+      }>,
+    ) => {
+      navigate({
+        search: (prev) => {
+          const merged = { ...prev, ...patch };
+          // Strip empty / default values so the URL stays clean.
+          return {
+            category: merged.category && merged.category !== 'platform' ? merged.category : undefined,
+            q: merged.q || undefined,
+            from: merged.from || undefined,
+            to: merged.to || undefined,
+            page: merged.page && merged.page > 0 ? merged.page : undefined,
+          };
+        },
+        replace: false,
+      });
+    },
+    [navigate],
+  );
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
@@ -190,8 +302,11 @@ export function UnifiedLogsPage() {
       for (const [k, v] of Object.entries(parsed)) {
         if (v) params.set(k, v);
       }
-      if (from) params.set('from', from.replace('T', ' ') + ':00');
-      if (to) params.set('to', to.replace('T', ' ') + ':00');
+      // Convert local wall-clock time to UTC for the backend.
+      const utcFrom = localToUtcQuery(from);
+      const utcTo = localToUtcQuery(to);
+      if (utcFrom) params.set('from', utcFrom);
+      if (utcTo) params.set('to', utcTo);
       params.set('limit', String(PAGE_SIZE));
       params.set('offset', String(page * PAGE_SIZE));
       const qs = params.toString();
@@ -211,15 +326,18 @@ export function UnifiedLogsPage() {
   useEffect(() => { fetchLogs(); }, [fetchLogs]);
 
   const handleSearch = () => {
-    setPage(0);
-    setActiveQuery(searchInput);
+    updateSearch({ q: searchInput, page: 0 });
   };
 
   const handleCategoryChange = (v: string) => {
-    setCategory(v as LogCategory);
-    setPage(0);
+    if (!isLogCategory(v)) return;
     setExpandedRow(null);
+    updateSearch({ category: v, page: 0 });
   };
+
+  const setFrom = (v: string) => updateSearch({ from: v, page: 0 });
+  const setTo = (v: string) => updateSearch({ to: v, page: 0 });
+  const setPage = (p: number) => updateSearch({ page: p });
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
   const columns = getColumns(category);
@@ -334,7 +452,7 @@ export function UnifiedLogsPage() {
                             if (col.render) {
                               display = col.render(val, log);
                             } else if (col.key === timeKey || col.key === 'created_at' || col.key === 'timestamp') {
-                              display = rowTime ? new Date(rowTime).toLocaleString() : '—';
+                              display = formatBackendTimestamp(rowTime);
                             } else {
                               display = val != null ? String(val) : '—';
                             }

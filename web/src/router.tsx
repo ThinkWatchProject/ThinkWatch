@@ -150,6 +150,13 @@ const logsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/logs',
   component: UnifiedLogsPage,
+  validateSearch: (search: Record<string, unknown>) => ({
+    category: typeof search.category === 'string' ? search.category : undefined,
+    q: typeof search.q === 'string' ? search.q : undefined,
+    from: typeof search.from === 'string' ? search.from : undefined,
+    to: typeof search.to === 'string' ? search.to : undefined,
+    page: typeof search.page === 'number' ? search.page : undefined,
+  }),
 });
 
 const guideRoute = createRoute({
