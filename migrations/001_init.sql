@@ -360,20 +360,17 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 ('security.client_ip_xff_position', '"left"',   'security', 'XFF pick direction: "left" (first) or "right" (last)'),
 ('security.client_ip_xff_depth',    '1',        'security', 'Position depth (1-based) from chosen XFF direction'),
 ('security.content_filter_patterns', '[
-    {"pattern": "ignore previous instructions", "severity": "critical", "category": "instruction_override"},
-    {"pattern": "ignore all previous",          "severity": "critical", "category": "instruction_override"},
-    {"pattern": "disregard your instructions",  "severity": "critical", "category": "instruction_override"},
-    {"pattern": "jailbreak",                    "severity": "critical", "category": "jailbreak"},
-    {"pattern": " dan ",                        "severity": "critical", "category": "jailbreak"},
-    {"pattern": "developer mode",              "severity": "critical", "category": "jailbreak"},
-    {"pattern": "you are now",                 "severity": "high",     "category": "persona_manipulation"},
-    {"pattern": "new persona",                 "severity": "high",     "category": "persona_manipulation"},
-    {"pattern": "act as",                      "severity": "high",     "category": "persona_manipulation"},
-    {"pattern": "pretend to be",               "severity": "high",     "category": "persona_manipulation"},
-    {"pattern": "system prompt",               "severity": "medium",   "category": "prompt_extraction"},
-    {"pattern": "reveal your instructions",    "severity": "medium",   "category": "prompt_extraction"},
-    {"pattern": "what are your rules",         "severity": "medium",   "category": "prompt_extraction"}
-]', 'security', 'Content filter deny patterns (JSON array)'),
+    {"name": "Ignore Previous Instructions", "pattern": "ignore previous instructions", "match_type": "contains", "action": "block"},
+    {"name": "Ignore All Previous",          "pattern": "ignore all previous",          "match_type": "contains", "action": "block"},
+    {"name": "Disregard Instructions",       "pattern": "disregard your instructions",  "match_type": "contains", "action": "block"},
+    {"name": "Jailbreak",                    "pattern": "jailbreak",                    "match_type": "contains", "action": "block"},
+    {"name": "DAN",                          "pattern": " dan ",                        "match_type": "contains", "action": "block"},
+    {"name": "Developer Mode",               "pattern": "developer mode",               "match_type": "contains", "action": "block"},
+    {"name": "Persona Manipulation",         "pattern": "you are now",                  "match_type": "contains", "action": "warn"},
+    {"name": "Act As",                       "pattern": "act as",                       "match_type": "contains", "action": "warn"},
+    {"name": "System Prompt Extraction",     "pattern": "system prompt",                "match_type": "contains", "action": "warn"},
+    {"name": "Reveal Instructions",          "pattern": "reveal your instructions",     "match_type": "contains", "action": "warn"}
+]', 'security', 'Content filter rules (JSON array of {name, pattern, match_type, action})'),
 ('security.pii_redactor_patterns', '[
     {"name": "email",       "regex": "[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}",           "placeholder_prefix": "EMAIL"},
     {"name": "id_card_cn",  "regex": "\\b\\d{17}[\\dXx]\\b",                                       "placeholder_prefix": "ID"},
@@ -410,3 +407,10 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 INSERT INTO system_settings (key, value, category, description) VALUES
 ('setup.initialized', 'false',         'setup', 'Whether initial setup has been completed'),
 ('setup.site_name',   '"ThinkWatch"', 'setup', 'Site display name');
+
+-- General — gateway public URL components (used by configuration guide).
+-- Empty/zero values mean "auto-detect from the user's browser request".
+INSERT INTO system_settings (key, value, category, description) VALUES
+('general.public_protocol', '""', 'general', 'Public gateway protocol: "http", "https", or empty for auto-detect from browser'),
+('general.public_host',     '""', 'general', 'Public gateway host (empty = auto-detect from browser)'),
+('general.public_port',     '0',  'general', 'Public gateway port (0 = use the gateway listening port)');

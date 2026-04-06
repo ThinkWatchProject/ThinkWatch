@@ -111,26 +111,16 @@ interface PiiTestResponse {
   matches: PiiTestMatch[];
 }
 
-/// Normalize a rule loaded from the backend, accepting both the new schema
-/// (name/match_type/action) and the legacy schema (category/severity).
 function normalizeContentRule(raw: unknown): ContentFilterRule {
   const r = (raw || {}) as Record<string, unknown>;
-  const legacySeverity = typeof r.severity === 'string' ? r.severity : '';
-  const action: ContentFilterRule['action'] =
-    r.action === 'block' || r.action === 'warn' || r.action === 'log'
-      ? r.action
-      : legacySeverity === 'critical' || legacySeverity === 'high'
-        ? 'block'
-        : legacySeverity === 'medium'
-          ? 'warn'
-          : legacySeverity === 'low'
-            ? 'log'
-            : 'block';
   return {
-    name: typeof r.name === 'string' ? r.name : typeof r.category === 'string' ? r.category : '',
+    name: typeof r.name === 'string' ? r.name : '',
     pattern: typeof r.pattern === 'string' ? r.pattern : '',
     match_type: r.match_type === 'regex' ? 'regex' : 'contains',
-    action,
+    action:
+      r.action === 'warn' || r.action === 'log'
+        ? r.action
+        : 'block',
   };
 }
 

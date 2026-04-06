@@ -1072,40 +1072,31 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                         "Rule {i}: pattern max 500 characters"
                     )));
                 }
-                // match_type: optional, defaults to "contains"
-                if let Some(mt) = item.get("match_type").and_then(|v| v.as_str()) {
-                    if !["contains", "regex"].contains(&mt) {
-                        return Err(AppError::BadRequest(format!(
-                            "Rule {i}: match_type must be 'contains' or 'regex'"
-                        )));
-                    }
-                    if mt == "regex" && regex::Regex::new(pattern).is_err() {
-                        return Err(AppError::BadRequest(format!(
-                            "Rule {i}: invalid regex pattern"
-                        )));
-                    }
+                let match_type =
+                    item.get("match_type")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| {
+                            AppError::BadRequest(format!("Rule {i}: missing 'match_type' field"))
+                        })?;
+                if !["contains", "regex"].contains(&match_type) {
+                    return Err(AppError::BadRequest(format!(
+                        "Rule {i}: match_type must be 'contains' or 'regex'"
+                    )));
                 }
-                // action (or legacy severity)
-                let action = item
-                    .get("action")
-                    .or_else(|| item.get("severity"))
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| {
-                        AppError::BadRequest(format!("Rule {i}: missing 'action' field"))
-                    })?;
-                if !["block", "warn", "log", "critical", "high", "medium", "low"].contains(&action)
-                {
+                if match_type == "regex" && regex::Regex::new(pattern).is_err() {
+                    return Err(AppError::BadRequest(format!(
+                        "Rule {i}: invalid regex pattern"
+                    )));
+                }
+                let action = item.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
+                    AppError::BadRequest(format!("Rule {i}: missing 'action' field"))
+                })?;
+                if !["block", "warn", "log"].contains(&action) {
                     return Err(AppError::BadRequest(format!(
                         "Rule {i}: action must be 'block', 'warn', or 'log'"
                     )));
                 }
-                // name (or legacy category) — required
-                if item
-                    .get("name")
-                    .or_else(|| item.get("category"))
-                    .and_then(|v| v.as_str())
-                    .is_none()
-                {
+                if item.get("name").and_then(|v| v.as_str()).is_none() {
                     return Err(AppError::BadRequest(format!(
                         "Rule {i}: missing 'name' field"
                     )));
@@ -1207,15 +1198,7 @@ mod tests {
     fn validates_content_filter_patterns() {
         // Empty array is valid
         assert!(validate_setting("security.content_filter_patterns", &json!([])).is_ok());
-        // Legacy schema (severity + category) still accepted
-        assert!(
-            validate_setting(
-                "security.content_filter_patterns",
-                &json!([{"pattern": "test", "severity": "high", "category": "custom"}])
-            )
-            .is_ok()
-        );
-        // New schema (action + name + match_type)
+        // Valid rule
         assert!(
             validate_setting(
                 "security.content_filter_patterns",
@@ -1239,11 +1222,19 @@ mod tests {
             )
             .is_err()
         );
+        // Missing match_type → rejected
+        assert!(
+            validate_setting(
+                "security.content_filter_patterns",
+                &json!([{"pattern": "test", "action": "block", "name": "T"}])
+            )
+            .is_err()
+        );
         // Missing action → rejected
         assert!(
             validate_setting(
                 "security.content_filter_patterns",
-                &json!([{"pattern": "test", "name": "T"}])
+                &json!([{"pattern": "test", "name": "T", "match_type": "contains"}])
             )
             .is_err()
         );
@@ -1251,7 +1242,7 @@ mod tests {
         assert!(
             validate_setting(
                 "security.content_filter_patterns",
-                &json!([{"pattern": "test", "action": "block"}])
+                &json!([{"pattern": "test", "action": "block", "match_type": "contains"}])
             )
             .is_err()
         );
@@ -1261,7 +1252,7 @@ mod tests {
         assert!(
             validate_setting(
                 "security.content_filter_patterns",
-                &json!([{"pattern": "test", "action": "invalid", "name": "x"}])
+                &json!([{"pattern": "test", "action": "invalid", "name": "x", "match_type": "contains"}])
             )
             .is_err()
         );
