@@ -65,6 +65,12 @@ pub async fn login(
         .unwrap_or_else(|| "unknown".to_string())
     };
 
+    let user_agent = request
+        .headers()
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     // Parse body
     let body_bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
         .await
@@ -212,9 +218,15 @@ pub async fn login(
         }
 
         // Log failed attempt
-        state.audit.log(
-            AuditEntry::new("auth.login_failed").detail(serde_json::json!({"email": req.email})),
-        );
+        let mut entry = AuditEntry::platform("auth.login_failed")
+            .resource("auth")
+            .user_email(&req.email)
+            .ip_address(&client_ip)
+            .detail(serde_json::json!({"email": req.email}));
+        if let Some(ref ua) = user_agent {
+            entry = entry.user_agent(ua);
+        }
+        state.audit.log(entry);
         return Err(AppError::Unauthorized);
     }
     let user = user.unwrap(); // Safe: checked above
@@ -265,11 +277,16 @@ pub async fn login(
                     }
 
                     if !recovery_used {
-                        state.audit.log(
-                            AuditEntry::new("auth.totp_failed")
-                                .user_id(user.id)
-                                .detail(serde_json::json!({"email": req.email})),
-                        );
+                        let mut entry = AuditEntry::platform("auth.totp_failed")
+                            .user_id(user.id)
+                            .user_email(&user.email)
+                            .resource("auth")
+                            .ip_address(&client_ip)
+                            .detail(serde_json::json!({"email": req.email}));
+                        if let Some(ref ua) = user_agent {
+                            entry = entry.user_agent(ua);
+                        }
+                        state.audit.log(entry);
                         return Err(AppError::Unauthorized);
                     }
                 }
@@ -312,11 +329,15 @@ pub async fn login(
                 AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))
             })?;
 
-    state.audit.log(
-        AuditEntry::new("auth.login")
-            .user_id(user.id)
-            .resource("auth"),
-    );
+    let mut entry = AuditEntry::platform("auth.login")
+        .user_id(user.id)
+        .user_email(&user.email)
+        .resource("auth")
+        .ip_address(&client_ip);
+    if let Some(ref ua) = user_agent {
+        entry = entry.user_agent(ua);
+    }
+    state.audit.log(entry);
 
     // Set signing key as httpOnly cookie (primary) + response body (backward compat)
     let cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
@@ -512,7 +533,7 @@ pub async fn change_password(
         fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &signing_key).await;
 
     state.audit.log(
-        AuditEntry::new("auth.password_changed")
+        AuditEntry::platform("auth.password_changed")
             .user_id(user.id)
             .resource("auth"),
     );
@@ -565,7 +586,7 @@ pub async fn revoke_sessions(
             .unwrap_or(());
 
     state.audit.log(
-        AuditEntry::new("auth.sessions_revoked")
+        AuditEntry::platform("auth.sessions_revoked")
             .user_id(user_id)
             .resource("auth"),
     );
@@ -709,7 +730,7 @@ pub async fn totp_verify_setup(
         .unwrap_or(0);
 
     state.audit.log(
-        AuditEntry::new("auth.totp_enabled")
+        AuditEntry::platform("auth.totp_enabled")
             .user_id(user_id)
             .resource("auth"),
     );
@@ -751,7 +772,7 @@ pub async fn totp_disable(
     .await?;
 
     state.audit.log(
-        AuditEntry::new("auth.totp_disabled")
+        AuditEntry::platform("auth.totp_disabled")
             .user_id(user.id)
             .resource("auth"),
     );

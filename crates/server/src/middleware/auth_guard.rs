@@ -145,6 +145,17 @@ pub async fn require_auth(
             .map(|ci| ci.0.ip().to_string()),
     };
 
+    // Publish user_id into the access-log slot if the access log layer
+    // installed one. This is how the HTTP access log gets a user_id
+    // attached even though it can't read request extensions after the
+    // inner service consumes the request.
+    if let Some(slot) = request
+        .extensions()
+        .get::<crate::middleware::access_log::AccessLogUserSlot>()
+    {
+        let _ = slot.0.set(claims.sub);
+    }
+
     request.extensions_mut().insert(AuthUser { claims, ip });
 
     Ok(next.run(request).await)

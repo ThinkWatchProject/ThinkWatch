@@ -3,13 +3,23 @@ use axum::response::Response;
 use std::{
     future::Future,
     pin::Pin,
+    sync::OnceLock,
     task::{Context, Poll},
 };
 use tower::{Layer, Service};
+use uuid::Uuid;
 
 use std::sync::Arc;
 use think_watch_common::audit::{AuditEntry, AuditLogger, LogType};
 use think_watch_common::dynamic_config::DynamicConfig;
+
+/// Slot inserted into request extensions by the access log layer so the
+/// auth middleware can publish the authenticated user_id back to us after
+/// it has verified the JWT. We can't read request extensions after
+/// `inner.call(request)` consumes the request, so we share an `Arc<OnceLock>`
+/// instead.
+#[derive(Clone, Default)]
+pub struct AccessLogUserSlot(pub Arc<OnceLock<Uuid>>);
 
 /// Layer that logs HTTP requests to ClickHouse.
 #[derive(Clone)]
@@ -63,9 +73,12 @@ where
         self.inner.poll_ready(cx)
     }
 
-    fn call(&mut self, request: Request) -> Self::Future {
+    fn call(&mut self, mut request: Request) -> Self::Future {
         let method = request.method().to_string();
         let path = request.uri().path().to_string();
+        // Slot for auth_guard to publish the resolved user_id into.
+        let user_slot = AccessLogUserSlot::default();
+        request.extensions_mut().insert(user_slot.clone());
         let user_agent = request
             .headers()
             .get(axum::http::header::USER_AGENT)
@@ -125,6 +138,9 @@ where
                     "latency_ms": latency_ms,
                     "port": port,
                 }));
+            if let Some(uid) = user_slot.0.get().copied() {
+                entry = entry.user_id(uid);
+            }
             if let Some(ip) = ip {
                 entry = entry.ip_address(ip);
             }
