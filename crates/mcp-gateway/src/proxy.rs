@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 
 use crate::access_control::AccessController;
+use crate::circuit_breaker::McpCircuitBreakers;
 use crate::pool::ConnectionPool;
 use crate::registry::Registry;
 
@@ -139,6 +140,7 @@ pub struct McpProxy {
     pub access_controller: AccessController,
     pub pool: ConnectionPool,
     pub rate_limiter: McpRateLimiter,
+    pub circuit_breakers: McpCircuitBreakers,
 }
 
 impl McpProxy {
@@ -153,6 +155,7 @@ impl McpProxy {
             access_controller,
             pool,
             rate_limiter,
+            circuit_breakers: McpCircuitBreakers::new(),
         }
     }
 
@@ -291,11 +294,40 @@ impl McpProxy {
             params: Some(upstream_params),
         };
 
+        // Circuit breaker — fail fast if the server's CB is currently Open.
+        // The breaker is keyed by server name, which is what the dashboard
+        // upstream-health panel reads from the shared cb_registry.
+        if self.circuit_breakers.check(&server.name).await.is_err() {
+            tracing::warn!(
+                server = %server.name,
+                "tools/call short-circuited: MCP circuit breaker open"
+            );
+            return err_response(
+                request.id,
+                INTERNAL_ERROR,
+                format!(
+                    "Upstream MCP server '{}' is temporarily unavailable",
+                    server.name
+                ),
+            );
+        }
+
         // Get (or create) a connection and forward the request.
         let conn = self.pool.get_or_create(&server).await;
         match self.pool.send_request(&conn, &upstream_request).await {
-            Ok(resp) => resp,
+            Ok(resp) => {
+                // JSON-RPC error responses still count as failures so the
+                // breaker reflects upstream tool errors, not just transport
+                // errors. We treat any `error` field as a failure.
+                if resp.error.is_some() {
+                    self.circuit_breakers.record_failure(&server.name).await;
+                } else {
+                    self.circuit_breakers.record_success(&server.name).await;
+                }
+                resp
+            }
             Err(e) => {
+                self.circuit_breakers.record_failure(&server.name).await;
                 tracing::error!(
                     server_id = %server.id,
                     error = %e,

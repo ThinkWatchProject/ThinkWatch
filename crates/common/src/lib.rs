@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod cb_registry;
 pub mod clickhouse_client;
 pub mod config;
 pub mod crypto;

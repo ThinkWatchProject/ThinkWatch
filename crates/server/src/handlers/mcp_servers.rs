@@ -68,6 +68,49 @@ pub async fn create_server(
     .fetch_one(&state.db)
     .await?;
 
+    // Sync the in-memory MCP registry so the gateway can route to the new
+    // server immediately, without a restart. The CB is also pre-registered
+    // so the dashboard upstream-health panel reflects it on next snapshot.
+    if let Ok(registered) =
+        crate::app::build_registered_server(&state.db, &server, &state.config.encryption_key).await
+    {
+        state.mcp_registry.register(registered).await;
+        state.mcp_circuit_breakers.register(&server.name).await;
+    }
+
+    // Kick off tool discovery in the background — adding a server in the
+    // UI should not block on a slow upstream tools/list, but the metadata
+    // should arrive shortly after so the admin sees its tools.
+    {
+        let db = state.db.clone();
+        let key = state.config.encryption_key.clone();
+        let registry = state.mcp_registry.clone();
+        let server = server.clone();
+        tokio::spawn(async move {
+            match crate::app::discover_and_persist_tools(&db, &server, &key).await {
+                Ok(n) => {
+                    tracing::info!(
+                        mcp_server = %server.name,
+                        tools = n,
+                        "MCP tool discovery completed for new server"
+                    );
+                    if let Ok(updated) =
+                        crate::app::build_registered_server(&db, &server, &key).await
+                    {
+                        registry.register(updated).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        mcp_server = %server.name,
+                        error = %e,
+                        "Initial MCP tool discovery failed"
+                    );
+                }
+            }
+        });
+    }
+
     state.audit.log(
         auth_user
             .audit("mcp_server.created")
@@ -137,6 +180,19 @@ pub async fn update_server(
     .fetch_one(&state.db)
     .await?;
 
+    // Evict any cached connection first — the pool keys by id, so a
+    // changed endpoint URL would otherwise keep using the old one.
+    state.mcp_pool.remove(id).await;
+
+    // Re-register so the in-memory registry picks up the new endpoint /
+    // name. `register` is an upsert keyed by id.
+    if let Ok(registered) =
+        crate::app::build_registered_server(&state.db, &updated, &state.config.encryption_key).await
+    {
+        state.mcp_registry.register(registered).await;
+        state.mcp_circuit_breakers.register(&updated.name).await;
+    }
+
     state.audit.log(
         auth_user
             .audit("mcp_server.updated")
@@ -176,6 +232,12 @@ pub async fn delete_server(
         .bind(id)
         .execute(&state.db)
         .await?;
+
+    // Drop from the in-memory registry and connection pool — otherwise the
+    // gateway would keep a stale entry for a server that no longer exists
+    // in the database.
+    state.mcp_registry.unregister(id).await;
+    state.mcp_pool.remove(id).await;
 
     state.audit.log(
         auth_user

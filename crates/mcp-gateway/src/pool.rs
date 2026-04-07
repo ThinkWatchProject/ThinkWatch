@@ -17,6 +17,9 @@ pub struct McpConnection {
     /// The `Mcp-Session-Id` header value returned by the upstream server
     /// during initialization, if any.
     session_id: Arc<RwLock<Option<String>>>,
+    /// `(header name, header value)` to attach to every upstream request.
+    /// Resolved at connection creation from `RegisteredServer.auth_header`.
+    auth_header: Option<(String, String)>,
 }
 
 impl McpConnection {
@@ -26,6 +29,7 @@ impl McpConnection {
             endpoint_url: server.endpoint_url.clone(),
             client,
             session_id: Arc::new(RwLock::new(None)),
+            auth_header: server.auth_header.clone(),
         }
     }
 
@@ -115,6 +119,11 @@ impl ConnectionPool {
             .post(&conn.endpoint_url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json");
+
+        // Attach upstream auth header if the server has one configured.
+        if let Some((name, value)) = &conn.auth_header {
+            builder = builder.header(name.as_str(), value.as_str());
+        }
 
         // Attach upstream session header if we have one.
         if let Some(sid) = conn.get_session_id().await {

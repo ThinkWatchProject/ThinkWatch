@@ -1,11 +1,16 @@
 use axum::Json;
-use axum::extract::State;
-use serde::Serialize;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
+use axum::extract::{Query, State};
+use axum::response::Response;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+
+use super::clickhouse_util::{ch_available, ch_client};
 
 #[derive(Debug, Serialize)]
 pub struct DashboardStats {
@@ -48,4 +53,392 @@ pub async fn get_dashboard_stats(
         active_api_keys: active_api_keys.unwrap_or(0),
         connected_mcp_servers: connected_mcp_servers.unwrap_or(0),
     }))
+}
+
+// ============================================================================
+// Live dashboard panel — aggregates real metrics from ClickHouse gateway_logs
+// + Postgres + the in-process circuit-breaker registry. Served two ways:
+//   - GET  /api/dashboard/live  — single snapshot (first paint, fallback)
+//   - WS   /api/dashboard/ws    — pushes a new snapshot every 4 s
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct ProviderHealth {
+    /// "ai" for AI providers, "mcp" for MCP servers.
+    pub kind: String,
+    pub provider: String,
+    pub requests: u64,
+    pub avg_latency_ms: f64,
+    pub success_rate: f64,
+    /// Real circuit-breaker state from the gateway runtime.
+    /// One of "Closed" / "HalfOpen" / "Open" — both AI providers and MCP
+    /// servers write into the same `cb_registry`, so this reflects whichever
+    /// gateway last touched the named upstream.
+    pub cb_state: String,
+}
+
+#[derive(Debug, clickhouse::Row, Deserialize)]
+struct ProviderHealthRow {
+    provider: String,
+    requests: u64,
+    avg_latency_ms: f64,
+    success_rate: f64,
+}
+
+#[derive(Debug, Serialize, clickhouse::Row, Deserialize)]
+pub struct RpmBucket {
+    pub minute: String,
+    pub count: u64,
+}
+
+/// One row in the unified live feed. Sourced from either `gateway_logs`
+/// (AI API requests) or `mcp_logs` (MCP tool calls), normalised so the
+/// frontend can render them in a single table.
+#[derive(Debug, Serialize, clickhouse::Row, Deserialize)]
+pub struct LiveLogRow {
+    /// "api" for gateway requests, "mcp" for MCP tool calls.
+    pub kind: String,
+    pub id: String,
+    pub user_id: String,
+    /// model_id for "api", tool_name for "mcp".
+    pub subject: String,
+    /// Numeric HTTP status for "api" (e.g. "200"), or string status for
+    /// "mcp" (e.g. "success" / "error").
+    pub status: String,
+    pub latency_ms: i64,
+    /// Total tokens for "api" (input+output), 0 for "mcp".
+    pub tokens: i64,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DashboardLive {
+    /// Per-provider health stats over the last 15 minutes.
+    pub providers: Vec<ProviderHealth>,
+    /// Requests per minute for the last 30 minutes (oldest → newest, length 30).
+    pub rpm_buckets: Vec<u64>,
+    /// Most recent gateway log rows (newest first, up to 14).
+    pub recent_logs: Vec<LiveLogRow>,
+    /// Highest configured per-key RPM limit across active API keys, if any.
+    /// Used as a reference line on the request-rate chart.
+    pub max_rpm_limit: Option<i32>,
+}
+
+/// Build a live snapshot. Reused by both the HTTP endpoint and the WS loop.
+async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError> {
+    // --- Highest per-key RPM limit (Postgres) -------------------------------
+    let max_rpm_limit: Option<i32> = sqlx::query_scalar(
+        "SELECT MAX(rate_limit_rpm) FROM api_keys \
+         WHERE is_active = true AND rate_limit_rpm IS NOT NULL",
+    )
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(None);
+
+    // Snapshot the in-process CB registry once so we can decorate every
+    // provider row with its real state below.
+    let cb_states = think_watch_gateway::failover::snapshot_cb_states();
+
+    // Always include every active AI provider AND every MCP server from
+    // Postgres so the health card is never blank — even on a fresh install
+    // with zero traffic. Names mirror what the respective gateways use as
+    // their lookup key.
+    let configured_providers: Vec<(String,)> = sqlx::query_as::<_, (String,)>(
+        "SELECT name FROM providers WHERE is_active = true AND deleted_at IS NULL",
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let configured_mcp_servers: Vec<(String,)> =
+        sqlx::query_as::<_, (String,)>("SELECT name FROM mcp_servers")
+            .fetch_all(&state.db)
+            .await
+            .unwrap_or_default();
+
+    let seed_provider = |kind: &str, name: &str| ProviderHealth {
+        kind: kind.to_string(),
+        provider: name.to_string(),
+        requests: 0,
+        avg_latency_ms: 0.0,
+        success_rate: 100.0,
+        cb_state: cb_states
+            .get(name)
+            .map(|c| c.as_str().to_string())
+            .unwrap_or_else(|| "Closed".to_string()),
+    };
+
+    if !ch_available(state) {
+        let mut providers: Vec<ProviderHealth> = configured_providers
+            .iter()
+            .map(|(name,)| seed_provider("ai", name))
+            .collect();
+        providers.extend(
+            configured_mcp_servers
+                .iter()
+                .map(|(name,)| seed_provider("mcp", name)),
+        );
+        return Ok(DashboardLive {
+            providers,
+            rpm_buckets: vec![0; 30],
+            recent_logs: vec![],
+            max_rpm_limit,
+        });
+    }
+    let ch = ch_client(state)?;
+
+    // --- Per-provider health (last 15 minutes) ------------------------------
+    let provider_rows: Vec<ProviderHealthRow> = ch
+        .query(
+            "SELECT \
+                ifNull(provider, 'unknown') AS provider, \
+                count() AS requests, \
+                avg(ifNull(latency_ms, 0)) AS avg_latency_ms, \
+                (countIf(status_code < 400) / count()) * 100 AS success_rate \
+             FROM gateway_logs \
+             WHERE created_at >= now() - INTERVAL 15 MINUTE \
+             GROUP BY provider \
+             ORDER BY requests DESC \
+             LIMIT 8",
+        )
+        .fetch_all()
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("ClickHouse providers query failed: {e}"))
+        })?;
+
+    // --- Per-MCP-server health (last 15 minutes) ----------------------------
+    let mcp_rows: Vec<ProviderHealthRow> = ch
+        .query(
+            "SELECT \
+                ifNull(server_name, 'unknown') AS provider, \
+                count() AS requests, \
+                avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
+                (countIf(status = 'success') / count()) * 100 AS success_rate \
+             FROM mcp_logs \
+             WHERE created_at >= now() - INTERVAL 15 MINUTE \
+             GROUP BY server_name \
+             ORDER BY requests DESC \
+             LIMIT 8",
+        )
+        .fetch_all()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse mcp query failed: {e}")))?;
+
+    // Merge real CB state into each AI row, then ensure every configured AI
+    // provider AND MCP server is represented even with zero traffic.
+    let mut providers: Vec<ProviderHealth> = provider_rows
+        .into_iter()
+        .map(|r| ProviderHealth {
+            kind: "ai".to_string(),
+            cb_state: cb_states
+                .get(&r.provider)
+                .map(|c| c.as_str().to_string())
+                .unwrap_or_else(|| "Closed".to_string()),
+            provider: r.provider,
+            requests: r.requests,
+            avg_latency_ms: r.avg_latency_ms,
+            success_rate: r.success_rate,
+        })
+        .collect();
+    for r in mcp_rows {
+        providers.push(ProviderHealth {
+            kind: "mcp".to_string(),
+            cb_state: cb_states
+                .get(&r.provider)
+                .map(|c| c.as_str().to_string())
+                .unwrap_or_else(|| "Closed".to_string()),
+            provider: r.provider,
+            requests: r.requests,
+            avg_latency_ms: r.avg_latency_ms,
+            success_rate: r.success_rate,
+        });
+    }
+    for (name,) in &configured_providers {
+        if !providers
+            .iter()
+            .any(|p| p.kind == "ai" && &p.provider == name)
+        {
+            providers.push(seed_provider("ai", name));
+        }
+    }
+    for (name,) in &configured_mcp_servers {
+        if !providers
+            .iter()
+            .any(|p| p.kind == "mcp" && &p.provider == name)
+        {
+            providers.push(seed_provider("mcp", name));
+        }
+    }
+
+    // --- Requests per minute (last 30 minutes) ------------------------------
+    let buckets_raw: Vec<RpmBucket> = ch
+        .query(
+            "SELECT \
+                toString(toStartOfMinute(created_at)) AS minute, \
+                count() AS count \
+             FROM gateway_logs \
+             WHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE \
+             GROUP BY minute \
+             ORDER BY minute ASC",
+        )
+        .fetch_all()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse rpm query failed: {e}")))?;
+
+    let now = chrono::Utc::now();
+    let start_minute = (now - chrono::Duration::minutes(29))
+        .format("%Y-%m-%d %H:%M:00")
+        .to_string();
+    let mut rpm_buckets = vec![0u64; 30];
+    for b in buckets_raw {
+        if let (Ok(b_dt), Ok(s_dt)) = (
+            chrono::NaiveDateTime::parse_from_str(&b.minute, "%Y-%m-%d %H:%M:%S"),
+            chrono::NaiveDateTime::parse_from_str(&start_minute, "%Y-%m-%d %H:%M:%S"),
+        ) {
+            let diff = (b_dt - s_dt).num_minutes();
+            if (0..30).contains(&diff) {
+                rpm_buckets[diff as usize] = b.count;
+            }
+        }
+    }
+
+    // --- Recent log rows (unified across AI gateway + MCP gateway) ----------
+    // We pull the top N from each source then re-order so the merged feed
+    // shows the most recent activity regardless of which gateway served it.
+    let recent_logs: Vec<LiveLogRow> = ch
+        .query(
+            "SELECT * FROM ( \
+                SELECT \
+                    'api' AS kind, \
+                    id, \
+                    ifNull(user_id, '') AS user_id, \
+                    ifNull(model_id, '') AS subject, \
+                    toString(ifNull(status_code, 0)) AS status, \
+                    ifNull(latency_ms, 0) AS latency_ms, \
+                    toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
+                    toString(created_at) AS created_at \
+                FROM gateway_logs \
+                ORDER BY created_at DESC \
+                LIMIT 20 \
+                UNION ALL \
+                SELECT \
+                    'mcp' AS kind, \
+                    id, \
+                    ifNull(user_id, '') AS user_id, \
+                    ifNull(tool_name, '') AS subject, \
+                    ifNull(status, '') AS status, \
+                    ifNull(duration_ms, 0) AS latency_ms, \
+                    toInt64(0) AS tokens, \
+                    toString(created_at) AS created_at \
+                FROM mcp_logs \
+                ORDER BY created_at DESC \
+                LIMIT 20 \
+             ) \
+             ORDER BY created_at DESC \
+             LIMIT 16",
+        )
+        .fetch_all()
+        .await
+        .map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("ClickHouse recent logs query failed: {e}"))
+        })?;
+
+    Ok(DashboardLive {
+        providers,
+        rpm_buckets,
+        recent_logs,
+        max_rpm_limit,
+    })
+}
+
+pub async fn get_dashboard_live(
+    _auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<DashboardLive>, AppError> {
+    Ok(Json(build_live_snapshot(&state).await?))
+}
+
+// ============================================================================
+// WebSocket push channel for the dashboard
+//
+// Browsers can't send Authorization headers on a WS upgrade, so we accept
+// the access token via `?token=...` and validate it inline. The endpoint is
+// mounted OUTSIDE the require_auth middleware on purpose.
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct WsAuthQuery {
+    pub token: Option<String>,
+}
+
+pub async fn dashboard_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Query(q): Query<WsAuthQuery>,
+) -> Result<Response, axum::http::StatusCode> {
+    // Manual JWT validation — mirrors `middleware::auth_guard::require_auth`
+    // for the bits that matter on a WS upgrade.
+    let token = q.token.ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let claims = state
+        .jwt
+        .verify_token(&token)
+        .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)?;
+    if claims.token_type != "access" {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    let token_hash = think_watch_auth::jwt::sha2_hash(&token);
+    if think_watch_auth::jwt::is_revoked(&state.redis, &token_hash).await {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+
+    Ok(ws.on_upgrade(move |socket| dashboard_ws_loop(socket, state)))
+}
+
+async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState) {
+    // Push an initial snapshot immediately so the client never sees an
+    // empty UI on connect.
+    if let Err(e) = push_snapshot(&mut socket, &state).await {
+        tracing::debug!("dashboard ws closed during initial push: {e}");
+        return;
+    }
+
+    let mut ticker = tokio::time::interval(Duration::from_secs(4));
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // First tick fires immediately — we already pushed once, so consume it.
+    ticker.tick().await;
+
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if let Err(e) = push_snapshot(&mut socket, &state).await {
+                    tracing::debug!("dashboard ws push failed: {e}");
+                    return;
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => return,
+                    Some(Ok(Message::Ping(p))) => {
+                        if socket.send(Message::Pong(p)).await.is_err() {
+                            return;
+                        }
+                    }
+                    Some(Err(_)) => return,
+                    _ => {} // ignore client text/binary frames
+                }
+            }
+        }
+    }
+}
+
+async fn push_snapshot(socket: &mut WebSocket, state: &AppState) -> Result<(), String> {
+    let snap = build_live_snapshot(state)
+        .await
+        .map_err(|e| format!("snapshot build failed: {e}"))?;
+    let json = serde_json::to_string(&snap).map_err(|e| e.to_string())?;
+    socket
+        .send(Message::Text(json.into()))
+        .await
+        .map_err(|e| e.to_string())
 }

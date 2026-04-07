@@ -9,6 +9,11 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+// Circuit-breaker state lives in `think-watch-common` so the MCP gateway
+// can write into the same registry. Re-exported here for backwards compat
+// with anything that already imported from this module.
+pub use think_watch_common::cb_registry::{CbState, record_cb, snapshot_cb_states};
+
 /// Load-balancing strategy for selecting a backend.
 #[derive(Debug, Clone, Copy)]
 pub enum LoadBalanceStrategy {
@@ -41,6 +46,9 @@ struct FailoverBackend {
 
 impl FailoverBackend {
     fn new(provider: Arc<dyn DynAiProvider>, failure_threshold: u32) -> Self {
+        // Seed the global CB registry so new providers show up as `Closed`
+        // before they have served their first request.
+        record_cb(provider.name(), CbState::Closed);
         Self {
             provider,
             state: RwLock::new(CircuitState::Closed),
@@ -68,6 +76,7 @@ impl FailoverBackend {
                     *self.state.write().await = CircuitState::Closed;
                     self.half_open_successes.store(0, Ordering::Relaxed);
                     metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(0.0);
+                    record_cb(self.provider.name(), CbState::Closed);
                     tracing::info!(
                         provider = self.provider.name(),
                         "Circuit breaker closed (recovered)"
@@ -78,6 +87,7 @@ impl FailoverBackend {
                 // Should not happen, but handle gracefully
                 *self.state.write().await = CircuitState::Closed;
                 metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(0.0);
+                record_cb(self.provider.name(), CbState::Closed);
             }
             CircuitState::Closed => {}
         }
@@ -93,6 +103,7 @@ impl FailoverBackend {
                     *self.state.write().await = CircuitState::Open;
                     *self.last_failure.write().await = Some(Instant::now());
                     metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(2.0);
+                    record_cb(self.provider.name(), CbState::Open);
                     tracing::warn!(
                         provider = self.provider.name(),
                         "Circuit breaker OPEN after {} consecutive failures",
@@ -106,6 +117,7 @@ impl FailoverBackend {
                 *self.last_failure.write().await = Some(Instant::now());
                 self.half_open_successes.store(0, Ordering::Relaxed);
                 metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(2.0);
+                record_cb(self.provider.name(), CbState::Open);
                 tracing::warn!(
                     provider = self.provider.name(),
                     "Circuit breaker back to OPEN (half-open probe failed)"
@@ -130,6 +142,7 @@ impl FailoverBackend {
             self.half_open_successes.store(0, Ordering::Relaxed);
             self.consecutive_failures.store(0, Ordering::Relaxed);
             metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(1.0);
+            record_cb(self.provider.name(), CbState::HalfOpen);
             tracing::info!(
                 provider = self.provider.name(),
                 "Circuit breaker HALF-OPEN (probing recovery)"
