@@ -22,7 +22,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Settings, Shield, Key, DollarSign, Database, Lock, Plus, Trash2, AlertCircle, CheckCircle, FlaskConical, Sparkles } from 'lucide-react';
+import { Settings, Shield, Key, DollarSign, Database, Lock, Plus, Trash2, AlertCircle, CheckCircle, FlaskConical, Sparkles, MemoryStick, Search } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
@@ -198,6 +198,7 @@ export function SettingsPage() {
 
   // Read-only state from dedicated endpoints
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
+  const [health, setHealth] = useState<{ postgres: boolean; redis: boolean; clickhouse: boolean } | null>(null);
   const [, setOidcConfig] = useState<OidcConfig | null>(null);
   const [auditConfig, setAuditConfig] = useState<AuditConfig | null>(null);
 
@@ -317,9 +318,11 @@ export function SettingsPage() {
       api<OidcConfig>('/api/admin/settings/oidc').catch(() => null),
       api<AuditConfig>('/api/admin/settings/audit').catch(() => null),
       api<Record<string, SettingEntry[]>>('/api/admin/settings').catch(() => ({})),
+      api<{ postgres: boolean; redis: boolean; clickhouse: boolean }>('/api/health').catch(() => null),
     ])
-      .then(([sys, oidc, audit, settings]) => {
+      .then(([sys, oidc, audit, settings, hp]) => {
         setSystemInfo(sys);
+        setHealth(hp);
         setOidcConfig(oidc);
         if (oidc) {
           setOidcEnabled(oidc.enabled);
@@ -605,6 +608,30 @@ export function SettingsPage() {
                       <div>
                         <Label className="text-xs text-muted-foreground">{t('settingsPage.consolePort')}</Label>
                         <p className="text-sm font-medium font-mono">{systemInfo?.console_port ?? '—'}</p>
+                      </div>
+                    </div>
+                    <Separator className="my-4" />
+                    <div>
+                      <Label className="text-xs text-muted-foreground">{t('dashboard.systemStatus')}</Label>
+                      <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                        {[
+                          { name: 'PostgreSQL', key: 'postgres' as const, icon: Database },
+                          { name: 'Redis', key: 'redis' as const, icon: MemoryStick },
+                          { name: 'ClickHouse', key: 'clickhouse' as const, icon: Search },
+                        ].map((svc) => {
+                          const ok = health?.[svc.key] ?? false;
+                          return (
+                            <div key={svc.key} className="flex items-center justify-between rounded-md border px-3 py-2">
+                              <div className="flex items-center gap-2">
+                                <svc.icon className="h-4 w-4 text-muted-foreground" />
+                                <span className="text-sm font-medium">{svc.name}</span>
+                              </div>
+                              <Badge variant={ok ? 'default' : 'destructive'}>
+                                {ok ? t('common.healthy') : t('dashboard.unreachable')}
+                              </Badge>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   </div>
