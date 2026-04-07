@@ -887,16 +887,24 @@ pub async fn discover_and_persist_tools(
     }
 
     let json: serde_json::Value = resp.json().await?;
-    let result = json.get("result").unwrap_or(&json).clone();
+    // Strict: require a `result` field. The previous fallback to the
+    // whole JSON body silently swallowed malformed responses (a server
+    // that returned `{"error": ...}` without `result` would still appear
+    // to "succeed" with garbage-shaped data).
+    let result = json
+        .get("result")
+        .ok_or_else(|| anyhow::anyhow!("MCP tools/list response missing `result` field"))?
+        .clone();
     let parsed: McpToolsListResult = serde_json::from_value(result)?;
 
-    // Deactivate stale rows then upsert the live ones in a single
-    // best-effort sequence — wrapping in a transaction would be tidier but
-    // would block other discovery attempts on the same row, which isn't
-    // worth it for a metadata refresh.
+    // Atomic: deactivate-then-upsert wrapped in a transaction so concurrent
+    // readers never observe a temporarily-empty tool list. Without the
+    // transaction, the deactivate above would be visible to other
+    // connections before the upserts re-enable the live tools.
+    let mut tx = db.begin().await?;
     sqlx::query("UPDATE mcp_tools SET is_active = false WHERE server_id = $1")
         .bind(server.id)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
 
     for tool in &parsed.tools {
@@ -910,7 +918,7 @@ pub async fn discover_and_persist_tools(
         .bind(&tool.name)
         .bind(&tool.description)
         .bind(&tool.input_schema)
-        .execute(db)
+        .execute(&mut *tx)
         .await?;
     }
 
@@ -918,8 +926,9 @@ pub async fn discover_and_persist_tools(
         "UPDATE mcp_servers SET status = 'connected', last_health_check = now() WHERE id = $1",
     )
     .bind(server.id)
-    .execute(db)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     Ok(parsed.tools.len())
 }

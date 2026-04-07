@@ -144,11 +144,20 @@ pub async fn login(
         ));
     }
 
-    // Progressive lockout: after 5 failures, increase lockout exponentially
+    // Progressive lockout: after 5 failures, increase lockout exponentially.
+    // Fail closed: a Redis outage must NOT silently disable the lockout
+    // check, otherwise an attacker can brute-force during the outage window.
     let lockout_key = format!("auth_lockout:{}", req.email);
-    let lockout_ttl: Option<i64> = fred::interfaces::KeysInterface::ttl(&state.redis, &lockout_key)
-        .await
-        .unwrap_or(None);
+    let lockout_ttl: Option<i64> =
+        match fred::interfaces::KeysInterface::ttl(&state.redis, &lockout_key).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!("Redis lockout TTL check failed (fail-closed): {e}");
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "Authentication temporarily unavailable"
+                )));
+            }
+        };
     if lockout_ttl.unwrap_or(-2) > 0 {
         return Err(AppError::BadRequest(
             "Account temporarily locked due to repeated failed attempts. Please try again later."
@@ -180,41 +189,35 @@ pub async fn login(
     let password_valid = password::verify_password(&req.password, &password_hash).unwrap_or(false);
 
     if !password_valid || user.is_none() {
-        // Progressive lockout: lock account after repeated failures
-        // Lockout duration increases: 5 fails=60s, 8=300s, 10+=900s
-        if count >= 10 {
-            let _: () = fred::interfaces::KeysInterface::set(
-                &state.redis,
-                &lockout_key,
-                "1",
-                Some(fred::types::Expiration::EX(900)),
-                None,
-                false,
-            )
-            .await
-            .unwrap_or(());
+        // Progressive lockout: lock account after repeated failures.
+        // Lockout duration increases: 5 fails=60s, 8=300s, 10+=900s.
+        // Fail closed on Redis errors so a Redis outage doesn't disable
+        // brute-force protection mid-attack.
+        let lockout_secs: Option<i64> = if count >= 10 {
+            Some(900)
         } else if count >= 8 {
-            let _: () = fred::interfaces::KeysInterface::set(
-                &state.redis,
-                &lockout_key,
-                "1",
-                Some(fred::types::Expiration::EX(300)),
-                None,
-                false,
-            )
-            .await
-            .unwrap_or(());
+            Some(300)
         } else if count >= 5 {
-            let _: () = fred::interfaces::KeysInterface::set(
+            Some(60)
+        } else {
+            None
+        };
+        if let Some(secs) = lockout_secs {
+            let r: Result<(), _> = fred::interfaces::KeysInterface::set(
                 &state.redis,
                 &lockout_key,
                 "1",
-                Some(fred::types::Expiration::EX(60)),
+                Some(fred::types::Expiration::EX(secs)),
                 None,
                 false,
             )
-            .await
-            .unwrap_or(());
+            .await;
+            if let Err(e) = r {
+                tracing::error!("Redis lockout SET failed (fail-closed): {e}");
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "Authentication temporarily unavailable"
+                )));
+            }
         }
 
         // Log failed attempt
@@ -259,7 +262,11 @@ pub async fn login(
                     false
                 };
 
-                // If TOTP code didn't match, try recovery codes (constant-time comparison)
+                // If TOTP code didn't match, try recovery codes
+                // (constant-time comparison). Consumption is atomic: the
+                // UPDATE only succeeds if the codes column hasn't changed
+                // since we read it, so two concurrent login attempts with
+                // the same recovery code can't both succeed.
                 if !totp_valid {
                     let mut recovery_used = false;
                     if let Some(ref codes_json) = user.totp_recovery_codes
@@ -267,13 +274,34 @@ pub async fn login(
                         && let Some(pos) = think_watch_auth::totp::find_recovery_code(&codes, code)
                     {
                         codes.remove(pos);
-                        let updated = serde_json::to_string(&codes).unwrap_or_default();
-                        sqlx::query("UPDATE users SET totp_recovery_codes = $1 WHERE id = $2")
-                            .bind(&updated)
-                            .bind(user.id)
-                            .execute(&state.db)
-                            .await?;
-                        recovery_used = true;
+                        let updated = serde_json::to_string(&codes).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!(
+                                "Recovery codes serialization failed: {e}"
+                            ))
+                        })?;
+                        // Compare-and-swap: only update if the column still
+                        // matches what we read. If another request raced us
+                        // to consume the same code, rows_affected == 0.
+                        let rows = sqlx::query(
+                            "UPDATE users SET totp_recovery_codes = $1 \
+                             WHERE id = $2 AND totp_recovery_codes = $3",
+                        )
+                        .bind(&updated)
+                        .bind(user.id)
+                        .bind(codes_json)
+                        .execute(&state.db)
+                        .await?
+                        .rows_affected();
+                        if rows == 1 {
+                            recovery_used = true;
+                            state.audit.log(
+                                AuditEntry::platform("auth.totp_recovery_used")
+                                    .user_id(user.id)
+                                    .user_email(&user.email)
+                                    .resource("auth")
+                                    .ip_address(&client_ip),
+                            );
+                        }
                     }
 
                     if !recovery_used {

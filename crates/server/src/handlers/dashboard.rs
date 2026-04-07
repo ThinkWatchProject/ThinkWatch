@@ -126,35 +126,28 @@ pub struct DashboardLive {
 
 /// Build a live snapshot. Reused by both the HTTP endpoint and the WS loop.
 async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError> {
-    // --- Highest per-key RPM limit (Postgres) -------------------------------
-    let max_rpm_limit: Option<i32> = sqlx::query_scalar(
+    // --- Postgres queries: parallel via tokio::try_join! --------------------
+    // Errors propagate so the dashboard surfaces a real failure instead of
+    // pretending data is empty when the DB is down.
+    let max_rpm_fut = sqlx::query_scalar::<_, Option<i32>>(
         "SELECT MAX(rate_limit_rpm) FROM api_keys \
          WHERE is_active = true AND rate_limit_rpm IS NOT NULL",
     )
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(None);
+    .fetch_one(&state.db);
+    let providers_fut = sqlx::query_as::<_, (String,)>(
+        "SELECT name FROM providers WHERE is_active = true AND deleted_at IS NULL",
+    )
+    .fetch_all(&state.db);
+    let mcp_servers_fut =
+        sqlx::query_as::<_, (String,)>("SELECT name FROM mcp_servers").fetch_all(&state.db);
+
+    let (max_rpm_limit, configured_providers, configured_mcp_servers) =
+        tokio::try_join!(max_rpm_fut, providers_fut, mcp_servers_fut)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Dashboard PG query failed: {e}")))?;
 
     // Snapshot the in-process CB registry once so we can decorate every
     // provider row with its real state below.
     let cb_states = think_watch_gateway::failover::snapshot_cb_states();
-
-    // Always include every active AI provider AND every MCP server from
-    // Postgres so the health card is never blank — even on a fresh install
-    // with zero traffic. Names mirror what the respective gateways use as
-    // their lookup key.
-    let configured_providers: Vec<(String,)> = sqlx::query_as::<_, (String,)>(
-        "SELECT name FROM providers WHERE is_active = true AND deleted_at IS NULL",
-    )
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-
-    let configured_mcp_servers: Vec<(String,)> =
-        sqlx::query_as::<_, (String,)>("SELECT name FROM mcp_servers")
-            .fetch_all(&state.db)
-            .await
-            .unwrap_or_default();
 
     let seed_provider = |kind: &str, name: &str| ProviderHealth {
         kind: kind.to_string(),
@@ -187,8 +180,11 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
     }
     let ch = ch_client(state)?;
 
-    // --- Per-provider health (last 15 minutes) ------------------------------
-    let provider_rows: Vec<ProviderHealthRow> = ch
+    // --- Four ClickHouse queries in parallel via tokio::try_join! -----------
+    // Previously these ran serially, costing 4× the CH round-trip latency
+    // every WS push (every 4s). All four are independent, so parallelizing
+    // is a free win.
+    let providers_q = ch
         .query(
             "SELECT \
                 ifNull(provider, 'unknown') AS provider, \
@@ -201,14 +197,9 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
              ORDER BY requests DESC \
              LIMIT 8",
         )
-        .fetch_all()
-        .await
-        .map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("ClickHouse providers query failed: {e}"))
-        })?;
+        .fetch_all::<ProviderHealthRow>();
 
-    // --- Per-MCP-server health (last 15 minutes) ----------------------------
-    let mcp_rows: Vec<ProviderHealthRow> = ch
+    let mcp_q = ch
         .query(
             "SELECT \
                 ifNull(server_name, 'unknown') AS provider, \
@@ -221,9 +212,58 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
              ORDER BY requests DESC \
              LIMIT 8",
         )
-        .fetch_all()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse mcp query failed: {e}")))?;
+        .fetch_all::<ProviderHealthRow>();
+
+    let buckets_q = ch
+        .query(
+            "SELECT \
+                toString(toStartOfMinute(created_at)) AS minute, \
+                count() AS count \
+             FROM gateway_logs \
+             WHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE \
+             GROUP BY minute \
+             ORDER BY minute ASC",
+        )
+        .fetch_all::<RpmBucket>();
+
+    let recent_q = ch
+        .query(
+            "SELECT * FROM ( \
+                SELECT \
+                    'api' AS kind, \
+                    id, \
+                    ifNull(user_id, '') AS user_id, \
+                    ifNull(model_id, '') AS subject, \
+                    toString(ifNull(status_code, 0)) AS status, \
+                    ifNull(latency_ms, 0) AS latency_ms, \
+                    toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
+                    toString(created_at) AS created_at \
+                FROM gateway_logs \
+                ORDER BY created_at DESC \
+                LIMIT 20 \
+                UNION ALL \
+                SELECT \
+                    'mcp' AS kind, \
+                    id, \
+                    ifNull(user_id, '') AS user_id, \
+                    ifNull(tool_name, '') AS subject, \
+                    ifNull(status, '') AS status, \
+                    ifNull(duration_ms, 0) AS latency_ms, \
+                    toInt64(0) AS tokens, \
+                    toString(created_at) AS created_at \
+                FROM mcp_logs \
+                ORDER BY created_at DESC \
+                LIMIT 20 \
+             ) \
+             ORDER BY created_at DESC \
+             LIMIT 16",
+        )
+        .fetch_all::<LiveLogRow>();
+
+    let (provider_rows, mcp_rows, buckets_raw, recent_logs) =
+        tokio::try_join!(providers_q, mcp_q, buckets_q, recent_q).map_err(|e| {
+            AppError::Internal(anyhow::anyhow!("Dashboard ClickHouse query failed: {e}"))
+        })?;
 
     // Merge real CB state into each AI row, then ensure every configured AI
     // provider AND MCP server is represented even with zero traffic.
@@ -271,21 +311,6 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
         }
     }
 
-    // --- Requests per minute (last 30 minutes) ------------------------------
-    let buckets_raw: Vec<RpmBucket> = ch
-        .query(
-            "SELECT \
-                toString(toStartOfMinute(created_at)) AS minute, \
-                count() AS count \
-             FROM gateway_logs \
-             WHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE \
-             GROUP BY minute \
-             ORDER BY minute ASC",
-        )
-        .fetch_all()
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse rpm query failed: {e}")))?;
-
     let now = chrono::Utc::now();
     let start_minute = (now - chrono::Duration::minutes(29))
         .format("%Y-%m-%d %H:%M:00")
@@ -302,47 +327,6 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
             }
         }
     }
-
-    // --- Recent log rows (unified across AI gateway + MCP gateway) ----------
-    // We pull the top N from each source then re-order so the merged feed
-    // shows the most recent activity regardless of which gateway served it.
-    let recent_logs: Vec<LiveLogRow> = ch
-        .query(
-            "SELECT * FROM ( \
-                SELECT \
-                    'api' AS kind, \
-                    id, \
-                    ifNull(user_id, '') AS user_id, \
-                    ifNull(model_id, '') AS subject, \
-                    toString(ifNull(status_code, 0)) AS status, \
-                    ifNull(latency_ms, 0) AS latency_ms, \
-                    toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
-                    toString(created_at) AS created_at \
-                FROM gateway_logs \
-                ORDER BY created_at DESC \
-                LIMIT 20 \
-                UNION ALL \
-                SELECT \
-                    'mcp' AS kind, \
-                    id, \
-                    ifNull(user_id, '') AS user_id, \
-                    ifNull(tool_name, '') AS subject, \
-                    ifNull(status, '') AS status, \
-                    ifNull(duration_ms, 0) AS latency_ms, \
-                    toInt64(0) AS tokens, \
-                    toString(created_at) AS created_at \
-                FROM mcp_logs \
-                ORDER BY created_at DESC \
-                LIMIT 20 \
-             ) \
-             ORDER BY created_at DESC \
-             LIMIT 16",
-        )
-        .fetch_all()
-        .await
-        .map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("ClickHouse recent logs query failed: {e}"))
-        })?;
 
     Ok(DashboardLive {
         providers,

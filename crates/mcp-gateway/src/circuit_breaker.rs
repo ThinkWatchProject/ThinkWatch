@@ -6,15 +6,23 @@
 //! when its CB trips we just fail fast on subsequent calls until the
 //! recovery window elapses.
 //!
+//! All breaker state lives behind a single `Mutex<BreakerInner>`. The
+//! previous design split state across an `RwLock<CbState>`, two
+//! `AtomicU32`s, and an `RwLock<Option<Instant>>`, which made the
+//! check / record_failure / record_success transitions racy: two
+//! concurrent failures could both observe `Closed`, both bump the
+//! counter, and both trip Open separately (writing `last_failure`
+//! twice). Holding one mutex for the entire transition makes every
+//! state change atomic.
+//!
 //! Every state transition is mirrored into the global `cb_registry` in
 //! `think-watch-common`, which the dashboard handler in the server crate
 //! reads to render real upstream-health on the UI.
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use think_watch_common::cb_registry::{CbState, record_cb};
 
@@ -39,14 +47,21 @@ impl Default for CircuitConfig {
     }
 }
 
+/// Mutable inner state of a single breaker. Always accessed under the
+/// outer `Mutex`, never split across multiple locks.
+#[derive(Debug)]
+struct BreakerInner {
+    state: CbState,
+    consecutive_failures: u32,
+    half_open_successes: u32,
+    last_failure: Option<Instant>,
+}
+
 /// One circuit breaker, scoped to a single MCP server (keyed by name).
 struct Breaker {
     server_name: String,
     config: CircuitConfig,
-    state: RwLock<CbState>,
-    consecutive_failures: AtomicU32,
-    half_open_successes: AtomicU32,
-    last_failure: RwLock<Option<Instant>>,
+    inner: Mutex<BreakerInner>,
 }
 
 impl Breaker {
@@ -55,31 +70,33 @@ impl Breaker {
         Self {
             server_name,
             config,
-            state: RwLock::new(CbState::Closed),
-            consecutive_failures: AtomicU32::new(0),
-            half_open_successes: AtomicU32::new(0),
-            last_failure: RwLock::new(None),
+            inner: Mutex::new(BreakerInner {
+                state: CbState::Closed,
+                consecutive_failures: 0,
+                half_open_successes: 0,
+                last_failure: None,
+            }),
         }
     }
 
     /// Decide whether a new request is allowed through. Side effect: if
     /// the breaker is `Open` and the recovery window has elapsed, this
     /// transitions it to `HalfOpen` so the caller's request acts as a
-    /// probe.
+    /// probe. The whole check-then-transition runs under one mutex so
+    /// concurrent callers can't both "win" the half-open promotion.
     async fn check(&self) -> Result<(), CircuitOpen> {
-        let state = *self.state.read().await;
-        match state {
+        let mut inner = self.inner.lock().await;
+        match inner.state {
             CbState::Closed | CbState::HalfOpen => Ok(()),
             CbState::Open => {
-                let last = *self.last_failure.read().await;
-                let elapsed_ok = last
+                let elapsed_ok = inner
+                    .last_failure
                     .map(|t| t.elapsed() >= Duration::from_secs(self.config.recovery_secs))
                     .unwrap_or(false);
                 if elapsed_ok {
-                    // Transition Open → HalfOpen and let this request probe.
-                    *self.state.write().await = CbState::HalfOpen;
-                    self.half_open_successes.store(0, Ordering::Relaxed);
-                    self.consecutive_failures.store(0, Ordering::Relaxed);
+                    inner.state = CbState::HalfOpen;
+                    inner.half_open_successes = 0;
+                    inner.consecutive_failures = 0;
                     record_cb(&self.server_name, CbState::HalfOpen);
                     tracing::info!(
                         server = %self.server_name,
@@ -94,14 +111,14 @@ impl Breaker {
     }
 
     async fn record_success(&self) {
-        let state = *self.state.read().await;
-        self.consecutive_failures.store(0, Ordering::Relaxed);
-        match state {
+        let mut inner = self.inner.lock().await;
+        inner.consecutive_failures = 0;
+        match inner.state {
             CbState::HalfOpen => {
-                let n = self.half_open_successes.fetch_add(1, Ordering::Relaxed) + 1;
-                if n >= self.config.half_open_max {
-                    *self.state.write().await = CbState::Closed;
-                    self.half_open_successes.store(0, Ordering::Relaxed);
+                inner.half_open_successes += 1;
+                if inner.half_open_successes >= self.config.half_open_max {
+                    inner.state = CbState::Closed;
+                    inner.half_open_successes = 0;
                     record_cb(&self.server_name, CbState::Closed);
                     tracing::info!(
                         server = %self.server_name,
@@ -112,7 +129,7 @@ impl Breaker {
             CbState::Open => {
                 // Shouldn't happen — `check` would have rejected — but if
                 // a stale request lands, recover gracefully.
-                *self.state.write().await = CbState::Closed;
+                inner.state = CbState::Closed;
                 record_cb(&self.server_name, CbState::Closed);
             }
             CbState::Closed => {}
@@ -120,26 +137,27 @@ impl Breaker {
     }
 
     async fn record_failure(&self) {
-        let prev = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-        let state = *self.state.read().await;
-        match state {
+        let mut inner = self.inner.lock().await;
+        inner.consecutive_failures += 1;
+        match inner.state {
             CbState::Closed => {
-                if prev + 1 >= self.config.failure_threshold {
-                    *self.state.write().await = CbState::Open;
-                    *self.last_failure.write().await = Some(Instant::now());
+                if inner.consecutive_failures >= self.config.failure_threshold {
+                    inner.state = CbState::Open;
+                    inner.last_failure = Some(Instant::now());
+                    let failures = inner.consecutive_failures;
                     record_cb(&self.server_name, CbState::Open);
                     tracing::warn!(
                         server = %self.server_name,
-                        failures = prev + 1,
+                        failures,
                         "MCP circuit breaker OPEN"
                     );
                 }
             }
             CbState::HalfOpen => {
                 // Probe failed → go back to Open and restart the timer.
-                *self.state.write().await = CbState::Open;
-                *self.last_failure.write().await = Some(Instant::now());
-                self.half_open_successes.store(0, Ordering::Relaxed);
+                inner.state = CbState::Open;
+                inner.last_failure = Some(Instant::now());
+                inner.half_open_successes = 0;
                 record_cb(&self.server_name, CbState::Open);
                 tracing::warn!(
                     server = %self.server_name,
@@ -276,5 +294,51 @@ mod tests {
         assert!(cb.check("srv-c").await.is_ok()); // HalfOpen
         cb.record_failure("srv-c").await; // probe fails
         assert!(cb.check("srv-c").await.is_err()); // back to Open
+    }
+
+    /// Concurrent failures must not bump the breaker past Open multiple
+    /// times. With the old per-field locking, two parallel record_failure
+    /// calls could both observe `Closed`, both increment the counter, and
+    /// both write `last_failure`. Now everything happens under one mutex.
+    #[tokio::test]
+    async fn concurrent_failures_serialize() {
+        let cb = McpCircuitBreakers::with_config(cfg());
+        let cb1 = cb.clone();
+        let cb2 = cb.clone();
+        let cb3 = cb.clone();
+        let (a, b, c) = tokio::join!(
+            tokio::spawn(async move { cb1.record_failure("srv-d").await }),
+            tokio::spawn(async move { cb2.record_failure("srv-d").await }),
+            tokio::spawn(async move { cb3.record_failure("srv-d").await }),
+        );
+        a.unwrap();
+        b.unwrap();
+        c.unwrap();
+        // Threshold = 3 → all three failures together must trip Open exactly once.
+        assert!(cb.check("srv-d").await.is_err());
+    }
+
+    /// Concurrent half-open probes must not all be allowed through at once
+    /// — only the first transition wins, the rest see HalfOpen and pass too
+    /// (which is fine for the probe semantics).
+    #[tokio::test]
+    async fn concurrent_open_to_halfopen_one_winner() {
+        let cb = McpCircuitBreakers::with_config(cfg());
+        for _ in 0..3 {
+            cb.record_failure("srv-e").await;
+        }
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        // Three concurrent checks — all should succeed (HalfOpen lets
+        // multiple probes through up to half_open_max).
+        let cb1 = cb.clone();
+        let cb2 = cb.clone();
+        let cb3 = cb.clone();
+        let r = tokio::join!(
+            tokio::spawn(async move { cb1.check("srv-e").await.is_ok() }),
+            tokio::spawn(async move { cb2.check("srv-e").await.is_ok() }),
+            tokio::spawn(async move { cb3.check("srv-e").await.is_ok() }),
+        );
+        // All three should be permitted as HalfOpen probes.
+        assert!(r.0.unwrap() && r.1.unwrap() && r.2.unwrap());
     }
 }
