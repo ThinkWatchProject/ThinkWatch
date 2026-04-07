@@ -462,9 +462,13 @@ export function UnifiedLogsPage() {
           onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
           className="flex-1 font-mono text-sm"
         />
-        <div className="shrink-0 w-64">
-          <DateTimeRangePicker from={from} to={to} onFromChange={setFrom} onToChange={setTo} />
-        </div>
+        <DateTimeRangePicker
+          className="shrink-0"
+          from={from}
+          to={to}
+          onFromChange={setFrom}
+          onToChange={setTo}
+        />
         <Button onClick={handleSearch} className="shrink-0">
           <Search className="h-4 w-4 mr-1" />
           {t('common.search')}
