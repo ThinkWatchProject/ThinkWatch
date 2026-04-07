@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from 'react';
 import { useTranslation } from 'react-i18next';
 import { Inbox } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ReferenceLine, YAxis } from 'recharts';
@@ -404,8 +411,12 @@ export function DashboardPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('dashboard.title')}</h1>
           <p className="text-sm text-muted-foreground">{t('dashboard.subtitle')}</p>
         </div>
-        <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+        <div
+          className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground"
+          aria-live="polite"
+        >
           <span
+            aria-hidden="true"
             className={`h-1.5 w-1.5 rounded-full ${
               connected ? 'animate-pulse bg-foreground' : 'bg-muted-foreground'
             }`}
@@ -541,14 +552,36 @@ function ProviderFilterTabs({
     { key: 'ai', label: 'ai' },
     { key: 'mcp', label: 'mcp' },
   ];
+  // Arrow-key navigation between tabs (W3C tablist pattern). Left/Right
+  // wrap around; Home/End jump to the first/last tab.
+  const onKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
+    const idx = tabs.findIndex((t) => t.key === value);
+    if (idx < 0) return;
+    let next = idx;
+    if (e.key === 'ArrowRight') next = (idx + 1) % tabs.length;
+    else if (e.key === 'ArrowLeft') next = (idx - 1 + tabs.length) % tabs.length;
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = tabs.length - 1;
+    else return;
+    e.preventDefault();
+    onChange(tabs[next].key);
+  };
   return (
-    <div className="flex items-center gap-px rounded border bg-muted/40 p-px text-[10px] uppercase tracking-wider">
+    <div
+      role="tablist"
+      aria-label="Filter upstream by kind"
+      className="flex items-center gap-px rounded border bg-muted/40 p-px text-[10px] uppercase tracking-wider"
+    >
       {tabs.map((tab) => {
         const active = value === tab.key;
         return (
           <button
             key={tab.key}
             type="button"
+            role="tab"
+            aria-selected={active}
+            tabIndex={active ? 0 : -1}
+            onKeyDown={onKeyDown}
             onClick={() => onChange(tab.key)}
             className={`rounded-sm px-1.5 py-0.5 font-mono transition-colors ${
               active
@@ -687,6 +720,10 @@ function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
                   ? 'border-muted-foreground/40 text-muted-foreground'
                   : 'border-border text-muted-foreground';
             const latency = Math.round(p.avg_latency_ms);
+            // Accessible status label for the colored dot — colorblind users
+            // and screen readers need a non-color text alternative.
+            const statusLabel =
+              cb === 'Closed' ? t('common.healthy') : cb === 'HalfOpen' ? t('dashboard.degraded') : t('dashboard.down');
             return (
               <li
                 key={`${p.kind}-${p.provider}`}
@@ -694,7 +731,12 @@ function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
               >
                 {/* status dot — color encodes the CB state, so we can drop
                     the textual "Healthy/Degraded/Down" label entirely */}
-                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} />
+                <span
+                  role="img"
+                  aria-label={statusLabel}
+                  title={statusLabel}
+                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`}
+                />
                 <span
                   className={`shrink-0 rounded border px-1 py-px font-mono text-[9px] uppercase ${kindBadgeClass(p.kind)}`}
                 >

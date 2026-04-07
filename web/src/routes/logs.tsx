@@ -652,24 +652,26 @@ export function UnifiedLogsPage() {
                                       <button
                                         type="button"
                                         title={`Filter: ${col.filterKey}:${filterValue}`}
+                                        aria-label={`Add filter ${col.filterKey}=${filterValue}`}
                                         onClick={(e) => {
                                           e.stopPropagation();
                                           handleAddFilter(col.filterKey!, filterValue);
                                         }}
                                         className="opacity-0 group-hover/cell:opacity-60 hover:!opacity-100 hover:bg-accent rounded p-0.5 transition-opacity"
                                       >
-                                        <Plus className="h-3 w-3" />
+                                        <Plus className="h-3 w-3" aria-hidden="true" />
                                       </button>
                                       <button
                                         type="button"
                                         title={`Exclude: -${col.filterKey}:${filterValue}`}
+                                        aria-label={`Exclude filter ${col.filterKey}=${filterValue}`}
                                         onClick={(e) => {
                                           e.stopPropagation();
                                           handleExcludeFilter(col.filterKey!, filterValue);
                                         }}
                                         className="opacity-0 group-hover/cell:opacity-60 hover:!opacity-100 hover:bg-accent rounded p-0.5 transition-opacity"
                                       >
-                                        <Minus className="h-3 w-3" />
+                                        <Minus className="h-3 w-3" aria-hidden="true" />
                                       </button>
                                     </span>
                                   )}

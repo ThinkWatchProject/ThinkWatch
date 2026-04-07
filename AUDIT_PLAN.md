@@ -123,20 +123,19 @@ mechanical fixes.
 
 ## Round 6 — Frontend a11y + virtualization
 
-- [ ] **R6.1** Unified logs list virtualization
-  - File: [web/src/routes/logs.tsx](web/src/routes/logs.tsx#L553)
-  - Fix: integrate `@tanstack/react-virtual` (or write a windowed
-    scroller) for the row list.
-- [ ] **R6.2** `ProviderFilterTabs` keyboard support + ARIA
-  - File: [web/src/routes/dashboard.tsx](web/src/routes/dashboard.tsx#L498)
-  - Fix: `role="tablist"` + arrow-key handler.
-- [ ] **R6.3** Status dots have text alternative
-  - File: [web/src/routes/dashboard.tsx](web/src/routes/dashboard.tsx#L654)
-  - Fix: visually-hidden `<span>` with the status label, or `aria-label`
-    on the dot wrapper.
-- [ ] **R6.4** Filter buttons missing `aria-label`
-  - File: [web/src/routes/logs.tsx](web/src/routes/logs.tsx#L640)
-  - Fix: add aria labels to `+` / `−` exclude buttons.
+- [N/A] **R6.1** Logs virtualization — deferred. After R2.6 the
+  pagination cap is 200 rows max per request, which renders fine
+  natively. Adding `@tanstack/react-virtual` would pull ~10 KB into
+  the logs chunk for marginal benefit. Revisit if/when streaming
+  log views land.
+- [x] **R6.2** `ProviderFilterTabs` now has `role="tablist"` + per-tab
+  `role="tab" aria-selected tabIndex` + arrow-key/Home/End navigation.
+- [x] **R6.3** Provider health status dots have `role="img"` +
+  `aria-label`/`title` carrying the localized status text. Connection
+  indicator dot at the page header is `aria-hidden` and its container
+  is `aria-live="polite"` so screen readers announce reconnect/live.
+- [x] **R6.4** Logs `+`/`−` filter buttons have descriptive `aria-label`s
+  and the inner icons are `aria-hidden`.
 
 ---
 
