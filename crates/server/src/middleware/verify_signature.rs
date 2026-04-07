@@ -139,21 +139,54 @@ pub async fn verify_signature(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Per-user nonce rate limit: max 120 nonces per minute to prevent Redis memory exhaustion
-    let nonce_rate_key = format!("nonce_rate:{user_id}");
-    let nonce_count: u64 =
-        fred::interfaces::KeysInterface::incr_by(&state.redis, &nonce_rate_key, 1)
+    // Per-user nonce rate limit: max 120 nonces per **rolling** minute.
+    //
+    // The previous implementation used a fixed-window counter (incr +
+    // expire 60s). With a fixed window an attacker could send 120
+    // requests at second 59 of one window and 120 more at second 0 of
+    // the next, achieving 240/min effective. Using a Redis sorted set
+    // keyed on monotonic timestamps gives a true sliding window.
+    {
+        use fred::interfaces::SortedSetsInterface;
+        let nonce_rate_key = format!("nonce_rate_zset:{user_id}");
+        let now_ms: i64 = chrono::Utc::now().timestamp_millis();
+        let window_start_ms = now_ms - 60_000;
+        // Drop expired entries from the head of the window.
+        let _: i64 = SortedSetsInterface::zremrangebyscore(
+            &state.redis,
+            &nonce_rate_key,
+            0,
+            window_start_ms,
+        )
+        .await
+        .unwrap_or(0);
+        // Count what's left in the window.
+        let in_window: i64 = SortedSetsInterface::zcard(&state.redis, &nonce_rate_key)
             .await
-            .unwrap_or(1);
-    if nonce_count == 1 {
+            .unwrap_or(0);
+        if in_window >= 120 {
+            tracing::warn!("Nonce rate limit exceeded for user {user_id} ({in_window}/120/min)");
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+        // Add this request's nonce to the window. Use the nonce string
+        // as the member to keep entries unique even if two requests
+        // arrive at the same millisecond.
+        let _: i64 = SortedSetsInterface::zadd(
+            &state.redis,
+            &nonce_rate_key,
+            None,
+            None,
+            false,
+            false,
+            (now_ms as f64, nonce.to_string()),
+        )
+        .await
+        .unwrap_or(0);
+        // Refresh TTL so the key disappears once the user goes idle.
         let _: () =
-            fred::interfaces::KeysInterface::expire(&state.redis, &nonce_rate_key, 60, None)
+            fred::interfaces::KeysInterface::expire(&state.redis, &nonce_rate_key, 120, None)
                 .await
                 .unwrap_or(());
-    }
-    if nonce_count > 120 {
-        tracing::warn!("Nonce rate limit exceeded for user {user_id}");
-        return Err(StatusCode::TOO_MANY_REQUESTS);
     }
 
     // Check nonce uniqueness (prevent replay)

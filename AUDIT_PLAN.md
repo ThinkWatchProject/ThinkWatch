@@ -176,19 +176,17 @@ mechanical fixes.
 
 ## Round 9 — Polish / observability
 
-- [ ] **R9.1** Audit log `detail` rendering hardening (defensive — current
-  code is text-only but enforce it explicitly)
-  - File: [web/src/routes/logs.tsx](web/src/routes/logs.tsx)
-  - Fix: never use `dangerouslySetInnerHTML` on detail; render via `<pre>`.
-- [ ] **R9.2** Sliding-window nonce limiter
-  - File: [crates/server/src/middleware/verify_signature.rs](crates/server/src/middleware/verify_signature.rs#L143)
-  - Fix: replace fixed-window counter with a small sorted-set sliding
-    window in Redis.
-- [ ] **R9.3** WebSocket per-user concurrent connection cap + per-tick
-  send timeout
-  - File: [crates/server/src/handlers/dashboard.rs](crates/server/src/handlers/dashboard.rs#L312)
-  - Fix: track `(user_id, count)` in a `DashMap`, reject upgrade above
-    limit; wrap each `send` in a 5s timeout.
+- [N/A] **R9.1** Audit log detail already rendered via `<pre>` with
+  text content; no `dangerouslySetInnerHTML` anywhere in logs.tsx.
+- [x] **R9.2** Nonce rate limiter switched from fixed-window
+  `INCR + EXPIRE` to a Redis sorted set keyed on millisecond
+  timestamps. The fixed window allowed 240/min effective at the
+  window boundary; the rolling window enforces a true 120/min cap.
+- [x] **R9.3** Per-user WS connection cap (4) enforced in
+  `try_acquire_ws_slot` via a process-local `Mutex<HashMap>`. RAII
+  `WsSlotGuard` releases on every return path. Every WS `send` is
+  wrapped in a 5s `tokio::time::timeout` so a slow/dead client can't
+  hang the loop.
 
 ---
 
