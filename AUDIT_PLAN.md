@@ -84,9 +84,16 @@ mechanical fixes.
 - [N/A] **R4.4** Admin role-creation: false positive. The current code
   uses standard `?` + `tx.commit()` which sqlx already rolls back on
   drop. No bug.
-- [~] **R4.5** Hardcoded timeouts: HTTP client timeout (15s) lifted into
-  the shared client construction. CB and pool timeouts left as-is for
-  now (touch them in the architecture round when AppConfig grows).
+- [x] **R4.5** Centralized `Timeouts` sub-config in
+  `crates/common/src/config.rs` with sensible defaults and per-field
+  env overrides (`THINKWATCH_HTTP_CLIENT_SECS`,
+  `THINKWATCH_MCP_POOL_SECS`, `THINKWATCH_CONSOLE_REQUEST_SECS`,
+  `THINKWATCH_MCP_HEALTH_INTERVAL_SECS`,
+  `THINKWATCH_DASHBOARD_WS_IO_SECS`, `THINKWATCH_DASHBOARD_WS_TICK_SECS`,
+  `THINKWATCH_DASHBOARD_WS_MAX_PER_USER`). All previously hardcoded
+  values rewired: HTTP client (main.rs), console request timeout
+  (app.rs), MCP health interval (app.rs), MCP connection pool timeout
+  (new `ConnectionPool::with_timeout`), dashboard WS io/tick/cap.
 - [x] **R4.6** `validate_url`: removed `std::thread::sleep` (was
   blocking the async executor) and the redundant double-resolve.
   Added IPv4-mapped IPv6 check (`::ffff:127.0.0.1`), 6to4 (`2002::/16`),

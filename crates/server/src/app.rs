@@ -210,7 +210,12 @@ pub async fn create_gateway_app(
     // Background health check loop — keeps the in-memory registry status
     // fresh AND mirrors the result back to `mcp_servers.status` so the
     // admin UI sees real liveness without a manual probe.
-    crate::mcp_runtime::spawn_mcp_health_loop(state.clone(), registry.clone(), pool.clone(), 60);
+    crate::mcp_runtime::spawn_mcp_health_loop(
+        state.clone(),
+        registry.clone(),
+        pool.clone(),
+        state.config.timeouts.mcp_health_interval_secs,
+    );
 
     let mut mcp_proxy = McpProxy::new(registry, access_controller, pool);
     // Wire the shared CB registry into the proxy so per-server breakers
@@ -568,7 +573,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1MB for console API
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(state.config.timeouts.console_request_secs),
         ))
         .layer(cors)
         .layer(SetResponseHeaderLayer::overriding(
