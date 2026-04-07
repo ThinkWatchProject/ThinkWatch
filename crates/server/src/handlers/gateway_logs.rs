@@ -60,8 +60,7 @@ pub async fn list_gateway_logs(
         }));
     }
     let ch = ch_client(&state)?;
-    let limit = params.limit.unwrap_or(50).min(200);
-    let offset = params.offset.unwrap_or(0);
+    let (limit, offset) = clamp_pagination(params.limit, params.offset, 200);
 
     // Build dynamic WHERE conditions
     let mut conditions: Vec<String> = Vec::new();

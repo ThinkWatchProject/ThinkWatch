@@ -160,11 +160,19 @@ impl McpProxy {
     }
 
     /// Main entry point: dispatch a single JSON-RPC request from a client.
-    pub async fn handle_request(&self, user_id: Uuid, request: JsonRpcRequest) -> JsonRpcResponse {
+    /// `user_roles` is required because the access controller is now
+    /// default-deny — without role information non-admin users would be
+    /// rejected even when an explicit per-tool policy permits them.
+    pub async fn handle_request(
+        &self,
+        user_id: Uuid,
+        user_roles: &[String],
+        request: JsonRpcRequest,
+    ) -> JsonRpcResponse {
         match request.method.as_str() {
             "initialize" => self.handle_initialize(request).await,
-            "tools/list" => self.handle_tools_list(user_id, request).await,
-            "tools/call" => self.handle_tools_call(user_id, request).await,
+            "tools/list" => self.handle_tools_list(user_id, user_roles, request).await,
+            "tools/call" => self.handle_tools_call(user_id, user_roles, request).await,
             _ => err_response(
                 request.id,
                 METHOD_NOT_FOUND,
@@ -198,7 +206,12 @@ impl McpProxy {
     // tools/list
     // -----------------------------------------------------------------------
 
-    async fn handle_tools_list(&self, user_id: Uuid, request: JsonRpcRequest) -> JsonRpcResponse {
+    async fn handle_tools_list(
+        &self,
+        user_id: Uuid,
+        user_roles: &[String],
+        request: JsonRpcRequest,
+    ) -> JsonRpcResponse {
         let all_tools = self.registry.get_all_tools(None).await;
 
         let mut tools = Vec::new();
@@ -209,11 +222,14 @@ impl McpProxy {
             {
                 let allowed = self
                     .access_controller
-                    .check_tool_access_by_id(user_id, server.id, &original_name)
+                    .check_tool_access(user_id, server.id, &original_name, user_roles)
                     .await;
                 if !allowed {
                     continue;
                 }
+            } else {
+                // No server resolved → can't check policy → don't expose
+                continue;
             }
 
             tools.push(serde_json::json!({
@@ -230,7 +246,12 @@ impl McpProxy {
     // tools/call
     // -----------------------------------------------------------------------
 
-    async fn handle_tools_call(&self, user_id: Uuid, request: JsonRpcRequest) -> JsonRpcResponse {
+    async fn handle_tools_call(
+        &self,
+        user_id: Uuid,
+        user_roles: &[String],
+        request: JsonRpcRequest,
+    ) -> JsonRpcResponse {
         // Per-user rate limiting for tool calls
         if let Err(msg) = self.rate_limiter.check(user_id).await {
             tracing::warn!(user_id = %user_id, "{msg}");
@@ -268,10 +289,11 @@ impl McpProxy {
                 }
             };
 
-        // Access control check.
+        // Access control check (default-deny: requires explicit policy
+        // for non-admin users).
         let allowed = self
             .access_controller
-            .check_tool_access_by_id(user_id, server.id, &original_tool_name)
+            .check_tool_access(user_id, server.id, &original_tool_name, user_roles)
             .await;
         if !allowed {
             return err_response(request.id, INVALID_REQUEST, "Access denied for this tool");

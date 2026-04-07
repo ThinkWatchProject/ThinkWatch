@@ -27,43 +27,16 @@ pub async fn login(
     State(state): State<AppState>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, AppError> {
-    // Extract client IP for composite rate limiting
-    let client_ip = {
-        let ip_source = state.dynamic_config.client_ip_source().await;
-        match ip_source.as_str() {
-            "xff" => {
-                let depth = state.dynamic_config.client_ip_xff_depth().await.max(1) as usize;
-                let position = state.dynamic_config.client_ip_xff_position().await;
-                request
-                    .headers()
-                    .get("x-forwarded-for")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| {
-                        let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
-                        if parts.is_empty() {
-                            return None;
-                        }
-                        let idx = if position == "right" {
-                            parts.len().checked_sub(depth)
-                        } else {
-                            let i = depth - 1;
-                            if i < parts.len() { Some(i) } else { None }
-                        };
-                        idx.and_then(|i| parts.get(i)).map(|s| s.to_string())
-                    })
-            }
-            "x-real-ip" => request
-                .headers()
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.trim().to_string()),
-            _ => request
-                .extensions()
-                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-                .map(|ci| ci.0.ip().to_string()),
-        }
-        .unwrap_or_else(|| "unknown".to_string())
-    };
+    // Extract client IP for composite rate limiting via the shared helper
+    // that validates the trusted-proxy whitelist. Without this validation
+    // an attacker can forge X-Forwarded-For to bypass per-IP rate limits.
+    let client_ip = crate::middleware::auth_guard::extract_client_ip(
+        &state,
+        request.headers(),
+        request.extensions(),
+    )
+    .await
+    .unwrap_or_else(|| "unknown".to_string());
 
     let user_agent = request
         .headers()

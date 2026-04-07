@@ -57,8 +57,7 @@ pub async fn list_audit_logs(
         }));
     }
     let ch = ch_client(&state)?;
-    let limit = query.limit.unwrap_or(50).min(200);
-    let offset = query.offset.unwrap_or(0);
+    let (limit, offset) = clamp_pagination(query.limit, query.offset, 200);
 
     let mut conditions: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();

@@ -21,12 +21,20 @@ struct ToolPolicy {
 
 /// In-memory, tool-level access controller.
 ///
-/// Default behaviour is **allow all**.  Once a policy is set for a specific
-/// tool, only users whose roles intersect with the allowed set are granted
-/// access.  The special role `"super_admin"` always has access.
+/// Default behaviour is **deny all** for non-admin users. The roles
+/// `"super_admin"` and `"admin"` always have access regardless of policy
+/// (admins are responsible for setting up tool ACLs in the first place).
+/// For any other role, the call is allowed only if an explicit policy
+/// exists for the `(server, tool)` pair AND the user's roles intersect
+/// the policy's allowed set.
+///
+/// This was changed from the previous default-allow behaviour because the
+/// previous design exposed every newly-discovered MCP tool to every
+/// authenticated user until an admin explicitly locked it down — a
+/// dangerous default for a multi-tenant gateway.
 #[derive(Clone)]
 pub struct AccessController {
-    /// Map from (server, tool) → policy.  Absent entries mean "allow all".
+    /// Map from (server, tool) → policy. Absent entries mean "deny non-admins".
     policies: Arc<RwLock<HashMap<ToolKey, ToolPolicy>>>,
 }
 
@@ -40,7 +48,7 @@ impl AccessController {
     /// Check whether a user (identified by `user_id` and their `roles`) is
     /// allowed to call a specific tool on a specific server.
     ///
-    /// If no policy has been registered for the tool the call is allowed.
+    /// Default-deny: a missing policy denies non-admin users.
     pub async fn check_tool_access(
         &self,
         _user_id: Uuid,
@@ -48,8 +56,11 @@ impl AccessController {
         tool_name: &str,
         user_roles: &[String],
     ) -> bool {
-        // Super-admins always pass.
-        if user_roles.iter().any(|r| r == "super_admin") {
+        // Admins always pass — they're the ones managing ACLs.
+        if user_roles
+            .iter()
+            .any(|r| r == "super_admin" || r == "admin")
+        {
             return true;
         }
 
@@ -60,7 +71,8 @@ impl AccessController {
         };
 
         match policies.get(&key) {
-            None => true, // no policy → default allow
+            // Default-deny: no policy means non-admins can't call the tool.
+            None => false,
             Some(policy) if policy.allowed_roles.is_empty() => false,
             Some(policy) => policy
                 .allowed_roles
@@ -69,17 +81,17 @@ impl AccessController {
         }
     }
 
-    /// Convenience wrapper when the caller only has a `user_id` and no roles
-    /// available — defaults to allowing access (no role check).
+    /// Convenience wrapper when the caller only has a `user_id` and no
+    /// roles available. With default-deny semantics this will reject any
+    /// non-admin user, since the empty role set can never satisfy a
+    /// policy. Callers that have role information should use
+    /// `check_tool_access` directly.
     pub async fn check_tool_access_by_id(
         &self,
         user_id: Uuid,
         server_id: Uuid,
         tool_name: &str,
     ) -> bool {
-        // Without role information we fall back to the policy check with an
-        // empty role set.  If a policy exists and requires roles, this will
-        // deny.  If no policy exists it will allow.
         self.check_tool_access(user_id, server_id, tool_name, &[])
             .await
     }
@@ -117,7 +129,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn default_allows_access() {
+    async fn default_denies_non_admin() {
         let ac = AccessController::new();
         let user_id = Uuid::new_v4();
         let server_id = Uuid::new_v4();
@@ -125,7 +137,34 @@ mod tests {
         let allowed = ac
             .check_tool_access(user_id, server_id, "any_tool", &["developer".into()])
             .await;
-        assert!(allowed, "no policy means default allow");
+        assert!(!allowed, "default-deny: no policy means non-admins denied");
+    }
+
+    #[tokio::test]
+    async fn default_allows_admin() {
+        let ac = AccessController::new();
+        let user_id = Uuid::new_v4();
+        let server_id = Uuid::new_v4();
+
+        for role in ["admin", "super_admin"] {
+            let allowed = ac
+                .check_tool_access(user_id, server_id, "any_tool", &[role.into()])
+                .await;
+            assert!(allowed, "{role} should bypass default-deny");
+        }
+    }
+
+    #[tokio::test]
+    async fn check_by_id_denies_unknown_user() {
+        let ac = AccessController::new();
+        let user_id = Uuid::new_v4();
+        let server_id = Uuid::new_v4();
+
+        // No roles known, no policy set → default deny
+        assert!(
+            !ac.check_tool_access_by_id(user_id, server_id, "any_tool")
+                .await
+        );
     }
 
     #[tokio::test]
@@ -177,16 +216,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn empty_policy_denies_non_super_admin() {
+    async fn empty_policy_denies_non_admin() {
         let ac = AccessController::new();
         let user_id = Uuid::new_v4();
         let server_id = Uuid::new_v4();
 
+        // Empty allowed_roles = explicitly deny everyone except the
+        // hardcoded admin / super_admin bypass roles.
         ac.set_policy(server_id, "locked_tool".into(), vec![]).await;
 
         let allowed = ac
-            .check_tool_access(user_id, server_id, "locked_tool", &["admin".into()])
+            .check_tool_access(user_id, server_id, "locked_tool", &["developer".into()])
             .await;
-        assert!(!allowed, "empty allowed_roles should deny non-super_admin");
+        assert!(
+            !allowed,
+            "empty allowed_roles should deny anyone who isn't admin/super_admin"
+        );
     }
 }
