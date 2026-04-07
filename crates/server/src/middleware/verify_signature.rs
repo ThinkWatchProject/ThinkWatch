@@ -193,21 +193,39 @@ pub async fn verify_signature(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    // Session binding: validate that the request IP matches the IP the signing key was issued to
+    // Session binding: validate that the request IP matches the IP the
+    // signing key was issued to. Fail-closed: if a session was issued
+    // without a bound IP for some reason (legacy session, Redis flush
+    // mid-rollout), reject so we don't silently accept session-replay
+    // attacks. The login/signup paths always bind an IP today.
     let ip_key = format!("signing_key_ip:{user_id}");
     let bound_ip: Option<String> = fred::interfaces::KeysInterface::get(&state.redis, &ip_key)
         .await
         .unwrap_or(None);
-    if let Some(ref bound) = bound_ip {
-        let request_ip = request
-            .extensions()
-            .get::<super::auth_guard::AuthUser>()
-            .and_then(|u| u.ip.clone())
-            .unwrap_or_default();
-        if !request_ip.is_empty() && bound != &request_ip {
+    let request_ip = request
+        .extensions()
+        .get::<super::auth_guard::AuthUser>()
+        .and_then(|u| u.ip.clone())
+        .unwrap_or_default();
+    match (&bound_ip, request_ip.is_empty()) {
+        (Some(bound), false) => {
+            if bound != &request_ip {
+                tracing::warn!(
+                    "Signing key IP mismatch for user {user_id}: bound={bound}, request={request_ip}"
+                );
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+        (None, _) => {
             tracing::warn!(
-                "Signing key IP mismatch for user {user_id}: bound={bound}, request={request_ip}"
+                "Signing key has no bound IP for user {user_id} — session must be re-issued"
             );
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        (Some(_), true) => {
+            // Bound but request IP unknown — likely an internal request
+            // path that didn't run the auth_guard. Reject to be safe.
+            tracing::warn!("Signing key has bound IP but request IP unknown for user {user_id}");
             return Err(StatusCode::UNAUTHORIZED);
         }
     }

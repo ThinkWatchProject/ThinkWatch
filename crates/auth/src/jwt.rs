@@ -1,8 +1,15 @@
 use chrono::{Duration, Utc};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
+
+/// Audience claim — identifies the application that consumes this token.
+/// Hardcoded to a stable string so any token issued by another service
+/// using the same secret won't validate here.
+pub const JWT_AUDIENCE: &str = "thinkwatch";
+/// Issuer claim — identifies the application that issued this token.
+pub const JWT_ISSUER: &str = "thinkwatch";
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
@@ -12,6 +19,12 @@ pub struct Claims {
     pub exp: i64,
     pub iat: i64,
     pub token_type: String, // "access" or "refresh"
+    /// Audience — must equal `JWT_AUDIENCE` on verify.
+    #[serde(default)]
+    pub aud: String,
+    /// Issuer — must equal `JWT_ISSUER` on verify.
+    #[serde(default)]
+    pub iss: String,
 }
 
 pub struct JwtManager {
@@ -51,8 +64,16 @@ impl JwtManager {
             exp: (now + Duration::seconds(ttl_secs)).timestamp(),
             iat: now.timestamp(),
             token_type: "access".to_string(),
+            aud: JWT_AUDIENCE.to_string(),
+            iss: JWT_ISSUER.to_string(),
         };
-        Ok(encode(&Header::default(), &claims, &self.encoding_key)?)
+        // Pin algorithm to HS256 — Header::default() also returns HS256 today
+        // but we set it explicitly to defend against future default drift.
+        Ok(encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &self.encoding_key,
+        )?)
     }
 
     pub fn create_refresh_token(
@@ -79,13 +100,25 @@ impl JwtManager {
             exp: (now + Duration::days(ttl_days)).timestamp(),
             iat: now.timestamp(),
             token_type: "refresh".to_string(),
+            aud: JWT_AUDIENCE.to_string(),
+            iss: JWT_ISSUER.to_string(),
         };
-        Ok(encode(&Header::default(), &claims, &self.encoding_key)?)
+        Ok(encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &self.encoding_key,
+        )?)
     }
 
     pub fn verify_token(&self, token: &str) -> anyhow::Result<Claims> {
-        let mut validation = Validation::default();
+        // Pin to HS256 only and require the hardcoded audience + issuer.
+        // Without aud/iss enforcement, a token from another service that
+        // happens to share the JWT secret would validate here, breaking
+        // multi-tenant isolation.
+        let mut validation = Validation::new(Algorithm::HS256);
         validation.leeway = 30; // Allow 30s clock skew
+        validation.set_audience(&[JWT_AUDIENCE]);
+        validation.set_issuer(&[JWT_ISSUER]);
         let token_data = decode::<Claims>(token, &self.decoding_key, &validation)?;
         Ok(token_data.claims)
     }
@@ -168,9 +201,11 @@ mod tests {
             exp: (now - Duration::hours(1)).timestamp(),
             iat: (now - Duration::hours(2)).timestamp(),
             token_type: "access".into(),
+            aud: JWT_AUDIENCE.into(),
+            iss: JWT_ISSUER.into(),
         };
         let token = encode(
-            &Header::default(),
+            &Header::new(Algorithm::HS256),
             &claims,
             &EncodingKey::from_secret(b"test-secret-key-for-unit-tests"),
         )
@@ -178,6 +213,60 @@ mod tests {
 
         let result = mgr.verify_token(&token);
         assert!(result.is_err(), "expired token must fail verification");
+    }
+
+    #[test]
+    fn token_with_wrong_audience_fails() {
+        let mgr = test_jwt_manager();
+        let uid = test_user_id();
+        let now = Utc::now();
+        let claims = Claims {
+            sub: uid,
+            email: "x@y.com".into(),
+            roles: vec![],
+            exp: (now + Duration::hours(1)).timestamp(),
+            iat: now.timestamp(),
+            token_type: "access".into(),
+            aud: "some-other-app".into(),
+            iss: JWT_ISSUER.into(),
+        };
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(b"test-secret-key-for-unit-tests"),
+        )
+        .unwrap();
+        assert!(
+            mgr.verify_token(&token).is_err(),
+            "token with foreign aud must be rejected"
+        );
+    }
+
+    #[test]
+    fn token_with_wrong_issuer_fails() {
+        let mgr = test_jwt_manager();
+        let uid = test_user_id();
+        let now = Utc::now();
+        let claims = Claims {
+            sub: uid,
+            email: "x@y.com".into(),
+            roles: vec![],
+            exp: (now + Duration::hours(1)).timestamp(),
+            iat: now.timestamp(),
+            token_type: "access".into(),
+            aud: JWT_AUDIENCE.into(),
+            iss: "some-other-issuer".into(),
+        };
+        let token = encode(
+            &Header::new(Algorithm::HS256),
+            &claims,
+            &EncodingKey::from_secret(b"test-secret-key-for-unit-tests"),
+        )
+        .unwrap();
+        assert!(
+            mgr.verify_token(&token).is_err(),
+            "token with foreign iss must be rejected"
+        );
     }
 
     #[test]

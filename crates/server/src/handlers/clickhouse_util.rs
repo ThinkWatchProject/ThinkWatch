@@ -15,6 +15,21 @@ pub fn ch_available(state: &AppState) -> bool {
     state.clickhouse.is_some()
 }
 
+/// Maximum allowed pagination offset for log/analytics list endpoints.
+/// Without a cap, an attacker can send `offset=10_000_000` and force
+/// ClickHouse to scan and discard millions of rows before returning a
+/// single row. 100k is well above any legitimate UI pagination need.
+pub const MAX_OFFSET: i64 = 100_000;
+
+/// Clamp `(limit, offset)` query params to safe bounds.
+/// - `limit` defaults to 50, capped at `max_limit`
+/// - `offset` defaults to 0, capped at `MAX_OFFSET`
+pub fn clamp_pagination(limit: Option<i64>, offset: Option<i64>, max_limit: i64) -> (i64, i64) {
+    let limit = limit.unwrap_or(50).clamp(1, max_limit);
+    let offset = offset.unwrap_or(0).clamp(0, MAX_OFFSET);
+    (limit, offset)
+}
+
 /// Helper: execute a count query and return the total.
 #[allow(dead_code)]
 pub async fn ch_count(client: &clickhouse::Client, query: &str) -> Result<u64, AppError> {

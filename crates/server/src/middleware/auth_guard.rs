@@ -44,6 +44,77 @@ where
     }
 }
 
+/// Resolve the client IP for an incoming request, honouring the dynamic
+/// `client_ip_source` setting and the `security.trusted_proxies` whitelist.
+///
+/// When the configured source is `xff` or `x-real-ip` we only trust the
+/// header if the direct TCP peer is in the trusted-proxy list — otherwise
+/// we fall back to the connection IP. This prevents an attacker from
+/// forging an IP via headers to bypass per-IP rate limits.
+///
+/// Shared between `require_auth` and unauthenticated endpoints (login,
+/// register) so all rate limiting uses the same validated IP.
+pub async fn extract_client_ip(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> Option<String> {
+    let ip_source = state.dynamic_config.client_ip_source().await;
+    let connection_ip = extensions
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string());
+
+    if ip_source != "connection"
+        && let Some(trusted_proxies) = state
+            .dynamic_config
+            .get_string("security.trusted_proxies")
+            .await
+        && !trusted_proxies.is_empty()
+    {
+        let conn_ip = connection_ip.as_deref().unwrap_or("");
+        let is_trusted = trusted_proxies
+            .split(',')
+            .map(|s| s.trim())
+            .any(|proxy| proxy == conn_ip || proxy == "*");
+        if !is_trusted {
+            tracing::warn!(
+                connection_ip = conn_ip,
+                "Request from untrusted proxy, falling back to connection IP"
+            );
+            return connection_ip;
+        }
+    }
+
+    match ip_source.as_str() {
+        "xff" => {
+            let position = state.dynamic_config.client_ip_xff_position().await;
+            let depth = state.dynamic_config.client_ip_xff_depth().await.max(1) as usize;
+            headers
+                .get("x-forwarded-for")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| {
+                    let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
+                    if parts.is_empty() {
+                        return None;
+                    }
+                    let idx = if position == "right" {
+                        parts.len().checked_sub(depth)
+                    } else {
+                        let i = depth - 1;
+                        if i < parts.len() { Some(i) } else { None }
+                    };
+                    idx.and_then(|i| parts.get(i)).map(|s| s.to_string())
+                })
+        }
+        "x-real-ip" => headers
+            .get("x-real-ip")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string()),
+        // "connection" — use TCP peer address from ConnectInfo
+        _ => connection_ip,
+    }
+}
+
 pub async fn require_auth(
     State(state): State<AppState>,
     mut request: Request<axum::body::Body>,
@@ -74,76 +145,9 @@ pub async fn require_auth(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Extract client IP based on dynamic config.
-    // When using header-based IP sources (xff, x-real-ip), validate that
-    // the direct connection comes from a trusted proxy if configured.
-    let ip_source = state.dynamic_config.client_ip_source().await;
-    let connection_ip = request
-        .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip().to_string());
-
-    if ip_source != "connection" {
-        // Check trusted proxy whitelist (comma-separated IPs/CIDRs in dynamic config)
-        if let Some(trusted_proxies) = state
-            .dynamic_config
-            .get_string("security.trusted_proxies")
-            .await
-            && !trusted_proxies.is_empty()
-        {
-            let conn_ip = connection_ip.as_deref().unwrap_or("");
-            let is_trusted = trusted_proxies
-                .split(',')
-                .map(|s| s.trim())
-                .any(|proxy| proxy == conn_ip || proxy == "*");
-            if !is_trusted {
-                tracing::warn!(
-                    connection_ip = conn_ip,
-                    "Request from untrusted proxy, falling back to connection IP"
-                );
-                // Fall back to connection IP instead of trusting the header
-                request.extensions_mut().insert(AuthUser {
-                    claims,
-                    ip: connection_ip,
-                });
-                return Ok(next.run(request).await);
-            }
-        }
-    }
-
-    let ip = match ip_source.as_str() {
-        "xff" => {
-            let position = state.dynamic_config.client_ip_xff_position().await;
-            let depth = state.dynamic_config.client_ip_xff_depth().await.max(1) as usize;
-            request
-                .headers()
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| {
-                    let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
-                    if parts.is_empty() {
-                        return None;
-                    }
-                    let idx = if position == "right" {
-                        parts.len().checked_sub(depth)
-                    } else {
-                        let i = depth - 1;
-                        if i < parts.len() { Some(i) } else { None }
-                    };
-                    idx.and_then(|i| parts.get(i)).map(|s| s.to_string())
-                })
-        }
-        "x-real-ip" => request
-            .headers()
-            .get("x-real-ip")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim().to_string()),
-        // "connection" — use TCP peer address from ConnectInfo
-        _ => request
-            .extensions()
-            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip().to_string()),
-    };
+    // Extract client IP via the shared helper that performs trusted-proxy
+    // validation. Without this, header-based IP sources can be forged.
+    let ip = extract_client_ip(&state, request.headers(), request.extensions()).await;
 
     // Publish user_id into the access-log slot if the access log layer
     // installed one. This is how the HTTP access log gets a user_id

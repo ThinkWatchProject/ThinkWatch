@@ -376,10 +376,10 @@ pub async fn dashboard_ws(
         return Err(axum::http::StatusCode::UNAUTHORIZED);
     }
 
-    Ok(ws.on_upgrade(move |socket| dashboard_ws_loop(socket, state)))
+    Ok(ws.on_upgrade(move |socket| dashboard_ws_loop(socket, state, token_hash)))
 }
 
-async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState) {
+async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, token_hash: String) {
     // Push an initial snapshot immediately so the client never sees an
     // empty UI on connect.
     if let Err(e) = push_snapshot(&mut socket, &state).await {
@@ -392,9 +392,25 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState) {
     // First tick fires immediately — we already pushed once, so consume it.
     ticker.tick().await;
 
+    // Re-check token revocation periodically. Without this, a token
+    // blacklisted via `/api/auth/revoke-sessions` would still keep its
+    // dashboard WS open until natural disconnect (potentially hours).
+    // 8 ticks @ 4s = ~32s window between revoke and forced disconnect.
+    let mut ticks_since_revoke_check: u32 = 0;
+    const REVOKE_CHECK_EVERY: u32 = 8;
+
     loop {
         tokio::select! {
             _ = ticker.tick() => {
+                ticks_since_revoke_check += 1;
+                if ticks_since_revoke_check >= REVOKE_CHECK_EVERY {
+                    ticks_since_revoke_check = 0;
+                    if think_watch_auth::jwt::is_revoked(&state.redis, &token_hash).await {
+                        tracing::info!("dashboard ws closing: token revoked");
+                        let _ = socket.send(Message::Close(None)).await;
+                        return;
+                    }
+                }
                 if let Err(e) = push_snapshot(&mut socket, &state).await {
                     tracing::debug!("dashboard ws push failed: {e}");
                     return;

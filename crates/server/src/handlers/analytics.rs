@@ -62,8 +62,8 @@ pub async fn get_usage(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<AnalyticsQuery>,
 ) -> Result<Json<Vec<UsageRow>>, AppError> {
-    let limit = params.limit.unwrap_or(50).min(200);
-    let offset = params.offset.unwrap_or(0);
+    let (limit, offset) =
+        super::clickhouse_util::clamp_pagination(params.limit, params.offset, 200);
 
     let rows = sqlx::query_as::<_, UsageRow>(
         r#"SELECT
@@ -145,8 +145,8 @@ pub async fn get_costs(
     State(state): State<AppState>,
     axum::extract::Query(params): axum::extract::Query<AnalyticsQuery>,
 ) -> Result<Json<Vec<CostRow>>, AppError> {
-    let limit = params.limit.unwrap_or(50).min(200);
-    let offset = params.offset.unwrap_or(0);
+    let (limit, offset) =
+        super::clickhouse_util::clamp_pagination(params.limit, params.offset, 200);
     let month_start = chrono::Utc::now()
         .date_naive()
         .with_day(1)

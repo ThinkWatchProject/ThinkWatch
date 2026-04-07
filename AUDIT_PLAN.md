@@ -36,31 +36,21 @@ mechanical fixes.
 
 ## Round 2 — Auth / authorization hardening
 
-- [ ] **R2.1** MCP tool default-allow → default-deny
-  - File: [crates/mcp-gateway/src/access_control.rs](crates/mcp-gateway/src/access_control.rs#L44)
-  - Fix: when no policy exists for a `(server, tool)` pair, deny unless
-    the user has admin role.
-- [ ] **R2.2** JWT missing `aud` / `iss` + explicit algorithm pinning
-  - File: [crates/auth/src/jwt.rs](crates/auth/src/jwt.rs#L7)
-  - Fix: add `aud` + `iss` to `Claims`, set them to a configurable value
-    (env: `THINKWATCH_JWT_AUDIENCE`), pin `Validation` to `HS256` only.
-- [ ] **R2.3** Dashboard WS doesn't recheck token revocation after upgrade
-  - File: [crates/server/src/handlers/dashboard.rs](crates/server/src/handlers/dashboard.rs#L312)
-  - Fix: every N ticks (every 30s), re-verify `is_revoked` and close the
-    socket if the token has been blacklisted.
-- [ ] **R2.4** Login rate-limit IP extraction trusts XFF without proxy check
-  - File: [crates/server/src/handlers/auth.rs](crates/server/src/handlers/auth.rs#L31)
-  - Fix: extract login IP via the same trusted-proxy validation as
-    `auth_guard::require_auth`.
-- [ ] **R2.5** Session IP binding fails open when bound_ip is `None`
-  - File: [crates/server/src/middleware/verify_signature.rs](crates/server/src/middleware/verify_signature.rs#L196)
-  - Fix: when `client_ip_source != "connection"` is configured, require
-    sessions to have a bound IP and reject when missing.
-- [ ] **R2.6** Unbounded `offset` parameter on log/analytics queries
-  - File: [crates/server/src/handlers/gateway_logs.rs](crates/server/src/handlers/gateway_logs.rs)
-    + similar handlers
-  - Fix: cap `offset` at `100_000` (or use cursor pagination, but cap is
-    enough for now).
+- [x] **R2.1** MCP tool default-allow → default-deny. `admin` and
+  `super_admin` always pass. Plumbed `user_roles` through `handle_request`
+  → `handle_tools_list` / `handle_tools_call`.
+- [x] **R2.2** JWT now requires hardcoded `aud="thinkwatch"` and
+  `iss="thinkwatch"`. Algorithm explicitly pinned to HS256 in both encode
+  and decode paths. New regression tests for foreign aud / foreign iss.
+- [x] **R2.3** Dashboard WS now re-checks `is_revoked` every 8 ticks
+  (~32s) and closes the socket on revocation.
+- [x] **R2.4** Login handler now uses the new shared
+  `auth_guard::extract_client_ip` helper which honours the trusted-proxy
+  whitelist.
+- [x] **R2.5** Session IP binding now fail-closed: missing bound IP or
+  missing request IP both reject.
+- [x] **R2.6** Added `clamp_pagination` helper in `clickhouse_util` and
+  applied to 8 log/analytics handlers. `offset` capped at 100_000.
 
 ---
 

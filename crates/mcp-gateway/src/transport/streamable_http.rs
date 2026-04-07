@@ -69,6 +69,7 @@ pub async fn handle_post(
     }
 
     let user_id = claims.sub;
+    let user_roles = claims.roles.clone();
 
     // --- Session management ------------------------------------------------
     let session_id = if let Some(sid) = headers
@@ -88,7 +89,10 @@ pub async fn handle_post(
     };
 
     // --- Dispatch ----------------------------------------------------------
-    let response = state.proxy.handle_request(user_id, request).await;
+    let response = state
+        .proxy
+        .handle_request(user_id, &user_roles, request)
+        .await;
 
     // Return the response with the session header.
     let mut resp_headers = HeaderMap::new();
