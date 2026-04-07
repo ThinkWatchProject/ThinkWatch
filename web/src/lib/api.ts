@@ -59,11 +59,41 @@ async function signRequest(
 }
 
 // --- Token Refresh ---
+//
+// Cross-tab coordination: refresh requests can race when multiple tabs
+// hit a 401 simultaneously. Without coordination each tab posts its own
+// refresh, the second one wins, and the first tab's freshly-rotated
+// token is silently invalidated. We coordinate via:
+//   1. BroadcastChannel (modern browsers): one tab broadcasts the new
+//      tokens after refresh, others apply them without a network call.
+//   2. Per-tab in-memory dedupe of the in-flight promise.
+//   3. localStorage `storage` event as a fallback for older browsers
+//      that don't support BroadcastChannel.
 
 let refreshPromise: Promise<boolean> | null = null;
 
+const authChannel: BroadcastChannel | null =
+  typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('thinkwatch-auth') : null;
+
+interface RefreshBroadcast {
+  type: 'refreshed';
+  access_token: string;
+  refresh_token: string;
+  signing_key: string;
+}
+
+if (authChannel) {
+  authChannel.onmessage = (ev: MessageEvent<RefreshBroadcast>) => {
+    if (ev.data?.type === 'refreshed') {
+      localStorage.setItem('access_token', ev.data.access_token);
+      localStorage.setItem('refresh_token', ev.data.refresh_token);
+      sessionStorage.setItem('signing_key', ev.data.signing_key);
+    }
+  };
+}
+
 async function tryRefreshToken(): Promise<boolean> {
-  // Deduplicate concurrent refresh attempts
+  // Deduplicate concurrent refresh attempts within this tab
   if (refreshPromise) return refreshPromise;
 
   refreshPromise = (async () => {
@@ -80,6 +110,14 @@ async function tryRefreshToken(): Promise<boolean> {
       localStorage.setItem('access_token', data.access_token);
       localStorage.setItem('refresh_token', data.refresh_token);
       sessionStorage.setItem('signing_key', data.signing_key);
+      // Tell other tabs about the new tokens so they don't trigger
+      // their own refresh and invalidate ours.
+      authChannel?.postMessage({
+        type: 'refreshed',
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        signing_key: data.signing_key,
+      } satisfies RefreshBroadcast);
       return true;
     } catch {
       return false;

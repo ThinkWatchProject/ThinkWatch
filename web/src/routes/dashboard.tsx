@@ -65,9 +65,23 @@ interface DashboardLive {
   max_rpm_limit: number | null;
 }
 
-const fmtCompact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
-const fmtUsd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
-const fmtInt = new Intl.NumberFormat('en-US');
+// Locale-aware formatters — react to i18next language changes by reading
+// the current language at format time. We don't cache the formatter
+// instances aggressively because the language only changes on user action,
+// and Intl.NumberFormat construction is fast.
+function fmtCompact(v: number, locale: string): string {
+  return new Intl.NumberFormat(locale, { notation: 'compact', maximumFractionDigits: 1 }).format(v);
+}
+function fmtUsd(v: number, locale: string): string {
+  return new Intl.NumberFormat(locale, {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 2,
+  }).format(v);
+}
+function fmtInt(v: number, locale: string): string {
+  return new Intl.NumberFormat(locale).format(v);
+}
 
 function useCounter(target: number, duration = 1200) {
   const [value, setValue] = useState(target);
@@ -339,7 +353,9 @@ function kindBadgeClass(kind: string): string {
 // ----------------------------------------------------------------------------
 
 export function DashboardPage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  // Map i18next language code → BCP 47 locale for Intl.NumberFormat.
+  const locale = i18n.language === 'zh' ? 'zh-CN' : 'en-US';
   const [stats, setStats] = useState<DashboardStats | null>(null);
   const [usage, setUsage] = useState<UsageStats | null>(null);
   const [cost, setCost] = useState<CostStats | null>(null);
@@ -403,7 +419,7 @@ export function DashboardPage() {
           <StatCard
             label={t('dashboard.tokensUsedToday')}
             value={usage?.total_tokens_today ?? 0}
-            format={(v) => fmtCompact.format(v)}
+            format={(v) => fmtCompact(v, locale)}
             spark={tokensSpark}
             loading={loading}
             chartIndex={1}
@@ -411,7 +427,7 @@ export function DashboardPage() {
           <StatCard
             label={t('dashboard.costMtd')}
             value={cost?.total_cost_mtd ?? 0}
-            format={(v) => fmtUsd.format(v)}
+            format={(v) => fmtUsd(v, locale)}
             delta={
               cost?.budget_usage_pct != null ? `${cost.budget_usage_pct.toFixed(1)}%` : undefined
             }
@@ -422,7 +438,7 @@ export function DashboardPage() {
           <StatCard
             label={t('dashboard.activeApiKeys')}
             value={stats?.active_api_keys ?? 0}
-            format={(v) => fmtInt.format(Math.round(v))}
+            format={(v) => fmtInt(Math.round(v), locale)}
             spark={keysSpark}
             loading={loading}
             chartIndex={3}
@@ -430,7 +446,7 @@ export function DashboardPage() {
           <StatCard
             label={t('dashboard.requestsPerMin')}
             value={currentRpm}
-            format={(v) => fmtInt.format(Math.round(v))}
+            format={(v) => fmtInt(Math.round(v), locale)}
             delta={t('dashboard.live')}
             spark={rpmSpark}
             loading={loading}

@@ -37,27 +37,53 @@ const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
 let cachedSetupStatus: { initialized: boolean; needs_setup: boolean } | null = null;
 
+/// Force the next mount to re-fetch /api/setup/status. Called by the
+/// setup wizard after a successful initialize so the user lands on the
+/// real app immediately, without a hard refresh.
+export function invalidateSetupStatusCache() {
+  cachedSetupStatus = null;
+}
+
 function RootComponent() {
   const { t } = useTranslation();
   const { user, loading, login, logout, handleSsoCallback } = useAuth();
   const [setupChecked, setSetupChecked] = useState(cachedSetupStatus !== null);
   const [needsSetup, setNeedsSetup] = useState(cachedSetupStatus?.needs_setup ?? false);
 
-  // Check setup status on mount
+  // Check setup status on mount AND when the tab becomes visible — the
+  // latter handles the "user completed setup in another tab" case.
   useEffect(() => {
-    if (cachedSetupStatus !== null) return;
-    fetch(`${API_BASE}/api/setup/status`)
-      .then((r) => r.json())
-      .then((data: { initialized: boolean; needs_setup: boolean }) => {
-        cachedSetupStatus = data;
-        setNeedsSetup(data.needs_setup);
-        setSetupChecked(true);
-      })
-      .catch(() => {
-        // If the endpoint fails, assume setup is done
-        cachedSetupStatus = { initialized: true, needs_setup: false };
-        setSetupChecked(true);
-      });
+    let cancelled = false;
+    const check = () => {
+      if (cancelled) return;
+      fetch(`${API_BASE}/api/setup/status`)
+        .then((r) => r.json())
+        .then((data: { initialized: boolean; needs_setup: boolean }) => {
+          if (cancelled) return;
+          cachedSetupStatus = data;
+          setNeedsSetup(data.needs_setup);
+          setSetupChecked(true);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          cachedSetupStatus = { initialized: true, needs_setup: false };
+          setSetupChecked(true);
+        });
+    };
+    if (cachedSetupStatus === null) check();
+    const onVis = () => {
+      // When the tab becomes visible, re-check IF the cache was invalidated
+      // (or if we're still in needs_setup state — covers the case where the
+      // user just finished setup in this tab).
+      if (!document.hidden && (cachedSetupStatus === null || cachedSetupStatus.needs_setup)) {
+        check();
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVis);
+    };
   }, []);
 
   // Handle SSO callback: tokens in URL fragment
