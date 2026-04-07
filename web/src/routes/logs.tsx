@@ -162,7 +162,7 @@ function getColumns(cat: LogCategory): ColDef[] {
       ];
     case 'audit':
       return [
-        { key: 'timestamp', label: 'Time' },
+        { key: 'created_at', label: 'Time' },
         { key: 'user_email', label: 'User', filterKey: 'user_id', filterValueKey: 'user_id' },
         { key: 'action', label: 'Action', filterKey: 'action' },
         { key: 'resource', label: 'Resource', filterKey: 'resource' },
@@ -197,8 +197,8 @@ function getColumns(cat: LogCategory): ColDef[] {
   }
 }
 
-function getTimeKey(cat: LogCategory): string {
-  return cat === 'audit' ? 'timestamp' : 'created_at';
+function getTimeKey(_cat: LogCategory): string {
+  return 'created_at';
 }
 
 // ---------------------------------------------------------------------------
