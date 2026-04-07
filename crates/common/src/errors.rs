@@ -39,22 +39,43 @@ struct ErrorBody {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let (status, error_type) = match &self {
-            AppError::Unauthorized => (StatusCode::UNAUTHORIZED, "unauthorized"),
-            AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden"),
-            AppError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
-            AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request"),
-            AppError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
-            AppError::Conflict(_) => (StatusCode::CONFLICT, "conflict"),
+        let (status, error_type, public_message) = match &self {
+            AppError::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Authentication required".to_string(),
+            ),
+            AppError::Forbidden => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Insufficient permissions".to_string(),
+            ),
+            AppError::NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m.clone()),
+            AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m.clone()),
+            AppError::RateLimited => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limited",
+                "Rate limit exceeded".to_string(),
+            ),
+            AppError::Conflict(m) => (StatusCode::CONFLICT, "conflict", m.clone()),
             AppError::Internal(e) => {
+                // Log the full chain on the server (operator visibility)
+                // but NEVER return it to the client. Internal errors can
+                // contain DB query params, parsed user input, file paths,
+                // or other details that aid an attacker. The client only
+                // gets a generic "internal error" string.
                 tracing::error!("Internal server error: {e:#}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "internal_error")
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "internal_error",
+                    "Internal server error".to_string(),
+                )
             }
         };
 
         let body = ErrorResponse {
             error: ErrorBody {
-                message: self.to_string(),
+                message: public_message,
                 r#type: error_type.to_string(),
             },
         };
