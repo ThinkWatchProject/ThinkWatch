@@ -19,6 +19,7 @@ pub struct McpLogsQuery {
     pub q: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+    pub exclude: Option<String>,
     pub sort_by: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -95,6 +96,19 @@ pub async fn list_mcp_logs(
             .replace('%', "\\%")
             .replace('_', "\\_");
         binds.push(format!("%{escaped}%"));
+    }
+
+    for (frag, val) in parse_exclude_param(
+        params.exclude.as_deref(),
+        &[
+            ("user_id", "user_id", ExcludeMode::Equals),
+            ("server_id", "server_id", ExcludeMode::Equals),
+            ("tool_name", "tool_name", ExcludeMode::Equals),
+            ("status", "status", ExcludeMode::Equals),
+        ],
+    ) {
+        conditions.push(frag);
+        binds.push(val);
     }
 
     let wc = if conditions.is_empty() {

@@ -16,6 +16,7 @@ pub struct AppLogsQuery {
     pub q: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+    pub exclude: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -93,6 +94,17 @@ pub async fn list_app_logs(
     if let Some(ref v) = params.to {
         conditions.push("created_at <= ?".into());
         binds.push(v.clone());
+    }
+
+    for (frag, val) in parse_exclude_param(
+        params.exclude.as_deref(),
+        &[
+            ("level", "level", ExcludeMode::Equals),
+            ("target", "target", ExcludeMode::NotLike),
+        ],
+    ) {
+        conditions.push(frag);
+        binds.push(val);
     }
 
     let wc = if conditions.is_empty() {

@@ -17,6 +17,7 @@ pub struct PlatformLogsQuery {
     pub resource_id: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+    pub exclude: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -97,6 +98,19 @@ pub async fn list_platform_logs(
     if let Some(ref v) = params.to {
         conditions.push("created_at <= ?".into());
         binds.push(v.clone());
+    }
+
+    for (frag, val) in parse_exclude_param(
+        params.exclude.as_deref(),
+        &[
+            ("user_id", "user_id", ExcludeMode::Equals),
+            ("action", "action", ExcludeMode::Equals),
+            ("resource", "resource", ExcludeMode::Equals),
+            ("resource_id", "resource_id", ExcludeMode::Equals),
+        ],
+    ) {
+        conditions.push(frag);
+        binds.push(val);
     }
 
     let wc = if conditions.is_empty() {

@@ -19,6 +19,10 @@ pub struct AccessLogsQuery {
     pub q: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+    /// Comma-separated `key:value` exclusions, e.g.
+    /// `method:GET,status_code:200,path:/admin`. See
+    /// [`super::clickhouse_util::parse_exclude_param`].
+    pub exclude: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -100,6 +104,21 @@ pub async fn list_access_logs(
     if let Some(ref v) = params.to {
         conditions.push("created_at <= ?".into());
         binds.push(v.clone());
+    }
+
+    // Excludes (-key:value tokens from the unified log explorer)
+    for (frag, val) in parse_exclude_param(
+        params.exclude.as_deref(),
+        &[
+            ("method", "method", ExcludeMode::Equals),
+            ("path", "path", ExcludeMode::NotLike),
+            ("status_code", "status_code", ExcludeMode::Equals),
+            ("port", "port", ExcludeMode::Equals),
+            ("user_id", "user_id", ExcludeMode::Equals),
+        ],
+    ) {
+        conditions.push(frag);
+        binds.push(val);
     }
 
     let wc = if conditions.is_empty() {

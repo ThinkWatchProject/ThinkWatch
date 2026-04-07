@@ -11,8 +11,7 @@ use super::clickhouse_util::*;
 
 #[derive(Debug, Deserialize)]
 pub struct GatewayLogsQuery {
-    /// Free-text search (reserved for future ngramSearch implementation)
-    #[allow(dead_code)]
+    /// Free-text search — substring match against model_id.
     pub q: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
@@ -21,6 +20,7 @@ pub struct GatewayLogsQuery {
     pub status_code: Option<i64>,
     pub from: Option<String>,
     pub to: Option<String>,
+    pub exclude: Option<String>,
     pub sort_by: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -108,6 +108,20 @@ pub async fn list_gateway_logs(
             .replace('%', "\\%")
             .replace('_', "\\_");
         bind_values.push(format!("%{escaped}%"));
+    }
+
+    for (frag, val) in parse_exclude_param(
+        params.exclude.as_deref(),
+        &[
+            ("model", "model_id", ExcludeMode::Equals),
+            ("provider", "provider", ExcludeMode::Equals),
+            ("user_id", "user_id", ExcludeMode::Equals),
+            ("api_key_id", "api_key_id", ExcludeMode::Equals),
+            ("status_code", "status_code", ExcludeMode::Equals),
+        ],
+    ) {
+        conditions.push(frag);
+        bind_values.push(val);
     }
 
     let where_clause = if conditions.is_empty() {

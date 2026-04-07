@@ -20,6 +20,7 @@ pub struct AuditLogQuery {
     pub ip_address: Option<String>,
     pub from: Option<String>,
     pub to: Option<String>,
+    pub exclude: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
@@ -89,6 +90,20 @@ pub async fn list_audit_logs(
     if let Some(ref v) = query.to {
         conditions.push("created_at <= ?".into());
         binds.push(v.clone());
+    }
+
+    for (frag, val) in parse_exclude_param(
+        query.exclude.as_deref(),
+        &[
+            ("user_id", "user_id", ExcludeMode::Equals),
+            ("api_key_id", "api_key_id", ExcludeMode::Equals),
+            ("action", "action", ExcludeMode::Equals),
+            ("resource", "resource", ExcludeMode::Equals),
+            ("ip_address", "ip_address", ExcludeMode::Equals),
+        ],
+    ) {
+        conditions.push(frag);
+        binds.push(val);
     }
 
     let wc = if conditions.is_empty() {

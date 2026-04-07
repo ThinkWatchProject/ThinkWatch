@@ -10,7 +10,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select';
-import { Search, FileText, ChevronDown, ChevronRight, Plus } from 'lucide-react';
+import { Search, FileText, ChevronDown, ChevronRight, Plus, Minus } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -50,11 +50,23 @@ const PAGE_SIZE = 50;
 //   { level: "error", target: "auth", q: "some text" }
 // ---------------------------------------------------------------------------
 
-function parseQuery(input: string): Record<string, string> {
+function escapeRegex(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+interface ParsedQuery {
+  /** Positive filters: key=value or `q` for free text. */
+  params: Record<string, string>;
+  /** Negative filters from `-key:value` tokens, kept as raw `key:value` strings. */
+  excludes: string[];
+}
+
+function parseQuery(input: string): ParsedQuery {
   const params: Record<string, string> = {};
+  const excludes: string[] = [];
   const freeText: string[] = [];
-  // Match key:value (value can be quoted)
-  const regex = /(\w+):(?:"([^"]*)"|(\S+))/g;
+  // Match optional leading "-" then key:value (value can be quoted)
+  const regex = /(-?)(\w+):(?:"([^"]*)"|(\S+))/g;
   let lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = regex.exec(input)) !== null) {
@@ -62,14 +74,22 @@ function parseQuery(input: string): Record<string, string> {
     const before = input.slice(lastIndex, match.index).trim();
     if (before) freeText.push(before);
     lastIndex = regex.lastIndex;
-    const key = match[1];
-    const value = match[2] ?? match[3];
-    params[key] = value;
+    const negate = match[1] === '-';
+    const key = match[2];
+    const value = match[3] ?? match[4];
+    if (negate) {
+      // Re-quote if value contains commas/colons/spaces so the backend
+      // splitter sees it as one token.
+      const needsQuotes = /[\s,:]/.test(value);
+      excludes.push(`${key}:${needsQuotes ? `"${value}"` : value}`);
+    } else {
+      params[key] = value;
+    }
   }
   const after = input.slice(lastIndex).trim();
   if (after) freeText.push(after);
   if (freeText.length > 0) params.q = freeText.join(' ');
-  return params;
+  return { params, excludes };
 }
 
 // ---------------------------------------------------------------------------
@@ -389,8 +409,13 @@ export function UnifiedLogsPage() {
     try {
       const parsed = parseQuery(activeQuery);
       const params = new URLSearchParams();
-      for (const [k, v] of Object.entries(parsed)) {
+      for (const [k, v] of Object.entries(parsed.params)) {
         if (v) params.set(k, v);
+      }
+      // Negative tokens (`-key:value`) are joined into a single
+      // `exclude=key:value,key:value` param the backend understands.
+      if (parsed.excludes.length > 0) {
+        params.set('exclude', parsed.excludes.join(','));
       }
       // Convert local wall-clock time to UTC for the backend.
       const utcFrom = localToUtcQuery(from);
@@ -420,25 +445,41 @@ export function UnifiedLogsPage() {
   };
 
   /**
-   * Append a `key:value` token to the active query and re-search.
-   * If the same `key:` is already present (with any value), replace it
-   * so users can click "+" on different rows to switch the filter
-   * instead of stacking duplicates.
+   * Append a `key:value` (or `-key:value`) token to the active query and
+   * re-search. If a positive `key:` token is already present, it is replaced
+   * so users can click "+" on different rows to switch the filter instead
+   * of stacking duplicates. Negative tokens with the same key+value are
+   * also de-duplicated.
    */
-  const handleAddFilter = (key: string, rawValue: unknown) => {
+  const updateFilter = (key: string, rawValue: unknown, negate: boolean) => {
     if (rawValue === null || rawValue === undefined || rawValue === '') return;
     let value = String(rawValue);
-    // Quote the value if it contains whitespace so the parser sees it as one token.
     if (/\s/.test(value)) value = `"${value.replace(/"/g, '\\"')}"`;
-    const token = `${key}:${value}`;
-    // Strip any existing token with the same key (key:something or key:"...")
-    const stripped = activeQuery
-      .replace(new RegExp(`\\b${key}:(?:"[^"]*"|\\S+)\\s*`, 'g'), '')
+    const token = `${negate ? '-' : ''}${key}:${value}`;
+
+    // Strip any existing positive `key:...` token (only one allowed at a time).
+    let stripped = activeQuery.replace(
+      new RegExp(`(?<![-\\w])${key}:(?:"[^"]*"|\\S+)\\s*`, 'g'),
+      '',
+    );
+    // Also strip a duplicate of the exact token we are about to add (for
+    // negatives, so clicking "−" twice on the same row is a no-op).
+    stripped = stripped
+      .replace(
+        new RegExp(`\\B${escapeRegex(token)}(?:\\s|$)`, 'g'),
+        '',
+      )
       .trim();
+
     const next = stripped ? `${stripped} ${token}` : token;
     setSearchInput(next);
     updateSearch({ q: next, page: 0 });
   };
+
+  const handleAddFilter = (key: string, rawValue: unknown) =>
+    updateFilter(key, rawValue, false);
+  const handleExcludeFilter = (key: string, rawValue: unknown) =>
+    updateFilter(key, rawValue, true);
 
   const handleCategoryChange = (v: string) => {
     if (!isLogCategory(v)) return;
@@ -593,17 +634,30 @@ export function UnifiedLogsPage() {
                                 <div className="group/cell flex items-center gap-1">
                                   <span className="min-w-0">{display}</span>
                                   {isFilterable && (
-                                    <button
-                                      type="button"
-                                      title={`Filter: ${col.filterKey}:${filterValue}`}
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleAddFilter(col.filterKey!, filterValue);
-                                      }}
-                                      className="opacity-0 group-hover/cell:opacity-60 hover:!opacity-100 hover:bg-accent rounded p-0.5 transition-opacity shrink-0"
-                                    >
-                                      <Plus className="h-3 w-3" />
-                                    </button>
+                                    <span className="flex shrink-0 items-center gap-0.5">
+                                      <button
+                                        type="button"
+                                        title={`Filter: ${col.filterKey}:${filterValue}`}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleAddFilter(col.filterKey!, filterValue);
+                                        }}
+                                        className="opacity-0 group-hover/cell:opacity-60 hover:!opacity-100 hover:bg-accent rounded p-0.5 transition-opacity"
+                                      >
+                                        <Plus className="h-3 w-3" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        title={`Exclude: -${col.filterKey}:${filterValue}`}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleExcludeFilter(col.filterKey!, filterValue);
+                                        }}
+                                        className="opacity-0 group-hover/cell:opacity-60 hover:!opacity-100 hover:bg-accent rounded p-0.5 transition-opacity"
+                                      >
+                                        <Minus className="h-3 w-3" />
+                                      </button>
+                                    </span>
                                   )}
                                 </div>
                               </TableCell>
