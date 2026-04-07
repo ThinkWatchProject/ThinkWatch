@@ -37,7 +37,7 @@ import {
   Settings,
   Forward,
   BookOpen,
-  ChevronsUpDown,
+  Menu,
   LogOut,
   User,
 } from 'lucide-react';
@@ -141,7 +141,7 @@ function NavUser({
                   {userEmail}
                 </span>
               </div>
-              <ChevronsUpDown className="ml-auto size-4" />
+              <Menu className="ml-auto size-4" />
             </SidebarMenuButton>
           </DropdownMenuTrigger>
           <DropdownMenuContent
