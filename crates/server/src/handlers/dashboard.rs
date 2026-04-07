@@ -427,7 +427,8 @@ pub async fn dashboard_ws(
     // Per-user connection cap. A pathological client opening hundreds
     // of dashboard WS sockets would otherwise consume one tokio task +
     // ~4s of snapshot work each, exhausting executor / DB pool.
-    if !try_acquire_ws_slot(user_id) {
+    let max_per_user = state.config.timeouts.dashboard_ws_max_per_user;
+    if !try_acquire_ws_slot(user_id, max_per_user) {
         tracing::warn!(%user_id, "dashboard ws rejected: per-user connection cap reached");
         return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
@@ -446,10 +447,9 @@ pub fn user_revoked_key(user_id: uuid::Uuid) -> String {
 //
 // Process-local in-memory counter. We don't need cross-instance accuracy:
 // each instance enforces its own cap, and the dashboard is sticky-per-tab
-// so a single user typically lands on one instance anyway.
+// so a single user typically lands on one instance anyway. The cap value
+// itself comes from `Timeouts.dashboard_ws_max_per_user`.
 // ---------------------------------------------------------------------------
-
-const MAX_WS_PER_USER: usize = 4;
 
 fn ws_counts() -> &'static std::sync::Mutex<std::collections::HashMap<uuid::Uuid, usize>> {
     static MAP: std::sync::OnceLock<
@@ -458,13 +458,13 @@ fn ws_counts() -> &'static std::sync::Mutex<std::collections::HashMap<uuid::Uuid
     MAP.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
 }
 
-fn try_acquire_ws_slot(user_id: uuid::Uuid) -> bool {
+fn try_acquire_ws_slot(user_id: uuid::Uuid, max_per_user: usize) -> bool {
     let mut m = match ws_counts().lock() {
         Ok(g) => g,
         Err(_) => return true, // poisoned mutex shouldn't deny service
     };
     let cnt = m.entry(user_id).or_insert(0);
-    if *cnt >= MAX_WS_PER_USER {
+    if *cnt >= max_per_user {
         false
     } else {
         *cnt += 1;
@@ -483,11 +483,6 @@ fn release_ws_slot(user_id: uuid::Uuid) {
     }
 }
 
-/// Cap each WS send/recv at 5 seconds. Without this a slow / dead client
-/// can hang the loop indefinitely on a buffered TCP write, blocking
-/// future snapshot pushes for that connection.
-const WS_IO_TIMEOUT: Duration = Duration::from_secs(5);
-
 /// RAII guard that releases a per-user WS slot on drop, regardless of
 /// which return path the loop takes.
 struct WsSlotGuard(uuid::Uuid);
@@ -500,14 +495,20 @@ impl Drop for WsSlotGuard {
 async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid::Uuid) {
     let _slot = WsSlotGuard(user_id);
 
+    // Per-frame I/O ceiling. Without this a slow / dead client can hang
+    // the loop indefinitely on a buffered TCP write, blocking future
+    // snapshot pushes for that connection.
+    let io_timeout = Duration::from_secs(state.config.timeouts.dashboard_ws_io_secs);
+    let tick_secs = state.config.timeouts.dashboard_ws_tick_secs;
+
     // Push an initial snapshot immediately so the client never sees an
     // empty UI on connect.
-    if let Err(e) = push_snapshot(&mut socket, &state).await {
+    if let Err(e) = push_snapshot(&mut socket, &state, io_timeout).await {
         tracing::debug!("dashboard ws closed during initial push: {e}");
         return;
     }
 
-    let mut ticker = tokio::time::interval(Duration::from_secs(4));
+    let mut ticker = tokio::time::interval(Duration::from_secs(tick_secs));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // First tick fires immediately — we already pushed once, so consume it.
     ticker.tick().await;
@@ -531,14 +532,14 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
                     if revoked > 0 {
                         tracing::info!(%user_id, "dashboard ws closing: user revoked");
                         let _ = tokio::time::timeout(
-                            WS_IO_TIMEOUT,
+                            io_timeout,
                             socket.send(Message::Close(None)),
                         )
                         .await;
                         return;
                     }
                 }
-                if let Err(e) = push_snapshot(&mut socket, &state).await {
+                if let Err(e) = push_snapshot(&mut socket, &state, io_timeout).await {
                     tracing::debug!("dashboard ws push failed: {e}");
                     return;
                 }
@@ -548,7 +549,7 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
                     Some(Ok(Message::Close(_))) | None => return,
                     Some(Ok(Message::Ping(p))) => {
                         // Respect the same per-frame timeout for pings.
-                        match tokio::time::timeout(WS_IO_TIMEOUT, socket.send(Message::Pong(p))).await {
+                        match tokio::time::timeout(io_timeout, socket.send(Message::Pong(p))).await {
                             Ok(Ok(())) => {}
                             _ => return,
                         }
@@ -561,14 +562,18 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
     }
 }
 
-async fn push_snapshot(socket: &mut WebSocket, state: &AppState) -> Result<(), String> {
+async fn push_snapshot(
+    socket: &mut WebSocket,
+    state: &AppState,
+    io_timeout: Duration,
+) -> Result<(), String> {
     let snap = build_live_snapshot(state)
         .await
         .map_err(|e| format!("snapshot build failed: {e}"))?;
     let json = serde_json::to_string(&snap).map_err(|e| e.to_string())?;
     // Wrap the send in a timeout so a slow/dead client can't park us
     // here forever, blocking future pushes.
-    match tokio::time::timeout(WS_IO_TIMEOUT, socket.send(Message::Text(json.into()))).await {
+    match tokio::time::timeout(io_timeout, socket.send(Message::Text(json.into()))).await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e.to_string()),
         Err(_) => Err("ws send timed out".into()),

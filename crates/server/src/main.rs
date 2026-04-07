@@ -227,12 +227,16 @@ async fn main() -> anyhow::Result<()> {
         // gateway proxy see the same view.
         mcp_registry: think_watch_mcp_gateway::registry::Registry::new(),
         mcp_circuit_breakers: think_watch_mcp_gateway::circuit_breaker::McpCircuitBreakers::new(),
-        mcp_pool: think_watch_mcp_gateway::pool::ConnectionPool::new(),
+        mcp_pool: think_watch_mcp_gateway::pool::ConnectionPool::with_timeout(
+            config.timeouts.mcp_pool_secs,
+        ),
         // Single shared HTTP client for outbound calls (tool discovery,
-        // SSO, etc). 15s default timeout — individual handlers can wrap
-        // calls in `tokio::time::timeout` for tighter limits.
+        // SSO, etc). Timeout from `AppConfig.timeouts.http_client_secs`,
+        // overridable via `THINKWATCH_HTTP_CLIENT_SECS`.
         http_client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(
+                config.timeouts.http_client_secs,
+            ))
             .build()
             .unwrap_or_else(|_| reqwest::Client::new()),
     };

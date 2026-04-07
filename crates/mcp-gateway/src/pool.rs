@@ -66,9 +66,17 @@ pub struct ConnectionPool {
 }
 
 impl ConnectionPool {
+    /// Create a pool with the default 30s per-request timeout.
     pub fn new() -> Self {
+        Self::with_timeout(30)
+    }
+
+    /// Create a pool with a custom per-request timeout (in seconds).
+    /// Used by the server crate to wire `Timeouts.mcp_pool_secs` through
+    /// from `AppConfig` so the timeout is operator-tunable.
+    pub fn with_timeout(timeout_secs: u64) -> Self {
         let client = Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
             .build()
             .unwrap_or_else(|_| Client::new());
 
