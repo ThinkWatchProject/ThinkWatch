@@ -13,9 +13,10 @@ import { AppShell } from '@/components/layout/app-shell';
 // Eagerly loaded — entry/auth screens that the user always hits first.
 import { LoginPage } from '@/routes/login';
 import { SetupPage } from '@/routes/setup';
-import { DashboardPage } from '@/routes/dashboard';
 
 // Lazy-loaded — split into separate chunks so the initial bundle stays small.
+// Dashboard is lazy too because it pulls in recharts (~250 KB gzipped).
+const DashboardPage = lazyRouteComponent(() => import('@/routes/dashboard'), 'DashboardPage');
 const RegisterPage = lazyRouteComponent(() => import('@/routes/register'), 'RegisterPage');
 const ProvidersPage = lazyRouteComponent(() => import('@/routes/gateway/providers'), 'ProvidersPage');
 const ModelsPage = lazyRouteComponent(() => import('@/routes/gateway/models'), 'ModelsPage');

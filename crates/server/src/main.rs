@@ -221,6 +221,12 @@ async fn main() -> anyhow::Result<()> {
         clickhouse: ch_client,
         content_filter,
         pii_redactor,
+        // Shared MCP runtime — registry, circuit breakers, and connection
+        // pool live in AppState so the console CRUD handlers and the
+        // gateway proxy see the same view.
+        mcp_registry: think_watch_mcp_gateway::registry::Registry::new(),
+        mcp_circuit_breakers: think_watch_mcp_gateway::circuit_breaker::McpCircuitBreakers::new(),
+        mcp_pool: think_watch_mcp_gateway::pool::ConnectionPool::new(),
     };
 
     // --- Hot reload of content filter / PII redactor on config change ---

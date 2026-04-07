@@ -1,31 +1,21 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
-import { Badge } from '@/components/ui/badge';
+import { Area, AreaChart, CartesianGrid, ReferenceLine, YAxis } from 'recharts';
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
-import { BarChart3, Key, Server, Cpu, Database, MemoryStick, Search } from 'lucide-react';
+  Card,
+  CardAction,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from '@/components/ui/chart';
 import { api } from '@/lib/api';
-
-interface HealthStatus {
-  postgres: boolean;
-  redis: boolean;
-  clickhouse: boolean;
-}
-
-interface AuditEntry {
-  id: string;
-  timestamp: string;
-  user_email: string;
-  action: string;
-  resource: string;
-}
 
 interface DashboardStats {
   total_requests_today: number;
@@ -34,134 +24,682 @@ interface DashboardStats {
   connected_mcp_servers: number;
 }
 
-const serviceList: { name: string; key: keyof HealthStatus; icon: typeof Database }[] = [
-  { name: 'PostgreSQL', key: 'postgres', icon: Database },
-  { name: 'Redis', key: 'redis', icon: MemoryStick },
-  { name: 'ClickHouse', key: 'clickhouse', icon: Search },
-];
+interface UsageStats {
+  total_tokens_today: number;
+  total_requests_today: number;
+}
+
+interface CostStats {
+  total_cost_mtd: number;
+  budget_usage_pct: number | null;
+}
+
+interface ProviderHealth {
+  kind: 'ai' | 'mcp';
+  provider: string;
+  requests: number;
+  avg_latency_ms: number;
+  success_rate: number;
+  cb_state: string; // "Closed" | "HalfOpen" | "Open" | ""
+}
+
+interface LiveLogRow {
+  kind: 'api' | 'mcp';
+  id: string;
+  user_id: string;
+  /** model_id for "api", tool_name for "mcp" */
+  subject: string;
+  /** numeric HTTP status as a string for "api", or status string for "mcp" */
+  status: string;
+  latency_ms: number;
+  /** total tokens for "api", 0 for "mcp" */
+  tokens: number;
+  created_at: string;
+}
+
+interface DashboardLive {
+  providers: ProviderHealth[];
+  rpm_buckets: number[];
+  recent_logs: LiveLogRow[];
+  max_rpm_limit: number | null;
+}
+
+const fmtCompact = new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 });
+const fmtUsd = new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 2 });
+const fmtInt = new Intl.NumberFormat('en-US');
+
+function useCounter(target: number, duration = 1200) {
+  const [value, setValue] = useState(target);
+  const fromRef = useRef(target);
+  useEffect(() => {
+    const from = fromRef.current;
+    if (from === target) return;
+    const start = performance.now();
+    let raf = 0;
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration);
+      const eased = 1 - Math.pow(1 - t, 3);
+      const v = from + (target - from) * eased;
+      setValue(v);
+      if (t < 1) raf = requestAnimationFrame(tick);
+      else fromRef.current = target;
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, duration]);
+  return value;
+}
+
+/** Append-only ring buffer of recent samples for sparklines. */
+function useSparkHistory(value: number | undefined, length = 24) {
+  const [hist, setHist] = useState<number[] | null>(null);
+  useEffect(() => {
+    if (value == null) return;
+    setHist((prev) => {
+      // Seed the buffer with the first value across the whole window so
+      // the line starts flat instead of "rising from zero".
+      if (prev === null) return Array(length).fill(value);
+      return [...prev.slice(1), value];
+    });
+  }, [value, length]);
+  return hist ?? Array(length).fill(0);
+}
+
+// ----------------------------------------------------------------------------
+// Live snapshot via WebSocket. Falls back to a one-shot HTTP fetch if WS
+// can't connect (e.g. behind a proxy that doesn't speak the upgrade).
+// ----------------------------------------------------------------------------
+
+function useLiveDashboard() {
+  const [live, setLive] = useState<DashboardLive | null>(null);
+  const [connected, setConnected] = useState(false);
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+    let backoff = 1000;
+
+    const connect = () => {
+      if (cancelled) return;
+      const token = localStorage.getItem('access_token');
+      if (!token) {
+        // Not signed in yet — try a plain HTTP fetch as a one-shot fallback.
+        api<DashboardLive>('/api/dashboard/live').then(setLive).catch(() => {});
+        return;
+      }
+      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const apiBase = import.meta.env.VITE_API_BASE ?? '';
+      // Resolve the WS URL relative to the current origin so it works behind
+      // any reverse proxy that the HTTP API also goes through.
+      const httpUrl = new URL(
+        `${apiBase}/api/dashboard/ws?token=${encodeURIComponent(token)}`,
+        window.location.origin,
+      );
+      const wsUrl = `${proto}://${httpUrl.host}${httpUrl.pathname}${httpUrl.search}`;
+
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+
+      ws.onopen = () => {
+        backoff = 1000;
+        setConnected(true);
+      };
+      ws.onmessage = (ev) => {
+        try {
+          const payload = JSON.parse(ev.data) as DashboardLive;
+          setLive(payload);
+        } catch {
+          /* drop malformed frames */
+        }
+      };
+      ws.onerror = () => {
+        // Surface state, the close handler will trigger reconnect.
+        setConnected(false);
+      };
+      ws.onclose = () => {
+        setConnected(false);
+        // First close — try a one-shot HTTP fetch so the user sees data
+        // immediately even if WS is unavailable.
+        if (live === null) {
+          api<DashboardLive>('/api/dashboard/live').then(setLive).catch(() => {});
+        }
+        scheduleReconnect();
+      };
+    };
+
+    const scheduleReconnect = () => {
+      if (cancelled) return;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      reconnectTimer = setTimeout(connect, backoff);
+      backoff = Math.min(backoff * 2, 15000);
+    };
+
+    connect();
+
+    const onVis = () => {
+      if (document.hidden) {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+        if (reconnectTimer) {
+          clearTimeout(reconnectTimer);
+          reconnectTimer = null;
+        }
+      } else if (!ws || ws.readyState === WebSocket.CLOSED) {
+        connect();
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVis);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) {
+        ws.onclose = null;
+        ws.close();
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return { live, connected };
+}
+
+// ----------------------------------------------------------------------------
+// Stat card with embedded shadcn AreaChart sparkline
+// ----------------------------------------------------------------------------
+
+interface StatCardProps {
+  label: string;
+  value: number;
+  format: (v: number) => string;
+  delta?: string;
+  spark: number[];
+  loading: boolean;
+  chartIndex: 1 | 2 | 3 | 4 | 5;
+}
+
+function StatCard({ label, value, format, delta, spark, loading, chartIndex }: StatCardProps) {
+  const animated = useCounter(value);
+  const data = useMemo(() => spark.map((v, i) => ({ i, v })), [spark]);
+  const config = {
+    v: { label, color: `var(--chart-${chartIndex})` },
+  } satisfies ChartConfig;
+
+  return (
+    <Card size="sm">
+      <CardHeader>
+        <CardDescription>{label}</CardDescription>
+        <CardTitle className="font-mono text-2xl tabular-nums tracking-tight">
+          {loading ? '…' : format(animated)}
+        </CardTitle>
+        {delta && (
+          <CardAction>
+            <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">
+              {delta}
+            </span>
+          </CardAction>
+        )}
+      </CardHeader>
+      <CardContent className="px-0 pb-0">
+        <ChartContainer config={config} className="aspect-auto h-14 w-full">
+          <AreaChart data={data} margin={{ top: 0, right: 0, bottom: 0, left: 0 }}>
+            <defs>
+              <linearGradient id={`stat-fill-${chartIndex}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="var(--color-v)" stopOpacity={0.4} />
+                <stop offset="100%" stopColor="var(--color-v)" stopOpacity={0} />
+              </linearGradient>
+            </defs>
+            <Area
+              dataKey="v"
+              type="natural"
+              stroke="var(--color-v)"
+              strokeWidth={1.6}
+              fill={`url(#stat-fill-${chartIndex})`}
+              isAnimationActive={false}
+            />
+          </AreaChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Helpers for the live log feed
+// ----------------------------------------------------------------------------
+
+function fmtTime(d: Date): string {
+  return [d.getHours(), d.getMinutes(), d.getSeconds()]
+    .map((n) => String(n).padStart(2, '0'))
+    .join(':');
+}
+
+function statusBadgeClass(kind: 'api' | 'mcp', status: string): string {
+  if (kind === 'api') {
+    const code = parseInt(status, 10);
+    if (!Number.isFinite(code) || code === 0) return 'bg-muted text-muted-foreground';
+    if (code >= 500 || (code >= 400 && code !== 429))
+      return 'bg-destructive/10 text-destructive';
+    if (code === 429) return 'bg-muted text-foreground';
+    return 'bg-primary/10 text-primary';
+  }
+  // MCP statuses are strings: success / error / failed / timeout / ...
+  const s = status.toLowerCase();
+  if (!s) return 'bg-muted text-muted-foreground';
+  if (s === 'success' || s === 'ok') return 'bg-primary/10 text-primary';
+  if (s === 'timeout' || s === 'rate_limited') return 'bg-muted text-foreground';
+  return 'bg-destructive/10 text-destructive';
+}
+
+function shortId(s: string | null, n = 8): string {
+  if (!s) return '—';
+  return s.length > n ? s.slice(0, n) : s;
+}
+
+function kindBadgeClass(kind: string): string {
+  // "api" (log row) and "ai" (provider) are both AI gateway things → primary tint
+  // "mcp" → muted
+  return kind === 'mcp'
+    ? 'border-border bg-muted text-foreground'
+    : 'border-primary/30 bg-primary/10 text-primary';
+}
+
+// ----------------------------------------------------------------------------
+// Page
+// ----------------------------------------------------------------------------
 
 export function DashboardPage() {
   const { t } = useTranslation();
-  const [health, setHealth] = useState<HealthStatus | null>(null);
-  const [recentActivity, setRecentActivity] = useState<AuditEntry[]>([]);
   const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [loadingHealth, setLoadingHealth] = useState(true);
-  const [loadingActivity, setLoadingActivity] = useState(true);
+  const [usage, setUsage] = useState<UsageStats | null>(null);
+  const [cost, setCost] = useState<CostStats | null>(null);
+  const { live, connected } = useLiveDashboard();
 
   useEffect(() => {
-    api<DashboardStats>('/api/dashboard/stats')
-      .then(setStats)
-      .catch((e) => console.error('Failed to load dashboard stats:', e));
-
-    api<HealthStatus>('/api/health')
-      .then(setHealth)
-      .catch((e) => { console.error('Failed to load health:', e); setHealth(null); })
-      .finally(() => setLoadingHealth(false));
-
-    api<{ items: AuditEntry[] }>('/api/audit/logs?limit=5')
-      .then((res) => setRecentActivity(res.items ?? []))
-      .catch((e) => { console.error('Failed to load activity:', e); setRecentActivity([]); })
-      .finally(() => setLoadingActivity(false));
+    api<DashboardStats>('/api/dashboard/stats').then(setStats).catch(() => {});
+    api<UsageStats>('/api/analytics/usage/stats').then(setUsage).catch(() => {});
+    api<CostStats>('/api/analytics/costs/stats').then(setCost).catch(() => {});
   }, []);
 
-  const statCards = [
-    { title: t('dashboard.totalRequests'), icon: BarChart3, value: stats?.total_requests_today, description: t('dashboard.today') },
-    { title: t('dashboard.activeProviders'), icon: Cpu, value: stats?.active_providers, description: t('dashboard.configured') },
-    { title: t('dashboard.apiKeysCount'), icon: Key, value: stats?.active_api_keys, description: t('dashboard.activeKeys') },
-    { title: t('dashboard.mcpServersCount'), icon: Server, value: stats?.connected_mcp_servers, description: t('dashboard.connected') },
-  ];
+  const tokensSpark = useSparkHistory(usage?.total_tokens_today);
+  const costSpark = useSparkHistory(cost?.total_cost_mtd);
+  const keysSpark = useSparkHistory(stats?.active_api_keys);
+  const rpmSpark = useMemo(() => live?.rpm_buckets ?? Array(24).fill(0), [live]);
+
+  const currentRpm = live?.rpm_buckets?.[live.rpm_buckets.length - 1] ?? 0;
+  const loading = !stats || !usage || !cost;
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{t('dashboard.title')}</h1>
-        <p className="text-muted-foreground">
-          {t('dashboard.subtitle')}
-        </p>
+    // Full-viewport layout — the entire dashboard fits on one screen with
+    // internal scrolling on the lists, never a page-level scrollbar.
+    // `min-h-0` cascades through the nested flex containers so the bottom
+    // grid can actually shrink to fit.
+    <div className="flex h-full min-h-0 flex-1 flex-col gap-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('dashboard.title')}</h1>
+          <p className="text-sm text-muted-foreground">{t('dashboard.subtitle')}</p>
+        </div>
+        <div className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground">
+          <span
+            className={`h-1.5 w-1.5 rounded-full ${
+              connected ? 'animate-pulse bg-foreground' : 'bg-muted-foreground'
+            }`}
+          />
+          {connected ? t('dashboard.live') : t('dashboard.reconnecting')}
+        </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-        {statCards.map((stat) => (
-          <Card key={stat.title}>
-            <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium">{stat.title}</CardTitle>
-              <stat.icon className="h-4 w-4 text-muted-foreground" />
-            </CardHeader>
-            <CardContent>
-              <div className="text-2xl font-bold">
-                {stat.value != null ? stat.value.toLocaleString() : '...'}
-              </div>
-              <p className="text-xs text-muted-foreground">{stat.description}</p>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+      <Section eyebrow={t('dashboard.overviewEyebrow')} className="shrink-0">
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <StatCard
+            label={t('dashboard.tokensUsedToday')}
+            value={usage?.total_tokens_today ?? 0}
+            format={(v) => fmtCompact.format(v)}
+            spark={tokensSpark}
+            loading={loading}
+            chartIndex={1}
+          />
+          <StatCard
+            label={t('dashboard.costMtd')}
+            value={cost?.total_cost_mtd ?? 0}
+            format={(v) => fmtUsd.format(v)}
+            delta={
+              cost?.budget_usage_pct != null ? `${cost.budget_usage_pct.toFixed(1)}%` : undefined
+            }
+            spark={costSpark}
+            loading={loading}
+            chartIndex={2}
+          />
+          <StatCard
+            label={t('dashboard.activeApiKeys')}
+            value={stats?.active_api_keys ?? 0}
+            format={(v) => fmtInt.format(Math.round(v))}
+            spark={keysSpark}
+            loading={loading}
+            chartIndex={3}
+          />
+          <StatCard
+            label={t('dashboard.requestsPerMin')}
+            value={currentRpm}
+            format={(v) => fmtInt.format(Math.round(v))}
+            delta={t('dashboard.live')}
+            spark={rpmSpark}
+            loading={loading}
+            chartIndex={4}
+          />
+        </div>
+      </Section>
 
-      <div className="grid gap-4 md:grid-cols-2">
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">{t('dashboard.recentActivity')}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {loadingActivity ? (
-              <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
-            ) : recentActivity.length === 0 ? (
-              <p className="text-sm text-muted-foreground">{t('dashboard.noRecentActivity')}</p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>{t('dashboard.time')}</TableHead>
-                    <TableHead>{t('dashboard.user')}</TableHead>
-                    <TableHead>{t('dashboard.action')}</TableHead>
-                    <TableHead>{t('dashboard.resource')}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {recentActivity.map((entry) => (
-                    <TableRow key={entry.id}>
-                      <TableCell className="text-xs text-muted-foreground">
-                        {new Date(entry.timestamp).toLocaleString()}
-                      </TableCell>
-                      <TableCell className="text-xs">{entry.user_email}</TableCell>
-                      <TableCell className="text-xs">{entry.action}</TableCell>
-                      <TableCell className="text-xs">{entry.resource}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </CardContent>
-        </Card>
+      {/* Bottom region — flex-1 fills the rest of the viewport. The inner
+          panels use `min-h-0 flex-1` + internal `overflow-y-auto` so they
+          shrink instead of pushing the page beyond one screen. */}
+      <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[1.4fr_1fr]">
+        <Section
+          eyebrow={t('dashboard.logsEyebrow')}
+          className="flex min-h-0 flex-col"
+        >
+          <LiveLogPanel rows={live?.recent_logs ?? null} />
+        </Section>
 
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">{t('dashboard.systemStatus')}</CardTitle>
-          </CardHeader>
-          <CardContent>
-            {loadingHealth ? (
-              <p className="text-sm text-muted-foreground">{t('dashboard.checkingServices')}</p>
-            ) : (
-              <div className="space-y-3">
-                {serviceList.map((svc) => {
-                  const ok = health?.[svc.key] ?? false;
-                  return (
-                    <div key={svc.key} className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <svc.icon className="h-4 w-4 text-muted-foreground" />
-                        <span className="text-sm font-medium">{svc.name}</span>
-                      </div>
-                      <Badge variant={ok ? 'default' : 'destructive'}>
-                        {ok ? t('common.healthy') : t('dashboard.unreachable')}
-                      </Badge>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </CardContent>
-        </Card>
+        <div className="flex min-h-0 flex-col gap-4">
+          {/* Upstream health takes whatever vertical space is left after
+              the (compact, fixed) RPM panel below. */}
+          <Section
+            eyebrow={t('dashboard.providerHealth')}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <ProviderHealthPanel rows={live?.providers ?? null} />
+          </Section>
+          <Section eyebrow={t('dashboard.requestRate')} className="shrink-0">
+            <RpmWindowPanel
+              buckets={live?.rpm_buckets ?? null}
+              maxRpm={live?.max_rpm_limit ?? null}
+            />
+          </Section>
+        </div>
       </div>
     </div>
+  );
+}
+
+// Tiny wrapper that renders a section eyebrow above its child panel. The
+// child fills the remaining vertical space when the parent flexes (so the
+// internal scroll lists can shrink to fit).
+function Section({
+  eyebrow,
+  className,
+  children,
+}: {
+  eyebrow: string;
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className={`flex min-h-0 flex-col ${className ?? ''}`}>
+      <div className="mb-2 shrink-0 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+        {eyebrow}
+      </div>
+      <div className="min-h-0 flex-1">{children}</div>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Live log feed
+// ----------------------------------------------------------------------------
+
+function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
+  const { t } = useTranslation();
+  // Mirror what the row layout will be so headers and rows align perfectly.
+  const cols =
+    'grid-cols-[1fr_auto_44px] lg:grid-cols-[64px_44px_1fr_1fr_56px_52px_52px]';
+  return (
+    // `min-h-0` lets this card shrink inside the flex parent so the row
+    // list scrolls internally instead of pushing the page.
+    <Card className="flex h-full min-h-0 flex-col gap-0 py-0">
+      <div
+        className={`hidden shrink-0 gap-3 border-b px-4 py-2 text-[10px] uppercase tracking-wider text-muted-foreground lg:grid ${cols}`}
+      >
+        <div>{t('dashboard.time')}</div>
+        <div>kind</div>
+        <div>{t('dashboard.user')}</div>
+        <div>{t('dashboard.subjectCol')}</div>
+        <div className="text-right">{t('dashboard.tokens')}</div>
+        <div className="text-right">ms</div>
+        <div className="text-right">{t('dashboard.statusCol')}</div>
+      </div>
+
+      {rows === null ? (
+        <div className="px-4 py-6 text-center font-mono text-xs text-muted-foreground">
+          {t('common.loading')}
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-muted-foreground">
+          <div className="font-mono text-xs">{t('dashboard.noTraffic')}</div>
+          <div className="text-[10px] uppercase tracking-wider">{t('dashboard.noTrafficHint')}</div>
+        </div>
+      ) : (
+        <ul className="min-h-0 flex-1 overflow-y-auto font-mono text-xs">
+          {rows.map((r, i) => (
+            <li
+              key={r.id}
+              className={`grid gap-3 border-b px-4 py-2 last:border-b-0 hover:bg-muted/30 lg:items-center ${cols}`}
+              style={{ opacity: 1 - i * 0.022 }}
+            >
+              <div className="hidden text-muted-foreground lg:block">
+                {fmtTime(new Date(r.created_at + 'Z'))}
+              </div>
+              <div className="hidden lg:block">
+                <span
+                  className={`rounded border px-1 py-0.5 text-[9px] font-medium uppercase ${kindBadgeClass(r.kind)}`}
+                >
+                  {r.kind}
+                </span>
+              </div>
+              <div className="truncate">{shortId(r.user_id || null, 12)}</div>
+              <div className="hidden truncate lg:block">{r.subject || '—'}</div>
+              <div className="hidden text-right tabular-nums lg:block">
+                {r.kind === 'api' ? r.tokens.toLocaleString() : '—'}
+              </div>
+              <div className="hidden text-right tabular-nums text-muted-foreground lg:block">
+                {r.latency_ms || '—'}
+              </div>
+              <div className="truncate text-[10px] text-muted-foreground lg:hidden">
+                <span
+                  className={`mr-1 rounded border px-1 text-[9px] uppercase ${kindBadgeClass(r.kind)}`}
+                >
+                  {r.kind}
+                </span>
+                {r.subject}
+              </div>
+              <div className="text-right">
+                <span
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${statusBadgeClass(r.kind, r.status)}`}
+                >
+                  {r.status || '—'}
+                </span>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Provider health
+// ----------------------------------------------------------------------------
+
+// Fixed-height upstream-health panel with a scrollable list. Each row is a
+// single line so 10+ providers fit comfortably without making the panel
+// taller than the chart next to it.
+function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
+  const { t } = useTranslation();
+  return (
+    <Card className="flex h-full min-h-0 flex-col gap-0 py-0">
+      {rows === null ? (
+        <div className="px-5 py-4 text-center text-[11px] text-muted-foreground">
+          {t('common.loading')}
+        </div>
+      ) : rows.length === 0 ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-1 px-5 text-[11px] text-muted-foreground">
+          <span>{t('dashboard.noProvidersTitle')}</span>
+          <span className="text-[10px] uppercase tracking-wider">
+            {t('dashboard.noProvidersHint')}
+          </span>
+        </div>
+      ) : (
+        <ul className="min-h-0 flex-1 divide-y overflow-y-auto">
+          {rows.map((p) => {
+            const cbReal = p.cb_state || '';
+            const inferred: 'Closed' | 'HalfOpen' | 'Open' =
+              p.success_rate >= 99 ? 'Closed' : p.success_rate >= 90 ? 'HalfOpen' : 'Open';
+            const cb = (cbReal || inferred) as 'Closed' | 'HalfOpen' | 'Open';
+            const dotClass =
+              cb === 'Closed'
+                ? 'bg-foreground'
+                : cb === 'HalfOpen'
+                  ? 'bg-muted-foreground'
+                  : 'bg-destructive';
+            const cbBorder =
+              cb === 'Open'
+                ? 'border-destructive/40 text-destructive'
+                : cb === 'HalfOpen'
+                  ? 'border-muted-foreground/40 text-muted-foreground'
+                  : 'border-border text-muted-foreground';
+            const latency = Math.round(p.avg_latency_ms);
+            return (
+              <li
+                key={`${p.kind}-${p.provider}`}
+                className="flex items-center gap-2 px-3 py-2 text-xs hover:bg-muted/30"
+              >
+                {/* status dot — color encodes the CB state, so we can drop
+                    the textual "Healthy/Degraded/Down" label entirely */}
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`} />
+                <span
+                  className={`shrink-0 rounded border px-1 py-px font-mono text-[9px] uppercase ${kindBadgeClass(p.kind)}`}
+                >
+                  {p.kind}
+                </span>
+                <span className="min-w-0 flex-1 truncate font-mono">{p.provider}</span>
+                <span className="font-mono tabular-nums text-muted-foreground">
+                  {p.requests.toLocaleString()}r
+                </span>
+                <span className="font-mono tabular-nums">{latency}ms</span>
+                <span className="w-11 text-right font-mono tabular-nums text-muted-foreground">
+                  {p.success_rate.toFixed(0)}%
+                </span>
+                <span className={`shrink-0 rounded border px-1 font-mono text-[9px] ${cbBorder}`}>
+                  {cb}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Sliding-window RPM area chart (shadcn AreaChart)
+// ----------------------------------------------------------------------------
+
+const rpmConfig = {
+  count: { label: 'Requests', color: 'var(--chart-1)' },
+} satisfies ChartConfig;
+
+function RpmWindowPanel({
+  buckets,
+  maxRpm,
+}: {
+  buckets: number[] | null;
+  maxRpm: number | null;
+}) {
+  const { t } = useTranslation();
+  const data = buckets ?? Array(30).fill(0);
+  const total = data.reduce((a, b) => a + b, 0);
+  const avg = Math.round(total / Math.max(1, data.length));
+  const last = data[data.length - 1] ?? 0;
+  const peak = Math.max(...data, 0);
+
+  const chartData = useMemo(
+    () =>
+      data.map((count, i) => ({
+        minute: `-${data.length - 1 - i}m`,
+        count,
+      })),
+    [data],
+  );
+
+  return (
+    // Compact: header on one line (current rpm + avg/peak/total inline),
+    // small chart, no footer. Total height ~140px.
+    <Card size="sm" className="gap-2">
+      <CardHeader className="flex-row items-baseline justify-between gap-3 pb-0">
+        <div className="flex items-baseline gap-2 min-w-0">
+          <span className="font-mono text-xl tabular-nums leading-none">
+            {last.toLocaleString()}
+          </span>
+          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            /min
+          </span>
+        </div>
+        <div className="flex items-baseline gap-3 text-[10px] text-muted-foreground">
+          <span>
+            <span className="uppercase tracking-wider">{t('dashboard.avgPerMin')} </span>
+            <span className="font-mono tabular-nums text-foreground">{avg}</span>
+          </span>
+          <span>
+            <span className="uppercase tracking-wider">{t('dashboard.peak')} </span>
+            <span className="font-mono tabular-nums text-foreground">{peak}</span>
+          </span>
+          {maxRpm != null && (
+            <span>
+              <span className="uppercase tracking-wider">{t('dashboard.limit')} </span>
+              <span className="font-mono tabular-nums text-foreground">{maxRpm}</span>
+            </span>
+          )}
+        </div>
+      </CardHeader>
+      <CardContent className="px-2 pb-2">
+        <ChartContainer config={rpmConfig} className="aspect-auto h-20 w-full">
+          <AreaChart data={chartData} margin={{ left: 4, right: 4, top: 4, bottom: 0 }}>
+            <defs>
+              <linearGradient id="rpm-fill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="5%" stopColor="var(--color-count)" stopOpacity={0.45} />
+                <stop offset="95%" stopColor="var(--color-count)" stopOpacity={0.05} />
+              </linearGradient>
+            </defs>
+            <CartesianGrid vertical={false} />
+            <YAxis hide domain={[0, 'dataMax']} />
+            <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="line" />} />
+            <Area
+              dataKey="count"
+              type="natural"
+              stroke="var(--color-count)"
+              strokeWidth={1.6}
+              fill="url(#rpm-fill)"
+              isAnimationActive={false}
+            />
+            {maxRpm != null && (
+              <ReferenceLine
+                y={maxRpm}
+                stroke="var(--destructive)"
+                strokeDasharray="4 4"
+                strokeWidth={1}
+              />
+            )}
+          </AreaChart>
+        </ChartContainer>
+      </CardContent>
+    </Card>
   );
 }

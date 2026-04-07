@@ -40,6 +40,12 @@ pub struct RegisteredServer {
     pub tools: Vec<McpToolInfo>,
     pub status: ServerStatus,
     pub last_health_check: Option<DateTime<Utc>>,
+    /// Optional `(header name, header value)` to attach to every upstream
+    /// request. Resolved once at registration time from the encrypted
+    /// `auth_secret` column. Skipped from serialization to avoid leaking
+    /// the secret through any debug/log surface.
+    #[serde(skip)]
+    pub auth_header: Option<(String, String)>,
 }
 
 /// The namespace separator used to prefix tool names with their server name.
@@ -181,6 +187,7 @@ mod tests {
                 .collect(),
             status: ServerStatus::Connected,
             last_health_check: None,
+            auth_header: None,
         }
     }
 
