@@ -732,12 +732,12 @@
   "unifiedLogs": {
     "title": "日志查询",
     "subtitle": "统一日志查询与搜索",
-    "platform": "平台",
-    "audit": "审计",
-    "gateway": "网关",
-    "mcp": "MCP",
-    "access": "访问",
-    "app": "应用",
+    "platform": "平台日志",
+    "audit": "审计日志",
+    "gateway": "网关日志",
+    "mcp": "MCP 日志",
+    "access": "访问日志",
+    "app": "应用日志",
     "results": "查询结果",
     "noLogs": "未找到日志。"
   }
