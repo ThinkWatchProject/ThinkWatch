@@ -118,12 +118,23 @@ pub fn parse_exclude_param(
 }
 
 /// Split on commas that are not inside double-quoted segments.
+///
+/// Recognises `\"` and `\\` as escapes inside quoted strings, so a value
+/// like `path:"foo\"bar"` parses as a single token instead of splitting
+/// on the embedded `"`. The split function returns slices that still
+/// contain the escapes; `unescape_value` undoes them after `strip_quotes`.
 fn split_top_level_commas(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut start = 0;
     let mut in_quote = false;
-    for (i, c) in s.char_indices() {
+    let mut chars = s.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
         match c {
+            // Inside quoted segments, a backslash escapes the next char
+            // (so `\"` is a literal quote, not a quote terminator).
+            '\\' if in_quote => {
+                chars.next();
+            }
             '"' => in_quote = !in_quote,
             ',' if !in_quote => {
                 out.push(&s[start..i]);
@@ -138,12 +149,29 @@ fn split_top_level_commas(s: &str) -> Vec<&str> {
     out
 }
 
-fn strip_quotes(s: &str) -> &str {
-    if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
+/// Strip surrounding double quotes if present, then undo any backslash
+/// escapes (`\\` → `\`, `\"` → `"`). Anything else after a backslash is
+/// passed through verbatim so users don't get surprised by C-style
+/// escape sequences they didn't ask for.
+fn strip_quotes(s: &str) -> String {
+    let inner = if s.len() >= 2 && s.starts_with('"') && s.ends_with('"') {
         &s[1..s.len() - 1]
     } else {
-        s
+        return s.to_string();
+    };
+    let mut out = String::with_capacity(inner.len());
+    let mut chars = inner.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(next) => out.push(next),
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
     }
+    out
 }
 
 #[cfg(test)]
@@ -305,6 +333,38 @@ mod tests {
         // (which would be a meaningful filter the user didn't ask for).
         assert!(parse_exclude_param(Some("method:"), allowed).is_empty());
         assert!(parse_exclude_param(Some("method:\"\""), allowed).is_empty());
+    }
+
+    #[test]
+    fn quoted_value_with_escaped_inner_quote_is_one_token() {
+        let allowed = &[("path", "path", ExcludeMode::NotLike)];
+        // Without escape handling the splitter would close the quote
+        // at \"  and then re-open it at the next ", leading to two
+        // bogus tokens.
+        let out = parse_exclude_param(Some(r#"path:"foo\"bar""#), allowed);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1, r#"%foo"bar%"#);
+    }
+
+    #[test]
+    fn quoted_value_with_escaped_backslash() {
+        let allowed = &[("path", "path", ExcludeMode::NotLike)];
+        // The user wants to match a literal backslash followed by an n.
+        // The token must come through as `\n` (2 chars), then the LIKE
+        // wildcard escape doubles the backslash for SQL → `\\n`.
+        let out = parse_exclude_param(Some(r#"path:"\\n""#), allowed);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1, r#"%\\n%"#);
+    }
+
+    #[test]
+    fn quoted_value_with_comma_inside_escaped_quotes() {
+        let allowed = &[("path", "path", ExcludeMode::NotLike)];
+        // Embedded comma must NOT split the token even when surrounded
+        // by escaped quotes.
+        let out = parse_exclude_param(Some(r#"path:"a\"b,c\"d""#), allowed);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1, r#"%a"b,c"d%"#);
     }
 
     #[test]

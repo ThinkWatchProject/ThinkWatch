@@ -78,10 +78,15 @@ function parseQuery(input: string): ParsedQuery {
     const key = match[2];
     const value = match[3] ?? match[4];
     if (negate) {
-      // Re-quote if value contains commas/colons/spaces so the backend
-      // splitter sees it as one token.
-      const needsQuotes = /[\s,:]/.test(value);
-      excludes.push(`${key}:${needsQuotes ? `"${value}"` : value}`);
+      // Re-quote if the value contains anything that would confuse the
+      // backend splitter (whitespace, comma, colon, quote, backslash).
+      // Inside the quotes, escape `\` and `"` so the backend's escape-aware
+      // splitter can recover the original value.
+      const needsQuotes = /[\s,:"\\]/.test(value);
+      const serialized = needsQuotes
+        ? `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`
+        : value;
+      excludes.push(`${key}:${serialized}`);
     } else {
       params[key] = value;
     }
