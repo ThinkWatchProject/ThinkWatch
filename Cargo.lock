@@ -4034,6 +4034,7 @@ dependencies = [
  "axum-extra",
  "chrono",
  "clickhouse",
+ "data-encoding",
  "dotenvy",
  "fred",
  "hex",

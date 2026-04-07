@@ -119,8 +119,6 @@
     "req15m": "请求 · 15 分钟",
     "noTraffic": "窗口内无流量",
     "noTrafficHint": "请求经过网关时会出现在这里",
-    "noProvidersTitle": "尚未配置提供商",
-    "noProvidersHint": "在 管理 → 提供商 中添加",
     "subjectCol": "模型 · 工具",
     "tokens": "Tokens",
     "statusCol": "状态",

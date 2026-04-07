@@ -119,8 +119,6 @@
     "req15m": "req · 15m",
     "noTraffic": "No traffic in window",
     "noTrafficHint": "logs will appear here as requests flow through",
-    "noProvidersTitle": "No providers configured",
-    "noProvidersHint": "add one in admin → providers",
     "subjectCol": "model · tool",
     "tokens": "tokens",
     "statusCol": "status",
