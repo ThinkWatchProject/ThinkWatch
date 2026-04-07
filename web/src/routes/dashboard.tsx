@@ -24,6 +24,7 @@ import {
   type ChartConfig,
 } from '@/components/ui/chart';
 import { api } from '@/lib/api';
+import { DashboardLiveSchema, WsTicketSchema } from '@/lib/schemas';
 
 interface DashboardStats {
   total_requests_today: number;
@@ -153,7 +154,9 @@ function useLiveDashboard() {
       const token = localStorage.getItem('access_token');
       if (!token) {
         // Not signed in yet — try a plain HTTP fetch as a one-shot fallback.
-        api<DashboardLive>('/api/dashboard/live').then(setLive).catch(() => {});
+        api<DashboardLive>('/api/dashboard/live', { schema: DashboardLiveSchema })
+          .then(setLive)
+          .catch(() => {});
         return;
       }
       // Mint a single-use ticket via authenticated POST. The ticket is
@@ -163,7 +166,10 @@ function useLiveDashboard() {
       // headers).
       let ticket: string;
       try {
-        const res = await api<{ ticket: string }>('/api/dashboard/ws-ticket', { method: 'POST' });
+        const res = await api<{ ticket: string }>('/api/dashboard/ws-ticket', {
+          method: 'POST',
+          schema: WsTicketSchema,
+        });
         ticket = res.ticket;
       } catch {
         scheduleReconnect();
@@ -210,7 +216,9 @@ function useLiveDashboard() {
         // immediately even if WS is unavailable. Reads via ref so it
         // sees the latest state, not a stale closure capture.
         if (liveRef.current === null) {
-          api<DashboardLive>('/api/dashboard/live').then(setLive).catch(() => {});
+          api<DashboardLive>('/api/dashboard/live', { schema: DashboardLiveSchema })
+            .then(setLive)
+            .catch(() => {});
         }
         scheduleReconnect();
       };

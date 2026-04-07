@@ -1,9 +1,15 @@
+import type { ZodType } from 'zod';
+
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
 
-interface ApiOptions {
+interface ApiOptions<T = unknown> {
   method?: string;
   body?: unknown;
   headers?: Record<string, string>;
+  /// Optional zod schema. When provided, the response is validated at
+  /// runtime — a schema mismatch is logged via console.error AND throws,
+  /// so callers find out immediately if the backend changes shape.
+  schema?: ZodType<T>;
 }
 
 // --- HMAC Signing (Web Crypto API) ---
@@ -133,7 +139,17 @@ async function tryRefreshToken(): Promise<boolean> {
 
 // --- API Client ---
 
-export async function api<T>(path: string, options: ApiOptions = {}): Promise<T> {
+function validate<T>(path: string, json: unknown, schema?: ZodType<T>): T {
+  if (!schema) return json as T;
+  const parsed = schema.safeParse(json);
+  if (!parsed.success) {
+    console.error(`API response failed schema validation for ${path}`, parsed.error, json);
+    throw new Error(`Invalid response shape from ${path}`);
+  }
+  return parsed.data;
+}
+
+export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise<T> {
   const token = localStorage.getItem('access_token');
   const method = options.method ?? 'GET';
   const bodyStr = options.body ? JSON.stringify(options.body) : undefined;
@@ -169,7 +185,7 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
         },
         body: bodyStr,
       });
-      if (retryRes.ok) return retryRes.json();
+      if (retryRes.ok) return validate(path, await retryRes.json(), options.schema);
     }
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
@@ -183,7 +199,7 @@ export async function api<T>(path: string, options: ApiOptions = {}): Promise<T>
     throw new Error(err.error?.message ?? 'Request failed');
   }
 
-  return res.json();
+  return validate(path, await res.json(), options.schema);
 }
 
 export const apiPost = <T>(path: string, body: unknown) =>
