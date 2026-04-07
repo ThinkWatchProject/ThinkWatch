@@ -71,8 +71,12 @@ pub async fn create_server(
     // Sync the in-memory MCP registry so the gateway can route to the new
     // server immediately, without a restart. The CB is also pre-registered
     // so the dashboard upstream-health panel reflects it on next snapshot.
-    if let Ok(registered) =
-        crate::app::build_registered_server(&state.db, &server, &state.config.encryption_key).await
+    if let Ok(registered) = crate::mcp_runtime::build_registered_server(
+        &state.db,
+        &server,
+        &state.config.encryption_key,
+    )
+    .await
     {
         state.mcp_registry.register(registered).await;
         state.mcp_circuit_breakers.register(&server.name).await;
@@ -93,7 +97,7 @@ pub async fn create_server(
         let server_id = server.id;
         let db_for_err = state.db.clone();
         tokio::spawn(async move {
-            match crate::app::discover_and_persist_tools(&db, &http, &server, &key).await {
+            match crate::mcp_runtime::discover_and_persist_tools(&db, &http, &server, &key).await {
                 Ok(n) => {
                     tracing::info!(
                         mcp_server = %server.name,
@@ -105,7 +109,7 @@ pub async fn create_server(
                         .execute(&db_for_err)
                         .await;
                     if let Ok(updated) =
-                        crate::app::build_registered_server(&db, &server, &key).await
+                        crate::mcp_runtime::build_registered_server(&db, &server, &key).await
                     {
                         registry.register(updated).await;
                     }
@@ -201,8 +205,12 @@ pub async fn update_server(
 
     // Re-register so the in-memory registry picks up the new endpoint /
     // name. `register` is an upsert keyed by id.
-    if let Ok(registered) =
-        crate::app::build_registered_server(&state.db, &updated, &state.config.encryption_key).await
+    if let Ok(registered) = crate::mcp_runtime::build_registered_server(
+        &state.db,
+        &updated,
+        &state.config.encryption_key,
+    )
+    .await
     {
         state.mcp_registry.register(registered).await;
         state.mcp_circuit_breakers.register(&updated.name).await;

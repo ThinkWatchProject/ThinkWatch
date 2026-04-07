@@ -37,7 +37,7 @@ pub async fn discover_tools(
     .await?
     .ok_or(AppError::NotFound("MCP Server not found".into()))?;
 
-    let count = crate::app::discover_and_persist_tools(
+    let count = crate::mcp_runtime::discover_and_persist_tools(
         &state.db,
         &state.http_client,
         &server,
@@ -48,8 +48,12 @@ pub async fn discover_tools(
 
     // Reflect the freshly-discovered tools in the in-memory registry so
     // `tools/list` returns them without waiting for the health loop.
-    if let Ok(updated) =
-        crate::app::build_registered_server(&state.db, &server, &state.config.encryption_key).await
+    if let Ok(updated) = crate::mcp_runtime::build_registered_server(
+        &state.db,
+        &server,
+        &state.config.encryption_key,
+    )
+    .await
     {
         state.mcp_registry.register(updated).await;
     }

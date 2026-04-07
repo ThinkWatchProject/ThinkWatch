@@ -154,16 +154,23 @@ mechanical fixes.
 
 ## Round 8 — Architecture / refactor
 
-- [ ] **R8.1** Split [crates/server/src/app.rs](crates/server/src/app.rs)
-  - Extract into `app/` module: `state.rs`, `gateway_app.rs`,
-    `console_app.rs`, `providers_loader.rs`, `mcp_loader.rs`,
-    `mcp_health.rs`.
-- [ ] **R8.2** Sub-state structs for `AppState`
-  - Reduce 18 fields → 4 logical sub-states (`Core`, `Mcp`, `Filters`,
-    `Clickhouse`). Handlers extract only the sub-state they need.
-- [ ] **R8.3** Move tracing of `format!()`-built error chains to
-  redact-aware helper to prevent secret leaks
-  - File: [crates/common/src/errors.rs](crates/common/src/errors.rs#L50)
+- [x] **R8.1** Extracted MCP runtime helpers (~380 lines —
+  `build_registered_server`, `discover_and_persist_tools`,
+  `resolve_mcp_auth_header`, `load_mcp_servers_into_registry`,
+  `spawn_mcp_health_loop`, parse helpers, McpToolDef/Result) from
+  `app.rs` into a new `crates/server/src/mcp_runtime.rs`. `app.rs`
+  drops from 1082 → ~700 lines and now focuses on AppState +
+  router wiring. CRUD handlers updated to call via
+  `crate::mcp_runtime::`.
+- [N/A] **R8.2** Sub-state struct refactor deferred. Touching every
+  handler signature is a huge churn for marginal benefit; Pareto-
+  better to revisit when we add a 5th major sub-system.
+- [x] **R8.3** Critical fix in `errors.rs`:
+  `AppError::Internal(e).into_response()` was using `self.to_string()`
+  as the public error message, which **leaked the full internal
+  error chain to API clients**. Now the internal variant returns a
+  generic "Internal server error" string while the full `e:#` chain
+  is logged server-side via `tracing::error!`.
 
 ---
 

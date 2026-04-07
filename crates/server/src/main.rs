@@ -11,6 +11,7 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 mod app;
 mod error;
 mod handlers;
+mod mcp_runtime;
 mod middleware;
 mod tasks;
 mod tracing_ch;
