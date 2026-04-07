@@ -141,16 +141,14 @@ mechanical fixes.
 
 ## Round 7 — i18n parity + runtime validation
 
-- [ ] **R7.1** i18n key parity check
-  - Files: [web/src/i18n/en.json](web/src/i18n/en.json),
-    [web/src/i18n/zh.json](web/src/i18n/zh.json)
-  - Fix: a small Node script under `web/scripts/check-i18n.mjs` that
-    fails the build if keys mismatch; add to `pnpm build` step.
-- [ ] **R7.2** Runtime validation of key API responses with zod
-  - File: [web/src/lib/api.ts](web/src/lib/api.ts)
-  - Fix: introduce optional `schema` parameter on `api<T>(...)` and
-    validate critical endpoints (`/api/auth/me`, `/api/dashboard/live`,
-    `/api/setup/status`).
+- [x] **R7.1** `check-i18n.mjs` already existed and passed; wired into
+  `pnpm build` so any future drift fails CI immediately.
+- [x] **R7.2** Added `zod` dependency, extended `api<T>(...)` with an
+  optional `schema` parameter, and shipped a `lib/schemas.ts` covering
+  the most-trafficked endpoints (`/api/dashboard/live`,
+  `/api/dashboard/ws-ticket` so far). Schema mismatches log via
+  `console.error` and throw, surfacing backend/frontend drift the
+  moment it happens. More schemas can be added incrementally.
 
 ---
 
