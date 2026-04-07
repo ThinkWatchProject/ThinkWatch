@@ -346,14 +346,62 @@ pub async fn get_dashboard_live(
 // ============================================================================
 // WebSocket push channel for the dashboard
 //
-// Browsers can't send Authorization headers on a WS upgrade, so we accept
-// the access token via `?token=...` and validate it inline. The endpoint is
-// mounted OUTSIDE the require_auth middleware on purpose.
+// Browsers can't send Authorization headers on a WS upgrade. The previous
+// design accepted the JWT in `?token=…`, but the URL ends up in:
+//   - server access logs (full URL)
+//   - reverse proxy logs
+//   - browser history
+//   - the Referer header on outbound links
+//
+// New flow:
+//   1. Authenticated client POSTs `/api/dashboard/ws-ticket` to mint a
+//      single-use, 30-second ticket. The ticket is bound to the user_id
+//      and the access-token hash so we can still re-check JWT revocation
+//      on the WS connection.
+//   2. Client opens `wss://…/api/dashboard/ws?ticket=<opaque>`. The
+//      handler atomically GETDELs the ticket from Redis and rejects on
+//      miss.
 // ============================================================================
+
+const WS_TICKET_TTL_SECS: i64 = 30;
+
+#[derive(Debug, Serialize)]
+pub struct WsTicketResponse {
+    pub ticket: String,
+}
+
+/// `POST /api/dashboard/ws-ticket` — mint a single-use ticket. Auth runs
+/// via the normal `require_auth` middleware so the user proves identity
+/// here without exposing the JWT in a URL afterwards.
+pub async fn create_dashboard_ws_ticket(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<WsTicketResponse>, AppError> {
+    let mut bytes = [0u8; 32];
+    rand::fill(&mut bytes);
+    let ticket = data_encoding::BASE64URL_NOPAD.encode(&bytes);
+    let key = format!("dashboard_ws_ticket:{ticket}");
+    // Store user_id so the WS handler knows who it's talking to without
+    // re-trusting any client-supplied data. We don't bind to the JWT
+    // hash here because the WS endpoint doesn't see the JWT — the
+    // ticket itself is the bearer credential, with a 30s lifetime.
+    let value = auth_user.claims.sub.to_string();
+    let _: () = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &key,
+        value,
+        Some(fred::types::Expiration::EX(WS_TICKET_TTL_SECS)),
+        None,
+        false,
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to mint WS ticket: {e}")))?;
+    Ok(Json(WsTicketResponse { ticket }))
+}
 
 #[derive(Debug, Deserialize)]
 pub struct WsAuthQuery {
-    pub token: Option<String>,
+    pub ticket: Option<String>,
 }
 
 pub async fn dashboard_ws(
@@ -361,25 +409,31 @@ pub async fn dashboard_ws(
     State(state): State<AppState>,
     Query(q): Query<WsAuthQuery>,
 ) -> Result<Response, axum::http::StatusCode> {
-    // Manual JWT validation — mirrors `middleware::auth_guard::require_auth`
-    // for the bits that matter on a WS upgrade.
-    let token = q.token.ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
-    let claims = state
-        .jwt
-        .verify_token(&token)
+    // Atomically consume the ticket. Using fred's GETDEL means a replay
+    // attempt always fails — the second consumer sees an empty string.
+    let ticket = q.ticket.ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    if ticket.is_empty() || ticket.len() > 64 {
+        return Err(axum::http::StatusCode::UNAUTHORIZED);
+    }
+    let key = format!("dashboard_ws_ticket:{ticket}");
+    let user_id_str: Option<String> = fred::interfaces::KeysInterface::getdel(&state.redis, &key)
+        .await
         .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)?;
-    if claims.token_type != "access" {
-        return Err(axum::http::StatusCode::UNAUTHORIZED);
-    }
-    let token_hash = think_watch_auth::jwt::sha2_hash(&token);
-    if think_watch_auth::jwt::is_revoked(&state.redis, &token_hash).await {
-        return Err(axum::http::StatusCode::UNAUTHORIZED);
-    }
+    let user_id_str = user_id_str.ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
+    let user_id: uuid::Uuid = user_id_str
+        .parse()
+        .map_err(|_| axum::http::StatusCode::UNAUTHORIZED)?;
 
-    Ok(ws.on_upgrade(move |socket| dashboard_ws_loop(socket, state, token_hash)))
+    Ok(ws.on_upgrade(move |socket| dashboard_ws_loop(socket, state, user_id)))
 }
 
-async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, token_hash: String) {
+/// Redis key set by `auth.revoke_sessions` to forcibly close all live
+/// dashboard WebSockets for a user. The WS loop polls this key.
+pub fn user_revoked_key(user_id: uuid::Uuid) -> String {
+    format!("dashboard_user_revoked:{user_id}")
+}
+
+async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid::Uuid) {
     // Push an initial snapshot immediately so the client never sees an
     // empty UI on connect.
     if let Err(e) = push_snapshot(&mut socket, &state).await {
@@ -392,12 +446,12 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, token_hash: S
     // First tick fires immediately — we already pushed once, so consume it.
     ticker.tick().await;
 
-    // Re-check token revocation periodically. Without this, a token
-    // blacklisted via `/api/auth/revoke-sessions` would still keep its
-    // dashboard WS open until natural disconnect (potentially hours).
+    // Re-check session revocation periodically. The auth handler's
+    // revoke_sessions sets a `dashboard_user_revoked:{uid}` flag in Redis;
     // 8 ticks @ 4s = ~32s window between revoke and forced disconnect.
     let mut ticks_since_revoke_check: u32 = 0;
     const REVOKE_CHECK_EVERY: u32 = 8;
+    let revoke_key = user_revoked_key(user_id);
 
     loop {
         tokio::select! {
@@ -405,8 +459,11 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, token_hash: S
                 ticks_since_revoke_check += 1;
                 if ticks_since_revoke_check >= REVOKE_CHECK_EVERY {
                     ticks_since_revoke_check = 0;
-                    if think_watch_auth::jwt::is_revoked(&state.redis, &token_hash).await {
-                        tracing::info!("dashboard ws closing: token revoked");
+                    let revoked: u8 = fred::interfaces::KeysInterface::exists(&state.redis, &revoke_key)
+                        .await
+                        .unwrap_or(0);
+                    if revoked > 0 {
+                        tracing::info!(%user_id, "dashboard ws closing: user revoked");
                         let _ = socket.send(Message::Close(None)).await;
                         return;
                     }

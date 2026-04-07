@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Inbox } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ReferenceLine, YAxis } from 'recharts';
 import {
   Card,
@@ -113,6 +114,12 @@ function useSparkHistory(value: number | undefined, length = 24) {
 function useLiveDashboard() {
   const [live, setLive] = useState<DashboardLive | null>(null);
   const [connected, setConnected] = useState(false);
+  // Ref mirror so the WS callbacks can read "have we ever received data?"
+  // without capturing a stale closure (the previous code captured `live`
+  // at effect-mount time and the fallback fetch in onclose never fired
+  // after the very first connect).
+  const liveRef = useRef<DashboardLive | null>(null);
+  liveRef.current = live;
 
   useEffect(() => {
     let ws: WebSocket | null = null;
@@ -120,7 +127,7 @@ function useLiveDashboard() {
     let cancelled = false;
     let backoff = 1000;
 
-    const connect = () => {
+    const connect = async () => {
       if (cancelled) return;
       const token = localStorage.getItem('access_token');
       if (!token) {
@@ -128,12 +135,25 @@ function useLiveDashboard() {
         api<DashboardLive>('/api/dashboard/live').then(setLive).catch(() => {});
         return;
       }
+      // Mint a single-use ticket via authenticated POST. The ticket is
+      // bound to the user_id and expires in 30s; the WS endpoint atomically
+      // consumes it. This keeps the JWT out of the WS URL (which would
+      // otherwise leak through access logs, browser history, and Referer
+      // headers).
+      let ticket: string;
+      try {
+        const res = await api<{ ticket: string }>('/api/dashboard/ws-ticket', { method: 'POST' });
+        ticket = res.ticket;
+      } catch {
+        scheduleReconnect();
+        return;
+      }
+      if (cancelled) return;
+
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const apiBase = import.meta.env.VITE_API_BASE ?? '';
-      // Resolve the WS URL relative to the current origin so it works behind
-      // any reverse proxy that the HTTP API also goes through.
       const httpUrl = new URL(
-        `${apiBase}/api/dashboard/ws?token=${encodeURIComponent(token)}`,
+        `${apiBase}/api/dashboard/ws?ticket=${encodeURIComponent(ticket)}`,
         window.location.origin,
       );
       const wsUrl = `${proto}://${httpUrl.host}${httpUrl.pathname}${httpUrl.search}`;
@@ -153,8 +173,10 @@ function useLiveDashboard() {
         try {
           const payload = JSON.parse(ev.data) as DashboardLive;
           setLive(payload);
-        } catch {
-          /* drop malformed frames */
+        } catch (err) {
+          // Surface parse failures so they're at least visible in
+          // devtools — the previous silent catch made WS bugs invisible.
+          console.error('dashboard ws parse failed', err, ev.data);
         }
       };
       ws.onerror = () => {
@@ -164,8 +186,9 @@ function useLiveDashboard() {
       ws.onclose = () => {
         setConnected(false);
         // First close — try a one-shot HTTP fetch so the user sees data
-        // immediately even if WS is unavailable.
-        if (live === null) {
+        // immediately even if WS is unavailable. Reads via ref so it
+        // sees the latest state, not a stale closure capture.
+        if (liveRef.current === null) {
           api<DashboardLive>('/api/dashboard/live').then(setLive).catch(() => {});
         }
         scheduleReconnect();
@@ -175,11 +198,13 @@ function useLiveDashboard() {
     const scheduleReconnect = () => {
       if (cancelled) return;
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      reconnectTimer = setTimeout(connect, backoff);
+      reconnectTimer = setTimeout(() => {
+        void connect();
+      }, backoff);
       backoff = Math.min(backoff * 2, 15000);
     };
 
-    connect();
+    void connect();
 
     const onVis = () => {
       if (document.hidden) {
@@ -189,7 +214,7 @@ function useLiveDashboard() {
           reconnectTimer = null;
         }
       } else if (!ws || ws.readyState === WebSocket.CLOSED) {
-        connect();
+        void connect();
       }
     };
     document.addEventListener('visibilitychange', onVis);
@@ -334,6 +359,24 @@ export function DashboardPage() {
   const currentRpm = live?.rpm_buckets?.[live.rpm_buckets.length - 1] ?? 0;
   const loading = !stats || !usage || !cost;
 
+  // Upstream-health filter (all / ai / mcp). Counts come from the live
+  // snapshot so the tab pills always show the current per-kind totals.
+  const [providerFilter, setProviderFilter] = useState<ProviderFilter>('all');
+  const allProviders = live?.providers ?? [];
+  const providerCounts = useMemo(
+    () => ({
+      all: allProviders.length,
+      ai: allProviders.filter((p) => p.kind === 'ai').length,
+      mcp: allProviders.filter((p) => p.kind === 'mcp').length,
+    }),
+    [allProviders],
+  );
+  const filteredProviders = useMemo(() => {
+    if (live === null) return null;
+    if (providerFilter === 'all') return allProviders;
+    return allProviders.filter((p) => p.kind === providerFilter);
+  }, [live, allProviders, providerFilter]);
+
   return (
     // Full-viewport layout — the entire dashboard fits on one screen with
     // internal scrolling on the lists, never a page-level scrollbar.
@@ -413,8 +456,15 @@ export function DashboardPage() {
           <Section
             eyebrow={t('dashboard.providerHealth')}
             className="flex min-h-0 flex-1 flex-col"
+            action={
+              <ProviderFilterTabs
+                value={providerFilter}
+                onChange={setProviderFilter}
+                counts={providerCounts}
+              />
+            }
           >
-            <ProviderHealthPanel rows={live?.providers ?? null} />
+            <ProviderHealthPanel rows={filteredProviders} />
           </Section>
           <Section eyebrow={t('dashboard.requestRate')} className="shrink-0">
             <RpmWindowPanel
@@ -430,22 +480,71 @@ export function DashboardPage() {
 
 // Tiny wrapper that renders a section eyebrow above its child panel. The
 // child fills the remaining vertical space when the parent flexes (so the
-// internal scroll lists can shrink to fit).
+// internal scroll lists can shrink to fit). An optional `action` slot is
+// rendered right-aligned next to the eyebrow (e.g. tab switchers).
 function Section({
   eyebrow,
+  action,
   className,
   children,
 }: {
   eyebrow: string;
+  action?: ReactNode;
   className?: string;
   children: ReactNode;
 }) {
   return (
     <div className={`flex min-h-0 flex-col ${className ?? ''}`}>
-      <div className="mb-2 shrink-0 text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
-        {eyebrow}
+      <div className="mb-2 flex shrink-0 items-center justify-between gap-3">
+        <div className="text-[10px] font-medium uppercase tracking-[0.18em] text-muted-foreground">
+          {eyebrow}
+        </div>
+        {action}
       </div>
       <div className="min-h-0 flex-1">{children}</div>
+    </div>
+  );
+}
+
+// Tab switcher used in the upstream-health eyebrow. Three options:
+// all / ai / mcp. Designed to be visually quiet — uppercase tracking-wider
+// labels matching the eyebrow itself.
+type ProviderFilter = 'all' | 'ai' | 'mcp';
+
+function ProviderFilterTabs({
+  value,
+  onChange,
+  counts,
+}: {
+  value: ProviderFilter;
+  onChange: (v: ProviderFilter) => void;
+  counts: { all: number; ai: number; mcp: number };
+}) {
+  const tabs: { key: ProviderFilter; label: string }[] = [
+    { key: 'all', label: 'all' },
+    { key: 'ai', label: 'ai' },
+    { key: 'mcp', label: 'mcp' },
+  ];
+  return (
+    <div className="flex items-center gap-px rounded border bg-muted/40 p-px text-[10px] uppercase tracking-wider">
+      {tabs.map((tab) => {
+        const active = value === tab.key;
+        return (
+          <button
+            key={tab.key}
+            type="button"
+            onClick={() => onChange(tab.key)}
+            className={`rounded-sm px-1.5 py-0.5 font-mono transition-colors ${
+              active
+                ? 'bg-background text-foreground'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {tab.label}
+            <span className="ml-1 tabular-nums opacity-60">{counts[tab.key]}</span>
+          </button>
+        );
+      })}
     </div>
   );
 }
@@ -549,11 +648,8 @@ function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
           {t('common.loading')}
         </div>
       ) : rows.length === 0 ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-1 px-5 text-[11px] text-muted-foreground">
-          <span>{t('dashboard.noProvidersTitle')}</span>
-          <span className="text-[10px] uppercase tracking-wider">
-            {t('dashboard.noProvidersHint')}
-          </span>
+        <div className="flex flex-1 items-center justify-center px-5 text-muted-foreground/40">
+          <Inbox className="h-10 w-10" strokeWidth={1.25} />
         </div>
       ) : (
         <ul className="min-h-0 flex-1 divide-y overflow-y-auto">

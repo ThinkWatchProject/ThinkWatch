@@ -56,17 +56,15 @@ mechanical fixes.
 
 ## Round 3 — WS token leak fix (ticket pattern)
 
-- [ ] **R3.1** Replace `?token=` upgrade with one-shot ticket
-  - Files:
-    - [crates/server/src/handlers/dashboard.rs](crates/server/src/handlers/dashboard.rs#L266)
-    - [crates/server/src/app.rs](crates/server/src/app.rs)
-    - [web/src/routes/dashboard.tsx](web/src/routes/dashboard.tsx#L114)
-  - Fix:
-    1. New endpoint `POST /api/dashboard/ws-ticket` (auth required) →
-       returns short-lived (30s) one-shot ticket stored in Redis.
-    2. WS handler accepts `?ticket=` instead of `?token=`, validates +
-       atomically deletes from Redis.
-    3. Frontend `useLiveDashboard` does the POST then opens the WS.
+- [x] **R3.1** Replaced `?token=` upgrade with one-shot ticket pattern.
+  New `POST /api/dashboard/ws-ticket` mints a 32-byte url-safe random
+  ticket bound to the user_id in Redis (30s TTL). WS handler atomically
+  consumes via fred GETDEL. Frontend `useLiveDashboard` POSTs first,
+  then opens WS with `?ticket=`. Token never appears in any URL.
+  Also fixed R5.4 (stale closure on `live === null`) and R5.5 (silent
+  WS parse errors) in the same edit since they touched the same hook.
+  Session revocation now uses a `dashboard_user_revoked:{uid}` Redis
+  flag set by `revoke_sessions`, polled by the WS loop every ~32s.
 
 ---
 
@@ -116,14 +114,9 @@ mechanical fixes.
 - [ ] **R5.3** `Intl.NumberFormat` hardcoded to `en-US`
   - File: [web/src/routes/dashboard.tsx](web/src/routes/dashboard.tsx#L65)
   - Fix: derive locale from i18next current language.
-- [ ] **R5.4** Dashboard WS stale-closure fallback fetch never fires
-  - File: [web/src/routes/dashboard.tsx](web/src/routes/dashboard.tsx#L155)
-  - Fix: read `live` via a ref instead of closure capture, OR move the
-    fallback fetch out of `onclose` into a separate first-paint effect.
-- [ ] **R5.5** WS frame parse errors silently dropped
-  - File: [web/src/routes/dashboard.tsx](web/src/routes/dashboard.tsx#L156)
-  - Fix: `console.error('dashboard ws parse failed', err, ev.data)` so
-    debugging is possible.
+- [x] **R5.4** Dashboard WS stale-closure fallback fetch — fixed in R3.1
+  by reading `live` via a `liveRef`.
+- [x] **R5.5** WS frame parse errors now `console.error` — fixed in R3.1.
 - [ ] **R5.6** Logs page search input loses focus on each refetch
   - File: [web/src/routes/logs.tsx](web/src/routes/logs.tsx#L364)
   - Fix: debounce the query, key the input by category not by query.

@@ -35,6 +35,7 @@ hmac = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+data-encoding = { workspace = true }
 subtle = { workspace = true }
 url = { workspace = true }
 metrics = { workspace = true }

@@ -321,9 +321,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             "/api/setup/test-provider",
             post(handlers::providers::test_provider_unauthenticated),
         )
-        // Dashboard live WebSocket — auth is performed inline via the
-        // `?token=` query parameter because browsers can't attach an
-        // Authorization header to a WS upgrade.
+        // Dashboard live WebSocket — auth is performed by atomically
+        // consuming a single-use ticket that the client minted via
+        // POST /api/dashboard/ws-ticket (which IS authenticated). The
+        // ticket lives for 30s and is bound to the user_id.
         .route("/api/dashboard/ws", get(handlers::dashboard::dashboard_ws));
 
     // User-level routes (any authenticated user)
@@ -369,6 +370,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route(
             "/api/dashboard/live",
             get(handlers::dashboard::get_dashboard_live),
+        )
+        .route(
+            "/api/dashboard/ws-ticket",
+            post(handlers::dashboard::create_dashboard_ws_ticket),
         )
         .route("/api/mcp/tools", get(handlers::mcp_tools::list_tools))
         .route("/api/mcp/logs", get(handlers::mcp_logs::list_mcp_logs))

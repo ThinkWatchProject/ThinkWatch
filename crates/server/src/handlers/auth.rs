@@ -586,6 +586,22 @@ pub async fn revoke_sessions(
             .await
             .unwrap_or(());
 
+    // Force-close any live dashboard WebSockets for this user. The WS
+    // loop polls this key every ~32s; setting it triggers a Close frame.
+    // 5 minute TTL is plenty — by then all listening WSs will have
+    // either disconnected or noticed.
+    let revoke_key = crate::handlers::dashboard::user_revoked_key(user_id);
+    let _: () = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &revoke_key,
+        "1",
+        Some(fred::types::Expiration::EX(300)),
+        None,
+        false,
+    )
+    .await
+    .unwrap_or(());
+
     state.audit.log(
         AuditEntry::platform("auth.sessions_revoked")
             .user_id(user_id)
