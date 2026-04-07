@@ -732,12 +732,12 @@
   "unifiedLogs": {
     "title": "Log Explorer",
     "subtitle": "Unified log query and search",
-    "platform": "Platform",
-    "audit": "Audit",
-    "gateway": "Gateway",
-    "mcp": "MCP",
-    "access": "Access",
-    "app": "App",
+    "platform": "Platform logs",
+    "audit": "Audit logs",
+    "gateway": "Gateway logs",
+    "mcp": "MCP logs",
+    "access": "Access logs",
+    "app": "App logs",
     "results": "Results",
     "noLogs": "No logs found."
   }

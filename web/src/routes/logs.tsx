@@ -438,7 +438,7 @@ export function UnifiedLogsPage() {
 
       <div className="flex gap-2 items-center">
         <Select value={category} onValueChange={handleCategoryChange}>
-          <SelectTrigger className="w-36 shrink-0">
+          <SelectTrigger className="w-40 shrink-0">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
