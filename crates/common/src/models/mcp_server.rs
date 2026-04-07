@@ -16,6 +16,11 @@ pub struct McpServer {
     pub status: String,
     pub health_check_interval: Option<i32>,
     pub last_health_check: Option<DateTime<Utc>>,
+    /// Most recent failure message from tool discovery / health check.
+    /// `NULL` means the last attempt succeeded. Surfaced in the admin UI
+    /// so operators don't have to dig through server logs.
+    #[serde(default)]
+    pub last_error: Option<String>,
     pub config_json: serde_json::Value,
     pub created_at: DateTime<Utc>,
 }

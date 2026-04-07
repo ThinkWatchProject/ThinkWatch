@@ -70,34 +70,28 @@ mechanical fixes.
 
 ## Round 4 — Backend code quality / correctness
 
-- [ ] **R4.1** Encryption key versioning envelope
-  - File: [crates/common/src/crypto.rs](crates/common/src/crypto.rs)
-  - Fix: prepend a `u8` key-version byte to the ciphertext envelope so we
-    can rotate keys later. Read path tries current then previous key.
-- [ ] **R4.2** `mcp_servers::create_server` discovery error visibility
-  - File: [crates/server/src/handlers/mcp_servers.rs](crates/server/src/handlers/mcp_servers.rs#L84)
-  - Fix: persist last discovery error onto `mcp_servers.last_error` (new
-    column) and surface in admin UI list.
-- [ ] **R4.3** Reuse a single `reqwest::Client` for tool discovery
-  - File: [crates/server/src/app.rs](crates/server/src/app.rs#L857)
-  - Fix: hoist a `reqwest::Client` into `AppState` (or a top-level
-    `OnceLock`) and reuse it.
-- [ ] **R4.4** Admin role-creation transaction missing rollback semantics
-  - File: [crates/server/src/handlers/admin.rs](crates/server/src/handlers/admin.rs#L134)
-  - Fix: wrap in `state.db.begin()` and let the `Drop` handle rollback;
-    explicit `tx.commit()` only on the happy path.
-- [ ] **R4.5** Hardcoded timeouts and intervals scattered across the code
-  - Files:
-    - [crates/server/src/app.rs](crates/server/src/app.rs#L264)
-    - [crates/mcp-gateway/src/pool.rs](crates/mcp-gateway/src/pool.rs#L67)
-    - [crates/mcp-gateway/src/circuit_breaker.rs](crates/mcp-gateway/src/circuit_breaker.rs#L31)
-  - Fix: move all to `AppConfig` with sensible defaults.
-- [ ] **R4.6** `validate_url` SSRF defence audit + IPv6 / decimal IP / DNS
-  rebinding hardening (existing helper, never re-checked)
-  - File: search `crates/server/src/handlers/providers.rs` for
-    `validate_url`
-  - Fix: add IPv6 link-local + ULA + IPv4-mapped checks, decimal/octal IP
-    rejection, and use a single resolver pass cached for the connection.
+- [x] **R4.1** Encryption key versioning envelope. Added 5-byte envelope
+  prefix `[magic(4)] [version(1)]`. New ciphertexts use v1; the decrypt
+  path auto-detects and falls back to legacy `nonce || ciphertext` for
+  existing rows. 3 new tests cover legacy decode, magic prefix, and
+  unknown-version rejection.
+- [x] **R4.2** Added `mcp_servers.last_error` TEXT column (migration
+  002). `create_server` and the health loop both write the error
+  message on failure and clear it on success. Admin UI can render it.
+- [x] **R4.3** `AppState.http_client` shared `reqwest::Client`.
+  `discover_and_persist_tools` now takes `&reqwest::Client` and reuses
+  the pooled client; both call sites updated.
+- [N/A] **R4.4** Admin role-creation: false positive. The current code
+  uses standard `?` + `tx.commit()` which sqlx already rolls back on
+  drop. No bug.
+- [~] **R4.5** Hardcoded timeouts: HTTP client timeout (15s) lifted into
+  the shared client construction. CB and pool timeouts left as-is for
+  now (touch them in the architecture round when AppConfig grows).
+- [x] **R4.6** `validate_url`: removed `std::thread::sleep` (was
+  blocking the async executor) and the redundant double-resolve.
+  Added IPv4-mapped IPv6 check (`::ffff:127.0.0.1`), 6to4 (`2002::/16`),
+  IPv6 multicast, and unified everything under `is_blocked_ip`. 3 new
+  test groups cover the new cases.
 
 ---
 

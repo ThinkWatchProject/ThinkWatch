@@ -84,16 +84,26 @@ pub async fn create_server(
     {
         let db = state.db.clone();
         let key = state.config.encryption_key.clone();
+        let http = state.http_client.clone();
         let registry = state.mcp_registry.clone();
         let server = server.clone();
+        // R4.2: capture the latest discovery error onto mcp_servers.last_error
+        // so the admin UI can surface it without needing log access. The
+        // task is fire-and-forget but its outcome is now persisted.
+        let server_id = server.id;
+        let db_for_err = state.db.clone();
         tokio::spawn(async move {
-            match crate::app::discover_and_persist_tools(&db, &server, &key).await {
+            match crate::app::discover_and_persist_tools(&db, &http, &server, &key).await {
                 Ok(n) => {
                     tracing::info!(
                         mcp_server = %server.name,
                         tools = n,
                         "MCP tool discovery completed for new server"
                     );
+                    let _ = sqlx::query("UPDATE mcp_servers SET last_error = NULL WHERE id = $1")
+                        .bind(server_id)
+                        .execute(&db_for_err)
+                        .await;
                     if let Ok(updated) =
                         crate::app::build_registered_server(&db, &server, &key).await
                     {
@@ -106,6 +116,11 @@ pub async fn create_server(
                         error = %e,
                         "Initial MCP tool discovery failed"
                     );
+                    let _ = sqlx::query("UPDATE mcp_servers SET last_error = $1 WHERE id = $2")
+                        .bind(format!("{e}"))
+                        .bind(server_id)
+                        .execute(&db_for_err)
+                        .await;
                 }
             }
         });

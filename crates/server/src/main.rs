@@ -227,6 +227,13 @@ async fn main() -> anyhow::Result<()> {
         mcp_registry: think_watch_mcp_gateway::registry::Registry::new(),
         mcp_circuit_breakers: think_watch_mcp_gateway::circuit_breaker::McpCircuitBreakers::new(),
         mcp_pool: think_watch_mcp_gateway::pool::ConnectionPool::new(),
+        // Single shared HTTP client for outbound calls (tool discovery,
+        // SSO, etc). 15s default timeout — individual handlers can wrap
+        // calls in `tokio::time::timeout` for tighter limits.
+        http_client: reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new()),
     };
 
     // --- Hot reload of content filter / PII redactor on config change ---

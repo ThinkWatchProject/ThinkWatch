@@ -65,6 +65,10 @@ pub struct AppState {
     /// the pool keys by server id, so a renamed endpoint would otherwise
     /// keep using the old URL.
     pub mcp_pool: think_watch_mcp_gateway::pool::ConnectionPool,
+    /// Shared HTTP client used by tool discovery and any future
+    /// outbound calls. Reusing one client preserves the connection pool
+    /// (TCP + TLS) instead of paying TCP/TLS handshake on every call.
+    pub http_client: reqwest::Client,
 }
 
 /// Build a `ContentFilter` from the current `system_settings` value.
@@ -856,12 +860,11 @@ struct McpToolsListResult {
 /// - the on-demand `discover_tools` admin handler.
 pub async fn discover_and_persist_tools(
     db: &PgPool,
+    http: &reqwest::Client,
     server: &think_watch_common::models::McpServer,
     encryption_key: &str,
 ) -> anyhow::Result<usize> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()?;
+    let client = http;
 
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -987,9 +990,10 @@ async fn load_mcp_servers_into_registry(
     for server in servers {
         let db = state.db.clone();
         let key = encryption_key.clone();
+        let http = state.http_client.clone();
         let registry = registry.clone();
         tokio::spawn(async move {
-            match discover_and_persist_tools(&db, &server, &key).await {
+            match discover_and_persist_tools(&db, &http, &server, &key).await {
                 Ok(n) => {
                     tracing::info!(
                         mcp_server = %server.name,
@@ -1050,17 +1054,18 @@ fn spawn_mcp_health_loop(
                 };
                 registry.update_status(server.id, new_status.clone()).await;
 
-                // Mirror the runtime status into Postgres so the admin UI
-                // doesn't depend on a fresh process being up.
+                // Mirror the runtime status + last error into Postgres so
+                // the admin UI doesn't depend on a fresh process being up.
                 let status_str = match new_status {
                     think_watch_mcp_gateway::registry::ServerStatus::Connected => "connected",
                     think_watch_mcp_gateway::registry::ServerStatus::Disconnected => "disconnected",
                     think_watch_mcp_gateway::registry::ServerStatus::Unknown => "unknown",
                 };
                 if let Err(e) = sqlx::query(
-                    "UPDATE mcp_servers SET status = $1, last_health_check = now() WHERE id = $2",
+                    "UPDATE mcp_servers SET status = $1, last_health_check = now(), last_error = $2 WHERE id = $3",
                 )
                 .bind(status_str)
+                .bind(health.error.clone())
                 .bind(server.id)
                 .execute(&state.db)
                 .await

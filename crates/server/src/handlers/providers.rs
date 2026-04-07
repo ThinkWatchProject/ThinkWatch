@@ -90,49 +90,75 @@ pub(crate) fn validate_url(url_str: &str) -> Result<(), AppError> {
 
     // Block obviously private hostnames (IP literals)
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(&ip) || is_link_local(&ip) {
+        if is_blocked_ip(&ip) {
             return Err(AppError::BadRequest("URL points to private network".into()));
         }
         // IP literal — no DNS rebinding risk
         return Ok(());
     }
 
-    // Resolve DNS and check all resolved IPs to prevent DNS rebinding.
-    // We resolve twice with a short delay to detect rebinding attacks where
-    // the first resolution returns a public IP and the second returns private.
-    let resolve = |host: &str| -> Vec<std::net::IpAddr> {
-        std::net::ToSocketAddrs::to_socket_addrs(&(host, 80))
-            .map(|addrs| addrs.map(|a| a.ip()).collect())
-            .unwrap_or_default()
-    };
+    // For hostnames, do a single blocking DNS resolution. The function is
+    // currently sync so the caller must run it from `spawn_blocking` if it
+    // can't tolerate the brief block. The previous double-resolve with
+    // std::thread::sleep was strictly worse: it blocked the *async*
+    // executor for 50ms on every successful validation.
+    //
+    // The double-resolve was meant to catch DNS rebinding, but rebinding
+    // is a TOFU attack against the actual TCP connection, not the
+    // validator — defending properly requires a custom DNS-pinning
+    // resolver in reqwest, which is out of scope here. We keep the
+    // single-shot resolve as a baseline guard.
+    let resolved: Vec<std::net::IpAddr> = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80))
+        .map(|addrs| addrs.map(|a| a.ip()).collect())
+        .unwrap_or_default();
 
-    let first_ips = resolve(host);
-    for ip in &first_ips {
-        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) || is_link_local(ip) {
+    if resolved.is_empty() {
+        return Err(AppError::BadRequest(
+            "URL host could not be resolved".into(),
+        ));
+    }
+    for ip in &resolved {
+        if is_blocked_ip(ip) {
             return Err(AppError::BadRequest(
                 "URL resolves to a private or loopback address".into(),
             ));
         }
     }
 
-    // Second resolution after a short delay to catch DNS rebinding
-    std::thread::sleep(std::time::Duration::from_millis(50));
-    let second_ips = resolve(host);
-    for ip in &second_ips {
-        if ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) || is_link_local(ip) {
-            return Err(AppError::BadRequest(
-                "URL resolves to a private address (possible DNS rebinding)".into(),
-            ));
+    Ok(())
+}
+
+/// Aggregate "do not connect to" check covering loopback, unspecified
+/// (0.0.0.0 / ::), private ranges, link-local, ULA, IPv4-mapped IPv6,
+/// 6to4, and IPv6 multicast.
+fn is_blocked_ip(ip: &std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) || is_link_local(ip) {
+        return true;
+    }
+    if let std::net::IpAddr::V6(v6) = ip {
+        // IPv4-mapped IPv6 (::ffff:0:0/96): unwrap and re-check the v4
+        // address to catch e.g. ::ffff:127.0.0.1.
+        if let Some(v4) = v6.to_ipv4_mapped() {
+            let inner = std::net::IpAddr::V4(v4);
+            if inner.is_loopback()
+                || inner.is_unspecified()
+                || is_private_ip(&inner)
+                || is_link_local(&inner)
+            {
+                return true;
+            }
+        }
+        // 6to4 (2002::/16) — embeds an IPv4 address; reject conservatively.
+        let segs = v6.segments();
+        if segs[0] == 0x2002 {
+            return true;
+        }
+        // IPv6 multicast ff00::/8
+        if (segs[0] & 0xff00) == 0xff00 {
+            return true;
         }
     }
-
-    if first_ips.is_empty() && second_ips.is_empty() {
-        return Err(AppError::BadRequest(
-            "URL host could not be resolved".into(),
-        ));
-    }
-
-    Ok(())
+    false
 }
 
 /// Check if an IP is in a private range (RFC 1918 + RFC 6598).
@@ -528,6 +554,30 @@ mod tests {
         assert!(validate_url("http://0.0.0.0").is_err());
         assert!(validate_url("http://169.254.169.254/metadata").is_err());
         assert!(validate_url("http://[::1]:8080").is_err());
+        assert!(validate_url("http://10.0.0.1").is_err());
+        assert!(validate_url("http://192.168.1.1").is_err());
+        assert!(validate_url("http://172.16.0.1").is_err());
+        assert!(validate_url("http://100.64.1.1").is_err()); // CGNAT
+    }
+
+    #[test]
+    fn validate_url_rejects_ipv4_mapped_ipv6_loopback() {
+        // ::ffff:127.0.0.1 — IPv4-mapped IPv6 form of loopback
+        assert!(validate_url("http://[::ffff:127.0.0.1]").is_err());
+        assert!(validate_url("http://[::ffff:10.0.0.1]").is_err());
+    }
+
+    #[test]
+    fn validate_url_rejects_6to4_and_ula() {
+        // 6to4 prefix 2002::/16
+        assert!(validate_url("http://[2002::1]").is_err());
+        // Unique local fc00::/7
+        assert!(validate_url("http://[fc00::1]").is_err());
+        assert!(validate_url("http://[fd12:3456::1]").is_err());
+        // Link-local fe80::/10
+        assert!(validate_url("http://[fe80::1]").is_err());
+        // IPv6 multicast
+        assert!(validate_url("http://[ff02::1]").is_err());
     }
 
     #[test]
