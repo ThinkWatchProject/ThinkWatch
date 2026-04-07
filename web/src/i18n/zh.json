@@ -733,11 +733,17 @@
     "title": "日志查询",
     "subtitle": "统一日志查询与搜索",
     "platform": "平台日志",
+    "platformDesc": "管理员在控制台的操作（设置、用户、Provider 等）",
     "audit": "审计日志",
+    "auditDesc": "所有安全事件——登录、密钥操作、权限拒绝",
     "gateway": "网关日志",
+    "gatewayDesc": "AI API 调用——模型、Token、费用、延迟",
     "mcp": "MCP 日志",
+    "mcpDesc": "MCP 工具调用——工具、服务器、耗时、状态",
     "access": "访问日志",
+    "accessDesc": "两个端口的 HTTP 请求——方法、路径、状态码",
     "app": "应用日志",
+    "appDesc": "服务运行时追踪——级别、模块、消息",
     "results": "查询结果",
     "noLogs": "未找到日志。"
   }

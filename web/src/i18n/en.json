@@ -733,11 +733,17 @@
     "title": "Log Explorer",
     "subtitle": "Unified log query and search",
     "platform": "Platform logs",
+    "platformDesc": "Admin actions in the console (settings, users, providers…)",
     "audit": "Audit logs",
+    "auditDesc": "All security events — logins, key ops, permission denials",
     "gateway": "Gateway logs",
+    "gatewayDesc": "AI API calls — model, tokens, cost, latency",
     "mcp": "MCP logs",
+    "mcpDesc": "MCP tool invocations — tool, server, duration, status",
     "access": "Access logs",
+    "accessDesc": "HTTP requests on both ports — method, path, status",
     "app": "App logs",
+    "appDesc": "Server runtime tracing — level, target, message",
     "results": "Results",
     "noLogs": "No logs found."
   }

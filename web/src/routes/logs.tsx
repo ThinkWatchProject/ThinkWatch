@@ -9,7 +9,7 @@ import { Badge } from '@/components/ui/badge';
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select';
 import { Search, FileText, ChevronDown, ChevronRight } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api } from '@/lib/api';
@@ -439,15 +439,20 @@ export function UnifiedLogsPage() {
       <div className="flex gap-2 items-center">
         <Select value={category} onValueChange={handleCategoryChange}>
           <SelectTrigger className="w-40 shrink-0">
-            <SelectValue />
+            {/* Show only the short label in the closed trigger */}
+            <span className="truncate">{t(`unifiedLogs.${category}`)}</span>
           </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="platform">{t('unifiedLogs.platform', 'Platform')}</SelectItem>
-            <SelectItem value="audit">{t('unifiedLogs.audit', 'Audit')}</SelectItem>
-            <SelectItem value="gateway">{t('unifiedLogs.gateway', 'Gateway')}</SelectItem>
-            <SelectItem value="mcp">{t('unifiedLogs.mcp', 'MCP')}</SelectItem>
-            <SelectItem value="access">{t('unifiedLogs.access', 'Access')}</SelectItem>
-            <SelectItem value="app">{t('unifiedLogs.app', 'App')}</SelectItem>
+          <SelectContent className="max-w-sm">
+            {(['platform', 'audit', 'gateway', 'mcp', 'access', 'app'] as const).map((cat) => (
+              <SelectItem key={cat} value={cat} className="py-2">
+                <div className="flex flex-col gap-0.5">
+                  <span className="font-medium">{t(`unifiedLogs.${cat}`)}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {t(`unifiedLogs.${cat}Desc`)}
+                  </span>
+                </div>
+              </SelectItem>
+            ))}
           </SelectContent>
         </Select>
         <Input
