@@ -101,12 +101,32 @@ export function DateTimeRangePicker({ from, to, onFromChange, onToChange, classN
   }, [onFromChange, onToChange]);
 
   const hasValue = fromDate || toDate;
-  const displayText = hasValue
-    ? [
-        fromDate ? format(fromDate, 'yyyy-MM-dd HH:mm') : '...',
-        toDate ? format(toDate, 'yyyy-MM-dd HH:mm') : '...',
-      ].join('  →  ')
-    : null;
+
+  /**
+   * Smart-compact the displayed range:
+   *   - same calendar day → "2026-04-07 08:55 → 23:55"
+   *   - same year but different day → "04-07 08:55 → 04-08 10:00"
+   *   - different year → "2025-12-30 08:55 → 2026-01-02 10:00"
+   *   - only one side set → that side rendered in full
+   * Never truncates — the trigger grows to fit whatever text is produced.
+   */
+  const displayText = (() => {
+    if (!hasValue) return null;
+    if (!fromDate) return `… → ${format(toDate!, 'yyyy-MM-dd HH:mm')}`;
+    if (!toDate) return `${format(fromDate, 'yyyy-MM-dd HH:mm')} → …`;
+    const sameDay =
+      fromDate.getFullYear() === toDate.getFullYear() &&
+      fromDate.getMonth() === toDate.getMonth() &&
+      fromDate.getDate() === toDate.getDate();
+    const sameYear = fromDate.getFullYear() === toDate.getFullYear();
+    if (sameDay) {
+      return `${format(fromDate, 'yyyy-MM-dd HH:mm')} → ${format(toDate, 'HH:mm')}`;
+    }
+    if (sameYear) {
+      return `${format(fromDate, 'MM-dd HH:mm')} → ${format(toDate, 'MM-dd HH:mm')}`;
+    }
+    return `${format(fromDate, 'yyyy-MM-dd HH:mm')} → ${format(toDate, 'yyyy-MM-dd HH:mm')}`;
+  })();
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -114,18 +134,18 @@ export function DateTimeRangePicker({ from, to, onFromChange, onToChange, classN
         <Button
           variant="outline"
           className={cn(
-            'w-full justify-start text-left font-normal h-9',
+            'justify-start text-left font-normal h-9 gap-2',
             !displayText && 'text-muted-foreground',
             className,
           )}
         >
-          <CalendarIcon className="mr-2 h-4 w-4 shrink-0" />
-          <span className="truncate">
+          <CalendarIcon className="h-4 w-4 shrink-0" />
+          <span className="whitespace-nowrap">
             {displayText ?? t('logs.pickDateRange', 'Select date range')}
           </span>
           {hasValue && (
             <X
-              className="ml-auto h-3.5 w-3.5 shrink-0 opacity-50 hover:opacity-100"
+              className="ml-1 h-3.5 w-3.5 shrink-0 opacity-50 hover:opacity-100"
               onClick={(e) => { e.stopPropagation(); handleClear(); }}
             />
           )}
