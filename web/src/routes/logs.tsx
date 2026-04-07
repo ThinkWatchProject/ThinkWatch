@@ -10,7 +10,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select';
-import { Search, FileText, ChevronDown, ChevronRight } from 'lucide-react';
+import { Search, FileText, ChevronDown, ChevronRight, Plus } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -82,6 +82,19 @@ interface ColDef {
   align?: 'right';
   mono?: boolean;
   render?: (v: unknown, row: LogEntry) => React.ReactNode;
+  /**
+   * Backend search key to use when the user clicks "+" to filter by this
+   * cell's value. If unset, the cell is not filterable. Distinct from `key`
+   * because some columns (e.g. `model_id`) map to a shorter search key
+   * (`model`).
+   */
+  filterKey?: string;
+  /**
+   * Field on the row to read for the filter value when it differs from
+   * `key`. For example, the user column displays `user_email` but should
+   * filter by `user_id`.
+   */
+  filterValueKey?: string;
 }
 
 function statusBadge(code: unknown) {
@@ -105,54 +118,54 @@ function getColumns(cat: LogCategory): ColDef[] {
     case 'gateway':
       return [
         { key: 'created_at', label: 'Time' },
-        { key: 'model_id', label: 'Model', mono: true },
-        { key: 'provider', label: 'Provider' },
+        { key: 'model_id', label: 'Model', mono: true, filterKey: 'model' },
+        { key: 'provider', label: 'Provider', filterKey: 'provider' },
         { key: 'input_tokens', label: 'In', align: 'right' },
         { key: 'output_tokens', label: 'Out', align: 'right' },
         { key: 'cost_usd', label: 'Cost', align: 'right', render: (v) => `$${parseFloat(String(v || 0)).toFixed(4)}` },
         { key: 'latency_ms', label: 'Latency', align: 'right', render: (v) => v != null ? `${v}ms` : '—' },
-        { key: 'status_code', label: 'Status', render: (v) => statusBadge(v) },
+        { key: 'status_code', label: 'Status', render: (v) => statusBadge(v), filterKey: 'status_code' },
       ];
     case 'mcp':
       return [
         { key: 'created_at', label: 'Time' },
-        { key: 'tool_name', label: 'Tool', mono: true },
-        { key: 'server_name', label: 'Server' },
+        { key: 'tool_name', label: 'Tool', mono: true, filterKey: 'tool_name' },
+        { key: 'server_name', label: 'Server', filterKey: 'server_id', filterValueKey: 'server_id' },
         { key: 'duration_ms', label: 'Duration', align: 'right', render: (v) => v != null ? `${v}ms` : '—' },
-        { key: 'status', label: 'Status', render: (v) => <Badge variant={v === 'success' ? 'default' : 'destructive'}>{String(v)}</Badge> },
-        { key: 'user_email', label: 'User' },
+        { key: 'status', label: 'Status', render: (v) => <Badge variant={v === 'success' ? 'default' : 'destructive'}>{String(v)}</Badge>, filterKey: 'status' },
+        { key: 'user_email', label: 'User', filterKey: 'user_id', filterValueKey: 'user_id' },
       ];
     case 'audit':
       return [
         { key: 'timestamp', label: 'Time' },
-        { key: 'user_email', label: 'User' },
-        { key: 'action', label: 'Action' },
-        { key: 'resource', label: 'Resource' },
+        { key: 'user_email', label: 'User', filterKey: 'user_id', filterValueKey: 'user_id' },
+        { key: 'action', label: 'Action', filterKey: 'action' },
+        { key: 'resource', label: 'Resource', filterKey: 'resource' },
         { key: 'ip_address', label: 'IP', mono: true },
       ];
     case 'platform':
       return [
         { key: 'created_at', label: 'Time' },
-        { key: 'user_email', label: 'User' },
-        { key: 'action', label: 'Action' },
-        { key: 'resource', label: 'Resource' },
+        { key: 'user_email', label: 'User', filterKey: 'user_id', filterValueKey: 'user_id' },
+        { key: 'action', label: 'Action', filterKey: 'action' },
+        { key: 'resource', label: 'Resource', filterKey: 'resource' },
         { key: 'ip_address', label: 'IP', mono: true },
       ];
     case 'access':
       return [
         { key: 'created_at', label: 'Time' },
-        { key: 'method', label: 'Method' },
-        { key: 'path', label: 'Path', mono: true },
-        { key: 'status_code', label: 'Status', render: (v) => statusBadge(v) },
+        { key: 'method', label: 'Method', filterKey: 'method' },
+        { key: 'path', label: 'Path', mono: true, filterKey: 'path' },
+        { key: 'status_code', label: 'Status', render: (v) => statusBadge(v), filterKey: 'status_code' },
         { key: 'latency_ms', label: 'Latency', align: 'right', render: (v) => `${v}ms` },
-        { key: 'port', label: 'Port' },
+        { key: 'port', label: 'Port', filterKey: 'port' },
         { key: 'ip_address', label: 'IP', mono: true },
       ];
     case 'app':
       return [
         { key: 'created_at', label: 'Time' },
-        { key: 'level', label: 'Level', render: (v) => levelBadge(v) },
-        { key: 'target', label: 'Target', mono: true },
+        { key: 'level', label: 'Level', render: (v) => levelBadge(v), filterKey: 'level' },
+        { key: 'target', label: 'Target', mono: true, filterKey: 'target' },
         { key: 'message', label: 'Message' },
         { key: 'span', label: 'Span' },
       ];
@@ -406,6 +419,27 @@ export function UnifiedLogsPage() {
     updateSearch({ q: searchInput, page: 0 });
   };
 
+  /**
+   * Append a `key:value` token to the active query and re-search.
+   * If the same `key:` is already present (with any value), replace it
+   * so users can click "+" on different rows to switch the filter
+   * instead of stacking duplicates.
+   */
+  const handleAddFilter = (key: string, rawValue: unknown) => {
+    if (rawValue === null || rawValue === undefined || rawValue === '') return;
+    let value = String(rawValue);
+    // Quote the value if it contains whitespace so the parser sees it as one token.
+    if (/\s/.test(value)) value = `"${value.replace(/"/g, '\\"')}"`;
+    const token = `${key}:${value}`;
+    // Strip any existing token with the same key (key:something or key:"...")
+    const stripped = activeQuery
+      .replace(new RegExp(`\\b${key}:(?:"[^"]*"|\\S+)\\s*`, 'g'), '')
+      .trim();
+    const next = stripped ? `${stripped} ${token}` : token;
+    setSearchInput(next);
+    updateSearch({ q: next, page: 0 });
+  };
+
   const handleCategoryChange = (v: string) => {
     if (!isLogCategory(v)) return;
     setExpandedRow(null);
@@ -542,10 +576,36 @@ export function UnifiedLogsPage() {
                             } else {
                               display = val != null ? String(val) : '—';
                             }
+                            // Click "+" to filter by this cell's value.
+                            // Some columns display one field but filter on a
+                            // different one (e.g. user_email column → user_id).
+                            const filterValue = col.filterValueKey
+                              ? log[col.filterValueKey]
+                              : val;
+                            const isFilterable =
+                              !!col.filterKey &&
+                              filterValue !== null &&
+                              filterValue !== undefined &&
+                              filterValue !== '';
                             return (
                               <TableCell key={col.key}
                                 className={`text-sm ${col.align === 'right' ? 'text-right tabular-nums' : ''} ${col.mono ? 'font-mono' : ''}`}>
-                                {display}
+                                <div className="group/cell flex items-center gap-1">
+                                  <span className="min-w-0">{display}</span>
+                                  {isFilterable && (
+                                    <button
+                                      type="button"
+                                      title={`Filter: ${col.filterKey}:${filterValue}`}
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleAddFilter(col.filterKey!, filterValue);
+                                      }}
+                                      className="opacity-0 group-hover/cell:opacity-60 hover:!opacity-100 hover:bg-accent rounded p-0.5 transition-opacity shrink-0"
+                                    >
+                                      <Plus className="h-3 w-3" />
+                                    </button>
+                                  )}
+                                </div>
                               </TableCell>
                             );
                           })}
