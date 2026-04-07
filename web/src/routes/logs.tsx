@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { subHours, format } from 'date-fns';
@@ -375,9 +375,18 @@ export function UnifiedLogsPage() {
   const [error, setError] = useState('');
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
 
-  // Keep the search input box in sync if the URL changes externally.
+  // Mirror the active query into a ref so we can sync the input *only*
+  // when the URL truly changes from somewhere else (browser back/forward,
+  // external navigation), not on every re-render. The previous version
+  // ran setSearchInput on every change of activeQuery — when the URL
+  // updated from our own handleSearch the local state was overwritten,
+  // racing the user's next keystroke.
+  const lastSyncedQueryRef = useRef(activeQuery);
   useEffect(() => {
-    setSearchInput(activeQuery);
+    if (activeQuery !== lastSyncedQueryRef.current) {
+      lastSyncedQueryRef.current = activeQuery;
+      setSearchInput(activeQuery);
+    }
   }, [activeQuery]);
 
   const updateSearch = useCallback(

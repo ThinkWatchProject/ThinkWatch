@@ -1,5 +1,6 @@
 import { useState, useCallback, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { invalidateSetupStatusCache } from '@/router';
 import { Button } from '@/components/ui/button';
 import {
   Card,
@@ -242,6 +243,10 @@ export function SetupPage() {
       }
       const data: SetupResult = await res.json();
       setResult(data);
+      // Drop the cached setup status so the next router check re-fetches.
+      // Without this the user has to hard-refresh after clicking
+      // "go to login" because the cache still says needs_setup=true.
+      invalidateSetupStatusCache();
       setStep('complete');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Setup failed');

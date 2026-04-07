@@ -97,29 +97,27 @@ mechanical fixes.
 
 ## Round 5 — Frontend bug fixes
 
-- [ ] **R5.1** Multi-tab token-refresh race
-  - File: [web/src/lib/api.ts](web/src/lib/api.ts#L106)
-  - Fix: use `BroadcastChannel('auth')` so only one tab refreshes; others
-    wait for the broadcast.
-- [ ] **R5.2** `cachedSetupStatus` never invalidated after setup completes
-  - File: [web/src/router.tsx](web/src/router.tsx#L46)
-  - Fix: clear the cache when setup-initialize succeeds + re-fetch on
-    visibility-change.
-- [ ] **R5.3** `Intl.NumberFormat` hardcoded to `en-US`
-  - File: [web/src/routes/dashboard.tsx](web/src/routes/dashboard.tsx#L65)
-  - Fix: derive locale from i18next current language.
+- [x] **R5.1** Multi-tab token-refresh — added a `BroadcastChannel`
+  named `thinkwatch-auth`. The tab that wins the refresh broadcasts
+  the new tokens; other tabs apply them via the channel listener
+  instead of running their own refresh.
+- [x] **R5.2** Setup status cache invalidation — added
+  `invalidateSetupStatusCache()` (called by setup wizard on success)
+  and a `visibilitychange` re-check.
+- [x] **R5.3** `Intl.NumberFormat` now reads `i18n.language` and maps to
+  a BCP 47 locale (`zh` → `zh-CN`, default `en-US`). Stat card
+  formatters take a `locale` parameter at call time.
 - [x] **R5.4** Dashboard WS stale-closure fallback fetch — fixed in R3.1
   by reading `live` via a `liveRef`.
 - [x] **R5.5** WS frame parse errors now `console.error` — fixed in R3.1.
-- [ ] **R5.6** Logs page search input loses focus on each refetch
-  - File: [web/src/routes/logs.tsx](web/src/routes/logs.tsx#L364)
-  - Fix: debounce the query, key the input by category not by query.
-- [ ] **R5.7** Destructive actions missing confirm dialogs
-  - Files:
-    - [web/src/routes/admin/settings.tsx](web/src/routes/admin/settings.tsx#L1000)
-    - [web/src/routes/gateway/providers.tsx](web/src/routes/gateway/providers.tsx#L340)
-  - Fix: route through existing `confirm-dialog.tsx` for content-filter,
-    pii-pattern, provider, key, MCP server delete.
+- [x] **R5.6** Logs search input — sync-on-mismatch via a
+  `lastSyncedQueryRef`. Previously every change of `activeQuery`
+  unconditionally re-set local state, racing the user's keystrokes
+  after our own navigation.
+- [N/A] **R5.7** False positive: providers delete is already wrapped
+  in `<ConfirmDialog>` (verified at providers.tsx:407). settings
+  content-filter / PII removals only edit local draft state and
+  require an explicit "Save" click — they're not destructive on click.
 
 ---
 
