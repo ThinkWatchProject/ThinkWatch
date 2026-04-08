@@ -46,56 +46,20 @@ CREATE TABLE team_members (
 CREATE INDEX idx_team_members_user_id ON team_members(user_id);
 
 -- --------------------------------------------------------------------------
--- RBAC — System Roles
+-- RBAC — Unified roles + assignments
+--
+-- One table for the role catalog (system + custom), one table for
+-- (user, role, scope) memberships. Permission strings live directly on
+-- the role row as TEXT[] — at this scale (~50 perms × ~10 roles) the
+-- join table buys nothing.
 -- --------------------------------------------------------------------------
 
-CREATE TABLE roles (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        VARCHAR(100) NOT NULL UNIQUE,
-    description TEXT,
-    is_system   BOOLEAN NOT NULL DEFAULT FALSE
-);
-
-CREATE TABLE permissions (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    resource    VARCHAR(100) NOT NULL,
-    action      VARCHAR(100) NOT NULL,
-    UNIQUE(resource, action)
-);
-
-CREATE TABLE role_permissions (
-    role_id       UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    permission_id UUID NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
-    PRIMARY KEY (role_id, permission_id)
-);
-
-CREATE INDEX idx_role_permissions_permission_id ON role_permissions(permission_id);
-
-CREATE TABLE user_roles (
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    role_id UUID NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
-    scope   VARCHAR(255) NOT NULL DEFAULT 'global',
-    PRIMARY KEY (user_id, role_id, scope)
-);
-
-CREATE INDEX idx_user_roles_scope ON user_roles(scope);
-
-INSERT INTO roles (name, description, is_system) VALUES
-    ('super_admin',   'Full system access',        TRUE),
-    ('admin',         'Administrative access',      TRUE),
-    ('team_manager',  'Team management access',     TRUE),
-    ('developer',     'Standard developer access',  TRUE),
-    ('viewer',        'Read-only access',           TRUE);
-
--- --------------------------------------------------------------------------
--- RBAC — Custom Roles with IAM Policies
--- --------------------------------------------------------------------------
-
-CREATE TABLE custom_roles (
+CREATE TABLE rbac_roles (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name                VARCHAR(100) NOT NULL UNIQUE,
     description         TEXT,
     is_system           BOOLEAN NOT NULL DEFAULT FALSE,
+    permissions         TEXT[]   NOT NULL DEFAULT ARRAY[]::TEXT[],
     allowed_models      TEXT[],
     allowed_mcp_servers UUID[],
     policy_document     JSONB,
@@ -104,22 +68,115 @@ CREATE TABLE custom_roles (
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE TABLE custom_role_permissions (
-    custom_role_id UUID NOT NULL REFERENCES custom_roles(id) ON DELETE CASCADE,
-    permission     VARCHAR(100) NOT NULL,
-    PRIMARY KEY (custom_role_id, permission)
+CREATE INDEX idx_rbac_roles_is_system ON rbac_roles(is_system);
+
+-- Scope is a (kind, id) twople. `scope_marker` collapses the
+-- (kind, NULL id) case into a deterministic UUID so the primary key
+-- treats two global assignments as duplicates (PostgreSQL would
+-- otherwise consider multiple NULLs distinct). It is never read by
+-- application code.
+CREATE TABLE rbac_role_assignments (
+    user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    role_id      UUID NOT NULL REFERENCES rbac_roles(id) ON DELETE CASCADE,
+    scope_kind   VARCHAR(16) NOT NULL DEFAULT 'global'
+        CHECK (scope_kind IN ('global', 'team', 'project')),
+    scope_id     UUID,
+    scope_marker UUID GENERATED ALWAYS AS (COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid)) STORED,
+    assigned_by  UUID REFERENCES users(id),
+    assigned_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (user_id, role_id, scope_kind, scope_marker),
+    CONSTRAINT chk_scope_consistency
+        CHECK ((scope_kind = 'global' AND scope_id IS NULL)
+            OR (scope_kind <> 'global' AND scope_id IS NOT NULL))
 );
 
-CREATE INDEX idx_custom_role_permissions_role ON custom_role_permissions(custom_role_id);
+CREATE INDEX idx_rbac_role_assignments_user  ON rbac_role_assignments(user_id);
+CREATE INDEX idx_rbac_role_assignments_role  ON rbac_role_assignments(role_id);
+CREATE INDEX idx_rbac_role_assignments_scope ON rbac_role_assignments(scope_kind, scope_id);
 
-CREATE TABLE user_custom_roles (
-    user_id        UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    custom_role_id UUID NOT NULL REFERENCES custom_roles(id) ON DELETE CASCADE,
-    assigned_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (user_id, custom_role_id)
-);
-
-CREATE INDEX idx_user_custom_roles_user ON user_custom_roles(user_id);
+-- Seed system roles. Permission catalog must stay in lockstep with the
+-- backend `PERMISSION_CATALOG` (crates/server/src/handlers/roles.rs).
+INSERT INTO rbac_roles (name, description, is_system, permissions) VALUES
+('super_admin',
+ 'Full system access. Can manage every resource and inspect every log.',
+ TRUE,
+ ARRAY[
+    'ai_gateway:use', 'mcp_gateway:use',
+    'api_keys:read', 'api_keys:create', 'api_keys:update', 'api_keys:rotate', 'api_keys:delete',
+    'providers:read', 'providers:create', 'providers:update', 'providers:delete', 'providers:rotate_key',
+    'mcp_servers:read', 'mcp_servers:create', 'mcp_servers:update', 'mcp_servers:delete',
+    'users:read', 'users:create', 'users:update', 'users:delete',
+    'team:read', 'team:write',
+    'sessions:revoke',
+    'roles:read', 'roles:create', 'roles:update', 'roles:delete',
+    'analytics:read_own', 'analytics:read_team', 'analytics:read_all',
+    'audit_logs:read_own', 'audit_logs:read_team', 'audit_logs:read_all',
+    'logs:read_own', 'logs:read_team', 'logs:read_all',
+    'log_forwarders:read', 'log_forwarders:write',
+    'webhooks:read', 'webhooks:write',
+    'content_filter:read', 'content_filter:write',
+    'pii_redactor:read', 'pii_redactor:write',
+    'settings:read', 'settings:write',
+    'system:configure_oidc'
+ ]),
+('admin',
+ 'Administrative access. Manages providers, MCP servers, API keys, and users.',
+ TRUE,
+ ARRAY[
+    'ai_gateway:use', 'mcp_gateway:use',
+    'api_keys:read', 'api_keys:create', 'api_keys:update', 'api_keys:rotate', 'api_keys:delete',
+    'providers:read', 'providers:create', 'providers:update', 'providers:delete', 'providers:rotate_key',
+    'mcp_servers:read', 'mcp_servers:create', 'mcp_servers:update', 'mcp_servers:delete',
+    'users:read', 'users:create', 'users:update',
+    'team:read', 'team:write',
+    'sessions:revoke',
+    'roles:read', 'roles:create', 'roles:update', 'roles:delete',
+    'analytics:read_all',
+    'audit_logs:read_all',
+    'logs:read_all',
+    'log_forwarders:read', 'log_forwarders:write',
+    'webhooks:read', 'webhooks:write',
+    'content_filter:read', 'content_filter:write',
+    'pii_redactor:read', 'pii_redactor:write',
+    'settings:read', 'settings:write'
+ ]),
+('team_manager',
+ 'Team-level management. Creates API keys for the team, sees the team''s usage and audit trail.',
+ TRUE,
+ ARRAY[
+    'ai_gateway:use', 'mcp_gateway:use',
+    'api_keys:read', 'api_keys:create', 'api_keys:update', 'api_keys:rotate',
+    'providers:read',
+    'mcp_servers:read',
+    'users:read',
+    'team:read', 'team:write',
+    'analytics:read_team',
+    'audit_logs:read_team',
+    'logs:read_team'
+ ]),
+('developer',
+ 'Standard developer. Uses the gateway, manages own API keys, sees own usage.',
+ TRUE,
+ ARRAY[
+    'ai_gateway:use', 'mcp_gateway:use',
+    'api_keys:read', 'api_keys:create', 'api_keys:update',
+    'providers:read',
+    'mcp_servers:read',
+    'analytics:read_own',
+    'audit_logs:read_own',
+    'logs:read_own'
+ ]),
+('viewer',
+ 'Read-only access. Can browse providers and analytics but not modify anything.',
+ TRUE,
+ ARRAY[
+    'api_keys:read',
+    'providers:read',
+    'mcp_servers:read',
+    'analytics:read_own',
+    'audit_logs:read_own',
+    'logs:read_own'
+ ]);
 
 -- --------------------------------------------------------------------------
 -- API Keys
@@ -192,16 +249,6 @@ CREATE TABLE models (
     UNIQUE(provider_id, model_id)
 );
 
-CREATE TABLE model_permissions (
-    id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    model_id  UUID NOT NULL REFERENCES models(id) ON DELETE CASCADE,
-    role_id   UUID REFERENCES roles(id) ON DELETE CASCADE,
-    team_id   UUID REFERENCES teams(id) ON DELETE CASCADE,
-    user_id   UUID REFERENCES users(id) ON DELETE CASCADE,
-    allowed   BOOLEAN NOT NULL DEFAULT TRUE,
-    CHECK (role_id IS NOT NULL OR team_id IS NOT NULL OR user_id IS NOT NULL)
-);
-
 -- --------------------------------------------------------------------------
 -- MCP Servers & Tools
 -- --------------------------------------------------------------------------
@@ -217,6 +264,7 @@ CREATE TABLE mcp_servers (
     status                VARCHAR(50) NOT NULL DEFAULT 'pending',
     health_check_interval INTEGER DEFAULT 60,
     last_health_check     TIMESTAMPTZ,
+    last_error            TEXT,
     config_json           JSONB DEFAULT '{}',
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -230,16 +278,6 @@ CREATE TABLE mcp_tools (
     is_active     BOOLEAN NOT NULL DEFAULT TRUE,
     discovered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(server_id, tool_name)
-);
-
-CREATE TABLE mcp_tool_permissions (
-    id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tool_id   UUID NOT NULL REFERENCES mcp_tools(id) ON DELETE CASCADE,
-    role_id   UUID REFERENCES roles(id) ON DELETE CASCADE,
-    team_id   UUID REFERENCES teams(id) ON DELETE CASCADE,
-    user_id   UUID REFERENCES users(id) ON DELETE CASCADE,
-    allowed   BOOLEAN NOT NULL DEFAULT TRUE,
-    CHECK (role_id IS NOT NULL OR team_id IS NOT NULL OR user_id IS NOT NULL)
 );
 
 -- --------------------------------------------------------------------------
