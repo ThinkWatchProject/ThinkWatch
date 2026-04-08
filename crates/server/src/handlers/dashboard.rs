@@ -129,11 +129,10 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
     // --- Postgres queries: parallel via tokio::try_join! --------------------
     // Errors propagate so the dashboard surfaces a real failure instead of
     // pretending data is empty when the DB is down.
-    let max_rpm_fut = sqlx::query_scalar::<_, Option<i32>>(
-        "SELECT MAX(rate_limit_rpm) FROM api_keys \
-         WHERE is_active = true AND rate_limit_rpm IS NOT NULL",
-    )
-    .fetch_one(&state.db);
+    //
+    // `max_rpm_limit` is hard-wired to None until phase E rewires it to
+    // query the new `rate_limit_rules` table. The chart still renders;
+    // the reference line just won't appear.
     let providers_fut = sqlx::query_as::<_, (String,)>(
         "SELECT name FROM providers WHERE is_active = true AND deleted_at IS NULL",
     )
@@ -141,9 +140,10 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
     let mcp_servers_fut =
         sqlx::query_as::<_, (String,)>("SELECT name FROM mcp_servers").fetch_all(&state.db);
 
-    let (max_rpm_limit, configured_providers, configured_mcp_servers) =
-        tokio::try_join!(max_rpm_fut, providers_fut, mcp_servers_fut)
+    let (configured_providers, configured_mcp_servers) =
+        tokio::try_join!(providers_fut, mcp_servers_fut)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Dashboard PG query failed: {e}")))?;
+    let max_rpm_limit: Option<i32> = None;
 
     // Snapshot the in-process CB registry once so we can decorate every
     // provider row with its real state below.

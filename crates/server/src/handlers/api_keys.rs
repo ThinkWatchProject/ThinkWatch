@@ -80,8 +80,8 @@ pub async fn create_key(
         .map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
 
     let row = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, allowed_models, rate_limit_rpm, rate_limit_tpm, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *"#,
+        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, allowed_models, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *"#,
     )
     .bind(&generated.prefix)
     .bind(&generated.hash)
@@ -89,8 +89,6 @@ pub async fn create_key(
     .bind(auth_user.claims.sub)
     .bind(req.team_id)
     .bind(&req.allowed_models)
-    .bind(req.rate_limit_rpm)
-    .bind(req.rate_limit_tpm)
     .bind(expires_at)
     .fetch_one(&state.db)
     .await?;
@@ -151,8 +149,6 @@ pub async fn revoke_key(
 #[derive(Debug, Deserialize)]
 pub struct UpdateKeyRequest {
     pub allowed_models: Option<Vec<String>>,
-    pub rate_limit_rpm: Option<i32>,
-    pub rate_limit_tpm: Option<i32>,
     pub expires_in_days: Option<i32>,
     pub rotation_period_days: Option<i32>,
     pub inactivity_timeout_days: Option<i32>,
@@ -189,16 +185,12 @@ pub async fn update_key(
     let updated = sqlx::query_as::<_, ApiKey>(
         r#"UPDATE api_keys SET
             allowed_models = COALESCE($1, allowed_models),
-            rate_limit_rpm = COALESCE($2, rate_limit_rpm),
-            rate_limit_tpm = COALESCE($3, rate_limit_tpm),
-            expires_at = $4,
-            rotation_period_days = COALESCE($5, rotation_period_days),
-            inactivity_timeout_days = COALESCE($6, inactivity_timeout_days)
-           WHERE id = $7 RETURNING *"#,
+            expires_at = $2,
+            rotation_period_days = COALESCE($3, rotation_period_days),
+            inactivity_timeout_days = COALESCE($4, inactivity_timeout_days)
+           WHERE id = $5 RETURNING *"#,
     )
     .bind(&req.allowed_models)
-    .bind(req.rate_limit_rpm)
-    .bind(req.rate_limit_tpm)
     .bind(expires_at)
     .bind(req.rotation_period_days)
     .bind(req.inactivity_timeout_days)
@@ -241,13 +233,17 @@ pub async fn rotate_key(
         .await;
     let grace_period_ends_at = chrono::Utc::now() + chrono::Duration::hours(grace_hours);
 
-    // Generate new key
+    // Generate new key. Rate-limit / budget rules attached to the
+    // OLD key id are NOT copied here — they live in `rate_limit_rules`
+    // / `budget_caps` keyed by api_key UUID. The follow-up phase
+    // ("limits attached to api_keys") will add an explicit copy step
+    // when rotation happens.
     let generated = api_key::generate_api_key();
     let new_key = sqlx::query_as::<_, ApiKey>(
         r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, allowed_models,
-            rate_limit_rpm, rate_limit_tpm, monthly_budget, expires_at,
-            rotation_period_days, inactivity_timeout_days, rotated_from_id, last_rotation_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+            expires_at, rotation_period_days, inactivity_timeout_days,
+            rotated_from_id, last_rotation_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
            RETURNING *"#,
     )
     .bind(&generated.prefix)
@@ -256,9 +252,6 @@ pub async fn rotate_key(
     .bind(old_key.user_id)
     .bind(old_key.team_id)
     .bind(&old_key.allowed_models)
-    .bind(old_key.rate_limit_rpm)
-    .bind(old_key.rate_limit_tpm)
-    .bind(old_key.monthly_budget)
     .bind(old_key.expires_at)
     .bind(old_key.rotation_period_days)
     .bind(old_key.inactivity_timeout_days)

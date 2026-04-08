@@ -14,9 +14,9 @@ pub struct ApiKey {
     pub team_id: Option<Uuid>,
     pub scopes: serde_json::Value,
     pub allowed_models: Option<Vec<String>>,
-    pub rate_limit_rpm: Option<i32>,
-    pub rate_limit_tpm: Option<i32>,
-    pub monthly_budget: Option<rust_decimal::Decimal>,
+    // Rate limits and budget caps moved to `rate_limit_rules` /
+    // `budget_caps` (subject_kind = 'api_key'). The previous fixed
+    // columns no longer exist on the table.
     pub expires_at: Option<DateTime<Utc>>,
     pub is_active: bool,
     pub last_used_at: Option<DateTime<Utc>>,

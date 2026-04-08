@@ -40,14 +40,16 @@ pub struct GatewayState {
 }
 
 /// Identity information extracted from the auth middleware.
-/// Used to enforce per-key model restrictions and rate limits.
+///
+/// Carries the resolved subject IDs the proxy needs in order to
+/// query the new `rate_limit_rules` / `budget_caps` engine. The old
+/// per-key fixed columns (rate_limit_rpm / tpm / monthly_budget)
+/// are gone — the engine reads everything from those tables.
 #[derive(Debug, Clone, Default)]
 pub struct GatewayRequestIdentity {
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
     pub allowed_models: Option<Vec<String>>,
-    pub rate_limit_rpm: Option<i32>,
-    pub rate_limit_tpm: Option<i32>,
 }
 
 /// POST /v1/chat/completions
@@ -87,25 +89,9 @@ pub async fn proxy_chat_completion(
         .into());
     }
 
-    // 3. Per-key RPM/TPM rate limiting (if API key has limits configured)
-    if let Some(rpm) = identity.rate_limit_rpm
-        && rpm > 0
-    {
-        let rate_key = identity
-            .api_key_id
-            .as_deref()
-            .unwrap_or_else(|| identity.user_id.as_deref().unwrap_or("global"));
-        state
-            .rate_limiter
-            .check_rate_limit(
-                rate_key,
-                rpm as u32,
-                identity.rate_limit_tpm.filter(|&t| t > 0).map(|t| t as u32),
-                None, // estimated tokens not known yet
-            )
-            .await
-            .map_err(|_| GatewayError::UpstreamRateLimited)?;
-    }
+    // 3. Rate limit / budget enforcement is wired in phase B against
+    // the new `rate_limit_rules` / `budget_caps` engine. The old
+    // per-key fixed-column path lived here and has been removed.
 
     // 4. Extract per-request metadata from headers and body
     let metadata = RequestMetadata::extract(&headers, &request);

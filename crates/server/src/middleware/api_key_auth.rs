@@ -47,8 +47,6 @@ pub struct GatewayIdentity {
     pub user_id: Option<uuid::Uuid>,
     pub team_id: Option<uuid::Uuid>,
     pub allowed_models: Option<Vec<String>>,
-    pub rate_limit_rpm: Option<i32>,
-    pub rate_limit_tpm: Option<i32>,
 }
 
 /// Middleware that authenticates requests via `tw-` prefixed API keys
@@ -132,8 +130,6 @@ pub async fn require_api_key_or_jwt(
             user_id: row.user_id.map(|u| u.to_string()),
             api_key_id: Some(row.id.to_string()),
             allowed_models: merged_models.clone(),
-            rate_limit_rpm: row.rate_limit_rpm,
-            rate_limit_tpm: row.rate_limit_tpm,
         };
 
         let identity = GatewayIdentity {
@@ -141,8 +137,6 @@ pub async fn require_api_key_or_jwt(
             user_id: row.user_id,
             team_id: row.team_id,
             allowed_models: merged_models,
-            rate_limit_rpm: row.rate_limit_rpm,
-            rate_limit_tpm: row.rate_limit_tpm,
         };
 
         request.extensions_mut().insert(identity);
@@ -170,8 +164,6 @@ pub async fn require_api_key_or_jwt(
             user_id: Some(claims.sub.to_string()),
             api_key_id: None,
             allowed_models: role_limits.allowed_models.clone(),
-            rate_limit_rpm: None,
-            rate_limit_tpm: None,
         };
 
         let identity = GatewayIdentity {
@@ -179,8 +171,6 @@ pub async fn require_api_key_or_jwt(
             user_id: Some(claims.sub),
             team_id: None,
             allowed_models: role_limits.allowed_models,
-            rate_limit_rpm: None,
-            rate_limit_tpm: None,
         };
 
         request.extensions_mut().insert(identity);

@@ -113,17 +113,13 @@ pub async fn get_cost_stats(
     use rust_decimal::prelude::ToPrimitive;
     let total_f64 = total.and_then(|d| d.to_f64()).unwrap_or(0.0);
 
-    // Calculate budget usage from total of all team monthly budgets
-    let total_budget: Option<rust_decimal::Decimal> = sqlx::query_scalar(
-        "SELECT SUM(monthly_budget) FROM teams WHERE monthly_budget IS NOT NULL AND monthly_budget > 0",
-    )
-    .fetch_one(&state.db)
-    .await?;
-
-    let budget_usage_pct = total_budget
-        .and_then(|b| b.to_f64())
-        .filter(|b| *b > 0.0)
-        .map(|b| (total_f64 / b * 100.0).min(100.0));
+    // `budget_usage_pct` was previously the running MTD total divided
+    // by the sum of all team monthly_budget columns. That column is
+    // gone (budgets live in `budget_caps` now and are weighted-token
+    // denominated, not USD). Phase E rewires this against the new
+    // engine; until then the field is always None and the UI hides
+    // the bar.
+    let budget_usage_pct: Option<f64> = None;
 
     Ok(Json(CostStats {
         total_cost_mtd: total_f64,

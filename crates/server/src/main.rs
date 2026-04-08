@@ -59,6 +59,14 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // Verify every persisted rate-limit rule has an allowed window
+    // length and every model row has positive multipliers. Catches
+    // hand-edits to the DB before they reach the gateway hot path.
+    if let Err(e) = think_watch_common::limits::validate_persisted(&pool).await {
+        tracing::error!("Limits validation failed: {e}");
+        std::process::exit(1);
+    }
+
     let redis_config = Config::from_url(&config.redis_url).map_err(|e| {
         tracing::error!("Invalid REDIS_URL: {e}");
         anyhow::anyhow!("Invalid REDIS_URL")

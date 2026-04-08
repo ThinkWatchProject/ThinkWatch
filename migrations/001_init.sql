@@ -31,7 +31,7 @@ CREATE TABLE teams (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            VARCHAR(255) NOT NULL UNIQUE,
     description     TEXT,
-    monthly_budget  DECIMAL(12, 4),
+    -- Budget caps live in `budget_caps` (subject_kind = 'team').
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -191,9 +191,10 @@ CREATE TABLE api_keys (
     team_id                 UUID REFERENCES teams(id) ON DELETE SET NULL,
     scopes                  JSONB NOT NULL DEFAULT '[]',
     allowed_models          TEXT[],
-    rate_limit_rpm          INTEGER,
-    rate_limit_tpm          INTEGER,
-    monthly_budget          DECIMAL(12, 4),
+    -- Rate limits and budget caps live in `rate_limit_rules` /
+    -- `budget_caps` (subject_kind = 'api_key'). The previous fixed
+    -- columns (rate_limit_rpm / rate_limit_tpm / monthly_budget)
+    -- have been removed.
     expires_at              TIMESTAMPTZ,
     is_active               BOOLEAN NOT NULL DEFAULT TRUE,
     last_used_at            TIMESTAMPTZ,
@@ -239,13 +240,24 @@ CREATE TABLE providers (
 );
 
 CREATE TABLE models (
-    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    provider_id   UUID NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
-    model_id      VARCHAR(255) NOT NULL,
-    display_name  VARCHAR(255) NOT NULL,
-    input_price   DECIMAL(10, 6),
-    output_price  DECIMAL(10, 6),
-    is_active     BOOLEAN NOT NULL DEFAULT TRUE,
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    provider_id       UUID NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    model_id          VARCHAR(255) NOT NULL,
+    display_name      VARCHAR(255) NOT NULL,
+    -- Real USD/token cost — drives billing reports.
+    input_price       DECIMAL(10, 6),
+    output_price      DECIMAL(10, 6),
+    -- Quota multipliers — relative to a virtual baseline (1.0).
+    -- Used by the rate-limit / budget-cap engine to convert raw
+    -- token counts into "weighted tokens" so a quota of 1M tokens
+    -- can't be drained by a single gpt-4o burst. Defaults to 1.0
+    -- so existing models behave as raw-token quotas until an admin
+    -- tunes them.
+    input_multiplier  DECIMAL(8, 4) NOT NULL DEFAULT 1.0
+        CHECK (input_multiplier > 0),
+    output_multiplier DECIMAL(8, 4) NOT NULL DEFAULT 1.0
+        CHECK (output_multiplier > 0),
+    is_active         BOOLEAN NOT NULL DEFAULT TRUE,
     UNIQUE(provider_id, model_id)
 );
 
@@ -316,6 +328,68 @@ CREATE TABLE budget_alerts (
     budget_limit  DECIMAL(12, 4),
     notified_at   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- --------------------------------------------------------------------------
+-- Rate limit rules + budget caps
+--
+-- Generic rule storage for sliding-window rate limits and natural-period
+-- budget caps. Both tables are subject-polymorphic — the same engine
+-- enforces limits on users, API keys, providers, and MCP servers via
+-- the (subject_kind, subject_id) tuple. See plan.md for the full design.
+-- --------------------------------------------------------------------------
+
+CREATE TABLE rate_limit_rules (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Who the rule applies to.
+    subject_kind VARCHAR(20) NOT NULL
+        CHECK (subject_kind IN ('user', 'api_key', 'provider', 'mcp_server')),
+    subject_id   UUID NOT NULL,
+    -- Which gateway this rule guards. A user can have separate rules
+    -- for the AI gateway and the MCP gateway.
+    surface      VARCHAR(20) NOT NULL
+        CHECK (surface IN ('ai_gateway', 'mcp_gateway')),
+    -- What we count: requests (1 per call) or weighted tokens (computed
+    -- by `weight.rs` from raw token counts × model multipliers).
+    metric       VARCHAR(20) NOT NULL CHECK (metric IN ('requests', 'tokens')),
+    -- Sliding window length in seconds. Validated at startup against
+    -- the `[60, 60*60*24*7*4]` range — anything outside that is
+    -- either too coarse for the bucket scheme or too long to be a
+    -- "rate" rather than a budget.
+    window_secs  INTEGER NOT NULL CHECK (window_secs > 0),
+    -- Threshold inside the window. requests-metric counts whole calls;
+    -- tokens-metric counts weighted tokens.
+    max_count    BIGINT  NOT NULL CHECK (max_count > 0),
+    enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- One row per (subject, surface, metric, window) — admins enable /
+    -- disable via the `enabled` flag rather than re-creating rows.
+    UNIQUE(subject_kind, subject_id, surface, metric, window_secs)
+);
+CREATE INDEX idx_rlr_subject  ON rate_limit_rules(subject_kind, subject_id);
+CREATE INDEX idx_rlr_enabled  ON rate_limit_rules(enabled) WHERE enabled = TRUE;
+
+CREATE TABLE budget_caps (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    subject_kind VARCHAR(20) NOT NULL
+        CHECK (subject_kind IN ('user', 'api_key', 'team', 'provider')),
+    subject_id   UUID NOT NULL,
+    -- Natural calendar period — counters reset on the period boundary
+    -- (system TZ). NOT a sliding window; that's what rate_limit_rules
+    -- is for.
+    period       VARCHAR(20) NOT NULL
+        CHECK (period IN ('daily', 'weekly', 'monthly')),
+    -- Threshold in weighted tokens. The UI may display "≈ $X" by
+    -- aggregating real `usage_records.cost_usd` for the same period,
+    -- but the cap itself is unitless tokens.
+    limit_tokens BIGINT  NOT NULL CHECK (limit_tokens > 0),
+    enabled      BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(subject_kind, subject_id, period)
+);
+CREATE INDEX idx_budget_caps_subject ON budget_caps(subject_kind, subject_id);
+CREATE INDEX idx_budget_caps_enabled ON budget_caps(enabled) WHERE enabled = TRUE;
 
 -- --------------------------------------------------------------------------
 -- MCP Call Logs

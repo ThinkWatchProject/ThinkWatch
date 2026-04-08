@@ -1,5 +1,4 @@
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
 use uuid::Uuid;
@@ -9,7 +8,7 @@ pub struct Team {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
-    pub monthly_budget: Option<Decimal>,
+    // Budget caps live in `budget_caps` (subject_kind = 'team').
     pub created_at: DateTime<Utc>,
 }
 

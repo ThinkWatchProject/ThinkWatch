@@ -86,8 +86,6 @@ pub struct CreateApiKeyRequest {
     pub name: String,
     pub team_id: Option<Uuid>,
     pub allowed_models: Option<Vec<String>>,
-    pub rate_limit_rpm: Option<i32>,
-    pub rate_limit_tpm: Option<i32>,
     pub expires_in_days: Option<i32>,
 }
 
