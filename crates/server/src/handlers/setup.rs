@@ -135,10 +135,11 @@ pub async fn setup_initialize(
         }
     })?;
 
-    // Assign super_admin role
+    // Assign super_admin role via the unified rbac_role_assignments
+    // table (post-migration 005).
     sqlx::query(
-        r#"INSERT INTO user_roles (user_id, role_id, scope)
-           SELECT $1, id, 'global' FROM roles WHERE name = 'super_admin'"#,
+        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
+           SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = 'super_admin'"#,
     )
     .bind(admin_user.0)
     .execute(&mut *tx)

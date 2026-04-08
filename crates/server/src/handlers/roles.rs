@@ -114,6 +114,15 @@ fn is_known_permission(key: &str) -> bool {
     PERMISSIONS.iter().any(|p| p.key == key)
 }
 
+// ============================================================================
+// Unified roles + role_assignments handlers (post-migration 005)
+//
+// All reads and writes go through `rbac_roles` and `rbac_role_assignments`.
+// The legacy tables (roles / user_roles / custom_roles / user_custom_roles)
+// are NOT touched here — they exist only for the duration of the migration
+// soak window and will be dropped in a future migration.
+// ============================================================================
+
 // --- Response types ---
 
 #[derive(Debug, Serialize)]
@@ -129,8 +138,7 @@ pub struct RoleResponse {
     pub allowed_mcp_servers: Option<Vec<Uuid>>,
     /// AWS IAM-style policy document JSON. `null` = use legacy permissions.
     pub policy_document: Option<serde_json::Value>,
-    /// Number of users currently assigned to this role. Used by the
-    /// admin UI to surface impact when changing or deleting a role.
+    /// Number of users currently assigned to this role.
     pub user_count: i64,
     pub created_at: String,
     pub updated_at: String,
@@ -141,135 +149,90 @@ pub struct RolesListResponse {
     pub items: Vec<RoleResponse>,
 }
 
+/// One row from `rbac_roles` mapped 1:1 by sqlx.
+type RoleRow = (
+    Uuid,
+    String,
+    Option<String>,
+    bool,
+    Vec<String>,
+    Option<Vec<String>>,
+    Option<Vec<Uuid>>,
+    Option<serde_json::Value>,
+    chrono::DateTime<chrono::Utc>,
+    chrono::DateTime<chrono::Utc>,
+);
+
+const ROLE_SELECT: &str = "SELECT id, name, description, is_system, permissions, \
+                                  allowed_models, allowed_mcp_servers, policy_document, \
+                                  created_at, updated_at \
+                           FROM rbac_roles";
+
+fn row_to_response(row: RoleRow, user_count: i64) -> RoleResponse {
+    RoleResponse {
+        id: row.0,
+        name: row.1,
+        description: row.2,
+        is_system: row.3,
+        permissions: row.4,
+        allowed_models: row.5,
+        allowed_mcp_servers: row.6,
+        policy_document: row.7,
+        user_count,
+        created_at: row.8.to_rfc3339(),
+        updated_at: row.9.to_rfc3339(),
+    }
+}
+
 // --- List all roles ---
 
 pub async fn list_roles(
     _auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<RolesListResponse>, AppError> {
-    // Roles + their permissions + user counts in three queries (instead
-    // of N+1 per role). System rows are ordered first so the table shows
-    // the seeded templates above any custom roles.
-    let rows = sqlx::query_as::<
-        _,
-        (
-            Uuid,
-            String,
-            Option<String>,
-            bool,
-            Option<Vec<String>>,
-            Option<Vec<Uuid>>,
-            Option<serde_json::Value>,
-            chrono::DateTime<chrono::Utc>,
-            chrono::DateTime<chrono::Utc>,
-        ),
-    >(
-        "SELECT id, name, description, is_system, allowed_models, allowed_mcp_servers, \
-                policy_document, created_at, updated_at \
-         FROM custom_roles \
-         ORDER BY is_system DESC, name ASC",
-    )
-    .fetch_all(&state.db)
-    .await?;
+    // System rows first, then alphabetical. Permissions and counts are
+    // pulled in two more queries (no N+1) and merged in Rust.
+    let rows: Vec<RoleRow> =
+        sqlx::query_as(&format!("{ROLE_SELECT} ORDER BY is_system DESC, name ASC"))
+            .fetch_all(&state.db)
+            .await?;
 
     let role_ids: Vec<Uuid> = rows.iter().map(|r| r.0).collect();
 
-    let perm_rows = sqlx::query_as::<_, (Uuid, String)>(
-        "SELECT custom_role_id, permission FROM custom_role_permissions \
-         WHERE custom_role_id = ANY($1)",
+    let counts: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT role_id, COUNT(*)::bigint \
+           FROM rbac_role_assignments \
+          WHERE role_id = ANY($1) \
+          GROUP BY role_id",
     )
     .bind(&role_ids)
     .fetch_all(&state.db)
     .await?;
-
-    let mut perm_map: std::collections::HashMap<Uuid, Vec<String>> =
-        std::collections::HashMap::new();
-    for (rid, perm) in perm_rows {
-        perm_map.entry(rid).or_default().push(perm);
-    }
-
-    // User count per role: surfaces "X users will lose this access" in
-    // the UI when an admin tries to delete or downgrade a role.
-    //
-    // Counts are pulled from BOTH membership tables and merged by role
-    // name, because legacy system-role assignments live in the
-    // `user_roles` -> `roles` (by-name) tables while custom-role
-    // assignments live in `user_custom_roles`. Until we unify the two
-    // membership tables in a future migration, summing them by name is
-    // the most accurate "who has this role today" view.
-    let count_rows = sqlx::query_as::<_, (Uuid, i64)>(
-        "SELECT cr.id, COALESCE(legacy.cnt, 0) + COALESCE(modern.cnt, 0) AS total \
-           FROM custom_roles cr \
-           LEFT JOIN ( \
-             SELECT r.name AS name, COUNT(*)::bigint AS cnt \
-               FROM user_roles ur \
-               JOIN roles r ON r.id = ur.role_id \
-              GROUP BY r.name \
-           ) AS legacy ON legacy.name = cr.name \
-           LEFT JOIN ( \
-             SELECT custom_role_id, COUNT(*)::bigint AS cnt \
-               FROM user_custom_roles \
-              GROUP BY custom_role_id \
-           ) AS modern ON modern.custom_role_id = cr.id \
-          WHERE cr.id = ANY($1)",
-    )
-    .bind(&role_ids)
-    .fetch_all(&state.db)
-    .await?;
-
     let mut count_map: std::collections::HashMap<Uuid, i64> = std::collections::HashMap::new();
-    for (rid, c) in count_rows {
+    for (rid, c) in counts {
         count_map.insert(rid, c);
     }
 
     let items = rows
         .into_iter()
-        .map(
-            |(
-                id,
-                name,
-                description,
-                is_system,
-                allowed_models,
-                allowed_mcp_servers,
-                policy_document,
-                created_at,
-                updated_at,
-            )| {
-                let mut permissions = perm_map.remove(&id).unwrap_or_default();
-                permissions.sort();
-                RoleResponse {
-                    id,
-                    name,
-                    description,
-                    is_system,
-                    permissions,
-                    allowed_models,
-                    allowed_mcp_servers,
-                    policy_document,
-                    user_count: count_map.get(&id).copied().unwrap_or(0),
-                    created_at: created_at.to_rfc3339(),
-                    updated_at: updated_at.to_rfc3339(),
-                }
-            },
-        )
+        .map(|row| {
+            let id = row.0;
+            row_to_response(row, count_map.get(&id).copied().unwrap_or(0))
+        })
         .collect();
 
     Ok(Json(RolesListResponse { items }))
 }
 
-// --- Create custom role ---
+// --- Create role ---
 
 #[derive(Debug, Deserialize)]
 pub struct CreateRoleRequest {
     pub name: String,
     pub description: Option<String>,
     pub permissions: Vec<String>,
-    /// Restrict to specific model IDs. `null` or absent = unrestricted.
     pub allowed_models: Option<Vec<String>>,
-    /// Restrict to specific MCP server UUIDs. `null` or absent = unrestricted.
     pub allowed_mcp_servers: Option<Vec<Uuid>>,
-    /// AWS IAM-style policy document. When provided, takes precedence over permissions.
     pub policy_document: Option<serde_json::Value>,
 }
 
@@ -284,81 +247,53 @@ pub async fn create_role(
             "Role name must be 1-100 characters".into(),
         ));
     }
-
-    // Validate policy document if provided
     if let Some(ref doc) = payload.policy_document {
         rbac::validate_policy_document(doc).map_err(AppError::BadRequest)?;
     }
-
-    // Validate permissions
     for perm in &payload.permissions {
         if !is_known_permission(perm) {
             return Err(AppError::BadRequest(format!("Invalid permission: {perm}")));
         }
     }
 
-    let mut tx = state.db.begin().await?;
-
-    let row = sqlx::query_as::<_, (Uuid, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
-        "INSERT INTO custom_roles (name, description, created_by, allowed_models, allowed_mcp_servers, policy_document) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, created_at, updated_at",
+    let row: RoleRow = sqlx::query_as(
+        "INSERT INTO rbac_roles (name, description, is_system, permissions, \
+                                 allowed_models, allowed_mcp_servers, policy_document, created_by) \
+         VALUES ($1, $2, FALSE, $3, $4, $5, $6, $7) \
+         RETURNING id, name, description, is_system, permissions, \
+                   allowed_models, allowed_mcp_servers, policy_document, \
+                   created_at, updated_at",
     )
     .bind(name)
     .bind(&payload.description)
-    .bind(auth_user.claims.sub)
+    .bind(&payload.permissions)
     .bind(&payload.allowed_models)
     .bind(&payload.allowed_mcp_servers)
     .bind(&payload.policy_document)
-    .fetch_one(&mut *tx)
+    .bind(auth_user.claims.sub)
+    .fetch_one(&state.db)
     .await
     .map_err(|e| match &e {
-        sqlx::Error::Database(db_err) if db_err.constraint() == Some("custom_roles_name_key") => {
+        sqlx::Error::Database(db_err) if db_err.constraint() == Some("rbac_roles_name_key") => {
             AppError::BadRequest(format!("Role name '{name}' already exists"))
         }
-        sqlx::Error::Database(db_err) if db_err.constraint() == Some("custom_roles_created_by_fkey") => {
-            AppError::BadRequest("Current user not found — cannot create role".into())
-        }
-        _ => {
-            tracing::error!("Failed to create custom role: {e:?}");
-            AppError::from(e)
-        }
+        _ => AppError::from(e),
     })?;
 
-    for perm in &payload.permissions {
-        sqlx::query(
-            "INSERT INTO custom_role_permissions (custom_role_id, permission) VALUES ($1, $2)",
-        )
-        .bind(row.0)
-        .bind(perm)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    tx.commit().await?;
+    let response = row_to_response(row, 0);
 
     state.audit.log(
         auth_user
             .audit("role.created")
             .resource("role")
-            .resource_id(row.0.to_string())
+            .resource_id(response.id.to_string())
             .detail(serde_json::json!({ "name": name })),
     );
 
-    Ok(Json(RoleResponse {
-        id: row.0,
-        name: name.to_string(),
-        description: payload.description,
-        is_system: false,
-        permissions: payload.permissions,
-        allowed_models: payload.allowed_models,
-        allowed_mcp_servers: payload.allowed_mcp_servers,
-        policy_document: payload.policy_document,
-        user_count: 0,
-        created_at: row.1.to_rfc3339(),
-        updated_at: row.2.to_rfc3339(),
-    }))
+    Ok(Json(response))
 }
 
-// --- Update custom role ---
+// --- Update role ---
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateRoleRequest {
@@ -376,24 +311,19 @@ pub async fn update_role(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
-    // Prevent editing system roles
-    let existing = sqlx::query_as::<_, (bool, String)>(
-        "SELECT is_system, name FROM custom_roles WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
-
+    let existing =
+        sqlx::query_as::<_, (bool, String)>("SELECT is_system, name FROM rbac_roles WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
     if existing.0 {
         return Err(AppError::BadRequest("Cannot modify system roles".into()));
     }
 
-    // Validate policy document if provided
     if let Some(ref doc) = payload.policy_document {
         rbac::validate_policy_document(doc).map_err(AppError::BadRequest)?;
     }
-
     if let Some(ref perms) = payload.permissions {
         for perm in perms {
             if !is_known_permission(perm) {
@@ -402,84 +332,42 @@ pub async fn update_role(
         }
     }
 
-    let mut tx = state.db.begin().await?;
+    // Build a single UPDATE with COALESCE so we only touch fields the
+    // caller actually sent. Permissions / models / servers / policy are
+    // nullable so an explicit `Some(None)` clears them. We pass them
+    // through directly and let the COALESCE branches resolve.
+    sqlx::query(
+        "UPDATE rbac_roles SET \
+            name              = COALESCE($2, name), \
+            description       = COALESCE($3, description), \
+            permissions       = COALESCE($4, permissions), \
+            allowed_models    = $5, \
+            allowed_mcp_servers = $6, \
+            policy_document   = $7, \
+            updated_at        = now() \
+         WHERE id = $1 AND is_system = FALSE",
+    )
+    .bind(id)
+    .bind(payload.name.as_deref().map(str::trim))
+    .bind(payload.description.as_deref())
+    .bind(payload.permissions.as_ref())
+    .bind(payload.allowed_models.as_ref())
+    .bind(payload.allowed_mcp_servers.as_ref())
+    .bind(payload.policy_document.as_ref())
+    .execute(&state.db)
+    .await?;
 
-    if let Some(ref name) = payload.name {
-        let name = name.trim();
-        if name.is_empty() || name.len() > 100 {
-            return Err(AppError::BadRequest(
-                "Role name must be 1-100 characters".into(),
-            ));
-        }
-        sqlx::query("UPDATE custom_roles SET name = $1, updated_at = now() WHERE id = $2")
-            .bind(name)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
-    if let Some(ref desc) = payload.description {
-        sqlx::query("UPDATE custom_roles SET description = $1, updated_at = now() WHERE id = $2")
-            .bind(desc)
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
-    // Update allowed_models (explicit null clears restriction)
-    if payload.allowed_models.is_some() {
-        sqlx::query(
-            "UPDATE custom_roles SET allowed_models = $1, updated_at = now() WHERE id = $2",
-        )
-        .bind(&payload.allowed_models)
+    let row: RoleRow = sqlx::query_as(&format!("{ROLE_SELECT} WHERE id = $1"))
         .bind(id)
-        .execute(&mut *tx)
+        .fetch_one(&state.db)
         .await?;
-    }
 
-    // Update allowed_mcp_servers
-    if payload.allowed_mcp_servers.is_some() {
-        sqlx::query(
-            "UPDATE custom_roles SET allowed_mcp_servers = $1, updated_at = now() WHERE id = $2",
-        )
-        .bind(&payload.allowed_mcp_servers)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    // Update policy_document
-    if payload.policy_document.is_some() {
-        sqlx::query(
-            "UPDATE custom_roles SET policy_document = $1, updated_at = now() WHERE id = $2",
-        )
-        .bind(&payload.policy_document)
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    }
-
-    if let Some(ref perms) = payload.permissions {
-        sqlx::query("DELETE FROM custom_role_permissions WHERE custom_role_id = $1")
+    let user_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM rbac_role_assignments WHERE role_id = $1")
             .bind(id)
-            .execute(&mut *tx)
-            .await?;
-        for perm in perms {
-            sqlx::query(
-                "INSERT INTO custom_role_permissions (custom_role_id, permission) VALUES ($1, $2)",
-            )
-            .bind(id)
-            .bind(perm)
-            .execute(&mut *tx)
-            .await?;
-        }
-        sqlx::query("UPDATE custom_roles SET updated_at = now() WHERE id = $1")
-            .bind(id)
-            .execute(&mut *tx)
-            .await?;
-    }
-
-    tx.commit().await?;
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
     state.audit.log(
         auth_user
@@ -489,67 +377,13 @@ pub async fn update_role(
             .detail(serde_json::json!({ "name": existing.1 })),
     );
 
-    // Fetch updated role
-    let row = sqlx::query_as::<_, (Uuid, String, Option<String>, bool, Option<Vec<String>>, Option<Vec<Uuid>>, Option<serde_json::Value>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>(
-        "SELECT id, name, description, is_system, allowed_models, allowed_mcp_servers, policy_document, created_at, updated_at FROM custom_roles WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await?;
-
-    let perms: Vec<String> = sqlx::query_as::<_, (String,)>(
-        "SELECT permission FROM custom_role_permissions WHERE custom_role_id = $1",
-    )
-    .bind(id)
-    .fetch_all(&state.db)
-    .await?
-    .into_iter()
-    .map(|r| r.0)
-    .collect();
-
-    // Same dual-table count as list_roles (see comment there).
-    let user_count: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(legacy.cnt, 0) + COALESCE(modern.cnt, 0) \
-           FROM custom_roles cr \
-           LEFT JOIN ( \
-             SELECT r.name AS name, COUNT(*)::bigint AS cnt \
-               FROM user_roles ur JOIN roles r ON r.id = ur.role_id \
-              GROUP BY r.name \
-           ) legacy ON legacy.name = cr.name \
-           LEFT JOIN ( \
-             SELECT custom_role_id, COUNT(*)::bigint AS cnt \
-               FROM user_custom_roles GROUP BY custom_role_id \
-           ) modern ON modern.custom_role_id = cr.id \
-          WHERE cr.id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
-
-    Ok(Json(RoleResponse {
-        id: row.0,
-        name: row.1,
-        description: row.2,
-        is_system: row.3,
-        permissions: perms,
-        allowed_models: row.4,
-        allowed_mcp_servers: row.5,
-        policy_document: row.6,
-        user_count,
-        created_at: row.7.to_rfc3339(),
-        updated_at: row.8.to_rfc3339(),
-    }))
+    Ok(Json(row_to_response(row, user_count)))
 }
 
-// --- Delete custom role ---
+// --- Delete role (with reassign-on-members) ---
 
 #[derive(Debug, Deserialize)]
 pub struct DeleteRoleQuery {
-    /// If set, all users currently assigned to the role being deleted
-    /// will be reassigned to this role atomically. Otherwise the delete
-    /// is rejected when the role still has members (so the admin
-    /// doesn't accidentally orphan users).
     pub reassign_to: Option<Uuid>,
 }
 
@@ -559,29 +393,23 @@ pub async fn delete_role(
     Path(id): Path<Uuid>,
     axum::extract::Query(query): axum::extract::Query<DeleteRoleQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let existing = sqlx::query_as::<_, (bool, String)>(
-        "SELECT is_system, name FROM custom_roles WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
-
+    let existing =
+        sqlx::query_as::<_, (bool, String)>("SELECT is_system, name FROM rbac_roles WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
     if existing.0 {
         return Err(AppError::BadRequest("Cannot delete system roles".into()));
     }
-
     let role_name = existing.1;
 
-    // Don't orphan users. If members exist, the caller must either pass
-    // ?reassign_to=<role_id> or remove the assignments first.
-    let assigned: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*)::bigint FROM user_custom_roles WHERE custom_role_id = $1",
-    )
-    .bind(id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
+    let assigned: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM rbac_role_assignments WHERE role_id = $1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
 
     let mut tx = state.db.begin().await?;
 
@@ -593,28 +421,28 @@ pub async fn delete_role(
                 ));
             }
             Some(target_id) => {
-                // Verify the target exists and isn't the same row.
                 let target_exists: bool =
-                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM custom_roles WHERE id = $1)")
+                    sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rbac_roles WHERE id = $1)")
                         .bind(target_id)
                         .fetch_one(&mut *tx)
                         .await?;
                 if !target_exists {
                     return Err(AppError::BadRequest("reassign_to role not found".into()));
                 }
-                // Swap each (user, scope) membership over. Use
-                // ON CONFLICT DO NOTHING because the user might already
-                // hold the target role in the same scope.
+                // Migrate every (user, scope) pair to the new role.
                 sqlx::query(
-                    "INSERT INTO user_custom_roles (user_id, custom_role_id, scope) \
-                     SELECT user_id, $2, scope FROM user_custom_roles WHERE custom_role_id = $1 \
+                    "INSERT INTO rbac_role_assignments \
+                         (user_id, role_id, scope_kind, scope_id, assigned_by) \
+                     SELECT user_id, $2, scope_kind, scope_id, $3 \
+                       FROM rbac_role_assignments WHERE role_id = $1 \
                      ON CONFLICT DO NOTHING",
                 )
                 .bind(id)
                 .bind(target_id)
+                .bind(auth_user.claims.sub)
                 .execute(&mut *tx)
                 .await?;
-                sqlx::query("DELETE FROM user_custom_roles WHERE custom_role_id = $1")
+                sqlx::query("DELETE FROM rbac_role_assignments WHERE role_id = $1")
                     .bind(id)
                     .execute(&mut *tx)
                     .await?;
@@ -627,7 +455,7 @@ pub async fn delete_role(
         }
     }
 
-    sqlx::query("DELETE FROM custom_roles WHERE id = $1")
+    sqlx::query("DELETE FROM rbac_roles WHERE id = $1 AND is_system = FALSE")
         .bind(id)
         .execute(&mut *tx)
         .await?;
@@ -653,28 +481,15 @@ pub async fn delete_role(
 }
 
 // --- List members of a role ---
-//
-// Returns every user currently assigned to the role, pulled from both
-// membership tables (legacy `user_roles` matched by role name, modern
-// `user_custom_roles` matched by id). The two are unioned + deduplicated
-// by user id and ordered by email so the admin UI can show "who has
-// this role today" without making N queries.
 
 #[derive(Debug, Serialize)]
 pub struct RoleMember {
     pub user_id: Uuid,
     pub email: String,
     pub display_name: Option<String>,
-    /// Scope assignment text — `"global"` for legacy and most modern
-    /// assignments. Once `user_custom_roles.scope` is in use this will
-    /// reflect the actual scope (e.g. `"team:<uuid>"`).
-    pub scope: String,
-    /// `"system"` for legacy `user_roles` membership, `"custom"` for
-    /// `user_custom_roles`. The same user may appear under both kinds
-    /// — they are kept as separate rows so the admin can see how the
-    /// assignment was made.
-    pub source: String,
-    pub assigned_at: Option<String>,
+    pub scope_kind: String,
+    pub scope_id: Option<Uuid>,
+    pub assigned_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -687,69 +502,46 @@ pub async fn list_role_members(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RoleMembersResponse>, AppError> {
-    // Resolve the role first so we can match the legacy table by name.
-    let role = sqlx::query_as::<_, (String,)>("SELECT name FROM custom_roles WHERE id = $1")
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rbac_roles WHERE id = $1)")
         .bind(id)
-        .fetch_optional(&state.db)
-        .await?
-        .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
-    let role_name = role.0;
+        .fetch_one(&state.db)
+        .await?;
+    if !exists {
+        return Err(AppError::NotFound("Role not found".into()));
+    }
 
-    // Modern: user_custom_roles -> users (now scope-aware)
-    type ModernMemberRow = (
+    type Row = (
         Uuid,
         String,
         Option<String>,
         String,
-        Option<chrono::DateTime<chrono::Utc>>,
+        Option<Uuid>,
+        chrono::DateTime<chrono::Utc>,
     );
-    let modern: Vec<ModernMemberRow> = sqlx::query_as(
-        "SELECT u.id, u.email, u.display_name, ucr.scope, ucr.assigned_at \
-           FROM user_custom_roles ucr \
-           JOIN users u ON u.id = ucr.user_id \
-          WHERE ucr.custom_role_id = $1 \
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT u.id, u.email, u.display_name, ra.scope_kind, ra.scope_id, ra.assigned_at \
+           FROM rbac_role_assignments ra \
+           JOIN users u ON u.id = ra.user_id \
+          WHERE ra.role_id = $1 \
           ORDER BY u.email ASC",
     )
     .bind(id)
     .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
+    .await?;
 
-    // Legacy: user_roles -> roles (by name) -> users
-    let legacy: Vec<(Uuid, String, Option<String>, String)> = sqlx::query_as(
-        "SELECT u.id, u.email, u.display_name, ur.scope \
-           FROM user_roles ur \
-           JOIN roles r ON r.id = ur.role_id \
-           JOIN users u ON u.id = ur.user_id \
-          WHERE r.name = $1 \
-          ORDER BY u.email ASC",
-    )
-    .bind(&role_name)
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-
-    let mut items: Vec<RoleMember> = Vec::with_capacity(modern.len() + legacy.len());
-    for (uid, email, display_name, scope, assigned_at) in modern {
-        items.push(RoleMember {
-            user_id: uid,
-            email,
-            display_name,
-            scope,
-            source: "custom".into(),
-            assigned_at: assigned_at.map(|d| d.to_rfc3339()),
-        });
-    }
-    for (uid, email, display_name, scope) in legacy {
-        items.push(RoleMember {
-            user_id: uid,
-            email,
-            display_name,
-            scope,
-            source: "system".into(),
-            assigned_at: None,
-        });
-    }
+    let items = rows
+        .into_iter()
+        .map(
+            |(user_id, email, display_name, scope_kind, scope_id, assigned_at)| RoleMember {
+                user_id,
+                email,
+                display_name,
+                scope_kind,
+                scope_id,
+                assigned_at: assigned_at.to_rfc3339(),
+            },
+        )
+        .collect();
 
     Ok(Json(RoleMembersResponse { items }))
 }
@@ -757,10 +549,7 @@ pub async fn list_role_members(
 // --- List all valid permissions ---
 //
 // Returns the structured catalog so the frontend can group by resource
-// and surface dangerous permissions with extra confirmation. The legacy
-// `Vec<String>` shape is preserved by serializing each entry as an
-// object — frontends that only read `key` keep working.
-
+// and surface dangerous permissions with extra confirmation.
 pub async fn list_permissions(_auth_user: AuthUser) -> Json<Vec<PermissionDef>> {
     Json(PERMISSIONS.to_vec())
 }

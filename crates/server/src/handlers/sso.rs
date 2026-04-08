@@ -106,10 +106,10 @@ pub async fn sso_callback(
             .fetch_one(&state.db)
             .await?;
 
-            // Assign default developer role
+            // Assign default developer role via the unified table.
             sqlx::query(
-                r#"INSERT INTO user_roles (user_id, role_id, scope)
-                   SELECT $1, id, 'global' FROM roles WHERE name = 'developer'"#,
+                r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
+                   SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = 'developer'"#,
             )
             .bind(u.id)
             .execute(&state.db)
@@ -123,9 +123,13 @@ pub async fn sso_callback(
         return Err(AppError::Forbidden);
     }
 
-    // Fetch roles
+    // Fetch system role names for the JWT (custom roles aren't part of
+    // the JWT roles[] field — they're loaded per-request from
+    // rbac_role_assignments by the handlers that need them).
     let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT r.name FROM roles r JOIN user_roles ur ON r.id = ur.role_id WHERE ur.user_id = $1",
+        "SELECT r.name FROM rbac_roles r \
+           JOIN rbac_role_assignments ra ON r.id = ra.role_id \
+          WHERE ra.user_id = $1 AND r.is_system = TRUE",
     )
     .bind(user.id)
     .fetch_all(&state.db)
