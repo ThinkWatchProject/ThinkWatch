@@ -26,6 +26,8 @@
     "total": "Total",
     "all": "All",
     "none": "None",
+    "selectAll": "Select all",
+    "clearAll": "Clear",
     "deleteSuccess": "Deleted successfully",
     "operationFailed": "Operation failed"
   },
@@ -327,9 +329,8 @@
     "deactivateConfirm": "Deactivate this user? They will not be able to log in.",
     "activateConfirm": "Activate this user?",
     "saving": "Saving...",
-    "customRoles": "Custom roles",
-    "customRolesDesc": "Assign custom roles to this user with optional scope. Leave scope as `global` for unrestricted access.",
-    "pickCustomRole": "Pick a custom role…",
+    "rolesDesc": "Assign one or more roles. Permissions are the union across every role. Leave scope as `global` for unrestricted access.",
+    "pickRole": "Pick a role…",
     "scope": "Scope",
     "scopeGlobal": "Global",
     "scopeTeam": "Team",
@@ -376,13 +377,13 @@
     "allowedMcpServersDesc": "Restrict which MCP servers this role can access. Leave empty for unrestricted access.",
     "allModels": "All models (unrestricted)",
     "allServers": "All servers (unrestricted)",
-    "resourceConstraints": "Resource Constraints",
     "simpleMode": "Simple Mode",
     "policyMode": "Policy Mode",
     "policyTemplates": "Policy Templates",
     "policyDocument": "Policy Document",
     "policyDocumentDesc": "AWS IAM-style JSON policy document for fine-grained access control",
-    "invalidJson": "Invalid JSON format"
+    "invalidJson": "Invalid JSON format",
+    "policySyncLossy": "Some policy statements (Deny rules or scoped Resource patterns) cannot be expressed in simple mode and were dropped."
   },
   "permissions": {
     "resource": {

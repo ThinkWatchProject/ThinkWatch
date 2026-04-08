@@ -69,7 +69,7 @@ pub async fn setup_initialize(
 ) -> Result<Json<SetupInitResponse>, AppError> {
     // Check if already initialized (fast path from cache)
     if state.dynamic_config.is_initialized().await {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Setup already completed".into()));
     }
 
     // Rate limit: max 5 setup attempts per minute (global, not per-user since no auth)
@@ -107,7 +107,7 @@ pub async fn setup_initialize(
         .and_then(|v| v.as_bool())
         .unwrap_or(false)
     {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Setup already completed".into()));
     }
 
     // Validate inputs

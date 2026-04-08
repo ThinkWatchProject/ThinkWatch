@@ -203,9 +203,10 @@ fn encryption_key(state: &AppState) -> Result<[u8; 32], AppError> {
 }
 
 pub async fn list_providers(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Provider>>, AppError> {
+    auth_user.require_permission("providers:read")?;
     let providers = sqlx::query_as::<_, Provider>(
         "SELECT * FROM providers WHERE deleted_at IS NULL ORDER BY created_at DESC",
     )
@@ -220,6 +221,7 @@ pub async fn create_provider(
     State(state): State<AppState>,
     Json(req): Json<CreateProviderRequest>,
 ) -> Result<Json<Provider>, AppError> {
+    auth_user.require_permission("providers:create")?;
     if req.name.is_empty() || req.base_url.is_empty() || req.api_key.is_empty() {
         return Err(AppError::BadRequest(
             "name, base_url, and api_key are required".into(),
@@ -280,6 +282,10 @@ pub async fn update_provider(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateProviderRequest>,
 ) -> Result<Json<Provider>, AppError> {
+    auth_user.require_permission("providers:update")?;
+    if req.api_key.is_some() {
+        auth_user.require_permission("providers:rotate_key")?;
+    }
     let existing = sqlx::query_as::<_, Provider>(
         "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
     )
@@ -341,10 +347,11 @@ pub async fn update_provider(
 }
 
 pub async fn get_provider(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<Provider>, AppError> {
+    auth_user.require_permission("providers:read")?;
     let provider = sqlx::query_as::<_, Provider>(
         "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
     )
@@ -361,6 +368,7 @@ pub async fn delete_provider(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("providers:delete")?;
     let name: Option<String> = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
@@ -411,10 +419,11 @@ pub struct TestProviderResponse {
 
 /// Authenticated route — used by the providers admin page.
 pub async fn test_provider(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(_state): State<AppState>,
     Json(req): Json<TestProviderRequest>,
 ) -> Result<Json<TestProviderResponse>, AppError> {
+    auth_user.require_permission("providers:create")?;
     run_provider_test(req).await
 }
 
@@ -426,7 +435,9 @@ pub async fn test_provider_unauthenticated(
     Json(req): Json<TestProviderRequest>,
 ) -> Result<Json<TestProviderResponse>, AppError> {
     if state.dynamic_config.is_initialized().await {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden(
+            "Setup already completed — use the authenticated endpoint".into(),
+        ));
     }
     run_provider_test(req).await
 }

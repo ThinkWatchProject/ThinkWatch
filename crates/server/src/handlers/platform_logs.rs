@@ -58,10 +58,11 @@ pub struct PlatformLogsResponse {
 }
 
 pub async fn list_platform_logs(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Query(params): Query<PlatformLogsQuery>,
 ) -> Result<Json<PlatformLogsResponse>, AppError> {
+    auth_user.require_permission("logs:read_all")?;
     if !ch_available(&state) {
         return Ok(Json(PlatformLogsResponse {
             total: 0,

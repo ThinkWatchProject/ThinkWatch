@@ -15,7 +15,16 @@ pub const JWT_ISSUER: &str = "thinkwatch";
 pub struct Claims {
     pub sub: Uuid,
     pub email: String,
+    /// Flat list of role names the user holds (system + custom, union).
+    /// Used by the UI for badges and by legacy name-based checks. Not
+    /// load-bearing for authorization — see `permissions`.
     pub roles: Vec<String>,
+    /// Union of all `rbac_roles.permissions` across every role the user
+    /// has. This is the **authoritative** set for runtime authorization
+    /// decisions — middleware and handlers check membership against
+    /// this field, not against `roles`.
+    #[serde(default)]
+    pub permissions: Vec<String>,
     pub exp: i64,
     pub iat: i64,
     pub token_type: String, // "access" or "refresh"
@@ -45,8 +54,9 @@ impl JwtManager {
         user_id: Uuid,
         email: &str,
         roles: Vec<String>,
+        permissions: Vec<String>,
     ) -> anyhow::Result<String> {
-        self.create_access_token_with_ttl(user_id, email, roles, 900)
+        self.create_access_token_with_ttl(user_id, email, roles, permissions, 900)
     }
 
     pub fn create_access_token_with_ttl(
@@ -54,6 +64,7 @@ impl JwtManager {
         user_id: Uuid,
         email: &str,
         roles: Vec<String>,
+        permissions: Vec<String>,
         ttl_secs: i64,
     ) -> anyhow::Result<String> {
         let now = Utc::now();
@@ -61,6 +72,7 @@ impl JwtManager {
             sub: user_id,
             email: email.to_string(),
             roles,
+            permissions,
             exp: (now + Duration::seconds(ttl_secs)).timestamp(),
             iat: now.timestamp(),
             token_type: "access".to_string(),
@@ -81,8 +93,9 @@ impl JwtManager {
         user_id: Uuid,
         email: &str,
         roles: Vec<String>,
+        permissions: Vec<String>,
     ) -> anyhow::Result<String> {
-        self.create_refresh_token_with_ttl(user_id, email, roles, 7)
+        self.create_refresh_token_with_ttl(user_id, email, roles, permissions, 7)
     }
 
     pub fn create_refresh_token_with_ttl(
@@ -90,6 +103,7 @@ impl JwtManager {
         user_id: Uuid,
         email: &str,
         roles: Vec<String>,
+        permissions: Vec<String>,
         ttl_days: i64,
     ) -> anyhow::Result<String> {
         let now = Utc::now();
@@ -97,6 +111,7 @@ impl JwtManager {
             sub: user_id,
             email: email.to_string(),
             roles,
+            permissions,
             exp: (now + Duration::days(ttl_days)).timestamp(),
             iat: now.timestamp(),
             token_type: "refresh".to_string(),
@@ -177,7 +192,12 @@ mod tests {
         let mgr = test_jwt_manager();
         let uid = test_user_id();
         let token = mgr
-            .create_access_token(uid, "alice@example.com", vec!["admin".into()])
+            .create_access_token(
+                uid,
+                "alice@example.com",
+                vec!["admin".into()],
+                vec!["users:read".into(), "users:update".into()],
+            )
             .expect("create should succeed");
 
         let claims = mgr.verify_token(&token).expect("verify should succeed");
@@ -185,6 +205,7 @@ mod tests {
         assert_eq!(claims.email, "alice@example.com");
         assert_eq!(claims.token_type, "access");
         assert_eq!(claims.roles, vec!["admin"]);
+        assert_eq!(claims.permissions, vec!["users:read", "users:update"]);
     }
 
     #[test]
@@ -198,6 +219,7 @@ mod tests {
             sub: uid,
             email: "bob@example.com".into(),
             roles: vec![],
+            permissions: vec![],
             exp: (now - Duration::hours(1)).timestamp(),
             iat: (now - Duration::hours(2)).timestamp(),
             token_type: "access".into(),
@@ -224,6 +246,7 @@ mod tests {
             sub: uid,
             email: "x@y.com".into(),
             roles: vec![],
+            permissions: vec![],
             exp: (now + Duration::hours(1)).timestamp(),
             iat: now.timestamp(),
             token_type: "access".into(),
@@ -251,6 +274,7 @@ mod tests {
             sub: uid,
             email: "x@y.com".into(),
             roles: vec![],
+            permissions: vec![],
             exp: (now + Duration::hours(1)).timestamp(),
             iat: now.timestamp(),
             token_type: "access".into(),
@@ -274,7 +298,7 @@ mod tests {
         let mgr = test_jwt_manager();
         let uid = test_user_id();
         let token = mgr
-            .create_refresh_token(uid, "carol@example.com", vec!["viewer".into()])
+            .create_refresh_token(uid, "carol@example.com", vec!["viewer".into()], vec![])
             .expect("create should succeed");
 
         let claims = mgr.verify_token(&token).expect("verify should succeed");
@@ -287,7 +311,7 @@ mod tests {
         let uid = test_user_id();
         let now = Utc::now().timestamp();
         let token = mgr
-            .create_access_token_with_ttl(uid, "ttl@example.com", vec![], 60)
+            .create_access_token_with_ttl(uid, "ttl@example.com", vec![], vec![], 60)
             .expect("create should succeed");
 
         let claims = mgr.verify_token(&token).expect("verify should succeed");
@@ -308,7 +332,7 @@ mod tests {
         let uid = test_user_id();
         let now = Utc::now().timestamp();
         let token = mgr
-            .create_refresh_token_with_ttl(uid, "ttl@example.com", vec![], 1)
+            .create_refresh_token_with_ttl(uid, "ttl@example.com", vec![], vec![], 1)
             .expect("create should succeed");
 
         let claims = mgr.verify_token(&token).expect("verify should succeed");

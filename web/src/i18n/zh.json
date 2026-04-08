@@ -26,6 +26,8 @@
     "total": "总计",
     "all": "全部",
     "none": "无",
+    "selectAll": "全选",
+    "clearAll": "清空",
     "deleteSuccess": "删除成功",
     "operationFailed": "操作失败"
   },
@@ -327,9 +329,8 @@
     "deactivateConfirm": "确定要禁用此用户吗？该用户将无法登录。",
     "activateConfirm": "确定要启用此用户吗？",
     "saving": "保存中...",
-    "customRoles": "自定义角色",
-    "customRolesDesc": "为此用户分配自定义角色,可选填范围。范围保持 `global` 表示不限制。",
-    "pickCustomRole": "选择一个自定义角色…",
+    "rolesDesc": "为该用户分配一个或多个角色，权限按所有角色取并集。范围保持 `global` 表示不限制。",
+    "pickRole": "选择角色…",
     "scope": "范围",
     "scopeGlobal": "全局",
     "scopeTeam": "团队",
@@ -376,13 +377,13 @@
     "allowedMcpServersDesc": "限制此角色可访问的 MCP 服务器。留空表示允许所有服务器。",
     "allModels": "所有模型（无限制）",
     "allServers": "所有服务器（无限制）",
-    "resourceConstraints": "资源约束",
     "simpleMode": "简单模式",
     "policyMode": "策略模式",
     "policyTemplates": "策略模板",
     "policyDocument": "策略文档",
     "policyDocumentDesc": "AWS IAM 风格的 JSON 策略文档，用于细粒度访问控制",
-    "invalidJson": "JSON 格式无效"
+    "invalidJson": "JSON 格式无效",
+    "policySyncLossy": "部分策略语句（Deny 规则或受限的 Resource 模式）无法在简单模式下表达，已被忽略。"
   },
   "permissions": {
     "resource": {

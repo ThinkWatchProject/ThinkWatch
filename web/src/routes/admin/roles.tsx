@@ -12,7 +12,6 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Separator } from '@/components/ui/separator';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
   Table,
@@ -194,6 +193,75 @@ function groupByResource(perms: PermissionDef[]): Map<string, PermissionDef[]> {
 }
 
 // ----------------------------------------------------------------------------
+// Simple ↔ Policy mode conversion
+//
+// `permsToPolicy` produces a single Allow statement listing every selected
+// permission key — round-trips losslessly back through `policyToPerms`.
+//
+// `policyToPerms` walks every Statement and harvests Action keys from any
+// Allow rule whose Resource matches `*` (or `["*"]`). Anything fancier
+// (Deny rules, Resource scoping like `model:gpt-*`, conditions) cannot be
+// represented in simple mode and is reported as lossy so the UI can warn
+// the admin before they overwrite the JSON.
+// ----------------------------------------------------------------------------
+function permsToPolicy(perms: Set<string>): PolicyDocument {
+  if (perms.size === 0) return { Version: '2024-01-01', Statement: [] };
+  return {
+    Version: '2024-01-01',
+    Statement: [
+      {
+        Sid: 'AllowPermissions',
+        Effect: 'Allow',
+        Action: Array.from(perms).sort(),
+        Resource: '*',
+      },
+    ],
+  };
+}
+
+function isWildcardResource(r: PolicyStatement['Resource']): boolean {
+  if (r === '*') return true;
+  if (Array.isArray(r)) return r.includes('*');
+  return false;
+}
+
+function policyToPerms(
+  json: string,
+  available: PermissionDef[],
+): { perms: Set<string>; lossy: boolean; parseError: boolean } {
+  const out = new Set<string>();
+  if (!json.trim()) return { perms: out, lossy: false, parseError: false };
+  let doc: PolicyDocument;
+  try {
+    doc = JSON.parse(json) as PolicyDocument;
+  } catch {
+    return { perms: out, lossy: false, parseError: true };
+  }
+  let lossy = false;
+  const valid = new Set(available.map((p) => p.key));
+  for (const st of doc.Statement ?? []) {
+    if (st.Effect !== 'Allow' || !isWildcardResource(st.Resource)) {
+      lossy = true;
+      continue;
+    }
+    const actions = Array.isArray(st.Action) ? st.Action : [st.Action];
+    for (const a of actions) {
+      if (a === '*') {
+        for (const p of available) out.add(p.key);
+      } else if (a.endsWith(':*')) {
+        const prefix = a.slice(0, -1); // includes the colon
+        for (const p of available) if (p.key.startsWith(prefix)) out.add(p.key);
+      } else if (valid.has(a)) {
+        out.add(a);
+      } else {
+        lossy = true;
+      }
+    }
+  }
+  return { perms: out, lossy, parseError: false };
+}
+
+// ----------------------------------------------------------------------------
 // Page
 // ----------------------------------------------------------------------------
 
@@ -318,6 +386,43 @@ export function RolesPage() {
       for (const p of perms) next.add(p.key);
     }
     setFn(next);
+  };
+
+  /// Generic mode-switch handler shared by the create + edit dialogs.
+  /// Going simple → policy regenerates the JSON from the perms set so
+  /// the policy editor opens on something that already matches what
+  /// the admin built. Going policy → simple parses the JSON back into
+  /// the perms set, surfacing a warning when the policy contained
+  /// constructs (Deny / scoped Resource / conditions) the simple mode
+  /// can't represent.
+  const switchMode = (
+    next: 'simple' | 'policy',
+    current: 'simple' | 'policy',
+    state: {
+      perms: Set<string>;
+      setPerms: (p: Set<string>) => void;
+      policyJson: string;
+      setPolicyJson: (j: string) => void;
+      setPolicyError: (e: string) => void;
+      setMode: (m: 'simple' | 'policy') => void;
+    },
+  ) => {
+    if (next === current) return;
+    if (next === 'policy') {
+      state.setPolicyJson(JSON.stringify(permsToPolicy(state.perms), null, 2));
+      state.setPolicyError('');
+      state.setMode('policy');
+      return;
+    }
+    // policy → simple
+    const result = policyToPerms(state.policyJson, permissions);
+    if (result.parseError) {
+      state.setPolicyError(t('roles.invalidJson'));
+      return; // refuse the switch — invalid JSON would silently nuke perms
+    }
+    state.setPerms(result.perms);
+    state.setPolicyError(result.lossy ? t('roles.policySyncLossy') : '');
+    state.setMode('simple');
   };
 
   const resetCreateForm = () => {
@@ -485,7 +590,19 @@ export function RolesPage() {
                     />
                   </div>
                 </div>
-                <Tabs value={formMode} onValueChange={(v) => setFormMode(v as 'simple' | 'policy')}>
+                <Tabs
+                  value={formMode}
+                  onValueChange={(v) =>
+                    switchMode(v as 'simple' | 'policy', formMode, {
+                      perms: formPerms,
+                      setPerms: setFormPerms,
+                      policyJson: formPolicyJson,
+                      setPolicyJson: setFormPolicyJson,
+                      setPolicyError: setFormPolicyError,
+                      setMode: setFormMode,
+                    })
+                  }
+                >
                   <TabsList className="grid w-full grid-cols-2">
                     <TabsTrigger value="simple">{t('roles.simpleMode')}</TabsTrigger>
                     <TabsTrigger value="policy">{t('roles.policyMode')}</TabsTrigger>
@@ -533,19 +650,33 @@ export function RolesPage() {
                       selected={formPerms}
                       onTogglePerm={(p) => togglePerm(formPerms, setFormPerms, p)}
                       onToggleGroup={(perms) => toggleResourceGroup(formPerms, setFormPerms, perms)}
-                    />
-                    <Separator />
-                    <ResourceConstraints
-                      restrictModels={formRestrictModels}
-                      onRestrictModelsChange={setFormRestrictModels}
-                      selectedModels={formModels}
-                      onToggleModel={(id) => togglePerm(formModels, setFormModels, id)}
-                      restrictServers={formRestrictServers}
-                      onRestrictServersChange={setFormRestrictServers}
-                      selectedServers={formServers}
-                      onToggleServer={(id) => togglePerm(formServers, setFormServers, id)}
-                      availableModels={availableModels}
-                      availableServers={availableServers}
+                      onSelectAll={() => setFormPerms(new Set(permissions.map((p) => p.key)))}
+                      onClear={() => setFormPerms(new Set())}
+                      renderExtras={(resource) => {
+                        if (resource === 'ai_gateway' && formPerms.has('ai_gateway:use')) {
+                          return (
+                            <ModelConstraint
+                              restrict={formRestrictModels}
+                              onRestrictChange={setFormRestrictModels}
+                              selected={formModels}
+                              onToggle={(id) => togglePerm(formModels, setFormModels, id)}
+                              available={availableModels}
+                            />
+                          );
+                        }
+                        if (resource === 'mcp_gateway' && formPerms.has('mcp_gateway:use')) {
+                          return (
+                            <ServerConstraint
+                              restrict={formRestrictServers}
+                              onRestrictChange={setFormRestrictServers}
+                              selected={formServers}
+                              onToggle={(id) => togglePerm(formServers, setFormServers, id)}
+                              available={availableServers}
+                            />
+                          );
+                        }
+                        return null;
+                      }}
                     />
                   </TabsContent>
                   <TabsContent value="policy" className="mt-3">
@@ -733,7 +864,19 @@ export function RolesPage() {
                   />
                 </div>
               </div>
-              <Tabs value={editMode} onValueChange={(v) => setEditMode(v as 'simple' | 'policy')}>
+              <Tabs
+                value={editMode}
+                onValueChange={(v) =>
+                  switchMode(v as 'simple' | 'policy', editMode, {
+                    perms: editPerms,
+                    setPerms: setEditPerms,
+                    policyJson: editPolicyJson,
+                    setPolicyJson: setEditPolicyJson,
+                    setPolicyError: setEditPolicyError,
+                    setMode: setEditMode,
+                  })
+                }
+              >
                 <TabsList className="grid w-full grid-cols-2">
                   <TabsTrigger value="simple">{t('roles.simpleMode')}</TabsTrigger>
                   <TabsTrigger value="policy">{t('roles.policyMode')}</TabsTrigger>
@@ -744,19 +887,33 @@ export function RolesPage() {
                     selected={editPerms}
                     onTogglePerm={(p) => togglePerm(editPerms, setEditPerms, p)}
                     onToggleGroup={(perms) => toggleResourceGroup(editPerms, setEditPerms, perms)}
-                  />
-                  <Separator />
-                  <ResourceConstraints
-                    restrictModels={editRestrictModels}
-                    onRestrictModelsChange={setEditRestrictModels}
-                    selectedModels={editModels}
-                    onToggleModel={(id) => togglePerm(editModels, setEditModels, id)}
-                    restrictServers={editRestrictServers}
-                    onRestrictServersChange={setEditRestrictServers}
-                    selectedServers={editServers}
-                    onToggleServer={(id) => togglePerm(editServers, setEditServers, id)}
-                    availableModels={availableModels}
-                    availableServers={availableServers}
+                    onSelectAll={() => setEditPerms(new Set(permissions.map((p) => p.key)))}
+                    onClear={() => setEditPerms(new Set())}
+                    renderExtras={(resource) => {
+                      if (resource === 'ai_gateway' && editPerms.has('ai_gateway:use')) {
+                        return (
+                          <ModelConstraint
+                            restrict={editRestrictModels}
+                            onRestrictChange={setEditRestrictModels}
+                            selected={editModels}
+                            onToggle={(id) => togglePerm(editModels, setEditModels, id)}
+                            available={availableModels}
+                          />
+                        );
+                      }
+                      if (resource === 'mcp_gateway' && editPerms.has('mcp_gateway:use')) {
+                        return (
+                          <ServerConstraint
+                            restrict={editRestrictServers}
+                            onRestrictChange={setEditRestrictServers}
+                            selected={editServers}
+                            onToggle={(id) => togglePerm(editServers, setEditServers, id)}
+                            available={availableServers}
+                          />
+                        );
+                      }
+                      return null;
+                    }}
                   />
                 </TabsContent>
                 <TabsContent value="policy" className="mt-3">
@@ -936,23 +1093,54 @@ function DangerPermissionWarning() {
 
 /// Tree-style permission picker grouped by resource. Each resource section
 /// has a parent checkbox that toggles all of its actions; dangerous actions
-/// are highlighted so the admin notices what they're granting.
+/// are highlighted so the admin notices what they're granting. The header
+/// row exposes Select All / Clear shortcuts. `renderExtras` lets the caller
+/// inject resource-scoped constraint UI (e.g. allowed-models picker for
+/// `ai_gateway`) directly under the matching permission group.
 function PermissionTree({
   grouped,
   selected,
   onTogglePerm,
   onToggleGroup,
+  onSelectAll,
+  onClear,
+  renderExtras,
 }: {
   grouped: Map<string, PermissionDef[]>;
   selected: Set<string>;
   onTogglePerm: (key: string) => void;
   onToggleGroup: (perms: PermissionDef[]) => void;
+  onSelectAll: () => void;
+  onClear: () => void;
+  renderExtras?: (resource: string) => ReactNode;
 }) {
   const { t } = useTranslation();
   const groups = Array.from(grouped.entries());
   return (
     <div>
-      <Label className="text-sm font-medium">{t('roles.permissions')}</Label>
+      <div className="flex items-center justify-between">
+        <Label className="text-sm font-medium">{t('roles.permissions')}</Label>
+        <div className="flex items-center gap-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-xs"
+            onClick={onSelectAll}
+          >
+            {t('common.selectAll')}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2 text-xs"
+            onClick={onClear}
+          >
+            {t('common.clearAll')}
+          </Button>
+        </div>
+      </div>
       <ScrollArea className="mt-2 h-72 rounded-md border">
         <div className="divide-y">
           {groups.map(([resource, perms]) => {
@@ -997,6 +1185,7 @@ function PermissionTree({
                     </label>
                   ))}
                 </div>
+                {renderExtras?.(resource)}
               </div>
             );
           })}
@@ -1006,95 +1195,103 @@ function PermissionTree({
   );
 }
 
-function ResourceConstraints({
-  restrictModels,
-  onRestrictModelsChange,
-  selectedModels,
-  onToggleModel,
-  restrictServers,
-  onRestrictServersChange,
-  selectedServers,
-  onToggleServer,
-  availableModels,
-  availableServers,
+/// Inline allowed-models picker rendered under the `ai_gateway` permission
+/// group. Collapsed by default — admin must opt in to "limit to specific
+/// models", which then exposes the per-model checkbox grid.
+function ModelConstraint({
+  restrict,
+  onRestrictChange,
+  selected,
+  onToggle,
+  available,
 }: {
-  restrictModels: boolean;
-  onRestrictModelsChange: (v: boolean) => void;
-  selectedModels: Set<string>;
-  onToggleModel: (id: string) => void;
-  restrictServers: boolean;
-  onRestrictServersChange: (v: boolean) => void;
-  selectedServers: Set<string>;
-  onToggleServer: (id: string) => void;
-  availableModels: string[];
-  availableServers: McpServer[];
+  restrict: boolean;
+  onRestrictChange: (v: boolean) => void;
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+  available: string[];
 }) {
   const { t } = useTranslation();
   return (
-    <div className="space-y-3">
-      <Label className="text-sm font-medium">{t('roles.resourceConstraints')}</Label>
-      <div className="rounded-md border p-3 space-y-2">
-        <label className="flex items-center gap-2 text-sm cursor-pointer">
-          <Checkbox
-            checked={restrictModels}
-            onCheckedChange={(v) => onRestrictModelsChange(!!v)}
-          />
-          <span className="font-medium">{t('roles.allowedModels')}</span>
-        </label>
-        <p className="text-xs text-muted-foreground">{t('roles.allowedModelsDesc')}</p>
-        {restrictModels ? (
-          availableModels.length > 0 ? (
-            <ScrollArea className="max-h-32">
-              <div className="grid grid-cols-2 gap-1.5">
-                {availableModels.map((model) => (
-                  <label key={model} className="flex items-center gap-1.5 text-xs cursor-pointer">
-                    <Checkbox
-                      checked={selectedModels.has(model)}
-                      onCheckedChange={() => onToggleModel(model)}
-                    />
-                    <span className="truncate">{model}</span>
-                  </label>
-                ))}
-              </div>
-            </ScrollArea>
-          ) : (
-            <p className="text-xs text-muted-foreground italic">{t('common.noData')}</p>
-          )
+    <div className="mt-2 ml-6 rounded border bg-muted/20 p-2 space-y-1.5">
+      <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
+        <Checkbox checked={restrict} onCheckedChange={(v) => onRestrictChange(!!v)} />
+        <span>{t('roles.allowedModels')}</span>
+        <span className="font-normal text-muted-foreground">
+          — {restrict ? `${selected.size}` : t('roles.allModels')}
+        </span>
+      </label>
+      {restrict &&
+        (available.length > 0 ? (
+          <ScrollArea className="max-h-32">
+            <div className="grid grid-cols-2 gap-1 pl-5">
+              {available.map((model) => (
+                <label
+                  key={model}
+                  className="flex cursor-pointer items-center gap-1.5 text-xs"
+                >
+                  <Checkbox
+                    checked={selected.has(model)}
+                    onCheckedChange={() => onToggle(model)}
+                  />
+                  <span className="truncate">{model}</span>
+                </label>
+              ))}
+            </div>
+          </ScrollArea>
         ) : (
-          <p className="text-xs text-muted-foreground italic">{t('roles.allModels')}</p>
-        )}
-      </div>
-      <div className="rounded-md border p-3 space-y-2">
-        <label className="flex items-center gap-2 text-sm cursor-pointer">
-          <Checkbox
-            checked={restrictServers}
-            onCheckedChange={(v) => onRestrictServersChange(!!v)}
-          />
-          <span className="font-medium">{t('roles.allowedMcpServers')}</span>
-        </label>
-        <p className="text-xs text-muted-foreground">{t('roles.allowedMcpServersDesc')}</p>
-        {restrictServers ? (
-          availableServers.length > 0 ? (
-            <ScrollArea className="max-h-32">
-              <div className="grid grid-cols-1 gap-1.5">
-                {availableServers.map((srv) => (
-                  <label key={srv.id} className="flex items-center gap-1.5 text-xs cursor-pointer">
-                    <Checkbox
-                      checked={selectedServers.has(srv.id)}
-                      onCheckedChange={() => onToggleServer(srv.id)}
-                    />
-                    {srv.name}
-                  </label>
-                ))}
-              </div>
-            </ScrollArea>
-          ) : (
-            <p className="text-xs text-muted-foreground italic">{t('common.noData')}</p>
-          )
+          <p className="pl-5 text-xs italic text-muted-foreground">{t('common.noData')}</p>
+        ))}
+    </div>
+  );
+}
+
+/// Inline allowed-MCP-servers picker rendered under the `mcp_gateway`
+/// permission group. Same opt-in model as `ModelConstraint`.
+function ServerConstraint({
+  restrict,
+  onRestrictChange,
+  selected,
+  onToggle,
+  available,
+}: {
+  restrict: boolean;
+  onRestrictChange: (v: boolean) => void;
+  selected: Set<string>;
+  onToggle: (id: string) => void;
+  available: McpServer[];
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="mt-2 ml-6 rounded border bg-muted/20 p-2 space-y-1.5">
+      <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
+        <Checkbox checked={restrict} onCheckedChange={(v) => onRestrictChange(!!v)} />
+        <span>{t('roles.allowedMcpServers')}</span>
+        <span className="font-normal text-muted-foreground">
+          — {restrict ? `${selected.size}` : t('roles.allServers')}
+        </span>
+      </label>
+      {restrict &&
+        (available.length > 0 ? (
+          <ScrollArea className="max-h-32">
+            <div className="grid grid-cols-1 gap-1 pl-5">
+              {available.map((srv) => (
+                <label
+                  key={srv.id}
+                  className="flex cursor-pointer items-center gap-1.5 text-xs"
+                >
+                  <Checkbox
+                    checked={selected.has(srv.id)}
+                    onCheckedChange={() => onToggle(srv.id)}
+                  />
+                  <span className="truncate">{srv.name}</span>
+                </label>
+              ))}
+            </div>
+          </ScrollArea>
         ) : (
-          <p className="text-xs text-muted-foreground italic">{t('roles.allServers')}</p>
-        )}
-      </div>
+          <p className="pl-5 text-xs italic text-muted-foreground">{t('common.noData')}</p>
+        ))}
     </div>
   );
 }

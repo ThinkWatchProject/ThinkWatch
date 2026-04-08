@@ -48,10 +48,11 @@ pub struct AccessLogsResponse {
 }
 
 pub async fn list_access_logs(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Query(params): Query<AccessLogsQuery>,
 ) -> Result<Json<AccessLogsResponse>, AppError> {
+    auth_user.require_permission("logs:read_all")?;
     if !ch_available(&state) {
         return Ok(Json(AccessLogsResponse {
             total: 0,

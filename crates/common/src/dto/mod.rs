@@ -46,14 +46,24 @@ pub struct CreateUserRequest {
     pub password: String,
 }
 
-/// One non-system role assignment for a user. Used by the frontend to
-/// render multi-role membership and scope-aware assignments without
-/// having to fetch the role catalog separately.
+/// One role assignment for a user. Unified over system and custom
+/// roles — the frontend uses `is_system` to style the badge and to
+/// decide whether the role can be removed/edited.
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct CustomRoleAssignment {
-    pub custom_role_id: Uuid,
+pub struct RoleAssignment {
+    pub role_id: Uuid,
     pub name: String,
+    pub is_system: bool,
     pub scope: String,
+}
+
+/// Request shape for creating / updating a user's role assignments.
+/// `scope` defaults to `"global"` when omitted.
+#[derive(Debug, Deserialize, Clone)]
+pub struct RoleAssignmentRequest {
+    pub role_id: Uuid,
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,12 +73,9 @@ pub struct UserResponse {
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub is_active: bool,
-    /// System role names (e.g. `super_admin`, `developer`). Used by the
-    /// UI for the headline role badge and by the JWT-based middleware.
-    pub roles: Vec<String>,
-    /// Scope-aware non-system role assignments. Empty by default.
+    /// All role assignments for this user (system + custom, union).
     #[serde(default)]
-    pub custom_role_assignments: Vec<CustomRoleAssignment>,
+    pub role_assignments: Vec<RoleAssignment>,
     pub created_at: DateTime<Utc>,
 }
 

@@ -114,6 +114,44 @@ fn is_known_permission(key: &str) -> bool {
     PERMISSIONS.iter().any(|p| p.key == key)
 }
 
+/// Startup-time validation: every permission string stored on a role in
+/// `rbac_roles.permissions` must appear in the static `PERMISSIONS` catalog.
+///
+/// If this check fails the server refuses to start. Rationale: a seeded
+/// role that grants a permission the catalog doesn't know about means
+/// either (a) the migration is stale, (b) the catalog was trimmed without
+/// updating the seed, or (c) someone wrote to the DB by hand. All three
+/// are footguns that silently break authorization, so we want a loud
+/// fail-fast.
+pub async fn validate_seeded_roles(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+    let rows: Vec<(String, Vec<String>)> =
+        sqlx::query_as("SELECT name, permissions FROM rbac_roles")
+            .fetch_all(pool)
+            .await?;
+    let mut unknown: Vec<String> = Vec::new();
+    for (role_name, perms) in &rows {
+        for perm in perms {
+            if !is_known_permission(perm) {
+                unknown.push(format!("{role_name}: {perm}"));
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        anyhow::bail!(
+            "Found {} role permission(s) not in PERMISSION_CATALOG:\n  - {}\n\
+             Either update the catalog in crates/server/src/handlers/roles.rs \
+             or fix the seed in migrations/001_init.sql.",
+            unknown.len(),
+            unknown.join("\n  - "),
+        );
+    }
+    tracing::info!(
+        role_count = rows.len(),
+        "RBAC catalog validation passed: all seeded role permissions are known"
+    );
+    Ok(())
+}
+
 // ============================================================================
 // Role + role-assignment handlers.
 //
@@ -185,9 +223,10 @@ fn row_to_response(row: RoleRow, user_count: i64) -> RoleResponse {
 // --- List all roles ---
 
 pub async fn list_roles(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<RolesListResponse>, AppError> {
+    auth_user.require_permission("roles:read")?;
     // System rows first, then alphabetical. Permissions and counts are
     // pulled in two more queries (no N+1) and merged in Rust.
     let rows: Vec<RoleRow> =
@@ -239,6 +278,7 @@ pub async fn create_role(
     State(state): State<AppState>,
     Json(payload): Json<CreateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
+    auth_user.require_permission("roles:create")?;
     let name = payload.name.trim();
     if name.is_empty() || name.len() > 100 {
         return Err(AppError::BadRequest(
@@ -309,6 +349,7 @@ pub async fn update_role(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
+    auth_user.require_permission("roles:update")?;
     let existing =
         sqlx::query_as::<_, (bool, String)>("SELECT is_system, name FROM rbac_roles WHERE id = $1")
             .bind(id)
@@ -391,6 +432,7 @@ pub async fn delete_role(
     Path(id): Path<Uuid>,
     axum::extract::Query(query): axum::extract::Query<DeleteRoleQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("roles:delete")?;
     let existing =
         sqlx::query_as::<_, (bool, String)>("SELECT is_system, name FROM rbac_roles WHERE id = $1")
             .bind(id)
@@ -496,10 +538,11 @@ pub struct RoleMembersResponse {
 }
 
 pub async fn list_role_members(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RoleMembersResponse>, AppError> {
+    auth_user.require_permission("roles:read")?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rbac_roles WHERE id = $1)")
         .bind(id)
         .fetch_one(&state.db)
@@ -548,6 +591,7 @@ pub async fn list_role_members(
 //
 // Returns the structured catalog so the frontend can group by resource
 // and surface dangerous permissions with extra confirmation.
-pub async fn list_permissions(_auth_user: AuthUser) -> Json<Vec<PermissionDef>> {
-    Json(PERMISSIONS.to_vec())
+pub async fn list_permissions(auth_user: AuthUser) -> Result<Json<Vec<PermissionDef>>, AppError> {
+    auth_user.require_permission("roles:read")?;
+    Ok(Json(PERMISSIONS.to_vec()))
 }

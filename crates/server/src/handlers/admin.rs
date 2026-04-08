@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use think_watch_auth::password;
 use think_watch_common::dto::{
-    CustomRoleAssignment, PaginatedResponse, PaginationParams, UserResponse,
+    PaginatedResponse, PaginationParams, RoleAssignment, RoleAssignmentRequest, UserResponse,
 };
 
 /// Parse a scope string into the `(scope_kind, scope_id)` tuple that
@@ -47,10 +47,12 @@ use crate::middleware::auth_guard::AuthUser;
 // --- User management ---
 
 pub async fn list_users(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<PaginatedResponse<UserResponse>>, AppError> {
+    auth_user.require_permission("users:read")?;
+
     let per_page = pagination.per_page();
     let offset = pagination.offset();
 
@@ -69,7 +71,7 @@ pub async fn list_users(
     let user_ids: Vec<uuid::Uuid> = users.iter().map(|u| u.id).collect();
 
     // Single query: every assignment for every user, joined against
-    // `rbac_roles` so we can split system vs custom by `is_system`.
+    // `rbac_roles` so we can report system + custom uniformly.
     type AssignmentRow = (
         uuid::Uuid,
         uuid::Uuid,
@@ -90,9 +92,7 @@ pub async fn list_users(
     .await
     .unwrap_or_default();
 
-    let mut sys_map: std::collections::HashMap<uuid::Uuid, Vec<String>> =
-        std::collections::HashMap::new();
-    let mut custom_map: std::collections::HashMap<uuid::Uuid, Vec<CustomRoleAssignment>> =
+    let mut assignments_map: std::collections::HashMap<uuid::Uuid, Vec<RoleAssignment>> =
         std::collections::HashMap::new();
     for (uid, role_id, name, is_system, scope_kind, scope_id) in rows {
         let scope = match (scope_kind.as_str(), scope_id) {
@@ -100,33 +100,28 @@ pub async fn list_users(
             (kind, Some(id)) => format!("{kind}:{id}"),
             (kind, None) => kind.to_string(),
         };
-        if is_system {
-            sys_map.entry(uid).or_default().push(name);
-        } else {
-            custom_map
-                .entry(uid)
-                .or_default()
-                .push(CustomRoleAssignment {
-                    custom_role_id: role_id,
-                    name,
-                    scope,
-                });
-        }
+        assignments_map
+            .entry(uid)
+            .or_default()
+            .push(RoleAssignment {
+                role_id,
+                name,
+                is_system,
+                scope,
+            });
     }
 
     let responses: Vec<UserResponse> = users
         .into_iter()
         .map(|u| {
-            let roles = sys_map.remove(&u.id).unwrap_or_default();
-            let custom_role_assignments = custom_map.remove(&u.id).unwrap_or_default();
+            let role_assignments = assignments_map.remove(&u.id).unwrap_or_default();
             UserResponse {
                 id: u.id,
                 email: u.email,
                 display_name: u.display_name,
                 avatar_url: u.avatar_url,
                 is_active: u.is_active,
-                roles,
-                custom_role_assignments,
+                role_assignments,
                 created_at: u.created_at,
             }
         })
@@ -140,25 +135,17 @@ pub async fn list_users(
     }))
 }
 
-/// Custom-role assignment payload for the admin user create/update
-/// endpoints. `scope` defaults to `"global"` when omitted.
-#[derive(Debug, Deserialize, Clone)]
-pub struct CustomRoleAssignmentRequest {
-    pub custom_role_id: uuid::Uuid,
-    #[serde(default)]
-    pub scope: Option<String>,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct CreateUserByAdminRequest {
     pub email: String,
     pub display_name: String,
     /// If omitted, a random password is generated and the user must change it on first login.
     pub password: Option<String>,
-    pub role: Option<String>,
-    /// Optional custom-role assignments to apply alongside the system role.
+    /// All roles (system + custom) to assign to the new user. If empty
+    /// the user has no permissions; callers typically send at least
+    /// one entry (e.g. `developer`).
     #[serde(default)]
-    pub custom_role_assignments: Vec<CustomRoleAssignmentRequest>,
+    pub role_assignments: Vec<RoleAssignmentRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -170,11 +157,73 @@ pub struct CreateUserByAdminResponse {
     pub generated_password: Option<String>,
 }
 
+/// Apply a set of role assignments to a user atomically inside `tx`.
+/// Every existing row for `user_id` is deleted first, then the new
+/// rows are inserted. Returns the fully-hydrated assignment list for
+/// inclusion in the response. The caller is responsible for any
+/// escalation checks (super_admin promotion, etc).
+async fn write_user_role_assignments(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    user_id: uuid::Uuid,
+    assignments: &[RoleAssignmentRequest],
+    assigned_by: uuid::Uuid,
+) -> Result<Vec<RoleAssignment>, AppError> {
+    sqlx::query("DELETE FROM rbac_role_assignments WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+
+    let mut out: Vec<RoleAssignment> = Vec::with_capacity(assignments.len());
+    for a in assignments {
+        let raw_scope = a.scope.clone().unwrap_or_else(|| "global".into());
+        let (scope_kind, scope_id) = parse_scope(&raw_scope)?;
+        // Insert + return role metadata in one round trip so we can
+        // build the UserResponse without a second query.
+        let row: Option<(String, bool)> = sqlx::query_as(
+            "WITH ins AS (\
+                INSERT INTO rbac_role_assignments \
+                    (user_id, role_id, scope_kind, scope_id, assigned_by) \
+                VALUES ($1, $2, $3, $4, $5) \
+                ON CONFLICT DO NOTHING \
+                RETURNING role_id\
+             ) \
+             SELECT r.name, r.is_system FROM rbac_roles r \
+              WHERE r.id = $2",
+        )
+        .bind(user_id)
+        .bind(a.role_id)
+        .bind(&scope_kind)
+        .bind(scope_id)
+        .bind(assigned_by)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(db)
+                if db.constraint() == Some("rbac_role_assignments_role_id_fkey") =>
+            {
+                AppError::BadRequest(format!("Unknown role id: {}", a.role_id))
+            }
+            _ => AppError::from(e),
+        })?;
+        let (name, is_system) =
+            row.ok_or_else(|| AppError::BadRequest(format!("Unknown role id: {}", a.role_id)))?;
+        out.push(RoleAssignment {
+            role_id: a.role_id,
+            name,
+            is_system,
+            scope: raw_scope,
+        });
+    }
+    Ok(out)
+}
+
 pub async fn create_user(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Json(req): Json<CreateUserByAdminRequest>,
 ) -> Result<Json<CreateUserByAdminResponse>, AppError> {
+    auth_user.require_permission("users:create")?;
+
     if !req.email.contains('@') || !req.email.contains('.') {
         return Err(AppError::BadRequest("Invalid email format".into()));
     }
@@ -187,13 +236,31 @@ pub async fn create_user(
         None => (password::generate_random_password(), true),
     };
 
-    // Role escalation prevention
-    let role_name = req.role.as_deref().unwrap_or("developer");
-    let allowed_roles = ["developer", "viewer", "team_manager"];
-    if !allowed_roles.contains(&role_name) {
-        return Err(AppError::BadRequest(
-            "Cannot assign admin or super_admin role via API".into(),
-        ));
+    // Privilege escalation check: only a user who ALREADY has
+    // `roles:create` can assign any role here, but granting
+    // super_admin/admin additionally requires the caller to hold that
+    // role themselves. Without this gate a user with `users:create`
+    // could bootstrap themselves a super_admin account.
+    let caller_has_super = auth_user.claims.roles.iter().any(|r| r == "super_admin");
+    let caller_has_admin = caller_has_super || auth_user.claims.roles.iter().any(|r| r == "admin");
+    // Look up requested role names in one query to check privilege.
+    let role_ids: Vec<uuid::Uuid> = req.role_assignments.iter().map(|a| a.role_id).collect();
+    let requested: Vec<(String,)> =
+        sqlx::query_as("SELECT name FROM rbac_roles WHERE id = ANY($1)")
+            .bind(&role_ids)
+            .fetch_all(&state.db)
+            .await?;
+    for (name,) in &requested {
+        if name == "super_admin" && !caller_has_super {
+            return Err(AppError::Forbidden(
+                "Only super_admin can assign the super_admin role".into(),
+            ));
+        }
+        if name == "admin" && !caller_has_admin {
+            return Err(AppError::Forbidden(
+                "Only admin/super_admin can assign the admin role".into(),
+            ));
+        }
     }
 
     let exists =
@@ -221,53 +288,13 @@ pub async fn create_user(
     .fetch_one(&mut *tx)
     .await?;
 
-    // Assign the system role via the unified table.
-    sqlx::query(
-        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
-           SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = $2"#,
+    let role_assignments = write_user_role_assignments(
+        &mut tx,
+        user.id,
+        &req.role_assignments,
+        auth_user.claims.sub,
     )
-    .bind(user.id)
-    .bind(role_name)
-    .execute(&mut *tx)
     .await?;
-
-    // Optional custom-role assignments. Scope is parsed via the shared
-    // `parse_scope` helper — invalid input fails the transaction.
-    let mut assigned: Vec<CustomRoleAssignment> = Vec::new();
-    for req_assign in &req.custom_role_assignments {
-        let raw_scope = req_assign.scope.clone().unwrap_or_else(|| "global".into());
-        let (scope_kind, scope_id) = parse_scope(&raw_scope)?;
-        let row = sqlx::query_as::<_, (String,)>(
-            "INSERT INTO rbac_role_assignments \
-                 (user_id, role_id, scope_kind, scope_id, assigned_by) \
-             VALUES ($1, $2, $3, $4, $1) ON CONFLICT DO NOTHING \
-             RETURNING (SELECT name FROM rbac_roles WHERE id = $2)",
-        )
-        .bind(user.id)
-        .bind(req_assign.custom_role_id)
-        .bind(&scope_kind)
-        .bind(scope_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(|e| match &e {
-            sqlx::Error::Database(db)
-                if db.constraint() == Some("rbac_role_assignments_role_id_fkey") =>
-            {
-                AppError::BadRequest(format!(
-                    "Unknown custom role id: {}",
-                    req_assign.custom_role_id
-                ))
-            }
-            _ => AppError::from(e),
-        })?;
-        if let Some((name,)) = row {
-            assigned.push(CustomRoleAssignment {
-                custom_role_id: req_assign.custom_role_id,
-                name,
-                scope: raw_scope,
-            });
-        }
-    }
 
     tx.commit().await?;
 
@@ -278,8 +305,7 @@ pub async fn create_user(
             display_name: user.display_name,
             avatar_url: user.avatar_url,
             is_active: user.is_active,
-            roles: vec![role_name.to_string()],
-            custom_role_assignments: assigned,
+            role_assignments,
             created_at: user.created_at,
         },
         generated_password: if force_change {
@@ -296,6 +322,7 @@ pub async fn force_logout_user(
     State(state): State<AppState>,
     axum::extract::Path(user_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("sessions:revoke")?;
     // Delete signing key
     let _: () =
         fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_key:{user_id}"))
@@ -318,23 +345,23 @@ pub async fn force_logout_user(
 #[derive(Debug, Deserialize)]
 pub struct UpdateUserRequest {
     pub display_name: Option<String>,
-    pub role: Option<String>,
     pub is_active: Option<bool>,
-    /// Scope-aware non-system role assignments. When this field is
-    /// present, every non-system assignment for this user is replaced
-    /// atomically. Pass an empty array to clear them; omit the field to
-    /// leave them untouched.
+    /// When present, replaces **all** role assignments for this user
+    /// atomically. Pass an empty array to strip every role. Omit the
+    /// field to leave assignments untouched.
     #[serde(default)]
-    pub custom_role_assignments: Option<Vec<CustomRoleAssignmentRequest>>,
+    pub role_assignments: Option<Vec<RoleAssignmentRequest>>,
 }
 
-/// PATCH /api/admin/users/{id} — update user display_name, role, or active status.
+/// PATCH /api/admin/users/{id} — update user display_name, role assignments, or active status.
 pub async fn update_user(
     auth_user: AuthUser,
     State(state): State<AppState>,
     Path(user_id): Path<uuid::Uuid>,
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("users:update")?;
+
     // Prevent self-deactivation
     if req.is_active == Some(false) && user_id == auth_user.claims.sub {
         return Err(AppError::BadRequest(
@@ -383,90 +410,50 @@ pub async fn update_user(
         }
     }
 
-    // Apply system-role change. We replace any existing system role
-    // assignment(s) atomically — there should only ever be one but the
-    // schema allows multiple, so we wipe is_system rows specifically
-    // and re-insert.
-    if let Some(ref role_name) = req.role {
-        let role_id: Option<uuid::Uuid> =
-            sqlx::query_scalar("SELECT id FROM rbac_roles WHERE name = $1 AND is_system = TRUE")
-                .bind(role_name)
-                .fetch_optional(&state.db)
-                .await?;
-        let role_id = role_id.ok_or(AppError::BadRequest(format!("Unknown role: {role_name}")))?;
+    // Apply role assignment replacement. We enforce two escalation
+    // guards here:
+    //   1. Only a super_admin can grant super_admin.
+    //   2. Only admin/super_admin can grant admin.
+    //   3. A super_admin cannot remove their own super_admin role
+    //      (prevents locking everyone out).
+    if let Some(ref assignments) = req.role_assignments {
+        let caller_has_super = auth_user.claims.roles.iter().any(|r| r == "super_admin");
+        let caller_has_admin =
+            caller_has_super || auth_user.claims.roles.iter().any(|r| r == "admin");
 
-        // Prevent self role-downgrade from super_admin
-        if user_id == auth_user.claims.sub {
-            let is_super: bool = auth_user.claims.roles.contains(&"super_admin".to_string());
-            if is_super && role_name != "super_admin" {
-                return Err(AppError::BadRequest(
-                    "Cannot downgrade your own super_admin role".into(),
+        let role_ids: Vec<uuid::Uuid> = assignments.iter().map(|a| a.role_id).collect();
+        let requested: Vec<(String,)> =
+            sqlx::query_as("SELECT name FROM rbac_roles WHERE id = ANY($1)")
+                .bind(&role_ids)
+                .fetch_all(&state.db)
+                .await?;
+        let requested_names: std::collections::HashSet<&String> =
+            requested.iter().map(|(n,)| n).collect();
+
+        for name in &requested_names {
+            if name.as_str() == "super_admin" && !caller_has_super {
+                return Err(AppError::Forbidden(
+                    "Only super_admin can assign the super_admin role".into(),
+                ));
+            }
+            if name.as_str() == "admin" && !caller_has_admin {
+                return Err(AppError::Forbidden(
+                    "Only admin/super_admin can assign the admin role".into(),
                 ));
             }
         }
 
-        let mut tx = state.db.begin().await?;
-        sqlx::query(
-            "DELETE FROM rbac_role_assignments \
-              WHERE user_id = $1 \
-                AND role_id IN (SELECT id FROM rbac_roles WHERE is_system = TRUE)",
-        )
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-        sqlx::query(
-            "INSERT INTO rbac_role_assignments \
-                 (user_id, role_id, scope_kind, assigned_by) \
-             VALUES ($1, $2, 'global', $3)",
-        )
-        .bind(user_id)
-        .bind(role_id)
-        .bind(auth_user.claims.sub)
-        .execute(&mut *tx)
-        .await?;
-        tx.commit().await?;
-    }
-
-    // Apply custom-role assignments. Replace-all semantics: if the
-    // field is `Some(...)`, ALL non-system assignments for this user
-    // are wiped and the supplied set becomes authoritative. System
-    // role assignments are left intact (handled by the role change
-    // block above). If the field is omitted entirely, custom roles
-    // are left untouched.
-    if let Some(ref assignments) = req.custom_role_assignments {
-        let mut tx = state.db.begin().await?;
-        sqlx::query(
-            "DELETE FROM rbac_role_assignments \
-              WHERE user_id = $1 \
-                AND role_id IN (SELECT id FROM rbac_roles WHERE is_system = FALSE)",
-        )
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await?;
-        for a in assignments {
-            let raw_scope = a.scope.clone().unwrap_or_else(|| "global".into());
-            let (scope_kind, scope_id) = parse_scope(&raw_scope)?;
-            sqlx::query(
-                "INSERT INTO rbac_role_assignments \
-                     (user_id, role_id, scope_kind, scope_id, assigned_by) \
-                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
-            )
-            .bind(user_id)
-            .bind(a.custom_role_id)
-            .bind(&scope_kind)
-            .bind(scope_id)
-            .bind(auth_user.claims.sub)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| match &e {
-                sqlx::Error::Database(db)
-                    if db.constraint() == Some("rbac_role_assignments_role_id_fkey") =>
-                {
-                    AppError::BadRequest(format!("Unknown custom role id: {}", a.custom_role_id))
-                }
-                _ => AppError::from(e),
-            })?;
+        if user_id == auth_user.claims.sub
+            && caller_has_super
+            && !requested_names.iter().any(|n| n.as_str() == "super_admin")
+        {
+            return Err(AppError::BadRequest(
+                "Cannot remove your own super_admin role".into(),
+            ));
         }
+
+        let mut tx = state.db.begin().await?;
+        write_user_role_assignments(&mut tx, user_id, assignments, auth_user.claims.sub).await?;
         tx.commit().await?;
     }
 
@@ -487,6 +474,7 @@ pub async fn delete_user(
     State(state): State<AppState>,
     Path(user_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("users:delete")?;
     // Prevent self-deletion
     if user_id == auth_user.claims.sub {
         return Err(AppError::BadRequest(
@@ -529,6 +517,7 @@ pub async fn reset_user_password(
     State(state): State<AppState>,
     Path(user_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("users:update")?;
     let exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
     )
@@ -608,12 +597,13 @@ fn format_uptime(dur: chrono::TimeDelta) -> String {
 }
 
 pub async fn get_system_settings(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
-) -> Json<SystemInfo> {
+) -> Result<Json<SystemInfo>, AppError> {
+    auth_user.require_permission("settings:read")?;
     let uptime = chrono::Utc::now() - state.started_at;
     let dc = &state.dynamic_config;
-    Json(SystemInfo {
+    Ok(Json(SystemInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime: format_uptime(uptime),
         rust_version: env!("RUSTC_VERSION").to_string(),
@@ -629,7 +619,7 @@ pub async fn get_system_settings(
             .await
             .unwrap_or_default(),
         public_port: dc.get_i64("general.public_port").await.unwrap_or(0),
-    })
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -643,9 +633,10 @@ pub struct OidcConfigResponse {
 }
 
 pub async fn get_oidc_settings(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
-) -> Json<OidcConfigResponse> {
+) -> Result<Json<OidcConfigResponse>, AppError> {
+    auth_user.require_permission("settings:read")?;
     let dc = &state.dynamic_config;
     let enabled = dc.oidc_enabled().await;
     let issuer_url = dc.oidc_issuer_url().await;
@@ -657,7 +648,7 @@ pub async fn get_oidc_settings(
         .map(|s| !s.is_empty())
         .unwrap_or(false);
 
-    Json(OidcConfigResponse {
+    Ok(Json(OidcConfigResponse {
         enabled,
         issuer_url,
         client_id: client_id.as_ref().map(|id| {
@@ -669,7 +660,7 @@ pub async fn get_oidc_settings(
         }),
         redirect_url,
         has_secret: Some(has_secret),
-    })
+    }))
 }
 
 #[derive(Debug, Deserialize)]
@@ -691,6 +682,7 @@ pub async fn update_oidc_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateOidcRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("system:configure_oidc")?;
     let dc = &state.dynamic_config;
     let encryption_key =
         think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
@@ -835,38 +827,41 @@ pub struct AuditConfigResponse {
 }
 
 pub async fn get_audit_settings(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
-) -> Json<AuditConfigResponse> {
+) -> Result<Json<AuditConfigResponse>, AppError> {
+    auth_user.require_permission("settings:read")?;
     let connected = if let Some(ref ch) = state.clickhouse {
         ch.query("SELECT 1").fetch_one::<u8>().await.is_ok()
     } else {
         false
     };
-    Json(AuditConfigResponse {
+    Ok(Json(AuditConfigResponse {
         clickhouse_url: state.config.clickhouse_url.clone(),
         clickhouse_db: state.config.clickhouse_db.clone(),
         connected,
-    })
+    }))
 }
 
 // --- Dynamic settings CRUD ---
 
 /// GET /api/admin/settings — return all settings grouped by category.
 pub async fn get_all_settings(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<HashMap<String, Vec<SettingEntry>>>, AppError> {
+    auth_user.require_permission("settings:read")?;
     let grouped = state.dynamic_config.get_all_grouped().await;
     Ok(Json(grouped))
 }
 
 /// GET /api/admin/settings/{category} — return settings for a specific category.
 pub async fn get_settings_by_category(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(category): Path<String>,
 ) -> Result<Json<Vec<SettingEntry>>, AppError> {
+    auth_user.require_permission("settings:read")?;
     let settings = state.dynamic_config.get_by_category(&category).await;
     Ok(Json(settings))
 }
@@ -978,6 +973,7 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettingsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("settings:write")?;
     // Validate each setting
     for (key, value) in &req.settings {
         validate_setting(key, value)?;
@@ -1054,9 +1050,10 @@ pub struct ContentFilterTestResponse {
 /// POST /api/admin/settings/content-filter/test — try the supplied rules
 /// against a sample of user text and return every rule that fires.
 pub async fn test_content_filter(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Json(req): Json<ContentFilterTestRequest>,
 ) -> Result<Json<ContentFilterTestResponse>, AppError> {
+    auth_user.require_permission("content_filter:read")?;
     use think_watch_gateway::content_filter::ContentFilter;
     let filter = ContentFilter::from_config(&req.rules);
     let matches = filter
@@ -1081,7 +1078,10 @@ pub struct ContentFilterPreset {
 
 /// GET /api/admin/settings/content-filter/presets — return built-in rule groups
 /// (basic / strict / chinese). UI labels are localized on the frontend.
-pub async fn list_content_filter_presets(_auth_user: AuthUser) -> Json<Vec<ContentFilterPreset>> {
+pub async fn list_content_filter_presets(
+    auth_user: AuthUser,
+) -> Result<Json<Vec<ContentFilterPreset>>, AppError> {
+    auth_user.require_permission("content_filter:read")?;
     let groups = think_watch_gateway::content_filter::presets()
         .into_iter()
         .map(|g| ContentFilterPreset {
@@ -1089,7 +1089,7 @@ pub async fn list_content_filter_presets(_auth_user: AuthUser) -> Json<Vec<Conte
             rules: g.rules,
         })
         .collect();
-    Json(groups)
+    Ok(Json(groups))
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,9 +1118,10 @@ pub struct PiiRedactorTestResponse {
 /// POST /api/admin/settings/pii-redactor/test — apply the supplied PII patterns
 /// to a text sample and return the redacted version with the substitution map.
 pub async fn test_pii_redactor(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     Json(req): Json<PiiRedactorTestRequest>,
 ) -> Result<Json<PiiRedactorTestResponse>, AppError> {
+    auth_user.require_permission("pii_redactor:read")?;
     use think_watch_gateway::pii_redactor::PiiRedactor;
     use think_watch_gateway::providers::traits::ChatMessage;
 

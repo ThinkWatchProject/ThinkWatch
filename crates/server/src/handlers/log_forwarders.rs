@@ -12,9 +12,10 @@ use crate::middleware::auth_guard::AuthUser;
 // --- List all forwarders ---
 
 pub async fn list_forwarders(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<LogForwarder>>, AppError> {
+    auth_user.require_permission("log_forwarders:read")?;
     let forwarders =
         sqlx::query_as::<_, LogForwarder>("SELECT * FROM log_forwarders ORDER BY created_at DESC")
             .fetch_all(&state.db)
@@ -41,6 +42,7 @@ pub async fn create_forwarder(
     State(state): State<AppState>,
     Json(req): Json<CreateForwarderRequest>,
 ) -> Result<Json<LogForwarder>, AppError> {
+    auth_user.require_permission("log_forwarders:write")?;
     let allowed_types = ["udp_syslog", "tcp_syslog", "kafka", "webhook"];
     if !allowed_types.contains(&req.forwarder_type.as_str()) {
         return Err(AppError::BadRequest(format!(
@@ -98,11 +100,12 @@ pub struct UpdateForwarderRequest {
 }
 
 pub async fn update_forwarder(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateForwarderRequest>,
 ) -> Result<Json<LogForwarder>, AppError> {
+    auth_user.require_permission("log_forwarders:write")?;
     let existing = sqlx::query_as::<_, LogForwarder>("SELECT * FROM log_forwarders WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
@@ -156,6 +159,7 @@ pub async fn delete_forwarder(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("log_forwarders:write")?;
     let result = sqlx::query("DELETE FROM log_forwarders WHERE id = $1")
         .bind(id)
         .execute(&state.db)
@@ -183,6 +187,7 @@ pub async fn toggle_forwarder(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<LogForwarder>, AppError> {
+    auth_user.require_permission("log_forwarders:write")?;
     let updated = sqlx::query_as::<_, LogForwarder>(
         r#"UPDATE log_forwarders SET enabled = NOT enabled, updated_at = now()
            WHERE id = $1 RETURNING *"#,
@@ -211,10 +216,11 @@ pub async fn toggle_forwarder(
 // --- Reset stats ---
 
 pub async fn reset_stats(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<LogForwarder>, AppError> {
+    auth_user.require_permission("log_forwarders:write")?;
     let updated = sqlx::query_as::<_, LogForwarder>(
         r#"UPDATE log_forwarders SET sent_count = 0, error_count = 0, last_error = NULL, updated_at = now()
            WHERE id = $1 RETURNING *"#,
@@ -240,6 +246,7 @@ pub async fn test_forwarder(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TestResult>, AppError> {
+    auth_user.require_permission("log_forwarders:write")?;
     let forwarder = sqlx::query_as::<_, LogForwarder>("SELECT * FROM log_forwarders WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)

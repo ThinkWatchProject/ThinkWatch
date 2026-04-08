@@ -7,8 +7,8 @@ pub enum AppError {
     #[error("Authentication required")]
     Unauthorized,
 
-    #[error("Insufficient permissions")]
-    Forbidden,
+    #[error("{0}")]
+    Forbidden(String),
 
     #[error("{0}")]
     NotFound(String),
@@ -45,11 +45,7 @@ impl IntoResponse for AppError {
                 "unauthorized",
                 "Authentication required".to_string(),
             ),
-            AppError::Forbidden => (
-                StatusCode::FORBIDDEN,
-                "forbidden",
-                "Insufficient permissions".to_string(),
-            ),
+            AppError::Forbidden(reason) => (StatusCode::FORBIDDEN, "forbidden", reason.clone()),
             AppError::NotFound(m) => (StatusCode::NOT_FOUND, "not_found", m.clone()),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, "bad_request", m.clone()),
             AppError::RateLimited => (

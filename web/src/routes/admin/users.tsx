@@ -36,9 +36,10 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 
-interface CustomRoleAssignment {
-  custom_role_id: string;
+interface RoleAssignment {
+  role_id: string;
   name: string;
+  is_system: boolean;
   scope: string;
 }
 
@@ -46,26 +47,23 @@ interface User {
   id: string;
   email: string;
   display_name: string;
-  roles: string[];
-  custom_role_assignments: CustomRoleAssignment[];
+  role_assignments: RoleAssignment[];
   oidc_subject: string | null;
   is_active: boolean;
   created_at: string;
 }
 
-interface AvailableCustomRole {
+interface AvailableRole {
   id: string;
   name: string;
   is_system: boolean;
   description: string | null;
 }
 
-const ROLE_OPTIONS = ['super_admin', 'admin', 'team_manager', 'developer', 'viewer'] as const;
-
 export function UsersPage() {
   const { t } = useTranslation();
   const [users, setUsers] = useState<User[]>([]);
-  const [availableRoles, setAvailableRoles] = useState<AvailableCustomRole[]>([]);
+  const [availableRoles, setAvailableRoles] = useState<AvailableRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
@@ -77,19 +75,15 @@ export function UsersPage() {
   const [email, setEmail] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
-  const [role, setRole] = useState('developer');
-  const [createCustomAssignments, setCreateCustomAssignments] = useState<CustomRoleAssignment[]>(
-    [],
-  );
+  const [createAssignments, setCreateAssignments] = useState<RoleAssignment[]>([]);
 
   // Edit dialog
   const [editOpen, setEditOpen] = useState(false);
   const [editUser, setEditUser] = useState<User | null>(null);
   const [editName, setEditName] = useState('');
-  const [editRole, setEditRole] = useState('');
   const [editError, setEditError] = useState('');
   const [editLoading, setEditLoading] = useState(false);
-  const [editCustomAssignments, setEditCustomAssignments] = useState<CustomRoleAssignment[]>([]);
+  const [editAssignments, setEditAssignments] = useState<RoleAssignment[]>([]);
 
   // Confirm dialogs
   const [confirmAction, setConfirmAction] = useState<{ type: 'logout' | 'delete' | 'toggle'; user: User } | null>(null);
@@ -105,19 +99,16 @@ export function UsersPage() {
     try {
       const [usersRes, rolesRes] = await Promise.all([
         api<{ data: User[]; total: number }>('/api/admin/users'),
-        api<{ items: AvailableCustomRole[] }>('/api/admin/roles').catch(() => ({ items: [] })),
+        api<{ items: AvailableRole[] }>('/api/admin/roles').catch(() => ({ items: [] })),
       ]);
-      // Backend may not include the new field on older servers — coerce
-      // missing values to empty array so the UI doesn't crash.
       setUsers(
         usersRes.data.map((u) => ({
           ...u,
-          custom_role_assignments: u.custom_role_assignments ?? [],
+          role_assignments: u.role_assignments ?? [],
         })),
       );
-      // Custom roles only — system roles are still picked from the legacy
-      // dropdown to preserve backwards-compat with the auth path.
-      setAvailableRoles(rolesRes.items.filter((r) => !r.is_system));
+      // Unified picker — system + custom roles all show up together.
+      setAvailableRoles(rolesRes.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load users');
     } finally {
@@ -132,8 +123,15 @@ export function UsersPage() {
     setEmail('');
     setDisplayName('');
     setPassword('');
-    setRole('developer');
-    setCreateCustomAssignments([]);
+    // Seed new users with the `developer` system role when the catalog
+    // is loaded — a user with zero assignments has zero permissions
+    // and would look broken in the UI.
+    const dev = availableRoles.find((r) => r.is_system && r.name === 'developer');
+    setCreateAssignments(
+      dev
+        ? [{ role_id: dev.id, name: dev.name, is_system: true, scope: 'global' }]
+        : [],
+    );
     setFormError('');
   };
 
@@ -145,9 +143,8 @@ export function UsersPage() {
         email,
         display_name: displayName,
         password,
-        role,
-        custom_role_assignments: createCustomAssignments.map((a) => ({
-          custom_role_id: a.custom_role_id,
+        role_assignments: createAssignments.map((a) => ({
+          role_id: a.role_id,
           scope: a.scope,
         })),
       });
@@ -161,8 +158,7 @@ export function UsersPage() {
   const openEdit = (u: User) => {
     setEditUser(u);
     setEditName(u.display_name);
-    setEditRole(u.roles[0] ?? 'developer');
-    setEditCustomAssignments(u.custom_role_assignments ?? []);
+    setEditAssignments(u.role_assignments ?? []);
     setEditError('');
     setEditOpen(true);
   };
@@ -174,9 +170,8 @@ export function UsersPage() {
     try {
       await apiPatch(`/api/admin/users/${editUser.id}`, {
         display_name: editName,
-        role: editRole,
-        custom_role_assignments: editCustomAssignments.map((a) => ({
-          custom_role_id: a.custom_role_id,
+        role_assignments: editAssignments.map((a) => ({
+          role_id: a.role_id,
           scope: a.scope,
         })),
       });
@@ -234,6 +229,9 @@ export function UsersPage() {
     return confirmAction.user.is_active ? t('users.deactivateConfirm') : t('users.activateConfirm');
   };
 
+  /// Localized label for the canonical system role names. Falls back
+  /// to the raw role name for custom roles so the operator sees exactly
+  /// what they typed.
   const roleLabel = (r: string) => {
     const map: Record<string, string> = {
       super_admin: t('users.roleSuperAdmin'),
@@ -252,9 +250,14 @@ export function UsersPage() {
       if (u.id.toLowerCase().includes(q)) return true;
       if (u.email.toLowerCase().includes(q)) return true;
       if (u.display_name.toLowerCase().includes(q)) return true;
-      if (u.roles.some((r) => r.toLowerCase().includes(q) || roleLabel(r).toLowerCase().includes(q)))
+      if (
+        u.role_assignments.some(
+          (a) =>
+            a.name.toLowerCase().includes(q) ||
+            roleLabel(a.name).toLowerCase().includes(q),
+        )
+      )
         return true;
-      if (u.custom_role_assignments.some((a) => a.name.toLowerCase().includes(q))) return true;
       return false;
     });
   })();
@@ -289,19 +292,11 @@ export function UsersPage() {
                 <Label htmlFor="user-password">{t('auth.password')}</Label>
                 <Input id="user-password" type="password" value={password} onChange={(e) => setPassword(e.target.value)} required />
               </div>
-              <div className="space-y-2">
-                <Label>{t('users.role')}</Label>
-                <Select value={role} onValueChange={(v) => { if (v) setRole(v); }}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    {ROLE_OPTIONS.map((r) => <SelectItem key={r} value={r}>{roleLabel(r)}</SelectItem>)}
-                  </SelectContent>
-                </Select>
-              </div>
-              <CustomRoleAssignmentEditor
-                value={createCustomAssignments}
-                onChange={setCreateCustomAssignments}
+              <RoleAssignmentEditor
+                value={createAssignments}
+                onChange={setCreateAssignments}
                 availableRoles={availableRoles}
+                roleLabel={roleLabel}
               />
               <DialogFooter>
                 <Button type="submit" disabled={submitting}>{submitting ? t('users.creating') : t('users.createUser')}</Button>
@@ -386,19 +381,19 @@ export function UsersPage() {
                     <TableCell>{u.display_name || '—'}</TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">
-                        {u.roles.map((r) => (
-                          <Badge key={r} variant="secondary">
-                            {r}
-                          </Badge>
-                        ))}
-                        {u.custom_role_assignments.map((a) => (
+                        {u.role_assignments.length === 0 && (
+                          <span className="text-xs italic text-muted-foreground">
+                            {t('common.none')}
+                          </span>
+                        )}
+                        {u.role_assignments.map((a) => (
                           <Badge
-                            key={`${a.custom_role_id}-${a.scope}`}
-                            variant="outline"
-                            className="font-mono text-[10px]"
+                            key={`${a.role_id}-${a.scope}`}
+                            variant={a.is_system ? 'secondary' : 'outline'}
+                            className={a.is_system ? undefined : 'font-mono text-[10px]'}
                             title={a.scope !== 'global' ? `${a.name} @ ${a.scope}` : a.name}
                           >
-                            {a.name}
+                            {a.is_system ? roleLabel(a.name) : a.name}
                             {a.scope !== 'global' && (
                               <span className="ml-1 opacity-60">@{a.scope}</span>
                             )}
@@ -469,19 +464,11 @@ export function UsersPage() {
               <Label htmlFor="edit-name">{t('users.displayName')}</Label>
               <Input id="edit-name" value={editName} onChange={(e) => setEditName(e.target.value)} required />
             </div>
-            <div className="space-y-2">
-              <Label>{t('users.role')}</Label>
-              <Select value={editRole} onValueChange={(v) => { if (v) setEditRole(v); }}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  {ROLE_OPTIONS.map((r) => <SelectItem key={r} value={r}>{roleLabel(r)}</SelectItem>)}
-                </SelectContent>
-              </Select>
-            </div>
-            <CustomRoleAssignmentEditor
-              value={editCustomAssignments}
-              onChange={setEditCustomAssignments}
+            <RoleAssignmentEditor
+              value={editAssignments}
+              onChange={setEditAssignments}
               availableRoles={availableRoles}
+              roleLabel={roleLabel}
             />
             <DialogFooter>
               <Button type="submit" disabled={editLoading}>{editLoading ? t('users.saving') : t('common.save')}</Button>
@@ -543,13 +530,13 @@ export function UsersPage() {
 }
 
 // ----------------------------------------------------------------------------
-// Custom-role assignment editor
+// Unified role assignment editor
 //
-// Renders the user's current `(role, scope)` pairs as removable rows and
-// gives the admin a small Add form to append a new one. Scope is now a
+// Renders every assignment (system + custom) as a removable row, and
+// exposes a single picker that lists every available role. Scope is a
 // structured `(scope_kind, scope_id)` twople — kind picks from a closed
 // enum (`global`/`team`/`project`), id is a UUID input that only appears
-// when the kind needs one. The result is serialized back to the legacy
+// when the kind needs one. Result is serialized back to the
 // `"global" | "team:<uuid>" | "project:<uuid>"` string the backend
 // `parse_scope` helper accepts.
 // ----------------------------------------------------------------------------
@@ -574,14 +561,16 @@ function buildScope(kind: ScopeKind, id: string): string {
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function CustomRoleAssignmentEditor({
+function RoleAssignmentEditor({
   value,
   onChange,
   availableRoles,
+  roleLabel,
 }: {
-  value: CustomRoleAssignment[];
-  onChange: (next: CustomRoleAssignment[]) => void;
-  availableRoles: AvailableCustomRole[];
+  value: RoleAssignment[];
+  onChange: (next: RoleAssignment[]) => void;
+  availableRoles: AvailableRole[];
+  roleLabel: (name: string) => string;
 }) {
   const { t } = useTranslation();
   const [pendingRoleId, setPendingRoleId] = useState('');
@@ -589,9 +578,9 @@ function CustomRoleAssignmentEditor({
   const [pendingScopeId, setPendingScopeId] = useState('');
   const [pendingError, setPendingError] = useState('');
 
-  // Don't render the section at all if there are no custom roles to
-  // assign — keeps the dialog clean on fresh installs.
-  if (availableRoles.length === 0 && value.length === 0) return null;
+  // Stable lookup so the row badge can pick up `is_system` even when the
+  // backend later changes a role's name (the role_id is the source of truth).
+  const rolesById = new Map(availableRoles.map((r) => [r.id, r]));
 
   const canAdd =
     !!pendingRoleId &&
@@ -604,11 +593,14 @@ function CustomRoleAssignmentEditor({
       setPendingError(t('users.scopeUuidRequired'));
       return;
     }
-    const role = availableRoles.find((r) => r.id === pendingRoleId);
+    const role = rolesById.get(pendingRoleId);
     if (!role) return;
     const scope = buildScope(pendingKind, pendingScopeId);
-    if (value.some((a) => a.custom_role_id === role.id && a.scope === scope)) return;
-    onChange([...value, { custom_role_id: role.id, name: role.name, scope }]);
+    if (value.some((a) => a.role_id === role.id && a.scope === scope)) return;
+    onChange([
+      ...value,
+      { role_id: role.id, name: role.name, is_system: role.is_system, scope },
+    ]);
     setPendingRoleId('');
     setPendingKind('global');
     setPendingScopeId('');
@@ -622,18 +614,25 @@ function CustomRoleAssignmentEditor({
 
   return (
     <div className="space-y-2">
-      <Label>{t('users.customRoles')}</Label>
-      <p className="text-xs text-muted-foreground">{t('users.customRolesDesc')}</p>
+      <Label>{t('users.roles')}</Label>
+      <p className="text-xs text-muted-foreground">{t('users.rolesDesc')}</p>
       {value.length > 0 && (
         <div className="space-y-1.5">
           {value.map((a, i) => {
             const parsed = parseScope(a.scope);
             return (
               <div
-                key={`${a.custom_role_id}-${a.scope}-${i}`}
+                key={`${a.role_id}-${a.scope}-${i}`}
                 className="flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
               >
-                <span className="min-w-0 flex-1 truncate font-mono">{a.name}</span>
+                <span className="min-w-0 flex-1 truncate">
+                  {a.is_system ? roleLabel(a.name) : a.name}
+                </span>
+                {a.is_system && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    {t('roles.systemRole')}
+                  </Badge>
+                )}
                 <Badge variant="outline" className="font-mono text-[10px]">
                   {parsed.kind === 'global'
                     ? 'global'
@@ -660,12 +659,19 @@ function CustomRoleAssignmentEditor({
             <div className="flex-1">
               <Select value={pendingRoleId} onValueChange={setPendingRoleId}>
                 <SelectTrigger>
-                  <SelectValue placeholder={t('users.pickCustomRole')} />
+                  <SelectValue placeholder={t('users.pickRole')} />
                 </SelectTrigger>
                 <SelectContent>
                   {availableRoles.map((r) => (
                     <SelectItem key={r.id} value={r.id}>
-                      <span className="font-mono text-xs">{r.name}</span>
+                      <span className={r.is_system ? '' : 'font-mono text-xs'}>
+                        {r.is_system ? roleLabel(r.name) : r.name}
+                      </span>
+                      {r.is_system && (
+                        <span className="ml-2 text-[10px] text-muted-foreground">
+                          {t('roles.systemRole')}
+                        </span>
+                      )}
                     </SelectItem>
                   ))}
                 </SelectContent>

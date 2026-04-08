@@ -303,25 +303,30 @@ pub async fn login(
         .await
         .unwrap_or(0);
 
-    // Fetch user roles
-    let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT r.name FROM rbac_roles r JOIN rbac_role_assignments ra ON r.id = ra.role_id WHERE ra.user_id = $1 AND r.is_system = TRUE",
-    )
-    .bind(user.id)
-    .fetch_all(&state.db)
-    .await?;
+    // Fetch the union of system + custom role names and the flat
+    // permission set (union of every role's `permissions` field).
+    // See `think_watch_auth::rbac::compute_user_permissions` for the
+    // authoritative documentation of multi-role merge semantics.
+    let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user.id).await?;
+    let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id).await?;
 
     let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
 
-    let access_token =
-        state
-            .jwt
-            .create_access_token_with_ttl(user.id, &user.email, roles.clone(), access_ttl)?;
-    let refresh_token =
-        state
-            .jwt
-            .create_refresh_token_with_ttl(user.id, &user.email, roles, refresh_ttl_days)?;
+    let access_token = state.jwt.create_access_token_with_ttl(
+        user.id,
+        &user.email,
+        roles.clone(),
+        permissions.clone(),
+        access_ttl,
+    )?;
+    let refresh_token = state.jwt.create_refresh_token_with_ttl(
+        user.id,
+        &user.email,
+        roles,
+        permissions,
+        refresh_ttl_days,
+    )?;
 
     let signing_key =
         verify_signature::create_signing_key(&state.redis, &user.id, Some(&client_ip))
@@ -369,7 +374,9 @@ pub async fn register(
 ) -> Result<Json<UserResponse>, AppError> {
     // Check if public registration is allowed
     if !state.dynamic_config.allow_registration().await {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden(
+            "Public registration is disabled".into(),
+        ));
     }
 
     // Input validation
@@ -401,13 +408,18 @@ pub async fn register(
         }
     };
 
-    // Assign default "developer" role
-    sqlx::query(
-        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
-           SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = 'developer'"#,
+    // Assign default "developer" role and capture the row for the
+    // response so the client doesn't need a second round trip.
+    let (role_id, role_name, is_system): (uuid::Uuid, String, bool) = sqlx::query_as(
+        r#"WITH ins AS (
+               INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
+               SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = 'developer'
+               RETURNING role_id
+           )
+           SELECT id, name, is_system FROM rbac_roles WHERE name = 'developer'"#,
     )
     .bind(user.id)
-    .execute(&mut *tx)
+    .fetch_one(&mut *tx)
     .await?;
 
     tx.commit().await?;
@@ -418,8 +430,12 @@ pub async fn register(
         display_name: user.display_name,
         avatar_url: user.avatar_url,
         is_active: user.is_active,
-        roles: vec!["developer".to_string()],
-        custom_role_assignments: vec![],
+        role_assignments: vec![think_watch_common::dto::RoleAssignment {
+            role_id,
+            name: role_name,
+            is_system,
+            scope: "global".into(),
+        }],
         created_at: user.created_at,
     }))
 }
@@ -440,16 +456,26 @@ pub async fn refresh(
     let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
 
+    // Reload roles + permissions from the DB rather than trusting the
+    // refresh token's snapshot. This is critical: if an admin revokes
+    // a role between login and refresh, the re-minted access token
+    // must reflect the current assignments, not the stale claim.
+    let roles = think_watch_auth::rbac::load_user_role_names(&state.db, claims.sub).await?;
+    let permissions =
+        think_watch_auth::rbac::compute_user_permissions(&state.db, claims.sub).await?;
+
     let access_token = state.jwt.create_access_token_with_ttl(
         claims.sub,
         &claims.email,
-        claims.roles.clone(),
+        roles.clone(),
+        permissions.clone(),
         access_ttl,
     )?;
     let refresh_token = state.jwt.create_refresh_token_with_ttl(
         claims.sub,
         &claims.email,
-        claims.roles,
+        roles,
+        permissions,
         refresh_ttl_days,
     )?;
 
@@ -487,7 +513,7 @@ pub async fn me(
     .await?
     .ok_or(AppError::NotFound("User not found".into()))?;
 
-    let custom_role_assignments = fetch_user_role_assignments(&state, user.id).await;
+    let role_assignments = fetch_user_role_assignments(&state, user.id).await;
 
     Ok(Json(UserResponse {
         id: user.id,
@@ -495,42 +521,41 @@ pub async fn me(
         display_name: user.display_name,
         avatar_url: user.avatar_url,
         is_active: user.is_active,
-        roles: auth_user.claims.roles.clone(),
-        custom_role_assignments,
+        role_assignments,
         created_at: user.created_at,
     }))
 }
 
-/// Helper: load all non-system role assignments for a single user.
-/// System roles already populate the `roles` field via the JWT claims.
-/// Pure read; never errors — returns an empty Vec on failure so the
-/// caller can keep building a response.
+/// Helper: load every role assignment (system + custom) for a single
+/// user. Pure read; never errors — returns an empty Vec on failure so
+/// the caller can keep building a response.
 async fn fetch_user_role_assignments(
     state: &AppState,
     user_id: uuid::Uuid,
-) -> Vec<think_watch_common::dto::CustomRoleAssignment> {
-    type Row = (uuid::Uuid, String, String, Option<uuid::Uuid>);
+) -> Vec<think_watch_common::dto::RoleAssignment> {
+    type Row = (uuid::Uuid, String, bool, String, Option<uuid::Uuid>);
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT r.id, r.name, ra.scope_kind, ra.scope_id \
+        "SELECT r.id, r.name, r.is_system, ra.scope_kind, ra.scope_id \
            FROM rbac_role_assignments ra \
            JOIN rbac_roles r ON r.id = ra.role_id \
-          WHERE ra.user_id = $1 AND r.is_system = FALSE \
-          ORDER BY r.name ASC",
+          WHERE ra.user_id = $1 \
+          ORDER BY r.is_system DESC, r.name ASC",
     )
     .bind(user_id)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
     rows.into_iter()
-        .map(|(custom_role_id, name, scope_kind, scope_id)| {
+        .map(|(role_id, name, is_system, scope_kind, scope_id)| {
             let scope = match (scope_kind.as_str(), scope_id) {
                 ("global", _) => "global".to_string(),
                 (kind, Some(id)) => format!("{kind}:{id}"),
                 (kind, None) => kind.to_string(),
             };
-            think_watch_common::dto::CustomRoleAssignment {
-                custom_role_id,
+            think_watch_common::dto::RoleAssignment {
+                role_id,
                 name,
+                is_system,
                 scope,
             }
         })

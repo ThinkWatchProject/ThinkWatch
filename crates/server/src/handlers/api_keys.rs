@@ -62,15 +62,14 @@ pub async fn create_key(
         .await?;
 
         if !is_member {
-            // Allow super_admin/admin to create keys for any team
-            if !auth_user
-                .claims
-                .roles
-                .iter()
-                .any(|r| r == "super_admin" || r == "admin")
-            {
-                return Err(AppError::Forbidden);
-            }
+            // Allow users with cross-team API key management to create
+            // keys for any team. The `api_keys:create` permission alone
+            // only grants access to the caller's own team; creating for
+            // another team requires full API-key administration rights,
+            // which we express as `team:write`.
+            auth_user
+                .require_permission("team:write")
+                .map_err(|_| AppError::Forbidden("Cannot create keys for other teams".into()))?;
         }
     }
 

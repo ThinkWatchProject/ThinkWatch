@@ -25,10 +25,11 @@ pub async fn list_tools(
 /// stays in one place — the same function is also called from the startup
 /// loader and from the create/update CRUD paths.
 pub async fn discover_tools(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     axum::extract::Path(server_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("mcp_servers:update")?;
     let server = sqlx::query_as::<_, think_watch_common::models::McpServer>(
         "SELECT * FROM mcp_servers WHERE id = $1",
     )

@@ -11,9 +11,10 @@ use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
 pub async fn list_servers(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<McpServer>>, AppError> {
+    auth_user.require_permission("mcp_servers:read")?;
     let servers =
         sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers ORDER BY created_at DESC")
             .fetch_all(&state.db)
@@ -27,6 +28,7 @@ pub async fn create_server(
     State(state): State<AppState>,
     Json(req): Json<CreateMcpServerRequest>,
 ) -> Result<Json<McpServer>, AppError> {
+    auth_user.require_permission("mcp_servers:create")?;
     if req.name.is_empty() || req.endpoint_url.is_empty() {
         return Err(AppError::BadRequest(
             "name and endpoint_url are required".into(),
@@ -156,6 +158,7 @@ pub async fn update_server(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateMcpServerRequest>,
 ) -> Result<Json<McpServer>, AppError> {
+    auth_user.require_permission("mcp_servers:update")?;
     let existing = sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
@@ -228,10 +231,11 @@ pub async fn update_server(
 }
 
 pub async fn get_server(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<McpServer>, AppError> {
+    auth_user.require_permission("mcp_servers:read")?;
     let server = sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
@@ -246,6 +250,7 @@ pub async fn delete_server(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("mcp_servers:delete")?;
     let name: Option<String> = sqlx::query_scalar("SELECT name FROM mcp_servers WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)

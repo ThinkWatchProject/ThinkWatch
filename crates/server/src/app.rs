@@ -553,10 +553,6 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            crate::middleware::require_role::require_admin,
-        ))
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
             crate::middleware::auth_guard::require_auth,
         ));
 

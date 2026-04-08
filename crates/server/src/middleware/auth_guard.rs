@@ -7,6 +7,7 @@ use axum::{
 
 use think_watch_auth::jwt::Claims;
 use think_watch_common::audit::AuditEntry;
+use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 
@@ -26,6 +27,40 @@ impl AuthUser {
             e = e.ip_address(ip.clone());
         }
         e
+    }
+
+    /// Authorization gate: require the JWT to carry the given permission
+    /// key (`resource:action`). This is the authoritative authorization
+    /// check — every admin handler calls it at the top.
+    ///
+    /// The permission set was computed at JWT creation as the union of
+    /// every role the user holds (see `rbac::compute_user_permissions`).
+    /// Returns `AppError::Forbidden` if the permission is not present.
+    pub fn require_permission(&self, perm: &str) -> Result<(), AppError> {
+        if self.claims.permissions.iter().any(|p| p == perm) {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(format!(
+                "Missing required permission: {perm}"
+            )))
+        }
+    }
+
+    /// Same as `require_permission` but accepts multiple alternatives.
+    /// Access is granted if the user has ANY of the listed permissions.
+    #[allow(dead_code)]
+    pub fn require_any_permission(&self, perms: &[&str]) -> Result<(), AppError> {
+        if perms
+            .iter()
+            .any(|p| self.claims.permissions.iter().any(|c| c == *p))
+        {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(format!(
+                "Missing any of required permissions: {}",
+                perms.join(", ")
+            )))
+        }
     }
 }
 

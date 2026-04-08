@@ -1,9 +1,79 @@
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
+use uuid::Uuid;
+
+// ============================================================================
+// Multi-role merging semantics: UNION.
+//
+// A user with multiple role assignments gets the UNION of every role's
+// `permissions` field. If ANY role grants a permission, the user has it.
+//
+// The same rule holds for `allowed_models` and `allowed_mcp_servers`:
+// - If ANY role has `allowed_* = NULL` (unrestricted), the user is
+//   unrestricted for that resource type.
+// - Otherwise the effective allow-list is the union of every role's
+//   allow-list.
+//
+// Rationale: RBAC is additive. Assigning a role should never *reduce*
+// a user's access. "Least privilege" is expressed by not assigning the
+// role in the first place, not by intersecting.
+//
+// `compute_user_permissions` below is the single source of truth for
+// this rule. It is called at JWT creation time; the resulting union
+// is embedded in `claims.permissions` and used by every runtime
+// authorization check.
+// ============================================================================
+
+/// Load the union of permissions for every role assigned to `user_id`.
+///
+/// Returns a deduplicated, sorted list. Empty Vec if the user has no
+/// roles (which is valid — they'll have no granular permissions and
+/// every handler's `require_permission` call will reject them).
+pub async fn compute_user_permissions(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<String>, sqlx::Error> {
+    // Flatten the TEXT[] `permissions` field of every role the user
+    // holds into a single set. `UNNEST` + `DISTINCT` does the job in
+    // one round trip.
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT perm \
+           FROM rbac_role_assignments ra \
+           JOIN rbac_roles r ON r.id = ra.role_id \
+           CROSS JOIN LATERAL UNNEST(r.permissions) AS perm \
+          WHERE ra.user_id = $1 \
+          ORDER BY perm",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(p,)| p).collect())
+}
+
+/// Load the list of role NAMES (system + custom) assigned to `user_id`.
+/// Used by the UI for badges and by `claims.roles`.
+pub async fn load_user_role_names(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<String>, sqlx::Error> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT r.name \
+           FROM rbac_role_assignments ra \
+           JOIN rbac_roles r ON r.id = ra.role_id \
+          WHERE ra.user_id = $1 \
+          ORDER BY r.is_system DESC, r.name ASC",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(n,)| n).collect())
+}
 
 // ---------------------------------------------------------------------------
-// SystemRole — closed enum used by JWT-based role checks (require_role
-// middleware). Kept in lockstep with the seeded `rbac_roles` rows whose
-// `is_system = TRUE`.
+// SystemRole — closed enum kept around for the setup wizard's hardcoded
+// "assign super_admin to the first user" path and for tests that want a
+// stable enum. NOT used for authorization anymore — the authoritative
+// check reads `claims.permissions` via `AuthUser::require_permission`.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,35 +104,6 @@ impl SystemRole {
             "developer" => Some(SystemRole::Developer),
             "viewer" => Some(SystemRole::Viewer),
             _ => None,
-        }
-    }
-
-    pub fn has_permission(&self, resource: &str, action: &str) -> bool {
-        match self {
-            SystemRole::SuperAdmin => true,
-            SystemRole::Admin => !matches!((resource, action), ("system", "configure_oidc")),
-            SystemRole::TeamManager => matches!(
-                (resource, action),
-                ("ai_gateway", "use")
-                    | ("mcp_gateway", "use")
-                    | ("api_keys", "read")
-                    | ("api_keys", "write")
-                    | ("team", "read")
-                    | ("team", "write")
-                    | ("analytics", "read")
-            ),
-            SystemRole::Developer => matches!(
-                (resource, action),
-                ("ai_gateway", "use")
-                    | ("mcp_gateway", "use")
-                    | ("api_keys", "read")
-                    | ("api_keys", "write")
-                    | ("analytics", "read")
-            ),
-            SystemRole::Viewer => matches!(
-                (resource, action),
-                ("analytics", "read") | ("api_keys", "read")
-            ),
         }
     }
 }
@@ -299,44 +340,6 @@ mod tests {
     use super::*;
 
     // --- SystemRole tests ---
-
-    #[test]
-    fn super_admin_has_all_permissions() {
-        let role = SystemRole::SuperAdmin;
-        assert!(role.has_permission("ai_gateway", "use"));
-        assert!(role.has_permission("mcp_gateway", "use"));
-        assert!(role.has_permission("system", "configure_oidc"));
-        assert!(role.has_permission("analytics", "read"));
-        assert!(role.has_permission("team", "write"));
-        assert!(role.has_permission("anything", "whatever"));
-    }
-
-    #[test]
-    fn viewer_can_only_read_analytics_and_api_keys() {
-        let role = SystemRole::Viewer;
-        assert!(role.has_permission("analytics", "read"));
-        assert!(role.has_permission("api_keys", "read"));
-        // Should not have write or other access
-        assert!(!role.has_permission("ai_gateway", "use"));
-        assert!(!role.has_permission("mcp_gateway", "use"));
-        assert!(!role.has_permission("api_keys", "write"));
-        assert!(!role.has_permission("team", "read"));
-        assert!(!role.has_permission("system", "configure_oidc"));
-    }
-
-    #[test]
-    fn developer_permissions() {
-        let role = SystemRole::Developer;
-        assert!(role.has_permission("ai_gateway", "use"));
-        assert!(role.has_permission("mcp_gateway", "use"));
-        assert!(role.has_permission("api_keys", "read"));
-        assert!(role.has_permission("api_keys", "write"));
-        assert!(role.has_permission("analytics", "read"));
-        // Developer should NOT manage teams or configure system
-        assert!(!role.has_permission("team", "read"));
-        assert!(!role.has_permission("team", "write"));
-        assert!(!role.has_permission("system", "configure_oidc"));
-    }
 
     #[test]
     fn role_string_roundtrip() {

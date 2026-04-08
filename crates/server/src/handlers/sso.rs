@@ -120,32 +120,31 @@ pub async fn sso_callback(
     };
 
     if !user.is_active {
-        return Err(AppError::Forbidden);
+        return Err(AppError::Forbidden("Account is deactivated".into()));
     }
 
-    // Fetch system role names for the JWT (custom roles aren't part of
-    // the JWT roles[] field — they're loaded per-request from
-    // rbac_role_assignments by the handlers that need them).
-    let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT r.name FROM rbac_roles r \
-           JOIN rbac_role_assignments ra ON r.id = ra.role_id \
-          WHERE ra.user_id = $1 AND r.is_system = TRUE",
-    )
-    .bind(user.id)
-    .fetch_all(&state.db)
-    .await?;
+    // Union of system + custom role names and permissions — see
+    // `rbac::compute_user_permissions` for merge semantics.
+    let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user.id).await?;
+    let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id).await?;
 
     let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
 
-    let access_token =
-        state
-            .jwt
-            .create_access_token_with_ttl(user.id, &user.email, roles.clone(), access_ttl)?;
-    let refresh_token =
-        state
-            .jwt
-            .create_refresh_token_with_ttl(user.id, &user.email, roles, refresh_ttl_days)?;
+    let access_token = state.jwt.create_access_token_with_ttl(
+        user.id,
+        &user.email,
+        roles.clone(),
+        permissions.clone(),
+        access_ttl,
+    )?;
+    let refresh_token = state.jwt.create_refresh_token_with_ttl(
+        user.id,
+        &user.email,
+        roles,
+        permissions,
+        refresh_ttl_days,
+    )?;
 
     // Audit log
     state.audit.log(

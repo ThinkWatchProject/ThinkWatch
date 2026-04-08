@@ -50,6 +50,15 @@ async fn main() -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
+    // Verify every seeded role only references permissions that exist
+    // in the static PERMISSION_CATALOG. A mismatch means either the
+    // catalog or the seed drifted and authorization would silently
+    // misbehave.
+    if let Err(e) = handlers::roles::validate_seeded_roles(&pool).await {
+        tracing::error!("RBAC catalog validation failed: {e}");
+        std::process::exit(1);
+    }
+
     let redis_config = Config::from_url(&config.redis_url).map_err(|e| {
         tracing::error!("Invalid REDIS_URL: {e}");
         anyhow::anyhow!("Invalid REDIS_URL")
