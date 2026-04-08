@@ -180,10 +180,10 @@ impl SystemRole {
 }
 
 // ---------------------------------------------------------------------------
-// AWS IAM-style policy engine
+// Structured policy engine
 // ---------------------------------------------------------------------------
 
-/// AWS IAM-style policy document.
+/// Structured policy document with Allow/Deny statements.
 ///
 /// ```json
 /// {
@@ -321,7 +321,7 @@ fn evaluate_statement(stmt: &Statement, action: &str, resource: &str) -> PolicyR
 /// Evaluate a complete policy document.
 /// Returns the final decision for the given action/resource.
 ///
-/// AWS rules: explicit Deny always wins. If no statement matches → implicit deny.
+/// Rules: explicit Deny always wins. If no statement matches → implicit deny.
 pub fn evaluate_policy(policy: &PolicyDocument, action: &str, resource: &str) -> PolicyResult {
     let mut has_allow = false;
     for stmt in &policy.statement {
@@ -428,7 +428,7 @@ mod tests {
         }
     }
 
-    // --- IAM policy engine tests ---
+    // --- Policy engine tests ---
 
     #[test]
     fn glob_match_wildcard() {

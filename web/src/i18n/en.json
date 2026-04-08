@@ -332,6 +332,8 @@
     "saving": "Saving...",
     "rolesDesc": "Assign one or more roles. Permissions are the union across every role. Leave scope as `global` for unrestricted access.",
     "pickRole": "Pick a role…",
+    "pickerSearch": "Search roles…",
+    "pickerEmpty": "No matching roles.",
     "scope": "Scope",
     "scopeGlobal": "Global",
     "scopeTeam": "Team",
@@ -419,7 +421,7 @@
     "policyMode": "Policy Mode",
     "policyTemplates": "Policy Templates",
     "policyDocument": "Policy Document",
-    "policyDocumentDesc": "AWS IAM-style JSON policy document for fine-grained access control",
+    "policyDocumentDesc": "JSON policy document with Allow/Deny statements for fine-grained access control",
     "invalidJson": "Invalid JSON format",
     "policySyncLossy": "Some policy statements (Deny rules or scoped Resource patterns) cannot be expressed in simple mode and were dropped."
   },

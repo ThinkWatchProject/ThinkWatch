@@ -55,7 +55,7 @@ import {
   Download,
   Upload,
 } from 'lucide-react';
-import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
@@ -124,7 +124,7 @@ interface McpServer {
 }
 
 // ----------------------------------------------------------------------------
-// Policy templates (kept; the IAM/policy mode is still useful for power users)
+// Policy templates — drop-in starters for the structured policy mode.
 // ----------------------------------------------------------------------------
 
 const POLICY_TEMPLATES: Record<string, PolicyDocument> = {
@@ -496,11 +496,13 @@ export function RolesPage() {
     [permissions],
   );
 
-  // Whether the current user can edit / reset system roles. Read once
-  // from the JWT — gated by `roles:edit_system` which only super_admin
-  // holds by default. Used to hide the row action buttons that would
-  // otherwise just 403 on save.
-  const canEditSystem = useMemo(() => hasPermission('roles:edit_system'), []);
+  // System roles are locked in the UI: no edit button on the row,
+  // no reset button in the dialog. The backend `roles:edit_system`
+  // permission and the reset endpoint still exist (so we can flip
+  // this back without a schema change), but exposing them via the
+  // UI was confusing — operators expect "system role" to mean
+  // "untouchable from this page". Use clone-from to fork instead.
+  const canEditSystem = false;
 
   /// Match a single permission key against a search query. The query
   /// is treated as a literal substring unless it contains `*`, in
@@ -519,7 +521,7 @@ export function RolesPage() {
   };
 
   /// Collect Action keys out of a policy_document so glob search hits
-  /// IAM-mode roles too. Doesn't try to interpret Effect / Resource —
+  /// policy-mode roles too. Doesn't try to interpret Effect / Resource —
   /// just harvests strings the user might be searching for.
   const extractPolicyActions = (doc: PolicyDocument | null): string[] => {
     if (!doc) return [];
@@ -661,7 +663,7 @@ export function RolesPage() {
     };
 
     // Only the simple-mode danger set is checked in the gate. Policy
-    // mode is power-user territory and the IAM doc may opt out via
+    // mode is power-user territory and the policy doc may opt out via
     // explicit Deny rules; we don't try to second-guess it here.
     const danger = formMode === 'simple' ? dangerKeysIn(formPerms) : [];
     if (danger.length > 0) {
@@ -2465,7 +2467,7 @@ function RoleDetail({
 /// Estimate the effective permission count for a policy_document by
 /// expanding wildcard Allow actions against the static catalog and
 /// subtracting Deny matches. Used in the role list to show a single
-/// number for IAM-mode roles instead of just "policy", and to render
+/// number for policy-mode roles instead of just "policy", and to render
 /// a hover preview of the first few statements.
 ///
 /// This is a static approximation: it ignores Conditions, treats

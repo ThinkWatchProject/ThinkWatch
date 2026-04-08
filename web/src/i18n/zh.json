@@ -332,6 +332,8 @@
     "saving": "保存中...",
     "rolesDesc": "为该用户分配一个或多个角色，权限按所有角色取并集。范围保持 `global` 表示不限制。",
     "pickRole": "选择角色…",
+    "pickerSearch": "搜索角色…",
+    "pickerEmpty": "没有匹配的角色。",
     "scope": "范围",
     "scopeGlobal": "全局",
     "scopeTeam": "团队",
@@ -419,7 +421,7 @@
     "policyMode": "策略模式",
     "policyTemplates": "策略模板",
     "policyDocument": "策略文档",
-    "policyDocumentDesc": "AWS IAM 风格的 JSON 策略文档，用于细粒度访问控制",
+    "policyDocumentDesc": "包含 Allow / Deny 语句的 JSON 策略文档，用于细粒度访问控制",
     "invalidJson": "JSON 格式无效",
     "policySyncLossy": "部分策略语句（Deny 规则或受限的 Resource 模式）无法在简单模式下表达，已被忽略。"
   },

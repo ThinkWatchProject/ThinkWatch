@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Dialog,
@@ -31,7 +32,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, Ban, CheckCircle, Users as UsersIcon, AlertCircle, Copy, Search } from 'lucide-react';
+import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, Ban, CheckCircle, Users as UsersIcon, AlertCircle, Copy, Search, ChevronRight, ChevronDown } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -279,7 +280,7 @@ export function UsersPage() {
           <DialogTrigger asChild>
             <Button><Plus className="h-4 w-4" />{t('users.addUser')}</Button>
           </DialogTrigger>
-          <DialogContent className="sm:max-w-md">
+          <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>{t('users.addUser')}</DialogTitle>
               <DialogDescription>{t('users.dialogDescription')}</DialogDescription>
@@ -459,7 +460,7 @@ export function UsersPage() {
 
       {/* Edit dialog */}
       <Dialog open={editOpen} onOpenChange={(open) => { setEditOpen(open); if (!open) setEditUser(null); }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('users.editUser')}</DialogTitle>
             <DialogDescription>{t('users.editDescription')}</DialogDescription>
@@ -514,7 +515,7 @@ export function UsersPage() {
 
       {/* Reset password result */}
       <Dialog open={!!resetResult} onOpenChange={(open) => { if (!open) setResetResult(null); }}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('users.resetPasswordSuccess')}</DialogTitle>
             <DialogDescription>{t('users.temporaryPasswordHint')}</DialogDescription>
@@ -591,6 +592,11 @@ function RoleAssignmentEditor({
   const [pendingKind, setPendingKind] = useState<ScopeKind>('global');
   const [pendingScopeId, setPendingScopeId] = useState('');
   const [pendingError, setPendingError] = useState('');
+  // Searchable role picker state. The popover stays open while the
+  // admin types so they can refine the filter; selecting a row both
+  // sets the pending role and closes it.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerQuery, setPickerQuery] = useState('');
 
   // Stable lookup so the row badge can pick up `is_system` even when the
   // backend later changes a role's name (the role_id is the source of truth).
@@ -618,6 +624,7 @@ function RoleAssignmentEditor({
     setPendingRoleId('');
     setPendingKind('global');
     setPendingScopeId('');
+    setPickerQuery('');
   };
 
   const remove = (idx: number) => {
@@ -671,25 +678,94 @@ function RoleAssignmentEditor({
         <div className="space-y-1.5">
           <div className="flex items-center gap-2">
             <div className="flex-1">
-              <Select value={pendingRoleId} onValueChange={setPendingRoleId}>
-                <SelectTrigger>
-                  <SelectValue placeholder={t('users.pickRole')} />
-                </SelectTrigger>
-                <SelectContent>
-                  {availableRoles.map((r) => (
-                    <SelectItem key={r.id} value={r.id}>
-                      <span className={r.is_system ? '' : 'font-mono text-xs'}>
-                        {r.is_system ? roleLabel(r.name) : r.name}
-                      </span>
-                      {r.is_system && (
-                        <span className="ml-2 text-[10px] text-muted-foreground">
-                          {t('roles.systemRole')}
+              {(() => {
+                const selected = availableRoles.find((r) => r.id === pendingRoleId);
+                const q = pickerQuery.trim().toLowerCase();
+                // Hide rows already in `value` so the picker doesn't
+                // offer the same (role, scope=global) pair twice.
+                // Scope-specific dupes are still allowed because the
+                // current pending kind isn't known yet.
+                const assignedAtGlobal = new Set(
+                  value.filter((a) => a.scope === 'global').map((a) => a.role_id),
+                );
+                const filtered = availableRoles.filter((r) => {
+                  if (assignedAtGlobal.has(r.id)) return false;
+                  if (!q) return true;
+                  if (r.name.toLowerCase().includes(q)) return true;
+                  if (r.is_system && roleLabel(r.name).toLowerCase().includes(q)) return true;
+                  if ((r.description ?? '').toLowerCase().includes(q)) return true;
+                  return false;
+                });
+                return (
+                  <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+                    <PopoverTrigger asChild>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        role="combobox"
+                        aria-expanded={pickerOpen}
+                        className="w-full justify-between font-normal"
+                      >
+                        <span className={selected ? '' : 'text-muted-foreground'}>
+                          {selected
+                            ? selected.is_system
+                              ? roleLabel(selected.name)
+                              : selected.name
+                            : t('users.pickRole')}
                         </span>
-                      )}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                        <ChevronDown className="h-4 w-4 opacity-50" />
+                      </Button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      align="start"
+                      className="w-[var(--radix-popover-trigger-width)] p-0"
+                    >
+                      <div className="border-b p-2">
+                        <Input
+                          autoFocus
+                          value={pickerQuery}
+                          onChange={(e) => setPickerQuery(e.target.value)}
+                          placeholder={t('users.pickerSearch')}
+                          className="h-8"
+                        />
+                      </div>
+                      <div className="max-h-64 overflow-y-auto py-1">
+                        {filtered.length === 0 ? (
+                          <p className="px-3 py-6 text-center text-xs text-muted-foreground">
+                            {t('users.pickerEmpty')}
+                          </p>
+                        ) : (
+                          filtered.map((r) => (
+                            <button
+                              key={r.id}
+                              type="button"
+                              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm hover:bg-muted"
+                              onClick={() => {
+                                setPendingRoleId(r.id);
+                                setPickerOpen(false);
+                                setPickerQuery('');
+                              }}
+                            >
+                              <span
+                                className={`min-w-0 flex-1 truncate ${
+                                  r.is_system ? '' : 'font-mono text-xs'
+                                }`}
+                              >
+                                {r.is_system ? roleLabel(r.name) : r.name}
+                              </span>
+                              {r.is_system && (
+                                <Badge variant="secondary" className="text-[10px]">
+                                  {t('roles.systemRole')}
+                                </Badge>
+                              )}
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </PopoverContent>
+                  </Popover>
+                );
+              })()}
             </div>
             <Select
               value={pendingKind}
@@ -781,61 +857,59 @@ function EffectivePermissionsPreview({
     grouped.set(resource, arr);
   }
 
+  // Collapsed by default — the panel can dump 50+ badges and was
+  // overflowing the dialog on smaller screens. The summary line
+  // already conveys the headline numbers; the badge grid only
+  // matters when the admin wants to double-check a specific perm.
+  const modelsLabel = modelsUnrestricted
+    ? t('users.unrestricted')
+    : `${models.size}`;
+  const serversLabel = serversUnrestricted
+    ? t('users.unrestricted')
+    : `${servers.size}`;
+
   return (
-    <div className="rounded-md border bg-muted/20 p-3 space-y-2">
-      <div className="flex items-center justify-between">
-        <Label className="text-sm font-medium">{t('users.effectivePermissions')}</Label>
-        <span className="font-mono text-xs tabular-nums text-muted-foreground">
-          {perms.size}
+    <details className="rounded-md border bg-muted/20 px-3 py-2 [&[open]>summary>svg]:rotate-90">
+      <summary className="flex cursor-pointer items-center gap-2 text-sm">
+        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform" />
+        <Label className="cursor-pointer font-medium">
+          {t('users.effectivePermissions')}
+        </Label>
+        <span className="ml-auto flex items-center gap-2 text-[11px] text-muted-foreground">
+          <span className="font-mono tabular-nums">{perms.size}</span>
+          <span>·</span>
+          <span>
+            {t('users.effectiveModels')} {modelsLabel}
+          </span>
+          <span>·</span>
+          <span>
+            {t('users.effectiveServers')} {serversLabel}
+          </span>
         </span>
+      </summary>
+      <div className="mt-2 space-y-2">
+        <p className="text-[11px] text-muted-foreground">
+          {t('users.effectivePermissionsDesc')}
+        </p>
+        {perms.size === 0 ? (
+          <p className="text-xs italic text-muted-foreground">{t('common.none')}</p>
+        ) : (
+          <div className="space-y-1.5">
+            {Array.from(grouped.entries()).map(([resource, actions]) => (
+              <div key={resource} className="flex flex-wrap items-center gap-1">
+                <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                  {resource}
+                </span>
+                {actions.map((a) => (
+                  <Badge key={`${resource}:${a}`} variant="outline" className="text-[10px]">
+                    {a}
+                  </Badge>
+                ))}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
-      <p className="text-[11px] text-muted-foreground">
-        {t('users.effectivePermissionsDesc')}
-      </p>
-      {perms.size === 0 ? (
-        <p className="text-xs italic text-muted-foreground">{t('common.none')}</p>
-      ) : (
-        <div className="space-y-1.5">
-          {Array.from(grouped.entries()).map(([resource, actions]) => (
-            <div key={resource} className="flex flex-wrap items-center gap-1">
-              <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
-                {resource}
-              </span>
-              {actions.map((a) => (
-                <Badge key={`${resource}:${a}`} variant="outline" className="text-[10px]">
-                  {a}
-                </Badge>
-              ))}
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="grid gap-1 pt-1 text-[11px] sm:grid-cols-2">
-        <div>
-          <span className="font-medium text-muted-foreground">
-            {t('users.effectiveModels')}:{' '}
-          </span>
-          <span className="font-mono">
-            {modelsUnrestricted
-              ? t('users.unrestricted')
-              : models.size > 0
-                ? `${models.size}`
-                : t('users.unrestricted')}
-          </span>
-        </div>
-        <div>
-          <span className="font-medium text-muted-foreground">
-            {t('users.effectiveServers')}:{' '}
-          </span>
-          <span className="font-mono">
-            {serversUnrestricted
-              ? t('users.unrestricted')
-              : servers.size > 0
-                ? `${servers.size}`
-                : t('users.unrestricted')}
-          </span>
-        </div>
-      </div>
-    </div>
+    </details>
   );
 }

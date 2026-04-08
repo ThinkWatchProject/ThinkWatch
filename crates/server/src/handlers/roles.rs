@@ -340,8 +340,9 @@ pub struct RoleResponse {
     pub allowed_models: Option<Vec<String>>,
     /// Allowed MCP server UUIDs. `null` = unrestricted (all servers).
     pub allowed_mcp_servers: Option<Vec<Uuid>>,
-    /// Optional AWS IAM-style policy document JSON. When `null`, the
-    /// flat `permissions` array is the sole source of truth.
+    /// Optional structured policy document (Allow/Deny statements
+    /// against action/resource patterns). When `null`, the flat
+    /// `permissions` array is the sole source of truth.
     pub policy_document: Option<serde_json::Value>,
     /// Number of users currently assigned to this role.
     pub user_count: i64,
