@@ -494,11 +494,33 @@ export function UsersPage() {
 // Custom-role assignment editor
 //
 // Renders the user's current `(role, scope)` pairs as removable rows and
-// gives the admin a small Add form (role dropdown + scope text input) to
-// append a new one. Scope defaults to `"global"` and is currently a free
-// text field — once a project/team picker exists this can become a
-// type-ahead.
+// gives the admin a small Add form to append a new one. Scope is now a
+// structured `(scope_kind, scope_id)` twople — kind picks from a closed
+// enum (`global`/`team`/`project`), id is a UUID input that only appears
+// when the kind needs one. The result is serialized back to the legacy
+// `"global" | "team:<uuid>" | "project:<uuid>"` string the backend
+// `parse_scope` helper accepts.
 // ----------------------------------------------------------------------------
+
+type ScopeKind = 'global' | 'team' | 'project';
+
+function parseScope(scope: string): { kind: ScopeKind; id: string } {
+  if (!scope || scope === 'global') return { kind: 'global', id: '' };
+  const idx = scope.indexOf(':');
+  if (idx < 0) return { kind: 'global', id: '' };
+  const kind = scope.slice(0, idx);
+  const id = scope.slice(idx + 1);
+  if (kind === 'team' || kind === 'project') return { kind, id };
+  return { kind: 'global', id: '' };
+}
+
+function buildScope(kind: ScopeKind, id: string): string {
+  if (kind === 'global') return 'global';
+  return `${kind}:${id.trim()}`;
+}
+
+const UUID_RE =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function CustomRoleAssignmentEditor({
   value,
@@ -511,25 +533,33 @@ function CustomRoleAssignmentEditor({
 }) {
   const { t } = useTranslation();
   const [pendingRoleId, setPendingRoleId] = useState('');
-  const [pendingScope, setPendingScope] = useState('global');
+  const [pendingKind, setPendingKind] = useState<ScopeKind>('global');
+  const [pendingScopeId, setPendingScopeId] = useState('');
+  const [pendingError, setPendingError] = useState('');
 
   // Don't render the section at all if there are no custom roles to
   // assign — keeps the dialog clean on fresh installs.
   if (availableRoles.length === 0 && value.length === 0) return null;
 
+  const canAdd =
+    !!pendingRoleId &&
+    (pendingKind === 'global' || (pendingScopeId.trim() && UUID_RE.test(pendingScopeId.trim())));
+
   const add = () => {
+    setPendingError('');
     if (!pendingRoleId) return;
+    if (pendingKind !== 'global' && !UUID_RE.test(pendingScopeId.trim())) {
+      setPendingError(t('users.scopeUuidRequired'));
+      return;
+    }
     const role = availableRoles.find((r) => r.id === pendingRoleId);
     if (!role) return;
-    const scope = pendingScope.trim() || 'global';
-    // Disallow exact duplicates (same role + same scope).
+    const scope = buildScope(pendingKind, pendingScopeId);
     if (value.some((a) => a.custom_role_id === role.id && a.scope === scope)) return;
-    onChange([
-      ...value,
-      { custom_role_id: role.id, name: role.name, scope },
-    ]);
+    onChange([...value, { custom_role_id: role.id, name: role.name, scope }]);
     setPendingRoleId('');
-    setPendingScope('global');
+    setPendingKind('global');
+    setPendingScopeId('');
   };
 
   const remove = (idx: number) => {
@@ -544,55 +574,84 @@ function CustomRoleAssignmentEditor({
       <p className="text-xs text-muted-foreground">{t('users.customRolesDesc')}</p>
       {value.length > 0 && (
         <div className="space-y-1.5">
-          {value.map((a, i) => (
-            <div
-              key={`${a.custom_role_id}-${a.scope}-${i}`}
-              className="flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
-            >
-              <span className="min-w-0 flex-1 truncate font-mono">{a.name}</span>
-              <Badge variant="outline" className="font-mono text-[10px]">
-                {a.scope}
-              </Badge>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="h-6 w-6"
-                onClick={() => remove(i)}
-                aria-label={t('common.delete')}
+          {value.map((a, i) => {
+            const parsed = parseScope(a.scope);
+            return (
+              <div
+                key={`${a.custom_role_id}-${a.scope}-${i}`}
+                className="flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
               >
-                <Trash2 className="h-3 w-3" />
-              </Button>
-            </div>
-          ))}
+                <span className="min-w-0 flex-1 truncate font-mono">{a.name}</span>
+                <Badge variant="outline" className="font-mono text-[10px]">
+                  {parsed.kind === 'global'
+                    ? 'global'
+                    : `${parsed.kind}:${parsed.id.slice(0, 8)}…`}
+                </Badge>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-6 w-6"
+                  onClick={() => remove(i)}
+                  aria-label={t('common.delete')}
+                >
+                  <Trash2 className="h-3 w-3" />
+                </Button>
+              </div>
+            );
+          })}
         </div>
       )}
       {availableRoles.length > 0 && (
-        <div className="flex items-center gap-2">
-          <div className="flex-1">
-            <Select value={pendingRoleId} onValueChange={setPendingRoleId}>
-              <SelectTrigger>
-                <SelectValue placeholder={t('users.pickCustomRole')} />
+        <div className="space-y-1.5">
+          <div className="flex items-center gap-2">
+            <div className="flex-1">
+              <Select value={pendingRoleId} onValueChange={setPendingRoleId}>
+                <SelectTrigger>
+                  <SelectValue placeholder={t('users.pickCustomRole')} />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableRoles.map((r) => (
+                    <SelectItem key={r.id} value={r.id}>
+                      <span className="font-mono text-xs">{r.name}</span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Select
+              value={pendingKind}
+              onValueChange={(v) => {
+                setPendingKind(v as ScopeKind);
+                setPendingScopeId('');
+                setPendingError('');
+              }}
+            >
+              <SelectTrigger className="w-28">
+                <SelectValue />
               </SelectTrigger>
               <SelectContent>
-                {availableRoles.map((r) => (
-                  <SelectItem key={r.id} value={r.id}>
-                    <span className="font-mono text-xs">{r.name}</span>
-                  </SelectItem>
-                ))}
+                <SelectItem value="global">{t('users.scopeGlobal')}</SelectItem>
+                <SelectItem value="team">{t('users.scopeTeam')}</SelectItem>
+                <SelectItem value="project">{t('users.scopeProject')}</SelectItem>
               </SelectContent>
             </Select>
+            {pendingKind !== 'global' && (
+              <Input
+                value={pendingScopeId}
+                onChange={(e) => setPendingScopeId(e.target.value)}
+                placeholder={t('users.scopeIdPlaceholder')}
+                className="w-44 font-mono text-xs"
+                aria-label={t('users.scope')}
+              />
+            )}
+            <Button type="button" variant="outline" size="sm" disabled={!canAdd} onClick={add}>
+              <Plus className="h-3 w-3" />
+            </Button>
           </div>
-          <Input
-            value={pendingScope}
-            onChange={(e) => setPendingScope(e.target.value)}
-            placeholder="global"
-            className="w-32 font-mono text-xs"
-            aria-label={t('users.scope')}
-          />
-          <Button type="button" variant="outline" size="sm" disabled={!pendingRoleId} onClick={add}>
-            <Plus className="h-3 w-3" />
-          </Button>
+          {pendingError && (
+            <p className="text-[10px] text-destructive">{pendingError}</p>
+          )}
         </div>
       )}
     </div>

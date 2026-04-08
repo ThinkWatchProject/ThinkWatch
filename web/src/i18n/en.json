@@ -330,7 +330,12 @@
     "customRoles": "Custom roles",
     "customRolesDesc": "Assign custom roles to this user with optional scope. Leave scope as `global` for unrestricted access.",
     "pickCustomRole": "Pick a custom role…",
-    "scope": "Scope"
+    "scope": "Scope",
+    "scopeGlobal": "Global",
+    "scopeTeam": "Team",
+    "scopeProject": "Project",
+    "scopeIdPlaceholder": "UUID",
+    "scopeUuidRequired": "Scope id must be a valid UUID."
   },
   "roles": {
     "title": "Roles & Permissions",

@@ -330,7 +330,12 @@
     "customRoles": "自定义角色",
     "customRolesDesc": "为此用户分配自定义角色,可选填范围。范围保持 `global` 表示不限制。",
     "pickCustomRole": "选择一个自定义角色…",
-    "scope": "范围"
+    "scope": "范围",
+    "scopeGlobal": "全局",
+    "scopeTeam": "团队",
+    "scopeProject": "项目",
+    "scopeIdPlaceholder": "UUID",
+    "scopeUuidRequired": "范围 id 必须是有效的 UUID。"
   },
   "roles": {
     "title": "角色与权限",
