@@ -83,6 +83,12 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     d("roles:create", "roles", "create"),
     d("roles:update", "roles", "update"),
     d("roles:delete", "roles", "delete"),
+    // Editing the system roles is strictly more dangerous than
+    // editing custom roles: a typo here can lock every existing
+    // user out of the entire system at once. Gated separately so
+    // an org can grant `roles:update` (custom roles) without
+    // implicitly handing out the ability to neuter `super_admin`.
+    d("roles:edit_system", "roles", "edit_system"),
     // --- Analytics & audit ---
     p("analytics:read_own", "analytics", "read_own"),
     p("analytics:read_team", "analytics", "read_team"),
@@ -112,6 +118,169 @@ pub const PERMISSIONS: &[PermissionDef] = &[
 
 fn is_known_permission(key: &str) -> bool {
     PERMISSIONS.iter().any(|p| p.key == key)
+}
+
+/// Default permission set for each seeded system role.
+///
+/// This is the **single source of truth** for "what should this
+/// system role grant out of the box". The migration uses these to
+/// seed `rbac_roles.permissions` on a fresh database, and the
+/// "Reset to defaults" UI in the system-role editor uses them to
+/// roll back any in-place edits.
+///
+/// Kept in lockstep with the seed in `migrations/001_init.sql`
+/// — `validate_seeded_roles` runs at startup so a drift between
+/// the two would fail-fast.
+pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
+    (
+        "super_admin",
+        &[
+            "ai_gateway:use",
+            "mcp_gateway:use",
+            "api_keys:read",
+            "api_keys:create",
+            "api_keys:update",
+            "api_keys:rotate",
+            "api_keys:delete",
+            "providers:read",
+            "providers:create",
+            "providers:update",
+            "providers:delete",
+            "providers:rotate_key",
+            "mcp_servers:read",
+            "mcp_servers:create",
+            "mcp_servers:update",
+            "mcp_servers:delete",
+            "users:read",
+            "users:create",
+            "users:update",
+            "users:delete",
+            "team:read",
+            "team:write",
+            "sessions:revoke",
+            "roles:read",
+            "roles:create",
+            "roles:update",
+            "roles:delete",
+            "roles:edit_system",
+            "analytics:read_own",
+            "analytics:read_team",
+            "analytics:read_all",
+            "audit_logs:read_own",
+            "audit_logs:read_team",
+            "audit_logs:read_all",
+            "logs:read_own",
+            "logs:read_team",
+            "logs:read_all",
+            "log_forwarders:read",
+            "log_forwarders:write",
+            "webhooks:read",
+            "webhooks:write",
+            "content_filter:read",
+            "content_filter:write",
+            "pii_redactor:read",
+            "pii_redactor:write",
+            "settings:read",
+            "settings:write",
+            "system:configure_oidc",
+        ],
+    ),
+    (
+        "admin",
+        &[
+            "ai_gateway:use",
+            "mcp_gateway:use",
+            "api_keys:read",
+            "api_keys:create",
+            "api_keys:update",
+            "api_keys:rotate",
+            "api_keys:delete",
+            "providers:read",
+            "providers:create",
+            "providers:update",
+            "providers:delete",
+            "providers:rotate_key",
+            "mcp_servers:read",
+            "mcp_servers:create",
+            "mcp_servers:update",
+            "mcp_servers:delete",
+            "users:read",
+            "users:create",
+            "users:update",
+            "team:read",
+            "team:write",
+            "sessions:revoke",
+            "roles:read",
+            "roles:create",
+            "roles:update",
+            "roles:delete",
+            "analytics:read_all",
+            "audit_logs:read_all",
+            "logs:read_all",
+            "log_forwarders:read",
+            "log_forwarders:write",
+            "webhooks:read",
+            "webhooks:write",
+            "content_filter:read",
+            "content_filter:write",
+            "pii_redactor:read",
+            "pii_redactor:write",
+            "settings:read",
+            "settings:write",
+        ],
+    ),
+    (
+        "team_manager",
+        &[
+            "ai_gateway:use",
+            "mcp_gateway:use",
+            "api_keys:read",
+            "api_keys:create",
+            "api_keys:update",
+            "api_keys:rotate",
+            "providers:read",
+            "mcp_servers:read",
+            "users:read",
+            "team:read",
+            "team:write",
+            "analytics:read_team",
+            "audit_logs:read_team",
+            "logs:read_team",
+        ],
+    ),
+    (
+        "developer",
+        &[
+            "ai_gateway:use",
+            "mcp_gateway:use",
+            "api_keys:read",
+            "api_keys:create",
+            "api_keys:update",
+            "providers:read",
+            "mcp_servers:read",
+            "analytics:read_own",
+            "audit_logs:read_own",
+            "logs:read_own",
+        ],
+    ),
+    (
+        "viewer",
+        &[
+            "api_keys:read",
+            "providers:read",
+            "mcp_servers:read",
+            "analytics:read_own",
+            "audit_logs:read_own",
+            "logs:read_own",
+        ],
+    ),
+];
+
+fn system_role_default_permissions(name: &str) -> Option<Vec<String>> {
+    SYSTEM_ROLE_DEFAULTS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, perms)| perms.iter().map(|p| (*p).to_string()).collect())
 }
 
 /// Startup-time validation: every permission string stored on a role in
@@ -356,8 +525,21 @@ pub async fn update_role(
             .fetch_optional(&state.db)
             .await?
             .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
-    if existing.0 {
-        return Err(AppError::BadRequest("Cannot modify system roles".into()));
+    let is_system = existing.0;
+
+    // System role gating:
+    //   - Editing the permissions / models / servers / policy / description
+    //     of a system role requires the additional `roles:edit_system`
+    //     permission, which is strictly more dangerous than `roles:update`.
+    //   - The `name` and `is_system` columns are immovable on system rows
+    //     because the rest of the app key off the literal string
+    //     ("super_admin", "developer", ...). The UI hides the name field
+    //     for system rows; the SQL clause below enforces it on the wire.
+    if is_system {
+        auth_user.require_permission("roles:edit_system")?;
+        if payload.name.is_some() {
+            return Err(AppError::BadRequest("Cannot rename system roles".into()));
+        }
     }
 
     if let Some(ref doc) = payload.policy_document {
@@ -384,7 +566,7 @@ pub async fn update_role(
             allowed_mcp_servers = $6, \
             policy_document   = $7, \
             updated_at        = now() \
-         WHERE id = $1 AND is_system = FALSE",
+         WHERE id = $1",
     )
     .bind(id)
     .bind(payload.name.as_deref().map(str::trim))
@@ -411,6 +593,78 @@ pub async fn update_role(
     state.audit.log(
         auth_user
             .audit("role.updated")
+            .resource("role")
+            .resource_id(id.to_string())
+            .detail(serde_json::json!({ "name": existing.1 })),
+    );
+
+    Ok(Json(row_to_response(row, user_count)))
+}
+
+// --- Reset system role to defaults ---
+//
+// Re-applies the catalog-default permission set for a system role
+// (whatever `SYSTEM_ROLE_DEFAULTS` says) and clears any
+// allowed_models / allowed_mcp_servers / policy_document overrides
+// that have accumulated. Useful after an in-place edit goes wrong.
+//
+// Custom roles have no canonical defaults, so this endpoint is
+// system-only and rejects everything else with 400.
+
+pub async fn reset_role(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RoleResponse>, AppError> {
+    auth_user.require_permission("roles:edit_system")?;
+
+    let existing =
+        sqlx::query_as::<_, (bool, String)>("SELECT is_system, name FROM rbac_roles WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
+    if !existing.0 {
+        return Err(AppError::BadRequest(
+            "Reset is only available for system roles".into(),
+        ));
+    }
+
+    let defaults = system_role_default_permissions(&existing.1).ok_or_else(|| {
+        AppError::BadRequest(format!(
+            "No defaults registered for system role '{}'",
+            existing.1
+        ))
+    })?;
+
+    sqlx::query(
+        "UPDATE rbac_roles SET \
+            permissions         = $2, \
+            allowed_models      = NULL, \
+            allowed_mcp_servers = NULL, \
+            policy_document     = NULL, \
+            updated_at          = now() \
+         WHERE id = $1",
+    )
+    .bind(id)
+    .bind(&defaults)
+    .execute(&state.db)
+    .await?;
+
+    let row: RoleRow = sqlx::query_as(&format!("{ROLE_SELECT} WHERE id = $1"))
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    let user_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*)::bigint FROM rbac_role_assignments WHERE role_id = $1")
+            .bind(id)
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(0);
+
+    state.audit.log(
+        auth_user
+            .audit("role.reset")
             .resource("role")
             .resource_id(id.to_string())
             .detail(serde_json::json!({ "name": existing.1 })),
@@ -594,4 +848,95 @@ pub async fn list_role_members(
 pub async fn list_permissions(auth_user: AuthUser) -> Result<Json<Vec<PermissionDef>>, AppError> {
     auth_user.require_permission("roles:read")?;
     Ok(Json(PERMISSIONS.to_vec()))
+}
+
+// --- Role audit history ---
+//
+// Reads the platform_logs table (where role mutations are recorded
+// via `auth_user.audit("role.*")`) for entries scoped to one role.
+// Gated by `roles:read` rather than `logs:read_all` so anyone who
+// can view the role can also see who has touched it — there is no
+// extra information here beyond what the role itself already shows.
+
+#[derive(Debug, Serialize)]
+pub struct RoleHistoryEntry {
+    pub id: String,
+    pub action: String,
+    pub user_id: Option<String>,
+    pub user_email: Option<String>,
+    pub ip_address: Option<String>,
+    pub detail: Option<serde_json::Value>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoleHistoryResponse {
+    pub items: Vec<RoleHistoryEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize, clickhouse::Row)]
+struct RoleHistoryRow {
+    id: String,
+    action: String,
+    user_id: Option<String>,
+    user_email: Option<String>,
+    ip_address: Option<String>,
+    detail: Option<String>,
+    created_at: String,
+}
+
+pub async fn list_role_history(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RoleHistoryResponse>, AppError> {
+    auth_user.require_permission("roles:read")?;
+
+    // 404 if the role doesn't exist — same shape as list_role_members.
+    let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rbac_roles WHERE id = $1)")
+        .bind(id)
+        .fetch_one(&state.db)
+        .await?;
+    if !exists {
+        return Err(AppError::NotFound("Role not found".into()));
+    }
+
+    let Some(ch) = state.clickhouse.as_ref() else {
+        // ClickHouse not configured — history is recorded in
+        // platform_logs only, so without it there is nothing to
+        // return. Empty list, not an error: the rest of the page
+        // should still render fine.
+        return Ok(Json(RoleHistoryResponse { items: vec![] }));
+    };
+
+    // Bound the result set so a long-lived role can't load
+    // unbounded history into the dialog. 100 rows == ~1 month of
+    // typical activity for a single role.
+    let sql = "SELECT id, action, user_id, user_email, ip_address, detail, \
+                      toString(created_at) AS created_at \
+               FROM platform_logs \
+              WHERE resource = 'role' AND resource_id = ? \
+              ORDER BY created_at DESC \
+              LIMIT 100";
+    let rows: Vec<RoleHistoryRow> = ch
+        .query(sql)
+        .bind(id.to_string().as_str())
+        .fetch_all()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
+
+    let items = rows
+        .into_iter()
+        .map(|r| RoleHistoryEntry {
+            id: r.id,
+            action: r.action,
+            user_id: r.user_id,
+            user_email: r.user_email,
+            ip_address: r.ip_address,
+            detail: r.detail.and_then(|s| serde_json::from_str(&s).ok()),
+            created_at: r.created_at,
+        })
+        .collect();
+
+    Ok(Json(RoleHistoryResponse { items }))
 }

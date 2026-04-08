@@ -395,6 +395,20 @@
     "dangerConfirmTitle": "Confirm dangerous permissions",
     "dangerConfirmDesc": "You are about to save a role with the following dangerous permissions. These can rotate secrets, delete resources, or change security-critical settings.",
     "dangerConfirmAccept": "Yes, save with these permissions",
+    "exportAll": "Export",
+    "importRoles": "Import",
+    "detailOverview": "Overview",
+    "detailHistory": "History",
+    "noHistory": "No audit entries for this role.",
+    "editSystemWarning": "Editing a system role takes effect for every user that holds it. Use \"Reset to defaults\" to roll back.",
+    "resetToDefaults": "Reset to defaults",
+    "resetSystemConfirm": "Reset {{name}} to its default permission set? Any in-place edits will be lost.",
+    "importResultTitle": "Import complete",
+    "importCreated": "Created",
+    "importSkipped": "Skipped (already exists)",
+    "importFailed": "Failed",
+    "importEmpty": "File contains no roles.",
+    "importMissingName": "Role missing required `name` field.",
     "allowedModels": "Allowed Models",
     "allowedModelsDesc": "Restrict which AI models this role can use. Leave empty for unrestricted access.",
     "allowedMcpServers": "Allowed MCP Servers",
@@ -443,7 +457,8 @@
       "read_own": "read own",
       "read_team": "read team",
       "read_all": "read all",
-      "configure_oidc": "configure OIDC"
+      "configure_oidc": "configure OIDC",
+      "edit_system": "edit system"
     }
   },
   "settingsPage": {

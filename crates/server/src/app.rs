@@ -544,6 +544,14 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             get(handlers::roles::list_role_members),
         )
         .route(
+            "/api/admin/roles/{id}/history",
+            get(handlers::roles::list_role_history),
+        )
+        .route(
+            "/api/admin/roles/{id}/reset",
+            post(handlers::roles::reset_role),
+        )
+        .route(
             "/api/admin/permissions",
             get(handlers::roles::list_permissions),
         )

@@ -108,7 +108,7 @@ INSERT INTO rbac_roles (name, description, is_system, permissions) VALUES
     'users:read', 'users:create', 'users:update', 'users:delete',
     'team:read', 'team:write',
     'sessions:revoke',
-    'roles:read', 'roles:create', 'roles:update', 'roles:delete',
+    'roles:read', 'roles:create', 'roles:update', 'roles:delete', 'roles:edit_system',
     'analytics:read_own', 'analytics:read_team', 'analytics:read_all',
     'audit_logs:read_own', 'audit_logs:read_team', 'audit_logs:read_all',
     'logs:read_own', 'logs:read_team', 'logs:read_all',

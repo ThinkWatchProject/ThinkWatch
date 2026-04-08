@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   useCallback,
   type FormEvent,
@@ -38,7 +39,9 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Textarea } from '@/components/ui/textarea';
+import CodeMirror, { EditorView } from '@uiw/react-codemirror';
+import { json } from '@codemirror/lang-json';
+import { useTheme } from '@/hooks/use-theme';
 import {
   Shield,
   Plus,
@@ -49,8 +52,10 @@ import {
   Search,
   AlertTriangle,
   Lock,
+  Download,
+  Upload,
 } from 'lucide-react';
-import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 
@@ -86,6 +91,18 @@ interface RoleMember {
   scope: string;
   source: 'system' | 'custom';
   assigned_at: string | null;
+}
+
+/// One audit-log row scoped to a single role. Sourced from
+/// `platform_logs` via `GET /api/admin/roles/:id/history`.
+interface RoleHistoryEntry {
+  id: string;
+  action: string;
+  user_id: string | null;
+  user_email: string | null;
+  ip_address: string | null;
+  detail: Record<string, unknown> | null;
+  created_at: string;
 }
 
 interface PolicyDocument {
@@ -436,6 +453,16 @@ export function RolesPage() {
     run: () => Promise<void>;
   } | null>(null);
 
+  // Import flow: hidden file input and a busy flag while we POST one
+  // role at a time. The actual file picker is mounted in the toolbar.
+  const importInputRef = useRef<HTMLInputElement>(null);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState<{
+    created: number;
+    skipped: number;
+    failed: { name: string; reason: string }[];
+  } | null>(null);
+
   // ------------------------------------------------------------------
   // Data fetch
   // ------------------------------------------------------------------
@@ -468,6 +495,12 @@ export function RolesPage() {
     () => new Set(permissions.filter((p) => p.dangerous).map((p) => p.key)),
     [permissions],
   );
+
+  // Whether the current user can edit / reset system roles. Read once
+  // from the JWT — gated by `roles:edit_system` which only super_admin
+  // holds by default. Used to hide the row action buttons that would
+  // otherwise just 403 on save.
+  const canEditSystem = useMemo(() => hasPermission('roles:edit_system'), []);
 
   /// Match a single permission key against a search query. The query
   /// is treated as a literal substring unless it contains `*`, in
@@ -700,6 +733,160 @@ export function RolesPage() {
     }
   };
 
+  // ----- Import / export -----------------------------------------
+  //
+  // The export shape is a small wrapper around the role rows so we
+  // can version the format and include metadata like the source
+  // hostname / export timestamp. Imported files are validated
+  // against the expected fields; system roles are skipped on import
+  // because they're seeded by the migration and would collide on
+  // the unique name.
+
+  type ExportedRole = {
+    name: string;
+    description: string | null;
+    permissions: string[];
+    allowed_models: string[] | null;
+    allowed_mcp_servers: string[] | null;
+    policy_document: PolicyDocument | null;
+  };
+
+  type ExportEnvelope = {
+    version: 1;
+    exported_at: string;
+    roles: ExportedRole[];
+  };
+
+  const exportRoles = (allRoles: RoleResponse[]) => {
+    const envelope: ExportEnvelope = {
+      version: 1,
+      exported_at: new Date().toISOString(),
+      // System roles are skipped — they're seeded by the migration
+      // on the destination side and importing them would collide
+      // on the unique `name` constraint.
+      roles: allRoles
+        .filter((r) => !r.is_system)
+        .map((r) => ({
+          name: r.name,
+          description: r.description,
+          permissions: r.permissions,
+          allowed_models: r.allowed_models,
+          allowed_mcp_servers: r.allowed_mcp_servers,
+          policy_document: r.policy_document,
+        })),
+    };
+    const blob = new Blob([JSON.stringify(envelope, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `thinkwatch-roles-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleImport = async (file: File) => {
+    setImporting(true);
+    setImportResult(null);
+    try {
+      const text = await file.text();
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch {
+        setImportResult({
+          created: 0,
+          skipped: 0,
+          failed: [{ name: file.name, reason: t('roles.invalidJson') }],
+        });
+        return;
+      }
+      // Accept either the wrapped envelope or a bare array of roles
+      // so admins can hand-author a tiny single-role file too.
+      const incoming: ExportedRole[] = Array.isArray(parsed)
+        ? (parsed as ExportedRole[])
+        : ((parsed as ExportEnvelope)?.roles ?? []);
+      if (incoming.length === 0) {
+        setImportResult({
+          created: 0,
+          skipped: 0,
+          failed: [{ name: file.name, reason: t('roles.importEmpty') }],
+        });
+        return;
+      }
+      const existingNames = new Set(roles.map((r) => r.name));
+      const failed: { name: string; reason: string }[] = [];
+      let created = 0;
+      let skipped = 0;
+      for (const r of incoming) {
+        // Light validation. The backend will re-validate, but we
+        // bail early on the obvious cases so the per-row error
+        // attribution stays meaningful.
+        if (!r || typeof r.name !== 'string' || !r.name.trim()) {
+          failed.push({ name: r?.name ?? '?', reason: t('roles.importMissingName') });
+          continue;
+        }
+        if (existingNames.has(r.name)) {
+          skipped += 1;
+          continue;
+        }
+        try {
+          await apiPost('/api/admin/roles', {
+            name: r.name,
+            description: r.description ?? null,
+            permissions: Array.isArray(r.permissions) ? r.permissions : [],
+            allowed_models: r.allowed_models ?? null,
+            allowed_mcp_servers: r.allowed_mcp_servers ?? null,
+            policy_document: r.policy_document ?? null,
+          });
+          created += 1;
+        } catch (e) {
+          failed.push({
+            name: r.name,
+            reason: e instanceof Error ? e.message : 'Failed',
+          });
+        }
+      }
+      setImportResult({ created, skipped, failed });
+      if (created > 0) await fetchData();
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  /// Reset a system role to its catalog defaults via the dedicated
+  /// backend endpoint. Confirmation is delegated to a window.confirm
+  /// because this is the rare case where we want to BLOCK the
+  /// operator on a yes/no the simple way — wiring it through the
+  /// danger-confirm dialog would obscure that this is a destructive
+  /// reset of the entire role, not just the new permissions.
+  const handleResetSystemRole = async () => {
+    if (!editRole) return;
+    if (!window.confirm(t('roles.resetSystemConfirm', { name: editRole.name }))) return;
+    setSaving(true);
+    try {
+      const updated = await apiPost<RoleResponse>(
+        `/api/admin/roles/${editRole.id}/reset`,
+        {},
+      );
+      setEditPerms(new Set(updated.permissions));
+      setEditRestrictModels(updated.allowed_models !== null);
+      setEditModels(new Set(updated.allowed_models ?? []));
+      setEditRestrictServers(updated.allowed_mcp_servers !== null);
+      setEditServers(new Set(updated.allowed_mcp_servers ?? []));
+      setEditMode(updated.policy_document ? 'policy' : 'simple');
+      setEditPolicyJson(
+        updated.policy_document ? JSON.stringify(updated.policy_document, null, 2) : '',
+      );
+      await fetchData();
+    } catch {
+      // surfaced via toast
+    } finally {
+      setSaving(false);
+    }
+  };
+
   /// Open the delete dialog and lazily fetch the member list so the
   /// per-member migration table has data to show. Resets reassign
   /// state and defaults back to bulk mode.
@@ -801,6 +988,43 @@ export function RolesPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('roles.title')}</h1>
           <p className="text-muted-foreground">{t('roles.subtitle')}</p>
         </div>
+        <div className="flex items-center gap-2">
+          {/* Export every CUSTOM role to a JSON file. System roles are
+              skipped because they're seeded by the migration anyway and
+              re-importing them would just collide on the unique name. */}
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => exportRoles(roles)}
+            disabled={roles.filter((r) => !r.is_system).length === 0}
+          >
+            <Download className="mr-1 h-3.5 w-3.5" />
+            {t('roles.exportAll')}
+          </Button>
+          {/* Hidden file input + visible button. Imported file is
+              parsed client-side, validated, and POSTed one role at a
+              time so failures surface per-role. */}
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) handleImport(file);
+              // Reset so the same filename can be re-picked.
+              e.target.value = '';
+            }}
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => importInputRef.current?.click()}
+            disabled={importing}
+          >
+            <Upload className="mr-1 h-3.5 w-3.5" />
+            {importing ? t('common.loading') : t('roles.importRoles')}
+          </Button>
         <Dialog
           open={createOpen}
           onOpenChange={(o) => {
@@ -991,6 +1215,7 @@ export function RolesPage() {
             </form>
           </DialogContent>
         </Dialog>
+        </div>
       </div>
 
       {/* Filters */}
@@ -1080,27 +1305,30 @@ export function RolesPage() {
                     onClick={(e) => e.stopPropagation()}
                   >
                     <div className="flex justify-end gap-1">
+                      {/* Edit is now allowed on system roles too,
+                          gated by `roles:edit_system`. Delete stays
+                          custom-only — system roles are immortal. */}
+                      {(!role.is_system || canEditSystem) && (
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={() => openEdit(role)}
+                          aria-label={t('common.edit')}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </Button>
+                      )}
                       {!role.is_system && (
-                        <>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7"
-                            onClick={() => openEdit(role)}
-                            aria-label={t('common.edit')}
-                          >
-                            <Pencil className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-7 w-7 text-destructive"
-                            onClick={() => openDelete(role)}
-                            aria-label={t('common.delete')}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-destructive"
+                          onClick={() => openDelete(role)}
+                          aria-label={t('common.delete')}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
                       )}
                     </div>
                   </TableCell>
@@ -1131,28 +1359,58 @@ export function RolesPage() {
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <form onSubmit={handleEdit}>
             <DialogHeader>
-              <DialogTitle>{t('roles.editRole')}</DialogTitle>
+              <DialogTitle className="flex items-center gap-2">
+                {t('roles.editRole')}
+                {editRole?.is_system && (
+                  <Badge variant="secondary" className="text-[10px]">
+                    {t('roles.systemRole')}
+                  </Badge>
+                )}
+              </DialogTitle>
+              {editRole?.is_system && (
+                <DialogDescription>{t('roles.editSystemWarning')}</DialogDescription>
+              )}
             </DialogHeader>
             <div className="space-y-4 py-4">
-              <div className="grid gap-3 md:grid-cols-2">
-                <div>
-                  <Label htmlFor="edit-name">{t('common.name')}</Label>
-                  <Input
-                    id="edit-name"
-                    value={editName}
-                    onChange={(e) => setEditName(e.target.value)}
-                    required
-                  />
+              {editRole?.is_system ? (
+                /* System roles: name is immutable, only description can
+                   be tweaked. We surface the locked name as a read-only
+                   field so the admin still sees what they're editing. */
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <Label>{t('common.name')}</Label>
+                    <Input value={editName} disabled className="font-mono" />
+                  </div>
+                  <div>
+                    <Label htmlFor="edit-desc">{t('common.description')}</Label>
+                    <Input
+                      id="edit-desc"
+                      value={editDesc}
+                      onChange={(e) => setEditDesc(e.target.value)}
+                    />
+                  </div>
                 </div>
-                <div>
-                  <Label htmlFor="edit-desc">{t('common.description')}</Label>
-                  <Input
-                    id="edit-desc"
-                    value={editDesc}
-                    onChange={(e) => setEditDesc(e.target.value)}
-                  />
+              ) : (
+                <div className="grid gap-3 md:grid-cols-2">
+                  <div>
+                    <Label htmlFor="edit-name">{t('common.name')}</Label>
+                    <Input
+                      id="edit-name"
+                      value={editName}
+                      onChange={(e) => setEditName(e.target.value)}
+                      required
+                    />
+                  </div>
+                  <div>
+                    <Label htmlFor="edit-desc">{t('common.description')}</Label>
+                    <Input
+                      id="edit-desc"
+                      value={editDesc}
+                      onChange={(e) => setEditDesc(e.target.value)}
+                    />
+                  </div>
                 </div>
-              </div>
+              )}
               <Tabs
                 value={editMode}
                 onValueChange={(v) =>
@@ -1219,6 +1477,17 @@ export function RolesPage() {
               )}
             </div>
             <DialogFooter>
+              {editRole?.is_system && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  className="mr-auto"
+                  disabled={saving}
+                  onClick={handleResetSystemRole}
+                >
+                  {t('roles.resetToDefaults')}
+                </Button>
+              )}
               <Button variant="outline" type="button" onClick={() => setEditOpen(false)}>
                 {t('common.cancel')}
               </Button>
@@ -1410,6 +1679,53 @@ export function RolesPage() {
             >
               {t('roles.dangerConfirmAccept')}
             </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Import result summary. Shows created / skipped / failed
+          counts so the admin can see what happened to each role
+          in a multi-row import file. */}
+      <Dialog
+        open={!!importResult}
+        onOpenChange={(o) => !o && setImportResult(null)}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('roles.importResultTitle')}</DialogTitle>
+          </DialogHeader>
+          {importResult && (
+            <div className="space-y-2 text-sm">
+              <div className="flex justify-between">
+                <span>{t('roles.importCreated')}</span>
+                <span className="font-mono tabular-nums">{importResult.created}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>{t('roles.importSkipped')}</span>
+                <span className="font-mono tabular-nums">{importResult.skipped}</span>
+              </div>
+              <div className="flex justify-between">
+                <span>{t('roles.importFailed')}</span>
+                <span className="font-mono tabular-nums text-destructive">
+                  {importResult.failed.length}
+                </span>
+              </div>
+              {importResult.failed.length > 0 && (
+                <ScrollArea className="max-h-40 rounded-md border">
+                  <ul className="divide-y text-xs">
+                    {importResult.failed.map((f, i) => (
+                      <li key={i} className="px-2 py-1.5">
+                        <div className="font-mono">{f.name}</div>
+                        <div className="text-[10px] text-destructive">{f.reason}</div>
+                      </li>
+                    ))}
+                  </ul>
+                </ScrollArea>
+              )}
+            </div>
+          )}
+          <DialogFooter>
+            <Button onClick={() => setImportResult(null)}>{t('common.done')}</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1838,6 +2154,27 @@ function RoleDetail({
     }
   };
 
+  // History tab is lazy-loaded the first time the user clicks it.
+  // ClickHouse may be unavailable in dev — the endpoint returns an
+  // empty array in that case, which we render as a friendly message.
+  const [detailTab, setDetailTab] = useState<'overview' | 'history'>('overview');
+  const [history, setHistory] = useState<RoleHistoryEntry[] | null>(null);
+  const [historyError, setHistoryError] = useState(false);
+  useEffect(() => {
+    if (detailTab !== 'history' || history !== null) return;
+    let cancelled = false;
+    api<{ items: RoleHistoryEntry[] }>(`/api/admin/roles/${role.id}/history`)
+      .then((res) => {
+        if (!cancelled) setHistory(res.items);
+      })
+      .catch(() => {
+        if (!cancelled) setHistoryError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [detailTab, history, role.id]);
+
   return (
     <>
       <DialogHeader>
@@ -1856,7 +2193,15 @@ function RoleDetail({
         </DialogTitle>
         <DialogDescription>{role.description || '—'}</DialogDescription>
       </DialogHeader>
-      <div className="space-y-4 py-2">
+      <Tabs
+        value={detailTab}
+        onValueChange={(v) => setDetailTab(v as 'overview' | 'history')}
+      >
+        <TabsList className="grid w-full grid-cols-2">
+          <TabsTrigger value="overview">{t('roles.detailOverview')}</TabsTrigger>
+          <TabsTrigger value="history">{t('roles.detailHistory')}</TabsTrigger>
+        </TabsList>
+        <TabsContent value="overview" className="space-y-4 py-2">
         <div>
           <div className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
             {t('roles.colUsers')}
@@ -2067,7 +2412,52 @@ function RoleDetail({
             </ScrollArea>
           )}
         </div>
-      </div>
+        </TabsContent>
+        <TabsContent value="history" className="py-2">
+          {history === null ? (
+            <p className="text-xs italic text-muted-foreground">
+              {historyError ? t('common.error') : t('common.loading')}
+            </p>
+          ) : history.length === 0 ? (
+            <p className="text-xs italic text-muted-foreground">
+              {t('roles.noHistory')}
+            </p>
+          ) : (
+            <ScrollArea className="max-h-96 rounded-md border">
+              <ul className="divide-y">
+                {history.map((h) => (
+                  <li key={h.id} className="px-3 py-2 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <Badge
+                        variant={
+                          h.action === 'role.deleted' ? 'destructive' : 'outline'
+                        }
+                        className="font-mono text-[10px]"
+                      >
+                        {h.action}
+                      </Badge>
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {new Date(h.created_at).toLocaleString()}
+                      </span>
+                    </div>
+                    {(h.user_email || h.ip_address) && (
+                      <div className="mt-1 text-[10px] text-muted-foreground">
+                        {h.user_email ?? h.user_id ?? '—'}
+                        {h.ip_address && ` · ${h.ip_address}`}
+                      </div>
+                    )}
+                    {h.detail && (
+                      <pre className="mt-1 max-h-32 overflow-auto rounded bg-muted/30 p-1.5 font-mono text-[10px]">
+                        {JSON.stringify(h.detail, null, 2)}
+                      </pre>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </ScrollArea>
+          )}
+        </TabsContent>
+      </Tabs>
     </>
   );
 }
@@ -2183,6 +2573,22 @@ function PolicyEditor({
   onApplyTemplate: (tpl: PolicyDocument) => void;
 }) {
   const { t } = useTranslation();
+  // Resolve the `system` theme value at render time so the editor
+  // matches whatever class is currently on <html>. We listen to the
+  // dark-mode media query AND to a MutationObserver on the html
+  // class so the theme toggle in the header is picked up live.
+  const { theme } = useTheme();
+  const [isDark, setIsDark] = useState(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark'),
+  );
+  useEffect(() => {
+    const update = () => setIsDark(document.documentElement.classList.contains('dark'));
+    update();
+    const obs = new MutationObserver(update);
+    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    return () => obs.disconnect();
+  }, [theme]);
+
   return (
     <div className="space-y-3">
       <div>
@@ -2206,13 +2612,26 @@ function PolicyEditor({
       <div>
         <Label className="text-sm font-medium">{t('roles.policyDocument')}</Label>
         <p className="text-xs text-muted-foreground mb-1.5">{t('roles.policyDocumentDesc')}</p>
-        <Textarea
-          className="font-mono min-h-[260px] resize-y"
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-          spellCheck={false}
-          placeholder={JSON.stringify(POLICY_TEMPLATES.developer, null, 2)}
-        />
+        <div className="overflow-hidden rounded-md border">
+          <CodeMirror
+            value={value}
+            onChange={onChange}
+            theme={isDark ? 'dark' : 'light'}
+            extensions={[json(), EditorView.lineWrapping]}
+            placeholder={JSON.stringify(POLICY_TEMPLATES.developer, null, 2)}
+            basicSetup={{
+              lineNumbers: true,
+              foldGutter: true,
+              highlightActiveLine: true,
+              bracketMatching: true,
+              closeBrackets: true,
+              autocompletion: false,
+              indentOnInput: true,
+            }}
+            height="320px"
+            className="text-xs"
+          />
+        </div>
         {error && <p className="text-xs text-destructive mt-1">{error}</p>}
       </div>
     </div>

@@ -119,7 +119,7 @@ make precommit
 | 3.1 | 系统角色差量覆盖：允许 admin 在系统角色基础上添加 / 屏蔽个别权限 | 新 migration `rbac_roles` 加 `permission_overrides JSONB` |
 | 3.2 | 角色审计历史标签页 | 新接口 `GET /api/admin/roles/{id}/history`（读 audit_logs） |
 | 3.3 | CodeMirror policy 编辑器（语法高亮 + JSON Schema 验证） | 新依赖 `@codemirror/lang-json`；`roles.tsx` policy 模式 |
-| 3.4 | 资源约束扩展：rate limit / 时间窗口 / IP 段 | schema 改动 + 前端 UI + 网关执行层 |
+| 3.4 | 资源约束扩展：rate limit / 时间窗口 / IP 段 | schema 改动 + 前端 UI + 网关执行层 — **部分完成**：AI 网关现在会把用户角色的 `allowed_models` 与 API key 的 allow-list 取交集执行；rate limit / 时间窗口 / IP 段、以及 MCP 网关的 `allowed_mcp_servers` 强制执行延后到有真实需求再做（MCP 网关需要先把 sqlx pool 接进去，目前是无 DB 的 actor 设计） |
 | 3.5 | 角色导入 / 导出 JSON | 后端两个新接口 + 前端按钮 |
 
 ---

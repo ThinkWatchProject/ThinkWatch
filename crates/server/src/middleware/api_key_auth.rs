@@ -6,9 +6,37 @@ use axum::{
 };
 
 use think_watch_auth::api_key;
+use think_watch_auth::rbac;
 use think_watch_gateway::proxy::GatewayRequestIdentity;
 
 use crate::app::AppState;
+
+/// Intersect a per-API-key allow-list with a per-role allow-list.
+///
+/// Both inputs are nullable, where `None` means "unrestricted":
+///   - key=None, role=None    → None (unrestricted)
+///   - key=Some, role=None    → key (role doesn't tighten)
+///   - key=None, role=Some    → role (key doesn't tighten)
+///   - key=Some, role=Some    → set intersection
+///
+/// Intersection (not union) is the right merge here because the
+/// per-key list is a tightening of what the user as a whole can do
+/// — an admin who restricts a developer's API key to gpt-4o-mini
+/// shouldn't have that overridden by the role's broader list.
+fn intersect_allowlists(
+    key_list: Option<Vec<String>>,
+    role_list: Option<Vec<String>>,
+) -> Option<Vec<String>> {
+    match (key_list, role_list) {
+        (None, None) => None,
+        (Some(k), None) => Some(k),
+        (None, Some(r)) => Some(r),
+        (Some(k), Some(r)) => {
+            let role_set: std::collections::HashSet<&String> = r.iter().collect();
+            Some(k.into_iter().filter(|m| role_set.contains(m)).collect())
+        }
+    }
+}
 
 /// Authenticated identity for gateway requests (via `tw-` API key).
 /// Inserted into request extensions for use by downstream middleware/handlers.
@@ -80,10 +108,30 @@ pub async fn require_api_key_or_jwt(
             }
         });
 
+        // Compute the user's role-derived constraints and intersect
+        // with the API-key allow-list. The role union is loaded once
+        // per request — fast enough at our scale, but a future
+        // optimization could cache it on the user_id for ~5s.
+        let role_limits = if let Some(uid) = row.user_id {
+            rbac::compute_user_resource_limits(&state.db, uid)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        } else {
+            // Service-account API keys (no user_id) inherit only
+            // the per-key constraints, since there's no user to
+            // resolve roles against.
+            rbac::UserResourceLimits {
+                allowed_models: None,
+                allowed_mcp_servers: None,
+            }
+        };
+        let merged_models =
+            intersect_allowlists(row.allowed_models.clone(), role_limits.allowed_models);
+
         let gateway_identity = GatewayRequestIdentity {
             user_id: row.user_id.map(|u| u.to_string()),
             api_key_id: Some(row.id.to_string()),
-            allowed_models: row.allowed_models.clone(),
+            allowed_models: merged_models.clone(),
             rate_limit_rpm: row.rate_limit_rpm,
             rate_limit_tpm: row.rate_limit_tpm,
         };
@@ -92,7 +140,7 @@ pub async fn require_api_key_or_jwt(
             api_key_id: row.id,
             user_id: row.user_id,
             team_id: row.team_id,
-            allowed_models: row.allowed_models.clone(),
+            allowed_models: merged_models,
             rate_limit_rpm: row.rate_limit_rpm,
             rate_limit_tpm: row.rate_limit_tpm,
         };
@@ -110,10 +158,18 @@ pub async fn require_api_key_or_jwt(
             return Err(StatusCode::UNAUTHORIZED);
         }
 
+        // JWT-authenticated gateway calls (rare; mostly admin/test
+        // tooling) inherit the user's role-derived allow-list as-is.
+        // No per-key list to intersect with, so the role union IS
+        // the effective allow-list.
+        let role_limits = rbac::compute_user_resource_limits(&state.db, claims.sub)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
         let gateway_identity = GatewayRequestIdentity {
             user_id: Some(claims.sub.to_string()),
             api_key_id: None,
-            allowed_models: None,
+            allowed_models: role_limits.allowed_models.clone(),
             rate_limit_rpm: None,
             rate_limit_tpm: None,
         };
@@ -122,7 +178,7 @@ pub async fn require_api_key_or_jwt(
             api_key_id: uuid::Uuid::nil(),
             user_id: Some(claims.sub),
             team_id: None,
-            allowed_models: None,
+            allowed_models: role_limits.allowed_models,
             rate_limit_rpm: None,
             rate_limit_tpm: None,
         };

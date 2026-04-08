@@ -210,3 +210,34 @@ export const apiPatch = <T>(path: string, body: unknown) =>
 
 export const apiDelete = <T>(path: string) =>
   api<T>(path, { method: 'DELETE' });
+
+/// Decode the current access token's payload (no signature verification)
+/// and return its `permissions` array. Returns an empty array when there
+/// is no token or when the payload doesn't parse — callers should treat
+/// "missing permission" as a sane default.
+///
+/// The token is the source of truth for what the server will allow; this
+/// helper exists purely so the UI can hide buttons that would otherwise
+/// just 403. Never trust this for any decision the server doesn't also
+/// re-check.
+export function currentUserPermissions(): string[] {
+  const token = localStorage.getItem('access_token');
+  if (!token) return [];
+  const parts = token.split('.');
+  if (parts.length !== 3) return [];
+  try {
+    // base64url -> base64. atob doesn't accept the URL-safe alphabet.
+    const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = atob(padded.padEnd(padded.length + ((4 - (padded.length % 4)) % 4), '='));
+    const payload = JSON.parse(json) as { permissions?: unknown };
+    return Array.isArray(payload.permissions)
+      ? (payload.permissions as unknown[]).filter((p): p is string => typeof p === 'string')
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function hasPermission(perm: string): boolean {
+  return currentUserPermissions().includes(perm);
+}

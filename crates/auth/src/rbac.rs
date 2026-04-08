@@ -69,6 +69,77 @@ pub async fn load_user_role_names(
     Ok(rows.into_iter().map(|(n,)| n).collect())
 }
 
+/// Effective resource constraints for a user, derived by union'ing
+/// every role's `allowed_models` and `allowed_mcp_servers`. Mirrors
+/// the same union semantics documented at the top of this file:
+///
+///   - If ANY role has `allowed_* = NULL` (unrestricted), the field
+///     in the result is also `None` and the gateway should treat the
+///     user as unrestricted for that resource.
+///   - Otherwise the result is the union of every restricted role's
+///     allow-list, deduplicated.
+///
+/// This is what the gateway middleware merges with the per-API-key
+/// allow-list (if any) before calling into the proxy.
+pub struct UserResourceLimits {
+    pub allowed_models: Option<Vec<String>>,
+    pub allowed_mcp_servers: Option<Vec<Uuid>>,
+}
+
+pub async fn compute_user_resource_limits(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<UserResourceLimits, sqlx::Error> {
+    type Row = (Option<Vec<String>>, Option<Vec<Uuid>>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT r.allowed_models, r.allowed_mcp_servers \
+           FROM rbac_role_assignments ra \
+           JOIN rbac_roles r ON r.id = ra.role_id \
+          WHERE ra.user_id = $1",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        // No roles → no constraints from the role side. The caller
+        // will fall back to whatever the API key carries.
+        return Ok(UserResourceLimits {
+            allowed_models: None,
+            allowed_mcp_servers: None,
+        });
+    }
+
+    // Union with the "ANY null wins" rule: a single unrestricted
+    // role makes the whole user unrestricted, since RBAC is additive.
+    let mut models_unrestricted = false;
+    let mut servers_unrestricted = false;
+    let mut models: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut servers: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
+    for (m, s) in rows {
+        match m {
+            None => models_unrestricted = true,
+            Some(list) => models.extend(list),
+        }
+        match s {
+            None => servers_unrestricted = true,
+            Some(list) => servers.extend(list),
+        }
+    }
+    Ok(UserResourceLimits {
+        allowed_models: if models_unrestricted {
+            None
+        } else {
+            Some(models.into_iter().collect())
+        },
+        allowed_mcp_servers: if servers_unrestricted {
+            None
+        } else {
+            Some(servers.into_iter().collect())
+        },
+    })
+}
+
 // ---------------------------------------------------------------------------
 // SystemRole — closed enum kept around for the setup wizard's hardcoded
 // "assign super_admin to the first user" path and for tests that want a

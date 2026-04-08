@@ -395,6 +395,20 @@
     "dangerConfirmTitle": "确认危险权限",
     "dangerConfirmDesc": "你即将保存一个包含以下危险权限的角色。这些权限可以轮换密钥、删除资源或修改与安全相关的配置。",
     "dangerConfirmAccept": "确认保存",
+    "exportAll": "导出",
+    "importRoles": "导入",
+    "detailOverview": "概览",
+    "detailHistory": "历史",
+    "noHistory": "该角色没有审计记录。",
+    "editSystemWarning": "修改系统角色会立刻影响所有持有该角色的用户。可通过\"恢复默认值\"回滚。",
+    "resetToDefaults": "恢复默认值",
+    "resetSystemConfirm": "确定将 {{name}} 恢复为默认权限集吗？所有修改都会丢失。",
+    "importResultTitle": "导入完成",
+    "importCreated": "已创建",
+    "importSkipped": "已跳过（同名已存在）",
+    "importFailed": "失败",
+    "importEmpty": "文件中不包含任何角色。",
+    "importMissingName": "角色缺少必填的 `name` 字段。",
     "allowedModels": "允许的模型",
     "allowedModelsDesc": "限制此角色可使用的 AI 模型。留空表示允许所有模型。",
     "allowedMcpServers": "允许的 MCP 服务器",
@@ -443,7 +457,8 @@
       "read_own": "读取自己的",
       "read_team": "读取团队的",
       "read_all": "读取全部",
-      "configure_oidc": "配置 OIDC"
+      "configure_oidc": "配置 OIDC",
+      "edit_system": "编辑系统角色"
     }
   },
   "settingsPage": {
