@@ -58,6 +58,12 @@ interface AvailableRole {
   name: string;
   is_system: boolean;
   description: string | null;
+  /// Flat permission keys this role grants. Used by the editor's
+  /// "effective permissions" preview to compute the union across
+  /// every assignment in real time.
+  permissions: string[];
+  allowed_models: string[] | null;
+  allowed_mcp_servers: string[] | null;
 }
 
 export function UsersPage() {
@@ -298,6 +304,10 @@ export function UsersPage() {
                 availableRoles={availableRoles}
                 roleLabel={roleLabel}
               />
+              <EffectivePermissionsPreview
+                assignments={createAssignments}
+                availableRoles={availableRoles}
+              />
               <DialogFooter>
                 <Button type="submit" disabled={submitting}>{submitting ? t('users.creating') : t('users.createUser')}</Button>
               </DialogFooter>
@@ -469,6 +479,10 @@ export function UsersPage() {
               onChange={setEditAssignments}
               availableRoles={availableRoles}
               roleLabel={roleLabel}
+            />
+            <EffectivePermissionsPreview
+              assignments={editAssignments}
+              availableRoles={availableRoles}
             />
             <DialogFooter>
               <Button type="submit" disabled={editLoading}>{editLoading ? t('users.saving') : t('common.save')}</Button>
@@ -712,6 +726,116 @@ function RoleAssignmentEditor({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Effective permissions preview
+//
+// Shows the union of permissions / allowed_models / allowed_mcp_servers
+// across the currently-selected role assignments. Computed live from
+// the catalog so the admin sees what they're about to grant BEFORE
+// hitting save. Mirrors the union semantics enforced server-side in
+// rbac::compute_user_permissions.
+//
+// `null` allow_lists win — if any role grants unrestricted access,
+// the union is unrestricted, matching the backend rule that "least
+// privilege is expressed by NOT assigning the role".
+// ----------------------------------------------------------------------------
+
+function EffectivePermissionsPreview({
+  assignments,
+  availableRoles,
+}: {
+  assignments: RoleAssignment[];
+  availableRoles: AvailableRole[];
+}) {
+  const { t } = useTranslation();
+
+  if (assignments.length === 0) return null;
+
+  const rolesById = new Map(availableRoles.map((r) => [r.id, r]));
+  const perms = new Set<string>();
+  let modelsUnrestricted = false;
+  const models = new Set<string>();
+  let serversUnrestricted = false;
+  const servers = new Set<string>();
+
+  for (const a of assignments) {
+    const role = rolesById.get(a.role_id);
+    if (!role) continue;
+    for (const p of role.permissions) perms.add(p);
+    if (role.allowed_models === null) modelsUnrestricted = true;
+    else for (const m of role.allowed_models) models.add(m);
+    if (role.allowed_mcp_servers === null) serversUnrestricted = true;
+    else for (const s of role.allowed_mcp_servers) servers.add(s);
+  }
+
+  // Group permissions by their resource prefix for a compact list.
+  const grouped = new Map<string, string[]>();
+  for (const key of Array.from(perms).sort()) {
+    const [resource, action] = key.split(':');
+    const arr = grouped.get(resource) ?? [];
+    arr.push(action ?? key);
+    grouped.set(resource, arr);
+  }
+
+  return (
+    <div className="rounded-md border bg-muted/20 p-3 space-y-2">
+      <div className="flex items-center justify-between">
+        <Label className="text-sm font-medium">{t('users.effectivePermissions')}</Label>
+        <span className="font-mono text-xs tabular-nums text-muted-foreground">
+          {perms.size}
+        </span>
+      </div>
+      <p className="text-[11px] text-muted-foreground">
+        {t('users.effectivePermissionsDesc')}
+      </p>
+      {perms.size === 0 ? (
+        <p className="text-xs italic text-muted-foreground">{t('common.none')}</p>
+      ) : (
+        <div className="space-y-1.5">
+          {Array.from(grouped.entries()).map(([resource, actions]) => (
+            <div key={resource} className="flex flex-wrap items-center gap-1">
+              <span className="font-mono text-[10px] uppercase tracking-wider text-muted-foreground">
+                {resource}
+              </span>
+              {actions.map((a) => (
+                <Badge key={`${resource}:${a}`} variant="outline" className="text-[10px]">
+                  {a}
+                </Badge>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="grid gap-1 pt-1 text-[11px] sm:grid-cols-2">
+        <div>
+          <span className="font-medium text-muted-foreground">
+            {t('users.effectiveModels')}:{' '}
+          </span>
+          <span className="font-mono">
+            {modelsUnrestricted
+              ? t('users.unrestricted')
+              : models.size > 0
+                ? `${models.size}`
+                : t('users.unrestricted')}
+          </span>
+        </div>
+        <div>
+          <span className="font-medium text-muted-foreground">
+            {t('users.effectiveServers')}:{' '}
+          </span>
+          <span className="font-mono">
+            {serversUnrestricted
+              ? t('users.unrestricted')
+              : servers.size > 0
+                ? `${servers.size}`
+                : t('users.unrestricted')}
+          </span>
+        </div>
+      </div>
     </div>
   );
 }

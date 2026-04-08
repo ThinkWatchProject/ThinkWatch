@@ -176,6 +176,102 @@ const POLICY_TEMPLATES: Record<string, PolicyDocument> = {
 };
 
 // ----------------------------------------------------------------------------
+// Simple-mode starter templates
+//
+// Each template is a curated set of permission keys the admin can drop
+// into the form with one click. The clone-from-existing picker handles
+// the "fork an existing role" workflow; this list covers the
+// from-scratch shapes that are common enough to deserve a shortcut.
+// ----------------------------------------------------------------------------
+
+interface SimpleTemplate {
+  id: 'gateway_user' | 'read_only' | 'ops_admin' | 'analytics_only';
+  /// Permission keys this template grants. Validated against the live
+  /// PERMISSION_CATALOG before being applied — anything not in the
+  /// catalog is silently dropped.
+  permissions: string[];
+}
+
+const SIMPLE_TEMPLATES: SimpleTemplate[] = [
+  // Just-enough permissions to call the AI + MCP gateways and manage
+  // own API keys. Mirrors the developer system role.
+  {
+    id: 'gateway_user',
+    permissions: [
+      'ai_gateway:use',
+      'mcp_gateway:use',
+      'api_keys:read',
+      'api_keys:create',
+      'api_keys:update',
+      'providers:read',
+      'mcp_servers:read',
+      'analytics:read_own',
+      'audit_logs:read_own',
+      'logs:read_own',
+    ],
+  },
+  // Read-only across the surface a non-admin can browse.
+  {
+    id: 'read_only',
+    permissions: [
+      'api_keys:read',
+      'providers:read',
+      'mcp_servers:read',
+      'roles:read',
+      'analytics:read_own',
+      'audit_logs:read_own',
+      'logs:read_own',
+      'settings:read',
+      'log_forwarders:read',
+      'webhooks:read',
+      'content_filter:read',
+      'pii_redactor:read',
+    ],
+  },
+  // Operational admin that can run the platform but cannot touch
+  // users, roles, or system-level OIDC config. Useful for an SRE who
+  // should be able to register providers and rotate keys without
+  // also being able to grant themselves more access.
+  {
+    id: 'ops_admin',
+    permissions: [
+      'ai_gateway:use',
+      'mcp_gateway:use',
+      'api_keys:read',
+      'api_keys:create',
+      'api_keys:update',
+      'api_keys:rotate',
+      'api_keys:delete',
+      'providers:read',
+      'providers:create',
+      'providers:update',
+      'providers:rotate_key',
+      'mcp_servers:read',
+      'mcp_servers:create',
+      'mcp_servers:update',
+      'mcp_servers:delete',
+      'analytics:read_all',
+      'audit_logs:read_all',
+      'logs:read_all',
+      'log_forwarders:read',
+      'log_forwarders:write',
+      'webhooks:read',
+      'webhooks:write',
+      'content_filter:read',
+      'content_filter:write',
+      'pii_redactor:read',
+      'pii_redactor:write',
+      'settings:read',
+    ],
+  },
+  // Analytics-only viewer (e.g. an SRE dashboard or finance owner).
+  {
+    id: 'analytics_only',
+    permissions: ['analytics:read_all', 'audit_logs:read_all', 'logs:read_all'],
+  },
+];
+
+// ----------------------------------------------------------------------------
 // Permission grouping helpers
 // ----------------------------------------------------------------------------
 
@@ -309,11 +405,36 @@ export function RolesPage() {
   // Detail (read-only inspector for system roles)
   const [detailRole, setDetailRole] = useState<RoleResponse | null>(null);
 
-  // Delete with reassign
+  // Delete with reassign. Two modes:
+  //   - 'bulk': pick a single target role for every current member.
+  //     This goes through the existing `?reassign_to=` query string
+  //     so the backend handles it atomically.
+  //   - 'per_member': admin picks a different target per member, via
+  //     N PATCH /api/admin/users/{id} calls before the DELETE. This is
+  //     non-atomic but covers the "split into multiple buckets" case
+  //     the bulk mode can't express.
   const [deleteRole, setDeleteRole] = useState<RoleResponse | null>(null);
   const [reassignTo, setReassignTo] = useState<string>('');
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string>('');
+  const [deleteMode, setDeleteMode] = useState<'bulk' | 'per_member'>('bulk');
+  /// Members of the role being deleted, fetched when the dialog
+  /// opens. Null while loading.
+  const [deleteMembers, setDeleteMembers] = useState<RoleMember[] | null>(null);
+  /// Per-member target role mapping. Key is `${user_id}-${scope}` so
+  /// distinct scope assignments for the same user can be migrated
+  /// to different roles.
+  const [perMemberTargets, setPerMemberTargets] = useState<Record<string, string>>({});
+
+  /// Confirmation gate for saving a role with dangerous permissions
+  /// selected. The submit handlers stash the actual save action here
+  /// instead of running it directly when the danger set is non-empty.
+  /// `keys` is the resolved set of dangerous keys we'll show in the
+  /// confirm dialog so the admin sees exactly what they're approving.
+  const [dangerConfirm, setDangerConfirm] = useState<{
+    keys: string[];
+    run: () => Promise<void>;
+  } | null>(null);
 
   // ------------------------------------------------------------------
   // Data fetch
@@ -348,17 +469,46 @@ export function RolesPage() {
     [permissions],
   );
 
+  /// Match a single permission key against a search query. The query
+  /// is treated as a literal substring unless it contains `*`, in
+  /// which case it's compiled to a regex anchored at start/end. This
+  /// lets the admin type `*:delete` to find every role with any
+  /// `:delete` permission, or `providers:*` to find every role that
+  /// touches providers.
+  const matchPermission = (perm: string, query: string): boolean => {
+    if (!query.includes('*')) return perm.includes(query);
+    const escaped = query.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    try {
+      return new RegExp(`^${escaped}$`).test(perm);
+    } catch {
+      return false;
+    }
+  };
+
+  /// Collect Action keys out of a policy_document so glob search hits
+  /// IAM-mode roles too. Doesn't try to interpret Effect / Resource —
+  /// just harvests strings the user might be searching for.
+  const extractPolicyActions = (doc: PolicyDocument | null): string[] => {
+    if (!doc) return [];
+    const out: string[] = [];
+    for (const stmt of doc.Statement ?? []) {
+      const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+      for (const a of actions) if (typeof a === 'string') out.push(a);
+    }
+    return out;
+  };
+
   const filteredRoles = useMemo(() => {
     const q = search.trim().toLowerCase();
     return roles.filter((r) => {
       if (filter === 'system' && !r.is_system) return false;
       if (filter === 'custom' && r.is_system) return false;
       if (!q) return true;
-      return (
-        r.name.toLowerCase().includes(q) ||
-        (r.description ?? '').toLowerCase().includes(q) ||
-        r.permissions.some((p) => p.toLowerCase().includes(q))
-      );
+      if (r.name.toLowerCase().includes(q)) return true;
+      if ((r.description ?? '').toLowerCase().includes(q)) return true;
+      const allPerms = [...r.permissions, ...extractPolicyActions(r.policy_document)];
+      if (allPerms.some((p) => matchPermission(p.toLowerCase(), q))) return true;
+      return false;
     });
   }, [roles, search, filter]);
 
@@ -438,36 +588,53 @@ export function RolesPage() {
     setFormPolicyError('');
   };
 
+  /// Compute the set of dangerous permission keys currently selected
+  /// in the given perms set. Used to decide whether to gate the
+  /// save behind a confirmation dialog.
+  const dangerKeysIn = (set: Set<string>): string[] =>
+    Array.from(set).filter((k) => dangerousKeys.has(k));
+
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
-    setCreating(true);
     setFormPolicyError('');
-    try {
-      let policyDocument: PolicyDocument | null = null;
-      if (formMode === 'policy' && formPolicyJson.trim()) {
-        try {
-          policyDocument = JSON.parse(formPolicyJson) as PolicyDocument;
-        } catch {
-          setFormPolicyError(t('roles.invalidJson'));
-          setCreating(false);
-          return;
-        }
+    let policyDocument: PolicyDocument | null = null;
+    if (formMode === 'policy' && formPolicyJson.trim()) {
+      try {
+        policyDocument = JSON.parse(formPolicyJson) as PolicyDocument;
+      } catch {
+        setFormPolicyError(t('roles.invalidJson'));
+        return;
       }
-      await apiPost('/api/admin/roles', {
-        name: formName,
-        description: formDesc || null,
-        permissions: formMode === 'simple' ? Array.from(formPerms) : [],
-        allowed_models: formRestrictModels ? Array.from(formModels) : null,
-        allowed_mcp_servers: formRestrictServers ? Array.from(formServers) : null,
-        policy_document: policyDocument,
-      });
-      setCreateOpen(false);
-      resetCreateForm();
-      fetchData();
-    } catch {
-      // surfaced via toast elsewhere; keep dialog open
-    } finally {
-      setCreating(false);
+    }
+    const performCreate = async () => {
+      setCreating(true);
+      try {
+        await apiPost('/api/admin/roles', {
+          name: formName,
+          description: formDesc || null,
+          permissions: formMode === 'simple' ? Array.from(formPerms) : [],
+          allowed_models: formRestrictModels ? Array.from(formModels) : null,
+          allowed_mcp_servers: formRestrictServers ? Array.from(formServers) : null,
+          policy_document: policyDocument,
+        });
+        setCreateOpen(false);
+        resetCreateForm();
+        fetchData();
+      } catch {
+        // surfaced via toast elsewhere; keep dialog open
+      } finally {
+        setCreating(false);
+      }
+    };
+
+    // Only the simple-mode danger set is checked in the gate. Policy
+    // mode is power-user territory and the IAM doc may opt out via
+    // explicit Deny rules; we don't try to second-guess it here.
+    const danger = formMode === 'simple' ? dangerKeysIn(formPerms) : [];
+    if (danger.length > 0) {
+      setDangerConfirm({ keys: danger, run: performCreate });
+    } else {
+      await performCreate();
     }
   };
 
@@ -489,35 +656,77 @@ export function RolesPage() {
   const handleEdit = async (e: FormEvent) => {
     e.preventDefault();
     if (!editRole) return;
-    setSaving(true);
     setEditPolicyError('');
-    try {
-      let policyDocument: PolicyDocument | null = null;
-      if (editMode === 'policy' && editPolicyJson.trim()) {
-        try {
-          policyDocument = JSON.parse(editPolicyJson) as PolicyDocument;
-        } catch {
-          setEditPolicyError(t('roles.invalidJson'));
-          setSaving(false);
-          return;
-        }
+    let policyDocument: PolicyDocument | null = null;
+    if (editMode === 'policy' && editPolicyJson.trim()) {
+      try {
+        policyDocument = JSON.parse(editPolicyJson) as PolicyDocument;
+      } catch {
+        setEditPolicyError(t('roles.invalidJson'));
+        return;
       }
-      await apiPatch(`/api/admin/roles/${editRole.id}`, {
-        name: editName,
-        description: editDesc || null,
-        permissions: editMode === 'simple' ? Array.from(editPerms) : [],
-        allowed_models: editRestrictModels ? Array.from(editModels) : null,
-        allowed_mcp_servers: editRestrictServers ? Array.from(editServers) : null,
-        policy_document: policyDocument,
-      });
-      setEditOpen(false);
-      setEditRole(null);
-      fetchData();
-    } catch {
-      // surfaced via toast
-    } finally {
-      setSaving(false);
     }
+    const performEdit = async () => {
+      setSaving(true);
+      try {
+        await apiPatch(`/api/admin/roles/${editRole.id}`, {
+          name: editName,
+          description: editDesc || null,
+          permissions: editMode === 'simple' ? Array.from(editPerms) : [],
+          allowed_models: editRestrictModels ? Array.from(editModels) : null,
+          allowed_mcp_servers: editRestrictServers ? Array.from(editServers) : null,
+          policy_document: policyDocument,
+        });
+        setEditOpen(false);
+        setEditRole(null);
+        fetchData();
+      } catch {
+        // surfaced via toast
+      } finally {
+        setSaving(false);
+      }
+    };
+
+    // Only gate when the EDIT introduces dangerous perms that weren't
+    // already on the role. Re-saving an existing dangerous role with
+    // no new dangerous perms shouldn't pester the admin.
+    const oldDanger = new Set((editRole.permissions ?? []).filter((k) => dangerousKeys.has(k)));
+    const newDanger =
+      editMode === 'simple' ? dangerKeysIn(editPerms).filter((k) => !oldDanger.has(k)) : [];
+    if (newDanger.length > 0) {
+      setDangerConfirm({ keys: newDanger, run: performEdit });
+    } else {
+      await performEdit();
+    }
+  };
+
+  /// Open the delete dialog and lazily fetch the member list so the
+  /// per-member migration table has data to show. Resets reassign
+  /// state and defaults back to bulk mode.
+  const openDelete = async (r: RoleResponse) => {
+    setDeleteRole(r);
+    setReassignTo('');
+    setDeleteError('');
+    setDeleteMode('bulk');
+    setPerMemberTargets({});
+    setDeleteMembers(null);
+    if (r.user_count > 0) {
+      try {
+        const res = await api<{ items: RoleMember[] }>(`/api/admin/roles/${r.id}/members`);
+        setDeleteMembers(res.items);
+      } catch {
+        setDeleteMembers([]);
+      }
+    }
+  };
+
+  const closeDelete = () => {
+    setDeleteRole(null);
+    setReassignTo('');
+    setDeleteError('');
+    setDeleteMode('bulk');
+    setPerMemberTargets({});
+    setDeleteMembers(null);
   };
 
   const handleDelete = async () => {
@@ -526,12 +735,53 @@ export function RolesPage() {
     setDeleteError('');
     try {
       const needsReassign = deleteRole.user_count > 0;
-      const url = needsReassign
-        ? `/api/admin/roles/${deleteRole.id}?reassign_to=${reassignTo}`
-        : `/api/admin/roles/${deleteRole.id}`;
-      await apiDelete(url);
-      setDeleteRole(null);
-      setReassignTo('');
+      if (!needsReassign) {
+        await apiDelete(`/api/admin/roles/${deleteRole.id}`);
+      } else if (deleteMode === 'bulk') {
+        // Atomic single-target migration via the existing query string.
+        await apiDelete(`/api/admin/roles/${deleteRole.id}?reassign_to=${reassignTo}`);
+      } else {
+        // Per-member: PATCH each user first to swap the role, then
+        // DELETE the now-empty role without a reassign target. Note
+        // this is non-atomic — if a PATCH fails halfway through,
+        // some users will already be migrated. The error message
+        // surfaces which user the loop bailed on so the admin can
+        // recover manually.
+        if (!deleteMembers || deleteMembers.length === 0) {
+          throw new Error('member list not loaded');
+        }
+        // Look up every member's current assignments via the user
+        // list endpoint. Cheaper than N individual GETs.
+        const usersRes = await api<{ data: PickableUser[] }>(
+          '/api/admin/users?per_page=1000',
+        );
+        const usersById = new Map(usersRes.data.map((u) => [u.id, u]));
+        for (const m of deleteMembers) {
+          const target = perMemberTargets[`${m.user_id}-${m.scope}`];
+          if (!target) {
+            throw new Error(t('roles.perMemberMissingTarget', { email: m.email }));
+          }
+          const user = usersById.get(m.user_id);
+          if (!user) continue; // user vanished mid-migrate; skip
+          const next = user.role_assignments
+            // Strip the role being deleted at this exact scope.
+            .filter((a) => !(a.role_id === deleteRole.id && a.scope === m.scope))
+            // Add the target role at the same scope (skip if already
+            // present so we don't duplicate).
+            .concat(
+              user.role_assignments.some(
+                (a) => a.role_id === target && a.scope === m.scope,
+              )
+                ? []
+                : [{ role_id: target, name: '', is_system: false, scope: m.scope }],
+            );
+          await apiPatch(`/api/admin/users/${user.id}`, {
+            role_assignments: next.map((a) => ({ role_id: a.role_id, scope: a.scope })),
+          });
+        }
+        await apiDelete(`/api/admin/roles/${deleteRole.id}`);
+      }
+      closeDelete();
       fetchData();
     } catch (e) {
       setDeleteError(e instanceof Error ? e.message : t('common.operationFailed'));
@@ -608,42 +858,79 @@ export function RolesPage() {
                     <TabsTrigger value="policy">{t('roles.policyMode')}</TabsTrigger>
                   </TabsList>
                   <TabsContent value="simple" className="space-y-4 mt-3">
-                    {/* Clone-from-existing starter — picking a role here
-                        copies its permissions + constraints into the form
-                        so the admin can fork an existing role and tweak. */}
-                    <div>
-                      <Label className="text-sm font-medium">{t('roles.cloneFrom')}</Label>
-                      <p className="text-xs text-muted-foreground mb-1.5">
-                        {t('roles.cloneFromDesc')}
-                      </p>
-                      <Select
-                        value=""
-                        onValueChange={(roleId) => {
-                          const src = roles.find((r) => r.id === roleId);
-                          if (!src) return;
-                          setFormPerms(new Set(src.permissions));
-                          setFormRestrictModels(src.allowed_models !== null);
-                          setFormModels(new Set(src.allowed_models ?? []));
-                          setFormRestrictServers(src.allowed_mcp_servers !== null);
-                          setFormServers(new Set(src.allowed_mcp_servers ?? []));
-                        }}
-                      >
-                        <SelectTrigger>
-                          <SelectValue placeholder={t('roles.cloneFromPlaceholder')} />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {roles.map((r) => (
-                            <SelectItem key={r.id} value={r.id}>
-                              <span className="font-mono text-xs">{r.name}</span>
-                              {r.is_system && (
-                                <span className="ml-2 text-[10px] text-muted-foreground">
-                                  {t('roles.systemRole')}
-                                </span>
-                              )}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
+                    {/* Starter pickers — admins can either clone an
+                        existing role or drop in one of the curated
+                        from-scratch templates. Both reset the rest of
+                        the form fields. */}
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div>
+                        <Label className="text-sm font-medium">{t('roles.cloneFrom')}</Label>
+                        <p className="text-xs text-muted-foreground mb-1.5">
+                          {t('roles.cloneFromDesc')}
+                        </p>
+                        <Select
+                          value=""
+                          onValueChange={(roleId) => {
+                            const src = roles.find((r) => r.id === roleId);
+                            if (!src) return;
+                            setFormPerms(new Set(src.permissions));
+                            setFormRestrictModels(src.allowed_models !== null);
+                            setFormModels(new Set(src.allowed_models ?? []));
+                            setFormRestrictServers(src.allowed_mcp_servers !== null);
+                            setFormServers(new Set(src.allowed_mcp_servers ?? []));
+                          }}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder={t('roles.cloneFromPlaceholder')} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {roles.map((r) => (
+                              <SelectItem key={r.id} value={r.id}>
+                                <span className="font-mono text-xs">{r.name}</span>
+                                {r.is_system && (
+                                  <span className="ml-2 text-[10px] text-muted-foreground">
+                                    {t('roles.systemRole')}
+                                  </span>
+                                )}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div>
+                        <Label className="text-sm font-medium">{t('roles.startFromTemplate')}</Label>
+                        <p className="text-xs text-muted-foreground mb-1.5">
+                          {t('roles.startFromTemplateDesc')}
+                        </p>
+                        <Select
+                          value=""
+                          onValueChange={(tplId) => {
+                            const tpl = SIMPLE_TEMPLATES.find((x) => x.id === tplId);
+                            if (!tpl) return;
+                            // Drop any keys not in the live catalog so a
+                            // stale template never injects unknown perms.
+                            const valid = new Set(permissions.map((p) => p.key));
+                            setFormPerms(new Set(tpl.permissions.filter((k) => valid.has(k))));
+                            setFormRestrictModels(false);
+                            setFormModels(new Set());
+                            setFormRestrictServers(false);
+                            setFormServers(new Set());
+                          }}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder={t('roles.pickTemplate')} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {SIMPLE_TEMPLATES.map((tpl) => (
+                              <SelectItem key={tpl.id} value={tpl.id}>
+                                {t(`roles.template_${tpl.id}` as const, {
+                                  defaultValue: tpl.id,
+                                })}
+                              </SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
                     </div>
                     <PermissionTree
                       grouped={grouped}
@@ -774,11 +1061,16 @@ export function RolesPage() {
                     <span className="line-clamp-1">{role.description || '—'}</span>
                   </TableCell>
                   <TableCell>
-                    <span className="font-mono text-xs tabular-nums">
-                      {role.policy_document
-                        ? t('roles.policyMode')
-                        : `${role.permissions.length}`}
-                    </span>
+                    {role.policy_document ? (
+                      <PolicyPermSummary
+                        doc={role.policy_document}
+                        catalog={permissions}
+                      />
+                    ) : (
+                      <span className="font-mono text-xs tabular-nums">
+                        {role.permissions.length}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell className="text-right font-mono text-xs tabular-nums">
                     {role.user_count}
@@ -803,11 +1095,7 @@ export function RolesPage() {
                             variant="ghost"
                             size="icon"
                             className="h-7 w-7 text-destructive"
-                            onClick={() => {
-                              setDeleteRole(role);
-                              setReassignTo('');
-                              setDeleteError('');
-                            }}
+                            onClick={() => openDelete(role)}
                             aria-label={t('common.delete')}
                           >
                             <Trash2 className="h-3.5 w-3.5" />
@@ -832,6 +1120,7 @@ export function RolesPage() {
               grouped={grouped}
               dangerousKeys={dangerousKeys}
               availableServers={availableServers}
+              onMembersChanged={fetchData}
             />
           )}
         </DialogContent>
@@ -945,14 +1234,10 @@ export function RolesPage() {
       <Dialog
         open={!!deleteRole}
         onOpenChange={(o) => {
-          if (!o) {
-            setDeleteRole(null);
-            setReassignTo('');
-            setDeleteError('');
-          }
+          if (!o) closeDelete();
         }}
       >
-        <DialogContent className="max-w-md">
+        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('roles.deleteRole')}</DialogTitle>
             <DialogDescription>
@@ -965,27 +1250,95 @@ export function RolesPage() {
             </DialogDescription>
           </DialogHeader>
           {deleteRole && deleteRole.user_count > 0 && (
-            <div className="space-y-2 py-2">
-              <Label>{t('roles.reassignTo')}</Label>
-              <Select value={reassignTo} onValueChange={setReassignTo}>
-                <SelectTrigger>
-                  <SelectValue placeholder={t('roles.reassignToPlaceholder')} />
-                </SelectTrigger>
-                <SelectContent>
-                  {roles
-                    .filter((r) => r.id !== deleteRole.id)
-                    .map((r) => (
-                      <SelectItem key={r.id} value={r.id}>
-                        <span className="font-mono text-xs">{r.name}</span>
-                        {r.is_system && (
-                          <span className="ml-2 text-[10px] text-muted-foreground">
-                            {t('roles.systemRole')}
-                          </span>
-                        )}
-                      </SelectItem>
-                    ))}
-                </SelectContent>
-              </Select>
+            <div className="space-y-3 py-2">
+              <Tabs
+                value={deleteMode}
+                onValueChange={(v) => setDeleteMode(v as 'bulk' | 'per_member')}
+              >
+                <TabsList className="grid w-full grid-cols-2">
+                  <TabsTrigger value="bulk">{t('roles.deleteBulk')}</TabsTrigger>
+                  <TabsTrigger value="per_member">{t('roles.deletePerMember')}</TabsTrigger>
+                </TabsList>
+                <TabsContent value="bulk" className="space-y-2 mt-3">
+                  <Label>{t('roles.reassignTo')}</Label>
+                  <Select value={reassignTo} onValueChange={setReassignTo}>
+                    <SelectTrigger>
+                      <SelectValue placeholder={t('roles.reassignToPlaceholder')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {roles
+                        .filter((r) => r.id !== deleteRole.id)
+                        .map((r) => (
+                          <SelectItem key={r.id} value={r.id}>
+                            <span className="font-mono text-xs">{r.name}</span>
+                            {r.is_system && (
+                              <span className="ml-2 text-[10px] text-muted-foreground">
+                                {t('roles.systemRole')}
+                              </span>
+                            )}
+                          </SelectItem>
+                        ))}
+                    </SelectContent>
+                  </Select>
+                </TabsContent>
+                <TabsContent value="per_member" className="mt-3">
+                  <p className="mb-2 text-xs text-muted-foreground">
+                    {t('roles.deletePerMemberDesc')}
+                  </p>
+                  {deleteMembers === null ? (
+                    <p className="text-xs text-muted-foreground italic">
+                      {t('common.loading')}
+                    </p>
+                  ) : (
+                    <ScrollArea className="max-h-72 rounded-md border">
+                      <div className="divide-y">
+                        {deleteMembers.map((m) => {
+                          const key = `${m.user_id}-${m.scope}`;
+                          return (
+                            <div
+                              key={key}
+                              className="flex items-center gap-2 px-3 py-2 text-xs"
+                            >
+                              <span className="min-w-0 flex-1 truncate font-mono">
+                                {m.email}
+                              </span>
+                              {m.scope !== 'global' && (
+                                <Badge variant="outline" className="text-[9px]">
+                                  {m.scope}
+                                </Badge>
+                              )}
+                              <Select
+                                value={perMemberTargets[key] ?? ''}
+                                onValueChange={(v) =>
+                                  setPerMemberTargets({
+                                    ...perMemberTargets,
+                                    [key]: v,
+                                  })
+                                }
+                              >
+                                <SelectTrigger className="h-7 w-44">
+                                  <SelectValue
+                                    placeholder={t('roles.reassignToPlaceholder')}
+                                  />
+                                </SelectTrigger>
+                                <SelectContent>
+                                  {roles
+                                    .filter((r) => r.id !== deleteRole.id)
+                                    .map((r) => (
+                                      <SelectItem key={r.id} value={r.id}>
+                                        <span className="font-mono text-xs">{r.name}</span>
+                                      </SelectItem>
+                                    ))}
+                                </SelectContent>
+                              </Select>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </ScrollArea>
+                  )}
+                </TabsContent>
+              </Tabs>
             </div>
           )}
           {deleteError && (
@@ -994,22 +1347,68 @@ export function RolesPage() {
             </div>
           )}
           <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setDeleteRole(null);
-                setReassignTo('');
-                setDeleteError('');
-              }}
-            >
+            <Button variant="outline" onClick={closeDelete}>
               {t('common.cancel')}
             </Button>
             <Button
               variant="destructive"
-              disabled={deleting || (!!deleteRole?.user_count && !reassignTo)}
+              disabled={
+                deleting ||
+                (!!deleteRole?.user_count &&
+                  ((deleteMode === 'bulk' && !reassignTo) ||
+                    (deleteMode === 'per_member' &&
+                      (!deleteMembers ||
+                        deleteMembers.some(
+                          (m) => !perMemberTargets[`${m.user_id}-${m.scope}`],
+                        )))))
+              }
               onClick={handleDelete}
             >
               {deleting ? t('common.loading') : t('common.delete')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Dangerous-permission save confirmation. Surfaces the exact
+          set of dangerous keys the admin is about to grant so they
+          can't blindly tab through. */}
+      <Dialog
+        open={!!dangerConfirm}
+        onOpenChange={(o) => {
+          if (!o) setDangerConfirm(null);
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-destructive">
+              <AlertTriangle className="h-4 w-4" />
+              {t('roles.dangerConfirmTitle')}
+            </DialogTitle>
+            <DialogDescription>{t('roles.dangerConfirmDesc')}</DialogDescription>
+          </DialogHeader>
+          {dangerConfirm && (
+            <div className="rounded-md border border-destructive/30 bg-destructive/10 p-3">
+              <ul className="space-y-1 font-mono text-xs text-destructive">
+                {dangerConfirm.keys.map((k) => (
+                  <li key={k}>• {k}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDangerConfirm(null)}>
+              {t('common.cancel')}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={async () => {
+                const action = dangerConfirm;
+                setDangerConfirm(null);
+                if (action) await action.run();
+              }}
+            >
+              {t('roles.dangerConfirmAccept')}
             </Button>
           </DialogFooter>
         </DialogContent>
@@ -1296,16 +1695,33 @@ function ServerConstraint({
   );
 }
 
+/// One row from the admin user list, used by RoleDetail's "add
+/// member" picker. Only the fields the picker needs to display and
+/// to PATCH a role assignment back are pulled in here.
+interface PickableUser {
+  id: string;
+  email: string;
+  display_name: string;
+  role_assignments: Array<{
+    role_id: string;
+    name: string;
+    is_system: boolean;
+    scope: string;
+  }>;
+}
+
 function RoleDetail({
   role,
   grouped,
   dangerousKeys,
   availableServers,
+  onMembersChanged,
 }: {
   role: RoleResponse;
   grouped: Map<string, PermissionDef[]>;
   dangerousKeys: Set<string>;
   availableServers: McpServer[];
+  onMembersChanged: () => void;
 }) {
   const { t } = useTranslation();
   const selected = new Set(role.permissions);
@@ -1315,21 +1731,112 @@ function RoleDetail({
   // initial table render.
   const [members, setMembers] = useState<RoleMember[] | null>(null);
   const [membersError, setMembersError] = useState(false);
+  const reloadMembers = useCallback(async () => {
+    try {
+      const res = await api<{ items: RoleMember[] }>(`/api/admin/roles/${role.id}/members`);
+      setMembers(res.items);
+      setMembersError(false);
+    } catch {
+      setMembersError(true);
+    }
+  }, [role.id]);
   useEffect(() => {
-    let cancelled = false;
     setMembers(null);
     setMembersError(false);
-    api<{ items: RoleMember[] }>(`/api/admin/roles/${role.id}/members`)
-      .then((res) => {
-        if (!cancelled) setMembers(res.items);
-      })
-      .catch(() => {
-        if (!cancelled) setMembersError(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [role.id]);
+    reloadMembers();
+  }, [reloadMembers]);
+
+  // Lazy user picker for the "add member" form. Fetched on demand
+  // (clicking the add button) so opening the dialog doesn't always
+  // pay the cost — most viewings are read-only.
+  const [users, setUsers] = useState<PickableUser[] | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [picking, setPicking] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [memberError, setMemberError] = useState('');
+  const ensureUsers = async () => {
+    if (users !== null) return;
+    try {
+      const res = await api<{ data: PickableUser[] }>('/api/admin/users');
+      setUsers(res.data);
+    } catch (e) {
+      setMemberError(e instanceof Error ? e.message : 'Failed to load users');
+    }
+  };
+
+  /// Update one user's role_assignments via PATCH /api/admin/users/{id}.
+  /// Used by both the add and remove flows. The backend's update_user
+  /// applies replace-all semantics, so we have to send the full
+  /// assignment list, not a diff.
+  const writeAssignments = async (
+    user: PickableUser,
+    next: PickableUser['role_assignments'],
+  ) => {
+    await apiPatch(`/api/admin/users/${user.id}`, {
+      role_assignments: next.map((a) => ({ role_id: a.role_id, scope: a.scope })),
+    });
+  };
+
+  const addMember = async () => {
+    if (!picking || !users) return;
+    const user = users.find((u) => u.id === picking);
+    if (!user) return;
+    if (user.role_assignments.some((a) => a.role_id === role.id && a.scope === 'global')) {
+      setMemberError(t('roles.memberAlreadyAssigned'));
+      return;
+    }
+    setBusy(true);
+    setMemberError('');
+    try {
+      const next = [
+        ...user.role_assignments,
+        { role_id: role.id, name: role.name, is_system: role.is_system, scope: 'global' },
+      ];
+      await writeAssignments(user, next);
+      // Locally patch the cached user list so subsequent picks reflect
+      // the change without a refetch.
+      setUsers(
+        (users ?? []).map((u) => (u.id === user.id ? { ...u, role_assignments: next } : u)),
+      );
+      setPicking('');
+      setPickerOpen(false);
+      await reloadMembers();
+      onMembersChanged();
+    } catch (e) {
+      setMemberError(e instanceof Error ? e.message : 'Failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeMember = async (m: RoleMember) => {
+    setBusy(true);
+    setMemberError('');
+    try {
+      // Read-modify-write the user. We could be operating on stale
+      // local state but the backend's PATCH is replace-all, so we
+      // refetch this user's current assignments first.
+      const fresh = await api<{ data: PickableUser[] }>(
+        `/api/admin/users?per_page=1000`,
+      );
+      const user = fresh.data.find((u) => u.id === m.user_id);
+      if (!user) {
+        setMemberError(t('roles.memberNotFound'));
+        return;
+      }
+      const next = user.role_assignments.filter(
+        (a) => !(a.role_id === role.id && a.scope === m.scope),
+      );
+      await writeAssignments(user, next);
+      setUsers(fresh.data);
+      await reloadMembers();
+      onMembersChanged();
+    } catch (e) {
+      setMemberError(e instanceof Error ? e.message : 'Failed');
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <>
@@ -1426,11 +1933,92 @@ function RoleDetail({
             )}
           </div>
         )}
-        {/* Members — who's actually using this role today. */}
+        {/* Members — who's actually using this role today, with
+            inline add / remove. */}
         <div>
-          <div className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
-            {t('roles.members')}
+          <div className="mb-2 flex items-center justify-between">
+            <span className="text-xs uppercase tracking-wider text-muted-foreground">
+              {t('roles.members')}
+            </span>
+            {!pickerOpen && (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                onClick={async () => {
+                  setMemberError('');
+                  setPickerOpen(true);
+                  await ensureUsers();
+                }}
+              >
+                <Plus className="mr-1 h-3 w-3" />
+                {t('roles.addMember')}
+              </Button>
+            )}
           </div>
+          {pickerOpen && (
+            <div className="mb-2 flex items-center gap-2 rounded-md border bg-muted/20 p-2">
+              <div className="flex-1">
+                <Select value={picking} onValueChange={setPicking}>
+                  <SelectTrigger className="h-8">
+                    <SelectValue placeholder={t('roles.pickUser')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {users === null ? (
+                      <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                        {t('common.loading')}
+                      </div>
+                    ) : (
+                      users
+                        // Hide users who already hold this role at global scope.
+                        .filter(
+                          (u) =>
+                            !u.role_assignments.some(
+                              (a) => a.role_id === role.id && a.scope === 'global',
+                            ),
+                        )
+                        .map((u) => (
+                          <SelectItem key={u.id} value={u.id}>
+                            <span className="font-mono text-xs">{u.email}</span>
+                            {u.display_name && (
+                              <span className="ml-2 text-[10px] text-muted-foreground">
+                                {u.display_name}
+                              </span>
+                            )}
+                          </SelectItem>
+                        ))
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                className="h-8"
+                disabled={!picking || busy}
+                onClick={addMember}
+              >
+                {busy ? t('common.loading') : t('common.add')}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-8"
+                onClick={() => {
+                  setPickerOpen(false);
+                  setPicking('');
+                  setMemberError('');
+                }}
+              >
+                {t('common.cancel')}
+              </Button>
+            </div>
+          )}
+          {memberError && (
+            <p className="mb-1 text-[11px] text-destructive">{memberError}</p>
+          )}
           {members === null ? (
             <div className="text-xs text-muted-foreground italic">
               {membersError ? t('common.error') : t('common.loading')}
@@ -1462,6 +2050,17 @@ function RoleDetail({
                     >
                       {m.source === 'system' ? t('roles.systemRole') : t('roles.customRoles')}
                     </Badge>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon"
+                      className="h-6 w-6 text-destructive"
+                      disabled={busy}
+                      onClick={() => removeMember(m)}
+                      aria-label={t('common.delete')}
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </Button>
                   </div>
                 ))}
               </div>
@@ -1470,6 +2069,75 @@ function RoleDetail({
         </div>
       </div>
     </>
+  );
+}
+
+/// Estimate the effective permission count for a policy_document by
+/// expanding wildcard Allow actions against the static catalog and
+/// subtracting Deny matches. Used in the role list to show a single
+/// number for IAM-mode roles instead of just "policy", and to render
+/// a hover preview of the first few statements.
+///
+/// This is a static approximation: it ignores Conditions, treats
+/// Resource as either `*` (full) or scoped (skipped from the count),
+/// and assumes the Action grammar matches `prefix:*` / `*:suffix`
+/// glob style. Power-user policies that depend on conditional logic
+/// will be undercounted; the docstring on the row tooltip says so.
+function PolicyPermSummary({
+  doc,
+  catalog,
+}: {
+  doc: PolicyDocument;
+  catalog: PermissionDef[];
+}) {
+  const { t } = useTranslation();
+
+  const matchAction = (pattern: string, key: string): boolean => {
+    if (pattern === '*') return true;
+    if (!pattern.includes('*')) return pattern === key;
+    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
+    try {
+      return new RegExp(`^${escaped}$`).test(key);
+    } catch {
+      return false;
+    }
+  };
+  const isWildcardResource = (r: PolicyStatement['Resource']): boolean => {
+    if (r === '*') return true;
+    if (Array.isArray(r)) return r.includes('*');
+    return false;
+  };
+
+  const granted = new Set<string>();
+  for (const stmt of doc.Statement ?? []) {
+    if (!isWildcardResource(stmt.Resource)) continue;
+    const actions = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+    for (const p of catalog) {
+      if (actions.some((a) => matchAction(a, p.key))) {
+        if (stmt.Effect === 'Allow') granted.add(p.key);
+        else if (stmt.Effect === 'Deny') granted.delete(p.key);
+      }
+    }
+  }
+
+  // Tooltip: first three statements compactly summarized.
+  const summarize = (stmt: PolicyStatement): string => {
+    const acts = Array.isArray(stmt.Action) ? stmt.Action.join(', ') : stmt.Action;
+    return `${stmt.Effect} ${acts}`;
+  };
+  const preview = (doc.Statement ?? []).slice(0, 3).map(summarize).join('\n');
+  const more =
+    (doc.Statement ?? []).length > 3
+      ? `\n… +${(doc.Statement ?? []).length - 3}`
+      : '';
+
+  return (
+    <span
+      className="font-mono text-xs tabular-nums"
+      title={`${t('roles.policyMode')}\n${preview}${more}`}
+    >
+      ~{granted.size}
+    </span>
   );
 }
 
