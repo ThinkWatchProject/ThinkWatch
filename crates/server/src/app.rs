@@ -540,6 +540,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             patch(handlers::roles::update_role).delete(handlers::roles::delete_role),
         )
         .route(
+            "/api/admin/roles/{id}/members",
+            get(handlers::roles::list_role_members),
+        )
+        .route(
             "/api/admin/permissions",
             get(handlers::roles::list_permissions),
         )

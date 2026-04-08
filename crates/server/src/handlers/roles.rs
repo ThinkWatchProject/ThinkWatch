@@ -602,11 +602,12 @@ pub async fn delete_role(
                 if !target_exists {
                     return Err(AppError::BadRequest("reassign_to role not found".into()));
                 }
-                // Swap each membership over. Use ON CONFLICT DO NOTHING
-                // because the user might already have the target role.
+                // Swap each (user, scope) membership over. Use
+                // ON CONFLICT DO NOTHING because the user might already
+                // hold the target role in the same scope.
                 sqlx::query(
-                    "INSERT INTO user_custom_roles (user_id, custom_role_id) \
-                     SELECT user_id, $2 FROM user_custom_roles WHERE custom_role_id = $1 \
+                    "INSERT INTO user_custom_roles (user_id, custom_role_id, scope) \
+                     SELECT user_id, $2, scope FROM user_custom_roles WHERE custom_role_id = $1 \
                      ON CONFLICT DO NOTHING",
                 )
                 .bind(id)
@@ -649,6 +650,108 @@ pub async fn delete_role(
         "deleted": true,
         "reassigned": assigned,
     })))
+}
+
+// --- List members of a role ---
+//
+// Returns every user currently assigned to the role, pulled from both
+// membership tables (legacy `user_roles` matched by role name, modern
+// `user_custom_roles` matched by id). The two are unioned + deduplicated
+// by user id and ordered by email so the admin UI can show "who has
+// this role today" without making N queries.
+
+#[derive(Debug, Serialize)]
+pub struct RoleMember {
+    pub user_id: Uuid,
+    pub email: String,
+    pub display_name: Option<String>,
+    /// Scope assignment text — `"global"` for legacy and most modern
+    /// assignments. Once `user_custom_roles.scope` is in use this will
+    /// reflect the actual scope (e.g. `"team:<uuid>"`).
+    pub scope: String,
+    /// `"system"` for legacy `user_roles` membership, `"custom"` for
+    /// `user_custom_roles`. The same user may appear under both kinds
+    /// — they are kept as separate rows so the admin can see how the
+    /// assignment was made.
+    pub source: String,
+    pub assigned_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoleMembersResponse {
+    pub items: Vec<RoleMember>,
+}
+
+pub async fn list_role_members(
+    _auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<Json<RoleMembersResponse>, AppError> {
+    // Resolve the role first so we can match the legacy table by name.
+    let role = sqlx::query_as::<_, (String,)>("SELECT name FROM custom_roles WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| AppError::NotFound("Role not found".into()))?;
+    let role_name = role.0;
+
+    // Modern: user_custom_roles -> users (now scope-aware)
+    type ModernMemberRow = (
+        Uuid,
+        String,
+        Option<String>,
+        String,
+        Option<chrono::DateTime<chrono::Utc>>,
+    );
+    let modern: Vec<ModernMemberRow> = sqlx::query_as(
+        "SELECT u.id, u.email, u.display_name, ucr.scope, ucr.assigned_at \
+           FROM user_custom_roles ucr \
+           JOIN users u ON u.id = ucr.user_id \
+          WHERE ucr.custom_role_id = $1 \
+          ORDER BY u.email ASC",
+    )
+    .bind(id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    // Legacy: user_roles -> roles (by name) -> users
+    let legacy: Vec<(Uuid, String, Option<String>, String)> = sqlx::query_as(
+        "SELECT u.id, u.email, u.display_name, ur.scope \
+           FROM user_roles ur \
+           JOIN roles r ON r.id = ur.role_id \
+           JOIN users u ON u.id = ur.user_id \
+          WHERE r.name = $1 \
+          ORDER BY u.email ASC",
+    )
+    .bind(&role_name)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let mut items: Vec<RoleMember> = Vec::with_capacity(modern.len() + legacy.len());
+    for (uid, email, display_name, scope, assigned_at) in modern {
+        items.push(RoleMember {
+            user_id: uid,
+            email,
+            display_name,
+            scope,
+            source: "custom".into(),
+            assigned_at: assigned_at.map(|d| d.to_rfc3339()),
+        });
+    }
+    for (uid, email, display_name, scope) in legacy {
+        items.push(RoleMember {
+            user_id: uid,
+            email,
+            display_name,
+            scope,
+            source: "system".into(),
+            assigned_at: None,
+        });
+    }
+
+    Ok(Json(RoleMembersResponse { items }))
 }
 
 // --- List all valid permissions ---

@@ -36,14 +36,28 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 
+interface CustomRoleAssignment {
+  custom_role_id: string;
+  name: string;
+  scope: string;
+}
+
 interface User {
   id: string;
   email: string;
   display_name: string;
   roles: string[];
+  custom_role_assignments: CustomRoleAssignment[];
   oidc_subject: string | null;
   is_active: boolean;
   created_at: string;
+}
+
+interface AvailableCustomRole {
+  id: string;
+  name: string;
+  is_system: boolean;
+  description: string | null;
 }
 
 const ROLE_OPTIONS = ['super_admin', 'admin', 'team_manager', 'developer', 'viewer'] as const;
@@ -51,6 +65,7 @@ const ROLE_OPTIONS = ['super_admin', 'admin', 'team_manager', 'developer', 'view
 export function UsersPage() {
   const { t } = useTranslation();
   const [users, setUsers] = useState<User[]>([]);
+  const [availableRoles, setAvailableRoles] = useState<AvailableCustomRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -62,6 +77,9 @@ export function UsersPage() {
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [role, setRole] = useState('developer');
+  const [createCustomAssignments, setCreateCustomAssignments] = useState<CustomRoleAssignment[]>(
+    [],
+  );
 
   // Edit dialog
   const [editOpen, setEditOpen] = useState(false);
@@ -70,6 +88,7 @@ export function UsersPage() {
   const [editRole, setEditRole] = useState('');
   const [editError, setEditError] = useState('');
   const [editLoading, setEditLoading] = useState(false);
+  const [editCustomAssignments, setEditCustomAssignments] = useState<CustomRoleAssignment[]>([]);
 
   // Confirm dialogs
   const [confirmAction, setConfirmAction] = useState<{ type: 'logout' | 'delete' | 'toggle'; user: User } | null>(null);
@@ -83,8 +102,21 @@ export function UsersPage() {
 
   const fetchUsers = async () => {
     try {
-      const res = await api<{ data: User[]; total: number }>('/api/admin/users');
-      setUsers(res.data);
+      const [usersRes, rolesRes] = await Promise.all([
+        api<{ data: User[]; total: number }>('/api/admin/users'),
+        api<{ items: AvailableCustomRole[] }>('/api/admin/roles').catch(() => ({ items: [] })),
+      ]);
+      // Backend may not include the new field on older servers — coerce
+      // missing values to empty array so the UI doesn't crash.
+      setUsers(
+        usersRes.data.map((u) => ({
+          ...u,
+          custom_role_assignments: u.custom_role_assignments ?? [],
+        })),
+      );
+      // Custom roles only — system roles are still picked from the legacy
+      // dropdown to preserve backwards-compat with the auth path.
+      setAvailableRoles(rolesRes.items.filter((r) => !r.is_system));
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load users');
     } finally {
@@ -96,14 +128,28 @@ export function UsersPage() {
 
   // --- Create user ---
   const resetCreateForm = () => {
-    setEmail(''); setDisplayName(''); setPassword(''); setRole('developer'); setFormError('');
+    setEmail('');
+    setDisplayName('');
+    setPassword('');
+    setRole('developer');
+    setCreateCustomAssignments([]);
+    setFormError('');
   };
 
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
     setFormError(''); setSubmitting(true);
     try {
-      await apiPost('/api/admin/users', { email, display_name: displayName, password, role });
+      await apiPost('/api/admin/users', {
+        email,
+        display_name: displayName,
+        password,
+        role,
+        custom_role_assignments: createCustomAssignments.map((a) => ({
+          custom_role_id: a.custom_role_id,
+          scope: a.scope,
+        })),
+      });
       setCreateOpen(false); resetCreateForm(); await fetchUsers();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Failed');
@@ -112,8 +158,12 @@ export function UsersPage() {
 
   // --- Edit user ---
   const openEdit = (u: User) => {
-    setEditUser(u); setEditName(u.display_name); setEditRole(u.roles[0] ?? 'developer');
-    setEditError(''); setEditOpen(true);
+    setEditUser(u);
+    setEditName(u.display_name);
+    setEditRole(u.roles[0] ?? 'developer');
+    setEditCustomAssignments(u.custom_role_assignments ?? []);
+    setEditError('');
+    setEditOpen(true);
   };
 
   const handleEdit = async (e: FormEvent) => {
@@ -124,6 +174,10 @@ export function UsersPage() {
       await apiPatch(`/api/admin/users/${editUser.id}`, {
         display_name: editName,
         role: editRole,
+        custom_role_assignments: editCustomAssignments.map((a) => ({
+          custom_role_id: a.custom_role_id,
+          scope: a.scope,
+        })),
       });
       setEditOpen(false); setEditUser(null); await fetchUsers();
     } catch (err) {
@@ -229,6 +283,11 @@ export function UsersPage() {
                   </SelectContent>
                 </Select>
               </div>
+              <CustomRoleAssignmentEditor
+                value={createCustomAssignments}
+                onChange={setCreateCustomAssignments}
+                availableRoles={availableRoles}
+              />
               <DialogFooter>
                 <Button type="submit" disabled={submitting}>{submitting ? t('users.creating') : t('users.createUser')}</Button>
               </DialogFooter>
@@ -275,7 +334,24 @@ export function UsersPage() {
                     <TableCell>{u.display_name || '—'}</TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">
-                        {u.roles.map((r) => <Badge key={r} variant="secondary">{r}</Badge>)}
+                        {u.roles.map((r) => (
+                          <Badge key={r} variant="secondary">
+                            {r}
+                          </Badge>
+                        ))}
+                        {u.custom_role_assignments.map((a) => (
+                          <Badge
+                            key={`${a.custom_role_id}-${a.scope}`}
+                            variant="outline"
+                            className="font-mono text-[10px]"
+                            title={a.scope !== 'global' ? `${a.name} @ ${a.scope}` : a.name}
+                          >
+                            {a.name}
+                            {a.scope !== 'global' && (
+                              <span className="ml-1 opacity-60">@{a.scope}</span>
+                            )}
+                          </Badge>
+                        ))}
                       </div>
                     </TableCell>
                     <TableCell>
@@ -350,6 +426,11 @@ export function UsersPage() {
                 </SelectContent>
               </Select>
             </div>
+            <CustomRoleAssignmentEditor
+              value={editCustomAssignments}
+              onChange={setEditCustomAssignments}
+              availableRoles={availableRoles}
+            />
             <DialogFooter>
               <Button type="submit" disabled={editLoading}>{editLoading ? t('users.saving') : t('common.save')}</Button>
             </DialogFooter>
@@ -404,6 +485,115 @@ export function UsersPage() {
         <Alert variant="destructive" className="fixed bottom-4 right-4 w-auto max-w-sm z-50">
           <AlertCircle className="h-4 w-4" /><AlertDescription>{confirmError}</AlertDescription>
         </Alert>
+      )}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Custom-role assignment editor
+//
+// Renders the user's current `(role, scope)` pairs as removable rows and
+// gives the admin a small Add form (role dropdown + scope text input) to
+// append a new one. Scope defaults to `"global"` and is currently a free
+// text field — once a project/team picker exists this can become a
+// type-ahead.
+// ----------------------------------------------------------------------------
+
+function CustomRoleAssignmentEditor({
+  value,
+  onChange,
+  availableRoles,
+}: {
+  value: CustomRoleAssignment[];
+  onChange: (next: CustomRoleAssignment[]) => void;
+  availableRoles: AvailableCustomRole[];
+}) {
+  const { t } = useTranslation();
+  const [pendingRoleId, setPendingRoleId] = useState('');
+  const [pendingScope, setPendingScope] = useState('global');
+
+  // Don't render the section at all if there are no custom roles to
+  // assign — keeps the dialog clean on fresh installs.
+  if (availableRoles.length === 0 && value.length === 0) return null;
+
+  const add = () => {
+    if (!pendingRoleId) return;
+    const role = availableRoles.find((r) => r.id === pendingRoleId);
+    if (!role) return;
+    const scope = pendingScope.trim() || 'global';
+    // Disallow exact duplicates (same role + same scope).
+    if (value.some((a) => a.custom_role_id === role.id && a.scope === scope)) return;
+    onChange([
+      ...value,
+      { custom_role_id: role.id, name: role.name, scope },
+    ]);
+    setPendingRoleId('');
+    setPendingScope('global');
+  };
+
+  const remove = (idx: number) => {
+    const next = value.slice();
+    next.splice(idx, 1);
+    onChange(next);
+  };
+
+  return (
+    <div className="space-y-2">
+      <Label>{t('users.customRoles')}</Label>
+      <p className="text-xs text-muted-foreground">{t('users.customRolesDesc')}</p>
+      {value.length > 0 && (
+        <div className="space-y-1.5">
+          {value.map((a, i) => (
+            <div
+              key={`${a.custom_role_id}-${a.scope}-${i}`}
+              className="flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+            >
+              <span className="min-w-0 flex-1 truncate font-mono">{a.name}</span>
+              <Badge variant="outline" className="font-mono text-[10px]">
+                {a.scope}
+              </Badge>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
+                onClick={() => remove(i)}
+                aria-label={t('common.delete')}
+              >
+                <Trash2 className="h-3 w-3" />
+              </Button>
+            </div>
+          ))}
+        </div>
+      )}
+      {availableRoles.length > 0 && (
+        <div className="flex items-center gap-2">
+          <div className="flex-1">
+            <Select value={pendingRoleId} onValueChange={setPendingRoleId}>
+              <SelectTrigger>
+                <SelectValue placeholder={t('users.pickCustomRole')} />
+              </SelectTrigger>
+              <SelectContent>
+                {availableRoles.map((r) => (
+                  <SelectItem key={r.id} value={r.id}>
+                    <span className="font-mono text-xs">{r.name}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <Input
+            value={pendingScope}
+            onChange={(e) => setPendingScope(e.target.value)}
+            placeholder="global"
+            className="w-32 font-mono text-xs"
+            aria-label={t('users.scope')}
+          />
+          <Button type="button" variant="outline" size="sm" disabled={!pendingRoleId} onClick={add}>
+            <Plus className="h-3 w-3" />
+          </Button>
+        </div>
       )}
     </div>
   );

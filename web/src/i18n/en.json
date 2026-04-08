@@ -326,7 +326,11 @@
     "activate": "Activate",
     "deactivateConfirm": "Deactivate this user? They will not be able to log in.",
     "activateConfirm": "Activate this user?",
-    "saving": "Saving..."
+    "saving": "Saving...",
+    "customRoles": "Custom roles",
+    "customRolesDesc": "Assign custom roles to this user with optional scope. Leave scope as `global` for unrestricted access.",
+    "pickCustomRole": "Pick a custom role…",
+    "scope": "Scope"
   },
   "roles": {
     "title": "Roles & Permissions",
@@ -337,6 +341,9 @@
     "customRoles": "Custom",
     "addRole": "Add Role",
     "addRoleDescription": "Create a new custom role with specific permissions.",
+    "cloneFrom": "Start from existing role",
+    "cloneFromDesc": "Pick a role to copy its permissions and constraints into this draft. You can edit them afterwards.",
+    "cloneFromPlaceholder": "Pick a role to clone…",
     "editRole": "Edit Role",
     "deleteRole": "Delete Role",
     "noRoles": "No roles match your filters.",
@@ -350,6 +357,8 @@
     "colDescription": "Description",
     "colPermissions": "Perms",
     "colUsers": "Users",
+    "members": "Members",
+    "noMembers": "No users currently have this role.",
     "dangerous": "Dangerous permission",
     "dangerWarning": "This role grants permissions that can revoke sessions, rotate secrets, or change security-critical settings. Make sure the role is only assigned to trusted users.",
     "allowedModels": "Allowed Models",
