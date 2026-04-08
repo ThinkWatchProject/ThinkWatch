@@ -305,7 +305,7 @@ pub async fn login(
 
     // Fetch user roles
     let roles: Vec<String> = sqlx::query_scalar(
-        "SELECT r.name FROM roles r JOIN user_roles ur ON r.id = ur.role_id WHERE ur.user_id = $1",
+        "SELECT r.name FROM rbac_roles r JOIN rbac_role_assignments ra ON r.id = ra.role_id WHERE ra.user_id = $1 AND r.is_system = TRUE",
     )
     .bind(user.id)
     .fetch_all(&state.db)
@@ -403,8 +403,8 @@ pub async fn register(
 
     // Assign default "developer" role
     sqlx::query(
-        r#"INSERT INTO user_roles (user_id, role_id, scope)
-           SELECT $1, id, 'global' FROM roles WHERE name = 'developer'"#,
+        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
+           SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = 'developer'"#,
     )
     .bind(user.id)
     .execute(&mut *tx)
@@ -501,33 +501,39 @@ pub async fn me(
     }))
 }
 
-/// Helper: load all `(custom_role_id, name, scope)` rows for a single
-/// user. Pure read; never errors — returns an empty Vec on failure so
-/// the caller can keep building a response even if the modern roles
-/// table is unavailable.
+/// Helper: load all `(role_id, name, scope_string)` rows for a single
+/// user, filtered to non-system roles (system roles already populate
+/// the `roles` field). Pure read; never errors — returns an empty Vec
+/// on failure so the caller can keep building a response.
 async fn fetch_user_custom_roles(
     state: &AppState,
     user_id: uuid::Uuid,
 ) -> Vec<think_watch_common::dto::CustomRoleAssignment> {
-    let rows: Vec<(uuid::Uuid, String, String)> = sqlx::query_as(
-        "SELECT cr.id, cr.name, ucr.scope \
-           FROM user_custom_roles ucr \
-           JOIN custom_roles cr ON cr.id = ucr.custom_role_id \
-          WHERE ucr.user_id = $1 \
-          ORDER BY cr.name ASC",
+    type Row = (uuid::Uuid, String, String, Option<uuid::Uuid>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT r.id, r.name, ra.scope_kind, ra.scope_id \
+           FROM rbac_role_assignments ra \
+           JOIN rbac_roles r ON r.id = ra.role_id \
+          WHERE ra.user_id = $1 AND r.is_system = FALSE \
+          ORDER BY r.name ASC",
     )
     .bind(user_id)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
     rows.into_iter()
-        .map(
-            |(custom_role_id, name, scope)| think_watch_common::dto::CustomRoleAssignment {
+        .map(|(custom_role_id, name, scope_kind, scope_id)| {
+            let scope = match (scope_kind.as_str(), scope_id) {
+                ("global", _) => "global".to_string(),
+                (kind, Some(id)) => format!("{kind}:{id}"),
+                (kind, None) => kind.to_string(),
+            };
+            think_watch_common::dto::CustomRoleAssignment {
                 custom_role_id,
                 name,
                 scope,
-            },
-        )
+            }
+        })
         .collect()
 }
 

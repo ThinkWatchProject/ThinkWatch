@@ -7,6 +7,37 @@ use think_watch_auth::password;
 use think_watch_common::dto::{
     CustomRoleAssignment, PaginatedResponse, PaginationParams, UserResponse,
 };
+
+/// Parse a scope string into the `(scope_kind, scope_id)` tuple that
+/// `rbac_role_assignments` stores. Accepted shapes:
+///
+///   "global"           → ("global", None)
+///   "team:<uuid>"      → ("team",   Some(uuid))
+///   "project:<uuid>"   → ("project", Some(uuid))
+///
+/// Anything else is rejected with a 400. The migration backfilled all
+/// legacy `'global'` rows; once team/project pickers ship the frontend
+/// will start sending `team:<uuid>` etc.
+pub(crate) fn parse_scope(input: &str) -> Result<(String, Option<uuid::Uuid>), AppError> {
+    let trimmed = input.trim();
+    if trimmed == "global" || trimmed.is_empty() {
+        return Ok(("global".into(), None));
+    }
+    if let Some((kind, rest)) = trimmed.split_once(':') {
+        let kind = kind.trim();
+        if !matches!(kind, "team" | "project") {
+            return Err(AppError::BadRequest(format!(
+                "Unknown scope kind '{kind}' (expected 'global', 'team:<uuid>', or 'project:<uuid>')"
+            )));
+        }
+        let id = uuid::Uuid::parse_str(rest.trim())
+            .map_err(|_| AppError::BadRequest(format!("Invalid UUID in scope '{input}'")))?;
+        return Ok((kind.into(), Some(id)));
+    }
+    Err(AppError::BadRequest(format!(
+        "Invalid scope '{input}' (expected 'global', 'team:<uuid>', or 'project:<uuid>')"
+    )))
+}
 use think_watch_common::dynamic_config::{self, SettingEntry};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
@@ -39,50 +70,58 @@ pub async fn list_users(
 
     let user_ids: Vec<uuid::Uuid> = users.iter().map(|u| u.id).collect();
 
-    // Fetch legacy system roles for all users in one query.
-    let role_rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
-        "SELECT ur.user_id, r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = ANY($1)",
-    )
-    .bind(&user_ids)
-    .fetch_all(&state.db)
-    .await?;
-
-    let mut roles_map: std::collections::HashMap<uuid::Uuid, Vec<String>> =
-        std::collections::HashMap::new();
-    for (uid, rname) in role_rows {
-        roles_map.entry(uid).or_default().push(rname);
-    }
-
-    // Fetch modern custom-role assignments (with scope) for the same users.
-    let custom_rows: Vec<(uuid::Uuid, uuid::Uuid, String, String)> = sqlx::query_as(
-        "SELECT ucr.user_id, cr.id, cr.name, ucr.scope \
-           FROM user_custom_roles ucr \
-           JOIN custom_roles cr ON cr.id = ucr.custom_role_id \
-          WHERE ucr.user_id = ANY($1) AND cr.is_system = FALSE \
-          ORDER BY cr.name ASC",
+    // Single query: every assignment for every user, joined into the
+    // unified `rbac_roles` table so we can split system vs custom by
+    // `is_system`. Phase 2 cutover (migration 005) — legacy
+    // `user_roles` / `user_custom_roles` are no longer read here.
+    type AssignmentRow = (
+        uuid::Uuid,
+        uuid::Uuid,
+        String,
+        bool,
+        String,
+        Option<uuid::Uuid>,
+    );
+    let rows: Vec<AssignmentRow> = sqlx::query_as(
+        "SELECT ra.user_id, r.id, r.name, r.is_system, ra.scope_kind, ra.scope_id \
+           FROM rbac_role_assignments ra \
+           JOIN rbac_roles r ON r.id = ra.role_id \
+          WHERE ra.user_id = ANY($1) \
+          ORDER BY r.is_system DESC, r.name ASC",
     )
     .bind(&user_ids)
     .fetch_all(&state.db)
     .await
     .unwrap_or_default();
 
+    let mut sys_map: std::collections::HashMap<uuid::Uuid, Vec<String>> =
+        std::collections::HashMap::new();
     let mut custom_map: std::collections::HashMap<uuid::Uuid, Vec<CustomRoleAssignment>> =
         std::collections::HashMap::new();
-    for (uid, custom_role_id, name, scope) in custom_rows {
-        custom_map
-            .entry(uid)
-            .or_default()
-            .push(CustomRoleAssignment {
-                custom_role_id,
-                name,
-                scope,
-            });
+    for (uid, role_id, name, is_system, scope_kind, scope_id) in rows {
+        let scope = match (scope_kind.as_str(), scope_id) {
+            ("global", _) => "global".to_string(),
+            (kind, Some(id)) => format!("{kind}:{id}"),
+            (kind, None) => kind.to_string(),
+        };
+        if is_system {
+            sys_map.entry(uid).or_default().push(name);
+        } else {
+            custom_map
+                .entry(uid)
+                .or_default()
+                .push(CustomRoleAssignment {
+                    custom_role_id: role_id,
+                    name,
+                    scope,
+                });
+        }
     }
 
     let responses: Vec<UserResponse> = users
         .into_iter()
         .map(|u| {
-            let roles = roles_map.remove(&u.id).unwrap_or_default();
+            let roles = sys_map.remove(&u.id).unwrap_or_default();
             let custom_role_assignments = custom_map.remove(&u.id).unwrap_or_default();
             UserResponse {
                 id: u.id,
@@ -186,33 +225,37 @@ pub async fn create_user(
     .fetch_one(&mut *tx)
     .await?;
 
+    // Assign the system role via the unified table.
     sqlx::query(
-        r#"INSERT INTO user_roles (user_id, role_id, scope)
-           SELECT $1, id, 'global' FROM roles WHERE name = $2"#,
+        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
+           SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = $2"#,
     )
     .bind(user.id)
     .bind(role_name)
     .execute(&mut *tx)
     .await?;
 
-    // Optional modern custom-role assignments. Each row gets a scope
-    // (default `"global"`). Unknown role ids fail the transaction.
+    // Optional custom-role assignments. Scope is parsed via the shared
+    // `parse_scope` helper — invalid input fails the transaction.
     let mut assigned: Vec<CustomRoleAssignment> = Vec::new();
     for req_assign in &req.custom_role_assignments {
-        let scope = req_assign.scope.clone().unwrap_or_else(|| "global".into());
+        let raw_scope = req_assign.scope.clone().unwrap_or_else(|| "global".into());
+        let (scope_kind, scope_id) = parse_scope(&raw_scope)?;
         let row = sqlx::query_as::<_, (String,)>(
-            "INSERT INTO user_custom_roles (user_id, custom_role_id, scope) \
-             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING \
-             RETURNING (SELECT name FROM custom_roles WHERE id = $2)",
+            "INSERT INTO rbac_role_assignments \
+                 (user_id, role_id, scope_kind, scope_id, assigned_by) \
+             VALUES ($1, $2, $3, $4, $1) ON CONFLICT DO NOTHING \
+             RETURNING (SELECT name FROM rbac_roles WHERE id = $2)",
         )
         .bind(user.id)
         .bind(req_assign.custom_role_id)
-        .bind(&scope)
+        .bind(&scope_kind)
+        .bind(scope_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(|e| match &e {
             sqlx::Error::Database(db)
-                if db.constraint() == Some("user_custom_roles_custom_role_id_fkey") =>
+                if db.constraint() == Some("rbac_role_assignments_role_id_fkey") =>
             {
                 AppError::BadRequest(format!(
                     "Unknown custom role id: {}",
@@ -225,7 +268,7 @@ pub async fn create_user(
             assigned.push(CustomRoleAssignment {
                 custom_role_id: req_assign.custom_role_id,
                 name,
-                scope,
+                scope: raw_scope,
             });
         }
     }
@@ -344,11 +387,13 @@ pub async fn update_user(
         }
     }
 
-    // Apply role change
+    // Apply system-role change. We replace any existing system role
+    // assignment(s) atomically — there should only ever be one but the
+    // schema allows multiple, so we wipe is_system rows specifically
+    // and re-insert.
     if let Some(ref role_name) = req.role {
-        // Check the target role exists
         let role_id: Option<uuid::Uuid> =
-            sqlx::query_scalar("SELECT id FROM roles WHERE name = $1")
+            sqlx::query_scalar("SELECT id FROM rbac_roles WHERE name = $1 AND is_system = TRUE")
                 .bind(role_name)
                 .fetch_optional(&state.db)
                 .await?;
@@ -364,44 +409,62 @@ pub async fn update_user(
             }
         }
 
-        // Replace all existing roles with the new one (atomic)
         let mut tx = state.db.begin().await?;
-        sqlx::query("DELETE FROM user_roles WHERE user_id = $1")
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT INTO user_roles (user_id, role_id, scope) VALUES ($1, $2, 'global')")
-            .bind(user_id)
-            .bind(role_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "DELETE FROM rbac_role_assignments \
+              WHERE user_id = $1 \
+                AND role_id IN (SELECT id FROM rbac_roles WHERE is_system = TRUE)",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "INSERT INTO rbac_role_assignments \
+                 (user_id, role_id, scope_kind, assigned_by) \
+             VALUES ($1, $2, 'global', $3)",
+        )
+        .bind(user_id)
+        .bind(role_id)
+        .bind(auth_user.claims.sub)
+        .execute(&mut *tx)
+        .await?;
         tx.commit().await?;
     }
 
-    // Apply modern custom-role assignments. Replace-all semantics: if
-    // the field is `Some(...)`, the previous rows for this user are
-    // wiped and the supplied set becomes authoritative. If the field
-    // is omitted, custom roles are left untouched.
+    // Apply custom-role assignments. Replace-all semantics: if the
+    // field is `Some(...)`, ALL non-system assignments for this user
+    // are wiped and the supplied set becomes authoritative. System
+    // role assignments are left intact (handled by the role change
+    // block above). If the field is omitted entirely, custom roles
+    // are left untouched.
     if let Some(ref assignments) = req.custom_role_assignments {
         let mut tx = state.db.begin().await?;
-        sqlx::query("DELETE FROM user_custom_roles WHERE user_id = $1")
-            .bind(user_id)
-            .execute(&mut *tx)
-            .await?;
+        sqlx::query(
+            "DELETE FROM rbac_role_assignments \
+              WHERE user_id = $1 \
+                AND role_id IN (SELECT id FROM rbac_roles WHERE is_system = FALSE)",
+        )
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
         for a in assignments {
-            let scope = a.scope.clone().unwrap_or_else(|| "global".into());
+            let raw_scope = a.scope.clone().unwrap_or_else(|| "global".into());
+            let (scope_kind, scope_id) = parse_scope(&raw_scope)?;
             sqlx::query(
-                "INSERT INTO user_custom_roles (user_id, custom_role_id, scope) \
-                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+                "INSERT INTO rbac_role_assignments \
+                     (user_id, role_id, scope_kind, scope_id, assigned_by) \
+                 VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
             )
             .bind(user_id)
             .bind(a.custom_role_id)
-            .bind(scope)
+            .bind(&scope_kind)
+            .bind(scope_id)
+            .bind(auth_user.claims.sub)
             .execute(&mut *tx)
             .await
             .map_err(|e| match &e {
                 sqlx::Error::Database(db)
-                    if db.constraint() == Some("user_custom_roles_custom_role_id_fkey") =>
+                    if db.constraint() == Some("rbac_role_assignments_role_id_fkey") =>
                 {
                     AppError::BadRequest(format!("Unknown custom role id: {}", a.custom_role_id))
                 }
