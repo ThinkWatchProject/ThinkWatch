@@ -335,7 +335,11 @@
     "scopeTeam": "Team",
     "scopeProject": "Project",
     "scopeIdPlaceholder": "UUID",
-    "scopeUuidRequired": "Scope id must be a valid UUID."
+    "scopeUuidRequired": "Scope id must be a valid UUID.",
+    "userId": "User ID",
+    "searchPlaceholder": "Search by UUID, email, name, or role",
+    "noMatches": "No users match your search.",
+    "copyId": "Copy ID"
   },
   "roles": {
     "title": "Roles & Permissions",

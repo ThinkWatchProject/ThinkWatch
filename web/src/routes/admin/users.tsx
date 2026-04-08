@@ -31,7 +31,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, Ban, CheckCircle, Users as UsersIcon, AlertCircle, Copy } from 'lucide-react';
+import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, Ban, CheckCircle, Users as UsersIcon, AlertCircle, Copy, Search } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -68,6 +68,7 @@ export function UsersPage() {
   const [availableRoles, setAvailableRoles] = useState<AvailableCustomRole[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
@@ -244,6 +245,20 @@ export function UsersPage() {
     return map[r] ?? r;
   };
 
+  const filteredUsers = (() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return users;
+    return users.filter((u) => {
+      if (u.id.toLowerCase().includes(q)) return true;
+      if (u.email.toLowerCase().includes(q)) return true;
+      if (u.display_name.toLowerCase().includes(q)) return true;
+      if (u.roles.some((r) => r.toLowerCase().includes(q) || roleLabel(r).toLowerCase().includes(q)))
+        return true;
+      if (u.custom_role_assignments.some((a) => a.name.toLowerCase().includes(q))) return true;
+      return false;
+    });
+  })();
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -299,7 +314,18 @@ export function UsersPage() {
       {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertDescription>{error}</AlertDescription></Alert>}
 
       <Card>
-        <CardHeader><CardTitle className="text-base">{t('users.allUsers')}</CardTitle></CardHeader>
+        <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0">
+          <CardTitle className="text-base">{t('users.allUsers')}</CardTitle>
+          <div className="relative w-full max-w-xs">
+            <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+            <Input
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder={t('users.searchPlaceholder')}
+              className="pl-8"
+            />
+          </div>
+        </CardHeader>
         <CardContent>
           {loading ? (
             <div className="space-y-3">
@@ -314,10 +340,16 @@ export function UsersPage() {
               <UsersIcon className="h-10 w-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground">{t('users.noUsers')}</p>
             </div>
+          ) : filteredUsers.length === 0 ? (
+            <div className="flex flex-col items-center justify-center py-12 text-center">
+              <UsersIcon className="h-10 w-10 text-muted-foreground mb-3" />
+              <p className="text-sm text-muted-foreground">{t('users.noMatches')}</p>
+            </div>
           ) : (
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead>{t('users.userId')}</TableHead>
                   <TableHead>{t('auth.email')}</TableHead>
                   <TableHead>{t('users.displayName')}</TableHead>
                   <TableHead>{t('users.roles')}</TableHead>
@@ -328,8 +360,28 @@ export function UsersPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {users.map((u) => (
+                {filteredUsers.map((u) => (
                   <TableRow key={u.id} className={!u.is_active ? 'opacity-50' : undefined}>
+                    <TableCell>
+                      <div className="flex items-center gap-1">
+                        <span
+                          className="font-mono text-xs text-muted-foreground"
+                          title={u.id}
+                        >
+                          {u.id.slice(0, 8)}
+                        </span>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6"
+                          onClick={() => navigator.clipboard.writeText(u.id)}
+                          aria-label={t('users.copyId')}
+                          title={t('users.copyId')}
+                        >
+                          <Copy className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </TableCell>
                     <TableCell className="font-medium">{u.email}</TableCell>
                     <TableCell>{u.display_name || '—'}</TableCell>
                     <TableCell>

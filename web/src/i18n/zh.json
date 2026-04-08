@@ -335,7 +335,11 @@
     "scopeTeam": "团队",
     "scopeProject": "项目",
     "scopeIdPlaceholder": "UUID",
-    "scopeUuidRequired": "范围 id 必须是有效的 UUID。"
+    "scopeUuidRequired": "范围 id 必须是有效的 UUID。",
+    "userId": "用户 ID",
+    "searchPlaceholder": "按 UUID、邮箱、用户名或角色搜索",
+    "noMatches": "没有匹配的用户。",
+    "copyId": "复制 ID"
   },
   "roles": {
     "title": "角色与权限",
