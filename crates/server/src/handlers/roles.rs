@@ -115,12 +115,9 @@ fn is_known_permission(key: &str) -> bool {
 }
 
 // ============================================================================
-// Unified roles + role_assignments handlers (post-migration 005)
+// Role + role-assignment handlers.
 //
 // All reads and writes go through `rbac_roles` and `rbac_role_assignments`.
-// The legacy tables (roles / user_roles / custom_roles / user_custom_roles)
-// are NOT touched here — they exist only for the duration of the migration
-// soak window and will be dropped in a future migration.
 // ============================================================================
 
 // --- Response types ---
@@ -136,7 +133,8 @@ pub struct RoleResponse {
     pub allowed_models: Option<Vec<String>>,
     /// Allowed MCP server UUIDs. `null` = unrestricted (all servers).
     pub allowed_mcp_servers: Option<Vec<Uuid>>,
-    /// AWS IAM-style policy document JSON. `null` = use legacy permissions.
+    /// Optional AWS IAM-style policy document JSON. When `null`, the
+    /// flat `permissions` array is the sole source of truth.
     pub policy_document: Option<serde_json::Value>,
     /// Number of users currently assigned to this role.
     pub user_count: i64,

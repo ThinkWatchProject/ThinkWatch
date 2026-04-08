@@ -487,7 +487,7 @@ pub async fn me(
     .await?
     .ok_or(AppError::NotFound("User not found".into()))?;
 
-    let custom_role_assignments = fetch_user_custom_roles(&state, user.id).await;
+    let custom_role_assignments = fetch_user_role_assignments(&state, user.id).await;
 
     Ok(Json(UserResponse {
         id: user.id,
@@ -501,11 +501,11 @@ pub async fn me(
     }))
 }
 
-/// Helper: load all `(role_id, name, scope_string)` rows for a single
-/// user, filtered to non-system roles (system roles already populate
-/// the `roles` field). Pure read; never errors — returns an empty Vec
-/// on failure so the caller can keep building a response.
-async fn fetch_user_custom_roles(
+/// Helper: load all non-system role assignments for a single user.
+/// System roles already populate the `roles` field via the JWT claims.
+/// Pure read; never errors — returns an empty Vec on failure so the
+/// caller can keep building a response.
+async fn fetch_user_role_assignments(
     state: &AppState,
     user_id: uuid::Uuid,
 ) -> Vec<think_watch_common::dto::CustomRoleAssignment> {

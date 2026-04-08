@@ -15,9 +15,7 @@ use think_watch_common::dto::{
 ///   "team:<uuid>"      → ("team",   Some(uuid))
 ///   "project:<uuid>"   → ("project", Some(uuid))
 ///
-/// Anything else is rejected with a 400. The migration backfilled all
-/// legacy `'global'` rows; once team/project pickers ship the frontend
-/// will start sending `team:<uuid>` etc.
+/// Anything else is rejected with a 400.
 pub(crate) fn parse_scope(input: &str) -> Result<(String, Option<uuid::Uuid>), AppError> {
     let trimmed = input.trim();
     if trimmed == "global" || trimmed.is_empty() {
@@ -70,10 +68,8 @@ pub async fn list_users(
 
     let user_ids: Vec<uuid::Uuid> = users.iter().map(|u| u.id).collect();
 
-    // Single query: every assignment for every user, joined into the
-    // unified `rbac_roles` table so we can split system vs custom by
-    // `is_system`. Phase 2 cutover (migration 005) — legacy
-    // `user_roles` / `user_custom_roles` are no longer read here.
+    // Single query: every assignment for every user, joined against
+    // `rbac_roles` so we can split system vs custom by `is_system`.
     type AssignmentRow = (
         uuid::Uuid,
         uuid::Uuid,
@@ -324,10 +320,10 @@ pub struct UpdateUserRequest {
     pub display_name: Option<String>,
     pub role: Option<String>,
     pub is_active: Option<bool>,
-    /// Modern scope-aware custom role assignments. When this field is
-    /// present, the existing `user_custom_roles` rows for this user are
-    /// replaced atomically. Pass an empty array to clear all custom
-    /// assignments. Omit the field to leave them untouched.
+    /// Scope-aware non-system role assignments. When this field is
+    /// present, every non-system assignment for this user is replaced
+    /// atomically. Pass an empty array to clear them; omit the field to
+    /// leave them untouched.
     #[serde(default)]
     pub custom_role_assignments: Option<Vec<CustomRoleAssignmentRequest>>,
 }

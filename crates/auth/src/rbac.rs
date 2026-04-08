@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// Legacy SystemRole (kept for JWT-based role checks)
+// SystemRole — closed enum used by JWT-based role checks (require_role
+// middleware). Kept in lockstep with the seeded `rbac_roles` rows whose
+// `is_system = TRUE`.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -288,21 +290,6 @@ pub fn validate_policy_document(value: &serde_json::Value) -> Result<PolicyDocum
     Ok(doc)
 }
 
-/// Convert legacy flat permissions list to a policy document.
-/// Useful for migration and backward compatibility.
-pub fn permissions_to_policy(permissions: &[String]) -> PolicyDocument {
-    PolicyDocument {
-        version: "2024-01-01".into(),
-        statement: vec![Statement {
-            sid: Some("LegacyPermissions".into()),
-            effect: Effect::Allow,
-            action: ActionPattern::Multiple(permissions.to_vec()),
-            resource: ResourcePattern::Single("*".into()),
-            condition: None,
-        }],
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -311,7 +298,7 @@ pub fn permissions_to_policy(permissions: &[String]) -> PolicyDocument {
 mod tests {
     use super::*;
 
-    // --- SystemRole tests (unchanged) ---
+    // --- SystemRole tests ---
 
     #[test]
     fn super_admin_has_all_permissions() {
@@ -508,24 +495,6 @@ mod tests {
             "Statement": [{ "Effect": "Allow", "Action": [], "Resource": ["*"] }]
         });
         assert!(validate_policy_document(&bad_action).is_err());
-    }
-
-    #[test]
-    fn permissions_to_policy_roundtrip() {
-        let perms = vec!["ai_gateway:use".into(), "providers:read".into()];
-        let doc = permissions_to_policy(&perms);
-        assert_eq!(
-            evaluate_policy(&doc, "ai_gateway:use", "*"),
-            PolicyResult::Allow
-        );
-        assert_eq!(
-            evaluate_policy(&doc, "providers:read", "*"),
-            PolicyResult::Allow
-        );
-        assert_eq!(
-            evaluate_policy(&doc, "system:settings", "*"),
-            PolicyResult::NoMatch
-        );
     }
 
     #[test]
