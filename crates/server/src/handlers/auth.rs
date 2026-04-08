@@ -419,6 +419,7 @@ pub async fn register(
         avatar_url: user.avatar_url,
         is_active: user.is_active,
         roles: vec!["developer".to_string()],
+        custom_role_assignments: vec![],
         created_at: user.created_at,
     }))
 }
@@ -486,6 +487,8 @@ pub async fn me(
     .await?
     .ok_or(AppError::NotFound("User not found".into()))?;
 
+    let custom_role_assignments = fetch_user_custom_roles(&state, user.id).await;
+
     Ok(Json(UserResponse {
         id: user.id,
         email: user.email,
@@ -493,8 +496,39 @@ pub async fn me(
         avatar_url: user.avatar_url,
         is_active: user.is_active,
         roles: auth_user.claims.roles.clone(),
+        custom_role_assignments,
         created_at: user.created_at,
     }))
+}
+
+/// Helper: load all `(custom_role_id, name, scope)` rows for a single
+/// user. Pure read; never errors — returns an empty Vec on failure so
+/// the caller can keep building a response even if the modern roles
+/// table is unavailable.
+async fn fetch_user_custom_roles(
+    state: &AppState,
+    user_id: uuid::Uuid,
+) -> Vec<think_watch_common::dto::CustomRoleAssignment> {
+    let rows: Vec<(uuid::Uuid, String, String)> = sqlx::query_as(
+        "SELECT cr.id, cr.name, ucr.scope \
+           FROM user_custom_roles ucr \
+           JOIN custom_roles cr ON cr.id = ucr.custom_role_id \
+          WHERE ucr.user_id = $1 \
+          ORDER BY cr.name ASC",
+    )
+    .bind(user_id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    rows.into_iter()
+        .map(
+            |(custom_role_id, name, scope)| think_watch_common::dto::CustomRoleAssignment {
+                custom_role_id,
+                name,
+                scope,
+            },
+        )
+        .collect()
 }
 
 pub async fn change_password(

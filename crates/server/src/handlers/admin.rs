@@ -4,7 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use think_watch_auth::password;
-use think_watch_common::dto::{PaginatedResponse, PaginationParams, UserResponse};
+use think_watch_common::dto::{
+    CustomRoleAssignment, PaginatedResponse, PaginationParams, UserResponse,
+};
 use think_watch_common::dynamic_config::{self, SettingEntry};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
@@ -37,7 +39,7 @@ pub async fn list_users(
 
     let user_ids: Vec<uuid::Uuid> = users.iter().map(|u| u.id).collect();
 
-    // Fetch roles for all users in one query
+    // Fetch legacy system roles for all users in one query.
     let role_rows: Vec<(uuid::Uuid, String)> = sqlx::query_as(
         "SELECT ur.user_id, r.name FROM user_roles ur JOIN roles r ON r.id = ur.role_id WHERE ur.user_id = ANY($1)",
     )
@@ -51,10 +53,37 @@ pub async fn list_users(
         roles_map.entry(uid).or_default().push(rname);
     }
 
+    // Fetch modern custom-role assignments (with scope) for the same users.
+    let custom_rows: Vec<(uuid::Uuid, uuid::Uuid, String, String)> = sqlx::query_as(
+        "SELECT ucr.user_id, cr.id, cr.name, ucr.scope \
+           FROM user_custom_roles ucr \
+           JOIN custom_roles cr ON cr.id = ucr.custom_role_id \
+          WHERE ucr.user_id = ANY($1) AND cr.is_system = FALSE \
+          ORDER BY cr.name ASC",
+    )
+    .bind(&user_ids)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let mut custom_map: std::collections::HashMap<uuid::Uuid, Vec<CustomRoleAssignment>> =
+        std::collections::HashMap::new();
+    for (uid, custom_role_id, name, scope) in custom_rows {
+        custom_map
+            .entry(uid)
+            .or_default()
+            .push(CustomRoleAssignment {
+                custom_role_id,
+                name,
+                scope,
+            });
+    }
+
     let responses: Vec<UserResponse> = users
         .into_iter()
         .map(|u| {
             let roles = roles_map.remove(&u.id).unwrap_or_default();
+            let custom_role_assignments = custom_map.remove(&u.id).unwrap_or_default();
             UserResponse {
                 id: u.id,
                 email: u.email,
@@ -62,6 +91,7 @@ pub async fn list_users(
                 avatar_url: u.avatar_url,
                 is_active: u.is_active,
                 roles,
+                custom_role_assignments,
                 created_at: u.created_at,
             }
         })
@@ -75,6 +105,15 @@ pub async fn list_users(
     }))
 }
 
+/// Custom-role assignment payload for the admin user create/update
+/// endpoints. `scope` defaults to `"global"` when omitted.
+#[derive(Debug, Deserialize, Clone)]
+pub struct CustomRoleAssignmentRequest {
+    pub custom_role_id: uuid::Uuid,
+    #[serde(default)]
+    pub scope: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateUserByAdminRequest {
     pub email: String,
@@ -82,6 +121,9 @@ pub struct CreateUserByAdminRequest {
     /// If omitted, a random password is generated and the user must change it on first login.
     pub password: Option<String>,
     pub role: Option<String>,
+    /// Optional custom-role assignments to apply alongside the system role.
+    #[serde(default)]
+    pub custom_role_assignments: Vec<CustomRoleAssignmentRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -153,6 +195,41 @@ pub async fn create_user(
     .execute(&mut *tx)
     .await?;
 
+    // Optional modern custom-role assignments. Each row gets a scope
+    // (default `"global"`). Unknown role ids fail the transaction.
+    let mut assigned: Vec<CustomRoleAssignment> = Vec::new();
+    for req_assign in &req.custom_role_assignments {
+        let scope = req_assign.scope.clone().unwrap_or_else(|| "global".into());
+        let row = sqlx::query_as::<_, (String,)>(
+            "INSERT INTO user_custom_roles (user_id, custom_role_id, scope) \
+             VALUES ($1, $2, $3) ON CONFLICT DO NOTHING \
+             RETURNING (SELECT name FROM custom_roles WHERE id = $2)",
+        )
+        .bind(user.id)
+        .bind(req_assign.custom_role_id)
+        .bind(&scope)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| match &e {
+            sqlx::Error::Database(db)
+                if db.constraint() == Some("user_custom_roles_custom_role_id_fkey") =>
+            {
+                AppError::BadRequest(format!(
+                    "Unknown custom role id: {}",
+                    req_assign.custom_role_id
+                ))
+            }
+            _ => AppError::from(e),
+        })?;
+        if let Some((name,)) = row {
+            assigned.push(CustomRoleAssignment {
+                custom_role_id: req_assign.custom_role_id,
+                name,
+                scope,
+            });
+        }
+    }
+
     tx.commit().await?;
 
     Ok(Json(CreateUserByAdminResponse {
@@ -163,6 +240,7 @@ pub async fn create_user(
             avatar_url: user.avatar_url,
             is_active: user.is_active,
             roles: vec![role_name.to_string()],
+            custom_role_assignments: assigned,
             created_at: user.created_at,
         },
         generated_password: if force_change {
@@ -203,6 +281,12 @@ pub struct UpdateUserRequest {
     pub display_name: Option<String>,
     pub role: Option<String>,
     pub is_active: Option<bool>,
+    /// Modern scope-aware custom role assignments. When this field is
+    /// present, the existing `user_custom_roles` rows for this user are
+    /// replaced atomically. Pass an empty array to clear all custom
+    /// assignments. Omit the field to leave them untouched.
+    #[serde(default)]
+    pub custom_role_assignments: Option<Vec<CustomRoleAssignmentRequest>>,
 }
 
 /// PATCH /api/admin/users/{id} — update user display_name, role, or active status.
@@ -291,6 +375,39 @@ pub async fn update_user(
             .bind(role_id)
             .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
+    }
+
+    // Apply modern custom-role assignments. Replace-all semantics: if
+    // the field is `Some(...)`, the previous rows for this user are
+    // wiped and the supplied set becomes authoritative. If the field
+    // is omitted, custom roles are left untouched.
+    if let Some(ref assignments) = req.custom_role_assignments {
+        let mut tx = state.db.begin().await?;
+        sqlx::query("DELETE FROM user_custom_roles WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        for a in assignments {
+            let scope = a.scope.clone().unwrap_or_else(|| "global".into());
+            sqlx::query(
+                "INSERT INTO user_custom_roles (user_id, custom_role_id, scope) \
+                 VALUES ($1, $2, $3) ON CONFLICT DO NOTHING",
+            )
+            .bind(user_id)
+            .bind(a.custom_role_id)
+            .bind(scope)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| match &e {
+                sqlx::Error::Database(db)
+                    if db.constraint() == Some("user_custom_roles_custom_role_id_fkey") =>
+                {
+                    AppError::BadRequest(format!("Unknown custom role id: {}", a.custom_role_id))
+                }
+                _ => AppError::from(e),
+            })?;
+        }
         tx.commit().await?;
     }
 

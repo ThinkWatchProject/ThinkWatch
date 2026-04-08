@@ -80,6 +80,15 @@ interface RoleResponse {
   updated_at: string;
 }
 
+interface RoleMember {
+  user_id: string;
+  email: string;
+  display_name: string | null;
+  scope: string;
+  source: 'system' | 'custom';
+  assigned_at: string | null;
+}
+
 interface PolicyDocument {
   Version: string;
   Statement: PolicyStatement[];
@@ -482,6 +491,43 @@ export function RolesPage() {
                     <TabsTrigger value="policy">{t('roles.policyMode')}</TabsTrigger>
                   </TabsList>
                   <TabsContent value="simple" className="space-y-4 mt-3">
+                    {/* Clone-from-existing starter — picking a role here
+                        copies its permissions + constraints into the form
+                        so the admin can fork an existing role and tweak. */}
+                    <div>
+                      <Label className="text-sm font-medium">{t('roles.cloneFrom')}</Label>
+                      <p className="text-xs text-muted-foreground mb-1.5">
+                        {t('roles.cloneFromDesc')}
+                      </p>
+                      <Select
+                        value=""
+                        onValueChange={(roleId) => {
+                          const src = roles.find((r) => r.id === roleId);
+                          if (!src) return;
+                          setFormPerms(new Set(src.permissions));
+                          setFormRestrictModels(src.allowed_models !== null);
+                          setFormModels(new Set(src.allowed_models ?? []));
+                          setFormRestrictServers(src.allowed_mcp_servers !== null);
+                          setFormServers(new Set(src.allowed_mcp_servers ?? []));
+                        }}
+                      >
+                        <SelectTrigger>
+                          <SelectValue placeholder={t('roles.cloneFromPlaceholder')} />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {roles.map((r) => (
+                            <SelectItem key={r.id} value={r.id}>
+                              <span className="font-mono text-xs">{r.name}</span>
+                              {r.is_system && (
+                                <span className="ml-2 text-[10px] text-muted-foreground">
+                                  {t('roles.systemRole')}
+                                </span>
+                              )}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
                     <PermissionTree
                       grouped={grouped}
                       selected={formPerms}
@@ -1066,6 +1112,28 @@ function RoleDetail({
 }) {
   const { t } = useTranslation();
   const selected = new Set(role.permissions);
+
+  // Fetch members lazily on open. The list lives outside the cached
+  // /api/admin/roles snapshot so it can be slow without slowing the
+  // initial table render.
+  const [members, setMembers] = useState<RoleMember[] | null>(null);
+  const [membersError, setMembersError] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    setMembers(null);
+    setMembersError(false);
+    api<{ items: RoleMember[] }>(`/api/admin/roles/${role.id}/members`)
+      .then((res) => {
+        if (!cancelled) setMembers(res.items);
+      })
+      .catch(() => {
+        if (!cancelled) setMembersError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [role.id]);
+
   return (
     <>
       <DialogHeader>
@@ -1161,6 +1229,48 @@ function RoleDetail({
             )}
           </div>
         )}
+        {/* Members — who's actually using this role today. */}
+        <div>
+          <div className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
+            {t('roles.members')}
+          </div>
+          {members === null ? (
+            <div className="text-xs text-muted-foreground italic">
+              {membersError ? t('common.error') : t('common.loading')}
+            </div>
+          ) : members.length === 0 ? (
+            <div className="text-xs italic text-muted-foreground">{t('roles.noMembers')}</div>
+          ) : (
+            <ScrollArea className="max-h-48 rounded-md border">
+              <div className="divide-y">
+                {members.map((m) => (
+                  <div
+                    key={`${m.user_id}-${m.source}-${m.scope}`}
+                    className="flex items-center gap-2 px-3 py-1.5 text-xs"
+                  >
+                    <span className="min-w-0 flex-1 truncate font-mono">{m.email}</span>
+                    {m.display_name && (
+                      <span className="hidden truncate text-muted-foreground sm:inline">
+                        {m.display_name}
+                      </span>
+                    )}
+                    {m.scope !== 'global' && (
+                      <Badge variant="outline" className="text-[9px]">
+                        {m.scope}
+                      </Badge>
+                    )}
+                    <Badge
+                      variant={m.source === 'system' ? 'secondary' : 'outline'}
+                      className="text-[9px]"
+                    >
+                      {m.source === 'system' ? t('roles.systemRole') : t('roles.customRoles')}
+                    </Badge>
+                  </div>
+                ))}
+              </div>
+            </ScrollArea>
+          )}
+        </div>
       </div>
     </>
   );

@@ -326,7 +326,11 @@
     "activate": "启用",
     "deactivateConfirm": "确定要禁用此用户吗？该用户将无法登录。",
     "activateConfirm": "确定要启用此用户吗？",
-    "saving": "保存中..."
+    "saving": "保存中...",
+    "customRoles": "自定义角色",
+    "customRolesDesc": "为此用户分配自定义角色,可选填范围。范围保持 `global` 表示不限制。",
+    "pickCustomRole": "选择一个自定义角色…",
+    "scope": "范围"
   },
   "roles": {
     "title": "角色与权限",
@@ -337,6 +341,9 @@
     "customRoles": "自定义",
     "addRole": "添加角色",
     "addRoleDescription": "创建具有特定权限的自定义角色。",
+    "cloneFrom": "基于现有角色创建",
+    "cloneFromDesc": "选择一个角色将其权限和约束复制到当前草稿。复制后仍可继续修改。",
+    "cloneFromPlaceholder": "选择要克隆的角色…",
     "editRole": "编辑角色",
     "deleteRole": "删除角色",
     "noRoles": "没有匹配筛选条件的角色。",
@@ -350,6 +357,8 @@
     "colDescription": "描述",
     "colPermissions": "权限数",
     "colUsers": "用户数",
+    "members": "成员",
+    "noMembers": "当前没有用户使用此角色。",
     "dangerous": "危险权限",
     "dangerWarning": "此角色包含可吊销会话、轮换密钥或修改安全关键设置的权限。请确保仅将此角色授予可信用户。",
     "allowedModels": "允许的模型",
