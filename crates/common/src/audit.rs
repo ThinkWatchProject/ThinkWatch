@@ -384,9 +384,19 @@ pub struct AuditLogger {
     registry: ForwarderRegistry,
 }
 
+/// Bounded audit channel capacity.
+///
+/// At ~80 bytes per entry that's about 8 MB of in-memory backlog,
+/// which is fine for any reasonable host. The previous 10k bound
+/// was too tight: a few seconds of ClickHouse stalling at 10k req/s
+/// silently dropped audit data. Bump to 100k so a 30-second outage
+/// at 3k req/s still survives, and surface drops via a metric
+/// instead of just logging.
+const AUDIT_CHANNEL_CAPACITY: usize = 100_000;
+
 impl AuditLogger {
     pub fn new(_config: AuditConfig, db: Option<PgPool>, ch: Option<clickhouse::Client>) -> Self {
-        let (tx, rx) = mpsc::channel(10_000);
+        let (tx, rx) = mpsc::channel(AUDIT_CHANNEL_CAPACITY);
         let registry: ForwarderRegistry = Arc::new(RwLock::new(HashMap::new()));
 
         // Spawn the background worker
@@ -406,7 +416,11 @@ impl AuditLogger {
 
     pub fn log(&self, entry: AuditEntry) {
         if let Err(e) = self.tx.try_send(entry) {
-            tracing::warn!("Audit log channel send failed (buffer full or closed): {e}");
+            // Compliance signal: dropped audit entries are a real
+            // operational incident, not a debug warning. Bump a
+            // metric so dashboards / alerts can fire on it.
+            metrics::counter!("audit_log_dropped_total").increment(1);
+            tracing::error!("Audit log channel send failed (buffer full or closed): {e}");
         }
     }
 
@@ -959,14 +973,24 @@ async fn flush_mcp(
 }
 
 /// Ensure ClickHouse tables exist. Call once at startup.
-pub async fn ensure_clickhouse_tables(ch: &Option<clickhouse::Client>) {
+/// Run the ClickHouse `init.sql` schema bootstrap exactly once at
+/// startup.
+///
+/// Returns `Ok(())` when ClickHouse isn't configured at all
+/// (`ch = None` is a valid deployment — operators who don't want
+/// columnar audit can opt out via env), or when every CREATE
+/// statement succeeded. Returns `Err` on the first failed statement
+/// so the caller can retry with backoff and refuse to start the
+/// gateway if the database is permanently unreachable.
+pub async fn ensure_clickhouse_tables(
+    ch: &Option<clickhouse::Client>,
+) -> Result<(), clickhouse::error::Error> {
     let Some(client) = ch else {
-        return;
+        return Ok(());
     };
 
     let init_sql = include_str!("../../../deploy/clickhouse/init.sql");
 
-    // Execute each statement separately
     for statement in init_sql.split(';') {
         let stmt = statement.trim();
         if stmt.is_empty() || stmt.starts_with("--") {
@@ -975,8 +999,9 @@ pub async fn ensure_clickhouse_tables(ch: &Option<clickhouse::Client>) {
 
         if let Err(e) = client.query(stmt).execute().await {
             tracing::warn!("ClickHouse init statement failed: {e}");
-            return;
+            return Err(e);
         }
     }
     tracing::info!("ClickHouse tables initialized");
+    Ok(())
 }

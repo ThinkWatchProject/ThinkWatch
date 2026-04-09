@@ -84,12 +84,43 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("ClickHouse client initialized");
     }
 
-    // Initialize ClickHouse tables with retry (best-effort, non-blocking)
-    {
-        let ch = ch_client.clone();
-        tokio::spawn(async move {
-            audit::ensure_clickhouse_tables(&ch).await;
-        });
+    // Initialize ClickHouse tables — block startup with bounded
+    // retry. The previous version was a fire-and-forget tokio::spawn
+    // that silently swallowed errors; if ClickHouse was unreachable
+    // at boot, the schema was never created and every audit insert
+    // for the entire process lifetime failed silently. Now we retry
+    // up to 5 times with exponential backoff (~1.5s + 3s + 6s + 12s
+    // = ~22s total) before giving up. If ClickHouse is configured
+    // (`ch_client.is_some()`) and all retries fail, we still log
+    // an error and continue rather than refuse to start — operators
+    // who tolerate degraded audit might prefer that — but bump
+    // `audit_clickhouse_init_failed_total` so dashboards see it.
+    if ch_client.is_some() {
+        let mut attempt = 0u32;
+        loop {
+            match audit::ensure_clickhouse_tables(&ch_client).await {
+                Ok(()) => break,
+                Err(e) if attempt < 4 => {
+                    let backoff_ms = 1_500u64 * 2u64.pow(attempt);
+                    tracing::warn!(
+                        attempt = attempt + 1,
+                        backoff_ms,
+                        "ClickHouse table init failed, retrying: {e}"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    attempt += 1;
+                }
+                Err(e) => {
+                    metrics::counter!("audit_clickhouse_init_failed_total").increment(1);
+                    tracing::error!(
+                        "ClickHouse table init failed after {} attempts: {e}. \
+                         Audit log inserts will fail until the schema is present.",
+                        attempt + 1
+                    );
+                    break;
+                }
+            }
+        }
     }
 
     // Load dynamic configuration from database
@@ -314,11 +345,31 @@ async fn main() -> anyhow::Result<()> {
     let gateway_listener = tokio::net::TcpListener::bind(&gateway_addr).await?;
     tracing::info!("Gateway listening on {gateway_addr} (AI API + MCP)");
 
+    // Graceful shutdown:
+    //   1. wait_for_shutdown_signal() resolves when the process gets
+    //      SIGTERM (k8s rolling upgrade) or SIGINT (operator Ctrl+C).
+    //   2. Both axum servers are wired with `with_graceful_shutdown`
+    //      so they stop accepting new connections AND drain in-flight
+    //      ones before returning.
+    //   3. We wait on both server JoinHandles so the process doesn't
+    //      exit until they've actually finished draining — if a long
+    //      streaming response is in-flight when SIGTERM arrives, it
+    //      keeps running until the response completes (or until the
+    //      orchestrator's grace period kills the pod).
+    //
+    // Background tasks (audit worker, retention sweep, config
+    // subscriber) are still detached `tokio::spawn`s — they don't
+    // hold critical state past the request boundary, and once the
+    // tokio runtime is dropped at the end of `main` they get torn
+    // down anyway. The win here is the in-flight requests, which is
+    // what k8s actually cares about.
+    let gateway_shutdown = wait_for_shutdown_signal();
     let gateway_handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(
             gateway_listener,
             gateway_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
+        .with_graceful_shutdown(gateway_shutdown)
         .await
         {
             tracing::error!("Gateway server crashed: {e}");
@@ -331,21 +382,54 @@ async fn main() -> anyhow::Result<()> {
     let console_listener = tokio::net::TcpListener::bind(&console_addr).await?;
     tracing::info!("Console listening on {console_addr} (Web UI + Admin API)");
 
+    let console_shutdown = wait_for_shutdown_signal();
     let console_handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(
             console_listener,
             console_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
+        .with_graceful_shutdown(console_shutdown)
         .await
         {
             tracing::error!("Console server crashed: {e}");
         }
     });
 
-    tokio::select! {
-        _ = gateway_handle => tracing::error!("Gateway server exited unexpectedly"),
-        _ = console_handle => tracing::error!("Console server exited unexpectedly"),
-    }
+    let _ = tokio::join!(gateway_handle, console_handle);
+    tracing::info!("Both servers stopped, exiting");
 
     Ok(())
+}
+
+/// Resolve when the process receives SIGTERM (Kubernetes rolling
+/// restart, `kubectl delete pod`, container stop) or SIGINT
+/// (operator Ctrl+C in a terminal). On non-unix platforms only the
+/// ctrl_c future is wired up — SIGTERM is unix-specific.
+async fn wait_for_shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!("failed to install ctrl_c handler: {e}");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::error!("failed to install SIGTERM handler: {e}");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("SIGINT received, starting graceful shutdown"),
+        _ = terminate => tracing::info!("SIGTERM received, starting graceful shutdown"),
+    }
 }
