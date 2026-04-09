@@ -22,7 +22,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Settings, Shield, Key, DollarSign, Database, Lock, Plus, Trash2, AlertCircle, CheckCircle, FlaskConical, Sparkles, MemoryStick, Search } from 'lucide-react';
+import { Settings, Shield, Key, Database, Lock, Plus, Trash2, AlertCircle, CheckCircle, FlaskConical, Sparkles, MemoryStick, Search } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
 import { Textarea } from '@/components/ui/textarea';
@@ -244,9 +244,6 @@ export function SettingsPage() {
   const [clientIpSource, setClientIpSource] = useState('xff');
   const [clientIpXffPosition, setClientIpXffPosition] = useState('left');
   const [clientIpXffDepth, setClientIpXffDepth] = useState(1);
-  // Budget
-  const [alertThresholds, setAlertThresholds] = useState('');
-  const [webhookUrl, setWebhookUrl] = useState('');
   // API Keys config
   const [defaultExpiry, setDefaultExpiry] = useState(90);
   const [inactivityTimeout, setInactivityTimeout] = useState(0);
@@ -293,10 +290,6 @@ export function SettingsPage() {
     setClientIpSource(str(getSettingValue(data, 'security', 'client_ip_source'), 'xff'));
     setClientIpXffPosition(str(getSettingValue(data, 'security', 'client_ip_xff_position'), 'left'));
     setClientIpXffDepth(num(getSettingValue(data, 'security', 'client_ip_xff_depth'), 1));
-
-    const th = getSettingValue(data, 'budget', 'alert_thresholds');
-    setAlertThresholds(Array.isArray(th) ? th.join(', ') : str(th, ''));
-    setWebhookUrl(str(getSettingValue(data, 'budget', 'webhook_url'), ''));
 
     setDefaultExpiry(num(getSettingValue(data, 'api_keys', 'default_expiry_days'), 90));
     setInactivityTimeout(num(getSettingValue(data, 'api_keys', 'inactivity_timeout_days'), 0));
@@ -347,13 +340,6 @@ export function SettingsPage() {
     setSaving(true);
     setStatusMsg(null);
     try {
-      const thresholdsParsed = alertThresholds
-        .split(',')
-        .map((s) => s.trim())
-        .filter(Boolean)
-        .map(Number)
-        .filter((n) => !Number.isNaN(n));
-
       await apiPatch('/api/admin/settings', {
         settings: {
           'setup.site_name': siteName,
@@ -373,8 +359,6 @@ export function SettingsPage() {
           'security.client_ip_source': clientIpSource,
           'security.client_ip_xff_position': clientIpXffPosition,
           'security.client_ip_xff_depth': clientIpXffDepth,
-          'budget.alert_thresholds': thresholdsParsed,
-          'budget.webhook_url': webhookUrl,
           'api_keys.default_expiry_days': defaultExpiry,
           'api_keys.inactivity_timeout_days': inactivityTimeout,
           'api_keys.rotation_period_days': rotationPeriod,
@@ -552,10 +536,6 @@ export function SettingsPage() {
           <TabsTrigger value="security">
             <Shield className="h-4 w-4" />
             {t('settings.security')}
-          </TabsTrigger>
-          <TabsTrigger value="budget">
-            <DollarSign className="h-4 w-4" />
-            {t('settings.budget')}
           </TabsTrigger>
           <TabsTrigger value="apikeys">
             <Key className="h-4 w-4" />
@@ -1106,34 +1086,9 @@ export function SettingsPage() {
         {/* ---------------------------------------------------------------- */}
         {/* Budget Tab                                                        */}
         {/* ---------------------------------------------------------------- */}
-        <TabsContent value="budget">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">{t('settings.budget')}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <div className="space-y-6 max-w-lg">
-                <div className="space-y-1">
-                  <Label className="text-sm">{t('settings.thresholds')}</Label>
-                  <Input
-                    value={alertThresholds}
-                    onChange={(e) => setAlertThresholds(e.target.value)}
-                    placeholder="50, 80, 100"
-                  />
-                  <p className="text-xs text-muted-foreground">Comma-separated numeric thresholds</p>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-sm">{t('settings.webhookUrl')}</Label>
-                  <Input
-                    value={webhookUrl}
-                    onChange={(e) => setWebhookUrl(e.target.value)}
-                    placeholder="https://hooks.example.com/budget"
-                  />
-                </div>
-              </div>
-            </CardContent>
-          </Card>
-        </TabsContent>
+        {/* The legacy "Budget alerts" tab is gone. Budget caps are
+            managed per-subject (user / API key / provider / team) on
+            their respective edit pages, not in global settings. */}
 
         {/* ---------------------------------------------------------------- */}
         {/* API Keys Config Tab                                               */}

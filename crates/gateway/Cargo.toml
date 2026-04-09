@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }
+sqlx = { workspace = true }
 reqwest = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }

@@ -18,7 +18,6 @@ use think_watch_auth::oidc::OidcManager;
 use think_watch_common::audit::AuditLogger;
 use think_watch_common::config::AppConfig;
 use think_watch_common::dynamic_config::DynamicConfig;
-use think_watch_gateway::budget_alert::{BudgetAlertConfig, BudgetAlertManager};
 use think_watch_gateway::cache::ResponseCache;
 use think_watch_gateway::content_filter::ContentFilter;
 use think_watch_gateway::model_mapping::ModelMapper;
@@ -138,8 +137,6 @@ pub async fn create_gateway_app(
     // Load dynamic config values for gateway initialization
     let dc = &state.dynamic_config;
     let cache_ttl = dc.cache_ttl_secs().await;
-    let budget_thresholds = dc.budget_alert_thresholds().await;
-    let budget_webhook = dc.budget_webhook_url().await;
 
     // AI Gateway: /v1/*
     // Load providers from database and register them in the model router
@@ -156,17 +153,13 @@ pub async fn create_gateway_app(
         quota: Arc::new(QuotaManager::new(state.redis.clone())),
         cache: Arc::new(ResponseCache::new(state.redis.clone(), cache_ttl)),
         pii_redactor: state.pii_redactor.clone(),
-        budget_alert: Some(Arc::new(BudgetAlertManager::new(
-            state.redis.clone(),
-            BudgetAlertConfig {
-                webhook_url: budget_webhook,
-                thresholds: budget_thresholds,
-            },
-        ))),
         cost_tracker: Arc::new(think_watch_gateway::cost_tracker::CostTracker::new()),
         rate_limiter: Arc::new(think_watch_gateway::rate_limiter::RateLimiter::new(
             state.redis.clone(),
         )),
+        db: state.db.clone(),
+        redis: state.redis.clone(),
+        weight_cache: think_watch_common::limits::weight::WeightCache::new(),
     };
     let ai_routes = Router::new()
         .route(
@@ -678,11 +671,11 @@ async fn load_providers_into_router(
         if models.is_empty() {
             // No specific models registered — use default prefixes
             for prefix in default_model_prefixes(&provider.provider_type) {
-                router.register_provider(prefix, Arc::clone(&dyn_provider));
+                router.register_provider(prefix, Arc::clone(&dyn_provider), provider.id);
             }
         } else {
             for model_id in &models {
-                router.register_provider(model_id, Arc::clone(&dyn_provider));
+                router.register_provider(model_id, Arc::clone(&dyn_provider), provider.id);
             }
         }
 
