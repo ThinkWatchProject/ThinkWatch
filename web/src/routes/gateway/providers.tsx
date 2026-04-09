@@ -25,7 +25,7 @@ import {
 } from '@/components/ui/table';
 import { Plus, Trash2, Pencil, X, Plug, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import { LimitsPanel } from '@/components/limits/limits-panel';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -181,7 +181,7 @@ export function ProvidersPage() {
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger asChild>
-            <Button>
+            <Button disabled={!hasPermission('providers:create')}>
               <Plus className="h-4 w-4" />
               {t('providers.addProvider')}
             </Button>
@@ -335,10 +335,22 @@ export function ProvidersPage() {
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
-                        <Button variant="ghost" size="icon-sm" onClick={() => openEditDialog(p)} title={t('common.edit')}>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => openEditDialog(p)}
+                          title={t('common.edit')}
+                          disabled={!hasPermission('providers:update')}
+                        >
                           <Pencil className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="icon-sm" onClick={() => setDeleteTargetId(p.id)} title={t('common.delete')}>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => setDeleteTargetId(p.id)}
+                          title={t('common.delete')}
+                          disabled={!hasPermission('providers:delete')}
+                        >
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>

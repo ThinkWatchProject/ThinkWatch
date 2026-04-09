@@ -112,9 +112,15 @@ impl PiiRedactor {
         let mut counters: HashMap<String, u32> = HashMap::new();
         let mut replacements: HashMap<String, String> = HashMap::new();
 
-        // Per-request random salt to prevent placeholder prediction
-        let salt: u16 = rand::rng().random();
-        let salt_hex = format!("{salt:04x}");
+        // Per-request random salt to prevent placeholder prediction.
+        // 64 bits gives 2^64 possible values — wide enough that an
+        // attacker can't enumerate placeholder space across requests
+        // to correlate redacted PII. The previous u16 (only 65k
+        // possible values) was small enough that a determined
+        // observer could brute-force matches across a few thousand
+        // requests.
+        let salt: u64 = rand::rng().random();
+        let salt_hex = format!("{salt:016x}");
 
         let redacted = messages
             .iter()

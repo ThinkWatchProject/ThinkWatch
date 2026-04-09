@@ -247,11 +247,22 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
             get(handlers::health::readiness).with_state(state.clone()),
         );
 
-    // Prometheus metrics endpoint
+    // Prometheus metrics endpoint. Wrapped in optional bearer auth
+    // — set `METRICS_BEARER_TOKEN` to require it. Without a token,
+    // /metrics on the public port leaks cost / token / error
+    // signals to anyone on the network. The token is read from env
+    // (`METRICS_BEARER_TOKEN`) so Prometheus scrape configs can
+    // pass it via the same env var or a static value.
     let prom_handle = handlers::metrics::install_prometheus_recorder();
+    let metrics_state = handlers::metrics::MetricsState {
+        handle: prom_handle,
+        bearer_token: std::env::var("METRICS_BEARER_TOKEN")
+            .ok()
+            .filter(|s| !s.is_empty()),
+    };
     let metrics_route = Router::new()
         .route("/metrics", get(handlers::metrics::prometheus_metrics))
-        .with_state(prom_handle);
+        .with_state(metrics_state);
 
     // CORS for gateway — allow configured origins (same as console)
     let gateway_cors = {
