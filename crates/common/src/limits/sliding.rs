@@ -271,6 +271,33 @@ pub async fn check_and_record(
     })
 }
 
+/// Read-only "what's the current sum for this rule" helper. Used by
+/// the limits CRUD's usage endpoint to render "X / Y used" without
+/// any side effects. Walks the same 60 buckets the Lua script does
+/// but issues plain GETs instead of an INCR.
+///
+/// Returns 0 on Redis error so the UI can fall back to "no data"
+/// rather than 500. Real failures are logged.
+pub async fn current_count(redis: &Client, rule: &ResolvedRule) -> i64 {
+    use fred::interfaces::KeysInterface;
+    let now_secs = chrono::Utc::now().timestamp();
+    let bucket_secs = rule.bucket_secs as i64;
+    if bucket_secs <= 0 {
+        return 0;
+    }
+    let current_bucket = now_secs / bucket_secs;
+    let mut sum: i64 = 0;
+    for b in 0..BUCKETS_PER_WINDOW {
+        let bucket_id = current_bucket - b;
+        let key = format!("{}:{}", rule.base_key, bucket_id);
+        let v: Option<i64> = redis.get(&key).await.ok().flatten();
+        if let Some(n) = v {
+            sum += n;
+        }
+    }
+    sum
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

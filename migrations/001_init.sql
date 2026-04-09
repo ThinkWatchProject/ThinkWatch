@@ -116,6 +116,7 @@ INSERT INTO rbac_roles (name, description, is_system, permissions) VALUES
     'webhooks:read', 'webhooks:write',
     'content_filter:read', 'content_filter:write',
     'pii_redactor:read', 'pii_redactor:write',
+    'rate_limits:read', 'rate_limits:write',
     'settings:read', 'settings:write',
     'system:configure_oidc'
  ]),
@@ -138,6 +139,7 @@ INSERT INTO rbac_roles (name, description, is_system, permissions) VALUES
     'webhooks:read', 'webhooks:write',
     'content_filter:read', 'content_filter:write',
     'pii_redactor:read', 'pii_redactor:write',
+    'rate_limits:read', 'rate_limits:write',
     'settings:read', 'settings:write'
  ]),
 ('team_manager',
@@ -152,7 +154,8 @@ INSERT INTO rbac_roles (name, description, is_system, permissions) VALUES
     'team:read', 'team:write',
     'analytics:read_team',
     'audit_logs:read_team',
-    'logs:read_team'
+    'logs:read_team',
+    'rate_limits:read'
  ]),
 ('developer',
  'Standard developer. Uses the gateway, manages own API keys, sees own usage.',

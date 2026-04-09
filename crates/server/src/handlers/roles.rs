@@ -110,6 +110,14 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     d("content_filter:write", "content_filter", "write"),
     p("pii_redactor:read", "pii_redactor", "read"),
     d("pii_redactor:write", "pii_redactor", "write"),
+    // --- Rate limits & budget caps ---
+    // Read covers viewing the rules, caps, and current usage on
+    // any subject's edit page. Write covers create/update/delete
+    // of rules and caps. Both are dangerous because tightening a
+    // limit can lock real users out and loosening one can blow
+    // through a budget.
+    p("rate_limits:read", "rate_limits", "read"),
+    d("rate_limits:write", "rate_limits", "write"),
     // --- System settings ---
     p("settings:read", "settings", "read"),
     d("settings:write", "settings", "write"),
@@ -180,6 +188,8 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
             "content_filter:write",
             "pii_redactor:read",
             "pii_redactor:write",
+            "rate_limits:read",
+            "rate_limits:write",
             "settings:read",
             "settings:write",
             "system:configure_oidc",
@@ -225,6 +235,8 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
             "content_filter:write",
             "pii_redactor:read",
             "pii_redactor:write",
+            "rate_limits:read",
+            "rate_limits:write",
             "settings:read",
             "settings:write",
         ],
@@ -246,6 +258,7 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
             "analytics:read_team",
             "audit_logs:read_team",
             "logs:read_team",
+            "rate_limits:read",
         ],
     ),
     (

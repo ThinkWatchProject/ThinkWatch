@@ -553,6 +553,29 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             "/api/admin/permissions",
             get(handlers::roles::list_permissions),
         )
+        // Limits CRUD: rate-limit rules + budget caps + current usage,
+        // keyed by (subject_kind, subject_id). All gated by
+        // `rate_limits:read` / `rate_limits:write` inside the handler.
+        .route(
+            "/api/admin/limits/{kind}/{id}/rules",
+            get(handlers::limits::list_rules).post(handlers::limits::upsert_rule),
+        )
+        .route(
+            "/api/admin/limits/{kind}/{id}/rules/{rule_id}",
+            delete(handlers::limits::delete_rule),
+        )
+        .route(
+            "/api/admin/limits/{kind}/{id}/budgets",
+            get(handlers::limits::list_caps).post(handlers::limits::upsert_cap),
+        )
+        .route(
+            "/api/admin/limits/{kind}/{id}/budgets/{cap_id}",
+            delete(handlers::limits::delete_cap),
+        )
+        .route(
+            "/api/admin/limits/{kind}/{id}/usage",
+            get(handlers::limits::get_usage),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::verify_signature::verify_signature,
