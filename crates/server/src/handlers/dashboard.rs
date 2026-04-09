@@ -3,6 +3,7 @@ use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::response::Response;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 use std::time::Duration;
 
 use think_watch_common::errors::AppError;
@@ -316,131 +317,235 @@ async fn build_live_snapshot(
     }
     let ch = ch_client(state)?;
 
-    // Build the optional `AND user_id IN (...)` SQL fragment once
-    // and reuse it in every query below. user_ids are UUID strings,
-    // already validated by the caller (they came out of `users.id`)
-    // so direct interpolation is safe — but we still wrap each
-    // value in single quotes to keep the SQL well-formed against
-    // ClickHouse's strict parser.
-    let user_filter_clause: String = match user_filter {
-        None => String::new(),
-        Some([]) => {
-            // Caller has zero visible users — return an empty
-            // snapshot rather than running queries that would
-            // legitimately filter to nothing. Cheaper and avoids
-            // emitting WHERE user_id IN ()` which CH rejects.
-            return Ok(DashboardLive {
-                providers: configured_providers
-                    .iter()
-                    .map(|(name,)| seed_provider("ai", name))
-                    .chain(
-                        configured_mcp_servers
-                            .iter()
-                            .map(|(name,)| seed_provider("mcp", name)),
-                    )
-                    .collect(),
-                rpm_buckets: vec![0; 30],
-                recent_logs: vec![],
-                max_rpm_limit,
-            });
-        }
-        Some(ids) => {
-            let escaped: Vec<String> = ids
+    // Empty owned set short-circuit. The caller has zero visible
+    // users, so any team-filtered query would legitimately return
+    // nothing — and ClickHouse rejects an empty IN list at parse
+    // time anyway. Skip straight to an empty snapshot.
+    if matches!(user_filter, Some([])) {
+        return Ok(DashboardLive {
+            providers: configured_providers
                 .iter()
-                .map(|id| format!("'{}'", id.replace('\'', "")))
-                .collect();
-            format!(" AND user_id IN ({})", escaped.join(","))
-        }
-    };
+                .map(|(name,)| seed_provider("ai", name))
+                .chain(
+                    configured_mcp_servers
+                        .iter()
+                        .map(|(name,)| seed_provider("mcp", name)),
+                )
+                .collect(),
+            rpm_buckets: vec![0; 30],
+            recent_logs: vec![],
+            max_rpm_limit,
+        });
+    }
 
     // --- Four ClickHouse queries in parallel via tokio::try_join! -----------
-    // Previously these ran serially, costing 4× the CH round-trip latency
-    // every WS push (every 4s). All four are independent, so parallelizing
-    // is a free win.
-    let providers_q = ch
-        .query(&format!(
-            "SELECT \
-                ifNull(provider, 'unknown') AS provider, \
-                count() AS requests, \
-                avg(ifNull(latency_ms, 0)) AS avg_latency_ms, \
-                (countIf(status_code < 400) / count()) * 100 AS success_rate \
-             FROM gateway_logs \
-             WHERE created_at >= now() - INTERVAL 15 MINUTE{} \
-             GROUP BY provider \
-             ORDER BY requests DESC \
-             LIMIT 8",
-            user_filter_clause
-        ))
-        .fetch_all::<ProviderHealthRow>();
+    //
+    // Each query has two SQL variants: an unfiltered one (caller has
+    // global analytics:read_all) and a filtered one that constrains
+    // `user_id` via the `has(?, user_id)` predicate, where `?` is
+    // bound to the caller's visible-user array using the clickhouse
+    // crate's parameter binding (NOT string interpolation).
+    //
+    // The bind path:
+    //   - escapes string values via `escape::string` inside the
+    //     ClickHouse crate's SQL serializer
+    //   - serializes Vec<String> as a CH array literal
+    //     `['a','b','c']` (`has` accepts that exactly)
+    //   - is the only path the rest of the crate uses for any
+    //     untrusted input — see `clickhouse::sql::escape`
+    //
+    // No format!() / direct string interpolation of `user_id`
+    // values anywhere below: SQL injection cannot happen even if
+    // `users.id` ever stops being a UUID column.
+    //
+    // Type wrangling: each match arm's `fetch_all::<T>()` returns a
+    // distinct anonymous Future type (different call sites), so the
+    // arms won't unify naturally. We Box::pin each future to erase
+    // the type — the boxing cost is rounding error compared to a
+    // ClickHouse round-trip.
+    type ChFut<T> =
+        Pin<Box<dyn std::future::Future<Output = clickhouse::error::Result<Vec<T>>> + Send>>;
 
-    let mcp_q = ch
-        .query(&format!(
-            "SELECT \
-                ifNull(server_name, 'unknown') AS provider, \
-                count() AS requests, \
-                avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
-                (countIf(status = 'success') / count()) * 100 AS success_rate \
-             FROM mcp_logs \
-             WHERE created_at >= now() - INTERVAL 15 MINUTE{} \
-             GROUP BY server_name \
-             ORDER BY requests DESC \
-             LIMIT 8",
-            user_filter_clause
-        ))
-        .fetch_all::<ProviderHealthRow>();
+    let providers_q: ChFut<ProviderHealthRow> = match user_filter {
+        None => Box::pin(
+            ch.query(
+                "SELECT \
+                    ifNull(provider, 'unknown') AS provider, \
+                    count() AS requests, \
+                    avg(ifNull(latency_ms, 0)) AS avg_latency_ms, \
+                    (countIf(status_code < 400) / count()) * 100 AS success_rate \
+                 FROM gateway_logs \
+                 WHERE created_at >= now() - INTERVAL 15 MINUTE \
+                 GROUP BY provider \
+                 ORDER BY requests DESC \
+                 LIMIT 8",
+            )
+            .fetch_all::<ProviderHealthRow>(),
+        ),
+        Some(ids) => Box::pin(
+            ch.query(
+                "SELECT \
+                    ifNull(provider, 'unknown') AS provider, \
+                    count() AS requests, \
+                    avg(ifNull(latency_ms, 0)) AS avg_latency_ms, \
+                    (countIf(status_code < 400) / count()) * 100 AS success_rate \
+                 FROM gateway_logs \
+                 WHERE created_at >= now() - INTERVAL 15 MINUTE \
+                   AND has(?, user_id) \
+                 GROUP BY provider \
+                 ORDER BY requests DESC \
+                 LIMIT 8",
+            )
+            .bind(ids)
+            .fetch_all::<ProviderHealthRow>(),
+        ),
+    };
 
-    let buckets_q = ch
-        .query(&format!(
-            "SELECT \
-                toString(toStartOfMinute(created_at)) AS minute, \
-                count() AS count \
-             FROM gateway_logs \
-             WHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE{} \
-             GROUP BY minute \
-             ORDER BY minute ASC",
-            user_filter_clause
-        ))
-        .fetch_all::<RpmBucket>();
+    let mcp_q: ChFut<ProviderHealthRow> = match user_filter {
+        None => Box::pin(
+            ch.query(
+                "SELECT \
+                    ifNull(server_name, 'unknown') AS provider, \
+                    count() AS requests, \
+                    avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
+                    (countIf(status = 'success') / count()) * 100 AS success_rate \
+                 FROM mcp_logs \
+                 WHERE created_at >= now() - INTERVAL 15 MINUTE \
+                 GROUP BY server_name \
+                 ORDER BY requests DESC \
+                 LIMIT 8",
+            )
+            .fetch_all::<ProviderHealthRow>(),
+        ),
+        Some(ids) => Box::pin(
+            ch.query(
+                "SELECT \
+                    ifNull(server_name, 'unknown') AS provider, \
+                    count() AS requests, \
+                    avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
+                    (countIf(status = 'success') / count()) * 100 AS success_rate \
+                 FROM mcp_logs \
+                 WHERE created_at >= now() - INTERVAL 15 MINUTE \
+                   AND has(?, user_id) \
+                 GROUP BY server_name \
+                 ORDER BY requests DESC \
+                 LIMIT 8",
+            )
+            .bind(ids)
+            .fetch_all::<ProviderHealthRow>(),
+        ),
+    };
 
-    // The recent-logs subqueries don't have a WHERE clause to
-    // append to, so we synthesize one with `WHERE 1=1` and let
-    // user_filter_clause's leading " AND " slot in cleanly.
-    let recent_q = ch
-        .query(&format!(
-            "SELECT * FROM ( \
-                SELECT \
-                    'api' AS kind, \
-                    id, \
-                    ifNull(user_id, '') AS user_id, \
-                    ifNull(model_id, '') AS subject, \
-                    toString(ifNull(status_code, 0)) AS status, \
-                    ifNull(latency_ms, 0) AS latency_ms, \
-                    toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
-                    toString(created_at) AS created_at \
-                FROM gateway_logs \
-                WHERE 1=1{filter} \
-                ORDER BY created_at DESC \
-                LIMIT 20 \
-                UNION ALL \
-                SELECT \
-                    'mcp' AS kind, \
-                    id, \
-                    ifNull(user_id, '') AS user_id, \
-                    ifNull(tool_name, '') AS subject, \
-                    ifNull(status, '') AS status, \
-                    ifNull(duration_ms, 0) AS latency_ms, \
-                    toInt64(0) AS tokens, \
-                    toString(created_at) AS created_at \
-                FROM mcp_logs \
-                WHERE 1=1{filter} \
-                ORDER BY created_at DESC \
-                LIMIT 20 \
-             ) \
-             ORDER BY created_at DESC \
-             LIMIT 16",
-            filter = user_filter_clause,
-        ))
-        .fetch_all::<LiveLogRow>();
+    let buckets_q: ChFut<RpmBucket> = match user_filter {
+        None => Box::pin(
+            ch.query(
+                "SELECT \
+                    toString(toStartOfMinute(created_at)) AS minute, \
+                    count() AS count \
+                 FROM gateway_logs \
+                 WHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE \
+                 GROUP BY minute \
+                 ORDER BY minute ASC",
+            )
+            .fetch_all::<RpmBucket>(),
+        ),
+        Some(ids) => Box::pin(
+            ch.query(
+                "SELECT \
+                    toString(toStartOfMinute(created_at)) AS minute, \
+                    count() AS count \
+                 FROM gateway_logs \
+                 WHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE \
+                   AND has(?, user_id) \
+                 GROUP BY minute \
+                 ORDER BY minute ASC",
+            )
+            .bind(ids)
+            .fetch_all::<RpmBucket>(),
+        ),
+    };
+
+    // The recent-logs query unions over gateway_logs and mcp_logs.
+    // The filtered variant binds the user array TWICE — once per
+    // subquery — because the clickhouse crate's `?` placeholders
+    // are positional and there's no CTE-style "bind once, use
+    // many" facility. The bind takes `impl Serialize` so passing
+    // the same `&[String]` slice twice is fine; each call writes
+    // its own copy into the SQL during query construction.
+    let recent_q: ChFut<LiveLogRow> = match user_filter {
+        None => Box::pin(
+            ch.query(
+                "SELECT * FROM ( \
+                    SELECT \
+                        'api' AS kind, \
+                        id, \
+                        ifNull(user_id, '') AS user_id, \
+                        ifNull(model_id, '') AS subject, \
+                        toString(ifNull(status_code, 0)) AS status, \
+                        ifNull(latency_ms, 0) AS latency_ms, \
+                        toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
+                        toString(created_at) AS created_at \
+                    FROM gateway_logs \
+                    ORDER BY created_at DESC \
+                    LIMIT 20 \
+                    UNION ALL \
+                    SELECT \
+                        'mcp' AS kind, \
+                        id, \
+                        ifNull(user_id, '') AS user_id, \
+                        ifNull(tool_name, '') AS subject, \
+                        ifNull(status, '') AS status, \
+                        ifNull(duration_ms, 0) AS latency_ms, \
+                        toInt64(0) AS tokens, \
+                        toString(created_at) AS created_at \
+                    FROM mcp_logs \
+                    ORDER BY created_at DESC \
+                    LIMIT 20 \
+                 ) \
+                 ORDER BY created_at DESC \
+                 LIMIT 16",
+            )
+            .fetch_all::<LiveLogRow>(),
+        ),
+        Some(ids) => Box::pin(
+            ch.query(
+                "SELECT * FROM ( \
+                    SELECT \
+                        'api' AS kind, \
+                        id, \
+                        ifNull(user_id, '') AS user_id, \
+                        ifNull(model_id, '') AS subject, \
+                        toString(ifNull(status_code, 0)) AS status, \
+                        ifNull(latency_ms, 0) AS latency_ms, \
+                        toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
+                        toString(created_at) AS created_at \
+                    FROM gateway_logs \
+                    WHERE has(?, user_id) \
+                    ORDER BY created_at DESC \
+                    LIMIT 20 \
+                    UNION ALL \
+                    SELECT \
+                        'mcp' AS kind, \
+                        id, \
+                        ifNull(user_id, '') AS user_id, \
+                        ifNull(tool_name, '') AS subject, \
+                        ifNull(status, '') AS status, \
+                        ifNull(duration_ms, 0) AS latency_ms, \
+                        toInt64(0) AS tokens, \
+                        toString(created_at) AS created_at \
+                    FROM mcp_logs \
+                    WHERE has(?, user_id) \
+                    ORDER BY created_at DESC \
+                    LIMIT 20 \
+                 ) \
+                 ORDER BY created_at DESC \
+                 LIMIT 16",
+            )
+            .bind(ids)
+            .bind(ids)
+            .fetch_all::<LiveLogRow>(),
+        ),
+    };
 
     let (provider_rows, mcp_rows, buckets_raw, recent_logs) =
         tokio::try_join!(providers_q, mcp_q, buckets_q, recent_q).map_err(|e| {
