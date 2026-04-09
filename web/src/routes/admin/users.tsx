@@ -68,10 +68,16 @@ interface AvailableRole {
   allowed_mcp_servers: string[] | null;
 }
 
+interface TeamSummary {
+  id: string;
+  name: string;
+}
+
 export function UsersPage() {
   const { t } = useTranslation();
   const [users, setUsers] = useState<User[]>([]);
   const [availableRoles, setAvailableRoles] = useState<AvailableRole[]>([]);
+  const [availableTeams, setAvailableTeams] = useState<TeamSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
@@ -105,9 +111,13 @@ export function UsersPage() {
 
   const fetchUsers = async () => {
     try {
-      const [usersRes, rolesRes] = await Promise.all([
+      const [usersRes, rolesRes, teamsRes] = await Promise.all([
         api<{ data: User[]; total: number }>('/api/admin/users'),
         api<{ items: AvailableRole[] }>('/api/admin/roles').catch(() => ({ items: [] })),
+        // Teams power the scope picker. team_managers can read this
+        // endpoint too — they'll just see only their own teams,
+        // which is exactly what we want for narrowing scope.
+        api<TeamSummary[]>('/api/admin/teams').catch(() => []),
       ]);
       setUsers(
         usersRes.data.map((u) => ({
@@ -117,6 +127,7 @@ export function UsersPage() {
       );
       // Unified picker — system + custom roles all show up together.
       setAvailableRoles(rolesRes.items);
+      setAvailableTeams(teamsRes);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load users');
     } finally {
@@ -304,6 +315,7 @@ export function UsersPage() {
                 value={createAssignments}
                 onChange={setCreateAssignments}
                 availableRoles={availableRoles}
+                availableTeams={availableTeams}
                 roleLabel={roleLabel}
               />
               <EffectivePermissionsPreview
@@ -480,6 +492,7 @@ export function UsersPage() {
               value={editAssignments}
               onChange={setEditAssignments}
               availableRoles={availableRoles}
+              availableTeams={availableTeams}
               roleLabel={roleLabel}
             />
             <EffectivePermissionsPreview
@@ -583,18 +596,17 @@ function buildScope(kind: ScopeKind, id: string): string {
   return `${kind}:${id.trim()}`;
 }
 
-const UUID_RE =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 function RoleAssignmentEditor({
   value,
   onChange,
   availableRoles,
+  availableTeams,
   roleLabel,
 }: {
   value: RoleAssignment[];
   onChange: (next: RoleAssignment[]) => void;
   availableRoles: AvailableRole[];
+  availableTeams: TeamSummary[];
   roleLabel: (name: string) => string;
 }) {
   const { t } = useTranslation();
@@ -602,6 +614,10 @@ function RoleAssignmentEditor({
   const [pendingKind, setPendingKind] = useState<ScopeKind>('global');
   const [pendingScopeId, setPendingScopeId] = useState('');
   const [pendingError, setPendingError] = useState('');
+
+  // Lookup so existing assignment rows can render team names
+  // instead of raw UUIDs.
+  const teamsById = new Map(availableTeams.map((t) => [t.id, t]));
   // Searchable role picker state. The popover stays open while the
   // admin types so they can refine the filter; selecting a row both
   // sets the pending role and closes it.
@@ -613,14 +629,13 @@ function RoleAssignmentEditor({
   const rolesById = new Map(availableRoles.map((r) => [r.id, r]));
 
   const canAdd =
-    !!pendingRoleId &&
-    (pendingKind === 'global' || (pendingScopeId.trim() && UUID_RE.test(pendingScopeId.trim())));
+    !!pendingRoleId && (pendingKind === 'global' || pendingScopeId.length > 0);
 
   const add = () => {
     setPendingError('');
     if (!pendingRoleId) return;
-    if (pendingKind !== 'global' && !UUID_RE.test(pendingScopeId.trim())) {
-      setPendingError(t('users.scopeUuidRequired'));
+    if (pendingKind !== 'global' && !pendingScopeId) {
+      setPendingError(t('users.scopeTeamRequired'));
       return;
     }
     const role = rolesById.get(pendingRoleId);
@@ -664,10 +679,12 @@ function RoleAssignmentEditor({
                     {t('roles.systemRole')}
                   </Badge>
                 )}
-                <Badge variant="outline" className="font-mono text-[10px]">
+                <Badge variant="outline" className="text-[10px]">
                   {parsed.kind === 'global'
-                    ? 'global'
-                    : `${parsed.kind}:${parsed.id.slice(0, 8)}…`}
+                    ? t('users.scopeGlobal')
+                    : `${t('users.scopeTeam')}: ${
+                        teamsById.get(parsed.id)?.name ?? `${parsed.id.slice(0, 8)}…`
+                      }`}
                 </Badge>
                 <Button
                   type="button"
@@ -794,13 +811,24 @@ function RoleAssignmentEditor({
               </SelectContent>
             </Select>
             {pendingKind !== 'global' && (
-              <Input
-                value={pendingScopeId}
-                onChange={(e) => setPendingScopeId(e.target.value)}
-                placeholder={t('users.scopeIdPlaceholder')}
-                className="w-44 font-mono text-xs"
-                aria-label={t('users.scope')}
-              />
+              <Select value={pendingScopeId} onValueChange={setPendingScopeId}>
+                <SelectTrigger className="w-44">
+                  <SelectValue placeholder={t('users.scopeTeamPick')} />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableTeams.length === 0 ? (
+                    <div className="px-3 py-2 text-xs text-muted-foreground">
+                      {t('users.scopeNoTeams')}
+                    </div>
+                  ) : (
+                    availableTeams.map((team) => (
+                      <SelectItem key={team.id} value={team.id}>
+                        {team.name}
+                      </SelectItem>
+                    ))
+                  )}
+                </SelectContent>
+              </Select>
             )}
             <Button type="button" variant="outline" size="sm" disabled={!canAdd} onClick={add}>
               <Plus className="h-3 w-3" />

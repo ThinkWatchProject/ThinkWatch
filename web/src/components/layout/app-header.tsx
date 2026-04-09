@@ -29,6 +29,7 @@ const breadcrumbMap: Record<string, { sectionKey: string; pageKey: string }> = {
   '/logs/platform': { sectionKey: 'nav.logs', pageKey: 'nav.platformLogs' },
   '/logs/forwarders': { sectionKey: 'nav.logs', pageKey: 'nav.logForwarders' },
   '/admin/users': { sectionKey: 'nav.admin', pageKey: 'nav.users' },
+  '/admin/teams': { sectionKey: 'nav.admin', pageKey: 'nav.teams' },
   '/admin/roles': { sectionKey: 'nav.admin', pageKey: 'nav.roles' },
   '/admin/settings': { sectionKey: 'nav.admin', pageKey: 'nav.settings' },
   '/profile': { sectionKey: 'nav.admin', pageKey: 'auth.profile' },

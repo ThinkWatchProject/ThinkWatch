@@ -54,6 +54,7 @@
     "admin": "Admin",
     "logs": "Logs",
     "users": "Users",
+    "teams": "Teams",
     "roles": "Roles",
     "settings": "Settings",
     "logExplorer": "Log Explorer",
@@ -249,6 +250,48 @@
       "deleted": "Model removed."
     }
   },
+  "teams": {
+    "title": "Teams",
+    "subtitle": "Group users so you can grant scoped admin powers (manage just one team's API keys, members, or rate limits) without handing out global access.",
+    "addTeam": "Add Team",
+    "allTeams": "All Teams",
+    "noTeams": "No teams yet.",
+    "noTeamsHint": "Create your first team to start grouping users for scoped administration.",
+    "manageMembers": "Manage members",
+    "createTitle": "Create Team",
+    "editTitle": "Edit Team",
+    "deleteTitle": "Delete Team",
+    "deleteConfirm": "Delete team \"{{team}}\"? Members are not deleted, but every scoped role assignment, rate-limit rule, and budget cap targeting this team is removed.",
+    "formHint": "A team is a label that other admins can grant scoped permissions to. Members are added separately.",
+    "field": {
+      "name": "Name",
+      "description": "Description"
+    },
+    "col": {
+      "name": "Name",
+      "description": "Description",
+      "members": "Members"
+    },
+    "errors": {
+      "nameRequired": "Team name is required."
+    },
+    "toast": {
+      "created": "Team created.",
+      "updated": "Team updated.",
+      "deleted": "Team deleted."
+    },
+    "membersTitle": "{{team}} — members",
+    "membersHint": "Add or remove members. Member-level role within the team is informational; platform permissions still come from the user's RBAC role assignments.",
+    "addMemberUser": "User",
+    "selectUser": "Pick a user",
+    "noMembers": "This team has no members yet.",
+    "member": "Member",
+    "role": "Role",
+    "roleMember": "Member",
+    "roleManager": "Manager",
+    "add": "Add",
+    "remove": "Remove"
+  },
   "mcpServers": {
     "title": "MCP Servers",
     "subtitle": "Manage Model Context Protocol servers",
@@ -418,8 +461,9 @@
     "scope": "Scope",
     "scopeGlobal": "Global",
     "scopeTeam": "Team",
-    "scopeIdPlaceholder": "UUID",
-    "scopeUuidRequired": "Scope id must be a valid UUID.",
+    "scopeTeamPick": "Pick a team",
+    "scopeTeamRequired": "Pick a team for the team scope.",
+    "scopeNoTeams": "No teams to scope to.",
     "userId": "User ID",
     "effectivePermissions": "Effective permissions",
     "effectivePermissionsDesc": "Union of every selected role. This is what the user will be able to do once you save.",

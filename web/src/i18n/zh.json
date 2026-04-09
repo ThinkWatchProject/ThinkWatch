@@ -54,6 +54,7 @@
     "admin": "管理",
     "logs": "日志",
     "users": "用户",
+    "teams": "团队",
     "roles": "角色",
     "settings": "设置",
     "logExplorer": "日志查询",
@@ -249,6 +250,48 @@
       "deleted": "模型已删除。"
     }
   },
+  "teams": {
+    "title": "团队",
+    "subtitle": "把用户分组,以便授予范围化的管理权限(只管某个团队的 API 密钥/成员/限速),而不必交出全局权限。",
+    "addTeam": "添加团队",
+    "allTeams": "全部团队",
+    "noTeams": "尚无团队。",
+    "noTeamsHint": "创建第一个团队以启用范围化管理。",
+    "manageMembers": "管理成员",
+    "createTitle": "创建团队",
+    "editTitle": "编辑团队",
+    "deleteTitle": "删除团队",
+    "deleteConfirm": "删除团队 \"{{team}}\"?成员本身不会被删除,但所有针对该团队的范围化角色绑定、限速规则、预算上限都会被清理。",
+    "formHint": "团队是一个标签,其他管理员可以将 scoped 权限授予它。成员需要单独添加。",
+    "field": {
+      "name": "名称",
+      "description": "描述"
+    },
+    "col": {
+      "name": "名称",
+      "description": "描述",
+      "members": "成员数"
+    },
+    "errors": {
+      "nameRequired": "团队名称必填。"
+    },
+    "toast": {
+      "created": "团队已创建。",
+      "updated": "团队已更新。",
+      "deleted": "团队已删除。"
+    },
+    "membersTitle": "{{team}} — 成员",
+    "membersHint": "添加或移除成员。团队内的角色仅供参考,平台权限仍然来自用户自己的 RBAC 角色绑定。",
+    "addMemberUser": "用户",
+    "selectUser": "选择一个用户",
+    "noMembers": "该团队尚无成员。",
+    "member": "成员",
+    "role": "角色",
+    "roleMember": "成员",
+    "roleManager": "管理员",
+    "add": "添加",
+    "remove": "移除"
+  },
   "mcpServers": {
     "title": "MCP 服务器",
     "subtitle": "管理模型上下文协议服务器",
@@ -418,8 +461,9 @@
     "scope": "范围",
     "scopeGlobal": "全局",
     "scopeTeam": "团队",
-    "scopeIdPlaceholder": "UUID",
-    "scopeUuidRequired": "范围 id 必须是有效的 UUID。",
+    "scopeTeamPick": "选择团队",
+    "scopeTeamRequired": "团队范围必须选择一个团队。",
+    "scopeNoTeams": "没有可选的团队。",
     "userId": "用户 ID",
     "effectivePermissions": "有效权限",
     "effectivePermissionsDesc": "所有所选角色的并集。这就是保存后用户能够执行的全部操作。",

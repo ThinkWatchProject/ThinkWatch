@@ -28,6 +28,7 @@ const McpToolsPage = lazyRouteComponent(() => import('@/routes/mcp/tools'), 'Mcp
 const UsagePage = lazyRouteComponent(() => import('@/routes/analytics/usage'), 'UsagePage');
 const CostsPage = lazyRouteComponent(() => import('@/routes/analytics/costs'), 'CostsPage');
 const UsersPage = lazyRouteComponent(() => import('@/routes/admin/users'), 'UsersPage');
+const TeamsPage = lazyRouteComponent(() => import('@/routes/admin/teams'), 'TeamsPage');
 const RolesPage = lazyRouteComponent(() => import('@/routes/admin/roles'), 'RolesPage');
 const SettingsPage = lazyRouteComponent(() => import('@/routes/admin/settings'), 'SettingsPage');
 const LogForwardersPage = lazyRouteComponent(() => import('@/routes/admin/log-forwarders'), 'LogForwardersPage');
@@ -232,6 +233,12 @@ const usersRoute = createRoute({
   component: UsersPage,
 });
 
+const teamsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/admin/teams',
+  component: TeamsPage,
+});
+
 const rolesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/roles',
@@ -284,6 +291,7 @@ const routeTree = rootRoute.addChildren([
   usageRoute,
   costsRoute,
   usersRoute,
+  teamsRoute,
   rolesRoute,
   settingsRoute,
   logForwardersRoute,

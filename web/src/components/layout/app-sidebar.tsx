@@ -33,6 +33,7 @@ import {
   BarChart3,
   DollarSign,
   Users,
+  UsersRound,
   Shield,
   Settings,
   Forward,
@@ -99,6 +100,7 @@ const navGroups: NavGroup[] = [
     labelKey: 'nav.admin',
     items: [
       { titleKey: 'nav.users', icon: Users, href: '/admin/users' },
+      { titleKey: 'nav.teams', icon: UsersRound, href: '/admin/teams' },
       { titleKey: 'nav.roles', icon: Shield, href: '/admin/roles' },
       { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings' },
     ],
