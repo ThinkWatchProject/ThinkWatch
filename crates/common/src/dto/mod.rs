@@ -85,6 +85,10 @@ pub struct UserResponse {
 pub struct CreateApiKeyRequest {
     pub name: String,
     pub team_id: Option<Uuid>,
+    /// Which gateways this key can call. Must be non-empty;
+    /// each entry must be `ai_gateway` or `mcp_gateway`. The
+    /// handler validates and normalizes the list.
+    pub surfaces: Vec<String>,
     pub allowed_models: Option<Vec<String>>,
     pub expires_in_days: Option<i32>,
 }

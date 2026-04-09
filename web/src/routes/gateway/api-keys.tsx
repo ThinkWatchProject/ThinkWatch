@@ -23,12 +23,20 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Plus, Copy, Check, Ban, RotateCw, Pencil, KeyRound, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
+
+/// Gateway surfaces an API key may be enabled for. Mirrors the
+/// closed enum on the backend (`api_keys.surfaces` CHECK constraint
+/// + `require_api_key("...")` middleware). Adding a new gateway
+/// means updating both this list and the server-side allowlist.
+const ALL_SURFACES = ['ai_gateway', 'mcp_gateway'] as const;
+type Surface = (typeof ALL_SURFACES)[number];
 
 // ---------------------------------------------------------------------------
 // Types
@@ -41,9 +49,8 @@ interface ApiKey {
   team_name: string | null;
   user_id: string | null;
   team_id: string | null;
+  surfaces: Surface[];
   allowed_models: string[] | null;
-  rate_limit_rpm: number | null;
-  rate_limit_tpm: number | null;
   expires_at: string | null;
   is_active: boolean;
   last_used_at: string | null;
@@ -169,14 +176,17 @@ export function ApiKeysPage() {
 
   const [name, setName] = useState('');
   const [allowedModels, setAllowedModels] = useState('');
-  const [rateLimitRpm, setRateLimitRpm] = useState('');
+  const [createSurfaces, setCreateSurfaces] = useState<Surface[]>([
+    'ai_gateway',
+    'mcp_gateway',
+  ]);
   const [expiresInDays, setExpiresInDays] = useState('');
 
   // Edit dialog
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editingKey, setEditingKey] = useState<ApiKey | null>(null);
   const [editAllowedModels, setEditAllowedModels] = useState('');
-  const [editRateLimitRpm, setEditRateLimitRpm] = useState('');
+  const [editSurfaces, setEditSurfaces] = useState<Surface[]>([]);
   const [editExpiresInDays, setEditExpiresInDays] = useState('');
   const [editRotationPeriod, setEditRotationPeriod] = useState('');
   const [editInactivityTimeout, setEditInactivityTimeout] = useState('');
@@ -231,7 +241,7 @@ export function ApiKeysPage() {
   const resetForm = () => {
     setName('');
     setAllowedModels('');
-    setRateLimitRpm('');
+    setCreateSurfaces(['ai_gateway', 'mcp_gateway']);
     setExpiresInDays('');
     setFormError('');
     setCreatedKey(null);
@@ -241,6 +251,12 @@ export function ApiKeysPage() {
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
     setFormError('');
+    if (createSurfaces.length === 0) {
+      // Server-side enforces this too via the CHECK constraint, but
+      // catch it client-side so the admin gets immediate feedback.
+      setFormError(t('apiKeys.surfacesRequired'));
+      return;
+    }
     setSubmitting(true);
     try {
       const models = allowedModels
@@ -249,8 +265,8 @@ export function ApiKeysPage() {
         .filter(Boolean);
       const res = await apiPost<CreateKeyResponse>('/api/keys', {
         name,
+        surfaces: createSurfaces,
         allowed_models: models.length > 0 ? models : undefined,
-        rate_limit_rpm: rateLimitRpm ? parseInt(rateLimitRpm, 10) : undefined,
         expires_in_days: expiresInDays ? parseInt(expiresInDays, 10) : undefined,
       });
       setCreatedKey(res.api_key);
@@ -259,6 +275,21 @@ export function ApiKeysPage() {
       setFormError(err instanceof Error ? err.message : 'Failed to create key');
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  /// Toggle a surface in either the create or edit form. Validation
+  /// (must have at least one) happens at submit time so the admin
+  /// can rearrange selections without the UI thrashing.
+  const toggleSurface = (
+    list: Surface[],
+    setList: (v: Surface[]) => void,
+    surface: Surface,
+  ) => {
+    if (list.includes(surface)) {
+      setList(list.filter((s) => s !== surface));
+    } else {
+      setList([...list, surface]);
     }
   };
 
@@ -297,7 +328,7 @@ export function ApiKeysPage() {
   const openEditDialog = (k: ApiKey) => {
     setEditingKey(k);
     setEditAllowedModels(k.allowed_models?.join(', ') ?? '');
-    setEditRateLimitRpm(k.rate_limit_rpm?.toString() ?? '');
+    setEditSurfaces(k.surfaces ?? []);
     setEditExpiresInDays('');
     setEditRotationPeriod(k.rotation_period_days?.toString() ?? '');
     setEditInactivityTimeout(k.inactivity_timeout_days?.toString() ?? '');
@@ -308,6 +339,10 @@ export function ApiKeysPage() {
   const handleEdit = async (e: FormEvent) => {
     e.preventDefault();
     if (!editingKey) return;
+    if (editSurfaces.length === 0) {
+      setEditError(t('apiKeys.surfacesRequired'));
+      return;
+    }
     setEditSubmitting(true);
     setEditError('');
     try {
@@ -317,7 +352,7 @@ export function ApiKeysPage() {
         .filter(Boolean);
       await apiPatch(`/api/keys/${editingKey.id}`, {
         allowed_models: models.length > 0 ? models : null,
-        rate_limit_rpm: editRateLimitRpm ? parseInt(editRateLimitRpm, 10) : null,
+        surfaces: editSurfaces,
         expires_in_days: editExpiresInDays ? parseInt(editExpiresInDays, 10) : undefined,
         rotation_period_days: editRotationPeriod ? parseInt(editRotationPeriod, 10) : null,
         inactivity_timeout_days: editInactivityTimeout ? parseInt(editInactivityTimeout, 10) : null,
@@ -417,12 +452,28 @@ export function ApiKeysPage() {
                   <Input id="key-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-service-key" required />
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="key-models">{t('apiKeys.allowedModels')}</Label>
-                  <Input id="key-models" value={allowedModels} onChange={(e) => setAllowedModels(e.target.value)} placeholder="gpt-4o, claude-sonnet-4 (comma-separated)" />
+                  <Label>{t('apiKeys.surfaces')}</Label>
+                  <p className="text-xs text-muted-foreground">
+                    {t('apiKeys.surfacesHint')}
+                  </p>
+                  <div className="space-y-2 rounded-md border p-3">
+                    {ALL_SURFACES.map((s) => (
+                      <label
+                        key={s}
+                        className="flex cursor-pointer items-center gap-2 text-sm"
+                      >
+                        <Checkbox
+                          checked={createSurfaces.includes(s)}
+                          onCheckedChange={() => toggleSurface(createSurfaces, setCreateSurfaces, s)}
+                        />
+                        {t(`apiKeys.surface_${s}` as const)}
+                      </label>
+                    ))}
+                  </div>
                 </div>
                 <div className="space-y-2">
-                  <Label htmlFor="key-rate">{t('apiKeys.rateLimitRpm')}</Label>
-                  <Input id="key-rate" type="number" value={rateLimitRpm} onChange={(e) => setRateLimitRpm(e.target.value)} placeholder="60" />
+                  <Label htmlFor="key-models">{t('apiKeys.allowedModels')}</Label>
+                  <Input id="key-models" value={allowedModels} onChange={(e) => setAllowedModels(e.target.value)} placeholder="gpt-4o, claude-sonnet-4 (comma-separated)" />
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="key-expires">{t('apiKeys.expiresInDays')}</Label>
@@ -461,13 +512,26 @@ export function ApiKeysPage() {
               </Alert>
             )}
             <div className="space-y-2">
+              <Label>{t('apiKeys.surfaces')}</Label>
+              <div className="space-y-2 rounded-md border p-3">
+                {ALL_SURFACES.map((s) => (
+                  <label
+                    key={s}
+                    className="flex cursor-pointer items-center gap-2 text-sm"
+                  >
+                    <Checkbox
+                      checked={editSurfaces.includes(s)}
+                      onCheckedChange={() => toggleSurface(editSurfaces, setEditSurfaces, s)}
+                    />
+                    {t(`apiKeys.surface_${s}` as const)}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <div className="space-y-2">
               <Label>{t('apiKeys.allowedModels')}</Label>
               <Input value={editAllowedModels} onChange={(e) => setEditAllowedModels(e.target.value)} placeholder="gpt-4o, claude-sonnet-4" />
               <p className="text-xs text-muted-foreground">{t('apiKeys.allowedModelsHint')}</p>
-            </div>
-            <div className="space-y-2">
-              <Label>{t('apiKeys.rateLimitRpm')}</Label>
-              <Input type="number" value={editRateLimitRpm} onChange={(e) => setEditRateLimitRpm(e.target.value)} placeholder="60" />
             </div>
             <div className="space-y-2">
               <Label>{t('apiKeys.expiresIn')}</Label>
@@ -582,7 +646,7 @@ export function ApiKeysPage() {
                   <TableHead>{t('common.name')}</TableHead>
                   <TableHead>{t('apiKeys.keyPrefix')}</TableHead>
                   <TableHead>{t('apiKeys.team')}</TableHead>
-                  <TableHead>{t('apiKeys.rateLimit')}</TableHead>
+                  <TableHead>{t('apiKeys.surfaces')}</TableHead>
                   <TableHead>{t('apiKeys.expires')}</TableHead>
                   <TableHead>{t('common.status')}</TableHead>
                   <TableHead>{t('common.createdAt')}</TableHead>
@@ -597,7 +661,15 @@ export function ApiKeysPage() {
                       <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{k.key_prefix}</code>
                     </TableCell>
                     <TableCell className="text-sm">{k.team_name ?? '—'}</TableCell>
-                    <TableCell className="text-sm">{k.rate_limit_rpm ? `${k.rate_limit_rpm}/min` : '—'}</TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1">
+                        {(k.surfaces ?? []).map((s) => (
+                          <Badge key={s} variant="outline" className="text-[10px]">
+                            {t(`apiKeys.surfaceShort_${s}` as const)}
+                          </Badge>
+                        ))}
+                      </div>
+                    </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       <ExpiryCell apiKey={k} />
                     </TableCell>

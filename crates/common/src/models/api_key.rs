@@ -12,7 +12,10 @@ pub struct ApiKey {
     pub name: String,
     pub user_id: Option<Uuid>,
     pub team_id: Option<Uuid>,
-    pub scopes: serde_json::Value,
+    /// Which gateway surfaces this key may call. Always non-empty
+    /// (DB CHECK enforces it). Each entry is one of `ai_gateway` /
+    /// `mcp_gateway`.
+    pub surfaces: Vec<String>,
     pub allowed_models: Option<Vec<String>>,
     // Rate limits and budget caps moved to `rate_limit_rules` /
     // `budget_caps` (subject_kind = 'api_key'). The previous fixed

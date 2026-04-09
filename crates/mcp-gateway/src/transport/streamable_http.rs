@@ -4,73 +4,54 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
-use think_watch_auth::jwt::JwtManager;
+use uuid::Uuid;
 
 use crate::proxy::McpProxy;
 use crate::proxy::{INVALID_REQUEST, JsonRpcRequest, err_response};
 use crate::session::SessionManager;
 
 /// Shared application state for the MCP gateway Axum handlers.
+///
+/// Authentication is handled by a router-level middleware in the
+/// parent server crate (the `require_api_key("mcp_gateway")` layer);
+/// the handlers below just read the `McpRequestIdentity` extension
+/// the middleware inserts.
 #[derive(Clone)]
 pub struct McpGatewayState {
     pub proxy: McpProxy,
     pub sessions: SessionManager,
-    pub jwt_manager: Arc<JwtManager>,
+}
+
+/// Identity inserted by the parent crate's API-key middleware after
+/// it validates a `tw-` token whose `surfaces` array contains
+/// `mcp_gateway`. Lives in this crate so the transport handlers can
+/// `axum::Extension`-extract it without depending on the server
+/// crate.
+#[derive(Debug, Clone)]
+pub struct McpRequestIdentity {
+    pub user_id: Uuid,
+    /// Role names the underlying user holds. Used by the access
+    /// controller to gate per-tool ACLs. Empty for service-account
+    /// keys (no associated user) — those will be denied any tool
+    /// that requires a role match.
+    pub user_roles: Vec<String>,
 }
 
 /// Header name used to carry the MCP session identifier.
 const MCP_SESSION_HEADER: &str = "mcp-session-id";
 
-/// Extract the bearer token from the `Authorization` header.
-fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("authorization")?
-        .to_str()
-        .ok()?
-        .strip_prefix("Bearer ")
-}
-
 /// `POST /mcp` — main Streamable HTTP endpoint.
 ///
-/// 1. Optionally extract or create an `Mcp-Session-Id`.
-/// 2. Authenticate via Bearer token.
-/// 3. Parse the body as a JSON-RPC request.
-/// 4. Delegate to `McpProxy::handle_request`.
-/// 5. Return the JSON-RPC response together with the session header.
+/// Auth runs as a router-level layer before this handler fires;
+/// here we just read the resolved identity from the request
+/// extensions. Returns a JSON-RPC error if the layer didn't
+/// install the extension (which means it's misconfigured).
 pub async fn handle_post(
     State(state): State<Arc<McpGatewayState>>,
     headers: HeaderMap,
+    axum::Extension(identity): axum::Extension<McpRequestIdentity>,
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
-    // --- Authentication ----------------------------------------------------
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None => {
-            let resp = err_response(request.id.clone(), INVALID_REQUEST, "Missing Bearer token");
-            return (StatusCode::UNAUTHORIZED, Json(resp)).into_response();
-        }
-    };
-
-    let claims = match state.jwt_manager.verify_token(token) {
-        Ok(c) => c,
-        Err(_) => {
-            let resp = err_response(
-                request.id.clone(),
-                INVALID_REQUEST,
-                "Invalid or expired token",
-            );
-            return (StatusCode::UNAUTHORIZED, Json(resp)).into_response();
-        }
-    };
-
-    if claims.token_type != "access" {
-        let resp = err_response(request.id.clone(), INVALID_REQUEST, "Invalid token type");
-        return (StatusCode::UNAUTHORIZED, Json(resp)).into_response();
-    }
-
-    let user_id = claims.sub;
-    let user_roles = claims.roles.clone();
-
     // --- Session management ------------------------------------------------
     let session_id = if let Some(sid) = headers
         .get(MCP_SESSION_HEADER)
@@ -85,13 +66,13 @@ pub async fn handle_post(
         sid.to_owned()
     } else {
         // First request — create a new session.
-        state.sessions.create_session(user_id).await
+        state.sessions.create_session(identity.user_id).await
     };
 
     // --- Dispatch ----------------------------------------------------------
     let response = state
         .proxy
-        .handle_request(user_id, &user_roles, request)
+        .handle_request(identity.user_id, &identity.user_roles, request)
         .await;
 
     // Return the response with the session header.
@@ -106,24 +87,13 @@ pub async fn handle_post(
 /// `DELETE /mcp` — close an MCP session.
 ///
 /// Expects the `Mcp-Session-Id` header.  Returns 204 on success.
+/// Auth is handled by the router-level layer; identity is read but
+/// the only field we touch here is the session id from the header.
 pub async fn handle_delete(
     State(state): State<Arc<McpGatewayState>>,
     headers: HeaderMap,
+    axum::Extension(_identity): axum::Extension<McpRequestIdentity>,
 ) -> impl IntoResponse {
-    // --- Authentication ----------------------------------------------------
-    let token = match extract_bearer_token(&headers) {
-        Some(t) => t,
-        None => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-
-    let claims = match state.jwt_manager.verify_token(token) {
-        Ok(c) => c,
-        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
-    };
-    if claims.token_type != "access" {
-        return StatusCode::UNAUTHORIZED.into_response();
-    }
-
     // --- Session teardown --------------------------------------------------
     let session_id = match headers
         .get(MCP_SESSION_HEADER)

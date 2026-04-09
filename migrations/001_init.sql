@@ -189,7 +189,16 @@ CREATE TABLE api_keys (
     name                    VARCHAR(255) NOT NULL,
     user_id                 UUID REFERENCES users(id) ON DELETE SET NULL,
     team_id                 UUID REFERENCES teams(id) ON DELETE SET NULL,
-    scopes                  JSONB NOT NULL DEFAULT '[]',
+    -- Which gateways this key can call. Subset of
+    -- {'ai_gateway', 'mcp_gateway'}; the CHECK enforces non-empty
+    -- so a key always has at least one surface. Both gateways
+    -- share the same `tw-` token format and the same auth
+    -- middleware — `surfaces` is what determines which one a
+    -- given key is allowed to hit at request time. The legacy
+    -- `scopes` JSONB column is gone.
+    surfaces                TEXT[] NOT NULL
+        CHECK (cardinality(surfaces) > 0
+               AND surfaces <@ ARRAY['ai_gateway', 'mcp_gateway']),
     allowed_models          TEXT[],
     -- Rate limits and budget caps live in `rate_limit_rules` /
     -- `budget_caps` (subject_kind = 'api_key'). The previous fixed

@@ -46,11 +46,42 @@ pub async fn list_keys(
     }))
 }
 
+/// Allowed values for the `surfaces` column. Kept in lockstep with
+/// the DB CHECK constraint and with `RateLimitSubject::Surface` on
+/// the limits engine — adding a new gateway means updating both.
+const ALLOWED_SURFACES: &[&str] = &["ai_gateway", "mcp_gateway"];
+
+/// Validate + dedupe a caller-supplied surfaces list. Rejects unknown
+/// values and empty input. Returns the normalized list (sorted,
+/// deduped) so the DB row is stable across re-saves.
+fn normalize_surfaces(input: &[String]) -> Result<Vec<String>, AppError> {
+    if input.is_empty() {
+        return Err(AppError::BadRequest(
+            "API key must be enabled for at least one gateway surface".into(),
+        ));
+    }
+    let mut out: Vec<String> = Vec::with_capacity(input.len());
+    for s in input {
+        if !ALLOWED_SURFACES.contains(&s.as_str()) {
+            return Err(AppError::BadRequest(format!(
+                "Unknown surface '{s}' (allowed: ai_gateway, mcp_gateway)"
+            )));
+        }
+        if !out.contains(s) {
+            out.push(s.clone());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 pub async fn create_key(
     auth_user: AuthUser,
     State(state): State<AppState>,
     Json(req): Json<CreateApiKeyRequest>,
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
+    let surfaces = normalize_surfaces(&req.surfaces)?;
+
     // Validate team membership if team_id is specified
     if let Some(team_id) = req.team_id {
         let is_member = sqlx::query_scalar::<_, bool>(
@@ -80,14 +111,15 @@ pub async fn create_key(
         .map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
 
     let row = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, allowed_models, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *"#,
+        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, surfaces, allowed_models, expires_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
     )
     .bind(&generated.prefix)
     .bind(&generated.hash)
     .bind(&req.name)
     .bind(auth_user.claims.sub)
     .bind(req.team_id)
+    .bind(&surfaces)
     .bind(&req.allowed_models)
     .bind(expires_at)
     .fetch_one(&state.db)
@@ -149,6 +181,9 @@ pub async fn revoke_key(
 #[derive(Debug, Deserialize)]
 pub struct UpdateKeyRequest {
     pub allowed_models: Option<Vec<String>>,
+    /// When `Some`, replaces the entire surfaces list. Must still
+    /// be non-empty. Omit the field to leave surfaces untouched.
+    pub surfaces: Option<Vec<String>>,
     pub expires_in_days: Option<i32>,
     pub rotation_period_days: Option<i32>,
     pub inactivity_timeout_days: Option<i32>,
@@ -171,6 +206,12 @@ pub async fn update_key(
     .await?
     .ok_or(AppError::NotFound("API key not found".into()))?;
 
+    let normalized_surfaces = req
+        .surfaces
+        .as_deref()
+        .map(normalize_surfaces)
+        .transpose()?;
+
     let expires_at = req
         .expires_in_days
         .map(|days| {
@@ -185,12 +226,14 @@ pub async fn update_key(
     let updated = sqlx::query_as::<_, ApiKey>(
         r#"UPDATE api_keys SET
             allowed_models = COALESCE($1, allowed_models),
-            expires_at = $2,
-            rotation_period_days = COALESCE($3, rotation_period_days),
-            inactivity_timeout_days = COALESCE($4, inactivity_timeout_days)
-           WHERE id = $5 RETURNING *"#,
+            surfaces = COALESCE($2, surfaces),
+            expires_at = $3,
+            rotation_period_days = COALESCE($4, rotation_period_days),
+            inactivity_timeout_days = COALESCE($5, inactivity_timeout_days)
+           WHERE id = $6 RETURNING *"#,
     )
     .bind(&req.allowed_models)
+    .bind(normalized_surfaces.as_ref())
     .bind(expires_at)
     .bind(req.rotation_period_days)
     .bind(req.inactivity_timeout_days)
@@ -240,10 +283,10 @@ pub async fn rotate_key(
     // when rotation happens.
     let generated = api_key::generate_api_key();
     let new_key = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, allowed_models,
+        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, surfaces, allowed_models,
             expires_at, rotation_period_days, inactivity_timeout_days,
             rotated_from_id, last_rotation_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
            RETURNING *"#,
     )
     .bind(&generated.prefix)
@@ -251,6 +294,7 @@ pub async fn rotate_key(
     .bind(format!("{} (rotated)", old_key.name))
     .bind(old_key.user_id)
     .bind(old_key.team_id)
+    .bind(&old_key.surfaces)
     .bind(&old_key.allowed_models)
     .bind(old_key.expires_at)
     .bind(old_key.rotation_period_days)
