@@ -62,6 +62,247 @@ impl AuthUser {
             )))
         }
     }
+
+    // ------------------------------------------------------------------------
+    // Scope-aware authorization
+    //
+    // `require_permission` is a UNION-style check across every role
+    // assignment regardless of scope. It's the right gate for:
+    //   - middleware "is this user authenticated and even allowed to
+    //     hit this route family" checks
+    //   - UI button gating in the React layer (the JWT claim is the
+    //     same union the frontend reads)
+    //
+    // It is NOT enough for "can this caller mutate THIS specific
+    // subject" decisions. A team-manager scoped to team:engineering
+    // has `api_keys:update` in their JWT permissions array, but the
+    // server must also verify that the api_key being edited belongs
+    // to a user in team:engineering. That second check is what the
+    // `assert_scope_for_*` family below does.
+    //
+    // The implementation queries `rbac_role_assignments JOIN rbac_roles`
+    // on every call. That's one indexed-join SQL query per request
+    // (~1ms) — cheap, and crucially the lookup is against LIVE data,
+    // so revoking a role takes effect on the next request, not the
+    // next refresh. The JWT's `role_assignments` field is only used
+    // by callers that need the raw assignment list without checking
+    // a specific permission (e.g. the /api/auth/me endpoint).
+    // ------------------------------------------------------------------------
+
+    /// Assert the caller has `perm` at GLOBAL scope.
+    ///
+    /// Used for platform-wide resources that no team manager should
+    /// ever be able to mutate: providers, mcp_servers, models,
+    /// settings, roles, log_forwarders, audit forwarder configs.
+    pub async fn assert_scope_global(
+        &self,
+        pool: &sqlx::PgPool,
+        perm: &str,
+    ) -> Result<(), AppError> {
+        let has: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM rbac_role_assignments ra
+                   JOIN rbac_roles r ON r.id = ra.role_id
+                  WHERE ra.user_id = $1
+                    AND ra.scope_kind = 'global'
+                    AND $2 = ANY(r.permissions)
+             )",
+        )
+        .bind(self.claims.sub)
+        .bind(perm)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("scope check failed: {e}")))?;
+        if has {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(format!(
+                "{perm} requires global scope (this is a platform-wide resource)"
+            )))
+        }
+    }
+
+    /// Assert the caller has `perm` either globally OR scoped to a
+    /// team that contains `target_user_id`.
+    ///
+    /// Used by handlers that mutate a user's own data: api_keys,
+    /// limits, role assignments, password resets.
+    pub async fn assert_scope_for_user(
+        &self,
+        pool: &sqlx::PgPool,
+        perm: &str,
+        target_user_id: uuid::Uuid,
+    ) -> Result<(), AppError> {
+        // Self-edit is always allowed: a user can manage their own
+        // resources without needing a `*:write` perm on themselves.
+        // Handlers that DON'T want this (e.g. preventing
+        // self-permission-grants) can `require_permission` first and
+        // skip the scope check.
+        if self.claims.sub == target_user_id {
+            return Ok(());
+        }
+        let has: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM rbac_role_assignments ra
+                   JOIN rbac_roles r ON r.id = ra.role_id
+                  WHERE ra.user_id = $1
+                    AND $2 = ANY(r.permissions)
+                    AND (
+                        ra.scope_kind = 'global'
+                        OR (ra.scope_kind = 'team'
+                            AND ra.scope_id IN (
+                                SELECT team_id FROM team_members WHERE user_id = $3
+                            ))
+                    )
+             )",
+        )
+        .bind(self.claims.sub)
+        .bind(perm)
+        .bind(target_user_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("scope check failed: {e}")))?;
+        if has {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(format!(
+                "{perm} not granted in any scope covering this user"
+            )))
+        }
+    }
+
+    /// Assert the caller has `perm` either globally OR scoped to
+    /// `target_team_id`.
+    ///
+    /// Used by team CRUD and any handler that operates directly on
+    /// a team row (rename, delete, edit budget cap targeting the
+    /// team).
+    pub async fn assert_scope_for_team(
+        &self,
+        pool: &sqlx::PgPool,
+        perm: &str,
+        target_team_id: uuid::Uuid,
+    ) -> Result<(), AppError> {
+        let has: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM rbac_role_assignments ra
+                   JOIN rbac_roles r ON r.id = ra.role_id
+                  WHERE ra.user_id = $1
+                    AND $2 = ANY(r.permissions)
+                    AND (
+                        ra.scope_kind = 'global'
+                        OR (ra.scope_kind = 'team' AND ra.scope_id = $3)
+                    )
+             )",
+        )
+        .bind(self.claims.sub)
+        .bind(perm)
+        .bind(target_team_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("scope check failed: {e}")))?;
+        if has {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(format!(
+                "{perm} not granted in any scope covering team {target_team_id}"
+            )))
+        }
+    }
+
+    /// Assert the caller has `perm` covering the api_key whose id
+    /// is `target_api_key_id`. Resolves the api_key's owner and
+    /// delegates to `assert_scope_for_user`.
+    pub async fn assert_scope_for_api_key(
+        &self,
+        pool: &sqlx::PgPool,
+        perm: &str,
+        target_api_key_id: uuid::Uuid,
+    ) -> Result<(), AppError> {
+        let owner: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT user_id FROM api_keys WHERE id = $1")
+                .bind(target_api_key_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("api_key lookup failed: {e}")))?;
+        let owner = owner.ok_or_else(|| AppError::NotFound("API key not found".into()))?;
+        self.assert_scope_for_user(pool, perm, owner).await
+    }
+
+    /// Polymorphic scope check for the limits engine. The limits
+    /// CRUD endpoints are keyed on `(subject_kind, subject_id)`
+    /// where `subject_kind ∈ {user, api_key, team, provider, mcp_server}`.
+    /// Provider / mcp_server are global resources and only allow
+    /// callers with the perm at global scope.
+    pub async fn assert_scope_for_subject(
+        &self,
+        pool: &sqlx::PgPool,
+        perm: &str,
+        subject_kind: &str,
+        subject_id: uuid::Uuid,
+    ) -> Result<(), AppError> {
+        match subject_kind {
+            "user" => self.assert_scope_for_user(pool, perm, subject_id).await,
+            "api_key" => self.assert_scope_for_api_key(pool, perm, subject_id).await,
+            "team" => self.assert_scope_for_team(pool, perm, subject_id).await,
+            "provider" | "mcp_server" => self.assert_scope_global(pool, perm).await,
+            other => Err(AppError::BadRequest(format!(
+                "unknown subject_kind '{other}' (expected user / api_key / team / provider / mcp_server)"
+            ))),
+        }
+    }
+
+    /// Returns the set of team ids the caller can act on for `perm`.
+    ///
+    /// Three return shapes encode the three filter cases:
+    ///   - `Ok(None)` — caller has `perm` at GLOBAL scope. The list
+    ///     handler should NOT add any team filter (caller sees all).
+    ///   - `Ok(Some(empty set))` — caller has the perm but only for
+    ///     teams they're not actually scoped to. List should be empty.
+    ///   - `Ok(Some(non-empty))` — caller has perm only for these
+    ///     specific teams. List handler must filter to subjects in
+    ///     those teams.
+    ///
+    /// Used by list endpoints (GET /api/admin/users, etc.) to scope
+    /// the result set without leaking other teams' data.
+    pub async fn owned_team_scope_for_perm(
+        &self,
+        pool: &sqlx::PgPool,
+        perm: &str,
+    ) -> Result<Option<std::collections::HashSet<uuid::Uuid>>, AppError> {
+        let global: bool = sqlx::query_scalar(
+            "SELECT EXISTS (
+                 SELECT 1 FROM rbac_role_assignments ra
+                   JOIN rbac_roles r ON r.id = ra.role_id
+                  WHERE ra.user_id = $1
+                    AND ra.scope_kind = 'global'
+                    AND $2 = ANY(r.permissions)
+             )",
+        )
+        .bind(self.claims.sub)
+        .bind(perm)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("scope lookup failed: {e}")))?;
+        if global {
+            return Ok(None);
+        }
+        let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+            "SELECT DISTINCT ra.scope_id
+               FROM rbac_role_assignments ra
+               JOIN rbac_roles r ON r.id = ra.role_id
+              WHERE ra.user_id = $1
+                AND ra.scope_kind = 'team'
+                AND ra.scope_id IS NOT NULL
+                AND $2 = ANY(r.permissions)",
+        )
+        .bind(self.claims.sub)
+        .bind(perm)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("scope lookup failed: {e}")))?;
+        Ok(Some(rows.into_iter().map(|(id,)| id).collect()))
+    }
 }
 
 impl<S> FromRequestParts<S> for AuthUser

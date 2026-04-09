@@ -14,6 +14,14 @@ use think_watch_common::models::ApiKey;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
+/// GET /api/keys
+///
+/// Result set is the union of:
+///   - the caller's own keys (always)
+///   - keys belonging to users in any team the caller has
+///     `api_keys:read` scoped to (team_manager case)
+///   - everyone's keys, when the caller has `api_keys:read` at
+///     global scope (super_admin / admin case)
 pub async fn list_keys(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -21,22 +29,74 @@ pub async fn list_keys(
 ) -> Result<Json<PaginatedResponse<ApiKey>>, AppError> {
     let per_page = pagination.per_page();
     let offset = pagination.offset();
+    let caller_id = auth_user.claims.sub;
 
-    let total: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(auth_user.claims.sub)
-    .fetch_one(&state.db)
-    .await?;
+    // Resolve the visible-key filter once. None = global, Some(set)
+    // = caller can only see keys belonging to users in those teams
+    // (plus their own).
+    let owned_teams = auth_user
+        .owned_team_scope_for_perm(&state.db, "api_keys:read")
+        .await?;
 
-    let keys = sqlx::query_as::<_, ApiKey>(
-        "SELECT * FROM api_keys WHERE user_id = $1 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(auth_user.claims.sub)
-    .bind(per_page as i64)
-    .bind(offset as i64)
-    .fetch_all(&state.db)
-    .await?;
+    let (total, keys): (i64, Vec<ApiKey>) = match owned_teams {
+        None => {
+            // Global scope — no filter at all.
+            let total: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE deleted_at IS NULL")
+                    .fetch_one(&state.db)
+                    .await?;
+            let keys = sqlx::query_as::<_, ApiKey>(
+                "SELECT * FROM api_keys WHERE deleted_at IS NULL \
+                 ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+            )
+            .bind(per_page as i64)
+            .bind(offset as i64)
+            .fetch_all(&state.db)
+            .await?;
+            (total, keys)
+        }
+        Some(team_ids) => {
+            // Caller can see their own keys plus any key whose owner
+            // is in one of the team_ids set.
+            let team_ids_vec: Vec<Uuid> = team_ids.into_iter().collect();
+            let total: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM api_keys k \
+                  WHERE k.deleted_at IS NULL \
+                    AND ( \
+                        k.user_id = $1 \
+                        OR EXISTS ( \
+                            SELECT 1 FROM team_members tm \
+                             WHERE tm.user_id = k.user_id \
+                               AND tm.team_id = ANY($2) \
+                        ) \
+                    )",
+            )
+            .bind(caller_id)
+            .bind(&team_ids_vec)
+            .fetch_one(&state.db)
+            .await?;
+            let keys = sqlx::query_as::<_, ApiKey>(
+                "SELECT k.* FROM api_keys k \
+                  WHERE k.deleted_at IS NULL \
+                    AND ( \
+                        k.user_id = $1 \
+                        OR EXISTS ( \
+                            SELECT 1 FROM team_members tm \
+                             WHERE tm.user_id = k.user_id \
+                               AND tm.team_id = ANY($2) \
+                        ) \
+                    ) \
+                  ORDER BY k.created_at DESC LIMIT $3 OFFSET $4",
+            )
+            .bind(caller_id)
+            .bind(&team_ids_vec)
+            .bind(per_page as i64)
+            .bind(offset as i64)
+            .fetch_all(&state.db)
+            .await?;
+            (total, keys)
+        }
+    };
 
     Ok(Json(PaginatedResponse {
         data: keys,
@@ -138,14 +198,18 @@ pub async fn get_key(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiKey>, AppError> {
-    let key = sqlx::query_as::<_, ApiKey>(
-        "SELECT * FROM api_keys WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .bind(auth_user.claims.sub)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("API key not found".into()))?;
+    // Scope check first — bounces requests for keys outside the
+    // caller's owned team set with a 403 instead of leaking the
+    // key's existence via a "not found" probe.
+    auth_user
+        .assert_scope_for_api_key(&state.db, "api_keys:read", id)
+        .await?;
+    let key =
+        sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(AppError::NotFound("API key not found".into()))?;
 
     Ok(Json(key))
 }
@@ -155,11 +219,15 @@ pub async fn revoke_key(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user
+        .assert_scope_for_api_key(&state.db, "api_keys:delete", id)
+        .await?;
+
     let result = sqlx::query(
-        "UPDATE api_keys SET is_active = false, disabled_reason = 'revoked' WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+        "UPDATE api_keys SET is_active = false, disabled_reason = 'revoked' \
+          WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
-    .bind(auth_user.claims.sub)
     .execute(&state.db)
     .await?;
 
@@ -196,15 +264,15 @@ pub async fn update_key(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateKeyRequest>,
 ) -> Result<Json<ApiKey>, AppError> {
-    // Verify ownership
-    let key = sqlx::query_as::<_, ApiKey>(
-        "SELECT * FROM api_keys WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .bind(auth_user.claims.sub)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("API key not found".into()))?;
+    auth_user
+        .assert_scope_for_api_key(&state.db, "api_keys:update", id)
+        .await?;
+    let key =
+        sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(AppError::NotFound("API key not found".into()))?;
 
     let normalized_surfaces = req
         .surfaces
@@ -256,15 +324,15 @@ pub async fn rotate_key(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
-    // Verify ownership and get old key
-    let old_key = sqlx::query_as::<_, ApiKey>(
-        "SELECT * FROM api_keys WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .bind(auth_user.claims.sub)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("API key not found".into()))?;
+    auth_user
+        .assert_scope_for_api_key(&state.db, "api_keys:rotate", id)
+        .await?;
+    let old_key =
+        sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or(AppError::NotFound("API key not found".into()))?;
 
     if !old_key.is_active {
         return Err(AppError::BadRequest("Cannot rotate an inactive key".into()));
@@ -344,6 +412,11 @@ pub struct ExpiringKeysQuery {
 }
 
 /// GET /api/keys/expiring — list keys expiring within N days.
+///
+/// Always includes the caller's own expiring keys, plus any keys
+/// belonging to users in teams the caller has `api_keys:read` for
+/// (so a team manager sees the whole team's expiring set, not just
+/// their own). Soft-deleted keys are filtered out.
 pub async fn list_expiring_keys(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -351,19 +424,51 @@ pub async fn list_expiring_keys(
 ) -> Result<Json<Vec<ApiKey>>, AppError> {
     let days = query.days.unwrap_or(7);
     let threshold = chrono::Utc::now() + chrono::Duration::days(days as i64);
+    let caller_id = auth_user.claims.sub;
 
-    let keys = sqlx::query_as::<_, ApiKey>(
-        r#"SELECT * FROM api_keys
-           WHERE user_id = $1
-             AND is_active = true
-             AND expires_at IS NOT NULL
-             AND expires_at <= $2
-           ORDER BY expires_at ASC"#,
-    )
-    .bind(auth_user.claims.sub)
-    .bind(threshold)
-    .fetch_all(&state.db)
-    .await?;
+    let owned_teams = auth_user
+        .owned_team_scope_for_perm(&state.db, "api_keys:read")
+        .await?;
+
+    let keys = match owned_teams {
+        None => {
+            sqlx::query_as::<_, ApiKey>(
+                r#"SELECT * FROM api_keys
+                   WHERE is_active = true
+                     AND deleted_at IS NULL
+                     AND expires_at IS NOT NULL
+                     AND expires_at <= $1
+                   ORDER BY expires_at ASC"#,
+            )
+            .bind(threshold)
+            .fetch_all(&state.db)
+            .await?
+        }
+        Some(team_ids) => {
+            let team_ids_vec: Vec<Uuid> = team_ids.into_iter().collect();
+            sqlx::query_as::<_, ApiKey>(
+                r#"SELECT k.* FROM api_keys k
+                   WHERE k.is_active = true
+                     AND k.deleted_at IS NULL
+                     AND k.expires_at IS NOT NULL
+                     AND k.expires_at <= $1
+                     AND (
+                         k.user_id = $2
+                         OR EXISTS (
+                             SELECT 1 FROM team_members tm
+                              WHERE tm.user_id = k.user_id
+                                AND tm.team_id = ANY($3)
+                         )
+                     )
+                   ORDER BY k.expires_at ASC"#,
+            )
+            .bind(threshold)
+            .bind(caller_id)
+            .bind(&team_ids_vec)
+            .fetch_all(&state.db)
+            .await?
+        }
+    };
 
     Ok(Json(keys))
 }

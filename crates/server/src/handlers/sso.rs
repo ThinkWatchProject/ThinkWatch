@@ -126,10 +126,13 @@ pub async fn sso_callback(
         return Err(AppError::Forbidden("Account is deactivated".into()));
     }
 
-    // Union of system + custom role names and permissions — see
+    // Union of system + custom role names, permissions, and the
+    // raw assignment list (for the JWT scope claims) — see
     // `rbac::compute_user_permissions` for merge semantics.
     let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user.id).await?;
     let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id).await?;
+    let role_assignments =
+        think_watch_auth::rbac::compute_user_role_assignments(&state.db, user.id).await?;
 
     let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
@@ -139,6 +142,7 @@ pub async fn sso_callback(
         &user.email,
         roles.clone(),
         permissions.clone(),
+        role_assignments.clone(),
         access_ttl,
     )?;
     let refresh_token = state.jwt.create_refresh_token_with_ttl(
@@ -146,6 +150,7 @@ pub async fn sso_callback(
         &user.email,
         roles.clone(),
         permissions.clone(),
+        role_assignments,
         refresh_ttl_days,
     )?;
 

@@ -50,6 +50,9 @@ pub async fn list_models(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ModelRow>>, AppError> {
     auth_user.require_permission("models:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:read")
+        .await?;
     let rows = sqlx::query_as::<_, ModelRow>(
         r#"SELECT
               m.id, m.provider_id, p.name AS provider_name,
@@ -86,6 +89,9 @@ pub async fn create_model(
     Json(req): Json<CreateModelRequest>,
 ) -> Result<Json<Model>, AppError> {
     auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
     if req.model_id.trim().is_empty() || req.display_name.trim().is_empty() {
         return Err(AppError::BadRequest(
             "model_id and display_name are required".into(),
@@ -158,6 +164,9 @@ pub async fn update_model(
     Json(req): Json<UpdateModelRequest>,
 ) -> Result<Json<Model>, AppError> {
     auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
     let existing = sqlx::query_as::<_, Model>(
         r#"SELECT id, provider_id, model_id, display_name,
                   input_price, output_price,
@@ -221,6 +230,9 @@ pub async fn delete_model(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
     let model_id: Option<String> = sqlx::query_scalar("SELECT model_id FROM models WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)

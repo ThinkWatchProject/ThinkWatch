@@ -13,9 +13,10 @@ use think_watch_common::dto::{
 ///
 ///   "global"           → ("global", None)
 ///   "team:<uuid>"      → ("team",   Some(uuid))
-///   "project:<uuid>"   → ("project", Some(uuid))
 ///
-/// Anything else is rejected with a 400.
+/// Anything else is rejected with a 400. The schema only knows two
+/// scope kinds (`global`, `team`); the third 'project' kind from
+/// earlier drafts was dropped along with this parser.
 pub(crate) fn parse_scope(input: &str) -> Result<(String, Option<uuid::Uuid>), AppError> {
     let trimmed = input.trim();
     if trimmed == "global" || trimmed.is_empty() {
@@ -23,9 +24,9 @@ pub(crate) fn parse_scope(input: &str) -> Result<(String, Option<uuid::Uuid>), A
     }
     if let Some((kind, rest)) = trimmed.split_once(':') {
         let kind = kind.trim();
-        if !matches!(kind, "team" | "project") {
+        if kind != "team" {
             return Err(AppError::BadRequest(format!(
-                "Unknown scope kind '{kind}' (expected 'global', 'team:<uuid>', or 'project:<uuid>')"
+                "Unknown scope kind '{kind}' (expected 'global' or 'team:<uuid>')"
             )));
         }
         let id = uuid::Uuid::parse_str(rest.trim())
@@ -33,7 +34,7 @@ pub(crate) fn parse_scope(input: &str) -> Result<(String, Option<uuid::Uuid>), A
         return Ok((kind.into(), Some(id)));
     }
     Err(AppError::BadRequest(format!(
-        "Invalid scope '{input}' (expected 'global', 'team:<uuid>', or 'project:<uuid>')"
+        "Invalid scope '{input}' (expected 'global' or 'team:<uuid>')"
     )))
 }
 use think_watch_common::dynamic_config::{self, SettingEntry};
@@ -56,17 +57,72 @@ pub async fn list_users(
     let per_page = pagination.per_page();
     let offset = pagination.offset();
 
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL")
-        .fetch_one(&state.db)
+    // Determine the team filter. None = global scope (see all),
+    // Some = scoped to those team_ids (see only their members).
+    let owned_teams = auth_user
+        .owned_team_scope_for_perm(&state.db, "users:read")
         .await?;
 
-    let users = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE deleted_at IS NULL ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-    )
-    .bind(per_page as i64)
-    .bind(offset as i64)
-    .fetch_all(&state.db)
-    .await?;
+    let (total, users): (i64, Vec<User>) = match owned_teams {
+        None => {
+            let total: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL")
+                    .fetch_one(&state.db)
+                    .await?;
+            let users = sqlx::query_as::<_, User>(
+                "SELECT * FROM users WHERE deleted_at IS NULL \
+                 ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+            )
+            .bind(per_page as i64)
+            .bind(offset as i64)
+            .fetch_all(&state.db)
+            .await?;
+            (total, users)
+        }
+        Some(team_ids) => {
+            let team_ids_vec: Vec<uuid::Uuid> = team_ids.into_iter().collect();
+            // Caller sees themselves + every team member of any team
+            // they hold `users:read` for. The self inclusion makes
+            // sure a team manager doesn't disappear from their own
+            // user list.
+            let total: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM users u \
+                  WHERE u.deleted_at IS NULL \
+                    AND ( \
+                        u.id = $1 \
+                        OR EXISTS ( \
+                            SELECT 1 FROM team_members tm \
+                             WHERE tm.user_id = u.id \
+                               AND tm.team_id = ANY($2) \
+                        ) \
+                    )",
+            )
+            .bind(auth_user.claims.sub)
+            .bind(&team_ids_vec)
+            .fetch_one(&state.db)
+            .await?;
+            let users = sqlx::query_as::<_, User>(
+                "SELECT u.* FROM users u \
+                  WHERE u.deleted_at IS NULL \
+                    AND ( \
+                        u.id = $1 \
+                        OR EXISTS ( \
+                            SELECT 1 FROM team_members tm \
+                             WHERE tm.user_id = u.id \
+                               AND tm.team_id = ANY($2) \
+                        ) \
+                    ) \
+                  ORDER BY u.created_at DESC LIMIT $3 OFFSET $4",
+            )
+            .bind(auth_user.claims.sub)
+            .bind(&team_ids_vec)
+            .bind(per_page as i64)
+            .bind(offset as i64)
+            .fetch_all(&state.db)
+            .await?;
+            (total, users)
+        }
+    };
 
     let user_ids: Vec<uuid::Uuid> = users.iter().map(|u| u.id).collect();
 
@@ -228,6 +284,14 @@ pub async fn create_user(
     Json(req): Json<CreateUserByAdminRequest>,
 ) -> Result<Json<CreateUserByAdminResponse>, AppError> {
     auth_user.require_permission("users:create")?;
+    // Creating a brand-new user is a global operation: the user
+    // doesn't yet belong to any team, so a team-scoped admin has
+    // nowhere to put them. Team managers add existing users to
+    // their team via the team_members API instead. SSO JIT
+    // provisioning is the other way new users enter the system.
+    auth_user
+        .assert_scope_global(&state.db, "users:create")
+        .await?;
 
     if !req.email.contains('@') || !req.email.contains('.') {
         return Err(AppError::BadRequest("Invalid email format".into()));
@@ -329,6 +393,9 @@ pub async fn force_logout_user(
     axum::extract::Path(user_id): axum::extract::Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("sessions:revoke")?;
+    auth_user
+        .assert_scope_for_user(&state.db, "sessions:revoke", user_id)
+        .await?;
     // Delete signing key
     let _: () =
         fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_key:{user_id}"))
@@ -367,6 +434,9 @@ pub async fn update_user(
     Json(req): Json<UpdateUserRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("users:update")?;
+    auth_user
+        .assert_scope_for_user(&state.db, "users:update", user_id)
+        .await?;
 
     // Prevent self-deactivation
     if req.is_active == Some(false) && user_id == auth_user.claims.sub {
@@ -481,12 +551,17 @@ pub async fn delete_user(
     Path(user_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("users:delete")?;
-    // Prevent self-deletion
+    // Prevent self-deletion. Done BEFORE the scope check because
+    // assert_scope_for_user has a self-shortcut that would
+    // otherwise let a team manager nuke their own account.
     if user_id == auth_user.claims.sub {
         return Err(AppError::BadRequest(
             "Cannot delete your own account from admin panel".into(),
         ));
     }
+    auth_user
+        .assert_scope_for_user(&state.db, "users:delete", user_id)
+        .await?;
 
     let rows = sqlx::query(
         "UPDATE users SET deleted_at = now(), is_active = false, updated_at = now() WHERE id = $1 AND deleted_at IS NULL",
@@ -524,6 +599,9 @@ pub async fn reset_user_password(
     Path(user_id): Path<uuid::Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("users:update")?;
+    auth_user
+        .assert_scope_for_user(&state.db, "users:update", user_id)
+        .await?;
     let exists = sqlx::query_scalar::<_, bool>(
         "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
     )
@@ -607,6 +685,9 @@ pub async fn get_system_settings(
     State(state): State<AppState>,
 ) -> Result<Json<SystemInfo>, AppError> {
     auth_user.require_permission("settings:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "settings:read")
+        .await?;
     let uptime = chrono::Utc::now() - state.started_at;
     let dc = &state.dynamic_config;
     Ok(Json(SystemInfo {
@@ -643,6 +724,9 @@ pub async fn get_oidc_settings(
     State(state): State<AppState>,
 ) -> Result<Json<OidcConfigResponse>, AppError> {
     auth_user.require_permission("settings:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "settings:read")
+        .await?;
     let dc = &state.dynamic_config;
     let enabled = dc.oidc_enabled().await;
     let issuer_url = dc.oidc_issuer_url().await;
@@ -689,6 +773,9 @@ pub async fn update_oidc_settings(
     Json(req): Json<UpdateOidcRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("system:configure_oidc")?;
+    auth_user
+        .assert_scope_global(&state.db, "system:configure_oidc")
+        .await?;
     let dc = &state.dynamic_config;
     let encryption_key =
         think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
@@ -837,6 +924,9 @@ pub async fn get_audit_settings(
     State(state): State<AppState>,
 ) -> Result<Json<AuditConfigResponse>, AppError> {
     auth_user.require_permission("settings:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "settings:read")
+        .await?;
     let connected = if let Some(ref ch) = state.clickhouse {
         ch.query("SELECT 1").fetch_one::<u8>().await.is_ok()
     } else {
@@ -857,6 +947,9 @@ pub async fn get_all_settings(
     State(state): State<AppState>,
 ) -> Result<Json<HashMap<String, Vec<SettingEntry>>>, AppError> {
     auth_user.require_permission("settings:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "settings:read")
+        .await?;
     let grouped = state.dynamic_config.get_all_grouped().await;
     Ok(Json(grouped))
 }
@@ -868,6 +961,9 @@ pub async fn get_settings_by_category(
     Path(category): Path<String>,
 ) -> Result<Json<Vec<SettingEntry>>, AppError> {
     auth_user.require_permission("settings:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "settings:read")
+        .await?;
     let settings = state.dynamic_config.get_by_category(&category).await;
     Ok(Json(settings))
 }
@@ -980,6 +1076,9 @@ pub async fn update_settings(
     Json(req): Json<UpdateSettingsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("settings:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "settings:write")
+        .await?;
     // Validate each setting
     for (key, value) in &req.settings {
         validate_setting(key, value)?;
@@ -1057,9 +1156,13 @@ pub struct ContentFilterTestResponse {
 /// against a sample of user text and return every rule that fires.
 pub async fn test_content_filter(
     auth_user: AuthUser,
+    State(state): State<AppState>,
     Json(req): Json<ContentFilterTestRequest>,
 ) -> Result<Json<ContentFilterTestResponse>, AppError> {
     auth_user.require_permission("content_filter:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "content_filter:read")
+        .await?;
     use think_watch_gateway::content_filter::ContentFilter;
     let filter = ContentFilter::from_config(&req.rules);
     let matches = filter
@@ -1086,8 +1189,12 @@ pub struct ContentFilterPreset {
 /// (basic / strict / chinese). UI labels are localized on the frontend.
 pub async fn list_content_filter_presets(
     auth_user: AuthUser,
+    State(state): State<AppState>,
 ) -> Result<Json<Vec<ContentFilterPreset>>, AppError> {
     auth_user.require_permission("content_filter:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "content_filter:read")
+        .await?;
     let groups = think_watch_gateway::content_filter::presets()
         .into_iter()
         .map(|g| ContentFilterPreset {
@@ -1125,9 +1232,13 @@ pub struct PiiRedactorTestResponse {
 /// to a text sample and return the redacted version with the substitution map.
 pub async fn test_pii_redactor(
     auth_user: AuthUser,
+    State(state): State<AppState>,
     Json(req): Json<PiiRedactorTestRequest>,
 ) -> Result<Json<PiiRedactorTestResponse>, AppError> {
     auth_user.require_permission("pii_redactor:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "pii_redactor:read")
+        .await?;
     use think_watch_gateway::pii_redactor::PiiRedactor;
     use think_watch_gateway::providers::traits::ChatMessage;
 

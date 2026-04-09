@@ -16,31 +16,17 @@
 //   GET    /api/admin/limits/{kind}/{id}/usage    current count + spend
 //
 // Auth model:
-//   - All endpoints require `rate_limits:read`.
-//   - Writes additionally require `rate_limits:write`.
-//   - There is no per-subject ownership check today — anyone with
-//     `rate_limits:write` can edit any subject's limits. This is
-//     **intentional, not an oversight**:
-//
-//       1. ThinkWatch's permissioning is currently global (Admin /
-//          Super Admin). There is no "team admin" or "scoped editor"
-//          role to delegate to, so adding `(subject_kind, subject_id)
-//          ∈ owned_set` checks here would gate every call against an
-//          empty set.
-//       2. The new RBAC table (`rbac_role_assignments`) DOES carry a
-//          `scope_kind / scope_id` column for exactly this purpose,
-//          but the role-management UI doesn't yet expose per-team
-//          rate-limit scopes. Building the check before the UI lands
-//          would just create dead code paths and false-positive
-//          authorization errors.
-//
-//     Re-visit when:
-//       - A "team manager" persona ships, AND
-//       - the role assignment UI lets operators bind a custom role
-//         with `rate_limits:write` to a specific team / project.
-//     At that point this handler should call something like
-//     `auth_user.assert_scope(SubjectKind::Team, team_id)` and the
-//     subject loaders below should filter to the caller's owned set.
+//   - All endpoints require the matching `rate_limits:*` perm
+//     (`:read` for GETs, `:write` for POST/DELETE).
+//   - **Every endpoint also runs `assert_scope_for_subject`** —
+//     the caller must hold the perm in a scope (global, or a team
+//     containing the target subject) that covers `(kind, id)` from
+//     the URL path. So a team_manager scoped to team:engineering
+//     can edit limits on api_keys belonging to engineering members
+//     but gets 403 trying to touch marketing's keys.
+//   - Provider / mcp_server subjects always require global scope
+//     because they're platform-wide resources — see
+//     `AuthUser::assert_scope_for_subject`'s polymorphic dispatch.
 // ============================================================================
 
 use axum::Json;
@@ -183,6 +169,9 @@ pub async fn list_rules(
     Path((kind, subject_id)): Path<(String, Uuid)>,
 ) -> Result<Json<RuleListResponse>, AppError> {
     auth_user.require_permission("rate_limits:read")?;
+    auth_user
+        .assert_scope_for_subject(&state.db, "rate_limits:read", &kind, subject_id)
+        .await?;
     let subject_kind = parse_rate_subject(&kind)?;
     let rules = limits::list_rules(&state.db, subject_kind, subject_id).await?;
     Ok(Json(RuleListResponse {
@@ -197,6 +186,9 @@ pub async fn upsert_rule(
     Json(req): Json<UpsertRuleRequest>,
 ) -> Result<Json<RuleRow>, AppError> {
     auth_user.require_permission("rate_limits:write")?;
+    auth_user
+        .assert_scope_for_subject(&state.db, "rate_limits:write", &kind, subject_id)
+        .await?;
     let subject_kind = parse_rate_subject(&kind)?;
     let surface = Surface::parse(&req.surface).ok_or_else(|| {
         AppError::BadRequest(format!(
@@ -256,9 +248,12 @@ pub async fn upsert_rule(
 pub async fn delete_rule(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    Path((kind, _subject_id, rule_id)): Path<(String, Uuid, Uuid)>,
+    Path((kind, subject_id, rule_id)): Path<(String, Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("rate_limits:write")?;
+    auth_user
+        .assert_scope_for_subject(&state.db, "rate_limits:write", &kind, subject_id)
+        .await?;
     // Validate the kind even though we don't actually need it for
     // the delete — keeps the URL shape consistent with the rest of
     // the surface.
@@ -287,6 +282,9 @@ pub async fn list_caps(
     Path((kind, subject_id)): Path<(String, Uuid)>,
 ) -> Result<Json<CapListResponse>, AppError> {
     auth_user.require_permission("rate_limits:read")?;
+    auth_user
+        .assert_scope_for_subject(&state.db, "rate_limits:read", &kind, subject_id)
+        .await?;
     let subject_kind = parse_budget_subject(&kind)?;
     let caps = limits::list_caps(&state.db, subject_kind, subject_id).await?;
     Ok(Json(CapListResponse {
@@ -301,6 +299,9 @@ pub async fn upsert_cap(
     Json(req): Json<UpsertCapRequest>,
 ) -> Result<Json<CapRow>, AppError> {
     auth_user.require_permission("rate_limits:write")?;
+    auth_user
+        .assert_scope_for_subject(&state.db, "rate_limits:write", &kind, subject_id)
+        .await?;
     let subject_kind = parse_budget_subject(&kind)?;
     let period = BudgetPeriod::parse(&req.period).ok_or_else(|| {
         AppError::BadRequest(format!(
@@ -342,9 +343,12 @@ pub async fn upsert_cap(
 pub async fn delete_cap(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    Path((kind, _subject_id, cap_id)): Path<(String, Uuid, Uuid)>,
+    Path((kind, subject_id, cap_id)): Path<(String, Uuid, Uuid)>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("rate_limits:write")?;
+    auth_user
+        .assert_scope_for_subject(&state.db, "rate_limits:write", &kind, subject_id)
+        .await?;
     parse_budget_subject(&kind)?;
     let removed = limits::delete_cap(&state.db, cap_id).await?;
     if !removed {
@@ -398,6 +402,9 @@ pub async fn get_usage(
     Path((kind, subject_id)): Path<(String, Uuid)>,
 ) -> Result<Json<UsageResponse>, AppError> {
     auth_user.require_permission("rate_limits:read")?;
+    auth_user
+        .assert_scope_for_subject(&state.db, "rate_limits:read", &kind, subject_id)
+        .await?;
 
     // Rate-limit rules: every rule for this subject (even disabled
     // ones), so the UI can show "this rule is paused but the
