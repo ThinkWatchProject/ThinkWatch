@@ -122,6 +122,7 @@ pub struct McpProxy {
     pub circuit_breakers: McpCircuitBreakers,
     pub db: PgPool,
     pub redis: fred::clients::Client,
+    pub dynamic_config: std::sync::Arc<think_watch_common::dynamic_config::DynamicConfig>,
 }
 
 impl McpProxy {
@@ -131,6 +132,7 @@ impl McpProxy {
         pool: ConnectionPool,
         db: PgPool,
         redis: fred::clients::Client,
+        dynamic_config: std::sync::Arc<think_watch_common::dynamic_config::DynamicConfig>,
     ) -> Self {
         Self {
             registry,
@@ -139,6 +141,7 @@ impl McpProxy {
             circuit_breakers: McpCircuitBreakers::new(),
             db,
             redis,
+            dynamic_config,
         }
     }
 
@@ -288,16 +291,27 @@ impl McpProxy {
             });
         let resolved = sliding::resolve_rules(&rules, RateMetric::Requests);
         if !resolved.is_empty() {
-            let outcome = sliding::check_and_record(&self.redis, &resolved, 1)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::warn!("MCP rate-limit redis error: {e}; allowing call");
-                    sliding::CheckOutcome {
-                        allowed: true,
-                        exceeded_index: -1,
-                        currents: Vec::new(),
+            let fail_closed = self.dynamic_config.rate_limit_fail_closed().await;
+            let outcome =
+                match sliding::check_and_record(&self.redis, &resolved, 1, !fail_closed).await {
+                    Ok(o) => o,
+                    Err(e) => {
+                        if fail_closed {
+                            tracing::warn!("MCP rate-limit redis error: {e}; failing closed");
+                            return err_response(
+                                request.id,
+                                INVALID_REQUEST,
+                                "Rate limited: rate_limiter_unavailable".to_string(),
+                            );
+                        }
+                        tracing::warn!("MCP rate-limit redis error: {e}; allowing call");
+                        sliding::CheckOutcome {
+                            allowed: true,
+                            exceeded_index: -1,
+                            currents: Vec::new(),
+                        }
                     }
-                });
+                };
             if !outcome.allowed {
                 let label = (outcome.exceeded_index >= 0)
                     .then(|| {

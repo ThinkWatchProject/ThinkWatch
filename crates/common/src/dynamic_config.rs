@@ -281,6 +281,15 @@ impl DynamicConfig {
             .unwrap_or(1)
     }
 
+    /// When true the bucketed rate-limit engine returns an error
+    /// instead of fail-opening on Redis outages. Defaults to false
+    /// (fail open) for parity with previous releases.
+    pub async fn rate_limit_fail_closed(&self) -> bool {
+        self.get_bool("security.rate_limit_fail_closed")
+            .await
+            .unwrap_or(false)
+    }
+
     pub async fn allow_registration(&self) -> bool {
         self.get_bool("auth.allow_registration")
             .await
@@ -419,7 +428,7 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
         }
 
         // Boolean settings
-        "setup.initialized" | "auth.allow_registration" => {
+        "setup.initialized" | "auth.allow_registration" | "security.rate_limit_fail_closed" => {
             value
                 .as_bool()
                 .ok_or_else(|| anyhow::anyhow!("{key}: expected a boolean value"))?;

@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use sqlx::PgPool;
+use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -18,6 +19,7 @@ use crate::quota::QuotaManager;
 use crate::rate_limiter::RateLimiter;
 use crate::router::ModelRouter;
 use crate::streaming::stream_to_sse;
+use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::{
     self, BudgetSubject, RateLimitSubject, RateMetric, sliding, weight,
 };
@@ -47,6 +49,11 @@ pub struct GatewayState {
     /// Looked up once per request to convert raw token counts into
     /// the weighted-token cost the engine consumes.
     pub weight_cache: weight::WeightCache,
+    /// Dynamic system settings — read in the hot path to honor
+    /// `security.rate_limit_fail_closed` (and other future toggles)
+    /// without restarting the gateway. The cache is in-process so
+    /// the lookup is a `RwLock::read` + `HashMap::get`.
+    pub dynamic_config: Arc<DynamicConfig>,
 }
 
 /// Identity information extracted from the auth middleware.
@@ -113,6 +120,62 @@ fn resolve_budget_subjects(
         out.push((BudgetSubject::Provider, pid));
     }
     out
+}
+
+/// Post-flight accounting for one completed AI gateway request.
+///
+/// Runs the token-metric sliding rules and budget caps against the
+/// real prompt/completion token counts the upstream returned. Used
+/// from BOTH the non-streaming branch (called inline after the
+/// upstream future resolves) and the streaming branch (called from
+/// `stream_to_sse`'s `on_done` callback after the SSE stream is
+/// drained).
+///
+/// All errors are logged and swallowed — by the time we get here
+/// the caller has already received their response, so refusing to
+/// account isn't an option.
+#[allow(clippy::too_many_arguments)]
+async fn post_flight_account(
+    db: sqlx::PgPool,
+    redis: fred::clients::Client,
+    weight_cache: weight::WeightCache,
+    model: String,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    request_rules: Vec<limits::RateLimitRule>,
+    budget_subjects: Vec<(BudgetSubject, Uuid)>,
+) {
+    let mult = weight_cache.get(&db, &model).await;
+    let weighted = weight::weighted_tokens(prompt_tokens as i64, completion_tokens as i64, mult);
+    if weighted <= 0 {
+        return;
+    }
+
+    // Token-metric sliding rules — same rule set the pre-flight
+    // loaded, filtered to tokens. Post-flight always runs fail-open
+    // because the response has already been delivered: refusing to
+    // record the spend would just hide it from analytics without
+    // recovering anything.
+    let resolved_token_rules = sliding::resolve_rules(&request_rules, RateMetric::Tokens);
+    if !resolved_token_rules.is_empty()
+        && let Err(e) =
+            sliding::check_and_record(&redis, &resolved_token_rules, weighted, true).await
+    {
+        tracing::warn!("token rate-limit accounting failed: {e}");
+    }
+
+    // Natural-period budget caps for the matching subjects.
+    match limits::list_enabled_caps_for_subjects(&db, &budget_subjects).await {
+        Ok(caps) if !caps.is_empty() => {
+            if let Err(e) = limits::budget::add_weighted_tokens(&redis, &caps, weighted).await {
+                tracing::warn!("budget add_weighted_tokens failed: {e}");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("budget caps DB load failed: {e}");
+        }
+    }
 }
 
 /// Build a human-readable label for "which rule rejected the request",
@@ -197,16 +260,32 @@ pub async fn proxy_chat_completion(
         };
     let resolved_request_rules = sliding::resolve_rules(&request_rules, RateMetric::Requests);
     if !resolved_request_rules.is_empty() {
-        let outcome = sliding::check_and_record(&state.redis, &resolved_request_rules, 1)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("rate-limit redis error: {e}; allowing request");
-                sliding::CheckOutcome {
-                    allowed: true,
-                    exceeded_index: -1,
-                    currents: Vec::new(),
+        // Honor `security.rate_limit_fail_closed`: when set, a Redis
+        // outage produces a 429 instead of a free pass. Default
+        // remains fail-open so a Redis blip can't take down the
+        // entire AI control plane.
+        let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
+        let outcome =
+            match sliding::check_and_record(&state.redis, &resolved_request_rules, 1, !fail_closed)
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    if fail_closed {
+                        tracing::warn!("rate-limit redis error: {e}; failing closed");
+                        return Err(GatewayError::LocalRateLimited(
+                            "rate_limiter_unavailable".to_string(),
+                        )
+                        .into());
+                    }
+                    tracing::warn!("rate-limit redis error: {e}; allowing request");
+                    sliding::CheckOutcome {
+                        allowed: true,
+                        exceeded_index: -1,
+                        currents: Vec::new(),
+                    }
                 }
-            });
+            };
         if !outcome.allowed {
             // Find the first rule that pushed us over so the response
             // body tells the caller exactly what to lift.
@@ -298,8 +377,42 @@ pub async fn proxy_chat_completion(
     })?;
 
     if is_stream {
+        // Capture everything the post-flight callback needs BEFORE
+        // moving `request` into the provider stream. The callback
+        // runs from inside `stream_to_sse` after the SSE source is
+        // drained but before the `[DONE]` sentinel — see
+        // `streaming::stream_to_sse` for the contract.
+        let db = state.db.clone();
+        let redis = state.redis.clone();
+        let weight_cache = state.weight_cache.clone();
+        let model = request.model.clone();
+        let request_rules_for_done = request_rules.clone();
+        let budget_subjects = resolve_budget_subjects(&identity, provider_id);
         let stream = provider.stream_chat_completion(request);
-        Ok(stream_to_sse(stream).into_response())
+        let on_done = move |usage: Option<crate::providers::traits::Usage>|
+            -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+            Box::pin(async move {
+                let Some(u) = usage else {
+                    // Upstream didn't surface usage on the stream
+                    // (client likely didn't set
+                    // `stream_options.include_usage`). Nothing to
+                    // account for here; the streaming gap stays.
+                    return;
+                };
+                post_flight_account(
+                    db,
+                    redis,
+                    weight_cache,
+                    model,
+                    u.prompt_tokens,
+                    u.completion_tokens,
+                    request_rules_for_done,
+                    budget_subjects,
+                )
+                .await;
+            })
+        };
+        Ok(stream_to_sse(stream, on_done).into_response())
     } else {
         let mut response = provider.chat_completion_boxed(request.clone()).await?;
 
@@ -316,50 +429,20 @@ pub async fn proxy_chat_completion(
         }
 
         // 8b.1. Post-flight accounting against the new limits engine.
-        //
-        // Token-metric sliding rules and budget caps both run here,
-        // after the upstream returned its real token counts. Both
-        // are recorded but never refused — by this point the request
-        // has already been served, so the caller can transiently
-        // exceed by exactly one request's worth of weighted tokens
-        // (the documented "soft cap" behavior).
+        // Same path the streaming branch takes via `on_done`, so the
+        // two surfaces stay symmetric.
         if let Some(ref usage) = response.usage {
-            let mult = state.weight_cache.get(&state.db, &request.model).await;
-            let weighted = weight::weighted_tokens(
-                usage.prompt_tokens as i64,
-                usage.completion_tokens as i64,
-                mult,
-            );
-            if weighted > 0 {
-                // Token-metric sliding rules — same set of rules we
-                // loaded above, just filtered to the tokens metric.
-                let resolved_token_rules =
-                    sliding::resolve_rules(&request_rules, RateMetric::Tokens);
-                if !resolved_token_rules.is_empty()
-                    && let Err(e) =
-                        sliding::check_and_record(&state.redis, &resolved_token_rules, weighted)
-                            .await
-                {
-                    tracing::warn!("token rate-limit accounting failed: {e}");
-                }
-
-                // Natural-period budget caps — daily / weekly /
-                // monthly weighted-token totals.
-                let budget_subjects = resolve_budget_subjects(&identity, provider_id);
-                match limits::list_enabled_caps_for_subjects(&state.db, &budget_subjects).await {
-                    Ok(caps) if !caps.is_empty() => {
-                        if let Err(e) =
-                            limits::budget::add_weighted_tokens(&state.redis, &caps, weighted).await
-                        {
-                            tracing::warn!("budget add_weighted_tokens failed: {e}");
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::warn!("budget caps DB load failed: {e}");
-                    }
-                }
-            }
+            post_flight_account(
+                state.db.clone(),
+                state.redis.clone(),
+                state.weight_cache.clone(),
+                request.model.clone(),
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                request_rules.clone(),
+                resolve_budget_subjects(&identity, provider_id),
+            )
+            .await;
         }
 
         // 8c. Budget threshold alerting was previously fired here
@@ -519,7 +602,15 @@ pub async fn proxy_anthropic_messages(
 
     if is_stream {
         let stream = provider.stream_chat_completion(request);
-        Ok(stream_to_sse(stream).into_response())
+        // No-op post-flight callback: these handlers don't currently
+        // wire per-request rate-limit pre-flight, so there's nothing
+        // to record. TODO: extend the limits engine to cover the
+        // Anthropic Messages and Responses surfaces.
+        let on_done = |_usage: Option<crate::providers::traits::Usage>|
+            -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+            Box::pin(async {})
+        };
+        Ok(stream_to_sse(stream, on_done).into_response())
     } else {
         let response = provider.chat_completion_boxed(request).await?;
 
@@ -685,7 +776,15 @@ pub async fn proxy_responses(
 
     if is_stream {
         let stream = provider.stream_chat_completion(request);
-        Ok(stream_to_sse(stream).into_response())
+        // No-op post-flight callback: these handlers don't currently
+        // wire per-request rate-limit pre-flight, so there's nothing
+        // to record. TODO: extend the limits engine to cover the
+        // Anthropic Messages and Responses surfaces.
+        let on_done = |_usage: Option<crate::providers::traits::Usage>|
+            -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+            Box::pin(async {})
+        };
+        Ok(stream_to_sse(stream, on_done).into_response())
     } else {
         let response = provider.chat_completion_boxed(request).await?;
         let responses_format = convert_to_responses_format(&response);
