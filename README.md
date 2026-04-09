@@ -93,8 +93,8 @@ ThinkWatch solves all of this with a single deployment.
 - **Data retention policies** — configurable retention periods for usage records and audit logs with automatic daily purge
 
 ### Observability
-- **Prometheus metrics** — `GET /metrics` endpoint on the gateway port (3000) exposing `gateway_requests_total`, `gateway_request_duration_seconds`, `gateway_tokens_total`, `gateway_rate_limited_total`, `circuit_breaker_state`, and more
-- **Enhanced health checks** — `/health/live` (liveness probe), `/health/ready` (readiness probe with PostgreSQL and Redis checks), `/api/health` (detailed latency and pool statistics)
+- **Prometheus metrics** — `GET /metrics` endpoint on the gateway port (3000) exposing `gateway_requests_total`, `gateway_request_duration_seconds`, `gateway_tokens_total`, `gateway_rate_limited_total`, `circuit_breaker_state`, `gateway_stream_completion_total`, `audit_log_dropped_total`, and more. **Disabled by default** — set `METRICS_BEARER_TOKEN` (the secret-generation script populates it automatically) to mount the route, then pass the same value as `Authorization: Bearer <token>` from your scraper. When unset, the route returns 404 and the recorder isn't even installed (zero memory / CPU cost).
+- **Enhanced health checks** — `/health/live` (liveness probe), `/health/ready` (readiness probe verifying PostgreSQL, Redis, **and at least one active provider** — so K8s won't route AI traffic to a fresh pod with an empty router), `/api/health` (detailed latency and pool statistics)
 - **ClickHouse-powered audit logs** — SQL-queryable audit logs across all API calls and tool invocations, stored in ClickHouse for high-performance columnar analytics
 - **Audit log forwarding** — multi-channel delivery: UDP/TCP Syslog (RFC 5424), Kafka, and HTTP webhooks — route audit events to any SIEM, data lake, or alerting pipeline
 - **Usage analytics** — token consumption by user, team, model, and time period
@@ -212,6 +212,25 @@ accounting silently no-ops for that request — the rate-limit and
 budget counters stay accurate within the limits of what the
 upstream is willing to tell us.
 
+### PII redaction and streaming responses
+
+The PII redactor (configured at Admin > Settings > PII patterns)
+runs on every prompt before it's forwarded upstream — emails,
+phone numbers, ID cards etc. are replaced with `{{EMAIL_xxx_1}}`
+style placeholders so the upstream never sees the original. On
+**non-streaming** responses the gateway then runs `restore_response`
+on the way back, so the client sees the original PII the model
+would have echoed.
+
+On **streaming** (SSE) responses the gateway does NOT restore the
+placeholders — re-stitching them across chunk boundaries is its own
+project. As a result, streaming clients see the placeholder text
+verbatim if the model echoes user PII back in its answer. The
+prompt-side redaction still happens, so the upstream provider
+never sees the original PII either way; this is purely a
+client-side cosmetic gap on streaming responses. Switch the client
+to non-streaming if it needs the original text restored.
+
 ## Tech Stack
 
 | Layer | Technology |
@@ -259,8 +278,10 @@ Full documentation: **[thinkwat.ch/docs](https://thinkwat.ch/docs)**
 
 | Port | Server | Exposure | Purpose |
 |------|--------|----------|---------|
-| `3000` | Gateway | **Public** — expose to AI clients | `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`, `/mcp`, `/metrics`, `/health/*` |
+| `3000` | Gateway | **Public** — expose to AI clients | `/v1/chat/completions`, `/v1/messages`, `/v1/responses`, `/v1/models`, `/mcp`, `/metrics`†, `/health/*` |
 | `3001` | Console | **Internal** — behind VPN/firewall | `/api/*` management endpoints, Web UI |
+
+† `/metrics` is only mounted when `METRICS_BEARER_TOKEN` is set. Without the env var the route returns 404 and the Prometheus recorder isn't installed.
 
 > In production, **only port 3000** should be reachable from the internet. Port 3001 should be restricted to your admin network.
 
