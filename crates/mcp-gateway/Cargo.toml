@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }
+sqlx = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
@@ -19,3 +20,4 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 fred = { workspace = true }
+metrics = { workspace = true }

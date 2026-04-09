@@ -1,65 +1,13 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
+use sqlx::PgPool;
 use uuid::Uuid;
+
+use think_watch_common::limits::{self, RateLimitSubject, RateMetric, sliding};
 
 use crate::access_control::AccessController;
 use crate::circuit_breaker::McpCircuitBreakers;
 use crate::pool::ConnectionPool;
 use crate::registry::Registry;
-
-/// Per-user sliding window rate limiter for MCP tool calls.
-#[derive(Clone)]
-pub struct McpRateLimiter {
-    /// user_id -> list of call timestamps (unix millis)
-    windows: Arc<RwLock<HashMap<Uuid, Vec<i64>>>>,
-    /// Maximum tool calls per user per minute
-    max_calls_per_minute: u32,
-}
-
-impl McpRateLimiter {
-    pub fn new(max_calls_per_minute: u32) -> Self {
-        Self {
-            windows: Arc::new(RwLock::new(HashMap::new())),
-            max_calls_per_minute,
-        }
-    }
-
-    /// Check if the user is within rate limits. Returns Ok if allowed.
-    pub async fn check(&self, user_id: Uuid) -> Result<(), String> {
-        let now = chrono::Utc::now().timestamp_millis();
-        let window_start = now - 60_000;
-
-        let mut windows = self.windows.write().await;
-        let timestamps = windows.entry(user_id).or_default();
-
-        // Remove expired entries
-        timestamps.retain(|&ts| ts > window_start);
-
-        if timestamps.len() >= self.max_calls_per_minute as usize {
-            return Err(format!(
-                "MCP tool call rate limit exceeded: {}/{} per minute",
-                timestamps.len(),
-                self.max_calls_per_minute
-            ));
-        }
-
-        timestamps.push(now);
-        Ok(())
-    }
-
-    /// Periodic cleanup of stale user entries.
-    pub async fn cleanup(&self) {
-        let now = chrono::Utc::now().timestamp_millis();
-        let window_start = now - 60_000;
-        let mut windows = self.windows.write().await;
-        windows.retain(|_, timestamps| {
-            timestamps.retain(|&ts| ts > window_start);
-            !timestamps.is_empty()
-        });
-    }
-}
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -128,19 +76,52 @@ pub fn err_response(
 }
 
 // ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Build a human label for a rate-limit rule. Same shape the AI
+/// gateway uses (`subject:metric/window`) so log scrapers see one
+/// consistent format across surfaces.
+fn rate_label(rule: &limits::RateLimitRule) -> String {
+    let window = match rule.window_secs {
+        60 => "1m".to_string(),
+        300 => "5m".to_string(),
+        3_600 => "1h".to_string(),
+        18_000 => "5h".to_string(),
+        86_400 => "1d".to_string(),
+        604_800 => "1w".to_string(),
+        n => format!("{n}s"),
+    };
+    format!(
+        "{}:{}/{}",
+        rule.subject_kind.as_str(),
+        rule.metric.as_str(),
+        window
+    )
+}
+
+// ---------------------------------------------------------------------------
 // McpProxy
 // ---------------------------------------------------------------------------
 
 /// The core MCP proxy.  Receives JSON-RPC requests from clients, aggregates
 /// tool lists from all registered upstream servers, enforces access control,
 /// and forwards tool calls to the correct upstream server.
+///
+/// Holds the same `db` / `redis` handles the AI gateway uses so the
+/// shared `limits` engine can be queried per request without bouncing
+/// out to a separate service. The previous in-process per-user rate
+/// limiter (hardcoded 60 calls/min) has been replaced — quotas now
+/// live in `rate_limit_rules` and are configurable per user / per
+/// MCP server.
 #[derive(Clone)]
 pub struct McpProxy {
     pub registry: Registry,
     pub access_controller: AccessController,
     pub pool: ConnectionPool,
-    pub rate_limiter: McpRateLimiter,
     pub circuit_breakers: McpCircuitBreakers,
+    pub db: PgPool,
+    pub redis: fred::clients::Client,
 }
 
 impl McpProxy {
@@ -148,14 +129,16 @@ impl McpProxy {
         registry: Registry,
         access_controller: AccessController,
         pool: ConnectionPool,
+        db: PgPool,
+        redis: fred::clients::Client,
     ) -> Self {
-        let rate_limiter = McpRateLimiter::new(60); // 60 tool calls per user per minute
         Self {
             registry,
             access_controller,
             pool,
-            rate_limiter,
             circuit_breakers: McpCircuitBreakers::new(),
+            db,
+            redis,
         }
     }
 
@@ -252,11 +235,10 @@ impl McpProxy {
         user_roles: &[String],
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
-        // Per-user rate limiting for tool calls
-        if let Err(msg) = self.rate_limiter.check(user_id).await {
-            tracing::warn!(user_id = %user_id, "{msg}");
-            return err_response(request.id, INVALID_REQUEST, msg);
-        }
+        // Resolve params + tool target up front so we know which MCP
+        // server this call belongs to. The rate-limit subjects need
+        // the server id, so the rate-limit gate runs AFTER the
+        // server lookup but BEFORE access control + the real call.
 
         let params = match &request.params {
             Some(p) => p,
@@ -288,6 +270,54 @@ impl McpProxy {
                     );
                 }
             };
+
+        // Rate limit pre-flight against the new generic engine.
+        // Subjects: (user, mcp_server). API keys aren't a thing on
+        // the MCP gateway today — auth is JWT-only — so the api_key
+        // subject is skipped. Only `requests`-metric rules are
+        // checked here; the MCP path doesn't have a tokens metric.
+        let subjects: Vec<(RateLimitSubject, Uuid)> = vec![
+            (RateLimitSubject::User, user_id),
+            (RateLimitSubject::McpServer, server.id),
+        ];
+        let rules = limits::list_enabled_rules_for_subjects(&self.db, &subjects)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("MCP rate-limit DB load failed: {e}; allowing call");
+                Vec::new()
+            });
+        let resolved = sliding::resolve_rules(&rules, RateMetric::Requests);
+        if !resolved.is_empty() {
+            let outcome = sliding::check_and_record(&self.redis, &resolved, 1)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!("MCP rate-limit redis error: {e}; allowing call");
+                    sliding::CheckOutcome {
+                        allowed: true,
+                        exceeded_index: -1,
+                        currents: Vec::new(),
+                    }
+                });
+            if !outcome.allowed {
+                let label = (outcome.exceeded_index >= 0)
+                    .then(|| {
+                        rules
+                            .iter()
+                            .filter(|r| r.metric == RateMetric::Requests)
+                            .nth(outcome.exceeded_index as usize)
+                            .map(rate_label)
+                    })
+                    .flatten()
+                    .unwrap_or_else(|| "rate limit".to_string());
+                tracing::warn!(user_id = %user_id, server = %server.name, "MCP rate limited: {label}");
+                metrics::counter!("mcp_rate_limited_total").increment(1);
+                return err_response(
+                    request.id,
+                    INVALID_REQUEST,
+                    format!("Rate limited: {label}"),
+                );
+            }
+        }
 
         // Access control check (default-deny: requires explicit policy
         // for non-admin users).

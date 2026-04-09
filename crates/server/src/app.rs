@@ -210,7 +210,13 @@ pub async fn create_gateway_app(
         state.config.timeouts.mcp_health_interval_secs,
     );
 
-    let mut mcp_proxy = McpProxy::new(registry, access_controller, pool);
+    let mut mcp_proxy = McpProxy::new(
+        registry,
+        access_controller,
+        pool,
+        state.db.clone(),
+        state.redis.clone(),
+    );
     // Wire the shared CB registry into the proxy so per-server breakers
     // are visible to the dashboard handler.
     mcp_proxy.circuit_breakers = state.mcp_circuit_breakers.clone();
