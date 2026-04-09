@@ -432,6 +432,7 @@
     "creating": "创建中...",
     "createUser": "创建用户",
     "roles": "角色",
+    "teams": "团队",
     "created": "创建时间",
     "forceLogout": "强制下线",
     "forceLogoutConfirm": "确定要强制该用户退出所有会话吗？",

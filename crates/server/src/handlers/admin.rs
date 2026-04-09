@@ -167,10 +167,43 @@ pub async fn list_users(
             });
     }
 
+    // Team memberships in one shot. The frontend uses this to
+    // render which team each row belongs to (so a team_manager
+    // looking at their merged-team list can tell engineering rows
+    // from marketing rows). Joined with `teams` so we can return
+    // the human name, not just the UUID.
+    type TeamRow = (uuid::Uuid, uuid::Uuid, String);
+    let team_rows: Vec<TeamRow> = sqlx::query_as(
+        "SELECT tm.user_id, t.id, t.name \
+           FROM team_members tm \
+           JOIN teams t ON t.id = tm.team_id \
+          WHERE tm.user_id = ANY($1) \
+          ORDER BY t.name ASC",
+    )
+    .bind(&user_ids)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let mut teams_map: std::collections::HashMap<
+        uuid::Uuid,
+        Vec<think_watch_common::dto::UserTeamSummary>,
+    > = std::collections::HashMap::new();
+    for (user_id, team_id, team_name) in team_rows {
+        teams_map
+            .entry(user_id)
+            .or_default()
+            .push(think_watch_common::dto::UserTeamSummary {
+                id: team_id,
+                name: team_name,
+            });
+    }
+
     let responses: Vec<UserResponse> = users
         .into_iter()
         .map(|u| {
             let role_assignments = assignments_map.remove(&u.id).unwrap_or_default();
+            let teams = teams_map.remove(&u.id).unwrap_or_default();
             UserResponse {
                 id: u.id,
                 email: u.email,
@@ -183,6 +216,7 @@ pub async fn list_users(
                 // page never reads them. /api/auth/me is the
                 // canonical place for the live permission set.
                 permissions: Vec::new(),
+                teams,
                 created_at: u.created_at,
             }
         })
@@ -376,6 +410,7 @@ pub async fn create_user(
             is_active: user.is_active,
             role_assignments,
             permissions: Vec::new(),
+            teams: Vec::new(),
             created_at: user.created_at,
         },
         generated_password: if force_change {

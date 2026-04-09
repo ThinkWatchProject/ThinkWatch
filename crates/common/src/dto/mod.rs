@@ -100,6 +100,15 @@ pub struct RoleAssignmentRequest {
     pub scope: Option<String>,
 }
 
+/// Lightweight team summary embedded in `UserResponse` so the
+/// admin user list can display team memberships without a second
+/// round-trip per row.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct UserTeamSummary {
+    pub id: Uuid,
+    pub name: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct UserResponse {
     pub id: Uuid,
@@ -116,6 +125,12 @@ pub struct UserResponse {
     /// (which is now an httpOnly cookie unreadable from JS).
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Teams this user is a member of. Used by the admin user
+    /// list to render scope context: a team_manager looking at
+    /// their merged-team list can tell which row belongs to
+    /// which team.
+    #[serde(default)]
+    pub teams: Vec<UserTeamSummary>,
     pub created_at: DateTime<Utc>,
 }
 

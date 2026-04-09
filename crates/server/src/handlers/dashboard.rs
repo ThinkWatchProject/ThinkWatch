@@ -21,16 +21,52 @@ pub struct DashboardStats {
 }
 
 pub async fn get_dashboard_stats(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<DashboardStats>, AppError> {
     let today = chrono::Utc::now().date_naive();
+    let caller_id = auth_user.claims.sub;
 
-    let total_requests: Option<i64> =
-        sqlx::query_scalar("SELECT COUNT(*) FROM usage_records WHERE created_at::date = $1")
+    // Determine the team scope for usage / api_key counts. Provider
+    // and mcp_server counts are platform-wide and stay global —
+    // they're shared resources every team consumes regardless of
+    // ownership. Only the per-tenant tiles get filtered.
+    let owned_teams_for_keys = auth_user
+        .owned_team_scope_for_perm(&state.db, "api_keys:read")
+        .await?;
+    let owned_teams_for_usage = match auth_user
+        .owned_team_scope_for_perm(&state.db, "analytics:read_all")
+        .await?
+    {
+        None => None, // global
+        Some(_) => {
+            auth_user
+                .owned_team_scope_for_perm(&state.db, "analytics:read_team")
+                .await?
+        }
+    };
+
+    let total_requests: Option<i64> = match &owned_teams_for_usage {
+        None => {
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_records WHERE created_at::date = $1")
+                .bind(today)
+                .fetch_one(&state.db)
+                .await?
+        }
+        Some(team_ids) => {
+            let team_ids_vec: Vec<uuid::Uuid> = team_ids.iter().copied().collect();
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM usage_records \
+                  WHERE created_at::date = $1 \
+                    AND (team_id = ANY($2) OR user_id = $3)",
+            )
             .bind(today)
+            .bind(&team_ids_vec)
+            .bind(caller_id)
             .fetch_one(&state.db)
-            .await?;
+            .await?
+        }
+    };
 
     // Filter out soft-deleted rows so the dashboard "active" tile
     // matches what the limits engine and the gateway router actually
@@ -42,11 +78,35 @@ pub async fn get_dashboard_stats(
     .fetch_one(&state.db)
     .await?;
 
-    let active_api_keys: Option<i64> = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM api_keys WHERE is_active = true AND deleted_at IS NULL",
-    )
-    .fetch_one(&state.db)
-    .await?;
+    let active_api_keys: Option<i64> = match owned_teams_for_keys {
+        None => {
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM api_keys WHERE is_active = true AND deleted_at IS NULL",
+            )
+            .fetch_one(&state.db)
+            .await?
+        }
+        Some(team_ids) => {
+            let team_ids_vec: Vec<uuid::Uuid> = team_ids.into_iter().collect();
+            sqlx::query_scalar(
+                "SELECT COUNT(*) FROM api_keys k \
+                  WHERE k.is_active = true \
+                    AND k.deleted_at IS NULL \
+                    AND ( \
+                        k.user_id = $1 \
+                        OR EXISTS ( \
+                            SELECT 1 FROM team_members tm \
+                             WHERE tm.user_id = k.user_id \
+                               AND tm.team_id = ANY($2) \
+                        ) \
+                    )",
+            )
+            .bind(caller_id)
+            .bind(&team_ids_vec)
+            .fetch_one(&state.db)
+            .await?
+        }
+    };
 
     let connected_mcp_servers: Option<i64> =
         sqlx::query_scalar("SELECT COUNT(*) FROM mcp_servers WHERE status = 'connected'")
@@ -130,8 +190,78 @@ pub struct DashboardLive {
     pub max_rpm_limit: Option<i32>,
 }
 
+/// Resolve the caller's "which user_ids should be visible" filter
+/// for the live dashboard. Returns:
+///   - `None` — caller has `analytics:read_all` at global scope and
+///     should see every gateway log (no SQL filter)
+///   - `Some(user_ids)` — caller has either `analytics:read_team` at
+///     team scope, or no analytics perm at all. The set always
+///     contains the caller's own id, plus every team member of any
+///     team the caller has `analytics:read_team` for. The list is
+///     stringified because the ClickHouse `user_id` column is
+///     `LowCardinality(Nullable(String))`.
+///
+/// This is the dashboard's own scope helper (not on AuthUser)
+/// because the WebSocket loop only has a user_id from a ticket —
+/// it never sees the JWT — so we can't lean on the `AuthUser`
+/// helpers from auth_guard.
+async fn resolve_dashboard_user_filter(
+    pool: &sqlx::PgPool,
+    caller_id: uuid::Uuid,
+) -> Result<Option<Vec<String>>, AppError> {
+    // Global analytics:read_all → no filter.
+    let has_global_all: bool = sqlx::query_scalar(
+        "SELECT EXISTS (
+             SELECT 1 FROM rbac_role_assignments ra
+               JOIN rbac_roles r ON r.id = ra.role_id
+              WHERE ra.user_id = $1
+                AND ra.scope_kind = 'global'
+                AND 'analytics:read_all' = ANY(r.permissions)
+         )",
+    )
+    .bind(caller_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("dashboard scope check failed: {e}")))?;
+    if has_global_all {
+        return Ok(None);
+    }
+
+    // Otherwise build the visible-user set: caller themself + every
+    // team member of any team the caller holds analytics:read_team
+    // (or analytics:read_all) for at team scope.
+    let user_id_strs: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT u.id::text
+           FROM users u
+          WHERE u.id = $1
+             OR EXISTS (
+                 SELECT 1 FROM team_members tm
+                   JOIN rbac_role_assignments ra ON ra.scope_kind = 'team'
+                                                 AND ra.scope_id = tm.team_id
+                   JOIN rbac_roles r ON r.id = ra.role_id
+                  WHERE tm.user_id = u.id
+                    AND ra.user_id = $1
+                    AND ('analytics:read_team' = ANY(r.permissions)
+                         OR 'analytics:read_all' = ANY(r.permissions))
+             )",
+    )
+    .bind(caller_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("dashboard scope query failed: {e}")))?;
+    Ok(Some(user_id_strs.into_iter().map(|(s,)| s).collect()))
+}
+
 /// Build a live snapshot. Reused by both the HTTP endpoint and the WS loop.
-async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError> {
+///
+/// `user_filter` is the result of `resolve_dashboard_user_filter` —
+/// `None` for global admins, `Some(user_ids)` for team-scoped
+/// callers (whose ClickHouse queries gain a `user_id IN (...)`
+/// clause).
+async fn build_live_snapshot(
+    state: &AppState,
+    user_filter: Option<&[String]>,
+) -> Result<DashboardLive, AppError> {
     // --- Postgres queries: parallel via tokio::try_join! --------------------
     // Errors propagate so the dashboard surfaces a real failure instead of
     // pretending data is empty when the DB is down.
@@ -186,54 +316,97 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
     }
     let ch = ch_client(state)?;
 
+    // Build the optional `AND user_id IN (...)` SQL fragment once
+    // and reuse it in every query below. user_ids are UUID strings,
+    // already validated by the caller (they came out of `users.id`)
+    // so direct interpolation is safe — but we still wrap each
+    // value in single quotes to keep the SQL well-formed against
+    // ClickHouse's strict parser.
+    let user_filter_clause: String = match user_filter {
+        None => String::new(),
+        Some([]) => {
+            // Caller has zero visible users — return an empty
+            // snapshot rather than running queries that would
+            // legitimately filter to nothing. Cheaper and avoids
+            // emitting WHERE user_id IN ()` which CH rejects.
+            return Ok(DashboardLive {
+                providers: configured_providers
+                    .iter()
+                    .map(|(name,)| seed_provider("ai", name))
+                    .chain(
+                        configured_mcp_servers
+                            .iter()
+                            .map(|(name,)| seed_provider("mcp", name)),
+                    )
+                    .collect(),
+                rpm_buckets: vec![0; 30],
+                recent_logs: vec![],
+                max_rpm_limit,
+            });
+        }
+        Some(ids) => {
+            let escaped: Vec<String> = ids
+                .iter()
+                .map(|id| format!("'{}'", id.replace('\'', "")))
+                .collect();
+            format!(" AND user_id IN ({})", escaped.join(","))
+        }
+    };
+
     // --- Four ClickHouse queries in parallel via tokio::try_join! -----------
     // Previously these ran serially, costing 4× the CH round-trip latency
     // every WS push (every 4s). All four are independent, so parallelizing
     // is a free win.
     let providers_q = ch
-        .query(
+        .query(&format!(
             "SELECT \
                 ifNull(provider, 'unknown') AS provider, \
                 count() AS requests, \
                 avg(ifNull(latency_ms, 0)) AS avg_latency_ms, \
                 (countIf(status_code < 400) / count()) * 100 AS success_rate \
              FROM gateway_logs \
-             WHERE created_at >= now() - INTERVAL 15 MINUTE \
+             WHERE created_at >= now() - INTERVAL 15 MINUTE{} \
              GROUP BY provider \
              ORDER BY requests DESC \
              LIMIT 8",
-        )
+            user_filter_clause
+        ))
         .fetch_all::<ProviderHealthRow>();
 
     let mcp_q = ch
-        .query(
+        .query(&format!(
             "SELECT \
                 ifNull(server_name, 'unknown') AS provider, \
                 count() AS requests, \
                 avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
                 (countIf(status = 'success') / count()) * 100 AS success_rate \
              FROM mcp_logs \
-             WHERE created_at >= now() - INTERVAL 15 MINUTE \
+             WHERE created_at >= now() - INTERVAL 15 MINUTE{} \
              GROUP BY server_name \
              ORDER BY requests DESC \
              LIMIT 8",
-        )
+            user_filter_clause
+        ))
         .fetch_all::<ProviderHealthRow>();
 
     let buckets_q = ch
-        .query(
+        .query(&format!(
             "SELECT \
                 toString(toStartOfMinute(created_at)) AS minute, \
                 count() AS count \
              FROM gateway_logs \
-             WHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE \
+             WHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE{} \
              GROUP BY minute \
              ORDER BY minute ASC",
-        )
+            user_filter_clause
+        ))
         .fetch_all::<RpmBucket>();
 
+    // The recent-logs subqueries don't have a WHERE clause to
+    // append to, so we synthesize one with `WHERE 1=1` and let
+    // user_filter_clause's leading " AND " slot in cleanly.
     let recent_q = ch
-        .query(
+        .query(&format!(
             "SELECT * FROM ( \
                 SELECT \
                     'api' AS kind, \
@@ -245,6 +418,7 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
                     toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
                     toString(created_at) AS created_at \
                 FROM gateway_logs \
+                WHERE 1=1{filter} \
                 ORDER BY created_at DESC \
                 LIMIT 20 \
                 UNION ALL \
@@ -258,12 +432,14 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
                     toInt64(0) AS tokens, \
                     toString(created_at) AS created_at \
                 FROM mcp_logs \
+                WHERE 1=1{filter} \
                 ORDER BY created_at DESC \
                 LIMIT 20 \
              ) \
              ORDER BY created_at DESC \
              LIMIT 16",
-        )
+            filter = user_filter_clause,
+        ))
         .fetch_all::<LiveLogRow>();
 
     let (provider_rows, mcp_rows, buckets_raw, recent_logs) =
@@ -343,10 +519,13 @@ async fn build_live_snapshot(state: &AppState) -> Result<DashboardLive, AppError
 }
 
 pub async fn get_dashboard_live(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<DashboardLive>, AppError> {
-    Ok(Json(build_live_snapshot(&state).await?))
+    let user_filter = resolve_dashboard_user_filter(&state.db, auth_user.claims.sub).await?;
+    Ok(Json(
+        build_live_snapshot(&state, user_filter.as_deref()).await?,
+    ))
 }
 
 // ============================================================================
@@ -507,9 +686,23 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
     let io_timeout = Duration::from_secs(state.config.timeouts.dashboard_ws_io_secs);
     let tick_secs = state.config.timeouts.dashboard_ws_tick_secs;
 
+    // Resolve the team / user filter ONCE on connect. The filter is
+    // determined by RBAC role assignments, which change rarely; we
+    // accept ~24h staleness here in exchange for not querying the
+    // RBAC tables on every push (every 4s × hundreds of connections
+    // would dominate Postgres). A re-login picks up changes
+    // immediately because the WS is closed and reopened.
+    let user_filter = match resolve_dashboard_user_filter(&state.db, user_id).await {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(%user_id, "dashboard scope resolve failed: {e}");
+            return;
+        }
+    };
+
     // Push an initial snapshot immediately so the client never sees an
     // empty UI on connect.
-    if let Err(e) = push_snapshot(&mut socket, &state, io_timeout).await {
+    if let Err(e) = push_snapshot(&mut socket, &state, user_filter.as_deref(), io_timeout).await {
         tracing::debug!("dashboard ws closed during initial push: {e}");
         return;
     }
@@ -545,7 +738,7 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
                         return;
                     }
                 }
-                if let Err(e) = push_snapshot(&mut socket, &state, io_timeout).await {
+                if let Err(e) = push_snapshot(&mut socket, &state, user_filter.as_deref(), io_timeout).await {
                     tracing::debug!("dashboard ws push failed: {e}");
                     return;
                 }
@@ -571,9 +764,10 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
 async fn push_snapshot(
     socket: &mut WebSocket,
     state: &AppState,
+    user_filter: Option<&[String]>,
     io_timeout: Duration,
 ) -> Result<(), String> {
-    let snap = build_live_snapshot(state)
+    let snap = build_live_snapshot(state, user_filter)
         .await
         .map_err(|e| format!("snapshot build failed: {e}"))?;
     let json = serde_json::to_string(&snap).map_err(|e| e.to_string())?;

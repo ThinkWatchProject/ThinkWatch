@@ -92,6 +92,11 @@ export function RolesPage() {
   const [permissions, setPermissions] = useState<PermissionDef[]>([]);
   const [availableModels, setAvailableModels] = useState<string[]>([]);
   const [availableServers, setAvailableServers] = useState<McpServer[]>([]);
+  // Team list — used to render scope badges as "team: engineering"
+  // instead of the raw `team:<uuid>` the wire format carries.
+  const [teamsById, setTeamsById] = useState<Map<string, { id: string; name: string }>>(
+    new Map(),
+  );
   const [loading, setLoading] = useState(true);
 
   // Filters
@@ -177,16 +182,20 @@ export function RolesPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [rolesRes, perms, modelsRes, serversRes] = await Promise.all([
+      const [rolesRes, perms, modelsRes, serversRes, teamsRes] = await Promise.all([
         api<{ items: RoleResponse[] }>('/api/admin/roles'),
         api<PermissionDef[]>('/api/admin/permissions'),
         api<{ data: { id: string }[] }>('/v1/models').catch(() => ({ data: [] })),
         api<{ items: McpServer[] }>('/api/mcp/servers').catch(() => ({ items: [] })),
+        // Teams power the scope badge on member rows. team_managers
+        // can read this endpoint too — they just see fewer teams.
+        api<Array<{ id: string; name: string }>>('/api/admin/teams').catch(() => []),
       ]);
       setRoles(rolesRes.items);
       setPermissions(perms);
       setAvailableModels(modelsRes.data.map((m) => m.id));
       setAvailableServers(serversRes.items);
+      setTeamsById(new Map(teamsRes.map((t) => [t.id, t])));
     } catch {
       // silently fail (auth / network); leave previous state
     } finally {
@@ -1058,6 +1067,7 @@ export function RolesPage() {
               grouped={grouped}
               dangerousKeys={dangerousKeys}
               availableServers={availableServers}
+              teamsById={teamsById}
               onMembersChanged={fetchData}
             />
           )}
@@ -1283,7 +1293,15 @@ export function RolesPage() {
                               </span>
                               {m.scope !== 'global' && (
                                 <Badge variant="outline" className="text-[9px]">
-                                  {m.scope}
+                                  {(() => {
+                                    const teamId = m.scope.startsWith('team:')
+                                      ? m.scope.slice(5)
+                                      : '';
+                                    const team = teamsById.get(teamId);
+                                    return team
+                                      ? `${t('users.scopeTeam')}: ${team.name}`
+                                      : m.scope;
+                                  })()}
                                 </Badge>
                               )}
                               <Select
@@ -1741,12 +1759,14 @@ function RoleDetail({
   grouped,
   dangerousKeys,
   availableServers,
+  teamsById,
   onMembersChanged,
 }: {
   role: RoleResponse;
   grouped: Map<string, PermissionDef[]>;
   dangerousKeys: Set<string>;
   availableServers: McpServer[];
+  teamsById: Map<string, { id: string; name: string }>;
   onMembersChanged: () => void;
 }) {
   const { t } = useTranslation();
@@ -2096,7 +2116,15 @@ function RoleDetail({
                     )}
                     {m.scope !== 'global' && (
                       <Badge variant="outline" className="text-[9px]">
-                        {m.scope}
+                        {(() => {
+                          const teamId = m.scope.startsWith('team:')
+                            ? m.scope.slice(5)
+                            : '';
+                          const team = teamsById.get(teamId);
+                          return team
+                            ? `${t('users.scopeTeam')}: ${team.name}`
+                            : m.scope;
+                        })()}
                       </Badge>
                     )}
                     <Badge

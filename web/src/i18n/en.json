@@ -432,6 +432,7 @@
     "creating": "Creating...",
     "createUser": "Create User",
     "roles": "Roles",
+    "teams": "Teams",
     "created": "Created",
     "forceLogout": "Force Logout",
     "forceLogoutConfirm": "Force logout this user from all sessions?",

@@ -50,6 +50,10 @@ interface User {
   email: string;
   display_name: string;
   role_assignments: RoleAssignment[];
+  /// Teams this user belongs to. Used by the team column on the
+  /// admin user list so a team_manager looking at a merged
+  /// multi-team result set can tell which row belongs where.
+  teams?: Array<{ id: string; name: string }>;
   oidc_subject: string | null;
   is_active: boolean;
   created_at: string;
@@ -372,6 +376,7 @@ export function UsersPage() {
                   <TableHead>{t('auth.email')}</TableHead>
                   <TableHead>{t('users.displayName')}</TableHead>
                   <TableHead>{t('users.roles')}</TableHead>
+                  <TableHead>{t('users.teams')}</TableHead>
                   <TableHead>{t('users.sso')}</TableHead>
                   <TableHead>{t('common.status')}</TableHead>
                   <TableHead>{t('users.created')}</TableHead>
@@ -423,6 +428,26 @@ export function UsersPage() {
                             )}
                           </Badge>
                         ))}
+                      </div>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex flex-wrap gap-1">
+                        {(u.teams ?? []).length === 0 ? (
+                          <span className="text-xs italic text-muted-foreground">
+                            {t('common.none')}
+                          </span>
+                        ) : (
+                          (u.teams ?? []).map((tm) => (
+                            <Badge
+                              key={tm.id}
+                              variant="outline"
+                              className="text-[10px]"
+                              title={tm.name}
+                            >
+                              {tm.name}
+                            </Badge>
+                          ))
+                        )}
                       </div>
                     </TableCell>
                     <TableCell>

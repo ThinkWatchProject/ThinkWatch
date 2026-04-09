@@ -458,6 +458,7 @@ pub async fn register(
             scope: "global".into(),
         }],
         permissions: Vec::new(),
+        teams: Vec::new(),
         created_at: user.created_at,
     }))
 }
@@ -637,6 +638,24 @@ pub async fn me(
         .await
         .unwrap_or_default();
 
+    // Team memberships — used by the frontend permission cache
+    // and the team-context badge in the header.
+    type TeamRow = (uuid::Uuid, String);
+    let team_rows: Vec<TeamRow> = sqlx::query_as(
+        "SELECT t.id, t.name FROM team_members tm \
+           JOIN teams t ON t.id = tm.team_id \
+          WHERE tm.user_id = $1 \
+          ORDER BY t.name ASC",
+    )
+    .bind(user.id)
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+    let teams: Vec<think_watch_common::dto::UserTeamSummary> = team_rows
+        .into_iter()
+        .map(|(id, name)| think_watch_common::dto::UserTeamSummary { id, name })
+        .collect();
+
     Ok(Json(UserResponse {
         id: user.id,
         email: user.email,
@@ -645,6 +664,7 @@ pub async fn me(
         is_active: user.is_active,
         role_assignments,
         permissions,
+        teams,
         created_at: user.created_at,
     }))
 }
