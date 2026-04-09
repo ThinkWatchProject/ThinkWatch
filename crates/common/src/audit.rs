@@ -394,6 +394,31 @@ pub struct AuditLogger {
 /// instead of just logging.
 const AUDIT_CHANNEL_CAPACITY: usize = 100_000;
 
+/// Throttle window for the structured "audit drop" log line. The
+/// metric still increments on every drop, so dashboards see the
+/// real rate; the log is just for human inspection and one line
+/// per second is plenty.
+fn log_audit_drop_throttled(err: &tokio::sync::mpsc::error::TrySendError<AuditEntry>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    static LAST_LOG_SECS: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST_LOG_SECS.load(Ordering::Relaxed);
+    if now != last
+        && LAST_LOG_SECS
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        tracing::error!(
+            "Audit log channel send failed (buffer full or closed): {err} \
+             — see audit_log_dropped_total / audit_log_queue_depth metrics"
+        );
+    }
+}
+
 impl AuditLogger {
     pub fn new(_config: AuditConfig, db: Option<PgPool>, ch: Option<clickhouse::Client>) -> Self {
         let (tx, rx) = mpsc::channel(AUDIT_CHANNEL_CAPACITY);
@@ -411,16 +436,41 @@ impl AuditLogger {
             });
         }
 
+        // Spawn a queue-depth sampler that updates the
+        // `audit_log_queue_depth` gauge every second. Without this,
+        // operators only see backlog after `audit_log_dropped_total`
+        // has already started incrementing — by which point data
+        // is already gone. The gauge gives a leading indicator that
+        // ClickHouse / forwarders are getting behind.
+        {
+            let tx_for_gauge = tx.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                loop {
+                    interval.tick().await;
+                    // `tokio::sync::mpsc::Sender` doesn't expose
+                    // current length directly; capacity() returns
+                    // the REMAINING capacity, so depth = total - capacity.
+                    let depth = AUDIT_CHANNEL_CAPACITY.saturating_sub(tx_for_gauge.capacity());
+                    metrics::gauge!("audit_log_queue_depth").set(depth as f64);
+                }
+            });
+        }
+
         Self { tx, db, registry }
     }
 
     pub fn log(&self, entry: AuditEntry) {
         if let Err(e) = self.tx.try_send(entry) {
             // Compliance signal: dropped audit entries are a real
-            // operational incident, not a debug warning. Bump a
-            // metric so dashboards / alerts can fire on it.
+            // operational incident, not a debug warning. Bump the
+            // metric on every drop so dashboards / alerts see the
+            // true rate, but throttle the structured log to once
+            // per second — at 10k req/s a sustained drop would
+            // otherwise produce 10k error lines/sec and saturate
+            // the log pipeline along with the audit pipeline.
             metrics::counter!("audit_log_dropped_total").increment(1);
-            tracing::error!("Audit log channel send failed (buffer full or closed): {e}");
+            log_audit_drop_throttled(&e);
         }
     }
 
