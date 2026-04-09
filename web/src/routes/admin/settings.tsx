@@ -35,159 +35,27 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { api, apiPatch, apiPost } from '@/lib/api';
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface SystemInfo {
-  version: string;
-  uptime: string;
-  rust_version: string;
-  server_host: string;
-  gateway_port: number;
-  console_port: number;
-  public_protocol: string;
-  public_host: string;
-  public_port: number;
-}
-
-interface OidcConfig {
-  issuer_url: string | null;
-  client_id: string | null;
-  redirect_url: string | null;
-  enabled: boolean;
-  has_secret?: boolean;
-}
-
-interface AuditConfig {
-  clickhouse_url: string;
-  clickhouse_db: string;
-  connected: boolean;
-}
-
-interface SettingEntry {
-  key: string;
-  value: unknown;
-  category: string;
-  description: string;
-  updated_at: string;
-}
-
-interface ContentFilterRule {
-  name: string;
-  pattern: string;
-  match_type: 'contains' | 'regex';
-  action: 'block' | 'warn' | 'log';
-}
-
-interface ContentFilterPreset {
-  id: string;
-  rules: ContentFilterRule[];
-}
-
-interface ContentFilterTestMatch {
-  name: string;
-  pattern: string;
-  match_type: string;
-  action: string;
-  matched_snippet: string;
-}
-
-interface PiiPattern {
-  name: string;
-  regex: string;
-  placeholder_prefix: string;
-}
-
-interface PiiTestMatch {
-  name: string;
-  original: string;
-  placeholder: string;
-}
-
-interface PiiTestResponse {
-  redacted_text: string;
-  matches: PiiTestMatch[];
-}
-
-function normalizeContentRule(raw: unknown): ContentFilterRule {
-  const r = (raw || {}) as Record<string, unknown>;
-  return {
-    name: typeof r.name === 'string' ? r.name : '',
-    pattern: typeof r.pattern === 'string' ? r.pattern : '',
-    match_type: r.match_type === 'regex' ? 'regex' : 'contains',
-    action:
-      r.action === 'warn' || r.action === 'log'
-        ? r.action
-        : 'block',
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function getSettingValue(
-  settings: Record<string, SettingEntry[]>,
-  category: string,
-  shortKey: string,
-): unknown {
-  const entries = settings[category];
-  if (!entries) return undefined;
-  const fullKey = `${category}.${shortKey}`;
-  const entry = entries.find((e) => e.key === fullKey);
-  return entry?.value;
-}
-
-function num(v: unknown, fallback = 0): number {
-  if (v === undefined || v === null || v === '') return fallback;
-  const n = Number(v);
-  return Number.isNaN(n) ? fallback : n;
-}
-
-function str(v: unknown, fallback = ''): string {
-  if (v === undefined || v === null) return fallback;
-  return String(v);
-}
-
-// ---------------------------------------------------------------------------
-// NumberField — a small helper for number inputs with label + hint
-// ---------------------------------------------------------------------------
-
-function NumberField({
-  label,
-  value,
-  onChange,
-  min = 0,
-  max,
-  hint,
-  readOnly,
-}: {
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-  min?: number;
-  max?: number;
-  hint?: string;
-  readOnly?: boolean;
-}) {
-  return (
-    <div className="space-y-1">
-      <Label className="text-sm">{label}</Label>
-      <Input
-        type="number"
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        min={min}
-        max={max}
-        readOnly={readOnly}
-        className={readOnly ? 'bg-muted' : ''}
-      />
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
-    </div>
-  );
-}
+// Types, value-coercion helpers, and the small NumberField input
+// live in the `settings/` sibling directory. The page component
+// itself is still big — owns all editable state and the save
+// flow — but the data shapes and the helpers it consumes are now
+// reusable and unit-testable in isolation.
+import {
+  type AuditConfig,
+  type ContentFilterPreset,
+  type ContentFilterRule,
+  type ContentFilterTestMatch,
+  getSettingValue,
+  num,
+  normalizeContentRule,
+  type OidcConfig,
+  type PiiPattern,
+  type PiiTestResponse,
+  type SettingEntry,
+  str,
+  type SystemInfo,
+} from './settings/types';
+import { NumberField } from './settings/NumberField';
 
 // ---------------------------------------------------------------------------
 // Component
