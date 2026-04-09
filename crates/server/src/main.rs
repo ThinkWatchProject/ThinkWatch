@@ -230,24 +230,31 @@ async fn main() -> anyhow::Result<()> {
             };
 
             if !issuer.is_empty() && !client_id.is_empty() && !client_secret.is_empty() {
-                // OIDC is enabled AND all fields are populated.
-                // Discovery failure here is a real misconfiguration
-                // — refusing to start is preferable to silently
-                // disabling SSO for an org that thinks it's on.
-                // Operators who want SSO off should flip
-                // `oidc.enabled = false` instead of editing the
-                // issuer URL to break it.
+                // OIDC config lives in `system_settings` and is
+                // edited by admins through the Web UI. We CANNOT
+                // fail-fast on discovery errors here: doing so
+                // would lock the admin out (the only place to fix
+                // a broken OIDC config is the very console the
+                // failing startup prevents from coming up).
+                //
+                // Instead: log loudly, leave SSO disabled, and
+                // bump a metric. The console-side
+                // `/api/auth/sso/status` endpoint reads the live
+                // OidcManager state, so the UI can render a
+                // "configured but unreachable" banner pointing the
+                // admin at the misconfig.
                 match OidcManager::discover(&issuer, &client_id, &client_secret, &redirect).await {
                     Ok(mgr) => {
                         tracing::info!("OIDC provider discovered successfully");
                         Some(mgr)
                     }
                     Err(e) => {
-                        return Err(anyhow::anyhow!(
-                            "OIDC discovery failed for issuer {issuer}: {e}. \
-                             Either fix the issuer URL / credentials or set \
-                             oidc.enabled = false to start without SSO."
-                        ));
+                        metrics::counter!("auth_oidc_discovery_failed_total").increment(1);
+                        tracing::error!(
+                            issuer = %issuer,
+                            "OIDC discovery failed; SSO disabled until fixed in Admin > Settings: {e}"
+                        );
+                        None
                     }
                 }
             } else {
@@ -362,7 +369,7 @@ async fn main() -> anyhow::Result<()> {
     handlers::admin::reconcile_clickhouse_ttls(&state).await;
 
     // --- Start Gateway server (AI API + MCP) ---
-    let gateway_app = app::create_gateway_app(&config, state.clone()).await?;
+    let gateway_app = app::create_gateway_app(&config, state.clone()).await;
     let gateway_addr = config.gateway_addr();
     let gateway_listener = tokio::net::TcpListener::bind(&gateway_addr).await?;
     tracing::info!("Gateway listening on {gateway_addr} (AI API + MCP)");
