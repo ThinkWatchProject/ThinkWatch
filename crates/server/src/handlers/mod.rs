@@ -21,3 +21,4 @@ pub mod providers;
 pub mod roles;
 pub mod setup;
 pub mod sso;
+pub mod teams;

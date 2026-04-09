@@ -116,6 +116,7 @@ INSERT INTO rbac_roles (name, description, is_system, permissions) VALUES
     'models:read', 'models:write',
     'mcp_servers:read', 'mcp_servers:create', 'mcp_servers:update', 'mcp_servers:delete',
     'users:read', 'users:create', 'users:update', 'users:delete',
+    'teams:read', 'teams:create', 'teams:update', 'teams:delete', 'team_members:write',
     'team:read', 'team:write',
     'sessions:revoke',
     'roles:read', 'roles:create', 'roles:update', 'roles:delete', 'roles:edit_system',
@@ -140,6 +141,7 @@ INSERT INTO rbac_roles (name, description, is_system, permissions) VALUES
     'models:read', 'models:write',
     'mcp_servers:read', 'mcp_servers:create', 'mcp_servers:update', 'mcp_servers:delete',
     'users:read', 'users:create', 'users:update',
+    'teams:read', 'teams:create', 'teams:update', 'teams:delete', 'team_members:write',
     'team:read', 'team:write',
     'sessions:revoke',
     'roles:read', 'roles:create', 'roles:update', 'roles:delete',
@@ -154,7 +156,7 @@ INSERT INTO rbac_roles (name, description, is_system, permissions) VALUES
     'settings:read', 'settings:write'
  ]),
 ('team_manager',
- 'Team-level management. Creates API keys for the team, sees the team''s usage and audit trail.',
+ 'Team-level management. Manages members, API keys, and rate limits for the team it''s assigned to. Intended to be granted with scope_kind = team.',
  TRUE,
  ARRAY[
     'ai_gateway:use', 'mcp_gateway:use',
@@ -162,12 +164,13 @@ INSERT INTO rbac_roles (name, description, is_system, permissions) VALUES
     'providers:read',
     'models:read',
     'mcp_servers:read',
-    'users:read',
+    'users:read', 'users:update',
+    'team_members:write',
     'team:read', 'team:write',
     'analytics:read_team',
     'audit_logs:read_team',
     'logs:read_team',
-    'rate_limits:read'
+    'rate_limits:read', 'rate_limits:write'
  ]),
 ('developer',
  'Standard developer. Uses the gateway, manages own API keys, sees own usage.',

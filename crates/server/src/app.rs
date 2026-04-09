@@ -489,6 +489,24 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             patch(handlers::models::update_model).delete(handlers::models::delete_model),
         )
         .route(
+            "/api/admin/teams",
+            get(handlers::teams::list_teams).post(handlers::teams::create_team),
+        )
+        .route(
+            "/api/admin/teams/{id}",
+            get(handlers::teams::get_team)
+                .patch(handlers::teams::update_team)
+                .delete(handlers::teams::delete_team),
+        )
+        .route(
+            "/api/admin/teams/{id}/members",
+            get(handlers::teams::list_members).post(handlers::teams::add_member),
+        )
+        .route(
+            "/api/admin/teams/{id}/members/{user_id}",
+            delete(handlers::teams::remove_member),
+        )
+        .route(
             "/api/mcp/servers",
             get(handlers::mcp_servers::list_servers).post(handlers::mcp_servers::create_server),
         )

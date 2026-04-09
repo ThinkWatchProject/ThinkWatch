@@ -58,6 +58,21 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     p("api_keys:update", "api_keys", "update"),
     d("api_keys:rotate", "api_keys", "rotate"),
     d("api_keys:delete", "api_keys", "delete"),
+    // --- Teams ---
+    // Teams are the unit of "scoped admin": a custom role with
+    // `team_members:write` granted in scope `team:<id>` lets the
+    // holder add/remove members of that team without touching any
+    // other team. The CRUD perms below operate on the team
+    // catalog itself (rename, delete) and live at global scope
+    // because they're platform-wide bookkeeping.
+    p("teams:read", "teams", "read"),
+    p("teams:create", "teams", "create"),
+    p("teams:update", "teams", "update"),
+    d("teams:delete", "teams", "delete"),
+    // Membership management is the only perm intended to be
+    // granted at team scope. The handler accepts it at global
+    // scope too for super_admin convenience.
+    d("team_members:write", "team_members", "write"),
     // --- Providers (AI upstream) ---
     p("providers:read", "providers", "read"),
     p("providers:create", "providers", "create"),
@@ -172,6 +187,11 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
             "users:create",
             "users:update",
             "users:delete",
+            "teams:read",
+            "teams:create",
+            "teams:update",
+            "teams:delete",
+            "team_members:write",
             "team:read",
             "team:write",
             "sessions:revoke",
@@ -228,6 +248,11 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
             "users:read",
             "users:create",
             "users:update",
+            "teams:read",
+            "teams:create",
+            "teams:update",
+            "teams:delete",
+            "team_members:write",
             "team:read",
             "team:write",
             "sessions:revoke",
@@ -254,6 +279,12 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
     ),
     (
         "team_manager",
+        // The team_manager role is meant to be assigned with
+        // `scope_kind = team` so its perms only fire on the team
+        // it's bound to. The handler-level scope checks
+        // (assert_scope_for_*) enforce that — the catalog just
+        // declares which perms the role HAS; the assignment
+        // declares WHERE.
         &[
             "ai_gateway:use",
             "mcp_gateway:use",
@@ -265,12 +296,15 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
             "models:read",
             "mcp_servers:read",
             "users:read",
+            "users:update",
+            "team_members:write",
             "team:read",
             "team:write",
             "analytics:read_team",
             "audit_logs:read_team",
             "logs:read_team",
             "rate_limits:read",
+            "rate_limits:write",
         ],
     ),
     (
