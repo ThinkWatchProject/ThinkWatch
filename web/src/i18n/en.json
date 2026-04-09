@@ -30,7 +30,10 @@
     "clearAll": "Clear",
     "add": "Add",
     "deleteSuccess": "Deleted successfully",
-    "operationFailed": "Operation failed"
+    "operationFailed": "Operation failed",
+    "yes": "Yes",
+    "no": "No",
+    "saving": "Saving..."
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -206,10 +209,45 @@
   },
   "models": {
     "title": "Models",
-    "subtitle": "Available models across all configured providers",
-    "noModels": "No models available.",
-    "noModelsHint": "Configure a provider first to see available models.",
-    "owner": "Owned by"
+    "subtitle": "Per-model price and weighted-token multiplier catalog. Used by the limits engine to convert raw token counts into the weighted units quotas are spent against.",
+    "noModels": "No models registered yet.",
+    "noModelsHint": "Add a model to override pricing or token weighting on a per-model basis. Without an entry, the gateway falls back to provider defaults and 1.0 multipliers.",
+    "noProvidersHint": "Add a provider before registering models.",
+    "owner": "Owned by",
+    "addModel": "Add Model",
+    "editTitle": "Edit Model",
+    "createTitle": "Add Model",
+    "deleteTitle": "Delete Model",
+    "deleteConfirm": "Removing a model row resets it to provider defaults (1.0 multipliers, no per-model pricing). Existing usage records are kept.",
+    "formHint": "Multipliers are relative units — 1.0 means quotas count raw tokens. Tune them so a 1M-token monthly budget can survive a single gpt-4o burst.",
+    "multiplierHint": "Multipliers must be greater than zero. They feed the weighted-token math the limits engine uses; pricing is independent and only affects cost reports.",
+    "col": {
+      "modelId": "Model ID",
+      "displayName": "Display Name",
+      "inputPrice": "Input $/M",
+      "outputPrice": "Output $/M",
+      "inputMult": "In ×",
+      "outputMult": "Out ×",
+      "active": "Active"
+    },
+    "field": {
+      "provider": "Provider",
+      "modelId": "Model ID",
+      "displayName": "Display Name",
+      "inputPrice": "Input price (USD per token)",
+      "outputPrice": "Output price (USD per token)",
+      "inputMult": "Input multiplier",
+      "outputMult": "Output multiplier",
+      "active": "Active"
+    },
+    "errors": {
+      "multiplierMustBePositive": "Multipliers must be positive numbers."
+    },
+    "toast": {
+      "created": "Model added.",
+      "updated": "Model updated.",
+      "deleted": "Model removed."
+    }
   },
   "mcpServers": {
     "title": "MCP Servers",
@@ -653,7 +691,12 @@
     "xffPositionLeft": "Left (client-appended, trust first)",
     "xffPositionRight": "Right (closest proxy, trust last)",
     "xffDepth": "XFF Depth",
-    "xffDepthHint": "1-based position from the chosen direction"
+    "xffDepthHint": "1-based position from the chosen direction",
+    "rateLimiter": {
+      "title": "Rate Limiter",
+      "failClosed": "Fail closed on Redis outage",
+      "failClosedHint": "Default is fail-open: a Redis blip lets requests through and bumps gateway_rate_limiter_fail_open_total. With this on, the gateway returns 429 (rate_limiter_unavailable) for any request the engine couldn't check, and bumps gateway_rate_limiter_fail_closed_total. Turn on if missing accounting is worse than denying traffic."
+    }
   },
   "logs": {
     "title": "Request Logs",

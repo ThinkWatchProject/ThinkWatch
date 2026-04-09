@@ -228,6 +228,7 @@ export function SettingsPage() {
   // Security
   const [contentFilters, setContentFilters] = useState<ContentFilterRule[]>([]);
   const [piiPatterns, setPiiPatterns] = useState<PiiPattern[]>([]);
+  const [rateLimitFailClosed, setRateLimitFailClosed] = useState(false);
 
   // Sandbox + presets state
   const [cfSandboxOpen, setCfSandboxOpen] = useState(false);
@@ -290,6 +291,7 @@ export function SettingsPage() {
     setClientIpSource(str(getSettingValue(data, 'security', 'client_ip_source'), 'xff'));
     setClientIpXffPosition(str(getSettingValue(data, 'security', 'client_ip_xff_position'), 'left'));
     setClientIpXffDepth(num(getSettingValue(data, 'security', 'client_ip_xff_depth'), 1));
+    setRateLimitFailClosed(getSettingValue(data, 'security', 'rate_limit_fail_closed') === true);
 
     setDefaultExpiry(num(getSettingValue(data, 'api_keys', 'default_expiry_days'), 90));
     setInactivityTimeout(num(getSettingValue(data, 'api_keys', 'inactivity_timeout_days'), 0));
@@ -359,6 +361,7 @@ export function SettingsPage() {
           'security.client_ip_source': clientIpSource,
           'security.client_ip_xff_position': clientIpXffPosition,
           'security.client_ip_xff_depth': clientIpXffDepth,
+          'security.rate_limit_fail_closed': rateLimitFailClosed,
           'api_keys.default_expiry_days': defaultExpiry,
           'api_keys.inactivity_timeout_days': inactivityTimeout,
           'api_keys.rotation_period_days': rotationPeriod,
@@ -867,6 +870,27 @@ export function SettingsPage() {
                       />
                     </>
                   )}
+                </div>
+              </CardContent>
+            </Card>
+
+            {/* Rate limiter failure mode */}
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t('settings.rateLimiter.title')}</CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="flex items-start justify-between max-w-2xl gap-4">
+                  <div>
+                    <Label className="text-sm">{t('settings.rateLimiter.failClosed')}</Label>
+                    <p className="text-xs text-muted-foreground mt-0.5 max-w-xl">
+                      {t('settings.rateLimiter.failClosedHint')}
+                    </p>
+                  </div>
+                  <Switch
+                    checked={rateLimitFailClosed}
+                    onCheckedChange={setRateLimitFailClosed}
+                  />
                 </div>
               </CardContent>
             </Card>

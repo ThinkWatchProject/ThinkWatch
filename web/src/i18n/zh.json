@@ -30,7 +30,10 @@
     "clearAll": "清空",
     "add": "添加",
     "deleteSuccess": "删除成功",
-    "operationFailed": "操作失败"
+    "operationFailed": "操作失败",
+    "yes": "是",
+    "no": "否",
+    "saving": "保存中..."
   },
   "nav": {
     "dashboard": "仪表盘",
@@ -206,10 +209,45 @@
   },
   "models": {
     "title": "模型",
-    "subtitle": "所有已配置提供商的可用模型",
-    "noModels": "暂无可用模型。",
-    "noModelsHint": "请先配置提供商以查看可用模型。",
-    "owner": "所有者"
+    "subtitle": "按模型配置价格和加权 token 倍率。限速引擎使用倍率把原始 token 数换算成配额扣减用的加权单位。",
+    "noModels": "尚未注册任何模型。",
+    "noModelsHint": "添加模型行可以按模型覆盖价格或 token 权重。没有条目时网关会回退到提供商默认值,倍率全部为 1.0。",
+    "noProvidersHint": "请先添加提供商,然后才能注册模型。",
+    "owner": "所有者",
+    "addModel": "添加模型",
+    "editTitle": "编辑模型",
+    "createTitle": "添加模型",
+    "deleteTitle": "删除模型",
+    "deleteConfirm": "删除模型行会重置为提供商默认值(倍率 1.0、无单独定价)。已记录的用量数据保持不变。",
+    "formHint": "倍率是相对单位 —— 1.0 表示按原始 token 计配额。把它调好,1M token 的月度预算就不会被一次 gpt-4o 调用打穿。",
+    "multiplierHint": "倍率必须大于零。它喂给限速引擎做加权 token 计算;价格独立配置,仅影响成本报表。",
+    "col": {
+      "modelId": "模型 ID",
+      "displayName": "显示名称",
+      "inputPrice": "输入 $/token",
+      "outputPrice": "输出 $/token",
+      "inputMult": "输入 ×",
+      "outputMult": "输出 ×",
+      "active": "启用"
+    },
+    "field": {
+      "provider": "提供商",
+      "modelId": "模型 ID",
+      "displayName": "显示名称",
+      "inputPrice": "输入价格 (USD/token)",
+      "outputPrice": "输出价格 (USD/token)",
+      "inputMult": "输入倍率",
+      "outputMult": "输出倍率",
+      "active": "启用"
+    },
+    "errors": {
+      "multiplierMustBePositive": "倍率必须为正数。"
+    },
+    "toast": {
+      "created": "模型已添加。",
+      "updated": "模型已更新。",
+      "deleted": "模型已删除。"
+    }
   },
   "mcpServers": {
     "title": "MCP 服务器",
@@ -653,7 +691,12 @@
     "xffPositionLeft": "从左（客户端追加，信任第一个）",
     "xffPositionRight": "从右（最近代理，信任最后一个）",
     "xffDepth": "XFF 取值深度",
-    "xffDepthHint": "从选定方向起的第 N 个（从 1 开始）"
+    "xffDepthHint": "从选定方向起的第 N 个（从 1 开始）",
+    "rateLimiter": {
+      "title": "限速引擎",
+      "failClosed": "Redis 故障时拒绝请求",
+      "failClosedHint": "默认为 fail-open:Redis 抖动时请求照常放行,并增加 gateway_rate_limiter_fail_open_total 指标。打开后,引擎无法检查的请求会返回 429 (rate_limiter_unavailable),并增加 gateway_rate_limiter_fail_closed_total。如果漏算比拒绝流量更糟,就把它打开。"
+    }
   },
   "logs": {
     "title": "请求日志",

@@ -428,6 +428,14 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
                 .delete(handlers::providers::delete_provider),
         )
         .route(
+            "/api/admin/models",
+            get(handlers::models::list_models).post(handlers::models::create_model),
+        )
+        .route(
+            "/api/admin/models/{id}",
+            patch(handlers::models::update_model).delete(handlers::models::delete_model),
+        )
+        .route(
             "/api/mcp/servers",
             get(handlers::mcp_servers::list_servers).post(handlers::mcp_servers::create_server),
         )

@@ -178,6 +178,75 @@ async fn post_flight_account(
     }
 }
 
+/// Run the requests-metric pre-flight against the limits engine for
+/// one resolved request. Shared by all three AI gateway surfaces:
+/// chat completions, Anthropic Messages, and the OpenAI Responses
+/// API. Returns the loaded rule set so the caller can hand it to
+/// `post_flight_account` after the upstream responds — saves a
+/// second DB round-trip.
+///
+/// Honors `security.rate_limit_fail_closed`: when set, a Redis
+/// outage on the engine returns `Err(LocalRateLimited)` so the
+/// caller can return 429 instead of letting the request slip
+/// through.
+async fn preflight_request_limits(
+    state: &GatewayState,
+    identity: &GatewayRequestIdentity,
+    model: &str,
+) -> Result<(Option<Uuid>, Vec<limits::RateLimitRule>), GatewayErrorResponse> {
+    let provider_id = state.router.provider_id_for(model);
+    let rate_subjects = resolve_rate_subjects(identity, provider_id);
+    let request_rules =
+        match limits::list_enabled_rules_for_subjects(&state.db, &rate_subjects).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("rate-limit DB load failed: {e}; allowing request");
+                metrics::counter!("gateway_rate_limit_db_error_total").increment(1);
+                Vec::new()
+            }
+        };
+    let resolved_request_rules = sliding::resolve_rules(&request_rules, RateMetric::Requests);
+    if !resolved_request_rules.is_empty() {
+        let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
+        let outcome =
+            match sliding::check_and_record(&state.redis, &resolved_request_rules, 1, !fail_closed)
+                .await
+            {
+                Ok(o) => o,
+                Err(e) => {
+                    if fail_closed {
+                        tracing::warn!("rate-limit redis error: {e}; failing closed");
+                        return Err(GatewayError::LocalRateLimited(
+                            "rate_limiter_unavailable".to_string(),
+                        )
+                        .into());
+                    }
+                    tracing::warn!("rate-limit redis error: {e}; allowing request");
+                    sliding::CheckOutcome {
+                        allowed: true,
+                        exceeded_index: -1,
+                        currents: Vec::new(),
+                    }
+                }
+            };
+        if !outcome.allowed {
+            let label = (outcome.exceeded_index >= 0)
+                .then(|| {
+                    request_rules
+                        .iter()
+                        .filter(|r| r.metric == RateMetric::Requests)
+                        .nth(outcome.exceeded_index as usize)
+                        .map(rule_label)
+                })
+                .flatten()
+                .unwrap_or_else(|| "rate limit".to_string());
+            metrics::counter!("gateway_rate_limited_total", "metric" => "requests").increment(1);
+            return Err(GatewayError::LocalRateLimited(label).into());
+        }
+    }
+    Ok((provider_id, request_rules))
+}
+
 /// Build a human-readable label for "which rule rejected the request",
 /// used as the error body so callers know what to lift. The label
 /// shape is `<subject>:<metric>/<window>` (e.g. `api_key:tokens/1h`).
@@ -236,73 +305,13 @@ pub async fn proxy_chat_completion(
         .into());
     }
 
-    // 3. Rate limit pre-flight (requests metric).
-    //
-    // Resolve every (api_key, user, provider) subject this request
-    // belongs to and load all enabled rules in one shot. We then
-    // split rules by metric — only requests-metric rules fire here;
-    // tokens-metric rules need real token counts and run after the
-    // upstream response in step 8.
-    //
-    // The actual check is a single Lua EVALSHA across every rule
-    // for atomicity. On Redis error the engine fails open and bumps
-    // a metric (see `sliding::check_and_record`).
-    let provider_id = state.router.provider_id_for(&request.model);
-    let rate_subjects = resolve_rate_subjects(&identity, provider_id);
-    let request_rules =
-        match limits::list_enabled_rules_for_subjects(&state.db, &rate_subjects).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("rate-limit DB load failed: {e}; allowing request");
-                metrics::counter!("gateway_rate_limit_db_error_total").increment(1);
-                Vec::new()
-            }
-        };
-    let resolved_request_rules = sliding::resolve_rules(&request_rules, RateMetric::Requests);
-    if !resolved_request_rules.is_empty() {
-        // Honor `security.rate_limit_fail_closed`: when set, a Redis
-        // outage produces a 429 instead of a free pass. Default
-        // remains fail-open so a Redis blip can't take down the
-        // entire AI control plane.
-        let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
-        let outcome =
-            match sliding::check_and_record(&state.redis, &resolved_request_rules, 1, !fail_closed)
-                .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    if fail_closed {
-                        tracing::warn!("rate-limit redis error: {e}; failing closed");
-                        return Err(GatewayError::LocalRateLimited(
-                            "rate_limiter_unavailable".to_string(),
-                        )
-                        .into());
-                    }
-                    tracing::warn!("rate-limit redis error: {e}; allowing request");
-                    sliding::CheckOutcome {
-                        allowed: true,
-                        exceeded_index: -1,
-                        currents: Vec::new(),
-                    }
-                }
-            };
-        if !outcome.allowed {
-            // Find the first rule that pushed us over so the response
-            // body tells the caller exactly what to lift.
-            let label = (outcome.exceeded_index >= 0)
-                .then(|| {
-                    request_rules
-                        .iter()
-                        .filter(|r| r.metric == RateMetric::Requests)
-                        .nth(outcome.exceeded_index as usize)
-                        .map(rule_label)
-                })
-                .flatten()
-                .unwrap_or_else(|| "rate limit".to_string());
-            metrics::counter!("gateway_rate_limited_total", "metric" => "requests").increment(1);
-            return Err(GatewayError::LocalRateLimited(label).into());
-        }
-    }
+    // 3. Rate limit pre-flight (requests metric). See
+    // `preflight_request_limits` — same path used by Anthropic
+    // Messages and the Responses surface so all three obey the
+    // same `(api_key, user, provider)` rule resolution and the
+    // same `security.rate_limit_fail_closed` toggle.
+    let (provider_id, request_rules) =
+        preflight_request_limits(&state, &identity, &request.model).await?;
 
     // 4. Extract per-request metadata from headers and body
     let metadata = RequestMetadata::extract(&headers, &request);
@@ -510,6 +519,7 @@ pub async fn list_models_handler(State(state): State<GatewayState>) -> Json<serd
 pub async fn proxy_anthropic_messages(
     State(state): State<GatewayState>,
     _headers: HeaderMap,
+    axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     let model = body
@@ -525,6 +535,12 @@ pub async fn proxy_anthropic_messages(
 
     // Apply model mapping
     let mapped_model = state.model_mapper.map(&model);
+
+    // Rate limit pre-flight — same engine as the chat-completions
+    // path so a developer key can't dodge their per-minute quota
+    // by switching from `/v1/chat/completions` to `/v1/messages`.
+    let (provider_id, request_rules) =
+        preflight_request_limits(&state, &identity, &mapped_model).await?;
 
     // Content filter — check user messages
     if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
@@ -601,18 +617,54 @@ pub async fn proxy_anthropic_messages(
     };
 
     if is_stream {
+        // Capture state needed by the post-flight closure before
+        // moving `request` into the provider stream.
+        let db = state.db.clone();
+        let redis = state.redis.clone();
+        let weight_cache = state.weight_cache.clone();
+        let model_for_done = mapped_model.clone();
+        let request_rules_for_done = request_rules.clone();
+        let budget_subjects = resolve_budget_subjects(&identity, provider_id);
         let stream = provider.stream_chat_completion(request);
-        // No-op post-flight callback: these handlers don't currently
-        // wire per-request rate-limit pre-flight, so there's nothing
-        // to record. TODO: extend the limits engine to cover the
-        // Anthropic Messages and Responses surfaces.
-        let on_done = |_usage: Option<crate::providers::traits::Usage>|
+        let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-            Box::pin(async {})
+            Box::pin(async move {
+                let Some(u) = usage else {
+                    return;
+                };
+                post_flight_account(
+                    db,
+                    redis,
+                    weight_cache,
+                    model_for_done,
+                    u.prompt_tokens,
+                    u.completion_tokens,
+                    request_rules_for_done,
+                    budget_subjects,
+                )
+                .await;
+            })
         };
         Ok(stream_to_sse(stream, on_done).into_response())
     } else {
         let response = provider.chat_completion_boxed(request).await?;
+
+        // Post-flight: same accounting path the chat-completions
+        // surface uses. Anthropic responses always carry usage
+        // unless the upstream errored.
+        if let Some(ref usage) = response.usage {
+            post_flight_account(
+                state.db.clone(),
+                state.redis.clone(),
+                state.weight_cache.clone(),
+                mapped_model.clone(),
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                request_rules.clone(),
+                resolve_budget_subjects(&identity, provider_id),
+            )
+            .await;
+        }
 
         // Convert OpenAI response back to Anthropic format
         let anthropic_response = convert_to_anthropic_response(&response);
@@ -680,6 +732,7 @@ fn convert_to_anthropic_response(
 pub async fn proxy_responses(
     State(state): State<GatewayState>,
     _headers: HeaderMap,
+    axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     let model = body
@@ -694,6 +747,11 @@ pub async fn proxy_responses(
         .unwrap_or(false);
 
     let mapped_model = state.model_mapper.map(&model);
+
+    // Rate limit pre-flight — same engine as the chat completions
+    // path. Keeps the three AI surfaces symmetric.
+    let (provider_id, request_rules) =
+        preflight_request_limits(&state, &identity, &mapped_model).await?;
 
     // Extract messages from the "input" field (Responses API format)
     // Input can be a string or an array of messages
@@ -775,18 +833,50 @@ pub async fn proxy_responses(
     })?;
 
     if is_stream {
+        let db = state.db.clone();
+        let redis = state.redis.clone();
+        let weight_cache = state.weight_cache.clone();
+        let model_for_done = mapped_model.clone();
+        let request_rules_for_done = request_rules.clone();
+        let budget_subjects = resolve_budget_subjects(&identity, provider_id);
         let stream = provider.stream_chat_completion(request);
-        // No-op post-flight callback: these handlers don't currently
-        // wire per-request rate-limit pre-flight, so there's nothing
-        // to record. TODO: extend the limits engine to cover the
-        // Anthropic Messages and Responses surfaces.
-        let on_done = |_usage: Option<crate::providers::traits::Usage>|
+        let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-            Box::pin(async {})
+            Box::pin(async move {
+                let Some(u) = usage else {
+                    return;
+                };
+                post_flight_account(
+                    db,
+                    redis,
+                    weight_cache,
+                    model_for_done,
+                    u.prompt_tokens,
+                    u.completion_tokens,
+                    request_rules_for_done,
+                    budget_subjects,
+                )
+                .await;
+            })
         };
         Ok(stream_to_sse(stream, on_done).into_response())
     } else {
         let response = provider.chat_completion_boxed(request).await?;
+
+        if let Some(ref usage) = response.usage {
+            post_flight_account(
+                state.db.clone(),
+                state.redis.clone(),
+                state.weight_cache.clone(),
+                mapped_model.clone(),
+                usage.prompt_tokens,
+                usage.completion_tokens,
+                request_rules.clone(),
+                resolve_budget_subjects(&identity, provider_id),
+            )
+            .await;
+        }
+
         let responses_format = convert_to_responses_format(&response);
         Ok(Json(responses_format).into_response())
     }

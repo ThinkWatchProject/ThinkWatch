@@ -64,6 +64,13 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     p("providers:update", "providers", "update"),
     d("providers:delete", "providers", "delete"),
     d("providers:rotate_key", "providers", "rotate_key"),
+    // --- Models (per-model price + multiplier catalog) ---
+    p("models:read", "models", "read"),
+    // Write covers create/update/delete. Marked dangerous because
+    // tweaking `output_multiplier` on a heavily-used model can
+    // silently invalidate every existing budget cap and rate-limit
+    // rule that touches it.
+    d("models:write", "models", "write"),
     // --- MCP servers ---
     p("mcp_servers:read", "mcp_servers", "read"),
     p("mcp_servers:create", "mcp_servers", "create"),
@@ -155,6 +162,8 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
             "providers:update",
             "providers:delete",
             "providers:rotate_key",
+            "models:read",
+            "models:write",
             "mcp_servers:read",
             "mcp_servers:create",
             "mcp_servers:update",
@@ -210,6 +219,8 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
             "providers:update",
             "providers:delete",
             "providers:rotate_key",
+            "models:read",
+            "models:write",
             "mcp_servers:read",
             "mcp_servers:create",
             "mcp_servers:update",
@@ -251,6 +262,7 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
             "api_keys:update",
             "api_keys:rotate",
             "providers:read",
+            "models:read",
             "mcp_servers:read",
             "users:read",
             "team:read",
@@ -270,6 +282,7 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
             "api_keys:create",
             "api_keys:update",
             "providers:read",
+            "models:read",
             "mcp_servers:read",
             "analytics:read_own",
             "audit_logs:read_own",
@@ -281,6 +294,7 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
         &[
             "api_keys:read",
             "providers:read",
+            "models:read",
             "mcp_servers:read",
             "analytics:read_own",
             "audit_logs:read_own",
