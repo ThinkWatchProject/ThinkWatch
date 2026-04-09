@@ -189,15 +189,23 @@ pub fn resolve_rules(rules: &[RateLimitRule], metric_filter: RateMetric) -> Vec<
 /// for `tokens`. All rules in the slice MUST share a single metric and
 /// must already be filtered through `resolve_rules`.
 ///
-/// On Redis error this returns `Ok(allowed = true)` with empty
-/// `currents` so the gateway fails open. The caller bumps a metric
-/// when this happens. Switching to fail-closed is a one-line change
-/// behind the `security.rate_limit_fail_closed` system setting in a
-/// later phase.
+/// On Redis error the policy is controlled by `fail_open`:
+///
+/// * `fail_open = true` (default): returns `Ok(allowed = true)` with
+///   empty `currents`, bumps `gateway_rate_limiter_fail_open_total`,
+///   and lets the request through. This is the historical behavior
+///   and matches what most operators want — Redis should not be a
+///   single point of failure for the AI control plane.
+/// * `fail_open = false`: returns the underlying `fred` error so
+///   callers can refuse the request. Wired up via the
+///   `security.rate_limit_fail_closed` system setting; flip it on
+///   when the limits engine is the only thing standing between you
+///   and a cost incident.
 pub async fn check_and_record(
     redis: &Client,
     rules: &[ResolvedRule],
     cost: i64,
+    fail_open: bool,
 ) -> Result<CheckOutcome, fred::error::Error> {
     if rules.is_empty() || cost <= 0 {
         return Ok(CheckOutcome {
@@ -242,13 +250,21 @@ pub async fn check_and_record(
             {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::warn!("rate-limit EVAL failed: {e}; failing open");
-                    metrics::counter!("gateway_rate_limiter_fail_open_total").increment(1);
-                    return Ok(CheckOutcome {
-                        allowed: true,
-                        exceeded_index: -1,
-                        currents: Vec::new(),
-                    });
+                    if fail_open {
+                        tracing::warn!("rate-limit EVAL failed: {e}; failing open");
+                        metrics::counter!("gateway_rate_limiter_fail_open_total").increment(1);
+                        return Ok(CheckOutcome {
+                            allowed: true,
+                            exceeded_index: -1,
+                            currents: Vec::new(),
+                        });
+                    } else {
+                        tracing::error!(
+                            "rate-limit EVAL failed: {e}; failing closed per security.rate_limit_fail_closed"
+                        );
+                        metrics::counter!("gateway_rate_limiter_fail_closed_total").increment(1);
+                        return Err(e);
+                    }
                 }
             }
         }

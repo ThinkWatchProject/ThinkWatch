@@ -19,10 +19,28 @@
 //   - All endpoints require `rate_limits:read`.
 //   - Writes additionally require `rate_limits:write`.
 //   - There is no per-subject ownership check today — anyone with
-//     `rate_limits:write` can edit any subject's limits. The
-//     follow-up phase that introduces per-team admins will need
-//     to revisit this; for the single-tenant operator the global
-//     gate is fine.
+//     `rate_limits:write` can edit any subject's limits. This is
+//     **intentional, not an oversight**:
+//
+//       1. ThinkWatch's permissioning is currently global (Admin /
+//          Super Admin). There is no "team admin" or "scoped editor"
+//          role to delegate to, so adding `(subject_kind, subject_id)
+//          ∈ owned_set` checks here would gate every call against an
+//          empty set.
+//       2. The new RBAC table (`rbac_role_assignments`) DOES carry a
+//          `scope_kind / scope_id` column for exactly this purpose,
+//          but the role-management UI doesn't yet expose per-team
+//          rate-limit scopes. Building the check before the UI lands
+//          would just create dead code paths and false-positive
+//          authorization errors.
+//
+//     Re-visit when:
+//       - A "team manager" persona ships, AND
+//       - the role assignment UI lets operators bind a custom role
+//         with `rate_limits:write` to a specific team / project.
+//     At that point this handler should call something like
+//     `auth_user.assert_scope(SubjectKind::Team, team_id)` and the
+//     subject loaders below should filter to the caller's owned set.
 // ============================================================================
 
 use axum::Json;

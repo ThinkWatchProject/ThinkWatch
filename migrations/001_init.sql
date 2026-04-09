@@ -476,6 +476,7 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 ('security.signature_nonce_ttl_secs', '600',    'security', 'Request signature nonce TTL in seconds'),
 ('security.signature_drift_secs',    '300',     'security', 'Maximum allowed clock skew for signatures'),
 ('security.totp_required',          'false',    'security', 'Require all users to enable TOTP two-factor authentication'),
+('security.rate_limit_fail_closed', 'false',    'security', 'When true the rate-limit engine refuses requests on Redis outage instead of failing open'),
 ('security.client_ip_source',       '"connection"',    'security', 'Client IP source: "connection", "xff", or "x-real-ip"'),
 ('security.client_ip_xff_position', '"left"',   'security', 'XFF pick direction: "left" (first) or "right" (last)'),
 ('security.client_ip_xff_depth',    '1',        'security', 'Position depth (1-based) from chosen XFF direction'),

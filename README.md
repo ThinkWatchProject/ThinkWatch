@@ -179,19 +179,38 @@ Any one of those failing → 429 with the rule label in the body
 
 ### Failure mode
 
-When Redis is unavailable the engine **fails open** and bumps the
-`gateway_rate_limiter_fail_open_total` / `gateway_budget_fail_open_total`
-metrics. Operators who prefer fail-closed can flip the planned
-`security.rate_limit_fail_closed` system setting (not yet shipped — the
-metric is the early-warning signal in the meantime).
+When Redis is unavailable the engine defaults to **fail open** and bumps
+the `gateway_rate_limiter_fail_open_total` / `gateway_budget_fail_open_total`
+metrics so the AI control plane keeps running through a Redis blip.
+Operators who would rather refuse traffic than miss accounting can flip
+`security.rate_limit_fail_closed = true` on the Settings page; the
+gateway then returns 429 (`rate_limiter_unavailable`) for any request
+the engine couldn't check, and bumps `gateway_rate_limiter_fail_closed_total`.
 
-### Streaming gap
+### Budget alerts
 
-Token-metric rules and budget caps only fire on **non-streaming** AI
-gateway responses. Streaming SSE responses don't surface a token usage
-field at the proxy layer, so weighted-token accounting is skipped for
-those requests. Request-metric rules and per-provider rules still apply
-to streaming. This is a known follow-up.
+Crossing 50% / 80% / 95% / 100% of any budget cap fires a structured
+`budget threshold crossed` warn log and bumps
+`gateway_budget_alert_total{subject_kind, period, threshold_pct}`.
+Each threshold fires at most once per period bucket — if a request
+takes you from 60% straight past 100% the 80 / 95 / 100 lines all
+fire on that single response, but the next request in the same
+period won't re-fire any of them.
+
+### Streaming token accounting
+
+Token-metric rules and budget caps fire on streaming responses too,
+provided the upstream actually surfaces usage on the SSE stream:
+
+- **OpenAI**: requires the client to set
+  `stream_options.include_usage = true` on the request body.
+- **Anthropic**: cumulative usage on the final `message_delta` event
+  is captured automatically.
+
+If neither upstream surfaces usage on the stream the post-flight
+accounting silently no-ops for that request — the rate-limit and
+budget counters stay accurate within the limits of what the
+upstream is willing to tell us.
 
 ## Tech Stack
 

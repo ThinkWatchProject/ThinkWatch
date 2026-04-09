@@ -38,6 +38,40 @@ use fred::interfaces::KeysInterface;
 use super::{BudgetCap, BudgetSubject};
 
 // ----------------------------------------------------------------------------
+// Threshold alerting
+// ----------------------------------------------------------------------------
+
+/// Percentage thresholds at which a crossing fires a budget alert.
+/// Each crossing in this list bumps the metric exactly once per
+/// period bucket — once 80% has been crossed, subsequent calls in
+/// the same calendar bucket only re-fire 95% / 100%, never 80%
+/// again.
+///
+/// The 100% step is the "soft cap" boundary documented in the
+/// README — it's the last alert before the engine starts rejecting
+/// new requests in the same period.
+pub const ALERT_THRESHOLDS_PCT: &[u8] = &[50, 80, 95, 100];
+
+/// Identify which thresholds in `ALERT_THRESHOLDS_PCT` got crossed
+/// going from `prev` to `new` against `limit`. Pure function — no
+/// I/O, fully testable.
+pub fn crossed_thresholds(prev: i64, new: i64, limit: i64) -> Vec<u8> {
+    if limit <= 0 || new <= prev {
+        return Vec::new();
+    }
+    ALERT_THRESHOLDS_PCT
+        .iter()
+        .copied()
+        .filter(|pct| {
+            // Threshold value in absolute weighted-token units.
+            // Use i128 to avoid overflow on the multiply.
+            let threshold = (limit as i128 * *pct as i128 / 100) as i64;
+            prev < threshold && new >= threshold
+        })
+        .collect()
+}
+
+// ----------------------------------------------------------------------------
 // Period key calculation
 // ----------------------------------------------------------------------------
 
@@ -168,6 +202,30 @@ pub async fn add_weighted_tokens(
                 continue;
             }
         };
+        // Detect threshold crossings off the prev/new pair. Fires a
+        // metric + structured warn for every threshold crossed in
+        // this single INCR. Detection is purely arithmetic — no
+        // extra Redis round trips.
+        let prev_total = new_total - weighted_tokens;
+        for pct in crossed_thresholds(prev_total, new_total, cap.limit_tokens) {
+            metrics::counter!(
+                "gateway_budget_alert_total",
+                "subject_kind" => cap.subject_kind.as_str(),
+                "period" => cap.period.as_str(),
+                "threshold_pct" => pct.to_string(),
+            )
+            .increment(1);
+            tracing::warn!(
+                cap_id = %cap.id,
+                subject_kind = cap.subject_kind.as_str(),
+                subject_id = %cap.subject_id,
+                period = cap.period.as_str(),
+                threshold_pct = pct,
+                limit = cap.limit_tokens,
+                current = new_total,
+                "budget threshold crossed"
+            );
+        }
         // Refresh TTL on every write — cheap and keeps the key
         // alive across restarts so a forgotten counter never lingers.
         let _: Result<(), _> = redis
@@ -203,6 +261,22 @@ mod tests {
     fn unknown_period_falls_back_to_monthly() {
         let t = Utc.with_ymd_and_hms(2026, 4, 8, 0, 0, 0).unwrap();
         assert_eq!(bucket_id("nonsense", t), "2026-04");
+    }
+
+    #[test]
+    fn crossings_fire_only_on_step() {
+        // limit = 1000 → thresholds at 500/800/950/1000
+        // 0 → 600 crosses 500 only
+        assert_eq!(crossed_thresholds(0, 600, 1000), vec![50]);
+        // 600 → 850 crosses 800 only (50 already above prev)
+        assert_eq!(crossed_thresholds(600, 850, 1000), vec![80]);
+        // 850 → 1100 crosses 95 and 100 (over-shoot the cap in
+        // one go — both fire)
+        assert_eq!(crossed_thresholds(850, 1100, 1000), vec![95, 100]);
+        // Same bucket re-INCR → no re-fire
+        assert_eq!(crossed_thresholds(1100, 1200, 1000), Vec::<u8>::new());
+        // limit = 0 (defensive — can't divide) → never fires
+        assert_eq!(crossed_thresholds(0, 999, 0), Vec::<u8>::new());
     }
 
     #[test]

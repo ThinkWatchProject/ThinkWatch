@@ -156,6 +156,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
         db: state.db.clone(),
         redis: state.redis.clone(),
         weight_cache: think_watch_common::limits::weight::WeightCache::new(),
+        dynamic_config: state.dynamic_config.clone(),
     };
     let ai_routes = Router::new()
         .route(
@@ -212,6 +213,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
         pool,
         state.db.clone(),
         state.redis.clone(),
+        state.dynamic_config.clone(),
     );
     // Wire the shared CB registry into the proxy so per-server breakers
     // are visible to the dashboard handler.
