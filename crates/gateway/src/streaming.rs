@@ -3,6 +3,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::Stream;
 use std::convert::Infallible;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
 /// Converts a stream of `ChatCompletionChunk` results into an Axum SSE response.
 ///
@@ -10,13 +11,22 @@ use std::pin::Pin;
 /// a final `data: [DONE]\n\n` event is emitted to signal completion (matching
 /// the OpenAI streaming protocol).
 ///
-/// `on_done` runs **after** the source stream is fully drained but
-/// **before** the SSE wrapper completes. It receives the most recent
-/// `Usage` value the proxy saw on any chunk (None if no chunk
+/// `on_done` is **guaranteed to run exactly once** for every stream
+/// returned from this function — including the case where the client
+/// drops the connection mid-stream. The callback receives the most
+/// recent `Usage` value the proxy saw on any chunk (None if no chunk
 /// reported usage — common when the upstream doesn't include
-/// `stream_options.include_usage`). The callback runs inside the
-/// stream future so it stays in the request task; use it for
-/// post-flight accounting (token-metric rate limits + budget caps).
+/// `stream_options.include_usage`).
+///
+/// **Why the channel dance:** the obvious implementation (call
+/// `on_done().await` at the bottom of an `async_stream::stream!`
+/// block) silently leaks accounting whenever the consumer (Sse)
+/// drops the stream future before the loop exits — and the consumer
+/// drops as soon as the client disconnects. We sidestep that by
+/// running `on_done` in a detached `tokio::spawn` task that listens
+/// for either the stream's "I'm finished" signal or the dropped
+/// sender that signals "I was cancelled". Either way, the callback
+/// fires exactly once with whatever usage the stream had captured.
 pub fn stream_to_sse<F>(
     stream: Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>,
     on_done: F,
@@ -26,12 +36,44 @@ where
         + Send
         + 'static,
 {
-    // Drive the source stream manually via async-stream so we can
-    // tap each chunk for `usage` and run `on_done` AFTER the loop
-    // exits — including the final `[DONE]` sentinel.
+    // Shared state — the stream loop writes the latest usage in,
+    // the post-flight task reads it on completion or drop.
+    let last_usage: Arc<Mutex<Option<Usage>>> = Arc::new(Mutex::new(None));
+    let last_usage_for_done = last_usage.clone();
+
+    // `done_tx.send(natural)` runs from the stream loop on graceful
+    // exit. If the loop is dropped before reaching that line, the
+    // sender is dropped and the receiver yields `Err(RecvError)` —
+    // which we treat as "client cancelled mid-stream". Either way
+    // the spawned task wakes up and runs `on_done`.
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<bool>();
+
+    tokio::spawn(async move {
+        let outcome = done_rx.await;
+        let usage = last_usage_for_done.lock().ok().and_then(|mut g| g.take());
+        match outcome {
+            Ok(true) => {
+                // Natural completion — the stream ran to the [DONE]
+                // sentinel. Counters track real provider usage.
+                metrics::counter!("gateway_stream_completion_total", "outcome" => "natural")
+                    .increment(1);
+            }
+            Ok(false) | Err(_) => {
+                // Either the stream errored mid-flight or the client
+                // disconnected before the [DONE] sentinel. We still
+                // run accounting so the partial usage we captured
+                // (if any) gets recorded — never let early disconnect
+                // be a free-quota loophole.
+                metrics::counter!("gateway_stream_completion_total", "outcome" => "cancelled")
+                    .increment(1);
+            }
+        }
+        on_done(usage).await;
+    });
+
     let body = async_stream::stream! {
         let mut source = stream;
-        let mut last_usage: Option<Usage> = None;
+        let mut done_tx = Some(done_tx);
 
         // We need StreamExt::next() but importing it pollutes the
         // outer scope; pull it in lexically here.
@@ -45,8 +87,10 @@ where
                     // Anthropic emits cumulative usage on the last
                     // `message_delta` event. Either way we just take
                     // the most recent non-None value.
-                    if chunk.usage.is_some() {
-                        last_usage = chunk.usage.clone();
+                    if chunk.usage.is_some()
+                        && let Ok(mut g) = last_usage.lock()
+                    {
+                        *g = chunk.usage.clone();
                     }
                     let json = serde_json::to_string(&chunk).unwrap_or_default();
                     yield Ok::<Event, Infallible>(Event::default().data(json));
@@ -66,13 +110,13 @@ where
             }
         }
 
-        // Source stream is fully drained. Run the post-flight
-        // accounting callback before the [DONE] sentinel so the
-        // counters are up to date by the time the client sees the
-        // close. Errors here can't propagate to the client (the
-        // request is already half-finished), so the callback is
-        // expected to log internally.
-        on_done(last_usage).await;
+        // Source stream is fully drained. Tell the post-flight task
+        // it was a natural completion; if this fails (the spawned
+        // task already got cancelled or dropped) there's nothing to
+        // do — accounting will run from the Drop path instead.
+        if let Some(tx) = done_tx.take() {
+            let _ = tx.send(true);
+        }
 
         yield Ok::<Event, Infallible>(Event::default().data("[DONE]"));
     };

@@ -69,27 +69,69 @@ impl QuotaManager {
         Ok(limit.saturating_sub(used))
     }
 
-    /// Consume tokens after a successful request. Returns new remaining count.
+    /// Consume tokens after a successful request. Returns the new
+    /// remaining count.
+    ///
+    /// Atomically reads the limit, INCRs usage, refreshes TTL, and
+    /// reports whether the new total has crossed the limit — all in
+    /// a single Redis round-trip via Lua. This closes the
+    /// check-then-incr TOCTOU window where two concurrent requests
+    /// could both pass `check_quota` and double-spend.
+    ///
+    /// Crossing the limit during consume bumps
+    /// `gateway_quota_overflow_total` and logs a warning, but the
+    /// request is **not** rejected — the upstream has already
+    /// returned its response by this point, and refusing here would
+    /// just hide the spend without recovering the cost. Use the
+    /// metric to alert on operators who need to tighten limits.
     pub async fn consume(&self, key: &str, tokens: u32) -> Result<u64, AppError> {
+        const LUA_CONSUME: &str = r#"
+local limit_key = KEYS[1]
+local usage_key = KEYS[2]
+local tokens    = tonumber(ARGV[1])
+local ttl_secs  = tonumber(ARGV[2])
+
+local limit = tonumber(redis.call('GET', limit_key) or '0')
+local new_used = redis.call('INCRBY', usage_key, tokens)
+redis.call('EXPIRE', usage_key, ttl_secs)
+
+-- Returns: {new_used, limit, overflowed_flag}
+local overflowed = 0
+if limit > 0 and new_used > limit then
+    overflowed = 1
+end
+return {new_used, limit, overflowed}
+"#;
+
+        let limit_key = Self::limit_key(key);
         let usage_key = Self::usage_key(key);
 
-        let new_used: u64 = self
+        let result: Vec<i64> = self
             .redis
-            .incr_by(usage_key.as_str(), tokens as i64)
+            .eval(
+                LUA_CONSUME,
+                vec![limit_key, usage_key],
+                vec![tokens.to_string(), (32 * 86400).to_string()],
+            )
             .await
             .map_err(|e| {
                 tracing::warn!("Quota consume failed: {e}");
                 AppError::Internal(anyhow::anyhow!("Quota consume failed"))
             })?;
 
-        // Ensure the usage key expires after ~32 days so old months auto-clean
-        let _: () = self
-            .redis
-            .expire(usage_key.as_str(), 32 * 86400, None)
-            .await
-            .unwrap_or(());
+        let new_used = result.first().copied().unwrap_or(0).max(0) as u64;
+        let limit = result.get(1).copied().unwrap_or(0).max(0) as u64;
+        let overflowed = result.get(2).copied().unwrap_or(0) == 1;
 
-        let limit: u64 = self.redis.get(Self::limit_key(key)).await.unwrap_or(0);
+        if overflowed {
+            metrics::counter!("gateway_quota_overflow_total").increment(1);
+            tracing::warn!(
+                key = %key,
+                used = new_used,
+                limit = limit,
+                "quota overflow on consume — request was already served, soft cap exceeded"
+            );
+        }
 
         Ok(limit.saturating_sub(new_used))
     }
