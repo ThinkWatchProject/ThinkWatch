@@ -26,6 +26,7 @@ import {
 import { Plus, Trash2, Pencil, X, Plug, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { LimitsPanel } from '@/components/limits/limits-panel';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
@@ -352,7 +353,7 @@ export function ProvidersPage() {
 
       {/* Edit Provider Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('providers.editProvider')}</DialogTitle>
             <DialogDescription>{t('providers.editDescription')}</DialogDescription>
@@ -394,6 +395,14 @@ export function ProvidersPage() {
                 <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
               </Button>
             </div>
+            {editProvider && (
+              <LimitsPanel
+                subjectKind="provider"
+                subjectId={editProvider.id}
+                surfaces={['ai_gateway']}
+                allowBudgets={true}
+              />
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditDialogOpen(false)}>{t('common.cancel')}</Button>

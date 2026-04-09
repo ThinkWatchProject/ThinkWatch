@@ -29,6 +29,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
+import { LimitsPanel } from '@/components/limits/limits-panel';
 import { toast } from 'sonner';
 
 /// Gateway surfaces an API key may be enabled for. Mirrors the
@@ -499,7 +500,7 @@ export function ApiKeysPage() {
 
       {/* ---- Edit Dialog ---- */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('apiKeys.editKey')}</DialogTitle>
             <DialogDescription>{editingKey?.name ?? ''}</DialogDescription>
@@ -546,6 +547,14 @@ export function ApiKeysPage() {
               <Label>{t('apiKeys.inactivityTimeout')}</Label>
               <Input type="number" value={editInactivityTimeout} onChange={(e) => setEditInactivityTimeout(e.target.value)} placeholder="0" min={0} />
             </div>
+            {editingKey && (
+              <LimitsPanel
+                subjectKind="api_key"
+                subjectId={editingKey.id}
+                surfaces={editingKey.surfaces ?? ['ai_gateway', 'mcp_gateway']}
+                allowBudgets={true}
+              />
+            )}
             <DialogFooter>
               <Button type="submit" disabled={editSubmitting}>
                 {editSubmitting ? t('common.loading') : t('common.save')}

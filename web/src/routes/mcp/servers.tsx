@@ -26,6 +26,7 @@ import {
 import { Plus, Trash2, Search, Pencil, X, Server, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { LimitsPanel } from '@/components/limits/limits-panel';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
@@ -359,7 +360,7 @@ export function McpServersPage() {
 
       {/* Edit MCP Server Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
-        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('mcpServers.editServer')}</DialogTitle>
             <DialogDescription>{t('mcpServers.editDescription')}</DialogDescription>
@@ -401,6 +402,14 @@ export function McpServersPage() {
                 <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
               </Button>
             </div>
+            {editServer && (
+              <LimitsPanel
+                subjectKind="mcp_server"
+                subjectId={editServer.id}
+                surfaces={['mcp_gateway']}
+                allowBudgets={false}
+              />
+            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditDialogOpen(false)}>{t('common.cancel')}</Button>
