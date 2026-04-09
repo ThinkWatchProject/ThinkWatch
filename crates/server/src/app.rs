@@ -251,26 +251,33 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
             get(handlers::health::readiness).with_state(state.clone()),
         );
 
-    // Prometheus `/metrics` endpoint — opt-in via env.
+    // Prometheus `/metrics` endpoint — fully opt-in via env.
     //
-    // The Prometheus recorder is always installed (so metrics are
-    // still collected and available for any future scraping path),
-    // but the HTTP route is only mounted when `METRICS_BEARER_TOKEN`
-    // is set. Rationale: /metrics on the public gateway port leaks
-    // cost / token-usage / error signals, so the safe default is
-    // "endpoint does not exist" rather than "endpoint exists with
-    // no auth". Operators who want scraping set the token (the
-    // `deploy/generate-secrets.sh` script does this automatically),
-    // and Prometheus passes it via `Authorization: Bearer <value>`.
+    // When `METRICS_BEARER_TOKEN` is set:
+    //   - install the Prometheus recorder (`metrics::*!` macros
+    //     start writing into a real backend)
+    //   - mount the `/metrics` route gated on bearer auth
     //
-    // Failing to set the token does not affect any other startup
-    // path — only the /metrics route is skipped.
-    let prom_handle = handlers::metrics::install_prometheus_recorder();
+    // When unset:
+    //   - DO NOT install the recorder. The `metrics` crate's
+    //     macros become silent no-ops at the call site, so we
+    //     waste neither memory nor CPU collecting samples that
+    //     would never be read.
+    //   - DO NOT mount the route (404 instead of leaking signals).
+    //
+    // Rationale: /metrics on the public gateway port leaks cost /
+    // token-usage / error signals, so the safe default is "the
+    // endpoint does not exist and the recorder isn't even running"
+    // rather than "endpoint exists with no auth". Operators who
+    // want scraping set the token (`deploy/generate-secrets.sh`
+    // does it automatically). Failing to set it does not affect
+    // any other startup path.
     let metrics_route = match std::env::var("METRICS_BEARER_TOKEN")
         .ok()
         .filter(|s| !s.is_empty())
     {
         Some(token) => {
+            let prom_handle = handlers::metrics::install_prometheus_recorder();
             tracing::info!("/metrics endpoint enabled (bearer auth required)");
             let metrics_state = handlers::metrics::MetricsState {
                 handle: prom_handle,
