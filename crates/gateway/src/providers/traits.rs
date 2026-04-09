@@ -76,6 +76,12 @@ pub enum GatewayError {
     UpstreamRateLimited,
     #[error("Authentication failed with upstream")]
     UpstreamAuthError,
+    /// Local rate limit / budget cap was hit. The String is the rule
+    /// label so the response body can tell the caller WHICH limit
+    /// fired (e.g. "user requests/5h", "api_key tokens/1d",
+    /// "monthly budget"). Maps to 429 in `IntoResponse`.
+    #[error("Rate limited: {0}")]
+    LocalRateLimited(String),
 }
 
 pub trait AiProvider: Send + Sync {

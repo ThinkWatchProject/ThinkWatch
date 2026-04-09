@@ -3,15 +3,10 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
+use sqlx::PgPool;
 use std::sync::Arc;
+use uuid::Uuid;
 
-use crate::budget_alert::BudgetAlertManager;
-use crate::rate_limiter::RateLimiter;
-use std::sync::LazyLock;
-
-/// Semaphore to limit concurrent spawned budget-alert tasks.
-static BUDGET_ALERT_SEMAPHORE: LazyLock<tokio::sync::Semaphore> =
-    LazyLock::new(|| tokio::sync::Semaphore::new(50));
 use crate::cache::ResponseCache;
 use crate::content_filter::{Action, ContentFilter};
 use crate::cost_tracker::CostTracker;
@@ -20,8 +15,12 @@ use crate::model_mapping::ModelMapper;
 use crate::pii_redactor::PiiRedactor;
 use crate::providers::traits::{ChatCompletionRequest, GatewayError};
 use crate::quota::QuotaManager;
+use crate::rate_limiter::RateLimiter;
 use crate::router::ModelRouter;
 use crate::streaming::stream_to_sse;
+use think_watch_common::limits::{
+    self, BudgetSubject, RateLimitSubject, RateMetric, sliding, weight,
+};
 
 /// Shared application state for the gateway proxy handlers.
 #[derive(Clone)]
@@ -34,9 +33,20 @@ pub struct GatewayState {
     pub cache: Arc<ResponseCache>,
     /// Hot-swappable so admins can update PII patterns without restarting.
     pub pii_redactor: Arc<ArcSwap<PiiRedactor>>,
-    pub budget_alert: Option<Arc<BudgetAlertManager>>,
     pub cost_tracker: Arc<CostTracker>,
     pub rate_limiter: Arc<RateLimiter>,
+    /// PG pool — used to query enabled rate-limit rules and budget caps
+    /// per request. Cached above the proxy via `WeightCache` for the
+    /// model multipliers; raw rules go through a separate cache later.
+    pub db: PgPool,
+    /// Redis client used by the bucketed sliding-window engine and the
+    /// natural-period budget counters. Same connection used by `quota`,
+    /// `cache`, and the rest of the gateway.
+    pub redis: fred::clients::Client,
+    /// LRU cache mapping `model_id → (input_multiplier, output_multiplier)`.
+    /// Looked up once per request to convert raw token counts into
+    /// the weighted-token cost the engine consumes.
+    pub weight_cache: weight::WeightCache,
 }
 
 /// Identity information extracted from the auth middleware.
@@ -50,6 +60,80 @@ pub struct GatewayRequestIdentity {
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
     pub allowed_models: Option<Vec<String>>,
+}
+
+/// Resolve every (subject_kind, subject_id) tuple this request should
+/// be rate-limited against.
+///
+/// Order is significant only for diagnostics — the rate-limit engine
+/// treats every rule independently and rejects on the first failure.
+/// We add api_key first so the most specific quota fires first in
+/// the error message.
+fn resolve_rate_subjects(
+    identity: &GatewayRequestIdentity,
+    provider_id: Option<Uuid>,
+) -> Vec<(RateLimitSubject, Uuid)> {
+    let mut out = Vec::new();
+    if let Some(s) = identity.api_key_id.as_deref()
+        && let Ok(id) = Uuid::parse_str(s)
+    {
+        out.push((RateLimitSubject::ApiKey, id));
+    }
+    if let Some(s) = identity.user_id.as_deref()
+        && let Ok(id) = Uuid::parse_str(s)
+    {
+        out.push((RateLimitSubject::User, id));
+    }
+    if let Some(pid) = provider_id {
+        out.push((RateLimitSubject::Provider, pid));
+    }
+    out
+}
+
+/// Same shape as `resolve_rate_subjects` but for `budget_caps`.
+/// Budget caps don't apply to MCP servers, but the rest of the
+/// subject set overlaps. Provider budgets are common (a finance
+/// owner caps the OpenAI provider per month) so we include them.
+fn resolve_budget_subjects(
+    identity: &GatewayRequestIdentity,
+    provider_id: Option<Uuid>,
+) -> Vec<(BudgetSubject, Uuid)> {
+    let mut out = Vec::new();
+    if let Some(s) = identity.api_key_id.as_deref()
+        && let Ok(id) = Uuid::parse_str(s)
+    {
+        out.push((BudgetSubject::ApiKey, id));
+    }
+    if let Some(s) = identity.user_id.as_deref()
+        && let Ok(id) = Uuid::parse_str(s)
+    {
+        out.push((BudgetSubject::User, id));
+    }
+    if let Some(pid) = provider_id {
+        out.push((BudgetSubject::Provider, pid));
+    }
+    out
+}
+
+/// Build a human-readable label for "which rule rejected the request",
+/// used as the error body so callers know what to lift. The label
+/// shape is `<subject>:<metric>/<window>` (e.g. `api_key:tokens/1h`).
+fn rule_label(rule: &limits::RateLimitRule) -> String {
+    let window = match rule.window_secs {
+        60 => "1m".to_string(),
+        300 => "5m".to_string(),
+        3_600 => "1h".to_string(),
+        18_000 => "5h".to_string(),
+        86_400 => "1d".to_string(),
+        604_800 => "1w".to_string(),
+        n => format!("{n}s"),
+    };
+    format!(
+        "{}:{}/{}",
+        rule.subject_kind.as_str(),
+        rule.metric.as_str(),
+        window
+    )
 }
 
 /// POST /v1/chat/completions
@@ -89,9 +173,57 @@ pub async fn proxy_chat_completion(
         .into());
     }
 
-    // 3. Rate limit / budget enforcement is wired in phase B against
-    // the new `rate_limit_rules` / `budget_caps` engine. The old
-    // per-key fixed-column path lived here and has been removed.
+    // 3. Rate limit pre-flight (requests metric).
+    //
+    // Resolve every (api_key, user, provider) subject this request
+    // belongs to and load all enabled rules in one shot. We then
+    // split rules by metric — only requests-metric rules fire here;
+    // tokens-metric rules need real token counts and run after the
+    // upstream response in step 8.
+    //
+    // The actual check is a single Lua EVALSHA across every rule
+    // for atomicity. On Redis error the engine fails open and bumps
+    // a metric (see `sliding::check_and_record`).
+    let provider_id = state.router.provider_id_for(&request.model);
+    let rate_subjects = resolve_rate_subjects(&identity, provider_id);
+    let request_rules =
+        match limits::list_enabled_rules_for_subjects(&state.db, &rate_subjects).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("rate-limit DB load failed: {e}; allowing request");
+                metrics::counter!("gateway_rate_limit_db_error_total").increment(1);
+                Vec::new()
+            }
+        };
+    let resolved_request_rules = sliding::resolve_rules(&request_rules, RateMetric::Requests);
+    if !resolved_request_rules.is_empty() {
+        let outcome = sliding::check_and_record(&state.redis, &resolved_request_rules, 1)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("rate-limit redis error: {e}; allowing request");
+                sliding::CheckOutcome {
+                    allowed: true,
+                    exceeded_index: -1,
+                    currents: Vec::new(),
+                }
+            });
+        if !outcome.allowed {
+            // Find the first rule that pushed us over so the response
+            // body tells the caller exactly what to lift.
+            let label = (outcome.exceeded_index >= 0)
+                .then(|| {
+                    request_rules
+                        .iter()
+                        .filter(|r| r.metric == RateMetric::Requests)
+                        .nth(outcome.exceeded_index as usize)
+                        .map(rule_label)
+                })
+                .flatten()
+                .unwrap_or_else(|| "rate limit".to_string());
+            metrics::counter!("gateway_rate_limited_total", "metric" => "requests").increment(1);
+            return Err(GatewayError::LocalRateLimited(label).into());
+        }
+    }
 
     // 4. Extract per-request metadata from headers and body
     let metadata = RequestMetadata::extract(&headers, &request);
@@ -183,39 +315,59 @@ pub async fn proxy_chat_completion(
             }
         }
 
-        // 8c. Budget alert check (async, non-blocking)
-        if let Some(ref budget_alert) = state.budget_alert
-            && let Some(ref usage) = response.usage
-        {
-            let request_cost = state.cost_tracker.calculate_cost(
-                &request.model,
-                usage.prompt_tokens,
-                usage.completion_tokens,
+        // 8b.1. Post-flight accounting against the new limits engine.
+        //
+        // Token-metric sliding rules and budget caps both run here,
+        // after the upstream returned its real token counts. Both
+        // are recorded but never refused — by this point the request
+        // has already been served, so the caller can transiently
+        // exceed by exactly one request's worth of weighted tokens
+        // (the documented "soft cap" behavior).
+        if let Some(ref usage) = response.usage {
+            let mult = state.weight_cache.get(&state.db, &request.model).await;
+            let weighted = weight::weighted_tokens(
+                usage.prompt_tokens as i64,
+                usage.completion_tokens as i64,
+                mult,
             );
-            if request_cost > 0.0 {
-                let alert = Arc::clone(budget_alert);
-                let key = quota_key.clone();
-                let quota = state.quota.clone();
-                tokio::spawn(async move {
-                    // Limit concurrent budget alert tasks to prevent unbounded spawning
-                    let _permit = match BUDGET_ALERT_SEMAPHORE.try_acquire() {
-                        Ok(p) => p,
-                        Err(_) => {
-                            tracing::debug!("Budget alert task skipped (backpressure)");
-                            return;
+            if weighted > 0 {
+                // Token-metric sliding rules — same set of rules we
+                // loaded above, just filtered to the tokens metric.
+                let resolved_token_rules =
+                    sliding::resolve_rules(&request_rules, RateMetric::Tokens);
+                if !resolved_token_rules.is_empty()
+                    && let Err(e) =
+                        sliding::check_and_record(&state.redis, &resolved_token_rules, weighted)
+                            .await
+                {
+                    tracing::warn!("token rate-limit accounting failed: {e}");
+                }
+
+                // Natural-period budget caps — daily / weekly /
+                // monthly weighted-token totals.
+                let budget_subjects = resolve_budget_subjects(&identity, provider_id);
+                match limits::list_enabled_caps_for_subjects(&state.db, &budget_subjects).await {
+                    Ok(caps) if !caps.is_empty() => {
+                        if let Err(e) =
+                            limits::budget::add_weighted_tokens(&state.redis, &caps, weighted).await
+                        {
+                            tracing::warn!("budget add_weighted_tokens failed: {e}");
                         }
-                    };
-                    // Get monthly spend from quota tracker
-                    if let Ok(info) = quota.get_usage(&key).await {
-                        let budget_limit = info.limit as f64;
-                        let current_spend = info.used as f64;
-                        alert
-                            .check_and_alert(&key, current_spend, budget_limit)
-                            .await;
                     }
-                });
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("budget caps DB load failed: {e}");
+                    }
+                }
             }
         }
+
+        // 8c. Budget threshold alerting was previously fired here
+        // by `BudgetAlertManager`. Removed in the limits refactor —
+        // alerts will be re-introduced as a subscriber on
+        // `budget_caps` cap-crossings in a follow-up phase. The
+        // current path still records spend (8b.1 above), it just
+        // doesn't notify any external webhook.
 
         // 8d. Cache the response
         state.cache.set(&request, &response, None).await;
@@ -602,6 +754,7 @@ impl IntoResponse for GatewayErrorResponse {
             GatewayError::TransformError(_) => (StatusCode::BAD_REQUEST, "transform_error"),
             GatewayError::NetworkError(_) => (StatusCode::BAD_GATEWAY, "network_error"),
             GatewayError::UpstreamRateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
+            GatewayError::LocalRateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
             GatewayError::UpstreamAuthError => (StatusCode::UNAUTHORIZED, "auth_error"),
         };
 

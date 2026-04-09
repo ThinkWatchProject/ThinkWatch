@@ -4005,6 +4005,7 @@ dependencies = [
  "reqwest 0.13.2",
  "serde",
  "serde_json",
+ "sqlx",
  "think-watch-auth",
  "think-watch-common",
  "thiserror 2.0.18",

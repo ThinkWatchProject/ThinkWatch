@@ -1,4 +1,3 @@
-pub mod budget_alert;
 pub mod cache;
 pub mod channel;
 pub mod content_filter;

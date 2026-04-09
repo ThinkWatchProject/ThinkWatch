@@ -319,15 +319,11 @@ CREATE INDEX idx_usage_records_team_id     ON usage_records(team_id, created_at)
 CREATE INDEX idx_usage_records_api_key_id  ON usage_records(api_key_id, created_at);
 CREATE INDEX idx_usage_records_model_id    ON usage_records(model_id, created_at);
 
-CREATE TABLE budget_alerts (
-    id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    target_type   VARCHAR(50)  NOT NULL,
-    target_id     UUID NOT NULL,
-    threshold     DECIMAL(5, 2) NOT NULL,
-    current_spend DECIMAL(12, 4),
-    budget_limit  DECIMAL(12, 4),
-    notified_at   TIMESTAMPTZ NOT NULL DEFAULT now()
-);
+-- The legacy `budget_alerts` table and its `BudgetAlertManager`
+-- runtime were removed in the limits/quotas refactor — alerts now
+-- come from cap crossings on `budget_caps` (or, today, from raw
+-- usage_records aggregations on the dashboard). The table is gone
+-- because nothing reads it anymore.
 
 -- --------------------------------------------------------------------------
 -- Rate limit rules + budget caps
@@ -497,11 +493,6 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 ('audit.batch_size',          '50',    'audit', 'Quickwit batch flush size'),
 ('audit.flush_interval_secs', '2',     'audit', 'Quickwit batch flush interval in seconds'),
 ('audit.channel_capacity',    '10000', 'audit', 'Audit log channel buffer capacity');
-
--- Budget
-INSERT INTO system_settings (key, value, category, description) VALUES
-('budget.alert_thresholds', '[0.50, 0.80, 0.95]', 'budget', 'Budget alert threshold percentages'),
-('budget.webhook_url',      'null',                'budget', 'Budget alert webhook URL');
 
 -- API Keys
 INSERT INTO system_settings (key, value, category, description) VALUES

@@ -112,14 +112,6 @@ impl DynamicConfig {
         self.cache.read().await.get(key).and_then(|v| v.as_bool())
     }
 
-    /// Get as Vec<f64>.
-    pub async fn get_f64_vec(&self, key: &str) -> Option<Vec<f64>> {
-        self.cache.read().await.get(key).and_then(|v| {
-            v.as_array()
-                .map(|arr| arr.iter().filter_map(|x| x.as_f64()).collect())
-        })
-    }
-
     /// Get the raw JSON value (for complex structures like pattern arrays).
     pub async fn get_json(&self, key: &str) -> Option<Value> {
         self.cache.read().await.get(key).cloned()
@@ -197,16 +189,6 @@ impl DynamicConfig {
         self.get_i64("security.signature_nonce_ttl_secs")
             .await
             .unwrap_or(600)
-    }
-
-    pub async fn budget_alert_thresholds(&self) -> Vec<f64> {
-        self.get_f64_vec("budget.alert_thresholds")
-            .await
-            .unwrap_or_else(|| vec![0.50, 0.80, 0.95])
-    }
-
-    pub async fn budget_webhook_url(&self) -> Option<String> {
-        self.get_string("budget.webhook_url").await
     }
 
     pub async fn is_initialized(&self) -> bool {
@@ -433,32 +415,6 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("{key}: expected integer"))?;
             if !(1..=365).contains(&n) {
                 anyhow::bail!("{key}: must be between 1 and 365 days");
-            }
-        }
-
-        // Budget thresholds must be between 0.0 and 1.0
-        "budget.alert_thresholds" => {
-            let arr = value
-                .as_array()
-                .ok_or_else(|| anyhow::anyhow!("{key}: expected an array of numbers"))?;
-            for v in arr {
-                let n = v
-                    .as_f64()
-                    .ok_or_else(|| anyhow::anyhow!("{key}: array elements must be numbers"))?;
-                if !(0.0..=1.0).contains(&n) {
-                    anyhow::bail!("{key}: threshold values must be between 0.0 and 1.0, got {n}");
-                }
-            }
-        }
-
-        // Webhook URL validation
-        "budget.webhook_url" => {
-            if let Some(url) = value.as_str()
-                && !url.is_empty()
-                && !url.starts_with("http://")
-                && !url.starts_with("https://")
-            {
-                anyhow::bail!("{key}: must be a valid http/https URL");
             }
         }
 

@@ -1210,32 +1210,6 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
-        // Budget thresholds: array of floats in 0.0..1.0
-        "budget.alert_thresholds" => {
-            let arr = value.as_array().ok_or_else(|| {
-                AppError::BadRequest("budget.alert_thresholds must be an array".into())
-            })?;
-            for item in arr {
-                let v = item.as_f64().ok_or_else(|| {
-                    AppError::BadRequest("Each threshold must be a number".into())
-                })?;
-                if !(0.0..=1.0).contains(&v) {
-                    return Err(AppError::BadRequest(
-                        "Each threshold must be between 0.0 and 1.0".into(),
-                    ));
-                }
-            }
-        }
-
-        // Budget webhook URL: null or string
-        "budget.webhook_url" => {
-            if !value.is_null() && !value.is_string() {
-                return Err(AppError::BadRequest(
-                    "budget.webhook_url must be a string or null".into(),
-                ));
-            }
-        }
-
         // Boolean settings
         "setup.initialized" => {
             // Only allow setting to true — prevent resetting initialization
@@ -1455,20 +1429,6 @@ mod tests {
         assert!(validate_setting("api_keys.default_expiry_days", &json!(0)).is_ok());
         assert!(validate_setting("api_keys.default_expiry_days", &json!(30)).is_ok());
         assert!(validate_setting("api_keys.default_expiry_days", &json!(-1)).is_err());
-    }
-
-    #[test]
-    fn validates_budget_thresholds() {
-        assert!(validate_setting("budget.alert_thresholds", &json!([0.5, 0.8])).is_ok());
-        assert!(validate_setting("budget.alert_thresholds", &json!([1.5])).is_err());
-        assert!(validate_setting("budget.alert_thresholds", &json!("not array")).is_err());
-    }
-
-    #[test]
-    fn validates_webhook_url() {
-        assert!(validate_setting("budget.webhook_url", &json!(null)).is_ok());
-        assert!(validate_setting("budget.webhook_url", &json!("https://example.com/hook")).is_ok());
-        assert!(validate_setting("budget.webhook_url", &json!(42)).is_err());
     }
 
     #[test]
