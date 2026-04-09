@@ -36,6 +36,7 @@ import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, B
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { LimitsPanel } from '@/components/limits/limits-panel';
 
 interface RoleAssignment {
   role_id: string;
@@ -460,7 +461,7 @@ export function UsersPage() {
 
       {/* Edit dialog */}
       <Dialog open={editOpen} onOpenChange={(open) => { setEditOpen(open); if (!open) setEditUser(null); }}>
-        <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
+        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('users.editUser')}</DialogTitle>
             <DialogDescription>{t('users.editDescription')}</DialogDescription>
@@ -485,6 +486,14 @@ export function UsersPage() {
               assignments={editAssignments}
               availableRoles={availableRoles}
             />
+            {editUser && (
+              <LimitsPanel
+                subjectKind="user"
+                subjectId={editUser.id}
+                surfaces={['ai_gateway', 'mcp_gateway']}
+                allowBudgets={true}
+              />
+            )}
             <DialogFooter>
               <Button type="submit" disabled={editLoading}>{editLoading ? t('users.saving') : t('common.save')}</Button>
             </DialogFooter>
