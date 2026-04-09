@@ -12,15 +12,43 @@ pub struct LoginRequest {
     pub totp_code: Option<String>,
 }
 
+/// Login / refresh / SSO callback response.
+///
+/// **Tokens are NOT in the body anymore.** access_token and
+/// refresh_token are delivered exclusively as httpOnly cookies
+/// (`Set-Cookie: access_token=...; HttpOnly; Secure; SameSite=Lax`)
+/// so client-side JavaScript — and any XSS attacker who lands in
+/// that JS — cannot read them. The frontend never sees the JWT
+/// payload directly.
+///
+/// What the body still carries:
+///   - `signing_key`: hex-encoded HMAC key. The browser CANNOT
+///     read the httpOnly cookie that holds this same value, but
+///     the page JS still needs the key to compute write-request
+///     signatures, so we hand it back in the body once and the
+///     frontend stashes it in `sessionStorage`. (sessionStorage,
+///     not localStorage, so it dies with the tab.)
+///   - `permissions` / `roles`: the JWT claims the frontend used
+///     to decode out of the access token to gate UI buttons. With
+///     the token now opaque from JS, the server has to surface
+///     them explicitly.
+///   - `expires_in`: how long the access cookie is valid, so the
+///     frontend can schedule a proactive refresh before it expires.
 #[derive(Debug, Serialize)]
 pub struct LoginResponse {
-    pub access_token: String,
-    pub refresh_token: String,
     pub token_type: String,
     pub expires_in: i64,
     /// Per-session HMAC signing key (hex-encoded, 32 bytes).
     /// Used by the frontend to sign state-changing requests.
     pub signing_key: String,
+    /// Flat union of every role's `permissions` field — the
+    /// authoritative set the UI uses for hasPermission() checks.
+    #[serde(default)]
+    pub permissions: Vec<String>,
+    /// Role names (system + custom union). Cosmetic — used by the
+    /// UI for badges, never for authorization decisions.
+    #[serde(default)]
+    pub roles: Vec<String>,
     /// If true, the user must change their password before using the platform.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub password_change_required: Option<bool>,
@@ -32,9 +60,15 @@ pub struct TotpRequiredResponse {
     pub totp_required: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct RefreshRequest {
-    pub refresh_token: String,
+    /// Optional. When omitted, the server reads `refresh_token`
+    /// from the httpOnly cookie set at login time. The body field
+    /// is kept for any non-browser clients that might still post
+    /// the token explicitly, but the cookie path is the standard
+    /// browser flow.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
 }
 
 // --- User DTOs ---
@@ -76,6 +110,12 @@ pub struct UserResponse {
     /// All role assignments for this user (system + custom, union).
     #[serde(default)]
     pub role_assignments: Vec<RoleAssignment>,
+    /// Flat union of every role's `permissions` field. Returned
+    /// from `/api/auth/me` so the frontend hasPermission() helper
+    /// can populate without needing to decode the access token
+    /// (which is now an httpOnly cookie unreadable from JS).
+    #[serde(default)]
+    pub permissions: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 

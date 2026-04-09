@@ -328,8 +328,8 @@ pub async fn login(
     let refresh_token = state.jwt.create_refresh_token_with_ttl(
         user.id,
         &user.email,
-        roles,
-        permissions,
+        roles.clone(),
+        permissions.clone(),
         refresh_ttl_days,
     )?;
 
@@ -350,14 +350,22 @@ pub async fn login(
     }
     state.audit.log(entry);
 
-    // Set signing key as httpOnly cookie (primary) + response body (backward compat)
-    let cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
+    // httpOnly cookies for the JWT tokens — frontend never sees
+    // them, XSS can't exfiltrate. The signing_key still goes via
+    // both cookie (server reads on signature verify) and body
+    // (page JS reads to compute write signatures, stashed in
+    // sessionStorage).
+    let signing_cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
+    let access_cookie = verify_signature::access_token_cookie(&access_token, access_ttl);
+    let refresh_cookie =
+        verify_signature::refresh_token_cookie(&refresh_token, refresh_ttl_days * 86400);
+
     let mut response = Json(LoginResponse {
-        access_token,
-        refresh_token,
         token_type: "Bearer".into(),
         expires_in: access_ttl,
         signing_key,
+        permissions: permissions.clone(),
+        roles: roles.clone(),
         password_change_required: if user.password_change_required {
             Some(true)
         } else {
@@ -365,10 +373,12 @@ pub async fn login(
         },
     })
     .into_response();
-    if let Ok(cookie_value) = cookie.parse() {
-        response
-            .headers_mut()
-            .insert(axum::http::header::SET_COOKIE, cookie_value);
+
+    let headers = response.headers_mut();
+    for cookie_str in [&signing_cookie, &access_cookie, &refresh_cookie] {
+        if let Ok(v) = cookie_str.parse() {
+            headers.append(axum::http::header::SET_COOKIE, v);
+        }
     }
     Ok(response)
 }
@@ -441,17 +451,40 @@ pub async fn register(
             is_system,
             scope: "global".into(),
         }],
+        permissions: Vec::new(),
         created_at: user.created_at,
     }))
 }
 
 pub async fn refresh(
     State(state): State<AppState>,
-    Json(req): Json<RefreshRequest>,
+    request: axum::extract::Request,
 ) -> Result<axum::response::Response, AppError> {
+    // Resolve the refresh token, preferring the httpOnly cookie set
+    // at login time and falling back to a body field for non-browser
+    // clients. The cookie path is the standard browser flow now —
+    // the body field is just a courtesy for curl/CI scripts.
+    let cookie_token =
+        crate::middleware::verify_signature::extract_cookie(&request, "refresh_token");
+    let presented_token = if let Some(t) = cookie_token {
+        t
+    } else {
+        // Read body manually so we can reuse the request later if needed.
+        let bytes = axum::body::to_bytes(request.into_body(), 64 * 1024)
+            .await
+            .map_err(|_| AppError::BadRequest("Failed to read body".into()))?;
+        let req: RefreshRequest = if bytes.is_empty() {
+            RefreshRequest::default()
+        } else {
+            serde_json::from_slice(&bytes)
+                .map_err(|e| AppError::BadRequest(format!("Invalid refresh body: {e}")))?
+        };
+        req.refresh_token.ok_or(AppError::Unauthorized)?
+    };
+
     let claims = state
         .jwt
-        .verify_token(&req.refresh_token)
+        .verify_token(&presented_token)
         .map_err(|_| AppError::Unauthorized)?;
 
     if claims.token_type != "refresh" {
@@ -461,22 +494,12 @@ pub async fn refresh(
     // Refresh-token rotation. Without this, a stolen refresh token
     // could be used indefinitely (until natural expiry — 7 days)
     // even after the user changed their password or had a role
-    // revoked. The model:
-    //
-    //   1. Hash the presented refresh token (sha256 of the JWT
-    //      string is fine — it's already a high-entropy bearer
-    //      secret).
-    //   2. If the hash is in `refresh_blacklist:*` Redis already,
-    //      this token has been used → reject. Catches replay attacks.
-    //   3. Otherwise add the hash to the blacklist with TTL set to
-    //      whatever lifetime the OLD token had remaining, then mint
-    //      and return the new pair.
-    //
-    // Trade-off: blacklist storage is O(active refresh tokens),
-    // each entry ~80 bytes; trivial at any reasonable user count.
+    // revoked. See the comment in wave 3 commit for the full
+    // model: hash → blacklist with TTL = remaining lifetime →
+    // reject on replay.
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(req.refresh_token.as_bytes());
+    hasher.update(presented_token.as_bytes());
     let token_hash = hex::encode(hasher.finalize());
     let blacklist_key = format!("refresh_blacklist:{token_hash}");
 
@@ -527,8 +550,8 @@ pub async fn refresh(
     let refresh_token = state.jwt.create_refresh_token_with_ttl(
         claims.sub,
         &claims.email,
-        roles,
-        permissions,
+        roles.clone(),
+        permissions.clone(),
         refresh_ttl_days,
     )?;
 
@@ -536,22 +559,48 @@ pub async fn refresh(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
 
-    let cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
+    let signing_cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
+    let access_cookie = verify_signature::access_token_cookie(&access_token, access_ttl);
+    let refresh_cookie =
+        verify_signature::refresh_token_cookie(&refresh_token, refresh_ttl_days * 86400);
+
     let mut response = Json(LoginResponse {
-        access_token,
-        refresh_token,
         token_type: "Bearer".into(),
         expires_in: access_ttl,
         signing_key,
+        permissions,
+        roles,
         password_change_required: None,
     })
     .into_response();
-    if let Ok(cookie_value) = cookie.parse() {
-        response
-            .headers_mut()
-            .insert(axum::http::header::SET_COOKIE, cookie_value);
+
+    let headers = response.headers_mut();
+    for cookie_str in [&signing_cookie, &access_cookie, &refresh_cookie] {
+        if let Ok(v) = cookie_str.parse() {
+            headers.append(axum::http::header::SET_COOKIE, v);
+        }
     }
     Ok(response)
+}
+
+/// POST /api/auth/logout — clear all auth cookies.
+///
+/// Idempotent: callable without an active session. Sets the three
+/// auth cookies to empty with `Max-Age=0`, which causes the browser
+/// to evict them immediately. Useful for the "log out from this
+/// device" flow and for cleaning up stale sessions on the client
+/// side without relying on the page JS to remember to clear
+/// localStorage (it can't, since the tokens are httpOnly now).
+pub async fn logout() -> axum::response::Response {
+    use axum::http::header::SET_COOKIE;
+    let mut response = Json(serde_json::json!({"status": "ok"})).into_response();
+    let headers = response.headers_mut();
+    for cookie_str in verify_signature::clear_auth_cookies() {
+        if let Ok(v) = cookie_str.parse() {
+            headers.append(SET_COOKIE, v);
+        }
+    }
+    response
 }
 
 pub async fn me(
@@ -568,6 +617,16 @@ pub async fn me(
 
     let role_assignments = fetch_user_role_assignments(&state, user.id).await;
 
+    // Re-derive permissions from the DB rather than trusting the
+    // JWT claim. The JWT is fresh enough for the request gate
+    // (every protected handler reads it) but `/me` is the canonical
+    // way the frontend learns "what can this user actually do
+    // RIGHT NOW", so we want it to reflect post-login role edits
+    // without needing a refresh.
+    let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id)
+        .await
+        .unwrap_or_default();
+
     Ok(Json(UserResponse {
         id: user.id,
         email: user.email,
@@ -575,6 +634,7 @@ pub async fn me(
         avatar_url: user.avatar_url,
         is_active: user.is_active,
         role_assignments,
+        permissions,
         created_at: user.created_at,
     }))
 }

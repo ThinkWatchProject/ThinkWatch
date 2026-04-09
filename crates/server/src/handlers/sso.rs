@@ -43,11 +43,14 @@ pub struct SsoCallbackParams {
     pub state: String,
 }
 
-/// GET /api/auth/sso/callback — handle OIDC callback, redirect with tokens in fragment.
+/// GET /api/auth/sso/callback — handle OIDC callback. Sets the auth
+/// httpOnly cookies on the response and redirects to the frontend
+/// with only `signing_key` in the URL fragment (the page JS needs
+/// it for HMAC computation).
 pub async fn sso_callback(
     State(state): State<AppState>,
     Query(params): Query<SsoCallbackParams>,
-) -> Result<Redirect, AppError> {
+) -> Result<axum::response::Response, AppError> {
     let oidc_guard = state.oidc.read().await;
     let oidc = oidc_guard
         .as_ref()
@@ -141,8 +144,8 @@ pub async fn sso_callback(
     let refresh_token = state.jwt.create_refresh_token_with_ttl(
         user.id,
         &user.email,
-        roles,
-        permissions,
+        roles.clone(),
+        permissions.clone(),
         refresh_ttl_days,
     )?;
 
@@ -165,7 +168,12 @@ pub async fn sso_callback(
                 AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))
             })?;
 
-    // Redirect to frontend with tokens in URL fragment (never sent to server in subsequent requests)
+    // Build the redirect target. Tokens go via httpOnly cookies
+    // (set on this same response below); only the signing_key
+    // travels via the URL fragment so the page JS can stash it in
+    // sessionStorage for HMAC computation. Fragments aren't sent
+    // to the server on subsequent requests, so the signing_key
+    // doesn't end up in proxy logs even though it's not httpOnly.
     let frontend_url = state
         .config
         .cors_origins
@@ -175,17 +183,37 @@ pub async fn sso_callback(
             tracing::warn!(
                 "No CORS_ORIGINS configured for SSO redirect, falling back to console address"
             );
-            // No hardcoded localhost — fail clearly if misconfigured
             "/"
         });
 
     let redirect_url = format!(
-        "{}/#access_token={}&refresh_token={}&signing_key={}&expires_in=900",
+        "{}/#sso=ok&signing_key={}&expires_in={}",
         frontend_url,
-        urlencoding::encode(&access_token),
-        urlencoding::encode(&refresh_token),
         urlencoding::encode(&signing_key),
+        access_ttl,
     );
 
-    Ok(Redirect::temporary(&redirect_url))
+    use axum::http::header::{LOCATION, SET_COOKIE};
+    let mut response = axum::response::Response::builder()
+        .status(axum::http::StatusCode::TEMPORARY_REDIRECT)
+        .body(axum::body::Body::empty())
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("redirect build failed: {e}")))?;
+    let headers = response.headers_mut();
+    if let Ok(loc) = redirect_url.parse() {
+        headers.insert(LOCATION, loc);
+    }
+    let signing_cookie =
+        crate::middleware::verify_signature::signing_key_cookie(&signing_key, 86400);
+    let access_cookie =
+        crate::middleware::verify_signature::access_token_cookie(&access_token, access_ttl);
+    let refresh_cookie = crate::middleware::verify_signature::refresh_token_cookie(
+        &refresh_token,
+        refresh_ttl_days * 86400,
+    );
+    for cookie_str in [&signing_cookie, &access_cookie, &refresh_cookie] {
+        if let Ok(v) = cookie_str.parse() {
+            headers.append(SET_COOKIE, v);
+        }
+    }
+    Ok(response)
 }

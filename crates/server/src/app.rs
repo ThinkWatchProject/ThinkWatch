@@ -369,6 +369,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route("/api/auth/login", post(handlers::auth::login))
         .route("/api/auth/register", post(handlers::auth::register))
         .route("/api/auth/refresh", post(handlers::auth::refresh))
+        .route("/api/auth/logout", post(handlers::auth::logout))
         .route("/api/auth/sso/authorize", get(handlers::sso::sso_authorize))
         .route("/api/auth/sso/callback", get(handlers::sso::sso_callback))
         .route("/api/auth/sso/status", get(handlers::health::sso_status))

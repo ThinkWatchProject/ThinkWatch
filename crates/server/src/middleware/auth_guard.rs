@@ -155,15 +155,28 @@ pub async fn require_auth(
     mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    let auth_header = request
-        .headers()
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let token = auth_header
-        .strip_prefix("Bearer ")
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    // Resolve the access token, preferring the httpOnly cookie
+    // (the new browser path) and falling back to the
+    // `Authorization: Bearer` header for non-browser clients (curl,
+    // CI scripts, server-to-server). XSS in the page can never
+    // exfiltrate the cookie, so the cookie path is strictly safer.
+    let token_from_cookie =
+        crate::middleware::verify_signature::extract_cookie(&request, "access_token");
+    let token = match token_from_cookie {
+        Some(t) => t,
+        None => {
+            let auth_header = request
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|v| v.to_str().ok())
+                .ok_or(StatusCode::UNAUTHORIZED)?;
+            auth_header
+                .strip_prefix("Bearer ")
+                .ok_or(StatusCode::UNAUTHORIZED)?
+                .to_string()
+        }
+    };
+    let token = token.as_str();
 
     let claims = state
         .jwt

@@ -58,27 +58,61 @@ pub fn signing_key_cookie(key: &str, max_age_secs: i64) -> String {
     format!("signing_key={key}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age_secs}")
 }
 
+/// Build the httpOnly access-token cookie. SameSite=Lax (not Strict)
+/// so SSO redirects from external IdPs work — the callback request
+/// is cross-site by definition.
+pub fn access_token_cookie(token: &str, max_age_secs: i64) -> String {
+    format!("access_token={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={max_age_secs}")
+}
+
+/// Build the httpOnly refresh-token cookie. Path scoped to
+/// `/api/auth/refresh` so it's only sent on the one endpoint that
+/// needs it — minimizes the blast radius if cookies leak via a
+/// downstream proxy log.
+pub fn refresh_token_cookie(token: &str, max_age_secs: i64) -> String {
+    format!(
+        "refresh_token={token}; HttpOnly; Secure; SameSite=Lax; Path=/api/auth; Max-Age={max_age_secs}"
+    )
+}
+
+/// Build the three Set-Cookie values that clear the auth cookies.
+/// Used by the logout handler to evict the session from the
+/// browser without relying on the client to do anything.
+pub fn clear_auth_cookies() -> [String; 3] {
+    [
+        "access_token=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0".to_string(),
+        "refresh_token=; HttpOnly; Secure; SameSite=Lax; Path=/api/auth; Max-Age=0".to_string(),
+        "signing_key=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0".to_string(),
+    ]
+}
+
+/// Extract a named cookie value from the request's `Cookie` header.
+pub fn extract_cookie(
+    request: &axum::http::Request<axum::body::Body>,
+    name: &str,
+) -> Option<String> {
+    let cookie_header = request
+        .headers()
+        .get("cookie")
+        .and_then(|v| v.to_str().ok())?;
+    let prefix = format!("{name}=");
+    for cookie in cookie_header.split(';') {
+        let cookie = cookie.trim();
+        if let Some(value) = cookie.strip_prefix(prefix.as_str())
+            && !value.is_empty()
+        {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
 /// Extract signing key from the `signing_key` httpOnly cookie, falling back
 /// to the `X-Signing-Key` header for backwards compatibility.
 pub fn extract_signing_key_from_request(
     request: &axum::http::Request<axum::body::Body>,
 ) -> Option<String> {
-    // 1. Try httpOnly cookie
-    if let Some(cookie_header) = request
-        .headers()
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())
-    {
-        for cookie in cookie_header.split(';') {
-            let cookie = cookie.trim();
-            if let Some(value) = cookie.strip_prefix("signing_key=")
-                && !value.is_empty()
-            {
-                return Some(value.to_string());
-            }
-        }
-    }
-    None
+    extract_cookie(request, "signing_key")
 }
 
 /// Middleware that verifies HMAC-SHA256 request signatures on state-changing methods.

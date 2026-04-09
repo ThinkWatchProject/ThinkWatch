@@ -151,18 +151,11 @@ function useLiveDashboard() {
 
     const connect = async () => {
       if (cancelled) return;
-      const token = localStorage.getItem('access_token');
-      if (!token) {
-        // Not signed in yet — try a plain HTTP fetch as a one-shot
-        // fallback. Errors are logged so operators can see what's
-        // wrong instead of staring at empty charts.
-        api<DashboardLive>('/api/dashboard/live', { schema: DashboardLiveSchema })
-          .then(setLive)
-          .catch((err) => {
-            console.error('dashboard live fetch failed:', err);
-          });
-        return;
-      }
+      // Auth tokens live in HttpOnly cookies now, so the page JS
+      // can't pre-check "are we logged in". We just try to mint
+      // the WS ticket — if the user isn't authenticated the api
+      // client gets a 401 and routes them through the standard
+      // refresh-then-redirect flow.
       // Mint a single-use ticket via authenticated POST. The ticket is
       // bound to the user_id and expires in 30s; the WS endpoint atomically
       // consumes it. This keeps the JWT out of the WS URL (which would

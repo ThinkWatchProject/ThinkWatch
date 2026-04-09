@@ -12,6 +12,37 @@ interface ApiOptions<T = unknown> {
   schema?: ZodType<T>;
 }
 
+// --- Auth model ---
+//
+// Access and refresh tokens live in HttpOnly cookies set by the
+// server on login/refresh/SSO. The browser auto-attaches them to
+// every request to the same origin (we use credentials: 'include'
+// below for the explicit declaration). The page JS NEVER reads
+// access_token / refresh_token — they're not in localStorage and
+// they can't be read out of the cookie either, so an XSS payload
+// can't exfiltrate them.
+//
+// `signing_key` is the one secret the page JS still needs to read,
+// because it has to compute HMAC signatures on write requests.
+// It's stored in sessionStorage (dies with the tab) and the server
+// also keeps a copy in an HttpOnly cookie that it reads to verify
+// the signature, so client-side and server-side stay in lock-step.
+//
+// `permissions` for hasPermission() come from the /api/auth/me
+// response (cached in `permissionsCache` below) — the JWT used to
+// be readable from localStorage and we'd decode it for this, but
+// the cookie is opaque now.
+
+let permissionsCache: Set<string> = new Set();
+
+export function setCachedPermissions(perms: string[] | undefined): void {
+  permissionsCache = new Set(perms ?? []);
+}
+
+export function clearCachedPermissions(): void {
+  permissionsCache = new Set();
+}
+
 // --- HMAC Signing (Web Crypto API) ---
 
 async function signRequest(
@@ -19,11 +50,6 @@ async function signRequest(
   path: string,
   bodyStr: string | undefined,
 ): Promise<Record<string, string>> {
-  // Signing key is delivered via httpOnly cookie (primary) and also stored
-  // in sessionStorage as fallback for the client-side HMAC computation.
-  // The httpOnly cookie is sent automatically by the browser for signature
-  // verification on the server side, but we still need the hex value
-  // client-side to compute the HMAC signature.
   const signingKeyHex = sessionStorage.getItem('signing_key');
   if (!signingKeyHex) return {};
 
@@ -66,34 +92,30 @@ async function signRequest(
 
 // --- Token Refresh ---
 //
-// Cross-tab coordination: refresh requests can race when multiple tabs
-// hit a 401 simultaneously. Without coordination each tab posts its own
-// refresh, the second one wins, and the first tab's freshly-rotated
-// token is silently invalidated. We coordinate via:
-//   1. BroadcastChannel (modern browsers): one tab broadcasts the new
-//      tokens after refresh, others apply them without a network call.
-//   2. Per-tab in-memory dedupe of the in-flight promise.
-//   3. localStorage `storage` event as a fallback for older browsers
-//      that don't support BroadcastChannel.
+// With cookie-based auth, refresh is just a POST without body —
+// the browser sends the refresh_token cookie automatically. We
+// still dedupe in-flight refreshes per tab so two simultaneous
+// 401s don't both trigger a refresh (the second one would hit
+// the rotation blacklist and force-logout the user).
+//
+// Cross-tab coordination is implicit: when one tab refreshes, the
+// new cookie is set on the entire origin, so every other tab's
+// next request automatically uses it. The BroadcastChannel below
+// just propagates "logged out" so all tabs redirect to login at
+// once, instead of each finding out separately when they 401.
 
 let refreshPromise: Promise<boolean> | null = null;
 
 const authChannel: BroadcastChannel | null =
   typeof BroadcastChannel !== 'undefined' ? new BroadcastChannel('thinkwatch-auth') : null;
 
-interface RefreshBroadcast {
-  type: 'refreshed';
-  access_token: string;
-  refresh_token: string;
-  signing_key: string;
-}
-
 if (authChannel) {
-  authChannel.onmessage = (ev: MessageEvent<RefreshBroadcast>) => {
-    if (ev.data?.type === 'refreshed') {
-      localStorage.setItem('access_token', ev.data.access_token);
-      localStorage.setItem('refresh_token', ev.data.refresh_token);
-      sessionStorage.setItem('signing_key', ev.data.signing_key);
+  authChannel.onmessage = (ev: MessageEvent<{ type: string }>) => {
+    if (ev.data?.type === 'logged-out') {
+      sessionStorage.removeItem('signing_key');
+      clearCachedPermissions();
+      // Don't redirect inside the message handler — let the existing
+      // 401 path handle it the next time this tab makes a request.
     }
   };
 }
@@ -103,27 +125,24 @@ async function tryRefreshToken(): Promise<boolean> {
   if (refreshPromise) return refreshPromise;
 
   refreshPromise = (async () => {
-    const refreshToken = localStorage.getItem('refresh_token');
-    if (!refreshToken) return false;
     try {
       const res = await fetch(`${API_BASE}/api/auth/refresh`, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refresh_token: refreshToken }),
+        body: '{}',
       });
       if (!res.ok) return false;
       const data = await res.json();
-      localStorage.setItem('access_token', data.access_token);
-      localStorage.setItem('refresh_token', data.refresh_token);
-      sessionStorage.setItem('signing_key', data.signing_key);
-      // Tell other tabs about the new tokens so they don't trigger
-      // their own refresh and invalidate ours.
-      authChannel?.postMessage({
-        type: 'refreshed',
-        access_token: data.access_token,
-        refresh_token: data.refresh_token,
-        signing_key: data.signing_key,
-      } satisfies RefreshBroadcast);
+      // The new tokens are in cookies the browser already set;
+      // we only need to update sessionStorage with the new
+      // signing_key and the cached permissions.
+      if (typeof data.signing_key === 'string') {
+        sessionStorage.setItem('signing_key', data.signing_key);
+      }
+      if (Array.isArray(data.permissions)) {
+        setCachedPermissions(data.permissions);
+      }
       return true;
     } catch {
       return false;
@@ -150,18 +169,18 @@ function validate<T>(path: string, json: unknown, schema?: ZodType<T>): T {
 }
 
 export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise<T> {
-  const token = localStorage.getItem('access_token');
   const method = options.method ?? 'GET';
   const bodyStr = options.body ? JSON.stringify(options.body) : undefined;
 
-  // Compute signature headers for write operations
+  // Compute signature headers for write operations (sessionStorage
+  // signing_key, set by login/refresh response).
   const sigHeaders = await signRequest(method, path, bodyStr);
 
   const res = await fetch(`${API_BASE}${path}`, {
     method,
+    credentials: 'include',
     headers: {
       'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...sigHeaders,
       ...options.headers,
     },
@@ -172,14 +191,14 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
     // Attempt token refresh before logging out
     const refreshed = await tryRefreshToken();
     if (refreshed) {
-      // Retry the original request with new token
-      const newToken = localStorage.getItem('access_token');
+      // Retry the original request — cookies are now refreshed
+      // by the browser, no need to re-fetch tokens manually.
       const retrySigHeaders = await signRequest(method, path, bodyStr);
       const retryRes = await fetch(`${API_BASE}${path}`, {
         method,
+        credentials: 'include',
         headers: {
           'Content-Type': 'application/json',
-          ...(newToken ? { Authorization: `Bearer ${newToken}` } : {}),
           ...retrySigHeaders,
           ...options.headers,
         },
@@ -187,9 +206,17 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
       });
       if (retryRes.ok) return validate(path, await retryRes.json(), options.schema);
     }
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
+    // Refresh failed → fully evict the session.
     sessionStorage.removeItem('signing_key');
+    clearCachedPermissions();
+    authChannel?.postMessage({ type: 'logged-out' });
+    // Best-effort server-side cookie clear (browser ignores
+    // failures). We DO NOT await this — the redirect must happen
+    // immediately so the user isn't stranded mid-navigation.
+    void fetch(`${API_BASE}/api/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+    }).catch(() => {});
     window.location.href = '/';
     throw new Error('Unauthorized');
   }
@@ -211,33 +238,19 @@ export const apiPatch = <T>(path: string, body: unknown) =>
 export const apiDelete = <T>(path: string) =>
   api<T>(path, { method: 'DELETE' });
 
-/// Decode the current access token's payload (no signature verification)
-/// and return its `permissions` array. Returns an empty array when there
-/// is no token or when the payload doesn't parse — callers should treat
-/// "missing permission" as a sane default.
-///
-/// The token is the source of truth for what the server will allow; this
-/// helper exists purely so the UI can hide buttons that would otherwise
-/// just 403. Never trust this for any decision the server doesn't also
-/// re-check.
+/// Returns the cached permission set populated from /api/auth/me.
+/// Empty until the auth hook has fetched once. Never throws.
 export function currentUserPermissions(): string[] {
-  const token = localStorage.getItem('access_token');
-  if (!token) return [];
-  const parts = token.split('.');
-  if (parts.length !== 3) return [];
-  try {
-    // base64url -> base64. atob doesn't accept the URL-safe alphabet.
-    const padded = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    const json = atob(padded.padEnd(padded.length + ((4 - (padded.length % 4)) % 4), '='));
-    const payload = JSON.parse(json) as { permissions?: unknown };
-    return Array.isArray(payload.permissions)
-      ? (payload.permissions as unknown[]).filter((p): p is string => typeof p === 'string')
-      : [];
-  } catch {
-    return [];
-  }
+  return Array.from(permissionsCache);
 }
 
 export function hasPermission(perm: string): boolean {
-  return currentUserPermissions().includes(perm);
+  return permissionsCache.has(perm);
+}
+
+/// Broadcast "logged out" to other tabs so they all clear their
+/// in-memory state and redirect together. Used by use-auth's
+/// logout flow.
+export function broadcastLogout(): void {
+  authChannel?.postMessage({ type: 'logged-out' });
 }

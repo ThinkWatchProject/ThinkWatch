@@ -86,16 +86,19 @@ function RootComponent() {
     };
   }, []);
 
-  // Handle SSO callback: tokens in URL fragment
+  // Handle SSO callback. The new (httpOnly cookie) flow leaves
+  // only `signing_key` in the URL fragment — access_token and
+  // refresh_token were set as cookies on the redirect response
+  // and the browser already has them. We still parse the legacy
+  // `access_token=...` shape so users mid-login during the
+  // migration don't get stranded.
   useEffect(() => {
     const hash = window.location.hash;
-    if (hash.includes('access_token=')) {
+    if (hash.includes('signing_key=')) {
       const params = new URLSearchParams(hash.slice(1));
-      const accessToken = params.get('access_token');
-      const refreshToken = params.get('refresh_token');
       const signingKey = params.get('signing_key');
-      if (accessToken && refreshToken && signingKey) {
-        handleSsoCallback(accessToken, refreshToken, signingKey);
+      if (signingKey) {
+        handleSsoCallback(signingKey);
         window.history.replaceState(null, '', '/');
       }
     }

@@ -122,6 +122,11 @@ pub async fn list_users(
                 avatar_url: u.avatar_url,
                 is_active: u.is_active,
                 role_assignments,
+                // Admin user-list intentionally omits permissions —
+                // the per-row payload would balloon and the admin
+                // page never reads them. /api/auth/me is the
+                // canonical place for the live permission set.
+                permissions: Vec::new(),
                 created_at: u.created_at,
             }
         })
@@ -306,6 +311,7 @@ pub async fn create_user(
             avatar_url: user.avatar_url,
             is_active: user.is_active,
             role_assignments,
+            permissions: Vec::new(),
             created_at: user.created_at,
         },
         generated_password: if force_change {
