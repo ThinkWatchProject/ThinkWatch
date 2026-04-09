@@ -377,6 +377,54 @@ mod tests {
     }
 
     #[test]
+    fn salt_is_64_bit_hex() {
+        // The wave-4 salt widening from u16 to u64 changes the
+        // placeholder format from `{{EMAIL_xxxx_1}}` (4 hex chars)
+        // to `{{EMAIL_xxxxxxxxxxxxxxxx_1}}` (16 hex chars). A
+        // regression to the narrow salt would re-open the
+        // collision-correlation gap the wave-4 review flagged.
+        let redactor = PiiRedactor::new();
+        let messages = vec![user_msg("Reach me at alice@example.com")];
+        let (_redacted, ctx) = redactor.redact_messages(&messages);
+        let placeholder = find_placeholder(&ctx, "alice@example.com");
+        // Format: `{{EMAIL_<16 hex>_<counter>}}`
+        let inside = placeholder
+            .strip_prefix("{{EMAIL_")
+            .and_then(|s| s.strip_suffix("}}"))
+            .expect("placeholder format unexpected");
+        let parts: Vec<&str> = inside.split('_').collect();
+        assert_eq!(parts.len(), 2, "expected SALT_COUNTER, got {placeholder}");
+        assert_eq!(
+            parts[0].len(),
+            16,
+            "salt must be 16 hex chars (64 bits), got {} chars in {placeholder}",
+            parts[0].len()
+        );
+        assert!(
+            parts[0].chars().all(|c| c.is_ascii_hexdigit()),
+            "salt must be hex: {placeholder}"
+        );
+    }
+
+    #[test]
+    fn salt_differs_per_request() {
+        // Each redact_messages call generates a fresh salt, so the
+        // same email in two different requests gets two different
+        // placeholders. The narrow u16 salt had a 65k collision
+        // space; the new u64 should never collide in practice.
+        let redactor = PiiRedactor::new();
+        let messages = vec![user_msg("alice@example.com")];
+        let (_, ctx_a) = redactor.redact_messages(&messages);
+        let (_, ctx_b) = redactor.redact_messages(&messages);
+        let ph_a = find_placeholder(&ctx_a, "alice@example.com");
+        let ph_b = find_placeholder(&ctx_b, "alice@example.com");
+        assert_ne!(
+            ph_a, ph_b,
+            "salt must differ across requests; got identical {ph_a}"
+        );
+    }
+
+    #[test]
     fn multiple_pii_types() {
         let redactor = PiiRedactor::new();
         let messages = vec![user_msg(

@@ -390,4 +390,83 @@ mod tests {
             .unwrap();
         assert!(extract_signing_key_from_request(&request).is_none());
     }
+
+    // ----- Wave-C cookie helpers -----
+
+    #[test]
+    fn access_token_cookie_has_required_attrs() {
+        let cookie = access_token_cookie("eyJhbGciOiJIUzI1NiJ9.test", 900);
+        assert!(cookie.starts_with("access_token=eyJhbGciOiJIUzI1NiJ9.test"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("Secure"));
+        // SameSite=Lax (not Strict) so SSO redirects work
+        assert!(cookie.contains("SameSite=Lax"));
+        assert!(cookie.contains("Path=/;"));
+        assert!(cookie.contains("Max-Age=900"));
+    }
+
+    #[test]
+    fn refresh_token_cookie_path_is_scoped_to_auth() {
+        let cookie = refresh_token_cookie("rt-token-here", 7 * 86400);
+        assert!(cookie.starts_with("refresh_token=rt-token-here"));
+        assert!(cookie.contains("HttpOnly"));
+        assert!(cookie.contains("Secure"));
+        assert!(cookie.contains("SameSite=Lax"));
+        // The narrow Path is the whole point of the helper:
+        // refresh_token only needs to travel to /api/auth/refresh
+        // so a leak elsewhere can't expose it.
+        assert!(
+            cookie.contains("Path=/api/auth"),
+            "refresh_token cookie must be scoped to /api/auth, got: {cookie}"
+        );
+        assert!(cookie.contains(&format!("Max-Age={}", 7 * 86400)));
+    }
+
+    #[test]
+    fn clear_auth_cookies_evicts_all_three() {
+        let cookies = clear_auth_cookies();
+        assert_eq!(cookies.len(), 3);
+        // Each cookie must Max-Age=0 to evict immediately, and the
+        // Path must match the original cookie's Path so the browser
+        // recognizes it as the same cookie.
+        let joined = cookies.join("\n");
+        assert!(joined.contains("access_token=;"));
+        assert!(joined.contains("refresh_token=;"));
+        assert!(joined.contains("signing_key=;"));
+        assert!(joined.matches("Max-Age=0").count() == 3);
+        assert!(joined.contains("Path=/api/auth")); // refresh_token
+        assert!(joined.contains("Path=/;")); // access_token + signing_key
+    }
+
+    #[test]
+    fn extract_cookie_finds_named_value() {
+        let request = Request::builder()
+            .header(
+                "cookie",
+                "session=abc; access_token=eyJ.test.sig; refresh_token=rt-x",
+            )
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            extract_cookie(&request, "access_token").as_deref(),
+            Some("eyJ.test.sig")
+        );
+        assert_eq!(
+            extract_cookie(&request, "refresh_token").as_deref(),
+            Some("rt-x")
+        );
+        assert_eq!(extract_cookie(&request, "missing"), None);
+    }
+
+    #[test]
+    fn extract_cookie_handles_extra_whitespace() {
+        let request = Request::builder()
+            .header("cookie", "  access_token=val ;  other=y  ")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            extract_cookie(&request, "access_token").as_deref(),
+            Some("val")
+        );
+    }
 }

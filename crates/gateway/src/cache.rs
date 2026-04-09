@@ -162,3 +162,99 @@ return total
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::traits::ChatMessage;
+
+    fn req(model: &str, prompt: &str) -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: model.to_string(),
+            messages: vec![ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::Value::String(prompt.to_string()),
+            }],
+            temperature: Some(0.0),
+            max_tokens: Some(1024),
+            stream: None,
+            extra: serde_json::json!({}),
+        }
+    }
+
+    #[test]
+    fn cache_key_is_deterministic_for_same_scope() {
+        let r = req("gpt-4o", "What is 2+2?");
+        let k1 = ResponseCache::cache_key(&r, "user-alice");
+        let k2 = ResponseCache::cache_key(&r, "user-alice");
+        assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn different_scopes_produce_different_keys() {
+        // Same prompt, same model, different tenants → MUST collide
+        // to different keys. This is the regression test for the
+        // wave-2 cross-tenant cache leak.
+        let r = req("gpt-4o", "What is my salary?");
+        let alice = ResponseCache::cache_key(&r, "user-alice");
+        let bob = ResponseCache::cache_key(&r, "user-bob");
+        assert_ne!(
+            alice, bob,
+            "scoped cache keys must not collide across tenants"
+        );
+    }
+
+    #[test]
+    fn empty_scope_still_isolates() {
+        // Even an empty scope is treated literally — it doesn't fall
+        // back to the global key space. This catches a class of bug
+        // where a caller forgot to populate scope and accidentally
+        // shared a cache slot with every other empty-scope request.
+        let r = req("gpt-4o", "ping");
+        let empty = ResponseCache::cache_key(&r, "");
+        let alice = ResponseCache::cache_key(&r, "user-alice");
+        assert_ne!(empty, alice);
+    }
+
+    #[test]
+    fn different_models_produce_different_keys() {
+        let alice_4o = ResponseCache::cache_key(&req("gpt-4o", "ping"), "user-alice");
+        let alice_5 = ResponseCache::cache_key(&req("gpt-5", "ping"), "user-alice");
+        assert_ne!(alice_4o, alice_5);
+    }
+
+    #[test]
+    fn different_messages_produce_different_keys() {
+        let one = ResponseCache::cache_key(&req("gpt-4o", "hello"), "alice");
+        let two = ResponseCache::cache_key(&req("gpt-4o", "world"), "alice");
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    fn cache_key_has_expected_prefix() {
+        // The Redis key prefix is what `invalidate_all` matches against,
+        // so a typo here would silently break cache invalidation.
+        let key = ResponseCache::cache_key(&req("gpt-4o", "ping"), "alice");
+        assert!(key.starts_with("llm_cache:"), "got {key}");
+    }
+
+    #[test]
+    fn streaming_requests_are_not_cacheable() {
+        let mut r = req("gpt-4o", "ping");
+        r.stream = Some(true);
+        assert!(!ResponseCache::is_cacheable(&r));
+    }
+
+    #[test]
+    fn high_temperature_requests_are_not_cacheable() {
+        let mut r = req("gpt-4o", "ping");
+        r.temperature = Some(0.7);
+        assert!(!ResponseCache::is_cacheable(&r));
+    }
+
+    #[test]
+    fn temperature_zero_is_cacheable() {
+        let r = req("gpt-4o", "ping");
+        assert!(ResponseCache::is_cacheable(&r));
+    }
+}
