@@ -361,8 +361,21 @@ pub async fn proxy_chat_completion(
 
     let is_stream = request.stream.unwrap_or(false);
 
+    // Per-tenant cache scope. Prefer api_key id (the most specific
+    // tenant boundary the limits engine knows about); fall back to
+    // user id, then to a literal "anon" so a missing identity still
+    // gets its own private bucket rather than sharing the global key
+    // space. The README's "responses are cached when temperature=0"
+    // promise is per-tenant — never cross-tenant.
+    let cache_scope = identity
+        .api_key_id
+        .as_deref()
+        .or(identity.user_id.as_deref())
+        .unwrap_or("anon")
+        .to_string();
+
     // Cache lookup (non-streaming only)
-    if !is_stream && let Some(cached) = state.cache.get(&request).await {
+    if !is_stream && let Some(cached) = state.cache.get(&request, &cache_scope).await {
         metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
         tracing::debug!(model = %request.model, "Cache HIT");
         let mut response = Json(&cached).into_response();
@@ -462,7 +475,10 @@ pub async fn proxy_chat_completion(
         // doesn't notify any external webhook.
 
         // 8d. Cache the response
-        state.cache.set(&request, &response, None).await;
+        state
+            .cache
+            .set(&request, &cache_scope, &response, None)
+            .await;
 
         // 8e. Log audit detail including metadata
         tracing::info!(
@@ -607,9 +623,21 @@ pub async fn proxy_anthropic_messages(
         }
     }
 
+    // PII redaction — same path as `proxy_chat_completion`. Without
+    // this, every email/phone/id-card sent through Claude Code
+    // (which uses the Anthropic Messages surface) was being
+    // forwarded verbatim to the upstream, defeating the entire PII
+    // policy on a tool that's specifically marketed for enterprise
+    // safety. Streaming responses can't currently undo the
+    // redaction (the chunks would each need a per-frame restore),
+    // so streaming clients see the placeholder text — same trade-off
+    // proxy_chat_completion makes.
+    let pii_redactor = state.pii_redactor.load();
+    let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&messages);
+
     let request = crate::providers::traits::ChatCompletionRequest {
         model: mapped_model.clone(),
-        messages,
+        messages: redacted_messages,
         temperature: body.get("temperature").and_then(|v| v.as_f64()),
         max_tokens: Some(max_tokens),
         stream: Some(is_stream),
@@ -647,7 +675,13 @@ pub async fn proxy_anthropic_messages(
         };
         Ok(stream_to_sse(stream, on_done).into_response())
     } else {
-        let response = provider.chat_completion_boxed(request).await?;
+        let mut response = provider.chat_completion_boxed(request).await?;
+
+        // Restore PII placeholders before the response leaves the
+        // gateway. Without this, callers see `{{EMAIL_xxx_1}}`
+        // instead of the original address whenever the upstream
+        // echoed it back.
+        pii_redactor.restore_response(&mut response, &redaction_ctx);
 
         // Post-flight: same accounting path the chat-completions
         // surface uses. Anthropic responses always carry usage

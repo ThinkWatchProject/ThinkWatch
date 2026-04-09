@@ -8,11 +8,13 @@ use xxhash_rust::xxh3::xxh3_128;
 /// Only caches non-streaming requests with deterministic parameters
 /// (temperature == 0 or absent).
 ///
-/// NOTE: The cache is intentionally shared across all users. The cache key is
-/// derived solely from the model, messages, and max_tokens. This is by design
-/// for many use cases (identical prompts yield identical results when temperature
-/// is 0). If per-user isolation is needed, callers should incorporate a user or
-/// team identifier into the request before caching.
+/// **Scope is mandatory.** The previous design used a global key
+/// space — same prompt from different users → same cache hit. That
+/// leaked confidential prompts across tenants ("what's my salary?"
+/// from User A returns User B's cached answer). The `scope` argument
+/// on `get`/`set` is now required and is mixed into the hash key.
+/// Callers should pass the API key id (or, when present, the user id)
+/// so two clients can never collide.
 #[derive(Clone)]
 pub struct ResponseCache {
     redis: Client,
@@ -43,26 +45,17 @@ impl ResponseCache {
         }
     }
 
-    /// Compute the cache key for a request, optionally scoped to a user/team.
-    pub fn cache_key_with_scope(request: &ChatCompletionRequest, scope: Option<&str>) -> String {
-        Self::cache_key_inner(request, scope)
-    }
-
-    /// Compute the cache key for a request (shared/global scope).
-    fn cache_key(request: &ChatCompletionRequest) -> String {
-        Self::cache_key_inner(request, None)
-    }
-
-    fn cache_key_inner(request: &ChatCompletionRequest, scope: Option<&str>) -> String {
+    /// Compute the cache key for a request, scoped to a tenant.
+    /// The scope is mixed into the hash so two callers can never
+    /// share a key — see the type-level note for the rationale.
+    pub fn cache_key(request: &ChatCompletionRequest, scope: &str) -> String {
         // Normalize messages to deterministic JSON for hashing
         let messages_json = serde_json::to_string(&request.messages).unwrap_or_default();
 
         // Build the input bytes for hashing
         let mut input = Vec::with_capacity(256);
-        if let Some(s) = scope {
-            input.extend_from_slice(s.as_bytes());
-            input.push(b':');
-        }
+        input.extend_from_slice(scope.as_bytes());
+        input.push(b':');
         input.extend_from_slice(request.model.as_bytes());
         input.push(b':');
         input.extend_from_slice(messages_json.as_bytes());
@@ -76,13 +69,19 @@ impl ResponseCache {
         format!("llm_cache:{hash:032x}")
     }
 
-    /// Look up a cached response.
-    pub async fn get(&self, request: &ChatCompletionRequest) -> Option<ChatCompletionResponse> {
+    /// Look up a cached response. `scope` MUST identify the
+    /// requesting tenant (api_key id or user id) so caches can't
+    /// cross tenant boundaries.
+    pub async fn get(
+        &self,
+        request: &ChatCompletionRequest,
+        scope: &str,
+    ) -> Option<ChatCompletionResponse> {
         if !Self::is_cacheable(request) {
             return None;
         }
 
-        let key = Self::cache_key(request);
+        let key = Self::cache_key(request, scope);
 
         let cached: Option<String> = self.redis.get(&key).await.ok().flatten();
 
@@ -128,10 +127,12 @@ return total
         tracing::info!(deleted, "Cache invalidated");
     }
 
-    /// Store a response in the cache.
+    /// Store a response in the cache. `scope` MUST identify the
+    /// requesting tenant — see `get` for the contract.
     pub async fn set(
         &self,
         request: &ChatCompletionRequest,
+        scope: &str,
         response: &ChatCompletionResponse,
         ttl: Option<u64>,
     ) {
@@ -139,7 +140,7 @@ return total
             return;
         }
 
-        let key = Self::cache_key(request);
+        let key = Self::cache_key(request, scope);
         let ttl_secs = ttl.unwrap_or(self.default_ttl);
 
         let json = match serde_json::to_string(response) {
