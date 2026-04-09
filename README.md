@@ -55,12 +55,13 @@ ThinkWatch solves all of this with a single deployment.
 - **Automatic format conversion** — Anthropic Messages API, Google Gemini, Azure OpenAI, AWS Bedrock Converse API, and more, all behind a unified interface
 - **Provider auto-loading** — active providers are loaded from the database at startup and registered in the model router; default model prefixes (`gpt-`/`o1-`/`o3-`/`o4-` for OpenAI, `claude-` for Anthropic, `gemini-` for Google) route automatically; Azure and Bedrock require explicit model registration
 - **Streaming SSE pass-through** — zero-overhead forwarding with real-time token counting
-- **Virtual API keys** — issue scoped `tw-` keys per team, per project, per developer; revoke in one click
+- **Virtual API keys** — issue scoped `tw-` keys; the same `tw-` token works on both the AI gateway and the MCP gateway via a per-key `surfaces` allowlist
 - **API key lifecycle management** — automatic rotation with grace periods, per-key inactivity timeout, expiry warnings, and background policy enforcement
-- **Sliding-window rate limiting** — RPM and TPM limits via Redis, per key or per user
+- **Composable rate limits & budgets** — multi-window sliding limits (1m / 5m / 1h / 5h / 1d / 1w) and natural-period token budgets (daily / weekly / monthly), keyed per user, per API key, per provider, or per MCP server. See [Rate limits & budgets](#rate-limits--budgets) below
+- **Per-model token weighting** — gpt-4o tokens can count more than gpt-3.5 tokens against the same quota via configurable `input_multiplier` / `output_multiplier`
 - **Circuit breaker** — three-state (Closed/Open/HalfOpen) circuit breaker with configurable failure threshold and recovery period
 - **Retry with exponential backoff** — configurable retries with jitter for network errors and upstream rate limits
-- **Real-time cost tracking** — per-model pricing with budget alerts and team attribution
+- **Real-time cost tracking** — per-model pricing with team attribution
 
 ### MCP Gateway
 - **Centralized tool proxy** — one MCP endpoint that aggregates tools from all upstream servers
@@ -100,6 +101,97 @@ ThinkWatch solves all of this with a single deployment.
 - **Cost analytics** — MTD spend, budget utilization, per-model cost breakdown
 - **Health dashboard** — real-time status of PostgreSQL, Redis, ClickHouse, and all MCP servers
 - **Unified log explorer** — search across audit, gateway, MCP, access, and platform logs from a single page with structured query syntax
+
+## Rate limits & budgets
+
+ThinkWatch enforces two parallel kinds of quota at every gateway request,
+both managed from the same admin UI:
+
+| | Sliding-window rate limits | Natural-period budget caps |
+|---|---|---|
+| **What it counts** | Requests OR weighted tokens, depending on the rule's `metric` | Weighted tokens only |
+| **Window shape** | Rolling 60-bucket window: `1m / 5m / 1h / 5h / 1d / 1w` | Calendar-aligned: `daily / weekly / monthly` (resets on the period boundary) |
+| **Backing store** | Redis ZSET-style buckets | Redis INCR counters keyed by `subject:period:bucket_id` |
+| **When it fires** | Pre-flight (requests metric) AND post-flight (tokens metric) | Post-flight only |
+| **Hard or soft?** | Hard for requests metric, soft for tokens metric | Soft cap — exactly one request can push you over before subsequent calls in the same period are rejected |
+
+### Subjects
+
+A single request can be subject to multiple rules and budgets at once. The
+engine resolves the request to a set of `(subject_kind, subject_id)` tuples
+and runs every enabled rule against all of them in one atomic Lua check.
+**Any rule rejecting → the request is rejected. All-or-nothing INCR.**
+
+| Subject | Rate limit rules | Budget caps |
+|---|---|---|
+| `user`        | ✅ ai_gateway / mcp_gateway | ✅ |
+| `api_key`     | ✅ ai_gateway / mcp_gateway | ✅ |
+| `provider`    | ✅ ai_gateway only          | ✅ |
+| `mcp_server`  | ✅ mcp_gateway only         | ❌ (no token cost concept) |
+| `team`        | (use user / api_key)        | ✅ |
+
+For an AI request the engine resolves: `api_key + user + provider`. For an
+MCP request: `user + mcp_server`. Per-subject limits stack — a developer
+can have a personal cap, AND their API key can have a tighter cap, AND the
+provider can have a global cap, all enforced simultaneously.
+
+### Three flavors of "tokens"
+
+Three numbers float around the system. Don't confuse them.
+
+| Number | Source | Used for | Where it shows up |
+|---|---|---|---|
+| **Raw tokens** | `usage_records.input_tokens / output_tokens` | Real provider-billed token counts | Analytics, cost reports |
+| **Weighted tokens** | `raw × models.input_multiplier / output_multiplier` | Quota accounting (rate limits + budgets) | Limits panel "X / Y used" |
+| **USD cost** | `raw × models.input_price / output_price` | Billing | Costs page |
+
+The two `models` columns are independent. Weighted tokens are a *relative*
+unit (gpt-3.5-turbo = 1.0 by convention); they have no global USD value.
+USD always comes from the real per-token price. By default every model has
+multiplier `1.0`, which means quotas count raw tokens. Tune the multipliers
+on the model management page to make a 1M-token monthly cap actually
+survive a single gpt-4o burst.
+
+### Example
+
+> *Operator goal:* "developers get 60 requests/minute on the AI gateway,
+> 1M weighted tokens/day, and 20M weighted tokens/month — but the entire
+> OpenAI provider has a 100k requests/hour ceiling."
+
+```
+On the developer USER subject:
+  rate_limit_rule  ai_gateway / requests / 60s   → 60
+  rate_limit_rule  ai_gateway / tokens   / 1d    → 1_000_000
+  budget_cap       monthly                       → 20_000_000
+
+On the OpenAI PROVIDER subject:
+  rate_limit_rule  ai_gateway / requests / 1h    → 100_000
+```
+
+A request from any developer key against gpt-4o then has to clear:
+1. Developer's per-minute request rule
+2. OpenAI provider's per-hour request rule
+3. After the response: developer's per-day token rule
+4. After the response: developer's monthly token budget
+
+Any one of those failing → 429 with the rule label in the body
+(`user:requests/1m`, `provider:requests/1h`, etc).
+
+### Failure mode
+
+When Redis is unavailable the engine **fails open** and bumps the
+`gateway_rate_limiter_fail_open_total` / `gateway_budget_fail_open_total`
+metrics. Operators who prefer fail-closed can flip the planned
+`security.rate_limit_fail_closed` system setting (not yet shipped — the
+metric is the early-warning signal in the meantime).
+
+### Streaming gap
+
+Token-metric rules and budget caps only fire on **non-streaming** AI
+gateway responses. Streaming SSE responses don't surface a token usage
+field at the proxy layer, so weighted-token accounting is skipped for
+those requests. Request-metric rules and per-provider rules still apply
+to streaming. This is a known follow-up.
 
 ## Tech Stack
 
