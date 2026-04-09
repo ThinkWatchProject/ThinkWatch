@@ -69,6 +69,38 @@ pub async fn load_user_role_names(
     Ok(rows.into_iter().map(|(n,)| n).collect())
 }
 
+/// Load every `(role_id, scope_kind, scope_id)` row for `user_id`.
+/// This is what gets embedded in the JWT as `claims.role_assignments`
+/// so the auth middleware can check scope without re-querying on
+/// every request. The actual permission set is still looked up
+/// against the `rbac_roles` table at request time so role permission
+/// edits take effect on the next request, not the next refresh.
+pub async fn compute_user_role_assignments(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<crate::jwt::RoleAssignmentClaim>, sqlx::Error> {
+    type Row = (Uuid, String, Option<Uuid>);
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT role_id, scope_kind, scope_id \
+           FROM rbac_role_assignments \
+          WHERE user_id = $1 \
+          ORDER BY scope_kind, scope_id",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(role_id, scope_kind, scope_id)| crate::jwt::RoleAssignmentClaim {
+                role_id,
+                scope_kind,
+                scope_id,
+            },
+        )
+        .collect())
+}
+
 /// Effective resource constraints for a user, derived by union'ing
 /// every role's `allowed_models` and `allowed_mcp_servers`. Mirrors
 /// the same union semantics documented at the top of this file:

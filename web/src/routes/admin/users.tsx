@@ -559,13 +559,14 @@ export function UsersPage() {
 // Renders every assignment (system + custom) as a removable row, and
 // exposes a single picker that lists every available role. Scope is a
 // structured `(scope_kind, scope_id)` twople — kind picks from a closed
-// enum (`global`/`team`/`project`), id is a UUID input that only appears
-// when the kind needs one. Result is serialized back to the
-// `"global" | "team:<uuid>" | "project:<uuid>"` string the backend
-// `parse_scope` helper accepts.
+// enum (`global` / `team`), id is a team UUID input that only appears
+// when the kind is `team`. Result is serialized back to the
+// `"global" | "team:<uuid>"` string the backend `parse_scope` helper
+// accepts. The Phase-4 work below replaces the raw UUID input with a
+// real team picker (Select fed by GET /api/admin/teams).
 // ----------------------------------------------------------------------------
 
-type ScopeKind = 'global' | 'team' | 'project';
+type ScopeKind = 'global' | 'team';
 
 function parseScope(scope: string): { kind: ScopeKind; id: string } {
   if (!scope || scope === 'global') return { kind: 'global', id: '' };
@@ -573,7 +574,7 @@ function parseScope(scope: string): { kind: ScopeKind; id: string } {
   if (idx < 0) return { kind: 'global', id: '' };
   const kind = scope.slice(0, idx);
   const id = scope.slice(idx + 1);
-  if (kind === 'team' || kind === 'project') return { kind, id };
+  if (kind === 'team') return { kind, id };
   return { kind: 'global', id: '' };
 }
 
@@ -790,7 +791,6 @@ function RoleAssignmentEditor({
               <SelectContent>
                 <SelectItem value="global">{t('users.scopeGlobal')}</SelectItem>
                 <SelectItem value="team">{t('users.scopeTeam')}</SelectItem>
-                <SelectItem value="project">{t('users.scopeProject')}</SelectItem>
               </SelectContent>
             </Select>
             {pendingKind !== 'global' && (

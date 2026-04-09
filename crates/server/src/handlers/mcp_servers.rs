@@ -15,6 +15,9 @@ pub async fn list_servers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<McpServer>>, AppError> {
     auth_user.require_permission("mcp_servers:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:read")
+        .await?;
     let servers =
         sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers ORDER BY created_at DESC")
             .fetch_all(&state.db)
@@ -29,6 +32,9 @@ pub async fn create_server(
     Json(req): Json<CreateMcpServerRequest>,
 ) -> Result<Json<McpServer>, AppError> {
     auth_user.require_permission("mcp_servers:create")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:create")
+        .await?;
     if req.name.is_empty() || req.endpoint_url.is_empty() {
         return Err(AppError::BadRequest(
             "name and endpoint_url are required".into(),
@@ -159,6 +165,9 @@ pub async fn update_server(
     Json(req): Json<UpdateMcpServerRequest>,
 ) -> Result<Json<McpServer>, AppError> {
     auth_user.require_permission("mcp_servers:update")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:update")
+        .await?;
     let existing = sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
@@ -236,6 +245,9 @@ pub async fn get_server(
     Path(id): Path<Uuid>,
 ) -> Result<Json<McpServer>, AppError> {
     auth_user.require_permission("mcp_servers:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:read")
+        .await?;
     let server = sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
@@ -251,6 +263,9 @@ pub async fn delete_server(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("mcp_servers:delete")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:delete")
+        .await?;
     let name: Option<String> = sqlx::query_scalar("SELECT name FROM mcp_servers WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)

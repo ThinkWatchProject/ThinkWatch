@@ -418,7 +418,6 @@
     "scope": "Scope",
     "scopeGlobal": "Global",
     "scopeTeam": "Team",
-    "scopeProject": "Project",
     "scopeIdPlaceholder": "UUID",
     "scopeUuidRequired": "Scope id must be a valid UUID.",
     "userId": "User ID",

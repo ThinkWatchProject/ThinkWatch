@@ -75,19 +75,28 @@ CREATE INDEX idx_rbac_roles_is_system ON rbac_roles(is_system);
 -- treats two global assignments as duplicates (PostgreSQL would
 -- otherwise consider multiple NULLs distinct). It is never read by
 -- application code.
+--
+-- The model is exactly two scope kinds:
+--   * 'global'  — applies platform-wide. scope_id IS NULL.
+--   * 'team'    — applies only when the target subject (user, api_key,
+--                 limits row, ...) belongs to that team. scope_id is
+--                 the team UUID.
+-- Earlier migrations had a third 'project' kind. Dropped — there was
+-- never a projects table or any UI / handler that consumed it, and
+-- keeping it in the CHECK encouraged dead-code design.
 CREATE TABLE rbac_role_assignments (
     user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role_id      UUID NOT NULL REFERENCES rbac_roles(id) ON DELETE CASCADE,
     scope_kind   VARCHAR(16) NOT NULL DEFAULT 'global'
-        CHECK (scope_kind IN ('global', 'team', 'project')),
-    scope_id     UUID,
+        CHECK (scope_kind IN ('global', 'team')),
+    scope_id     UUID REFERENCES teams(id) ON DELETE CASCADE,
     scope_marker UUID GENERATED ALWAYS AS (COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid)) STORED,
     assigned_by  UUID REFERENCES users(id),
     assigned_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, role_id, scope_kind, scope_marker),
     CONSTRAINT chk_scope_consistency
         CHECK ((scope_kind = 'global' AND scope_id IS NULL)
-            OR (scope_kind <> 'global' AND scope_id IS NOT NULL))
+            OR (scope_kind = 'team'   AND scope_id IS NOT NULL))
 );
 
 CREATE INDEX idx_rbac_role_assignments_user  ON rbac_role_assignments(user_id);

@@ -418,7 +418,6 @@
     "scope": "范围",
     "scopeGlobal": "全局",
     "scopeTeam": "团队",
-    "scopeProject": "项目",
     "scopeIdPlaceholder": "UUID",
     "scopeUuidRequired": "范围 id 必须是有效的 UUID。",
     "userId": "用户 ID",

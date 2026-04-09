@@ -207,6 +207,9 @@ pub async fn list_providers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<Provider>>, AppError> {
     auth_user.require_permission("providers:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "providers:read")
+        .await?;
     let providers = sqlx::query_as::<_, Provider>(
         "SELECT * FROM providers WHERE deleted_at IS NULL ORDER BY created_at DESC",
     )
@@ -222,6 +225,9 @@ pub async fn create_provider(
     Json(req): Json<CreateProviderRequest>,
 ) -> Result<Json<Provider>, AppError> {
     auth_user.require_permission("providers:create")?;
+    auth_user
+        .assert_scope_global(&state.db, "providers:create")
+        .await?;
     if req.name.is_empty() || req.base_url.is_empty() || req.api_key.is_empty() {
         return Err(AppError::BadRequest(
             "name, base_url, and api_key are required".into(),
@@ -283,8 +289,14 @@ pub async fn update_provider(
     Json(req): Json<UpdateProviderRequest>,
 ) -> Result<Json<Provider>, AppError> {
     auth_user.require_permission("providers:update")?;
+    auth_user
+        .assert_scope_global(&state.db, "providers:update")
+        .await?;
     if req.api_key.is_some() {
         auth_user.require_permission("providers:rotate_key")?;
+        auth_user
+            .assert_scope_global(&state.db, "providers:rotate_key")
+            .await?;
     }
     let existing = sqlx::query_as::<_, Provider>(
         "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
@@ -352,6 +364,9 @@ pub async fn get_provider(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Provider>, AppError> {
     auth_user.require_permission("providers:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "providers:read")
+        .await?;
     let provider = sqlx::query_as::<_, Provider>(
         "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
     )
@@ -369,6 +384,9 @@ pub async fn delete_provider(
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("providers:delete")?;
+    auth_user
+        .assert_scope_global(&state.db, "providers:delete")
+        .await?;
     let name: Option<String> = sqlx::query_scalar("SELECT name FROM providers WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)
@@ -420,10 +438,13 @@ pub struct TestProviderResponse {
 /// Authenticated route — used by the providers admin page.
 pub async fn test_provider(
     auth_user: AuthUser,
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<TestProviderRequest>,
 ) -> Result<Json<TestProviderResponse>, AppError> {
     auth_user.require_permission("providers:create")?;
+    auth_user
+        .assert_scope_global(&state.db, "providers:create")
+        .await?;
     run_provider_test(req).await
 }
 

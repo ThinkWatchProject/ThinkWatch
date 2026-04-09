@@ -11,6 +11,33 @@ pub const JWT_AUDIENCE: &str = "thinkwatch";
 /// Issuer claim — identifies the application that issued this token.
 pub const JWT_ISSUER: &str = "thinkwatch";
 
+/// One row from `rbac_role_assignments`, embedded into the JWT so
+/// the auth middleware knows the caller's scope set without a DB
+/// round-trip per request.
+///
+/// Note that this is **only the assignment shape** — `(role_id,
+/// scope_kind, scope_id)`. The actual permission set still has to
+/// be looked up against the `rbac_roles` table because:
+///   1. Embedding `(perm, scope)` tuples for every assignment
+///      would balloon the JWT (admin users have ~50 perms × N
+///      role assignments).
+///   2. We want role permission edits to take effect on the next
+///      request, not the next refresh — so the perm lookup runs
+///      against the live DB regardless.
+///
+/// `claims.permissions` (the flat union) is kept for fast UI
+/// gating; `assert_scope_*` queries the DB.
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct RoleAssignmentClaim {
+    pub role_id: Uuid,
+    /// Always one of `"global"` or `"team"` per the schema CHECK.
+    pub scope_kind: String,
+    /// `Some(team_id)` when `scope_kind == "team"`, `None` when
+    /// `scope_kind == "global"`.
+    #[serde(default)]
+    pub scope_id: Option<Uuid>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Claims {
     pub sub: Uuid,
@@ -20,11 +47,16 @@ pub struct Claims {
     /// load-bearing for authorization — see `permissions`.
     pub roles: Vec<String>,
     /// Union of all `rbac_roles.permissions` across every role the user
-    /// has. This is the **authoritative** set for runtime authorization
-    /// decisions — middleware and handlers check membership against
-    /// this field, not against `roles`.
+    /// has, regardless of scope. Used for fast UI button-gating
+    /// (`require_permission`); the per-subject scope check uses the
+    /// `role_assignments` field below + a live DB lookup.
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Per-assignment scope info. Used by `auth_guard::AuthUser`'s
+    /// `assert_scope_*` helpers to decide whether the caller's
+    /// scope set covers the request's target subject.
+    #[serde(default)]
+    pub role_assignments: Vec<RoleAssignmentClaim>,
     pub exp: i64,
     pub iat: i64,
     pub token_type: String, // "access" or "refresh"
@@ -55,8 +87,9 @@ impl JwtManager {
         email: &str,
         roles: Vec<String>,
         permissions: Vec<String>,
+        role_assignments: Vec<RoleAssignmentClaim>,
     ) -> anyhow::Result<String> {
-        self.create_access_token_with_ttl(user_id, email, roles, permissions, 900)
+        self.create_access_token_with_ttl(user_id, email, roles, permissions, role_assignments, 900)
     }
 
     pub fn create_access_token_with_ttl(
@@ -65,6 +98,7 @@ impl JwtManager {
         email: &str,
         roles: Vec<String>,
         permissions: Vec<String>,
+        role_assignments: Vec<RoleAssignmentClaim>,
         ttl_secs: i64,
     ) -> anyhow::Result<String> {
         let now = Utc::now();
@@ -73,6 +107,7 @@ impl JwtManager {
             email: email.to_string(),
             roles,
             permissions,
+            role_assignments,
             exp: (now + Duration::seconds(ttl_secs)).timestamp(),
             iat: now.timestamp(),
             token_type: "access".to_string(),
@@ -94,8 +129,9 @@ impl JwtManager {
         email: &str,
         roles: Vec<String>,
         permissions: Vec<String>,
+        role_assignments: Vec<RoleAssignmentClaim>,
     ) -> anyhow::Result<String> {
-        self.create_refresh_token_with_ttl(user_id, email, roles, permissions, 7)
+        self.create_refresh_token_with_ttl(user_id, email, roles, permissions, role_assignments, 7)
     }
 
     pub fn create_refresh_token_with_ttl(
@@ -104,6 +140,7 @@ impl JwtManager {
         email: &str,
         roles: Vec<String>,
         permissions: Vec<String>,
+        role_assignments: Vec<RoleAssignmentClaim>,
         ttl_days: i64,
     ) -> anyhow::Result<String> {
         let now = Utc::now();
@@ -112,6 +149,7 @@ impl JwtManager {
             email: email.to_string(),
             roles,
             permissions,
+            role_assignments,
             exp: (now + Duration::days(ttl_days)).timestamp(),
             iat: now.timestamp(),
             token_type: "refresh".to_string(),
@@ -197,6 +235,7 @@ mod tests {
                 "alice@example.com",
                 vec!["admin".into()],
                 vec!["users:read".into(), "users:update".into()],
+                vec![],
             )
             .expect("create should succeed");
 
@@ -206,6 +245,40 @@ mod tests {
         assert_eq!(claims.token_type, "access");
         assert_eq!(claims.roles, vec!["admin"]);
         assert_eq!(claims.permissions, vec!["users:read", "users:update"]);
+    }
+
+    #[test]
+    fn access_token_carries_role_assignments() {
+        let mgr = test_jwt_manager();
+        let uid = test_user_id();
+        let role_id = uuid::Uuid::nil();
+        let team_id = uuid::Uuid::from_u128(0x1234_5678_90ab_cdef_1234_5678_90ab_cdef);
+        let token = mgr
+            .create_access_token(
+                uid,
+                "scoped@example.com",
+                vec!["team_manager".into()],
+                vec!["api_keys:update".into()],
+                vec![
+                    RoleAssignmentClaim {
+                        role_id,
+                        scope_kind: "global".into(),
+                        scope_id: None,
+                    },
+                    RoleAssignmentClaim {
+                        role_id,
+                        scope_kind: "team".into(),
+                        scope_id: Some(team_id),
+                    },
+                ],
+            )
+            .expect("create should succeed");
+
+        let claims = mgr.verify_token(&token).expect("verify should succeed");
+        assert_eq!(claims.role_assignments.len(), 2);
+        assert_eq!(claims.role_assignments[0].scope_kind, "global");
+        assert_eq!(claims.role_assignments[1].scope_kind, "team");
+        assert_eq!(claims.role_assignments[1].scope_id, Some(team_id));
     }
 
     #[test]
@@ -220,6 +293,7 @@ mod tests {
             email: "bob@example.com".into(),
             roles: vec![],
             permissions: vec![],
+            role_assignments: vec![],
             exp: (now - Duration::hours(1)).timestamp(),
             iat: (now - Duration::hours(2)).timestamp(),
             token_type: "access".into(),
@@ -247,6 +321,7 @@ mod tests {
             email: "x@y.com".into(),
             roles: vec![],
             permissions: vec![],
+            role_assignments: vec![],
             exp: (now + Duration::hours(1)).timestamp(),
             iat: now.timestamp(),
             token_type: "access".into(),
@@ -275,6 +350,7 @@ mod tests {
             email: "x@y.com".into(),
             roles: vec![],
             permissions: vec![],
+            role_assignments: vec![],
             exp: (now + Duration::hours(1)).timestamp(),
             iat: now.timestamp(),
             token_type: "access".into(),
@@ -298,7 +374,13 @@ mod tests {
         let mgr = test_jwt_manager();
         let uid = test_user_id();
         let token = mgr
-            .create_refresh_token(uid, "carol@example.com", vec!["viewer".into()], vec![])
+            .create_refresh_token(
+                uid,
+                "carol@example.com",
+                vec!["viewer".into()],
+                vec![],
+                vec![],
+            )
             .expect("create should succeed");
 
         let claims = mgr.verify_token(&token).expect("verify should succeed");
@@ -311,7 +393,7 @@ mod tests {
         let uid = test_user_id();
         let now = Utc::now().timestamp();
         let token = mgr
-            .create_access_token_with_ttl(uid, "ttl@example.com", vec![], vec![], 60)
+            .create_access_token_with_ttl(uid, "ttl@example.com", vec![], vec![], vec![], 60)
             .expect("create should succeed");
 
         let claims = mgr.verify_token(&token).expect("verify should succeed");
@@ -332,7 +414,7 @@ mod tests {
         let uid = test_user_id();
         let now = Utc::now().timestamp();
         let token = mgr
-            .create_refresh_token_with_ttl(uid, "ttl@example.com", vec![], vec![], 1)
+            .create_refresh_token_with_ttl(uid, "ttl@example.com", vec![], vec![], vec![], 1)
             .expect("create should succeed");
 
         let claims = mgr.verify_token(&token).expect("verify should succeed");

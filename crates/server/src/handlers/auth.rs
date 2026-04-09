@@ -308,12 +308,16 @@ pub async fn login(
         .await
         .unwrap_or(0);
 
-    // Fetch the union of system + custom role names and the flat
-    // permission set (union of every role's `permissions` field).
-    // See `think_watch_auth::rbac::compute_user_permissions` for the
-    // authoritative documentation of multi-role merge semantics.
+    // Fetch the union of system + custom role names, the flat
+    // permission set (union of every role's `permissions`), and
+    // every (role_id, scope_kind, scope_id) assignment so the
+    // server-side scope checks have the raw assignment list. See
+    // `think_watch_auth::rbac::compute_user_permissions` for the
+    // multi-role merge semantics.
     let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user.id).await?;
     let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id).await?;
+    let role_assignments =
+        think_watch_auth::rbac::compute_user_role_assignments(&state.db, user.id).await?;
 
     let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
@@ -323,6 +327,7 @@ pub async fn login(
         &user.email,
         roles.clone(),
         permissions.clone(),
+        role_assignments.clone(),
         access_ttl,
     )?;
     let refresh_token = state.jwt.create_refresh_token_with_ttl(
@@ -330,6 +335,7 @@ pub async fn login(
         &user.email,
         roles.clone(),
         permissions.clone(),
+        role_assignments,
         refresh_ttl_days,
     )?;
 
@@ -532,19 +538,22 @@ pub async fn refresh(
     let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
 
-    // Reload roles + permissions from the DB rather than trusting the
-    // refresh token's snapshot. This is critical: if an admin revokes
-    // a role between login and refresh, the re-minted access token
-    // must reflect the current assignments, not the stale claim.
+    // Reload roles + permissions + assignments from the DB rather
+    // than trusting the refresh token's snapshot. Critical: if an
+    // admin revoked a role or changed scope between login and
+    // refresh, the re-minted token must reflect the current state.
     let roles = think_watch_auth::rbac::load_user_role_names(&state.db, claims.sub).await?;
     let permissions =
         think_watch_auth::rbac::compute_user_permissions(&state.db, claims.sub).await?;
+    let role_assignments =
+        think_watch_auth::rbac::compute_user_role_assignments(&state.db, claims.sub).await?;
 
     let access_token = state.jwt.create_access_token_with_ttl(
         claims.sub,
         &claims.email,
         roles.clone(),
         permissions.clone(),
+        role_assignments.clone(),
         access_ttl,
     )?;
     let refresh_token = state.jwt.create_refresh_token_with_ttl(
@@ -552,6 +561,7 @@ pub async fn refresh(
         &claims.email,
         roles.clone(),
         permissions.clone(),
+        role_assignments,
         refresh_ttl_days,
     )?;
 
