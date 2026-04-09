@@ -16,6 +16,35 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  build: {
+    chunkSizeWarningLimit: 600,
+    rollupOptions: {
+      output: {
+        // Conservative manual chunking. We only carve out the
+        // truly heavy route-specific deps (codemirror on /roles,
+        // recharts on /dashboard + /analytics) so they don't bloat
+        // the initial page load and are cached separately. React,
+        // radix, i18next etc. all stay in the default vendor split
+        // — the bundler does a better job with those than a
+        // hand-rolled regex would.
+        manualChunks: (id: string) => {
+          if (!id.includes('node_modules')) return undefined
+          if (id.includes('@codemirror') || id.includes('@lezer')) {
+            return 'vendor-codemirror'
+          }
+          if (id.includes('recharts') || id.includes('d3-')) {
+            return 'vendor-charts'
+          }
+          // Date pickers pull in date-fns + react-day-picker which
+          // are ~90KB combined and only used on a couple of pages.
+          if (id.includes('react-day-picker') || id.includes('date-fns')) {
+            return 'vendor-date'
+          }
+          return undefined
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       // Console API → console port (configurable via env). `ws: true`
