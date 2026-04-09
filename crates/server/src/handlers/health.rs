@@ -19,6 +19,13 @@ pub async fn liveness() -> Json<Value> {
 }
 
 /// GET /health/ready — readiness probe, checks critical dependencies.
+///
+/// Verifies the gateway can actually serve traffic, not just that
+/// its dependencies respond. Includes:
+///   1. Postgres reachable
+///   2. Redis reachable
+///   3. At least one active, non-deleted provider configured
+///      (without this, every `/v1/*` request would 502 at runtime)
 pub async fn readiness(State(state): State<AppState>) -> Response {
     let pg_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
         .fetch_one(&state.db)
@@ -30,12 +37,38 @@ pub async fn readiness(State(state): State<AppState>) -> Response {
         state.redis.ping::<String>(None).await.is_ok()
     };
 
-    if pg_ok && redis_ok {
-        Json(json!({ "status": "ready", "postgres": true, "redis": true })).into_response()
+    // Provider count check — only meaningful if Postgres is up,
+    // otherwise the lookup itself would fail and we'd double-count
+    // the same outage.
+    let providers_ready = if pg_ok {
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM providers WHERE is_active = true AND deleted_at IS NULL",
+        )
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(0);
+        count > 0
+    } else {
+        false
+    };
+
+    if pg_ok && redis_ok && providers_ready {
+        Json(json!({
+            "status": "ready",
+            "postgres": true,
+            "redis": true,
+            "providers": true,
+        }))
+        .into_response()
     } else {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "status": "not_ready", "postgres": pg_ok, "redis": redis_ok })),
+            Json(json!({
+                "status": "not_ready",
+                "postgres": pg_ok,
+                "redis": redis_ok,
+                "providers": providers_ready,
+            })),
         )
             .into_response()
     }

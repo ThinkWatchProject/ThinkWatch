@@ -32,15 +32,21 @@ pub async fn get_dashboard_stats(
             .fetch_one(&state.db)
             .await?;
 
-    let active_providers: Option<i64> =
-        sqlx::query_scalar("SELECT COUNT(*) FROM providers WHERE is_active = true")
-            .fetch_one(&state.db)
-            .await?;
+    // Filter out soft-deleted rows so the dashboard "active" tile
+    // matches what the limits engine and the gateway router actually
+    // see. Without `deleted_at IS NULL` the count silently inflates
+    // for 30 days after a delete.
+    let active_providers: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM providers WHERE is_active = true AND deleted_at IS NULL",
+    )
+    .fetch_one(&state.db)
+    .await?;
 
-    let active_api_keys: Option<i64> =
-        sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE is_active = true")
-            .fetch_one(&state.db)
-            .await?;
+    let active_api_keys: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM api_keys WHERE is_active = true AND deleted_at IS NULL",
+    )
+    .fetch_one(&state.db)
+    .await?;
 
     let connected_mcp_servers: Option<i64> =
         sqlx::query_scalar("SELECT COUNT(*) FROM mcp_servers WHERE status = 'connected'")

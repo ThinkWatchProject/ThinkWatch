@@ -309,7 +309,7 @@ async fn main() -> anyhow::Result<()> {
     handlers::admin::reconcile_clickhouse_ttls(&state).await;
 
     // --- Start Gateway server (AI API + MCP) ---
-    let gateway_app = app::create_gateway_app(&config, state.clone()).await;
+    let gateway_app = app::create_gateway_app(&config, state.clone()).await?;
     let gateway_addr = config.gateway_addr();
     let gateway_listener = tokio::net::TcpListener::bind(&gateway_addr).await?;
     tracing::info!("Gateway listening on {gateway_addr} (AI API + MCP)");

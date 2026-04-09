@@ -141,11 +141,16 @@ pub async fn login(
     // Constant-time login: always perform Argon2 verify to prevent user enumeration
     let dummy_hash = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAAAAAAAAA$AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
-    let maybe_user =
-        sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1 AND is_active = true")
-            .bind(&req.email)
-            .fetch_optional(&state.db)
-            .await?;
+    // Soft-deleted users must NOT be able to log in. Every other user
+    // lookup in this file already filters `deleted_at IS NULL`; the
+    // login path was the lone exception, leaving a 30-day window after
+    // soft-delete where the credential still worked.
+    let maybe_user = sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL",
+    )
+    .bind(&req.email)
+    .fetch_optional(&state.db)
+    .await?;
 
     let (user, password_hash) = match maybe_user {
         Some(u) => {

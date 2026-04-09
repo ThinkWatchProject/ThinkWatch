@@ -282,6 +282,13 @@ pub async fn rotate_key(
     // ("limits attached to api_keys") will add an explicit copy step
     // when rotation happens.
     let generated = api_key::generate_api_key();
+
+    // INSERT new key + UPDATE old key's grace period must be atomic.
+    // Without the transaction, an error between the two leaves the
+    // old key with no grace_period_ends_at — meaning it never enters
+    // the rotation grace window and both keys remain valid forever.
+    let mut tx = state.db.begin().await?;
+
     let new_key = sqlx::query_as::<_, ApiKey>(
         r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, surfaces, allowed_models,
             expires_at, rotation_period_days, inactivity_timeout_days,
@@ -300,17 +307,18 @@ pub async fn rotate_key(
     .bind(old_key.rotation_period_days)
     .bind(old_key.inactivity_timeout_days)
     .bind(id)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
 
-    // Set grace period on old key
     sqlx::query(
         "UPDATE api_keys SET grace_period_ends_at = $1, disabled_reason = 'rotated' WHERE id = $2",
     )
     .bind(grace_period_ends_at)
     .bind(id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     state.audit.log(
         AuditEntry::new("api_key.rotate")
