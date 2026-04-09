@@ -458,6 +458,54 @@ pub async fn refresh(
         return Err(AppError::BadRequest("Invalid token type".into()));
     }
 
+    // Refresh-token rotation. Without this, a stolen refresh token
+    // could be used indefinitely (until natural expiry — 7 days)
+    // even after the user changed their password or had a role
+    // revoked. The model:
+    //
+    //   1. Hash the presented refresh token (sha256 of the JWT
+    //      string is fine — it's already a high-entropy bearer
+    //      secret).
+    //   2. If the hash is in `refresh_blacklist:*` Redis already,
+    //      this token has been used → reject. Catches replay attacks.
+    //   3. Otherwise add the hash to the blacklist with TTL set to
+    //      whatever lifetime the OLD token had remaining, then mint
+    //      and return the new pair.
+    //
+    // Trade-off: blacklist storage is O(active refresh tokens),
+    // each entry ~80 bytes; trivial at any reasonable user count.
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(req.refresh_token.as_bytes());
+    let token_hash = hex::encode(hasher.finalize());
+    let blacklist_key = format!("refresh_blacklist:{token_hash}");
+
+    use fred::interfaces::KeysInterface;
+    let already_used: Option<String> = state.redis.get(&blacklist_key).await.ok().flatten();
+    if already_used.is_some() {
+        tracing::warn!(
+            user_id = %claims.sub,
+            "refresh token replay detected — token already in blacklist"
+        );
+        metrics::counter!("auth_refresh_replay_total").increment(1);
+        return Err(AppError::Unauthorized);
+    }
+
+    // Set the blacklist entry to expire when the OLD token would
+    // have expired naturally — anything past that is a no-op anyway.
+    let now = chrono::Utc::now().timestamp();
+    let remaining_secs = (claims.exp - now).max(60);
+    let _: Result<(), _> = state
+        .redis
+        .set(
+            &blacklist_key,
+            "1",
+            Some(fred::types::Expiration::EX(remaining_secs)),
+            None,
+            false,
+        )
+        .await;
+
     let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
 

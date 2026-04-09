@@ -62,5 +62,49 @@ async fn run_retention_cleanup(db: &PgPool, config: &DynamicConfig) -> anyhow::R
         tracing::info!("Purged {total_purged} soft-deleted records older than 30 days");
     }
 
+    // 4. Orphan cleanup for the polymorphic limits engine.
+    //
+    // `rate_limit_rules` and `budget_caps` use a polymorphic
+    // `(subject_kind, subject_id)` pair instead of a real foreign
+    // key, so when the subject row is hard-deleted (step 3 above)
+    // its rules are left dangling forever. The list endpoints
+    // happily return the orphans, the limits engine evaluates them
+    // against UUIDs that no longer exist, and they accumulate
+    // across rotations.
+    //
+    // We can't add a real FK because the column is multi-typed
+    // (user / api_key / provider / mcp_server), so we sweep here
+    // instead. The query is one DELETE per kind with a NOT EXISTS
+    // anti-join — runs in milliseconds even at high cardinality
+    // because both sides are indexed on UUID.
+    let orphan_rules = sqlx::query(
+        r#"DELETE FROM rate_limit_rules
+           WHERE (subject_kind = 'user'        AND NOT EXISTS (SELECT 1 FROM users        u WHERE u.id  = subject_id))
+              OR (subject_kind = 'api_key'    AND NOT EXISTS (SELECT 1 FROM api_keys     k WHERE k.id  = subject_id))
+              OR (subject_kind = 'provider'   AND NOT EXISTS (SELECT 1 FROM providers    p WHERE p.id  = subject_id))
+              OR (subject_kind = 'mcp_server' AND NOT EXISTS (SELECT 1 FROM mcp_servers  s WHERE s.id  = subject_id))"#,
+    )
+    .execute(db)
+    .await?;
+
+    let orphan_caps = sqlx::query(
+        r#"DELETE FROM budget_caps
+           WHERE (subject_kind = 'user'      AND NOT EXISTS (SELECT 1 FROM users     u WHERE u.id  = subject_id))
+              OR (subject_kind = 'api_key'  AND NOT EXISTS (SELECT 1 FROM api_keys  k WHERE k.id  = subject_id))
+              OR (subject_kind = 'team'     AND NOT EXISTS (SELECT 1 FROM teams     t WHERE t.id  = subject_id))
+              OR (subject_kind = 'provider' AND NOT EXISTS (SELECT 1 FROM providers p WHERE p.id  = subject_id))"#,
+    )
+    .execute(db)
+    .await?;
+
+    let orphan_total = orphan_rules.rows_affected() + orphan_caps.rows_affected();
+    if orphan_total > 0 {
+        tracing::info!(
+            "Purged {orphan_total} orphaned limits rows ({} rate-limit rules, {} budget caps)",
+            orphan_rules.rows_affected(),
+            orphan_caps.rows_affected()
+        );
+    }
+
     Ok(())
 }
