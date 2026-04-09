@@ -251,22 +251,44 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
             get(handlers::health::readiness).with_state(state.clone()),
         );
 
-    // Prometheus metrics endpoint. Wrapped in optional bearer auth
-    // — set `METRICS_BEARER_TOKEN` to require it. Without a token,
-    // /metrics on the public port leaks cost / token / error
-    // signals to anyone on the network. The token is read from env
-    // (`METRICS_BEARER_TOKEN`) so Prometheus scrape configs can
-    // pass it via the same env var or a static value.
+    // Prometheus `/metrics` endpoint — opt-in via env.
+    //
+    // The Prometheus recorder is always installed (so metrics are
+    // still collected and available for any future scraping path),
+    // but the HTTP route is only mounted when `METRICS_BEARER_TOKEN`
+    // is set. Rationale: /metrics on the public gateway port leaks
+    // cost / token-usage / error signals, so the safe default is
+    // "endpoint does not exist" rather than "endpoint exists with
+    // no auth". Operators who want scraping set the token (the
+    // `deploy/generate-secrets.sh` script does this automatically),
+    // and Prometheus passes it via `Authorization: Bearer <value>`.
+    //
+    // Failing to set the token does not affect any other startup
+    // path — only the /metrics route is skipped.
     let prom_handle = handlers::metrics::install_prometheus_recorder();
-    let metrics_state = handlers::metrics::MetricsState {
-        handle: prom_handle,
-        bearer_token: std::env::var("METRICS_BEARER_TOKEN")
-            .ok()
-            .filter(|s| !s.is_empty()),
+    let metrics_route = match std::env::var("METRICS_BEARER_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        Some(token) => {
+            tracing::info!("/metrics endpoint enabled (bearer auth required)");
+            let metrics_state = handlers::metrics::MetricsState {
+                handle: prom_handle,
+                bearer_token: token,
+            };
+            Some(
+                Router::new()
+                    .route("/metrics", get(handlers::metrics::prometheus_metrics))
+                    .with_state(metrics_state),
+            )
+        }
+        None => {
+            tracing::info!(
+                "/metrics endpoint disabled — set METRICS_BEARER_TOKEN to enable Prometheus scraping"
+            );
+            None
+        }
     };
-    let metrics_route = Router::new()
-        .route("/metrics", get(handlers::metrics::prometheus_metrics))
-        .with_state(metrics_state);
 
     // CORS for gateway — allow configured origins (same as console)
     let gateway_cors = {
@@ -283,9 +305,11 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
             .allow_credentials(true)
     };
 
-    let app = Router::new()
-        .merge(health)
-        .merge(metrics_route)
+    let mut app = Router::new().merge(health);
+    if let Some(mr) = metrics_route {
+        app = app.merge(mr);
+    }
+    let app = app
         .merge(ai_routes)
         .merge(mcp_routes)
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB for large prompts
