@@ -129,11 +129,7 @@ fn security_layers<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Route
 // Gateway server (port 3000) — AI API + MCP, exposed to downstream clients
 // ---------------------------------------------------------------------------
 
-pub async fn create_gateway_app(
-    _config: &AppConfig,
-    state: AppState,
-    jwt: Arc<JwtManager>,
-) -> Router {
+pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router {
     // Load dynamic config values for gateway initialization
     let dc = &state.dynamic_config;
     let cache_ttl = dc.cache_ttl_secs().await;
@@ -174,7 +170,7 @@ pub async fn create_gateway_app(
         .route("/v1/models", get(gateway_proxy::list_models_handler))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            crate::middleware::api_key_auth::require_api_key_or_jwt,
+            crate::middleware::api_key_auth::require_api_key("ai_gateway"),
         ))
         .with_state(gateway_state);
 
@@ -224,11 +220,14 @@ pub async fn create_gateway_app(
     let mcp_state = Arc::new(McpGatewayState {
         proxy: mcp_proxy,
         sessions: session_manager,
-        jwt_manager: jwt,
     });
     let mcp_routes = Router::new()
         .route("/mcp", post(streamable_http::handle_post))
         .route("/mcp", delete(streamable_http::handle_delete))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::api_key_auth::require_api_key("mcp_gateway"),
+        ))
         .with_state(mcp_state);
 
     // Health check routes
