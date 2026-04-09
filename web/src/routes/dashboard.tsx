@@ -153,10 +153,14 @@ function useLiveDashboard() {
       if (cancelled) return;
       const token = localStorage.getItem('access_token');
       if (!token) {
-        // Not signed in yet — try a plain HTTP fetch as a one-shot fallback.
+        // Not signed in yet — try a plain HTTP fetch as a one-shot
+        // fallback. Errors are logged so operators can see what's
+        // wrong instead of staring at empty charts.
         api<DashboardLive>('/api/dashboard/live', { schema: DashboardLiveSchema })
           .then(setLive)
-          .catch(() => {});
+          .catch((err) => {
+            console.error('dashboard live fetch failed:', err);
+          });
         return;
       }
       // Mint a single-use ticket via authenticated POST. The ticket is

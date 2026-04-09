@@ -45,8 +45,13 @@ export function ProfilePage() {
 
   useEffect(() => {
     api<{ enabled: boolean; required: boolean }>('/api/auth/totp/status')
-      .then((s) => { setTotpEnabled(s.enabled); setTotpRequired(s.required); })
-      .catch(() => {})
+      .then((s) => {
+        setTotpEnabled(s.enabled);
+        setTotpRequired(s.required);
+      })
+      .catch((err) => {
+        console.error('TOTP status fetch failed:', err);
+      })
       .finally(() => setTotpLoading(false));
   }, []);
 

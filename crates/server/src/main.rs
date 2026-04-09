@@ -230,18 +230,30 @@ async fn main() -> anyhow::Result<()> {
             };
 
             if !issuer.is_empty() && !client_id.is_empty() && !client_secret.is_empty() {
+                // OIDC is enabled AND all fields are populated.
+                // Discovery failure here is a real misconfiguration
+                // — refusing to start is preferable to silently
+                // disabling SSO for an org that thinks it's on.
+                // Operators who want SSO off should flip
+                // `oidc.enabled = false` instead of editing the
+                // issuer URL to break it.
                 match OidcManager::discover(&issuer, &client_id, &client_secret, &redirect).await {
                     Ok(mgr) => {
                         tracing::info!("OIDC provider discovered successfully");
                         Some(mgr)
                     }
                     Err(e) => {
-                        tracing::warn!("OIDC discovery failed, SSO disabled: {e}");
-                        None
+                        return Err(anyhow::anyhow!(
+                            "OIDC discovery failed for issuer {issuer}: {e}. \
+                             Either fix the issuer URL / credentials or set \
+                             oidc.enabled = false to start without SSO."
+                        ));
                     }
                 }
             } else {
-                tracing::info!("OIDC configured but fields incomplete, SSO disabled");
+                tracing::warn!(
+                    "OIDC enabled but issuer/client_id/client_secret incomplete; SSO disabled"
+                );
                 None
             }
         } else {
@@ -309,9 +321,19 @@ async fn main() -> anyhow::Result<()> {
             }
             while let Ok(msg) = rx.recv().await {
                 if msg.channel == "config:changed" {
-                    // DynamicConfig has its own subscriber that reloads the cache
-                    // first; we wait briefly so we read the fresh value.
-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    // Force a fresh reload of DynamicConfig before
+                    // recomputing the filter / redactor. The previous
+                    // implementation slept 50ms and hoped the parallel
+                    // DynamicConfig subscriber had fired first — a
+                    // race that would silently install stale rules
+                    // under any subscriber latency. Now we drive the
+                    // reload explicitly: by the time `load_content_filter`
+                    // reads from `dc_clone`, the in-memory cache has
+                    // already been refreshed from Postgres.
+                    if let Err(e) = dc_clone.reload().await {
+                        tracing::warn!("Failed to reload dynamic config before filter swap: {e}");
+                        continue;
+                    }
                     let new_filter = app::load_content_filter(&dc_clone).await;
                     cf_clone.store(Arc::new(new_filter));
                     let new_pii = app::load_pii_redactor(&dc_clone).await;

@@ -258,6 +258,12 @@ export function ApiKeysPage() {
       setFormError(t('apiKeys.surfacesRequired'));
       return;
     }
+    // Clear any previously created key BEFORE the new request flies.
+    // Without this, a fast click-close-reopen cycle could leave the
+    // previous key visible underneath the new dialog and the admin
+    // would copy the wrong secret.
+    setCreatedKey(null);
+    setCopied(false);
     setSubmitting(true);
     try {
       const models = allowedModels
