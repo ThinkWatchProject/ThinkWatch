@@ -129,23 +129,27 @@ fn security_layers<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Route
 // Gateway server (port 3000) — AI API + MCP, exposed to downstream clients
 // ---------------------------------------------------------------------------
 
-pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow::Result<Router> {
+pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router {
     // Load dynamic config values for gateway initialization
     let dc = &state.dynamic_config;
     let cache_ttl = dc.cache_ttl_secs().await;
 
     // AI Gateway: /v1/*
-    // Load providers from database and register them in the model router.
-    // Fail-fast: starting the gateway with zero providers means every
-    // /v1/* request will 502 the moment traffic arrives. We'd rather
-    // refuse to come up than serve a broken control plane.
+    // Load providers from database. Failure is logged loudly but
+    // does NOT abort startup — that would block the chicken-and-egg
+    // case of a fresh deployment that has zero providers and needs
+    // the console (port 3001) to be reachable so the admin can add
+    // the first one. The `/health/ready` probe checks the providers
+    // table directly, so K8s won't route AI traffic to a pod with
+    // an empty router.
     let mut model_router = ModelRouter::new();
-    load_providers_into_router(&state, &mut model_router)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to load providers from database: {e}");
-            anyhow::anyhow!("provider load failed: {e}")
-        })?;
+    if let Err(e) = load_providers_into_router(&state, &mut model_router).await {
+        metrics::counter!("gateway_provider_load_failed_total").increment(1);
+        tracing::error!(
+            "Failed to load providers from database; gateway will start with empty router \
+             and /health/ready will return 503 until providers are configured: {e}"
+        );
+    }
     let model_router = Arc::new(model_router);
     let gateway_state = GatewayState {
         router: model_router,
@@ -301,7 +305,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         ))
         .with_state(state.clone());
 
-    Ok(security_layers(app))
+    security_layers(app)
 }
 
 // ---------------------------------------------------------------------------
