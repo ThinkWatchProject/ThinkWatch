@@ -60,7 +60,8 @@
     "logExplorer": "Log Explorer",
     "logForwarders": "Log Forwarding",
     "platformLogs": "Platform Logs",
-    "configGuide": "Configuration Guide"
+    "configGuide": "Configuration Guide",
+    "apiDocs": "API Docs"
   },
   "auth": {
     "signIn": "Sign in",

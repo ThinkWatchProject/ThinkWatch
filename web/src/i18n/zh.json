@@ -60,7 +60,8 @@
     "logExplorer": "日志查询",
     "logForwarders": "日志转发",
     "platformLogs": "平台日志",
-    "configGuide": "配置指南"
+    "configGuide": "配置指南",
+    "apiDocs": "API 文档"
   },
   "auth": {
     "signIn": "登录",
