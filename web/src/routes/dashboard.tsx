@@ -31,6 +31,7 @@ interface DashboardStats {
   active_providers: number;
   active_api_keys: number;
   connected_mcp_servers: number;
+  active_keys_buckets: number[];
 }
 
 interface UsageStats {
@@ -381,7 +382,7 @@ export function DashboardPage() {
 
   const tokensSpark = useSparkHistory(usage?.total_tokens_today);
   const costSpark = useSparkHistory(cost?.total_cost_mtd);
-  const keysSpark = useSparkHistory(stats?.active_api_keys);
+  const keysSpark = useMemo(() => stats?.active_keys_buckets ?? Array(24).fill(0), [stats]);
   const rpmSpark = useMemo(() => live?.rpm_buckets ?? Array(24).fill(0), [live]);
 
   const currentRpm = live?.rpm_buckets?.[live.rpm_buckets.length - 1] ?? 0;

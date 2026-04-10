@@ -17,8 +17,11 @@ use super::clickhouse_util::{ch_available, ch_client};
 pub struct DashboardStats {
     pub total_requests_today: i64,
     pub active_providers: i64,
+    /// Number of distinct API keys used in the last 24 hours.
     pub active_api_keys: i64,
     pub connected_mcp_servers: i64,
+    /// Hourly distinct active key counts for the past 24 hours (oldest → newest, length 24).
+    pub active_keys_buckets: Vec<u64>,
 }
 
 #[utoipa::path(
@@ -90,48 +93,138 @@ pub async fn get_dashboard_stats(
     .fetch_one(&state.db)
     .await?;
 
-    let active_api_keys: Option<i64> = match owned_teams_for_keys {
-        None => {
-            sqlx::query_scalar(
-                "SELECT COUNT(*) FROM api_keys \
-                  WHERE is_active = true AND deleted_at IS NULL AND last_used_at IS NOT NULL",
-            )
-            .fetch_one(&state.db)
-            .await?
-        }
-        Some(team_ids) => {
-            let team_ids_vec: Vec<uuid::Uuid> = team_ids.into_iter().collect();
-            sqlx::query_scalar(
-                "SELECT COUNT(*) FROM api_keys k \
-                  WHERE k.is_active = true \
-                    AND k.deleted_at IS NULL \
-                    AND k.last_used_at IS NOT NULL \
-                    AND ( \
-                        k.user_id = $1 \
-                        OR EXISTS ( \
-                            SELECT 1 FROM team_members tm \
-                             WHERE tm.user_id = k.user_id \
-                               AND tm.team_id = ANY($2) \
-                        ) \
-                    )",
-            )
-            .bind(caller_id)
-            .bind(&team_ids_vec)
-            .fetch_one(&state.db)
-            .await?
-        }
-    };
-
     let connected_mcp_servers: Option<i64> =
         sqlx::query_scalar("SELECT COUNT(*) FROM mcp_servers WHERE status = 'connected'")
             .fetch_one(&state.db)
             .await?;
 
+    // Active API keys — count distinct keys used in the last 24 hours
+    // from ClickHouse gateway_logs, plus hourly buckets for the sparkline.
+    let (active_api_keys, active_keys_buckets) = if ch_available(&state) {
+        let ch = ch_client(&state)?;
+
+        #[derive(Debug, clickhouse::Row, Deserialize)]
+        struct KeyCount {
+            cnt: u64,
+        }
+        #[derive(Debug, clickhouse::Row, Deserialize)]
+        struct KeyBucket {
+            hour: String,
+            cnt: u64,
+        }
+
+        // Scope filter for team-based access — reuse same owned_teams
+        // already resolved for usage counts above.
+        let visible_user_ids: Option<Vec<String>> = match &owned_teams_for_keys {
+            None => None,
+            Some(team_ids) => {
+                let team_ids_vec: Vec<uuid::Uuid> = team_ids.iter().copied().collect();
+                let rows: Vec<(String,)> = sqlx::query_as(
+                    "SELECT DISTINCT u.id::text FROM users u \
+                     WHERE u.id = $1 \
+                        OR EXISTS ( \
+                            SELECT 1 FROM team_members tm \
+                             WHERE tm.user_id = u.id AND tm.team_id = ANY($2) \
+                        )",
+                )
+                .bind(caller_id)
+                .bind(&team_ids_vec)
+                .fetch_all(&state.db)
+                .await?;
+                Some(rows.into_iter().map(|(s,)| s).collect())
+            }
+        };
+
+        let count_result: u64 = match &visible_user_ids {
+            None => ch
+                .query(
+                    "SELECT uniqExact(api_key_id) AS cnt \
+                     FROM gateway_logs \
+                     WHERE created_at >= now() - INTERVAL 24 HOUR \
+                       AND api_key_id IS NOT NULL AND api_key_id != ''",
+                )
+                .fetch_one::<KeyCount>()
+                .await
+                .map(|r| r.cnt)
+                .unwrap_or(0),
+            Some(ids) => ch
+                .query(
+                    "SELECT uniqExact(api_key_id) AS cnt \
+                     FROM gateway_logs \
+                     WHERE created_at >= now() - INTERVAL 24 HOUR \
+                       AND api_key_id IS NOT NULL AND api_key_id != '' \
+                       AND has(?, user_id)",
+                )
+                .bind(ids)
+                .fetch_one::<KeyCount>()
+                .await
+                .map(|r| r.cnt)
+                .unwrap_or(0),
+        };
+
+        let bucket_rows: Vec<KeyBucket> = match &visible_user_ids {
+            None => ch
+                .query(
+                    "SELECT \
+                        toString(toStartOfHour(created_at)) AS hour, \
+                        uniqExact(api_key_id) AS cnt \
+                     FROM gateway_logs \
+                     WHERE created_at >= toStartOfHour(now()) - INTERVAL 23 HOUR \
+                       AND api_key_id IS NOT NULL AND api_key_id != '' \
+                     GROUP BY hour \
+                     ORDER BY hour ASC",
+                )
+                .fetch_all::<KeyBucket>()
+                .await
+                .unwrap_or_default(),
+            Some(ids) => ch
+                .query(
+                    "SELECT \
+                        toString(toStartOfHour(created_at)) AS hour, \
+                        uniqExact(api_key_id) AS cnt \
+                     FROM gateway_logs \
+                     WHERE created_at >= toStartOfHour(now()) - INTERVAL 23 HOUR \
+                       AND api_key_id IS NOT NULL AND api_key_id != '' \
+                       AND has(?, user_id) \
+                     GROUP BY hour \
+                     ORDER BY hour ASC",
+                )
+                .bind(ids)
+                .fetch_all::<KeyBucket>()
+                .await
+                .unwrap_or_default(),
+        };
+
+        // Build a dense 24-slot array keyed by hour string.
+        let now = chrono::Utc::now();
+        let mut buckets = Vec::with_capacity(24);
+        let lookup: std::collections::HashMap<String, u64> =
+            bucket_rows.into_iter().map(|b| (b.hour, b.cnt)).collect();
+        for i in (0..24).rev() {
+            let hour = (now - chrono::Duration::hours(i))
+                .format("%Y-%m-%d %H:00:00")
+                .to_string();
+            buckets.push(*lookup.get(&hour).unwrap_or(&0));
+        }
+        (count_result as i64, buckets)
+    } else {
+        // No ClickHouse — fall back to Postgres last_used_at in past 24h.
+        let count: Option<i64> = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT id) FROM api_keys \
+             WHERE is_active = true AND deleted_at IS NULL \
+               AND last_used_at >= now() - INTERVAL '24 hours'",
+        )
+        .fetch_one(&state.db)
+        .await?;
+        (count.unwrap_or(0), vec![0; 24])
+    };
+
     Ok(Json(DashboardStats {
         total_requests_today: total_requests.unwrap_or(0),
         active_providers: active_providers.unwrap_or(0),
-        active_api_keys: active_api_keys.unwrap_or(0),
+        active_api_keys,
         connected_mcp_servers: connected_mcp_servers.unwrap_or(0),
+        active_keys_buckets,
     }))
 }
 
