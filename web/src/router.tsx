@@ -34,6 +34,7 @@ const TeamsPage = lazyRouteComponent(() => import('@/routes/admin/teams'), 'Team
 const RolesPage = lazyRouteComponent(() => import('@/routes/admin/roles'), 'RolesPage');
 const SettingsPage = lazyRouteComponent(() => import('@/routes/admin/settings'), 'SettingsPage');
 const LogForwardersPage = lazyRouteComponent(() => import('@/routes/admin/log-forwarders'), 'LogForwardersPage');
+const ApiDocsPage = lazyRouteComponent(() => import('@/routes/admin/api-docs'), 'ApiDocsPage');
 const ProfilePage = lazyRouteComponent(() => import('@/routes/profile'), 'ProfilePage');
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -261,6 +262,12 @@ const logForwardersRoute = createRoute({
 });
 
 
+const apiDocsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/admin/api-docs',
+  component: ApiDocsPage,
+});
+
 const profileRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/profile',
@@ -298,6 +305,7 @@ const routeTree = rootRoute.addChildren([
   rolesRoute,
   settingsRoute,
   logForwardersRoute,
+  apiDocsRoute,
   profileRoute,
   registerRoute,
   setupRoute,
