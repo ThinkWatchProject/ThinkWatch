@@ -45,13 +45,11 @@ import {
 } from 'lucide-react';
 import { useNavigate, useLocation } from '@tanstack/react-router';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
-import { API_BASE } from '@/lib/api';
 
 interface NavItem {
   titleKey: string;
   icon: typeof LayoutDashboard;
   href: string;
-  external?: boolean;
 }
 interface NavGroup {
   labelKey: string;
@@ -65,12 +63,6 @@ const navGroups: NavGroup[] = [
       { titleKey: 'nav.dashboard', icon: LayoutDashboard, href: '/' },
       { titleKey: 'nav.apiKeys', icon: Key, href: '/api-keys' },
       { titleKey: 'nav.configGuide', icon: BookOpen, href: '/guide' },
-      {
-        titleKey: 'nav.apiDocs',
-        icon: FileCode2,
-        href: `${API_BASE}/api/docs`,
-        external: true,
-      },
     ],
   },
   {
@@ -112,6 +104,7 @@ const navGroups: NavGroup[] = [
       { titleKey: 'nav.teams', icon: UsersRound, href: '/admin/teams' },
       { titleKey: 'nav.roles', icon: Shield, href: '/admin/roles' },
       { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings' },
+      { titleKey: 'nav.apiDocs', icon: FileCode2, href: '/admin/api-docs' },
     ],
   },
 ];
@@ -245,11 +238,7 @@ export function AppSidebar({
                       <SidebarMenuButton
                         tooltip={t(item.titleKey)}
                         isActive={isActive}
-                        onClick={() =>
-                          item.external
-                            ? window.open(item.href, '_blank', 'noopener,noreferrer')
-                            : navigate({ to: item.href as '/' })
-                        }
+                        onClick={() => navigate({ to: item.href as '/' })}
                       >
                         <item.icon />
                         <span>{t(item.titleKey)}</span>
