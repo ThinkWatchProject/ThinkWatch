@@ -47,7 +47,7 @@ use crate::handlers::{
         title = "ThinkWatch Console API",
         version = "1.0.0",
         description = "Management API for the ThinkWatch AI gateway platform. Runs on port 3001.",
-        contact(name = "ThinkWatch", url = "https://github.com/thinkwatch"),
+        contact(name = "ThinkWatch", url = "https://thinkwat.ch"),
     ),
     paths(
         // Auth
