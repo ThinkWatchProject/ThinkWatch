@@ -130,7 +130,7 @@ pub async fn verify_signature(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Skip CORS preflight
+    // Skip CORS preflight — browsers don't attach custom headers.
     if *request.method() == Method::OPTIONS {
         return Ok(next.run(request).await);
     }

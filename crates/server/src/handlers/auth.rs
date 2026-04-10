@@ -467,6 +467,15 @@ pub async fn refresh(
     State(state): State<AppState>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, AppError> {
+    // Capture client IP before consuming the request — must match
+    // what login bound so subsequent signed requests pass IP check.
+    let client_ip = crate::middleware::auth_guard::extract_client_ip(
+        &state,
+        request.headers(),
+        request.extensions(),
+    )
+    .await;
+
     // Resolve the refresh token, preferring the httpOnly cookie set
     // at login time and falling back to a body field for non-browser
     // clients. The cookie path is the standard browser flow now —
@@ -566,9 +575,12 @@ pub async fn refresh(
         refresh_ttl_days,
     )?;
 
-    let signing_key = verify_signature::create_signing_key(&state.redis, &claims.sub, None)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
+    let signing_key =
+        verify_signature::create_signing_key(&state.redis, &claims.sub, client_ip.as_deref())
+            .await
+            .map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))
+            })?;
 
     let signing_cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
     let access_cookie = verify_signature::access_token_cookie(&access_token, access_ttl);

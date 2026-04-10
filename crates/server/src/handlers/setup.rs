@@ -174,13 +174,14 @@ pub async fn setup_initialize(
     // 3. Generate first API key for admin user
     let generated = api_key::generate_api_key();
     sqlx::query(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id)
-           VALUES ($1, $2, $3, $4)"#,
+        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces)
+           VALUES ($1, $2, $3, $4, $5)"#,
     )
     .bind(&generated.prefix)
     .bind(&generated.hash)
     .bind("Default Admin Key")
     .bind(admin_user.0)
+    .bind(super::api_keys::ALLOWED_SURFACES)
     .execute(&mut *tx)
     .await?;
 
