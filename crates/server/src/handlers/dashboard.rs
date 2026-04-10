@@ -93,7 +93,8 @@ pub async fn get_dashboard_stats(
     let active_api_keys: Option<i64> = match owned_teams_for_keys {
         None => {
             sqlx::query_scalar(
-                "SELECT COUNT(*) FROM api_keys WHERE is_active = true AND deleted_at IS NULL",
+                "SELECT COUNT(*) FROM api_keys \
+                  WHERE is_active = true AND deleted_at IS NULL AND last_used_at IS NOT NULL",
             )
             .fetch_one(&state.db)
             .await?
@@ -104,6 +105,7 @@ pub async fn get_dashboard_stats(
                 "SELECT COUNT(*) FROM api_keys k \
                   WHERE k.is_active = true \
                     AND k.deleted_at IS NULL \
+                    AND k.last_used_at IS NOT NULL \
                     AND ( \
                         k.user_id = $1 \
                         OR EXISTS ( \
