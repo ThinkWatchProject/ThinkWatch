@@ -99,7 +99,7 @@ fn security_layers<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Route
         ))
         .layer(SetResponseHeaderLayer::overriding(
             header::X_FRAME_OPTIONS,
-            HeaderValue::from_static("DENY"),
+            HeaderValue::from_static("SAMEORIGIN"),
         ))
         .layer(SetResponseHeaderLayer::overriding(
             axum::http::HeaderName::from_static("strict-transport-security"),
