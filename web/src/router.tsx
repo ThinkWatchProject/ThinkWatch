@@ -22,6 +22,7 @@ const DashboardPage = lazyRouteComponent(() => import('@/routes/dashboard'), 'Da
 const RegisterPage = lazyRouteComponent(() => import('@/routes/register'), 'RegisterPage');
 const ProvidersPage = lazyRouteComponent(() => import('@/routes/gateway/providers'), 'ProvidersPage');
 const ModelsPage = lazyRouteComponent(() => import('@/routes/gateway/models'), 'ModelsPage');
+const GatewaySecurityPage = lazyRouteComponent(() => import('@/routes/gateway/security'), 'GatewaySecurityPage');
 const ApiKeysPage = lazyRouteComponent(() => import('@/routes/api-keys'), 'ApiKeysPage');
 const UnifiedLogsPage = lazyRouteComponent(() => import('@/routes/logs'), 'UnifiedLogsPage');
 const GuidePage = lazyRouteComponent(() => import('@/routes/guide'), 'GuidePage');
@@ -180,6 +181,12 @@ const modelsRoute = createRoute({
   component: ModelsPage,
 });
 
+const gatewaySecurityRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/gateway/security',
+  component: GatewaySecurityPage,
+});
+
 const apiKeysRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/api-keys',
@@ -293,6 +300,7 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   providersRoute,
   modelsRoute,
+  gatewaySecurityRoute,
   apiKeysRoute,
   logsRoute,
   guideRoute,

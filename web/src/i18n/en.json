@@ -61,7 +61,11 @@
     "logForwarders": "Log Forwarding",
     "platformLogs": "Platform Logs",
     "configGuide": "Configuration Guide",
-    "apiDocs": "API Docs"
+    "apiDocs": "API Docs",
+    "contentSecurity": "Content Security"
+  },
+  "contentSecurity": {
+    "subtitle": "Content filter rules and PII redaction patterns applied to AI gateway requests"
   },
   "auth": {
     "signIn": "Sign in",

@@ -42,6 +42,7 @@ import {
   LogOut,
   User,
   FileCode2,
+  Filter,
 } from 'lucide-react';
 import { useNavigate, useLocation } from '@tanstack/react-router';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
@@ -70,6 +71,7 @@ const navGroups: NavGroup[] = [
     items: [
       { titleKey: 'nav.providers', icon: Plug, href: '/gateway/providers' },
       { titleKey: 'nav.models', icon: BrainCircuit, href: '/gateway/models' },
+      { titleKey: 'nav.contentSecurity', icon: Filter, href: '/gateway/security' },
     ],
   },
   {
