@@ -10,6 +10,11 @@ interface ApiOptions<T = unknown> {
   /// runtime — a schema mismatch is logged via console.error AND throws,
   /// so callers find out immediately if the backend changes shape.
   schema?: ZodType<T>;
+  /// When true, a 401 that survives refresh does NOT trigger the
+  /// global window.location.href redirect. Use this for "am I logged in?"
+  /// probes (e.g. /api/auth/me on mount) where 401 just means "not logged
+  /// in yet" rather than "session expired mid-use".
+  no401Redirect?: boolean;
 }
 
 // --- Auth model ---
@@ -206,18 +211,18 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
       });
       if (retryRes.ok) return validate(path, await retryRes.json(), options.schema);
     }
-    // Refresh failed → fully evict the session.
-    sessionStorage.removeItem('signing_key');
-    clearCachedPermissions();
-    authChannel?.postMessage({ type: 'logged-out' });
-    // Best-effort server-side cookie clear (browser ignores
-    // failures). We DO NOT await this — the redirect must happen
-    // immediately so the user isn't stranded mid-navigation.
-    void fetch(`${API_BASE}/api/auth/logout`, {
-      method: 'POST',
-      credentials: 'include',
-    }).catch(() => {});
-    window.location.href = '/';
+    // Skip eviction for probe calls like /api/auth/me on mount —
+    // a 401 there means "not logged in yet", not "session expired".
+    if (!options.no401Redirect) {
+      sessionStorage.removeItem('signing_key');
+      clearCachedPermissions();
+      authChannel?.postMessage({ type: 'logged-out' });
+      void fetch(`${API_BASE}/api/auth/logout`, {
+        method: 'POST',
+        credentials: 'include',
+      }).catch(() => {});
+      window.location.href = '/';
+    }
     throw new Error('Unauthorized');
   }
 

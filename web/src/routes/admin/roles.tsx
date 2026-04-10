@@ -185,7 +185,7 @@ export function RolesPage() {
       const [rolesRes, perms, modelsRes, serversRes, teamsRes] = await Promise.all([
         api<{ items: RoleResponse[] }>('/api/admin/roles'),
         api<PermissionDef[]>('/api/admin/permissions'),
-        api<{ data: { id: string }[] }>('/v1/models').catch(() => ({ data: [] })),
+        api<{ model_id: string }[]>('/api/admin/models').catch(() => []),
         api<{ items: McpServer[] }>('/api/mcp/servers').catch(() => ({ items: [] })),
         // Teams power the scope badge on member rows. team_managers
         // can read this endpoint too — they just see fewer teams.
@@ -193,7 +193,7 @@ export function RolesPage() {
       ]);
       setRoles(rolesRes.items);
       setPermissions(perms);
-      setAvailableModels(modelsRes.data.map((m) => m.id));
+      setAvailableModels(modelsRes.map((m) => m.model_id));
       setAvailableServers(serversRes.items);
       setTeamsById(new Map(teamsRes.map((t) => [t.id, t])));
     } catch {

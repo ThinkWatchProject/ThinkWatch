@@ -5,6 +5,8 @@ import {
   createRoute,
   lazyRouteComponent,
   Outlet,
+  useNavigate,
+  useRouterState,
 } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/hooks/use-auth';
@@ -20,7 +22,7 @@ const DashboardPage = lazyRouteComponent(() => import('@/routes/dashboard'), 'Da
 const RegisterPage = lazyRouteComponent(() => import('@/routes/register'), 'RegisterPage');
 const ProvidersPage = lazyRouteComponent(() => import('@/routes/gateway/providers'), 'ProvidersPage');
 const ModelsPage = lazyRouteComponent(() => import('@/routes/gateway/models'), 'ModelsPage');
-const ApiKeysPage = lazyRouteComponent(() => import('@/routes/gateway/api-keys'), 'ApiKeysPage');
+const ApiKeysPage = lazyRouteComponent(() => import('@/routes/api-keys'), 'ApiKeysPage');
 const UnifiedLogsPage = lazyRouteComponent(() => import('@/routes/logs'), 'UnifiedLogsPage');
 const GuidePage = lazyRouteComponent(() => import('@/routes/guide'), 'GuidePage');
 const McpServersPage = lazyRouteComponent(() => import('@/routes/mcp/servers'), 'McpServersPage');
@@ -50,6 +52,8 @@ function RootComponent() {
   const { user, loading, login, logout, handleSsoCallback } = useAuth();
   const [setupChecked, setSetupChecked] = useState(cachedSetupStatus !== null);
   const [needsSetup, setNeedsSetup] = useState(cachedSetupStatus?.needs_setup ?? false);
+  const navigate = useNavigate();
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
 
   // Check setup status on mount AND when the tab becomes visible — the
   // latter handles the "user completed setup in another tab" case.
@@ -105,26 +109,25 @@ function RootComponent() {
     }
   }, [handleSsoCallback]);
 
+  const isSetupPath = pathname === '/setup';
+
+  // Soft-navigate once both async checks have settled — avoids hard reloads
+  // (and the full-page flash they cause) that window.location.href would trigger.
+  useEffect(() => {
+    if (!setupChecked || loading) return;
+    if (needsSetup && !isSetupPath) {
+      void navigate({ to: '/setup' });
+    } else if (!needsSetup && isSetupPath) {
+      void navigate({ to: '/' });
+    }
+  }, [setupChecked, loading, needsSetup, isSetupPath, navigate]);
+
   if (!setupChecked || loading) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <div className="text-muted-foreground">{t('common.loading')}</div>
       </div>
     );
-  }
-
-  const isSetupPath = window.location.pathname === '/setup';
-
-  // Redirect to /setup if needs setup and not already there
-  if (needsSetup && !isSetupPath) {
-    window.location.href = '/setup';
-    return null;
-  }
-
-  // Redirect away from /setup if already initialized
-  if (!needsSetup && isSetupPath) {
-    window.location.href = '/';
-    return null;
   }
 
   // Show setup page directly (no AppShell)
@@ -178,7 +181,7 @@ const modelsRoute = createRoute({
 
 const apiKeysRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: '/gateway/api-keys',
+  path: '/api-keys',
   component: ApiKeysPage,
 });
 

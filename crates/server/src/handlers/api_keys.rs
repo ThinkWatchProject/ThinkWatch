@@ -109,7 +109,7 @@ pub async fn list_keys(
 /// Allowed values for the `surfaces` column. Kept in lockstep with
 /// the DB CHECK constraint and with `RateLimitSubject::Surface` on
 /// the limits engine — adding a new gateway means updating both.
-const ALLOWED_SURFACES: &[&str] = &["ai_gateway", "mcp_gateway"];
+pub(crate) const ALLOWED_SURFACES: &[&str] = &["ai_gateway", "mcp_gateway"];
 
 /// Validate + dedupe a caller-supplied surfaces list. Rejects unknown
 /// values and empty input. Returns the normalized list (sorted,

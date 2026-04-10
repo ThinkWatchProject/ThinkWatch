@@ -38,7 +38,7 @@ export function useAuth() {
     // missing or invalid, which the api client handles via the
     // 401 → refresh → logout flow.
     try {
-      const u = await api<User>('/api/auth/me');
+      const u = await api<User>('/api/auth/me', { no401Redirect: true });
       setUser(u);
       setCachedPermissions(u.permissions);
     } catch {
