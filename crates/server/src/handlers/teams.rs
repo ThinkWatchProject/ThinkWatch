@@ -37,7 +37,7 @@ use think_watch_common::errors::AppError;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct Team {
     pub id: Uuid,
     pub name: String,
@@ -45,26 +45,26 @@ pub struct Team {
     pub created_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TeamWithCount {
     #[serde(flatten)]
     pub team: Team,
     pub member_count: i64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateTeamRequest {
     pub name: String,
     pub description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateTeamRequest {
     pub name: Option<String>,
     pub description: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TeamMemberRow {
     pub user_id: Uuid,
     pub email: String,
@@ -73,7 +73,7 @@ pub struct TeamMemberRow {
     pub joined_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AddMemberRequest {
     pub user_id: Uuid,
     /// 'member' (default) or 'manager'. The team_members.role
@@ -128,6 +128,16 @@ async fn assert_can_view_team(
 /// Returns every team the caller can see:
 ///   - global `teams:read` → all teams
 ///   - otherwise → teams the caller is a member of
+#[utoipa::path(
+    get,
+    path = "/api/admin/teams",
+    tag = "Teams",
+    responses(
+        (status = 200, description = "List of teams with member counts"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn list_teams(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -202,6 +212,20 @@ impl From<TeamWithCountRow> for TeamWithCount {
 }
 
 /// GET /api/admin/teams/{id}
+#[utoipa::path(
+    get,
+    path = "/api/admin/teams/{id}",
+    tag = "Teams",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Team ID"),
+    ),
+    responses(
+        (status = 200, description = "Team details", body = Team),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Team not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn get_team(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -220,6 +244,19 @@ pub async fn get_team(
 }
 
 /// POST /api/admin/teams
+#[utoipa::path(
+    post,
+    path = "/api/admin/teams",
+    tag = "Teams",
+    request_body = CreateTeamRequest,
+    responses(
+        (status = 200, description = "Created team", body = Team),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+        (status = 409, description = "Team name already exists"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn create_team(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -263,6 +300,23 @@ pub async fn create_team(
 }
 
 /// PATCH /api/admin/teams/{id}
+#[utoipa::path(
+    patch,
+    path = "/api/admin/teams/{id}",
+    tag = "Teams",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Team ID"),
+    ),
+    request_body = UpdateTeamRequest,
+    responses(
+        (status = 200, description = "Updated team", body = Team),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Team not found"),
+        (status = 409, description = "Team name already exists"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn update_team(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -326,13 +380,21 @@ pub async fn update_team(
 
 /// DELETE /api/admin/teams/{id}
 ///
-/// Deleting a team CASCADEs to:
-///   - team_members entries (FK)
-///   - rbac_role_assignments scoped to this team (FK we added in
-///     phase 0)
-///   - budget_caps and rate_limit_rules subjects keyed to this
-///     team will be left orphaned, but the data retention sweep
-///     scrubs those daily (see tasks/data_retention.rs).
+/// Deleting a team CASCADEs to team_members, rbac_role_assignments, etc.
+#[utoipa::path(
+    delete,
+    path = "/api/admin/teams/{id}",
+    tag = "Teams",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Team ID"),
+    ),
+    responses(
+        (status = 200, description = "Team deleted"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Team not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn delete_team(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -370,6 +432,20 @@ pub async fn delete_team(
 // ----------------------------------------------------------------------------
 
 /// GET /api/admin/teams/{id}/members
+#[utoipa::path(
+    get,
+    path = "/api/admin/teams/{id}/members",
+    tag = "Teams",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Team ID"),
+    ),
+    responses(
+        (status = 200, description = "Team member list"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Team not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn list_members(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -414,6 +490,22 @@ pub async fn list_members(
 }
 
 /// POST /api/admin/teams/{id}/members
+#[utoipa::path(
+    post,
+    path = "/api/admin/teams/{id}/members",
+    tag = "Teams",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Team ID"),
+    ),
+    request_body = AddMemberRequest,
+    responses(
+        (status = 200, description = "Member added"),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "User not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn add_member(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -465,6 +557,21 @@ pub async fn add_member(
 }
 
 /// DELETE /api/admin/teams/{id}/members/{user_id}
+#[utoipa::path(
+    delete,
+    path = "/api/admin/teams/{id}/members/{user_id}",
+    tag = "Teams",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Team ID"),
+        ("user_id" = uuid::Uuid, Path, description = "User ID to remove"),
+    ),
+    responses(
+        (status = 200, description = "Member removed"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Member not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn remove_member(
     auth_user: AuthUser,
     State(state): State<AppState>,

@@ -202,6 +202,16 @@ fn encryption_key(state: &AppState) -> Result<[u8; 32], AppError> {
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/providers",
+    tag = "Providers",
+    security(("bearer_token" = [])),
+    responses(
+        (status = 200, description = "List of AI providers"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
 pub async fn list_providers(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -219,6 +229,18 @@ pub async fn list_providers(
     Ok(Json(providers))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/providers",
+    tag = "Providers",
+    security(("bearer_token" = [])),
+    request_body(content_type = "application/json", description = "Provider creation request"),
+    responses(
+        (status = 200, description = "Provider created"),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
 pub async fn create_provider(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -273,7 +295,7 @@ pub async fn create_provider(
     Ok(Json(provider))
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct UpdateProviderRequest {
     pub display_name: Option<String>,
     pub base_url: Option<String>,
@@ -282,6 +304,22 @@ pub struct UpdateProviderRequest {
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/admin/providers/{id}",
+    tag = "Providers",
+    security(("bearer_token" = [])),
+    params(
+        ("id" = uuid::Uuid, Path, description = "Provider ID"),
+    ),
+    request_body = UpdateProviderRequest,
+    responses(
+        (status = 200, description = "Provider updated"),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    )
+)]
 pub async fn update_provider(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -358,6 +396,20 @@ pub async fn update_provider(
     Ok(Json(updated))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/providers/{id}",
+    tag = "Providers",
+    security(("bearer_token" = [])),
+    params(
+        ("id" = uuid::Uuid, Path, description = "Provider ID"),
+    ),
+    responses(
+        (status = 200, description = "Provider details"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    )
+)]
 pub async fn get_provider(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -378,6 +430,20 @@ pub async fn get_provider(
     Ok(Json(provider))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/admin/providers/{id}",
+    tag = "Providers",
+    security(("bearer_token" = [])),
+    params(
+        ("id" = uuid::Uuid, Path, description = "Provider ID"),
+    ),
+    responses(
+        (status = 200, description = "Provider deleted"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    )
+)]
 pub async fn delete_provider(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -413,7 +479,7 @@ pub async fn delete_provider(
 // admins can verify base URL + API key + custom headers without persisting.
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct TestProviderRequest {
     pub provider_type: String,
     pub base_url: String,
@@ -421,7 +487,7 @@ pub struct TestProviderRequest {
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct TestProviderResponse {
     pub success: bool,
     pub message: String,
@@ -436,6 +502,18 @@ pub struct TestProviderResponse {
 }
 
 /// Authenticated route — used by the providers admin page.
+#[utoipa::path(
+    post,
+    path = "/api/admin/providers/test",
+    tag = "Providers",
+    security(("bearer_token" = [])),
+    request_body = TestProviderRequest,
+    responses(
+        (status = 200, description = "Connection test result", body = TestProviderResponse),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
 pub async fn test_provider(
     auth_user: AuthUser,
     State(state): State<AppState>,

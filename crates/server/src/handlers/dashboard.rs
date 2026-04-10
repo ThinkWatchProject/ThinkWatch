@@ -13,7 +13,7 @@ use crate::middleware::auth_guard::AuthUser;
 
 use super::clickhouse_util::{ch_available, ch_client};
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DashboardStats {
     pub total_requests_today: i64,
     pub active_providers: i64,
@@ -21,6 +21,17 @@ pub struct DashboardStats {
     pub connected_mcp_servers: i64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/stats",
+    tag = "Dashboard",
+    responses(
+        (status = 200, description = "High-level dashboard counters", body = DashboardStats),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn get_dashboard_stats(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -129,7 +140,7 @@ pub async fn get_dashboard_stats(
 //   - WS   /api/dashboard/ws    — pushes a new snapshot every 4 s
 // ============================================================================
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ProviderHealth {
     /// "ai" for AI providers, "mcp" for MCP servers.
     pub kind: String,
@@ -152,7 +163,7 @@ struct ProviderHealthRow {
     success_rate: f64,
 }
 
-#[derive(Debug, Serialize, clickhouse::Row, Deserialize)]
+#[derive(Debug, Serialize, clickhouse::Row, Deserialize, utoipa::ToSchema)]
 pub struct RpmBucket {
     pub minute: String,
     pub count: u64,
@@ -161,7 +172,7 @@ pub struct RpmBucket {
 /// One row in the unified live feed. Sourced from either `gateway_logs`
 /// (AI API requests) or `mcp_logs` (MCP tool calls), normalised so the
 /// frontend can render them in a single table.
-#[derive(Debug, Serialize, clickhouse::Row, Deserialize)]
+#[derive(Debug, Serialize, clickhouse::Row, Deserialize, utoipa::ToSchema)]
 pub struct LiveLogRow {
     /// "api" for gateway requests, "mcp" for MCP tool calls.
     pub kind: String,
@@ -178,7 +189,7 @@ pub struct LiveLogRow {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DashboardLive {
     /// Per-provider health stats over the last 15 minutes.
     pub providers: Vec<ProviderHealth>,
@@ -623,6 +634,17 @@ async fn build_live_snapshot(
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/live",
+    tag = "Dashboard",
+    responses(
+        (status = 200, description = "Live provider health, RPM buckets and recent log entries", body = DashboardLive),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn get_dashboard_live(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -655,7 +677,7 @@ pub async fn get_dashboard_live(
 
 const WS_TICKET_TTL_SECS: i64 = 30;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct WsTicketResponse {
     pub ticket: String,
 }
@@ -663,6 +685,16 @@ pub struct WsTicketResponse {
 /// `POST /api/dashboard/ws-ticket` — mint a single-use ticket. Auth runs
 /// via the normal `require_auth` middleware so the user proves identity
 /// here without exposing the JWT in a URL afterwards.
+#[utoipa::path(
+    post,
+    path = "/api/dashboard/ws-ticket",
+    tag = "Dashboard",
+    responses(
+        (status = 200, description = "Single-use WebSocket ticket valid for 30 seconds", body = WsTicketResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn create_dashboard_ws_ticket(
     auth_user: AuthUser,
     State(state): State<AppState>,

@@ -11,7 +11,7 @@ use crate::middleware::auth_guard::AuthUser;
 
 use super::clickhouse_util::*;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct AuditLogQuery {
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
@@ -45,6 +45,18 @@ struct ChAuditRow {
     created_at: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/audit/logs",
+    tag = "Audit Logs",
+    params(AuditLogQuery),
+    responses(
+        (status = 200, description = "Paginated audit log entries"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn list_audit_logs(
     _auth_user: AuthUser,
     State(state): State<AppState>,

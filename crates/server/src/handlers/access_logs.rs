@@ -9,7 +9,7 @@ use crate::middleware::auth_guard::AuthUser;
 
 use super::clickhouse_util::*;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct AccessLogsQuery {
     pub method: Option<String>,
     pub path: Option<String>,
@@ -27,7 +27,7 @@ pub struct AccessLogsQuery {
     pub offset: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, clickhouse::Row)]
+#[derive(Debug, Serialize, Deserialize, clickhouse::Row, utoipa::ToSchema)]
 pub struct AccessLogEntry {
     pub id: String,
     pub method: String,
@@ -41,12 +41,24 @@ pub struct AccessLogEntry {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AccessLogsResponse {
     pub items: Vec<AccessLogEntry>,
     pub total: u64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/access-logs",
+    tag = "System Logs",
+    params(AccessLogsQuery),
+    responses(
+        (status = 200, description = "Paginated HTTP access log entries", body = AccessLogsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn list_access_logs(
     auth_user: AuthUser,
     State(state): State<AppState>,

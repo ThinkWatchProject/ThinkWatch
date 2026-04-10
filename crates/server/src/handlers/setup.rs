@@ -6,16 +6,26 @@ use think_watch_common::audit::AuditEntry;
 use think_watch_common::dynamic_config;
 use think_watch_common::errors::AppError;
 use think_watch_common::validation::validate_password;
+use utoipa::ToSchema;
 
 use crate::app::AppState;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SetupStatusResponse {
     pub initialized: bool,
     pub needs_setup: bool,
 }
 
 /// GET /api/setup/status — public, returns initialization status.
+#[utoipa::path(
+    get,
+    path = "/api/setup/status",
+    tag = "Setup",
+    responses(
+        (status = 200, description = "Platform initialization status", body = SetupStatusResponse),
+    ),
+    security(()),
+)]
 pub async fn setup_status(
     State(state): State<AppState>,
 ) -> Result<Json<SetupStatusResponse>, AppError> {
@@ -26,21 +36,21 @@ pub async fn setup_status(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct SetupInitRequest {
     pub admin: AdminSetup,
     pub site_name: Option<String>,
     pub provider: Option<ProviderSetup>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct AdminSetup {
     pub email: String,
     pub display_name: String,
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ProviderSetup {
     pub name: String,
     pub display_name: String,
@@ -49,7 +59,7 @@ pub struct ProviderSetup {
     pub api_key: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct SetupInitResponse {
     pub admin_id: uuid::Uuid,
     pub admin_email: String,
@@ -63,6 +73,19 @@ pub struct SetupInitResponse {
 /// 1. DB-level check (setup.initialized = true rejects)
 /// 2. Redis rate limiting (max 5 attempts per minute per IP)
 /// 3. Database advisory lock to prevent race conditions
+#[utoipa::path(
+    post,
+    path = "/api/setup/initialize",
+    tag = "Setup",
+    request_body = SetupInitRequest,
+    responses(
+        (status = 200, description = "Setup completed — admin user, optional provider, and initial API key created", body = SetupInitResponse),
+        (status = 400, description = "Invalid input or rate-limited"),
+        (status = 403, description = "Setup already completed"),
+        (status = 409, description = "Admin email already exists"),
+    ),
+    security(()),
+)]
 pub async fn setup_initialize(
     State(state): State<AppState>,
     Json(req): Json<SetupInitRequest>,

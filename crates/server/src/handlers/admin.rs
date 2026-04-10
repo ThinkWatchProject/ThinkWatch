@@ -47,6 +47,20 @@ use crate::middleware::auth_guard::AuthUser;
 
 // --- User management ---
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/users",
+    tag = "Users",
+    params(
+        ("page" = Option<i64>, Query, description = "Page number (1-based)"),
+        ("page_size" = Option<i64>, Query, description = "Items per page"),
+    ),
+    responses(
+        (status = 200, description = "Paginated user list"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn list_users(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -312,6 +326,22 @@ async fn write_user_role_assignments(
     Ok(out)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/users",
+    tag = "Users",
+    request_body(
+        content = inline(serde_json::Value),
+        description = "email, display_name, optional password, role_assignments[]",
+    ),
+    responses(
+        (status = 200, description = "Created user with optional generated password"),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+        (status = 409, description = "Email already registered"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn create_user(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -422,6 +452,20 @@ pub async fn create_user(
 }
 
 /// POST /api/admin/users/{id}/force-logout — admin force-logout a user.
+#[utoipa::path(
+    post,
+    path = "/api/admin/users/{id}/force-logout",
+    tag = "Users",
+    params(
+        ("id" = uuid::Uuid, Path, description = "User ID"),
+    ),
+    responses(
+        (status = 200, description = "User logged out"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "User not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn force_logout_user(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -462,6 +506,25 @@ pub struct UpdateUserRequest {
 }
 
 /// PATCH /api/admin/users/{id} — update user display_name, role assignments, or active status.
+#[utoipa::path(
+    patch,
+    path = "/api/admin/users/{id}",
+    tag = "Users",
+    params(
+        ("id" = uuid::Uuid, Path, description = "User ID"),
+    ),
+    request_body(
+        content = inline(serde_json::Value),
+        description = "display_name, is_active, role_assignments[]",
+    ),
+    responses(
+        (status = 200, description = "Update applied"),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "User not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn update_user(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -580,6 +643,21 @@ pub async fn update_user(
 }
 
 /// DELETE /api/admin/users/{id} — soft-delete a user.
+#[utoipa::path(
+    delete,
+    path = "/api/admin/users/{id}",
+    tag = "Users",
+    params(
+        ("id" = uuid::Uuid, Path, description = "User ID"),
+    ),
+    responses(
+        (status = 200, description = "User deleted"),
+        (status = 400, description = "Bad request (e.g. self-deletion)"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "User not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn delete_user(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -628,6 +706,20 @@ pub async fn delete_user(
 }
 
 /// POST /api/admin/users/{id}/reset-password — admin reset user password.
+#[utoipa::path(
+    post,
+    path = "/api/admin/users/{id}/reset-password",
+    tag = "Users",
+    params(
+        ("id" = uuid::Uuid, Path, description = "User ID"),
+    ),
+    responses(
+        (status = 200, description = "Password reset, returns temporary password"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "User not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn reset_user_password(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -685,7 +777,7 @@ pub async fn reset_user_password(
 
 // --- System settings ---
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct SystemInfo {
     pub version: String,
     pub uptime: String,
@@ -715,6 +807,16 @@ fn format_uptime(dur: chrono::TimeDelta) -> String {
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/settings/system",
+    tag = "Settings",
+    responses(
+        (status = 200, description = "System info", body = SystemInfo),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn get_system_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -744,7 +846,7 @@ pub async fn get_system_settings(
     }))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct OidcConfigResponse {
     pub enabled: bool,
     pub issuer_url: Option<String>,
@@ -754,6 +856,16 @@ pub struct OidcConfigResponse {
     pub has_secret: Option<bool>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/settings/oidc",
+    tag = "Settings",
+    responses(
+        (status = 200, description = "OIDC/SSO configuration", body = OidcConfigResponse),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn get_oidc_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -788,7 +900,7 @@ pub async fn get_oidc_settings(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateOidcRequest {
     pub enabled: Option<bool>,
     pub issuer_url: Option<String>,
@@ -802,6 +914,18 @@ pub struct UpdateOidcRequest {
 /// PATCH /api/admin/settings/oidc — update OIDC/SSO configuration.
 /// Client secret is encrypted with AES-256-GCM before storage.
 /// Triggers OIDC provider re-discovery if settings change.
+#[utoipa::path(
+    patch,
+    path = "/api/admin/settings/oidc",
+    tag = "Settings",
+    request_body = UpdateOidcRequest,
+    responses(
+        (status = 200, description = "OIDC settings updated"),
+        (status = 400, description = "Bad request or OIDC discovery failed"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn update_oidc_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -947,13 +1071,23 @@ pub async fn update_oidc_settings(
     ))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AuditConfigResponse {
     pub clickhouse_url: Option<String>,
     pub clickhouse_db: String,
     pub connected: bool,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/settings/audit",
+    tag = "Settings",
+    responses(
+        (status = 200, description = "Audit/ClickHouse configuration", body = AuditConfigResponse),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn get_audit_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -977,6 +1111,16 @@ pub async fn get_audit_settings(
 // --- Dynamic settings CRUD ---
 
 /// GET /api/admin/settings — return all settings grouped by category.
+#[utoipa::path(
+    get,
+    path = "/api/admin/settings",
+    tag = "Settings",
+    responses(
+        (status = 200, description = "All settings grouped by category"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn get_all_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -990,6 +1134,19 @@ pub async fn get_all_settings(
 }
 
 /// GET /api/admin/settings/{category} — return settings for a specific category.
+#[utoipa::path(
+    get,
+    path = "/api/admin/settings/{category}",
+    tag = "Settings",
+    params(
+        ("category" = String, Path, description = "Settings category name"),
+    ),
+    responses(
+        (status = 200, description = "Settings for the given category"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn get_settings_by_category(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -1003,7 +1160,7 @@ pub async fn get_settings_by_category(
     Ok(Json(settings))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateSettingsRequest {
     pub settings: HashMap<String, serde_json::Value>,
 }
@@ -1105,6 +1262,18 @@ pub async fn reconcile_clickhouse_ttls(state: &AppState) {
 }
 
 /// PATCH /api/admin/settings — update one or more settings.
+#[utoipa::path(
+    patch,
+    path = "/api/admin/settings",
+    tag = "Settings",
+    request_body = UpdateSettingsRequest,
+    responses(
+        (status = 200, description = "Settings updated"),
+        (status = 400, description = "Validation error"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn update_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -1189,6 +1358,20 @@ pub struct ContentFilterTestResponse {
 
 /// POST /api/admin/settings/content-filter/test — try the supplied rules
 /// against a sample of user text and return every rule that fires.
+#[utoipa::path(
+    post,
+    path = "/api/admin/settings/content-filter/test",
+    tag = "Settings",
+    request_body(
+        content = inline(serde_json::Value),
+        description = "text: string, rules: DenyRuleConfig[]",
+    ),
+    responses(
+        (status = 200, description = "Rules that matched the input text"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn test_content_filter(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -1222,6 +1405,16 @@ pub struct ContentFilterPreset {
 
 /// GET /api/admin/settings/content-filter/presets — return built-in rule groups
 /// (basic / strict / chinese). UI labels are localized on the frontend.
+#[utoipa::path(
+    get,
+    path = "/api/admin/settings/content-filter/presets",
+    tag = "Settings",
+    responses(
+        (status = 200, description = "Built-in content filter preset groups"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn list_content_filter_presets(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -1265,6 +1458,20 @@ pub struct PiiRedactorTestResponse {
 
 /// POST /api/admin/settings/pii-redactor/test — apply the supplied PII patterns
 /// to a text sample and return the redacted version with the substitution map.
+#[utoipa::path(
+    post,
+    path = "/api/admin/settings/pii-redactor/test",
+    tag = "Settings",
+    request_body(
+        content = inline(serde_json::Value),
+        description = "text: string, patterns: PiiPatternConfig[]",
+    ),
+    responses(
+        (status = 200, description = "Redacted text and substitution map"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn test_pii_redactor(
     auth_user: AuthUser,
     State(state): State<AppState>,

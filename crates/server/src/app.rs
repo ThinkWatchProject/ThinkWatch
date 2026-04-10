@@ -677,6 +677,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
 
     let app = Router::new()
         .merge(health)
+        .merge(crate::openapi::openapi_router())
         .merge(public_routes)
         .merge(user_routes)
         .merge(admin_routes)

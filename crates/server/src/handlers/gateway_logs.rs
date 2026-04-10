@@ -9,7 +9,7 @@ use crate::middleware::auth_guard::AuthUser;
 
 use super::clickhouse_util::*;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct GatewayLogsQuery {
     /// Free-text search — substring match against model_id.
     pub q: Option<String>,
@@ -26,7 +26,7 @@ pub struct GatewayLogsQuery {
     pub offset: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, clickhouse::Row)]
+#[derive(Debug, Serialize, Deserialize, clickhouse::Row, utoipa::ToSchema)]
 pub struct GatewayLogEntry {
     pub id: String,
     pub user_id: Option<String>,
@@ -42,12 +42,24 @@ pub struct GatewayLogEntry {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct GatewayLogsResponse {
     pub items: Vec<GatewayLogEntry>,
     pub total: u64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/gateway/logs",
+    tag = "Gateway Logs",
+    params(GatewayLogsQuery),
+    responses(
+        (status = 200, description = "Paginated AI gateway request logs", body = GatewayLogsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn list_gateway_logs(
     _auth_user: AuthUser,
     State(state): State<AppState>,

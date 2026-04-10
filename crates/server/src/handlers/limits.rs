@@ -71,7 +71,7 @@ fn parse_budget_subject(kind: &str) -> Result<BudgetSubject, AppError> {
 // re-parsing the engine's enum types.
 // ----------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RuleRow {
     pub id: Uuid,
     pub subject_kind: &'static str,
@@ -98,7 +98,7 @@ impl From<RateLimitRule> for RuleRow {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CapRow {
     pub id: Uuid,
     pub subject_kind: &'static str,
@@ -121,12 +121,12 @@ impl From<BudgetCap> for CapRow {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RuleListResponse {
     pub items: Vec<RuleRow>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CapListResponse {
     pub items: Vec<CapRow>,
 }
@@ -137,7 +137,7 @@ pub struct CapListResponse {
 // typed enums. Conversion happens in the handler.
 // ----------------------------------------------------------------------------
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpsertRuleRequest {
     pub surface: String,
     pub metric: String,
@@ -147,7 +147,7 @@ pub struct UpsertRuleRequest {
     pub enabled: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpsertCapRequest {
     pub period: String,
     pub limit_tokens: i64,
@@ -163,6 +163,21 @@ fn default_true() -> bool {
 // Rate-limit rules CRUD
 // ----------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/limits/{kind}/{id}/rules",
+    tag = "Limits",
+    security(("bearer_token" = [])),
+    params(
+        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server)"),
+        ("id" = uuid::Uuid, Path, description = "Subject ID"),
+    ),
+    responses(
+        (status = 200, description = "List of rate-limit rules", body = RuleListResponse),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
 pub async fn list_rules(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -179,6 +194,22 @@ pub async fn list_rules(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/limits/{kind}/{id}/rules",
+    tag = "Limits",
+    security(("bearer_token" = [])),
+    params(
+        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server)"),
+        ("id" = uuid::Uuid, Path, description = "Subject ID"),
+    ),
+    request_body = UpsertRuleRequest,
+    responses(
+        (status = 200, description = "Rule upserted", body = RuleRow),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
 pub async fn upsert_rule(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -245,6 +276,23 @@ pub async fn upsert_rule(
     Ok(Json(RuleRow::from(row)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/admin/limits/{kind}/{id}/rules/{rule_id}",
+    tag = "Limits",
+    security(("bearer_token" = [])),
+    params(
+        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server)"),
+        ("id" = uuid::Uuid, Path, description = "Subject ID"),
+        ("rule_id" = uuid::Uuid, Path, description = "Rate-limit rule ID"),
+    ),
+    responses(
+        (status = 200, description = "Rule deleted"),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    )
+)]
 pub async fn delete_rule(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -276,6 +324,21 @@ pub async fn delete_rule(
 // Budget caps CRUD
 // ----------------------------------------------------------------------------
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/limits/{kind}/{id}/budgets",
+    tag = "Limits",
+    security(("bearer_token" = [])),
+    params(
+        ("kind" = String, Path, description = "Subject kind (user, api_key, team, provider)"),
+        ("id" = uuid::Uuid, Path, description = "Subject ID"),
+    ),
+    responses(
+        (status = 200, description = "List of budget caps", body = CapListResponse),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
 pub async fn list_caps(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -292,6 +355,22 @@ pub async fn list_caps(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/limits/{kind}/{id}/budgets",
+    tag = "Limits",
+    security(("bearer_token" = [])),
+    params(
+        ("kind" = String, Path, description = "Subject kind (user, api_key, team, provider)"),
+        ("id" = uuid::Uuid, Path, description = "Subject ID"),
+    ),
+    request_body = UpsertCapRequest,
+    responses(
+        (status = 200, description = "Budget cap upserted", body = CapRow),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
 pub async fn upsert_cap(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -340,6 +419,23 @@ pub async fn upsert_cap(
     Ok(Json(CapRow::from(row)))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/admin/limits/{kind}/{id}/budgets/{cap_id}",
+    tag = "Limits",
+    security(("bearer_token" = [])),
+    params(
+        ("kind" = String, Path, description = "Subject kind (user, api_key, team, provider)"),
+        ("id" = uuid::Uuid, Path, description = "Subject ID"),
+        ("cap_id" = uuid::Uuid, Path, description = "Budget cap ID"),
+    ),
+    responses(
+        (status = 200, description = "Budget cap deleted"),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    )
+)]
 pub async fn delete_cap(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -376,26 +472,41 @@ pub async fn delete_cap(
 // superset; budgets get queried with whichever subset overlaps.
 // ----------------------------------------------------------------------------
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RuleUsage {
     pub rule_id: Uuid,
     pub current: i64,
     pub limit: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CapUsage {
     pub cap_id: Uuid,
     pub current: i64,
     pub limit: i64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UsageResponse {
     pub rules: Vec<RuleUsage>,
     pub caps: Vec<CapUsage>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/limits/{kind}/{id}/usage",
+    tag = "Limits",
+    security(("bearer_token" = [])),
+    params(
+        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server)"),
+        ("id" = uuid::Uuid, Path, description = "Subject ID"),
+    ),
+    responses(
+        (status = 200, description = "Current usage counters for all rules and caps", body = UsageResponse),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
 pub async fn get_usage(
     auth_user: AuthUser,
     State(state): State<AppState>,

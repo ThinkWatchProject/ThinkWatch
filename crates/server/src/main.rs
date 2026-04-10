@@ -13,6 +13,7 @@ mod error;
 mod handlers;
 mod mcp_runtime;
 mod middleware;
+mod openapi;
 mod tasks;
 mod tracing_ch;
 

@@ -11,6 +11,17 @@ use crate::middleware::auth_guard::AuthUser;
 
 // --- List all forwarders ---
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/log-forwarders",
+    tag = "Log Forwarders",
+    responses(
+        (status = 200, description = "List of all log forwarders"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn list_forwarders(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -29,7 +40,7 @@ pub async fn list_forwarders(
 
 // --- Create forwarder ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateForwarderRequest {
     pub name: String,
     pub forwarder_type: String,
@@ -40,6 +51,19 @@ pub struct CreateForwarderRequest {
 
 const VALID_LOG_TYPES: &[&str] = &["access", "app", "audit", "gateway", "mcp", "platform"];
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/log-forwarders",
+    tag = "Log Forwarders",
+    request_body(content = CreateForwarderRequest),
+    responses(
+        (status = 200, description = "Newly created log forwarder"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn create_forwarder(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -97,7 +121,7 @@ pub async fn create_forwarder(
 
 // --- Update forwarder ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateForwarderRequest {
     pub name: Option<String>,
     pub config: Option<serde_json::Value>,
@@ -105,6 +129,23 @@ pub struct UpdateForwarderRequest {
     pub log_types: Option<Vec<String>>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/admin/log-forwarders/{id}",
+    tag = "Log Forwarders",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Log forwarder ID"),
+    ),
+    request_body(content = UpdateForwarderRequest),
+    responses(
+        (status = 200, description = "Updated log forwarder"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn update_forwarder(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -163,6 +204,21 @@ pub async fn update_forwarder(
 
 // --- Delete forwarder ---
 
+#[utoipa::path(
+    delete,
+    path = "/api/admin/log-forwarders/{id}",
+    tag = "Log Forwarders",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Log forwarder ID"),
+    ),
+    responses(
+        (status = 200, description = "Forwarder deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn delete_forwarder(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -194,6 +250,21 @@ pub async fn delete_forwarder(
 
 // --- Toggle (pause / resume) ---
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/log-forwarders/{id}/toggle",
+    tag = "Log Forwarders",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Log forwarder ID"),
+    ),
+    responses(
+        (status = 200, description = "Forwarder with toggled enabled state"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn toggle_forwarder(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -230,6 +301,21 @@ pub async fn toggle_forwarder(
 
 // --- Reset stats ---
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/log-forwarders/{id}/reset-stats",
+    tag = "Log Forwarders",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Log forwarder ID"),
+    ),
+    responses(
+        (status = 200, description = "Forwarder with reset sent/error counters"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn reset_stats(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -253,12 +339,27 @@ pub async fn reset_stats(
 
 // --- Test forwarder (send a test entry) ---
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TestResult {
     pub success: bool,
     pub message: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/log-forwarders/{id}/test",
+    tag = "Log Forwarders",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Log forwarder ID"),
+    ),
+    responses(
+        (status = 200, description = "Result of sending a test log entry", body = TestResult),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn test_forwarder(
     auth_user: AuthUser,
     State(state): State<AppState>,

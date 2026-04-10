@@ -2,6 +2,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::response::IntoResponse;
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use think_watch_auth::password;
 use think_watch_common::audit::AuditEntry;
@@ -17,12 +18,28 @@ use crate::middleware::verify_signature;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct ChangePasswordRequest {
     pub old_password: String,
     pub new_password: String,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    tag = "Auth",
+    request_body(
+        content_type = "application/json",
+        description = "Email, password, and optional TOTP code",
+    ),
+    responses(
+        (status = 200, description = "Login successful — tokens set as httpOnly cookies; body carries signing_key, permissions, roles"),
+        (status = 200, description = "TOTP verification required — body contains {\"totp_required\": true}"),
+        (status = 400, description = "Invalid credentials or rate-limited"),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(()),
+)]
 pub async fn login(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -389,6 +406,22 @@ pub async fn login(
     Ok(response)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/register",
+    tag = "Auth",
+    request_body(
+        content_type = "application/json",
+        description = "New user credentials (only when public registration is enabled)",
+    ),
+    responses(
+        (status = 200, description = "User registered successfully"),
+        (status = 400, description = "Invalid input"),
+        (status = 403, description = "Public registration is disabled"),
+        (status = 409, description = "Email already registered"),
+    ),
+    security(()),
+)]
 pub async fn register(
     State(state): State<AppState>,
     Json(req): Json<CreateUserRequest>,
@@ -463,6 +496,20 @@ pub async fn register(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/refresh",
+    tag = "Auth",
+    request_body(
+        content_type = "application/json",
+        description = "Optional body with refresh_token field; browser flow uses httpOnly cookie instead",
+    ),
+    responses(
+        (status = 200, description = "New access + refresh tokens issued as httpOnly cookies"),
+        (status = 401, description = "Invalid or expired refresh token"),
+    ),
+    security(()),
+)]
 pub async fn refresh(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -614,6 +661,15 @@ pub async fn refresh(
 /// device" flow and for cleaning up stale sessions on the client
 /// side without relying on the page JS to remember to clear
 /// localStorage (it can't, since the tokens are httpOnly now).
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "Logged out — auth cookies cleared"),
+    ),
+    security(()),
+)]
 pub async fn logout() -> axum::response::Response {
     use axum::http::header::SET_COOKIE;
     let mut response = Json(serde_json::json!({"status": "ok"})).into_response();
@@ -626,6 +682,16 @@ pub async fn logout() -> axum::response::Response {
     response
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/auth/me",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "Current user profile with live role assignments and permissions"),
+        (status = 401, description = "Unauthorized"),
+        (status = 404, description = "User not found"),
+    ),
+)]
 pub async fn me(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -717,6 +783,17 @@ async fn fetch_user_role_assignments(
         .collect()
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/auth/password",
+    tag = "Auth",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 200, description = "Password changed — all sessions invalidated"),
+        (status = 400, description = "Invalid password or SSO account"),
+        (status = 401, description = "Unauthorized or wrong current password"),
+    ),
+)]
 pub async fn change_password(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -762,6 +839,15 @@ pub async fn change_password(
     Ok(Json(serde_json::json!({"status": "password_changed"})))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/auth/account",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "Account soft-deleted and all sessions revoked"),
+        (status = 401, description = "Unauthorized"),
+    ),
+)]
 pub async fn delete_account(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -794,6 +880,15 @@ pub async fn delete_account(
 }
 
 /// POST /api/auth/revoke-sessions — revoke all sessions for the current user.
+#[utoipa::path(
+    post,
+    path = "/api/auth/revoke-sessions",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "All sessions (signing keys + WebSocket) revoked"),
+        (status = 401, description = "Unauthorized"),
+    ),
+)]
 pub async fn revoke_sessions(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -833,7 +928,7 @@ pub async fn revoke_sessions(
 
 // --- TOTP endpoints ---
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct TotpSetupResponse {
     secret: String,
     otpauth_uri: String,
@@ -842,6 +937,16 @@ pub struct TotpSetupResponse {
 
 /// POST /api/auth/totp/setup — Begin TOTP setup. Returns secret + otpauth URI + recovery codes.
 /// The user must call /totp/verify-setup with a valid code to finalize.
+#[utoipa::path(
+    post,
+    path = "/api/auth/totp/setup",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "TOTP setup initiated — scan the otpauth_uri with an authenticator app then call /totp/verify-setup", body = TotpSetupResponse),
+        (status = 400, description = "TOTP already enabled"),
+        (status = 401, description = "Unauthorized"),
+    ),
+)]
 pub async fn totp_setup(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -895,12 +1000,23 @@ pub async fn totp_setup(
     }))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct TotpVerifyRequest {
     pub code: String,
 }
 
 /// POST /api/auth/totp/verify-setup — Finalize TOTP setup by verifying a code.
+#[utoipa::path(
+    post,
+    path = "/api/auth/totp/verify-setup",
+    tag = "Auth",
+    request_body = TotpVerifyRequest,
+    responses(
+        (status = 200, description = "TOTP enabled successfully"),
+        (status = 400, description = "Invalid code or no pending setup"),
+        (status = 401, description = "Unauthorized"),
+    ),
+)]
 pub async fn totp_verify_setup(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -976,6 +1092,17 @@ pub async fn totp_verify_setup(
 }
 
 /// POST /api/auth/totp/disable — Disable TOTP (requires current password verification).
+#[utoipa::path(
+    post,
+    path = "/api/auth/totp/disable",
+    tag = "Auth",
+    request_body = ChangePasswordRequest,
+    responses(
+        (status = 200, description = "TOTP disabled"),
+        (status = 400, description = "TOTP not enabled or SSO account"),
+        (status = 401, description = "Unauthorized or wrong password"),
+    ),
+)]
 pub async fn totp_disable(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -1018,6 +1145,15 @@ pub async fn totp_disable(
 }
 
 /// GET /api/auth/totp/status — Check TOTP status for current user.
+#[utoipa::path(
+    get,
+    path = "/api/auth/totp/status",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "TOTP status: {\"enabled\": bool, \"required\": bool}"),
+        (status = 401, description = "Unauthorized"),
+    ),
+)]
 pub async fn totp_status(
     auth_user: AuthUser,
     State(state): State<AppState>,

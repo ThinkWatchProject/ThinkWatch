@@ -10,6 +10,17 @@ use think_watch_common::models::McpServer;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
+#[utoipa::path(
+    get,
+    path = "/api/mcp/servers",
+    tag = "MCP Servers",
+    responses(
+        (status = 200, description = "List of all MCP servers"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn list_servers(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -26,6 +37,19 @@ pub async fn list_servers(
     Ok(Json(servers))
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/mcp/servers",
+    tag = "MCP Servers",
+    request_body(content = inline(serde_json::Value), description = "CreateMcpServerRequest"),
+    responses(
+        (status = 200, description = "Newly created MCP server"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn create_server(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -149,7 +173,7 @@ pub async fn create_server(
     Ok(Json(server))
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct UpdateMcpServerRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -158,6 +182,23 @@ pub struct UpdateMcpServerRequest {
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/mcp/servers/{id}",
+    tag = "MCP Servers",
+    params(
+        ("id" = uuid::Uuid, Path, description = "MCP server ID"),
+    ),
+    request_body(content = UpdateMcpServerRequest),
+    responses(
+        (status = 200, description = "Updated MCP server"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn update_server(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -239,6 +280,21 @@ pub async fn update_server(
     Ok(Json(updated))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/mcp/servers/{id}",
+    tag = "MCP Servers",
+    params(
+        ("id" = uuid::Uuid, Path, description = "MCP server ID"),
+    ),
+    responses(
+        (status = 200, description = "MCP server details"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn get_server(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -257,6 +313,21 @@ pub async fn get_server(
     Ok(Json(server))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/mcp/servers/{id}",
+    tag = "MCP Servers",
+    params(
+        ("id" = uuid::Uuid, Path, description = "MCP server ID"),
+    ),
+    responses(
+        (status = 200, description = "Server deleted"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn delete_server(
     auth_user: AuthUser,
     State(state): State<AppState>,

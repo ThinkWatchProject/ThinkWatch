@@ -31,20 +31,34 @@ use crate::middleware::auth_guard::AuthUser;
 /// Row shape returned by `GET /api/admin/models`. Joins in the
 /// provider name so the UI can render "openai / gpt-4o" without
 /// needing a second round-trip per row.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct ModelRow {
     pub id: Uuid,
     pub provider_id: Uuid,
     pub provider_name: String,
     pub model_id: String,
     pub display_name: String,
+    #[schema(value_type = Option<f64>)]
     pub input_price: Option<Decimal>,
+    #[schema(value_type = Option<f64>)]
     pub output_price: Option<Decimal>,
+    #[schema(value_type = f64)]
     pub input_multiplier: Decimal,
+    #[schema(value_type = f64)]
     pub output_multiplier: Decimal,
     pub is_active: bool,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/models",
+    tag = "Models",
+    security(("bearer_token" = [])),
+    responses(
+        (status = 200, description = "List of models", body = Vec<ModelRow>),
+        (status = 403, description = "Forbidden"),
+    )
+)]
 pub async fn list_models(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -70,19 +84,35 @@ pub async fn list_models(
     Ok(Json(rows))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateModelRequest {
     pub provider_id: Uuid,
     pub model_id: String,
     pub display_name: String,
+    #[schema(value_type = Option<f64>)]
     pub input_price: Option<Decimal>,
+    #[schema(value_type = Option<f64>)]
     pub output_price: Option<Decimal>,
     /// Defaults to 1.0 if omitted.
+    #[schema(value_type = Option<f64>)]
     pub input_multiplier: Option<Decimal>,
+    #[schema(value_type = Option<f64>)]
     pub output_multiplier: Option<Decimal>,
     pub is_active: Option<bool>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/models",
+    tag = "Models",
+    security(("bearer_token" = [])),
+    request_body = CreateModelRequest,
+    responses(
+        (status = 200, description = "Model created"),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
 pub async fn create_model(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -147,16 +177,36 @@ pub async fn create_model(
     Ok(Json(model))
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateModelRequest {
     pub display_name: Option<String>,
+    #[schema(value_type = Option<f64>)]
     pub input_price: Option<Decimal>,
+    #[schema(value_type = Option<f64>)]
     pub output_price: Option<Decimal>,
+    #[schema(value_type = Option<f64>)]
     pub input_multiplier: Option<Decimal>,
+    #[schema(value_type = Option<f64>)]
     pub output_multiplier: Option<Decimal>,
     pub is_active: Option<bool>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/admin/models/{id}",
+    tag = "Models",
+    security(("bearer_token" = [])),
+    params(
+        ("id" = uuid::Uuid, Path, description = "Model ID"),
+    ),
+    request_body = UpdateModelRequest,
+    responses(
+        (status = 200, description = "Model updated"),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    )
+)]
 pub async fn update_model(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -224,6 +274,20 @@ pub async fn update_model(
     Ok(Json(updated))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/admin/models/{id}",
+    tag = "Models",
+    security(("bearer_token" = [])),
+    params(
+        ("id" = uuid::Uuid, Path, description = "Model ID"),
+    ),
+    responses(
+        (status = 200, description = "Model deleted"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    )
+)]
 pub async fn delete_model(
     auth_user: AuthUser,
     State(state): State<AppState>,

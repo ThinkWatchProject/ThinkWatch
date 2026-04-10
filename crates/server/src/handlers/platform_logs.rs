@@ -9,7 +9,7 @@ use crate::middleware::auth_guard::AuthUser;
 
 use super::clickhouse_util::*;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct PlatformLogsQuery {
     pub user_id: Option<String>,
     pub action: Option<String>,
@@ -37,7 +37,7 @@ pub struct PlatformLogEntry {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PlatformLogEntryResponse {
     pub id: String,
     pub user_id: Option<String>,
@@ -51,12 +51,24 @@ pub struct PlatformLogEntryResponse {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PlatformLogsResponse {
     pub items: Vec<PlatformLogEntryResponse>,
     pub total: u64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/platform-logs",
+    tag = "System Logs",
+    params(PlatformLogsQuery),
+    responses(
+        (status = 200, description = "Paginated platform operation log entries", body = PlatformLogsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn list_platform_logs(
     auth_user: AuthUser,
     State(state): State<AppState>,

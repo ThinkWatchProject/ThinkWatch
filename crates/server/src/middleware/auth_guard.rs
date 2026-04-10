@@ -5,11 +5,18 @@ use axum::{
     response::Response,
 };
 
-use think_watch_auth::jwt::Claims;
+use think_watch_auth::{api_key, jwt::Claims, rbac};
 use think_watch_common::audit::AuditEntry;
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
+
+/// Marker inserted into request extensions when a request is authenticated
+/// via a `tw-` API key (console surface) rather than a session JWT.
+/// `verify_signature` reads this to skip HMAC checking — HMAC is a
+/// session-security mechanism; API keys carry their own credential.
+#[derive(Clone)]
+pub struct ApiKeyAuthenticated;
 
 #[derive(Debug, Clone)]
 pub struct AuthUser {
@@ -396,14 +403,15 @@ pub async fn require_auth(
     mut request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Resolve the access token, preferring the httpOnly cookie
-    // (the new browser path) and falling back to the
-    // `Authorization: Bearer` header for non-browser clients (curl,
-    // CI scripts, server-to-server). XSS in the page can never
-    // exfiltrate the cookie, so the cookie path is strictly safer.
+    // Resolve the credential. Cookie (httpOnly) is preferred for browser
+    // sessions — XSS can never exfiltrate it. Bearer header is the fallback
+    // for non-browser clients. If the Bearer value is a `tw-` API key with
+    // the `console` surface, we do API-key auth instead of JWT auth.
     let token_from_cookie =
         crate::middleware::verify_signature::extract_cookie(&request, "access_token");
-    let token = match token_from_cookie {
+
+    // Resolve as an owned String so we can move `request` later.
+    let bearer: String = match token_from_cookie {
         Some(t) => t,
         None => {
             let auth_header = request
@@ -414,14 +422,19 @@ pub async fn require_auth(
             auth_header
                 .strip_prefix("Bearer ")
                 .ok_or(StatusCode::UNAUTHORIZED)?
-                .to_string()
+                .to_owned()
         }
     };
-    let token = token.as_str();
 
+    // --- API key path ---
+    if bearer.starts_with(api_key::KEY_PREFIX) {
+        return auth_via_api_key(&state, &bearer, request, next).await;
+    }
+
+    // --- JWT session path ---
     let claims = state
         .jwt
-        .verify_token(token)
+        .verify_token(&bearer)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
 
     if claims.token_type != "access" {
@@ -429,19 +442,13 @@ pub async fn require_auth(
     }
 
     // Check JWT blacklist (revoked tokens)
-    let token_hash = think_watch_auth::jwt::sha2_hash(token);
+    let token_hash = think_watch_auth::jwt::sha2_hash(&bearer);
     if think_watch_auth::jwt::is_revoked(&state.redis, &token_hash).await {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Extract client IP via the shared helper that performs trusted-proxy
-    // validation. Without this, header-based IP sources can be forged.
     let ip = extract_client_ip(&state, request.headers(), request.extensions()).await;
 
-    // Publish user_id into the access-log slot if the access log layer
-    // installed one. This is how the HTTP access log gets a user_id
-    // attached even though it can't read request extensions after the
-    // inner service consumes the request.
     if let Some(slot) = request
         .extensions()
         .get::<crate::middleware::access_log::AccessLogUserSlot>()
@@ -450,6 +457,105 @@ pub async fn require_auth(
     }
 
     request.extensions_mut().insert(AuthUser { claims, ip });
+
+    Ok(next.run(request).await)
+}
+
+/// Authenticate a `tw-` API key against the `console` surface and build a
+/// synthetic `AuthUser` from the key owner's current permissions. Inserts
+/// `ApiKeyAuthenticated` so `verify_signature` knows to skip HMAC.
+async fn auth_via_api_key(
+    state: &AppState,
+    token: &str,
+    mut request: Request<axum::body::Body>,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    let key_hash = api_key::hash_api_key(token);
+
+    let row = sqlx::query_as::<_, think_watch_common::models::ApiKey>(
+        r#"SELECT * FROM api_keys
+           WHERE key_hash = $1
+             AND deleted_at IS NULL
+             AND (
+                 is_active = true
+                 OR (grace_period_ends_at IS NOT NULL AND grace_period_ends_at > now())
+             )"#,
+    )
+    .bind(&key_hash)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    if !row.surfaces.iter().any(|s| s == "console") {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    if let Some(expires_at) = row.expires_at
+        && expires_at < chrono::Utc::now()
+    {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Service-account keys (no user_id) cannot use the console surface —
+    // all console RBAC checks require a user identity.
+    let user_id = row.user_id.ok_or(StatusCode::FORBIDDEN)?;
+
+    // Load current permissions from DB (not a snapshot like JWT claims).
+    // This means permission changes take effect immediately for API key users.
+    let permissions = rbac::compute_user_permissions(&state.db, user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let role_assignments = rbac::compute_user_role_assignments(&state.db, user_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let email = sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let roles = rbac::load_user_role_names(&state.db, user_id)
+        .await
+        .unwrap_or_default();
+
+    // Best-effort last_used_at update (same pattern as gateway path).
+    let db = state.db.clone();
+    let key_id = row.id;
+    tokio::spawn(async move {
+        let _ = sqlx::query("UPDATE api_keys SET last_used_at = now() WHERE id = $1")
+            .bind(key_id)
+            .execute(&db)
+            .await;
+    });
+
+    let now = chrono::Utc::now().timestamp();
+    let claims = Claims {
+        sub: user_id,
+        email,
+        roles,
+        permissions,
+        role_assignments,
+        exp: now + 86400,
+        iat: now,
+        token_type: "access".into(),
+        aud: String::new(),
+        iss: String::new(),
+    };
+
+    if let Some(slot) = request
+        .extensions()
+        .get::<crate::middleware::access_log::AccessLogUserSlot>()
+    {
+        let _ = slot.0.set(user_id);
+    }
+
+    request
+        .extensions_mut()
+        .insert(AuthUser { claims, ip: None });
+    request.extensions_mut().insert(ApiKeyAuthenticated);
 
     Ok(next.run(request).await)
 }

@@ -48,12 +48,23 @@ async fn analytics_team_filter(
 
 // --- Usage analytics ---
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UsageStats {
     pub total_tokens_today: i64,
     pub total_requests_today: i64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/analytics/usage/stats",
+    tag = "Analytics",
+    responses(
+        (status = 200, description = "Today's usage statistics", body = UsageStats),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn get_usage_stats(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -111,22 +122,35 @@ pub async fn get_usage_stats(
     }))
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct UsageRow {
     pub date: chrono::NaiveDate,
     pub model_id: String,
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    #[schema(value_type = f64)]
     pub total_cost: rust_decimal::Decimal,
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
 pub struct AnalyticsQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/analytics/usage",
+    tag = "Analytics",
+    params(AnalyticsQuery),
+    responses(
+        (status = 200, description = "Usage records grouped by date and model", body = Vec<UsageRow>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn get_usage(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -186,12 +210,23 @@ pub async fn get_usage(
 
 // --- Cost analytics ---
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CostStats {
     pub total_cost_mtd: f64,
     pub budget_usage_pct: Option<f64>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/analytics/costs/stats",
+    tag = "Analytics",
+    responses(
+        (status = 200, description = "Month-to-date cost summary", body = CostStats),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn get_cost_stats(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -242,15 +277,28 @@ pub async fn get_cost_stats(
     }))
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct CostRow {
     pub model_id: String,
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    #[schema(value_type = f64)]
     pub total_cost: rust_decimal::Decimal,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/analytics/costs",
+    tag = "Analytics",
+    params(AnalyticsQuery),
+    responses(
+        (status = 200, description = "Cost breakdown by model for the current month", body = Vec<CostRow>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn get_costs(
     auth_user: AuthUser,
     State(state): State<AppState>,

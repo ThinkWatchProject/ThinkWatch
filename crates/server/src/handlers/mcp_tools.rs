@@ -7,6 +7,17 @@ use think_watch_common::models::McpTool;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
+#[utoipa::path(
+    get,
+    path = "/api/mcp/tools",
+    tag = "MCP Tools",
+    responses(
+        (status = 200, description = "All active MCP tools across all servers"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn list_tools(
     _auth_user: AuthUser,
     State(state): State<AppState>,
@@ -24,6 +35,22 @@ pub async fn list_tools(
 /// the shared `discover_and_persist_tools` so the auth/HTTP/upsert logic
 /// stays in one place — the same function is also called from the startup
 /// loader and from the create/update CRUD paths.
+#[utoipa::path(
+    post,
+    path = "/api/mcp/servers/{id}/discover",
+    tag = "MCP Tools",
+    params(
+        ("id" = uuid::Uuid, Path, description = "MCP server ID to run tool discovery against"),
+    ),
+    responses(
+        (status = 200, description = "Discovery result with count of discovered tools"),
+        (status = 400, description = "Discovery failed"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Server not found"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn discover_tools(
     auth_user: AuthUser,
     State(state): State<AppState>,

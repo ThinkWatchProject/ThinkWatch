@@ -9,7 +9,7 @@ use crate::middleware::auth_guard::AuthUser;
 
 use super::clickhouse_util::*;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct AppLogsQuery {
     pub level: Option<String>,
     pub target: Option<String>,
@@ -32,7 +32,7 @@ pub struct AppLogEntry {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AppLogEntryResponse {
     pub id: String,
     pub level: String,
@@ -43,12 +43,24 @@ pub struct AppLogEntryResponse {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct AppLogsResponse {
     pub items: Vec<AppLogEntryResponse>,
     pub total: u64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/app-logs",
+    tag = "System Logs",
+    params(AppLogsQuery),
+    responses(
+        (status = 200, description = "Paginated application runtime log entries", body = AppLogsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn list_app_logs(
     auth_user: AuthUser,
     State(state): State<AppState>,

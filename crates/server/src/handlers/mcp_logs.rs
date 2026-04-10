@@ -9,7 +9,7 @@ use crate::middleware::auth_guard::AuthUser;
 
 use super::clickhouse_util::*;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::IntoParams)]
 pub struct McpLogsQuery {
     pub user_id: Option<String>,
     pub server_id: Option<String>,
@@ -25,7 +25,7 @@ pub struct McpLogsQuery {
     pub offset: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, clickhouse::Row)]
+#[derive(Debug, Serialize, Deserialize, clickhouse::Row, utoipa::ToSchema)]
 pub struct McpLogEntry {
     pub id: String,
     pub user_id: Option<String>,
@@ -39,12 +39,24 @@ pub struct McpLogEntry {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct McpLogsResponse {
     pub items: Vec<McpLogEntry>,
     pub total: u64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/mcp/logs",
+    tag = "MCP Logs",
+    params(McpLogsQuery),
+    responses(
+        (status = 200, description = "Paginated MCP tool call logs", body = McpLogsResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
 pub async fn list_mcp_logs(
     _auth_user: AuthUser,
     State(state): State<AppState>,

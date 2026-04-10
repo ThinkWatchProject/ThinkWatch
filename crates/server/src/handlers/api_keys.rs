@@ -1,6 +1,7 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use serde::Deserialize;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use think_watch_auth::api_key;
@@ -22,6 +23,19 @@ use crate::middleware::auth_guard::AuthUser;
 ///     `api_keys:read` scoped to (team_manager case)
 ///   - everyone's keys, when the caller has `api_keys:read` at
 ///     global scope (super_admin / admin case)
+#[utoipa::path(
+    get,
+    path = "/api/keys",
+    tag = "API Keys",
+    params(
+        ("page" = Option<u32>, Query, description = "Page number (1-based, default 1)"),
+        ("per_page" = Option<u32>, Query, description = "Items per page (max 100, default 20)"),
+    ),
+    responses(
+        (status = 200, description = "Paginated list of API keys visible to the caller"),
+        (status = 401, description = "Unauthorized"),
+    ),
+)]
 pub async fn list_keys(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -109,7 +123,7 @@ pub async fn list_keys(
 /// Allowed values for the `surfaces` column. Kept in lockstep with
 /// the DB CHECK constraint and with `RateLimitSubject::Surface` on
 /// the limits engine — adding a new gateway means updating both.
-pub(crate) const ALLOWED_SURFACES: &[&str] = &["ai_gateway", "mcp_gateway"];
+pub(crate) const ALLOWED_SURFACES: &[&str] = &["ai_gateway", "mcp_gateway", "console"];
 
 /// Validate + dedupe a caller-supplied surfaces list. Rejects unknown
 /// values and empty input. Returns the normalized list (sorted,
@@ -135,6 +149,21 @@ fn normalize_surfaces(input: &[String]) -> Result<Vec<String>, AppError> {
     Ok(out)
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/keys",
+    tag = "API Keys",
+    request_body(
+        content_type = "application/json",
+        description = "Key name, surfaces, optional team_id, models, and expiry",
+    ),
+    responses(
+        (status = 200, description = "API key created — plaintext key shown only once"),
+        (status = 400, description = "Invalid surfaces or team membership"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Cannot create keys for other teams without team:write"),
+    ),
+)]
 pub async fn create_key(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -193,6 +222,20 @@ pub async fn create_key(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/keys/{id}",
+    tag = "API Keys",
+    params(
+        ("id" = Uuid, Path, description = "API key UUID"),
+    ),
+    responses(
+        (status = 200, description = "API key details"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden — key is outside the caller's team scope"),
+        (status = 404, description = "API key not found"),
+    ),
+)]
 pub async fn get_key(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -214,6 +257,20 @@ pub async fn get_key(
     Ok(Json(key))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/keys/{id}",
+    tag = "API Keys",
+    params(
+        ("id" = Uuid, Path, description = "API key UUID"),
+    ),
+    responses(
+        (status = 200, description = "API key revoked"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "API key not found"),
+    ),
+)]
 pub async fn revoke_key(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -246,7 +303,7 @@ pub async fn revoke_key(
 
 // --- API key lifecycle management ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateKeyRequest {
     pub allowed_models: Option<Vec<String>>,
     /// When `Some`, replaces the entire surfaces list. Must still
@@ -258,6 +315,22 @@ pub struct UpdateKeyRequest {
 }
 
 /// PATCH /api/keys/{id} — update key settings.
+#[utoipa::path(
+    patch,
+    path = "/api/keys/{id}",
+    tag = "API Keys",
+    params(
+        ("id" = Uuid, Path, description = "API key UUID"),
+    ),
+    request_body = UpdateKeyRequest,
+    responses(
+        (status = 200, description = "Updated API key details"),
+        (status = 400, description = "Invalid surfaces"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "API key not found"),
+    ),
+)]
 pub async fn update_key(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -319,6 +392,21 @@ pub async fn update_key(
 }
 
 /// POST /api/keys/{id}/rotate — rotate an API key, returning a new key.
+#[utoipa::path(
+    post,
+    path = "/api/keys/{id}/rotate",
+    tag = "API Keys",
+    params(
+        ("id" = Uuid, Path, description = "API key UUID to rotate"),
+    ),
+    responses(
+        (status = 200, description = "New key generated; old key enters grace period"),
+        (status = 400, description = "Key is inactive"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "API key not found"),
+    ),
+)]
 pub async fn rotate_key(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -417,6 +505,18 @@ pub struct ExpiringKeysQuery {
 /// belonging to users in teams the caller has `api_keys:read` for
 /// (so a team manager sees the whole team's expiring set, not just
 /// their own). Soft-deleted keys are filtered out.
+#[utoipa::path(
+    get,
+    path = "/api/keys/expiring",
+    tag = "API Keys",
+    params(
+        ("days" = Option<i32>, Query, description = "Number of days to look ahead (default 7)"),
+    ),
+    responses(
+        (status = 200, description = "List of API keys expiring within the specified window"),
+        (status = 401, description = "Unauthorized"),
+    ),
+)]
 pub async fn list_expiring_keys(
     auth_user: AuthUser,
     State(state): State<AppState>,

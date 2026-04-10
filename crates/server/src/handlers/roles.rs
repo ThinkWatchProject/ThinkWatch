@@ -16,7 +16,7 @@ use crate::middleware::auth_guard::AuthUser;
 /// in the UI. `dangerous` flags permissions that should require an extra
 /// confirmation when granted (rotating API keys, revoking sessions,
 /// disabling PII redaction, etc).
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, utoipa::ToSchema)]
 pub struct PermissionDef {
     pub key: &'static str,
     pub resource: &'static str,
@@ -390,7 +390,7 @@ pub async fn validate_seeded_roles(pool: &sqlx::PgPool) -> anyhow::Result<()> {
 
 // --- Response types ---
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RoleResponse {
     pub id: Uuid,
     pub name: String,
@@ -411,7 +411,7 @@ pub struct RoleResponse {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RolesListResponse {
     pub items: Vec<RoleResponse>,
 }
@@ -453,6 +453,16 @@ fn row_to_response(row: RoleRow, user_count: i64) -> RoleResponse {
 
 // --- List all roles ---
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/roles",
+    tag = "Roles",
+    responses(
+        (status = 200, description = "All roles with user counts", body = RolesListResponse),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn list_roles(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -497,7 +507,7 @@ pub async fn list_roles(
 
 // --- Create role ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateRoleRequest {
     pub name: String,
     pub description: Option<String>,
@@ -507,6 +517,18 @@ pub struct CreateRoleRequest {
     pub policy_document: Option<serde_json::Value>,
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/roles",
+    tag = "Roles",
+    request_body = CreateRoleRequest,
+    responses(
+        (status = 200, description = "Created role", body = RoleResponse),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn create_role(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -570,7 +592,7 @@ pub async fn create_role(
 
 // --- Update role ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateRoleRequest {
     pub name: Option<String>,
     pub description: Option<String>,
@@ -580,6 +602,22 @@ pub struct UpdateRoleRequest {
     pub policy_document: Option<serde_json::Value>,
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/admin/roles/{id}",
+    tag = "Roles",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Role ID"),
+    ),
+    request_body = UpdateRoleRequest,
+    responses(
+        (status = 200, description = "Updated role", body = RoleResponse),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Role not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn update_role(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -685,6 +723,21 @@ pub async fn update_role(
 // Custom roles have no canonical defaults, so this endpoint is
 // system-only and rejects everything else with 400.
 
+#[utoipa::path(
+    post,
+    path = "/api/admin/roles/{id}/reset",
+    tag = "Roles",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Role ID"),
+    ),
+    responses(
+        (status = 200, description = "Role reset to defaults", body = RoleResponse),
+        (status = 400, description = "Not a system role"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Role not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn reset_role(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -752,11 +805,27 @@ pub async fn reset_role(
 
 // --- Delete role (with reassign-on-members) ---
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct DeleteRoleQuery {
     pub reassign_to: Option<Uuid>,
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/admin/roles/{id}",
+    tag = "Roles",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Role ID"),
+        ("reassign_to" = Option<uuid::Uuid>, Query, description = "Role ID to migrate existing members to"),
+    ),
+    responses(
+        (status = 200, description = "Role deleted"),
+        (status = 400, description = "System role or members still assigned without reassignment target"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Role not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn delete_role(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -856,7 +925,7 @@ pub async fn delete_role(
 
 // --- List members of a role ---
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RoleMember {
     pub user_id: Uuid,
     pub email: String,
@@ -866,11 +935,25 @@ pub struct RoleMember {
     pub assigned_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RoleMembersResponse {
     pub items: Vec<RoleMember>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/roles/{id}/members",
+    tag = "Roles",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Role ID"),
+    ),
+    responses(
+        (status = 200, description = "Users assigned to this role", body = RoleMembersResponse),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Role not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn list_role_members(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -928,6 +1011,16 @@ pub async fn list_role_members(
 //
 // Returns the structured catalog so the frontend can group by resource
 // and surface dangerous permissions with extra confirmation.
+#[utoipa::path(
+    get,
+    path = "/api/admin/roles/permissions",
+    tag = "Roles",
+    responses(
+        (status = 200, description = "Full permission catalog"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn list_permissions(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -947,7 +1040,7 @@ pub async fn list_permissions(
 // can view the role can also see who has touched it — there is no
 // extra information here beyond what the role itself already shows.
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RoleHistoryEntry {
     pub id: String,
     pub action: String,
@@ -958,7 +1051,7 @@ pub struct RoleHistoryEntry {
     pub created_at: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct RoleHistoryResponse {
     pub items: Vec<RoleHistoryEntry>,
 }
@@ -974,6 +1067,20 @@ struct RoleHistoryRow {
     created_at: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/admin/roles/{id}/history",
+    tag = "Roles",
+    params(
+        ("id" = uuid::Uuid, Path, description = "Role ID"),
+    ),
+    responses(
+        (status = 200, description = "Role audit history (last 100 entries)", body = RoleHistoryResponse),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Role not found"),
+    ),
+    security(("BearerAuth" = []))
+)]
 pub async fn list_role_history(
     auth_user: AuthUser,
     State(state): State<AppState>,

@@ -135,6 +135,17 @@ pub async fn verify_signature(
         return Ok(next.run(request).await);
     }
 
+    // Skip for API key authenticated requests — HMAC is a session-security
+    // mechanism (prevents cookie theft replay). API keys are a separate
+    // credential and carry their own security guarantees.
+    if request
+        .extensions()
+        .get::<super::auth_guard::ApiKeyAuthenticated>()
+        .is_some()
+    {
+        return Ok(next.run(request).await);
+    }
+
     // Extract auth user from extensions (set by require_auth middleware)
     let user_id = request
         .extensions()
