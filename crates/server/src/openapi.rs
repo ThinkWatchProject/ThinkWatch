@@ -258,3 +258,34 @@ pub fn openapi_router() -> axum::Router<crate::app::AppState> {
     let spec = ApiDoc::openapi();
     axum::Router::new().merge(SwaggerUi::new("/api/docs").url("/api/openapi.json", spec))
 }
+
+/// Middleware that restricts the Swagger UI (`/api/docs/*`) to iframe-only access.
+///
+/// Browsers set `Sec-Fetch-Dest: document` when the user navigates to a URL
+/// directly. When the same URL is loaded inside an `<iframe>` the value is
+/// `iframe`. We reject `document` requests so the UI cannot be opened as a
+/// standalone page — it must be embedded in the admin console.
+///
+/// The JSON spec (`/api/openapi.json`) is excluded from this check so that
+/// external tooling (curl, code generators) can still fetch the spec.
+///
+/// Non-browser clients (curl, Postman) do not send `Sec-Fetch-Dest` at all
+/// and are left unaffected.
+pub async fn iframe_only(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+
+    if request.uri().path().starts_with("/api/docs") {
+        let dest = request
+            .headers()
+            .get("sec-fetch-dest")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if dest == "document" {
+            return axum::http::StatusCode::FORBIDDEN.into_response();
+        }
+    }
+    next.run(request).await
+}

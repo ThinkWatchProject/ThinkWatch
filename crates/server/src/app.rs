@@ -675,15 +675,19 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             get(handlers::health::readiness).with_state(state.clone()),
         );
 
-    // Docs routes — require_auth only (no verify_signature).
+    // Docs routes — require_auth + iframe_only (no verify_signature).
     // Swagger UI is accessed via normal browser GET navigation; the browser
     // sends the access_token cookie automatically, but it cannot compute
     // HMAC request signatures. The spec itself (/api/openapi.json) is
     // also protected — unauthenticated callers get 401.
-    let docs_routes = crate::openapi::openapi_router().layer(axum::middleware::from_fn_with_state(
-        state.clone(),
-        crate::middleware::auth_guard::require_auth,
-    ));
+    // iframe_only blocks direct browser navigation (Sec-Fetch-Dest: document)
+    // so the Swagger UI can only be opened embedded in the admin console.
+    let docs_routes = crate::openapi::openapi_router()
+        .layer(axum::middleware::from_fn(crate::openapi::iframe_only))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::auth_guard::require_auth,
+        ));
 
     let app = Router::new()
         .merge(health)
