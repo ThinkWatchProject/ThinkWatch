@@ -37,11 +37,13 @@ interface DashboardStats {
 interface UsageStats {
   total_tokens_today: number;
   total_requests_today: number;
+  tokens_buckets: number[];
 }
 
 interface CostStats {
   total_cost_mtd: number;
   budget_usage_pct: number | null;
+  cost_buckets: number[];
 }
 
 interface ProviderHealth {
@@ -114,20 +116,7 @@ function useCounter(target: number, duration = 1200) {
   return value;
 }
 
-/** Append-only ring buffer of recent samples for sparklines. */
-function useSparkHistory(value: number | undefined, length = 24) {
-  const [hist, setHist] = useState<number[] | null>(null);
-  useEffect(() => {
-    if (value == null) return;
-    setHist((prev) => {
-      // Seed the buffer with the first value across the whole window so
-      // the line starts flat instead of "rising from zero".
-      if (prev === null) return Array(length).fill(value);
-      return [...prev.slice(1), value];
-    });
-  }, [value, length]);
-  return hist ?? Array(length).fill(0);
-}
+
 
 // ----------------------------------------------------------------------------
 // Live snapshot via WebSocket. Falls back to a one-shot HTTP fetch if WS
@@ -380,8 +369,8 @@ export function DashboardPage() {
     api<CostStats>('/api/analytics/costs/stats').then(setCost).catch(() => {});
   }, []);
 
-  const tokensSpark = useSparkHistory(usage?.total_tokens_today);
-  const costSpark = useSparkHistory(cost?.total_cost_mtd);
+  const tokensSpark = useMemo(() => usage?.tokens_buckets ?? Array(24).fill(0), [usage]);
+  const costSpark = useMemo(() => cost?.cost_buckets ?? Array(24).fill(0), [cost]);
   const keysSpark = useMemo(() => stats?.active_keys_buckets ?? Array(24).fill(0), [stats]);
   const rpmSpark = useMemo(() => live?.rpm_buckets ?? Array(24).fill(0), [live]);
 

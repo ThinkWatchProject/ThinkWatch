@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::extract::State;
-use chrono::Datelike;
+use chrono::{Datelike, Timelike};
 use serde::Serialize;
 
 use think_watch_common::errors::AppError;
@@ -52,6 +52,8 @@ async fn analytics_team_filter(
 pub struct UsageStats {
     pub total_tokens_today: i64,
     pub total_requests_today: i64,
+    /// Hourly token totals for the past 24 hours (oldest → newest, length 24).
+    pub tokens_buckets: Vec<i64>,
 }
 
 #[utoipa::path(
@@ -73,7 +75,7 @@ pub async fn get_usage_stats(
     let team_filter = analytics_team_filter(&auth_user, &state.db).await?;
     let caller_id = auth_user.claims.sub;
 
-    let (total_tokens, total_requests): (Option<i64>, Option<i64>) = match team_filter {
+    let (total_tokens, total_requests): (Option<i64>, Option<i64>) = match &team_filter {
         None => {
             let tokens: Option<i64> = sqlx::query_scalar(
                 "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint \
@@ -98,7 +100,7 @@ pub async fn get_usage_stats(
                     AND (team_id = ANY($2) OR user_id = $3)",
             )
             .bind(today)
-            .bind(&team_ids)
+            .bind(team_ids)
             .bind(caller_id)
             .fetch_one(&state.db)
             .await?;
@@ -108,7 +110,7 @@ pub async fn get_usage_stats(
                     AND (team_id = ANY($2) OR user_id = $3)",
             )
             .bind(today)
-            .bind(&team_ids)
+            .bind(team_ids)
             .bind(caller_id)
             .fetch_one(&state.db)
             .await?;
@@ -116,9 +118,62 @@ pub async fn get_usage_stats(
         }
     };
 
+    // Hourly token buckets for the past 24 hours
+    let tokens_buckets = {
+        #[derive(sqlx::FromRow)]
+        struct Bucket {
+            hour: chrono::DateTime<chrono::Utc>,
+            tokens: i64,
+        }
+        let rows: Vec<Bucket> = match &team_filter {
+            None => {
+                sqlx::query_as::<_, Bucket>(
+                    "SELECT date_trunc('hour', created_at) AS hour, \
+                            COALESCE(SUM(total_tokens::bigint), 0)::bigint AS tokens \
+                       FROM usage_records \
+                      WHERE created_at >= date_trunc('hour', now()) - INTERVAL '23 hours' \
+                      GROUP BY hour ORDER BY hour",
+                )
+                .fetch_all(&state.db)
+                .await?
+            }
+            Some(team_ids) => {
+                sqlx::query_as::<_, Bucket>(
+                    "SELECT date_trunc('hour', created_at) AS hour, \
+                            COALESCE(SUM(total_tokens::bigint), 0)::bigint AS tokens \
+                       FROM usage_records \
+                      WHERE created_at >= date_trunc('hour', now()) - INTERVAL '23 hours' \
+                        AND (team_id = ANY($1) OR user_id = $2) \
+                      GROUP BY hour ORDER BY hour",
+                )
+                .bind(team_ids)
+                .bind(caller_id)
+                .fetch_all(&state.db)
+                .await?
+            }
+        };
+        let now = chrono::Utc::now();
+        let lookup: std::collections::HashMap<i64, i64> = rows
+            .into_iter()
+            .map(|b| (b.hour.timestamp(), b.tokens))
+            .collect();
+        (0..24)
+            .map(|i| {
+                let hour = (now - chrono::Duration::hours(23 - i))
+                    .date_naive()
+                    .and_hms_opt((now - chrono::Duration::hours(23 - i)).hour(), 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp();
+                *lookup.get(&hour).unwrap_or(&0)
+            })
+            .collect::<Vec<i64>>()
+    };
+
     Ok(Json(UsageStats {
         total_tokens_today: total_tokens.unwrap_or(0),
         total_requests_today: total_requests.unwrap_or(0),
+        tokens_buckets,
     }))
 }
 
@@ -214,6 +269,8 @@ pub async fn get_usage(
 pub struct CostStats {
     pub total_cost_mtd: f64,
     pub budget_usage_pct: Option<f64>,
+    /// Hourly cost totals (USD) for the past 24 hours (oldest → newest, length 24).
+    pub cost_buckets: Vec<f64>,
 }
 
 #[utoipa::path(
@@ -239,7 +296,7 @@ pub async fn get_cost_stats(
     let caller_id = auth_user.claims.sub;
 
     let total: Option<rust_decimal::Decimal> =
-        match team_filter {
+        match &team_filter {
             None => sqlx::query_scalar(
                 "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records WHERE created_at::date >= $1",
             )
@@ -253,7 +310,7 @@ pub async fn get_cost_stats(
                 AND (team_id = ANY($2) OR user_id = $3)",
                 )
                 .bind(month_start)
-                .bind(&team_ids)
+                .bind(team_ids)
                 .bind(caller_id)
                 .fetch_one(&state.db)
                 .await?
@@ -271,9 +328,63 @@ pub async fn get_cost_stats(
     // the bar.
     let budget_usage_pct: Option<f64> = None;
 
+    // Hourly cost buckets for the past 24 hours
+    let cost_buckets = {
+        #[derive(sqlx::FromRow)]
+        struct Bucket {
+            hour: chrono::DateTime<chrono::Utc>,
+            cost: rust_decimal::Decimal,
+        }
+        let rows: Vec<Bucket> = match &team_filter {
+            None => {
+                sqlx::query_as::<_, Bucket>(
+                    "SELECT date_trunc('hour', created_at) AS hour, \
+                            COALESCE(SUM(cost_usd), 0) AS cost \
+                       FROM usage_records \
+                      WHERE created_at >= date_trunc('hour', now()) - INTERVAL '23 hours' \
+                      GROUP BY hour ORDER BY hour",
+                )
+                .fetch_all(&state.db)
+                .await?
+            }
+            Some(team_ids) => {
+                sqlx::query_as::<_, Bucket>(
+                    "SELECT date_trunc('hour', created_at) AS hour, \
+                            COALESCE(SUM(cost_usd), 0) AS cost \
+                       FROM usage_records \
+                      WHERE created_at >= date_trunc('hour', now()) - INTERVAL '23 hours' \
+                        AND (team_id = ANY($1) OR user_id = $2) \
+                      GROUP BY hour ORDER BY hour",
+                )
+                .bind(team_ids)
+                .bind(caller_id)
+                .fetch_all(&state.db)
+                .await?
+            }
+        };
+        use rust_decimal::prelude::ToPrimitive;
+        let now = chrono::Utc::now();
+        let lookup: std::collections::HashMap<i64, f64> = rows
+            .into_iter()
+            .map(|b| (b.hour.timestamp(), b.cost.to_f64().unwrap_or(0.0)))
+            .collect();
+        (0..24)
+            .map(|i| {
+                let hour = (now - chrono::Duration::hours(23 - i))
+                    .date_naive()
+                    .and_hms_opt((now - chrono::Duration::hours(23 - i)).hour(), 0, 0)
+                    .unwrap()
+                    .and_utc()
+                    .timestamp();
+                *lookup.get(&hour).unwrap_or(&0.0)
+            })
+            .collect::<Vec<f64>>()
+    };
+
     Ok(Json(CostStats {
         total_cost_mtd: total_f64,
         budget_usage_pct,
+        cost_buckets,
     }))
 }
 
