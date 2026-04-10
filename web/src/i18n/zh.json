@@ -61,7 +61,11 @@
     "logForwarders": "日志转发",
     "platformLogs": "平台日志",
     "configGuide": "配置指南",
-    "apiDocs": "API 文档"
+    "apiDocs": "API 文档",
+    "contentSecurity": "内容安全"
+  },
+  "contentSecurity": {
+    "subtitle": "应用于 AI 网关请求的内容过滤规则和 PII 脱敏配置"
   },
   "auth": {
     "signIn": "登录",

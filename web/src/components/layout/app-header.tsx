@@ -18,6 +18,7 @@ const breadcrumbMap: Record<string, { sectionKey: string; pageKey: string }> = {
   '/guide': { sectionKey: 'nav.overview', pageKey: 'nav.configGuide' },
   '/gateway/providers': { sectionKey: 'nav.aiGateway', pageKey: 'nav.providers' },
   '/gateway/models': { sectionKey: 'nav.aiGateway', pageKey: 'nav.models' },
+  '/gateway/security': { sectionKey: 'nav.aiGateway', pageKey: 'nav.contentSecurity' },
   '/api-keys': { sectionKey: 'nav.overview', pageKey: 'nav.apiKeys' },
   '/mcp/servers': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.mcpServers' },
   '/mcp/tools': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.tools' },
