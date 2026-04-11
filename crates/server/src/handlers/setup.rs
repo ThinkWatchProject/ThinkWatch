@@ -66,6 +66,8 @@ pub struct SetupInitResponse {
     pub api_key: Option<String>,
     pub provider_id: Option<uuid::Uuid>,
     pub message: String,
+    /// Per-session HMAC signing key — same as the login response.
+    pub signing_key: String,
 }
 
 /// POST /api/setup/initialize — public (only works if not initialized).
@@ -88,8 +90,21 @@ pub struct SetupInitResponse {
 )]
 pub async fn setup_initialize(
     State(state): State<AppState>,
-    Json(req): Json<SetupInitRequest>,
-) -> Result<Json<SetupInitResponse>, AppError> {
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, AppError> {
+    let client_ip = crate::middleware::auth_guard::extract_client_ip(
+        &state,
+        request.headers(),
+        request.extensions(),
+    )
+    .await
+    .unwrap_or_else(|| "unknown".into());
+
+    let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| AppError::BadRequest("Invalid request body".into()))?;
+    let req: SetupInitRequest =
+        serde_json::from_slice(&body).map_err(|e| AppError::BadRequest(e.to_string()))?;
     // Check if already initialized (fast path from cache)
     if state.dynamic_config.is_initialized().await {
         return Err(AppError::Forbidden("Setup already completed".into()));
@@ -240,11 +255,67 @@ pub async fn setup_initialize(
             })),
     );
 
-    Ok(Json(SetupInitResponse {
+    // Auto-login: issue JWT cookies so the admin is authenticated
+    // immediately after setup, without a manual login step.
+    let roles = think_watch_auth::rbac::load_user_role_names(&state.db, admin_user.0).await?;
+    let permissions =
+        think_watch_auth::rbac::compute_user_permissions(&state.db, admin_user.0).await?;
+    let role_assignments =
+        think_watch_auth::rbac::compute_user_role_assignments(&state.db, admin_user.0).await?;
+
+    let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
+    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
+
+    let access_token = state.jwt.create_access_token_with_ttl(
+        admin_user.0,
+        &admin_user.1,
+        roles,
+        permissions,
+        role_assignments,
+        access_ttl,
+    )?;
+    let refresh_token = state.jwt.create_refresh_token_with_ttl(
+        admin_user.0,
+        &admin_user.1,
+        vec![],
+        vec![],
+        vec![],
+        refresh_ttl_days,
+    )?;
+
+    let signing_key = crate::middleware::verify_signature::create_signing_key(
+        &state.redis,
+        &admin_user.0,
+        Some(&client_ip),
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
+
+    let signing_cookie =
+        crate::middleware::verify_signature::signing_key_cookie(&signing_key, 86400);
+    let access_cookie =
+        crate::middleware::verify_signature::access_token_cookie(&access_token, access_ttl);
+    let refresh_cookie = crate::middleware::verify_signature::refresh_token_cookie(
+        &refresh_token,
+        refresh_ttl_days * 86400,
+    );
+
+    use axum::response::IntoResponse;
+    let mut response = Json(SetupInitResponse {
         admin_id: admin_user.0,
         admin_email: admin_user.1,
         api_key: Some(generated.plaintext),
         provider_id,
-        message: "Setup completed successfully. Please log in with your admin credentials.".into(),
-    }))
+        message: "Setup completed successfully.".into(),
+        signing_key,
+    })
+    .into_response();
+
+    let headers = response.headers_mut();
+    for cookie_str in [&signing_cookie, &access_cookie, &refresh_cookie] {
+        if let Ok(v) = cookie_str.parse() {
+            headers.append(axum::http::header::SET_COOKIE, v);
+        }
+    }
+    Ok(response)
 }

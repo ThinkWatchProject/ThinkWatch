@@ -966,7 +966,8 @@
       "subtitle": "Your ThinkWatch instance is ready",
       "apiKeyLabel": "Your Admin API Key",
       "apiKeyWarning": "Save this key now. It will not be shown again.",
-      "goToLogin": "Go to Login"
+      "goToLogin": "Go to Login",
+      "goToDashboard": "Go to Dashboard"
     },
     "next": "Next",
     "back": "Back"

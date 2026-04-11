@@ -42,6 +42,7 @@ interface SetupResult {
   api_key?: string;
   provider_id?: string;
   message: string;
+  signing_key?: string;
 }
 
 function StepIndicator({ currentStep }: { currentStep: Step }) {
@@ -243,6 +244,10 @@ export function SetupPage() {
       }
       const data: SetupResult = await res.json();
       setResult(data);
+      // Store the signing key so the admin is authenticated immediately.
+      if (data.signing_key) {
+        sessionStorage.setItem('signing_key', data.signing_key);
+      }
       // Drop the cached setup status so the next router check re-fetches.
       // Without this the user has to hard-refresh after clicking
       // "go to login" because the cache still says needs_setup=true.
@@ -548,7 +553,7 @@ export function SetupPage() {
           size="lg"
           onClick={() => { window.location.href = '/'; }}
         >
-          {t('setup.complete.goToLogin')}
+          {t('setup.complete.goToDashboard')}
           <ArrowRight className="ml-2 h-4 w-4" />
         </Button>
       </CardContent>
