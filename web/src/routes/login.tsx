@@ -21,6 +21,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [ssoEnabled, setSsoEnabled] = useState(false);
+  const [registrationOpen, setRegistrationOpen] = useState(false);
   const [totpStep, setTotpStep] = useState(false);
   const [totpCode, setTotpCode] = useState('');
 
@@ -28,7 +29,10 @@ export function LoginPage({ onLogin }: LoginPageProps) {
     // Use public endpoint (no auth required)
     fetch(`${API_BASE}/api/auth/sso/status`)
       .then((r) => r.json())
-      .then((d: { enabled: boolean }) => setSsoEnabled(d.enabled))
+      .then((d: { enabled: boolean; allow_registration?: boolean }) => {
+        setSsoEnabled(d.enabled);
+        setRegistrationOpen(d.allow_registration === true);
+      })
       .catch(() => {});
   }, []);
 
@@ -124,11 +128,13 @@ export function LoginPage({ onLogin }: LoginPageProps) {
             <Button type="button" variant="outline" className="w-full" disabled={!ssoEnabled} onClick={handleSsoLogin}>
               {t('auth.signInWith')}
             </Button>
-            <div className="text-center">
-              <a href="/register" className="text-sm text-muted-foreground hover:text-foreground">
-                {t('auth.noAccount')}
-              </a>
-            </div>
+            {registrationOpen && (
+              <div className="text-center">
+                <a href="/register" className="text-sm text-muted-foreground hover:text-foreground">
+                  {t('auth.noAccount')}
+                </a>
+              </div>
+            )}
           </form>
         </CardContent>
       </Card>

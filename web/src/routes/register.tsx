@@ -6,10 +6,15 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Shield, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { apiPost } from '@/lib/api';
+import { apiPost, setCachedPermissions } from '@/lib/api';
 
 interface RegisterPageProps {
-  onRegistered: () => void;
+  onRegistered: (signingKey: string) => void;
+}
+
+interface RegisterResponse {
+  signing_key: string;
+  permissions?: string[];
 }
 
 export function RegisterPage({ onRegistered }: RegisterPageProps) {
@@ -38,8 +43,14 @@ export function RegisterPage({ onRegistered }: RegisterPageProps) {
     }
     setLoading(true);
     try {
-      await apiPost('/api/auth/register', { email, display_name: displayName, password });
-      onRegistered();
+      const res = await apiPost<RegisterResponse>('/api/auth/register', {
+        email,
+        display_name: displayName,
+        password,
+      });
+      sessionStorage.setItem('signing_key', res.signing_key);
+      setCachedPermissions(res.permissions);
+      onRegistered(res.signing_key);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed');
     } finally {

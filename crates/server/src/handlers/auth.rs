@@ -415,7 +415,7 @@ pub async fn login(
         description = "New user credentials (only when public registration is enabled)",
     ),
     responses(
-        (status = 200, description = "User registered successfully"),
+        (status = 200, description = "User registered and automatically logged in — tokens set as httpOnly cookies"),
         (status = 400, description = "Invalid input"),
         (status = 403, description = "Public registration is disabled"),
         (status = 409, description = "Email already registered"),
@@ -424,8 +424,22 @@ pub async fn login(
 )]
 pub async fn register(
     State(state): State<AppState>,
-    Json(req): Json<CreateUserRequest>,
-) -> Result<Json<UserResponse>, AppError> {
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, AppError> {
+    let client_ip = crate::middleware::auth_guard::extract_client_ip(
+        &state,
+        request.headers(),
+        request.extensions(),
+    )
+    .await
+    .unwrap_or_else(|| "unknown".into());
+
+    let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| AppError::BadRequest("Invalid request body".into()))?;
+    let req: CreateUserRequest =
+        serde_json::from_slice(&body).map_err(|e| AppError::BadRequest(e.to_string()))?;
+
     // Check if public registration is allowed
     if !state.dynamic_config.allow_registration().await {
         return Err(AppError::Forbidden(
@@ -462,38 +476,81 @@ pub async fn register(
         }
     };
 
-    // Assign default "developer" role and capture the row for the
-    // response so the client doesn't need a second round trip.
-    let (role_id, role_name, is_system): (uuid::Uuid, String, bool) = sqlx::query_as(
-        r#"WITH ins AS (
-               INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
-               SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = 'developer'
-               RETURNING role_id
-           )
-           SELECT id, name, is_system FROM rbac_roles WHERE name = 'developer'"#,
+    // Assign default "developer" role
+    sqlx::query(
+        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
+           SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = 'developer'"#,
     )
     .bind(user.id)
-    .fetch_one(&mut *tx)
+    .execute(&mut *tx)
     .await?;
 
     tx.commit().await?;
 
-    Ok(Json(UserResponse {
-        id: user.id,
-        email: user.email,
-        display_name: user.display_name,
-        avatar_url: user.avatar_url,
-        is_active: user.is_active,
-        role_assignments: vec![think_watch_common::dto::RoleAssignment {
-            role_id,
-            name: role_name,
-            is_system,
-            scope: "global".into(),
-        }],
-        permissions: Vec::new(),
-        teams: Vec::new(),
-        created_at: user.created_at,
-    }))
+    // Auto-login: issue tokens + cookies so the user is immediately
+    // authenticated — same flow as the login handler.
+    let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user.id).await?;
+    let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id).await?;
+    let role_assignments =
+        think_watch_auth::rbac::compute_user_role_assignments(&state.db, user.id).await?;
+
+    let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
+    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
+
+    let access_token = state.jwt.create_access_token_with_ttl(
+        user.id,
+        &user.email,
+        roles.clone(),
+        permissions.clone(),
+        role_assignments.clone(),
+        access_ttl,
+    )?;
+    let refresh_token = state.jwt.create_refresh_token_with_ttl(
+        user.id,
+        &user.email,
+        roles.clone(),
+        permissions.clone(),
+        role_assignments,
+        refresh_ttl_days,
+    )?;
+
+    let signing_key =
+        verify_signature::create_signing_key(&state.redis, &user.id, Some(&client_ip))
+            .await
+            .map_err(|e| {
+                AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))
+            })?;
+
+    state.audit.log(
+        AuditEntry::platform("auth.register")
+            .user_id(user.id)
+            .user_email(&user.email)
+            .resource("auth")
+            .ip_address(&client_ip),
+    );
+
+    let signing_cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
+    let access_cookie = verify_signature::access_token_cookie(&access_token, access_ttl);
+    let refresh_cookie =
+        verify_signature::refresh_token_cookie(&refresh_token, refresh_ttl_days * 86400);
+
+    let mut response = Json(LoginResponse {
+        token_type: "Bearer".into(),
+        expires_in: access_ttl,
+        signing_key,
+        permissions,
+        roles,
+        password_change_required: None,
+    })
+    .into_response();
+
+    let headers = response.headers_mut();
+    for cookie_str in [&signing_cookie, &access_cookie, &refresh_cookie] {
+        if let Ok(v) = cookie_str.parse() {
+            headers.append(axum::http::header::SET_COOKIE, v);
+        }
+    }
+    Ok(response)
 }
 
 #[utoipa::path(
