@@ -54,6 +54,7 @@ function RootComponent() {
   const { user, loading, login, logout, handleSsoCallback } = useAuth();
   const [setupChecked, setSetupChecked] = useState(cachedSetupStatus !== null);
   const [needsSetup, setNeedsSetup] = useState(cachedSetupStatus?.needs_setup ?? false);
+  const [registrationOpen, setRegistrationOpen] = useState(false);
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
@@ -91,6 +92,16 @@ function RootComponent() {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVis);
     };
+  }, []);
+
+  // Fetch whether self-registration is open (public endpoint, no auth).
+  useEffect(() => {
+    fetch(`${API_BASE}/api/auth/sso/status`)
+      .then((r) => r.json())
+      .then((d: { allow_registration?: boolean }) => {
+        setRegistrationOpen(d.allow_registration === true);
+      })
+      .catch(() => {});
   }, []);
 
   // Handle SSO callback. The new (httpOnly cookie) flow leaves
@@ -135,6 +146,12 @@ function RootComponent() {
   // Show setup page directly (no AppShell)
   if (isSetupPath && needsSetup) {
     return <SetupPage />;
+  }
+
+  // Allow the register route to render via <Outlet /> when not logged in
+  // AND registration is enabled. Otherwise show the login page.
+  if (!user && pathname === '/register' && registrationOpen) {
+    return <Outlet />;
   }
 
   if (!user) {
@@ -285,8 +302,15 @@ const registerRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/register',
   component: () => {
-    const navigate = registerRoute.useNavigate();
-    return <RegisterPage onRegistered={() => navigate({ to: '/' })} />;
+    return (
+      <RegisterPage
+        onRegistered={() => {
+          // Hard navigate so RootComponent remounts and picks up
+          // the freshly-set auth cookies via useAuth → fetchUser.
+          window.location.href = '/';
+        }}
+      />
+    );
   },
 });
 

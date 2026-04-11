@@ -74,11 +74,14 @@ pub async fn readiness(State(state): State<AppState>) -> Response {
     }
 }
 
-/// GET /api/auth/sso/status — public, returns whether SSO is enabled (no auth required).
+/// GET /api/auth/sso/status — public, returns whether SSO is enabled
+/// and whether self-registration is allowed (no auth required).
 pub async fn sso_status(State(state): State<AppState>) -> Json<Value> {
     let enabled = state.oidc.read().await.is_some();
+    let allow_registration = state.dynamic_config.allow_registration().await;
     Json(json!({
         "enabled": enabled,
+        "allow_registration": allow_registration,
     }))
 }
 
