@@ -53,7 +53,7 @@ use crate::middleware::auth_guard::AuthUser;
 fn parse_rate_subject(kind: &str) -> Result<RateLimitSubject, AppError> {
     RateLimitSubject::parse(kind).ok_or_else(|| {
         AppError::BadRequest(format!(
-            "Unknown rate-limit subject kind '{kind}' (allowed: user, api_key, provider, mcp_server, team)"
+            "Unknown rate-limit subject kind '{kind}' (allowed: role)"
         ))
     })
 }
@@ -61,7 +61,7 @@ fn parse_rate_subject(kind: &str) -> Result<RateLimitSubject, AppError> {
 fn parse_budget_subject(kind: &str) -> Result<BudgetSubject, AppError> {
     BudgetSubject::parse(kind).ok_or_else(|| {
         AppError::BadRequest(format!(
-            "Unknown budget subject kind '{kind}' (allowed: user, api_key, team, provider)"
+            "Unknown budget subject kind '{kind}' (allowed: role)"
         ))
     })
 }
@@ -575,11 +575,7 @@ pub async fn get_usage(
 /// callers fall back to "no caps".
 fn budget_kind_for(subject: RateLimitSubject) -> Option<BudgetSubject> {
     match subject {
-        RateLimitSubject::User => Some(BudgetSubject::User),
-        RateLimitSubject::ApiKey => Some(BudgetSubject::ApiKey),
-        RateLimitSubject::Provider => Some(BudgetSubject::Provider),
-        RateLimitSubject::Team => Some(BudgetSubject::Team),
-        RateLimitSubject::McpServer => None,
+        RateLimitSubject::Role => Some(BudgetSubject::Role),
     }
 }
 

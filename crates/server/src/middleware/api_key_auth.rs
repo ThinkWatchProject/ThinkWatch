@@ -154,14 +154,17 @@ pub fn require_api_key(
             //
             // We also pull the role NAMES so the MCP access controller
             // can gate per-tool access without re-querying the DB.
-            let (role_limits, user_roles) = if let Some(uid) = row.user_id {
+            let (role_limits, user_roles, role_ids) = if let Some(uid) = row.user_id {
                 let limits = rbac::compute_user_resource_limits(&state.db, uid)
                     .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                 let names = rbac::load_user_role_names(&state.db, uid)
                     .await
                     .unwrap_or_default();
-                (limits, names)
+                let ids = rbac::load_user_role_ids(&state.db, uid)
+                    .await
+                    .unwrap_or_default();
+                (limits, names, ids)
             } else {
                 // Service-account API keys (no user_id) inherit only
                 // the per-key constraints, since there's no user to
@@ -174,6 +177,7 @@ pub fn require_api_key(
                         allowed_mcp_servers: None,
                     },
                     Vec::new(),
+                    Vec::new(),
                 )
             };
             let merged_models =
@@ -183,6 +187,7 @@ pub fn require_api_key(
                 user_id: row.user_id.map(|u| u.to_string()),
                 api_key_id: Some(row.id.to_string()),
                 allowed_models: merged_models.clone(),
+                role_ids: role_ids.iter().map(|id| id.to_string()).collect(),
             };
 
             let identity = GatewayIdentity {
@@ -209,6 +214,7 @@ pub fn require_api_key(
                 let mcp_identity = McpRequestIdentity {
                     user_id: uid,
                     user_roles: identity.user_roles.clone(),
+                    role_ids: role_ids.clone(),
                 };
                 request.extensions_mut().insert(mcp_identity);
             }

@@ -34,15 +34,24 @@ pub async fn compute_user_permissions(
     user_id: Uuid,
 ) -> Result<Vec<String>, sqlx::Error> {
     // Flatten the TEXT[] `permissions` field of every role the user
-    // holds into a single set. `UNNEST` + `DISTINCT` does the job in
-    // one round trip.
+    // holds into a single set — both directly-assigned roles AND
+    // roles inherited through team membership.
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT perm \
-           FROM rbac_role_assignments ra \
-           JOIN rbac_roles r ON r.id = ra.role_id \
-           CROSS JOIN LATERAL UNNEST(r.permissions) AS perm \
-          WHERE ra.user_id = $1 \
-          ORDER BY perm",
+        "SELECT DISTINCT perm FROM ( \
+           SELECT perm \
+             FROM rbac_role_assignments ra \
+             JOIN rbac_roles r ON r.id = ra.role_id \
+             CROSS JOIN LATERAL UNNEST(r.permissions) AS perm \
+            WHERE ra.user_id = $1 \
+           UNION ALL \
+           SELECT perm \
+             FROM team_members tm \
+             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
+             JOIN rbac_roles r ON r.id = tra.role_id \
+             CROSS JOIN LATERAL UNNEST(r.permissions) AS perm \
+            WHERE tm.user_id = $1 \
+         ) combined \
+         ORDER BY perm",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -50,18 +59,25 @@ pub async fn compute_user_permissions(
     Ok(rows.into_iter().map(|(p,)| p).collect())
 }
 
-/// Load the list of role NAMES (system + custom) assigned to `user_id`.
+/// Load the list of role NAMES (system + custom) assigned to `user_id`,
+/// including roles inherited through team membership.
 /// Used by the UI for badges and by `claims.roles`.
 pub async fn load_user_role_names(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<Vec<String>, sqlx::Error> {
     let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT r.name \
-           FROM rbac_role_assignments ra \
-           JOIN rbac_roles r ON r.id = ra.role_id \
-          WHERE ra.user_id = $1 \
-          ORDER BY r.is_system DESC, r.name ASC",
+        "SELECT DISTINCT r.name FROM ( \
+           SELECT ra.role_id \
+             FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
+           UNION \
+           SELECT tra.role_id \
+             FROM team_members tm \
+             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
+            WHERE tm.user_id = $1 \
+         ) roles \
+         JOIN rbac_roles r ON r.id = roles.role_id \
+         ORDER BY r.name ASC",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -69,7 +85,30 @@ pub async fn load_user_role_names(
     Ok(rows.into_iter().map(|(n,)| n).collect())
 }
 
-/// Load every `(role_id, scope_kind, scope_id)` row for `user_id`.
+/// Load the distinct role IDs assigned to `user_id`, including
+/// roles inherited through team membership.
+/// Used by the rate-limit engine so role-level quotas apply to the user.
+pub async fn load_user_role_ids(pool: &PgPool, user_id: Uuid) -> Result<Vec<Uuid>, sqlx::Error> {
+    let rows: Vec<(Uuid,)> = sqlx::query_as(
+        "SELECT DISTINCT role_id FROM ( \
+           SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
+           UNION \
+           SELECT tra.role_id \
+             FROM team_members tm \
+             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
+            WHERE tm.user_id = $1 \
+         ) combined",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows.into_iter().map(|(id,)| id).collect())
+}
+
+/// Load every `(role_id, scope_kind, scope_id)` row for `user_id`,
+/// including roles inherited through team membership (surfaced as
+/// global scope since team roles grant permissions platform-wide).
+///
 /// This is what gets embedded in the JWT as `claims.role_assignments`
 /// so the auth middleware can check scope without re-querying on
 /// every request. The actual permission set is still looked up
@@ -81,10 +120,17 @@ pub async fn compute_user_role_assignments(
 ) -> Result<Vec<crate::jwt::RoleAssignmentClaim>, sqlx::Error> {
     type Row = (Uuid, String, Option<Uuid>);
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT role_id, scope_kind, scope_id \
-           FROM rbac_role_assignments \
-          WHERE user_id = $1 \
-          ORDER BY scope_kind, scope_id",
+        "SELECT DISTINCT role_id, scope_kind, scope_id FROM ( \
+           SELECT ra.role_id, ra.scope_kind, ra.scope_id \
+             FROM rbac_role_assignments ra \
+            WHERE ra.user_id = $1 \
+           UNION ALL \
+           SELECT tra.role_id, 'global'::varchar AS scope_kind, NULL::uuid AS scope_id \
+             FROM team_members tm \
+             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
+            WHERE tm.user_id = $1 \
+         ) combined \
+         ORDER BY scope_kind, scope_id",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -124,10 +170,15 @@ pub async fn compute_user_resource_limits(
 ) -> Result<UserResourceLimits, sqlx::Error> {
     type Row = (Option<Vec<String>>, Option<Vec<Uuid>>);
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT r.allowed_models, r.allowed_mcp_servers \
-           FROM rbac_role_assignments ra \
-           JOIN rbac_roles r ON r.id = ra.role_id \
-          WHERE ra.user_id = $1",
+        "SELECT r.allowed_models, r.allowed_mcp_servers FROM ( \
+           SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
+           UNION \
+           SELECT tra.role_id \
+             FROM team_members tm \
+             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
+            WHERE tm.user_id = $1 \
+         ) roles \
+         JOIN rbac_roles r ON r.id = roles.role_id",
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -170,6 +221,64 @@ pub async fn compute_user_resource_limits(
             Some(servers.into_iter().collect())
         },
     })
+}
+
+/// Compute the set of permissions that are explicitly denied to `user_id`
+/// by policy documents attached to any of their roles (direct + team).
+///
+/// For each permission in `allowed`, checks if any role's policy_document
+/// contains a Deny statement matching that permission. Returns the subset
+/// of `allowed` that is denied. Callers subtract this from the allow set
+/// so Deny always wins.
+pub async fn compute_denied_permissions(
+    pool: &PgPool,
+    user_id: Uuid,
+    allowed: &[String],
+) -> Result<Vec<String>, sqlx::Error> {
+    // Load all non-null policy_document values from the user's roles.
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT DISTINCT r.policy_document FROM ( \
+           SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
+           UNION \
+           SELECT tra.role_id \
+             FROM team_members tm \
+             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
+            WHERE tm.user_id = $1 \
+         ) roles \
+         JOIN rbac_roles r ON r.id = roles.role_id \
+        WHERE r.policy_document IS NOT NULL",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+
+    if rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let policies: Vec<PolicyDocument> = rows
+        .into_iter()
+        .filter_map(|(v,)| serde_json::from_value(v).ok())
+        .collect();
+
+    if policies.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // For each allowed permission, check if any policy denies it.
+    let denied: Vec<String> = allowed
+        .iter()
+        .filter(|perm| {
+            // Split "resource:action" into action=perm, resource="*"
+            // (our permission model uses flat strings, not resource-level)
+            policies
+                .iter()
+                .any(|doc| evaluate_policy(doc, perm, "*") == PolicyResult::Deny)
+        })
+        .cloned()
+        .collect();
+
+    Ok(denied)
 }
 
 // ---------------------------------------------------------------------------

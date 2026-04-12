@@ -67,6 +67,8 @@ pub struct GatewayRequestIdentity {
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
     pub allowed_models: Option<Vec<String>>,
+    /// Role IDs the user holds — used to apply role-level rate limits.
+    pub role_ids: Vec<String>,
 }
 
 /// Resolve every (subject_kind, subject_id) tuple this request should
@@ -76,50 +78,22 @@ pub struct GatewayRequestIdentity {
 /// treats every rule independently and rejects on the first failure.
 /// We add api_key first so the most specific quota fires first in
 /// the error message.
-fn resolve_rate_subjects(
-    identity: &GatewayRequestIdentity,
-    provider_id: Option<Uuid>,
-) -> Vec<(RateLimitSubject, Uuid)> {
-    let mut out = Vec::new();
-    if let Some(s) = identity.api_key_id.as_deref()
-        && let Ok(id) = Uuid::parse_str(s)
-    {
-        out.push((RateLimitSubject::ApiKey, id));
-    }
-    if let Some(s) = identity.user_id.as_deref()
-        && let Ok(id) = Uuid::parse_str(s)
-    {
-        out.push((RateLimitSubject::User, id));
-    }
-    if let Some(pid) = provider_id {
-        out.push((RateLimitSubject::Provider, pid));
-    }
-    out
+fn resolve_rate_subjects(identity: &GatewayRequestIdentity) -> Vec<(RateLimitSubject, Uuid)> {
+    identity
+        .role_ids
+        .iter()
+        .filter_map(|s| Uuid::parse_str(s).ok())
+        .map(|id| (RateLimitSubject::Role, id))
+        .collect()
 }
 
-/// Same shape as `resolve_rate_subjects` but for `budget_caps`.
-/// Budget caps don't apply to MCP servers, but the rest of the
-/// subject set overlaps. Provider budgets are common (a finance
-/// owner caps the OpenAI provider per month) so we include them.
-fn resolve_budget_subjects(
-    identity: &GatewayRequestIdentity,
-    provider_id: Option<Uuid>,
-) -> Vec<(BudgetSubject, Uuid)> {
-    let mut out = Vec::new();
-    if let Some(s) = identity.api_key_id.as_deref()
-        && let Ok(id) = Uuid::parse_str(s)
-    {
-        out.push((BudgetSubject::ApiKey, id));
-    }
-    if let Some(s) = identity.user_id.as_deref()
-        && let Ok(id) = Uuid::parse_str(s)
-    {
-        out.push((BudgetSubject::User, id));
-    }
-    if let Some(pid) = provider_id {
-        out.push((BudgetSubject::Provider, pid));
-    }
-    out
+fn resolve_budget_subjects(identity: &GatewayRequestIdentity) -> Vec<(BudgetSubject, Uuid)> {
+    identity
+        .role_ids
+        .iter()
+        .filter_map(|s| Uuid::parse_str(s).ok())
+        .map(|id| (BudgetSubject::Role, id))
+        .collect()
 }
 
 /// Post-flight accounting for one completed AI gateway request.
@@ -221,8 +195,8 @@ async fn preflight_request_limits(
     identity: &GatewayRequestIdentity,
     model: &str,
 ) -> Result<(Option<Uuid>, Vec<limits::RateLimitRule>), GatewayErrorResponse> {
-    let provider_id = state.router.provider_id_for(model);
-    let rate_subjects = resolve_rate_subjects(identity, provider_id);
+    let _provider_id = state.router.provider_id_for(model);
+    let rate_subjects = resolve_rate_subjects(identity);
     let request_rules =
         match limits::list_enabled_rules_for_subjects(&state.db, &rate_subjects).await {
             Ok(r) => r,
@@ -271,7 +245,7 @@ async fn preflight_request_limits(
             return Err(GatewayError::LocalRateLimited(label).into());
         }
     }
-    Ok((provider_id, request_rules))
+    Ok((_provider_id, request_rules))
 }
 
 /// Build a human-readable label for "which rule rejected the request",
@@ -337,7 +311,7 @@ pub async fn proxy_chat_completion(
     // Messages and the Responses surface so all three obey the
     // same `(api_key, user, provider)` rule resolution and the
     // same `security.rate_limit_fail_closed` toggle.
-    let (provider_id, request_rules) =
+    let (_provider_id, request_rules) =
         preflight_request_limits(&state, &identity, &request.model).await?;
 
     // 4. Extract per-request metadata from headers and body
@@ -437,7 +411,7 @@ pub async fn proxy_chat_completion(
         let weight_cache = state.weight_cache.clone();
         let model = request.model.clone();
         let request_rules_for_done = request_rules.clone();
-        let budget_subjects = resolve_budget_subjects(&identity, provider_id);
+        let budget_subjects = resolve_budget_subjects(&identity);
         let stream = provider.stream_chat_completion(request);
         let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
@@ -492,7 +466,7 @@ pub async fn proxy_chat_completion(
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 request_rules.clone(),
-                resolve_budget_subjects(&identity, provider_id),
+                resolve_budget_subjects(&identity),
             )
             .await;
         }
@@ -585,7 +559,7 @@ pub async fn proxy_anthropic_messages(
     // Rate limit pre-flight — same engine as the chat-completions
     // path so a developer key can't dodge their per-minute quota
     // by switching from `/v1/chat/completions` to `/v1/messages`.
-    let (provider_id, request_rules) =
+    let (_provider_id, request_rules) =
         preflight_request_limits(&state, &identity, &mapped_model).await?;
 
     // Content filter — check user messages
@@ -683,7 +657,7 @@ pub async fn proxy_anthropic_messages(
         let weight_cache = state.weight_cache.clone();
         let model_for_done = mapped_model.clone();
         let request_rules_for_done = request_rules.clone();
-        let budget_subjects = resolve_budget_subjects(&identity, provider_id);
+        let budget_subjects = resolve_budget_subjects(&identity);
         let stream = provider.stream_chat_completion(request);
         let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
@@ -728,7 +702,7 @@ pub async fn proxy_anthropic_messages(
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 request_rules.clone(),
-                resolve_budget_subjects(&identity, provider_id),
+                resolve_budget_subjects(&identity),
             )
             .await;
         }
@@ -817,7 +791,7 @@ pub async fn proxy_responses(
 
     // Rate limit pre-flight — same engine as the chat completions
     // path. Keeps the three AI surfaces symmetric.
-    let (provider_id, request_rules) =
+    let (_provider_id, request_rules) =
         preflight_request_limits(&state, &identity, &mapped_model).await?;
 
     // Extract messages from the "input" field (Responses API format)
@@ -906,7 +880,7 @@ pub async fn proxy_responses(
         let weight_cache = state.weight_cache.clone();
         let model_for_done = mapped_model.clone();
         let request_rules_for_done = request_rules.clone();
-        let budget_subjects = resolve_budget_subjects(&identity, provider_id);
+        let budget_subjects = resolve_budget_subjects(&identity);
         let stream = provider.stream_chat_completion(request);
         let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
@@ -942,7 +916,7 @@ pub async fn proxy_responses(
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 request_rules.clone(),
-                resolve_budget_subjects(&identity, provider_id),
+                resolve_budget_subjects(&identity),
             )
             .await;
         }

@@ -517,8 +517,20 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             delete(handlers::teams::remove_member),
         )
         .route(
+            "/api/admin/teams/{id}/roles",
+            get(handlers::teams::list_team_roles).post(handlers::teams::assign_team_role),
+        )
+        .route(
+            "/api/admin/teams/{id}/roles/{role_id}",
+            delete(handlers::teams::remove_team_role),
+        )
+        .route(
             "/api/mcp/servers",
             get(handlers::mcp_servers::list_servers).post(handlers::mcp_servers::create_server),
+        )
+        .route(
+            "/api/mcp/servers/test",
+            post(handlers::mcp_servers::test_mcp_server),
         )
         .route(
             "/api/mcp/servers/{id}",

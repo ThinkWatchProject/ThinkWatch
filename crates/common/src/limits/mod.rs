@@ -49,31 +49,19 @@ pub mod weight;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitSubject {
-    User,
-    ApiKey,
-    Provider,
-    McpServer,
-    Team,
+    Role,
 }
 
 impl RateLimitSubject {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::User => "user",
-            Self::ApiKey => "api_key",
-            Self::Provider => "provider",
-            Self::McpServer => "mcp_server",
-            Self::Team => "team",
+            Self::Role => "role",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "user" => Self::User,
-            "api_key" => Self::ApiKey,
-            "provider" => Self::Provider,
-            "mcp_server" => Self::McpServer,
-            "team" => Self::Team,
+            "role" => Self::Role,
             _ => return None,
         })
     }
@@ -82,28 +70,19 @@ impl RateLimitSubject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetSubject {
-    User,
-    ApiKey,
-    Team,
-    Provider,
+    Role,
 }
 
 impl BudgetSubject {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::User => "user",
-            Self::ApiKey => "api_key",
-            Self::Team => "team",
-            Self::Provider => "provider",
+            Self::Role => "role",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "user" => Self::User,
-            "api_key" => Self::ApiKey,
-            "team" => Self::Team,
-            "provider" => Self::Provider,
+            "role" => Self::Role,
             _ => return None,
         })
     }

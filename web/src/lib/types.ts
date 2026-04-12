@@ -15,6 +15,5 @@ export interface TeamMember {
   user_id: string;
   email: string;
   display_name: string;
-  role: string;
   joined_at: string;
 }

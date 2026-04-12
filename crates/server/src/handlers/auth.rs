@@ -39,6 +39,7 @@ pub(crate) async fn parse_json_body<T: serde::de::DeserializeOwned>(
 pub(crate) struct AuthSession {
     pub signing_key: String,
     pub permissions: Vec<String>,
+    pub denied_permissions: Vec<String>,
     pub roles: Vec<String>,
     pub access_ttl: i64,
     /// Pre-formatted Set-Cookie header values (signing, access, refresh).
@@ -63,6 +64,7 @@ impl AuthSession {
             expires_in: self.access_ttl,
             signing_key: self.signing_key,
             permissions: self.permissions,
+            denied_permissions: self.denied_permissions,
             roles: self.roles,
             password_change_required: if password_change_required {
                 Some(true)
@@ -92,6 +94,9 @@ pub(crate) async fn issue_auth_session(
 ) -> Result<AuthSession, AppError> {
     let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user_id).await?;
     let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user_id).await?;
+    let denied_permissions =
+        think_watch_auth::rbac::compute_denied_permissions(&state.db, user_id, &permissions)
+            .await?;
     let role_assignments =
         think_watch_auth::rbac::compute_user_role_assignments(&state.db, user_id).await?;
 
@@ -103,6 +108,7 @@ pub(crate) async fn issue_auth_session(
         email,
         roles.clone(),
         permissions.clone(),
+        denied_permissions.clone(),
         role_assignments.clone(),
         access_ttl,
     )?;
@@ -111,6 +117,7 @@ pub(crate) async fn issue_auth_session(
         email,
         roles.clone(),
         permissions.clone(),
+        denied_permissions.clone(),
         role_assignments,
         refresh_ttl_days,
     )?;
@@ -127,6 +134,7 @@ pub(crate) async fn issue_auth_session(
     Ok(AuthSession {
         signing_key,
         permissions,
+        denied_permissions,
         roles,
         access_ttl,
         cookie_headers: [signing_cookie, access_cookie, refresh_cookie],
@@ -546,14 +554,17 @@ pub async fn register(
         }
     };
 
-    // Assign default "developer" role
-    sqlx::query(
-        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
-           SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = 'developer'"#,
-    )
-    .bind(user.id)
-    .execute(&mut *tx)
-    .await?;
+    // Assign default role (configurable via settings; empty = no role)
+    if let Some(role_name) = state.dynamic_config.default_role().await {
+        sqlx::query(
+            r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
+               SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = $2"#,
+        )
+        .bind(user.id)
+        .bind(&role_name)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     tx.commit().await?;
 
@@ -763,6 +774,10 @@ pub async fn me(
     let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id)
         .await
         .unwrap_or_default();
+    let denied_permissions =
+        think_watch_auth::rbac::compute_denied_permissions(&state.db, user.id, &permissions)
+            .await
+            .unwrap_or_default();
 
     // Team memberships — used by the frontend permission cache
     // and the team-context badge in the header.
@@ -790,6 +805,7 @@ pub async fn me(
         is_active: user.is_active,
         role_assignments,
         permissions,
+        denied_permissions,
         teams,
         created_at: user.created_at,
     }))

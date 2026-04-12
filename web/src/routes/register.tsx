@@ -15,6 +15,7 @@ interface RegisterPageProps {
 interface RegisterResponse {
   signing_key: string;
   permissions?: string[];
+  denied_permissions?: string[];
 }
 
 export function RegisterPage({ onRegistered }: RegisterPageProps) {
@@ -56,7 +57,7 @@ export function RegisterPage({ onRegistered }: RegisterPageProps) {
         return;
       }
       sessionStorage.setItem('signing_key', res.signing_key);
-      setCachedPermissions(res.permissions);
+      setCachedPermissions(res.permissions, res.denied_permissions);
       onRegistered(res.signing_key);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed');

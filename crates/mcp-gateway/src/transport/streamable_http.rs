@@ -35,6 +35,8 @@ pub struct McpRequestIdentity {
     /// keys (no associated user) — those will be denied any tool
     /// that requires a role match.
     pub user_roles: Vec<String>,
+    /// Role IDs for rate-limit subject resolution.
+    pub role_ids: Vec<Uuid>,
 }
 
 /// Header name used to carry the MCP session identifier.
@@ -72,7 +74,12 @@ pub async fn handle_post(
     // --- Dispatch ----------------------------------------------------------
     let response = state
         .proxy
-        .handle_request(identity.user_id, &identity.user_roles, request)
+        .handle_request(
+            identity.user_id,
+            &identity.user_roles,
+            &identity.role_ids,
+            request,
+        )
         .await;
 
     // Return the response with the session header.

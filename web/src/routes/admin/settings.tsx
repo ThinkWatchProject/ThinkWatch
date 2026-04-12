@@ -66,6 +66,8 @@ export function SettingsPage() {
   const [signatureDrift, setSignatureDrift] = useState(300);
   const [nonceTtl, setNonceTtl] = useState(300);
   const [allowRegistration, setAllowRegistration] = useState(false);
+  const [defaultRole, setDefaultRole] = useState('');
+  const [availableRoles, setAvailableRoles] = useState<{ id: string; name: string }[]>([]);
   // Gateway
   const [cacheTtl, setCacheTtl] = useState(0);
   const [requestTimeout, setRequestTimeout] = useState(30);
@@ -110,6 +112,7 @@ export function SettingsPage() {
     setSignatureDrift(num(getSettingValue(data, 'security', 'signature_drift_secs'), 300));
     setNonceTtl(num(getSettingValue(data, 'security', 'signature_nonce_ttl_secs'), 600));
     setAllowRegistration(getSettingValue(data, 'auth', 'allow_registration') === true);
+    setDefaultRole(str(getSettingValue(data, 'auth', 'default_role'), ''));
     setCacheTtl(num(getSettingValue(data, 'gateway', 'cache_ttl_secs'), 3600));
     setRequestTimeout(num(getSettingValue(data, 'gateway', 'request_timeout_secs'), 120));
     setBodyLimit(num(getSettingValue(data, 'gateway', 'body_limit_bytes'), 10485760));
@@ -140,8 +143,10 @@ export function SettingsPage() {
       api<AuditConfig>('/api/admin/settings/audit').catch(() => null),
       api<Record<string, SettingEntry[]>>('/api/admin/settings').catch(() => ({})),
       api<{ postgres: boolean; redis: boolean; clickhouse: boolean }>('/api/health').catch(() => null),
+      api<{ items: { id: string; name: string }[] }>('/api/admin/roles').catch(() => ({ items: [] })),
     ])
-      .then(([sys, oidc, audit, settings, hp]) => {
+      .then(([sys, oidc, audit, settings, hp, rolesData]) => {
+        if (rolesData) setAvailableRoles(rolesData.items);
         setSystemInfo(sys);
         setHealth(hp);
         setOidcConfig(oidc);
@@ -179,6 +184,7 @@ export function SettingsPage() {
           'security.signature_drift_secs': signatureDrift,
           'security.signature_nonce_ttl_secs': nonceTtl,
           'auth.allow_registration': allowRegistration,
+          'auth.default_role': defaultRole,
           'gateway.cache_ttl_secs': cacheTtl,
           'gateway.request_timeout_secs': requestTimeout,
           'gateway.body_limit_bytes': bodyLimit,
@@ -443,6 +449,22 @@ export function SettingsPage() {
                     <p className="text-xs text-muted-foreground mt-0.5">{t('settings.allowRegistrationHint')}</p>
                   </div>
                   <Switch checked={allowRegistration} onCheckedChange={setAllowRegistration} />
+                </div>
+                <Separator className="my-6" />
+                <div className="space-y-2 max-w-2xl">
+                  <Label className="text-sm">{t('settings.defaultRole')}</Label>
+                  <p className="text-xs text-muted-foreground">{t('settings.defaultRoleHint')}</p>
+                  <Select value={defaultRole} onValueChange={setDefaultRole}>
+                    <SelectTrigger className="w-64">
+                      <SelectValue placeholder={t('settings.noRole')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">{t('settings.noRole')}</SelectItem>
+                      {availableRoles.map((r) => (
+                        <SelectItem key={r.id} value={r.name}>{r.name}</SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
               </CardContent>
             </Card>

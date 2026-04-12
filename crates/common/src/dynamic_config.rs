@@ -296,6 +296,14 @@ impl DynamicConfig {
             .unwrap_or(false)
     }
 
+    /// Role name to assign to newly registered / SSO users.
+    /// Empty or absent means no role (0 permissions).
+    pub async fn default_role(&self) -> Option<String> {
+        self.get_string("auth.default_role")
+            .await
+            .filter(|s| !s.is_empty())
+    }
+
     // --- OIDC / SSO ---
 
     pub async fn oidc_enabled(&self) -> bool {
@@ -432,6 +440,13 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
             value
                 .as_bool()
                 .ok_or_else(|| anyhow::anyhow!("{key}: expected a boolean value"))?;
+        }
+
+        // Default role for new registrations (role name or empty string)
+        "auth.default_role" => {
+            value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
         }
 
         // Client IP settings

@@ -45,6 +45,9 @@ pub struct LoginResponse {
     /// authoritative set the UI uses for hasPermission() checks.
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Permissions explicitly denied by policy documents.
+    #[serde(default)]
+    pub denied_permissions: Vec<String>,
     /// Role names (system + custom union). Cosmetic — used by the
     /// UI for badges, never for authorization decisions.
     #[serde(default)]
@@ -125,6 +128,9 @@ pub struct UserResponse {
     /// (which is now an httpOnly cookie unreadable from JS).
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Permissions explicitly denied by policy documents.
+    #[serde(default)]
+    pub denied_permissions: Vec<String>,
     /// Teams this user is a member of. Used by the admin user
     /// list to render scope context: a team_manager looking at
     /// their merged-team list can tell which row belongs to

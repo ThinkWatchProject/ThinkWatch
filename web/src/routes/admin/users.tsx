@@ -32,13 +32,13 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, Ban, CheckCircle, Users as UsersIcon, AlertCircle, Copy, Search, ChevronRight, ChevronDown } from 'lucide-react';
+import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, Ban, CheckCircle, Users as UsersIcon, AlertCircle, Copy, Search, ChevronRight, ChevronDown, X } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import type { TeamSummary } from '@/lib/types';
 import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
-import { LimitsPanel } from '@/components/limits/limits-panel';
+
 
 interface RoleAssignment {
   role_id: string;
@@ -99,6 +99,7 @@ export function UsersPage() {
   const [editError, setEditError] = useState('');
   const [editLoading, setEditLoading] = useState(false);
   const [editAssignments, setEditAssignments] = useState<RoleAssignment[]>([]);
+  const [editTeamIds, setEditTeamIds] = useState<string[]>([]);
 
   // Confirm dialogs
   const [confirmAction, setConfirmAction] = useState<{ type: 'logout' | 'delete' | 'toggle'; user: User } | null>(null);
@@ -174,6 +175,7 @@ export function UsersPage() {
     setEditUser(u);
     setEditName(u.display_name);
     setEditAssignments(u.role_assignments ?? []);
+    setEditTeamIds((u.teams ?? []).map((t) => t.id));
     setEditError('');
     setEditOpen(true);
   };
@@ -190,6 +192,19 @@ export function UsersPage() {
           scope: a.scope,
         })),
       });
+      // Sync team memberships: add new, remove old
+      const oldTeamIds = new Set((editUser.teams ?? []).map((t) => t.id));
+      const newTeamIds = new Set(editTeamIds);
+      for (const tid of editTeamIds) {
+        if (!oldTeamIds.has(tid)) {
+          await apiPost(`/api/admin/teams/${tid}/members`, { user_id: editUser.id });
+        }
+      }
+      for (const tid of oldTeamIds) {
+        if (!newTeamIds.has(tid)) {
+          await apiDelete(`/api/admin/teams/${tid}/members/${editUser.id}`);
+        }
+      }
       setEditOpen(false); setEditUser(null); await fetchUsers();
     } catch (err) {
       setEditError(err instanceof Error ? err.message : 'Failed');
@@ -512,18 +527,45 @@ export function UsersPage() {
               availableTeams={availableTeams}
               roleLabel={roleLabel}
             />
+            <div className="space-y-2">
+              <Label>{t('users.teams')}</Label>
+              <p className="text-xs text-muted-foreground">{t('users.teamsHint')}</p>
+              <div className="flex flex-wrap gap-1">
+                {editTeamIds.map((tid) => {
+                  const team = availableTeams.find((t) => t.id === tid);
+                  return (
+                    <Badge key={tid} variant="secondary" className="gap-1 pr-1">
+                      {team?.name ?? tid}
+                      <button
+                        type="button"
+                        className="ml-1 rounded-sm hover:bg-muted"
+                        onClick={() => setEditTeamIds(editTeamIds.filter((id) => id !== tid))}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </Badge>
+                  );
+                })}
+              </div>
+              {availableTeams.filter((t) => !editTeamIds.includes(t.id)).length > 0 && (
+                <Select onValueChange={(v) => { if (v && !editTeamIds.includes(v)) setEditTeamIds([...editTeamIds, v]); }}>
+                  <SelectTrigger className="w-64">
+                    <SelectValue placeholder={t('users.addToTeam')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {availableTeams
+                      .filter((t) => !editTeamIds.includes(t.id))
+                      .map((t) => (
+                        <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
             <EffectivePermissionsPreview
               assignments={editAssignments}
               availableRoles={availableRoles}
             />
-            {editUser && (
-              <LimitsPanel
-                subjectKind="user"
-                subjectId={editUser.id}
-                surfaces={['ai_gateway', 'mcp_gateway']}
-                allowBudgets={true}
-              />
-            )}
             <DialogFooter>
               <Button type="submit" disabled={editLoading}>{editLoading ? t('users.saving') : t('common.save')}</Button>
             </DialogFooter>

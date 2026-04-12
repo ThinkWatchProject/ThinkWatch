@@ -230,6 +230,7 @@ pub async fn list_users(
                 // page never reads them. /api/auth/me is the
                 // canonical place for the live permission set.
                 permissions: Vec::new(),
+                denied_permissions: Vec::new(),
                 teams,
                 created_at: u.created_at,
             }
@@ -440,6 +441,7 @@ pub async fn create_user(
             is_active: user.is_active,
             role_assignments,
             permissions: Vec::new(),
+            denied_permissions: Vec::new(),
             teams: Vec::new(),
             created_at: user.created_at,
         },
@@ -1315,6 +1317,23 @@ pub async fn update_settings(
         validate_setting(key, value)?;
     }
 
+    // DB-level validation for settings that reference other entities
+    if let Some(role_val) = req.settings.get("auth.default_role") {
+        let role_name = role_val.as_str().unwrap_or("");
+        if !role_name.is_empty() {
+            let exists: Option<(String,)> =
+                sqlx::query_as("SELECT name FROM rbac_roles WHERE name = $1")
+                    .bind(role_name)
+                    .fetch_optional(&state.db)
+                    .await?;
+            if exists.is_none() {
+                return Err(AppError::BadRequest(format!(
+                    "Role '{role_name}' does not exist"
+                )));
+            }
+        }
+    }
+
     state
         .dynamic_config
         .update(&req.settings, Some(auth_user.claims.sub))
@@ -1613,6 +1632,12 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             if !value.is_boolean() {
                 return Err(AppError::BadRequest(format!("{key} must be a boolean")));
             }
+        }
+
+        "auth.default_role" => {
+            value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
         }
 
         // Client IP resolution

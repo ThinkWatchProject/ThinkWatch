@@ -10,6 +10,170 @@ use think_watch_common::models::McpServer;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
+// ---------------------------------------------------------------------------
+// Test MCP server connection — probe via JSON-RPC tools/list without persisting
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct TestMcpServerRequest {
+    pub endpoint_url: String,
+    pub auth_type: Option<String>,
+    pub auth_secret: Option<String>,
+    pub custom_headers: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct TestMcpServerResponse {
+    pub success: bool,
+    pub message: String,
+    pub latency_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools: Option<Vec<McpToolSummary>>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct McpToolSummary {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/mcp/servers/test",
+    tag = "MCP Servers",
+    security(("bearer_token" = [])),
+    request_body = TestMcpServerRequest,
+    responses(
+        (status = 200, description = "Connection test result", body = TestMcpServerResponse),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
+pub async fn test_mcp_server(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<TestMcpServerRequest>,
+) -> Result<Json<TestMcpServerResponse>, AppError> {
+    auth_user.require_permission("mcp_servers:create")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:create")
+        .await?;
+
+    if req.endpoint_url.is_empty() {
+        return Err(AppError::BadRequest("endpoint_url is required".into()));
+    }
+    super::providers::validate_url(&req.endpoint_url)?;
+    if let Some(ref headers) = req.custom_headers {
+        super::providers::validate_custom_headers(headers)?;
+    }
+
+    // Build the JSON-RPC tools/list request
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {}
+    });
+
+    let mut builder = state
+        .http_client
+        .post(&req.endpoint_url)
+        .header("Content-Type", "application/json")
+        .json(&body);
+
+    // Attach auth header
+    match req.auth_type.as_deref() {
+        Some("bearer") => {
+            if let Some(ref secret) = req.auth_secret {
+                builder = builder.header("Authorization", format!("Bearer {secret}"));
+            }
+        }
+        Some("api_key") => {
+            if let Some(ref secret) = req.auth_secret {
+                builder = builder.header("X-API-Key", secret);
+            }
+        }
+        _ => {}
+    }
+
+    // Attach custom headers
+    if let Some(ref headers) = req.custom_headers {
+        for (k, v) in headers {
+            builder = builder.header(k, v);
+        }
+    }
+
+    let started = std::time::Instant::now();
+    let result = builder.send().await;
+    let latency_ms = started.elapsed().as_millis() as u64;
+
+    match result {
+        Ok(resp) => {
+            if !resp.status().is_success() {
+                return Ok(Json(TestMcpServerResponse {
+                    success: false,
+                    message: format!("HTTP {}", resp.status()),
+                    latency_ms,
+                    tools_count: None,
+                    tools: None,
+                }));
+            }
+            let json: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+            let result_field = json.get("result");
+
+            // Parse tools from result.tools
+            let tools: Vec<McpToolSummary> = result_field
+                .and_then(|r| r.get("tools"))
+                .and_then(|t| t.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|t| {
+                            t.get("name")
+                                .and_then(|n| n.as_str())
+                                .map(|name| McpToolSummary {
+                                    name: name.to_string(),
+                                    description: t
+                                        .get("description")
+                                        .and_then(|d| d.as_str())
+                                        .map(|s| s.to_string()),
+                                })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if tools.is_empty() && result_field.is_none() {
+                return Ok(Json(TestMcpServerResponse {
+                    success: false,
+                    message: "Invalid response: missing `result` field".into(),
+                    latency_ms,
+                    tools_count: None,
+                    tools: None,
+                }));
+            }
+
+            let count = tools.len();
+            Ok(Json(TestMcpServerResponse {
+                success: true,
+                message: format!("Connected — {count} tools available"),
+                latency_ms,
+                tools_count: Some(count),
+                tools: Some(tools),
+            }))
+        }
+        Err(e) => Ok(Json(TestMcpServerResponse {
+            success: false,
+            message: format!("Request failed: {e}"),
+            latency_ms,
+            tools_count: None,
+            tools: None,
+        })),
+    }
+}
+
 #[utoipa::path(
     get,
     path = "/api/mcp/servers",

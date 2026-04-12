@@ -37,16 +37,18 @@ import {
   AlertCircle,
   ArrowLeft,
   Hash,
-  Key,
   Pencil,
+  Plus,
+  Shield,
+  Trash2,
   UserPlus,
   Users,
   X,
 } from 'lucide-react';
 import { api, apiDelete, apiPatch, apiPost, hasPermission } from '@/lib/api';
+import { ConfirmDialog } from '@/components/confirm-dialog';
 import type { Team, TeamMember } from '@/lib/types';
 import { toast } from 'sonner';
-import { LimitsPanel } from '@/components/limits/limits-panel';
 
 const routeApi = getRouteApi('/admin/teams/$id');
 
@@ -54,16 +56,6 @@ interface UserSummary {
   id: string;
   email: string;
   display_name: string;
-}
-
-interface ApiKey {
-  id: string;
-  key_prefix: string;
-  name: string;
-  team_id: string | null;
-  active: boolean;
-  expires_at: string | null;
-  created_at: string;
 }
 
 export function TeamDetailPage() {
@@ -79,10 +71,6 @@ export function TeamDetailPage() {
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [membersLoading, setMembersLoading] = useState(true);
 
-  // API Keys
-  const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
-  const [keysLoading, setKeysLoading] = useState(true);
-
   // Edit dialog
   const [editOpen, setEditOpen] = useState(false);
   const [formName, setFormName] = useState('');
@@ -90,12 +78,23 @@ export function TeamDetailPage() {
   const [formError, setFormError] = useState('');
   const [saving, setSaving] = useState(false);
 
+  // Delete
+  const [deleteOpen, setDeleteOpen] = useState(false);
+
   // Add member
   const [addMemberOpen, setAddMemberOpen] = useState(false);
   const [allUsers, setAllUsers] = useState<UserSummary[]>([]);
   const [pendingUserId, setPendingUserId] = useState('');
-  const [pendingRole, setPendingRole] = useState<'member' | 'manager'>('member');
   const [memberError, setMemberError] = useState('');
+
+  // Team roles
+  interface TeamRole { role_id: string; name: string; is_system: boolean; assigned_at: string }
+  interface AvailableRole { id: string; name: string; is_system: boolean }
+  const [teamRoles, setTeamRoles] = useState<TeamRole[]>([]);
+  const [rolesLoading, setRolesLoading] = useState(true);
+  const [availableRoles, setAvailableRoles] = useState<AvailableRole[]>([]);
+  const [assignRoleOpen, setAssignRoleOpen] = useState(false);
+  const [pendingRoleId, setPendingRoleId] = useState('');
 
   const fetchTeam = async () => {
     try {
@@ -121,29 +120,22 @@ export function TeamDetailPage() {
     }
   };
 
-  const fetchApiKeys = async () => {
-    setKeysLoading(true);
+  const fetchTeamRoles = async () => {
+    setRolesLoading(true);
     try {
-      // Try fetching with team_id param; fall back to fetching all and filtering client-side
-      let keys: ApiKey[];
-      try {
-        keys = await api<ApiKey[]>(`/api/keys?team_id=${teamId}`);
-      } catch {
-        const all = await api<ApiKey[]>('/api/keys');
-        keys = all.filter((k) => k.team_id === teamId);
-      }
-      setApiKeys(keys);
+      const data = await api<TeamRole[]>(`/api/admin/teams/${teamId}/roles`);
+      setTeamRoles(data);
     } catch {
       // silently ignore
     } finally {
-      setKeysLoading(false);
+      setRolesLoading(false);
     }
   };
 
   useEffect(() => {
     void fetchTeam();
     void fetchMembers();
-    void fetchApiKeys();
+    void fetchTeamRoles();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [teamId]);
 
@@ -183,7 +175,6 @@ export function TeamDetailPage() {
   const openAddMember = async () => {
     setAddMemberOpen(true);
     setPendingUserId('');
-    setPendingRole('member');
     setMemberError('');
     try {
       const users = await api<{ data: UserSummary[] }>('/api/admin/users?per_page=200').catch(
@@ -206,7 +197,6 @@ export function TeamDetailPage() {
     try {
       await apiPost(`/api/admin/teams/${teamId}/members`, {
         user_id: pendingUserId,
-        role: pendingRole,
       });
       setPendingUserId('');
       setAddMemberOpen(false);
@@ -233,8 +223,8 @@ export function TeamDetailPage() {
     return (
       <div className="space-y-6">
         <Skeleton className="h-8 w-64" />
-        <div className="grid gap-4 md:grid-cols-3">
-          {[...Array(3)].map((_, i) => (
+        <div className="grid gap-4 md:grid-cols-2">
+          {[...Array(2)].map((_, i) => (
             <Skeleton key={i} className="h-24 w-full" />
           ))}
         </div>
@@ -278,18 +268,28 @@ export function TeamDetailPage() {
             )}
           </div>
         </div>
-        <Button
-          variant="outline"
-          onClick={openEdit}
-          disabled={!hasPermission('teams:update')}
-        >
-          <Pencil className="mr-2 h-4 w-4" />
-          {t('common.edit')}
-        </Button>
+        <div className="flex gap-2">
+          <Button
+            variant="outline"
+            onClick={openEdit}
+            disabled={!hasPermission('teams:update')}
+          >
+            <Pencil className="mr-2 h-4 w-4" />
+            {t('common.edit')}
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => setDeleteOpen(true)}
+            disabled={!hasPermission('teams:delete')}
+          >
+            <Trash2 className="mr-2 h-4 w-4" />
+            {t('common.delete')}
+          </Button>
+        </div>
       </div>
 
       {/* Stats row */}
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium">{t('teamDetail.members')}</CardTitle>
@@ -297,17 +297,6 @@ export function TeamDetailPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">{team.member_count}</div>
-          </CardContent>
-        </Card>
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">{t('teamDetail.apiKeys')}</CardTitle>
-            <Key className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {keysLoading ? <Skeleton className="h-8 w-12" /> : apiKeys.length}
-            </div>
           </CardContent>
         </Card>
         <Card>
@@ -327,8 +316,7 @@ export function TeamDetailPage() {
       <Tabs defaultValue="members">
         <TabsList>
           <TabsTrigger value="members">{t('teamDetail.members')}</TabsTrigger>
-          <TabsTrigger value="apikeys">{t('teamDetail.apiKeys')}</TabsTrigger>
-          <TabsTrigger value="budget">{t('teamDetail.budget')}</TabsTrigger>
+          <TabsTrigger value="roles">{t('teamDetail.roles')}</TabsTrigger>
         </TabsList>
 
         {/* Members tab */}
@@ -360,7 +348,6 @@ export function TeamDetailPage() {
                     <TableRow>
                       <TableHead>{t('auth.email')}</TableHead>
                       <TableHead>{t('auth.displayName')}</TableHead>
-                      <TableHead>{t('teams.role')}</TableHead>
                       <TableHead>{t('common.createdAt')}</TableHead>
                       <TableHead className="text-right">{t('common.actions')}</TableHead>
                     </TableRow>
@@ -370,9 +357,6 @@ export function TeamDetailPage() {
                       <TableRow key={m.user_id}>
                         <TableCell className="text-sm">{m.email}</TableCell>
                         <TableCell className="text-sm">{m.display_name || '—'}</TableCell>
-                        <TableCell>
-                          <Badge variant="outline">{m.role}</Badge>
-                        </TableCell>
                         <TableCell className="text-xs text-muted-foreground">
                           {new Date(m.joined_at).toLocaleDateString()}
                         </TableCell>
@@ -396,51 +380,78 @@ export function TeamDetailPage() {
           </Card>
         </TabsContent>
 
-        {/* API Keys tab */}
-        <TabsContent value="apikeys">
+        {/* Roles tab */}
+        <TabsContent value="roles">
           <Card>
-            <CardHeader>
-              <CardTitle className="text-base">{t('teamDetail.apiKeys')}</CardTitle>
+            <CardHeader className="flex flex-row items-center justify-between">
+              <CardTitle className="text-base">{t('teamDetail.roles')}</CardTitle>
+              {hasPermission('teams:update') && (
+                <Button
+                  size="sm"
+                  onClick={async () => {
+                    setAssignRoleOpen(true);
+                    setPendingRoleId('');
+                    try {
+                      const data = await api<{ items: AvailableRole[] }>('/api/admin/roles');
+                      setAvailableRoles(data.items ?? []);
+                    } catch { /* ignore */ }
+                  }}
+                >
+                  <Plus className="h-4 w-4 mr-1" />
+                  {t('teamDetail.assignRole')}
+                </Button>
+              )}
             </CardHeader>
             <CardContent>
-              {keysLoading ? (
+              {rolesLoading ? (
                 <div className="space-y-2">
-                  {[...Array(3)].map((_, i) => (
-                    <Skeleton key={i} className="h-10 w-full" />
-                  ))}
+                  {[...Array(2)].map((_, i) => <Skeleton key={i} className="h-8 w-full" />)}
                 </div>
-              ) : apiKeys.length === 0 ? (
-                <p className="py-8 text-center text-sm text-muted-foreground">
-                  {t('teamDetail.noApiKeys')}
-                </p>
+              ) : teamRoles.length === 0 ? (
+                <div className="flex flex-col items-center py-8 text-center">
+                  <Shield className="h-8 w-8 text-muted-foreground mb-2" />
+                  <p className="text-sm text-muted-foreground">{t('teamDetail.noRoles')}</p>
+                  <p className="text-xs text-muted-foreground mt-1">{t('teamDetail.noRolesHint')}</p>
+                </div>
               ) : (
                 <Table>
                   <TableHeader>
                     <TableRow>
                       <TableHead>{t('common.name')}</TableHead>
-                      <TableHead>{t('apiKeys.keyPrefix')}</TableHead>
-                      <TableHead>{t('common.status')}</TableHead>
-                      <TableHead>{t('apiKeys.expires')}</TableHead>
-                      <TableHead>{t('common.createdAt')}</TableHead>
+                      <TableHead>{t('teamDetail.assignedAt')}</TableHead>
+                      <TableHead className="w-10" />
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {apiKeys.map((k) => (
-                      <TableRow key={k.id}>
-                        <TableCell className="font-medium">{k.name || '—'}</TableCell>
-                        <TableCell className="font-mono text-xs">{k.key_prefix}...</TableCell>
+                    {teamRoles.map((r) => (
+                      <TableRow key={r.role_id}>
+                        <TableCell className="font-medium">
+                          {r.name}
+                          {r.is_system && (
+                            <Badge variant="secondary" className="ml-2 text-[10px]">{t('roles.systemRole')}</Badge>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {new Date(r.assigned_at).toLocaleDateString()}
+                        </TableCell>
                         <TableCell>
-                          <Badge variant={k.active ? 'default' : 'secondary'}>
-                            {k.active ? t('common.active') : t('common.inactive')}
-                          </Badge>
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {k.expires_at
-                            ? new Date(k.expires_at).toLocaleDateString()
-                            : t('apiKeys.never')}
-                        </TableCell>
-                        <TableCell className="text-xs text-muted-foreground">
-                          {new Date(k.created_at).toLocaleDateString()}
+                          {hasPermission('teams:update') && (
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={async () => {
+                                try {
+                                  await apiDelete(`/api/admin/teams/${teamId}/roles/${r.role_id}`);
+                                  toast.success(t('teamDetail.roleRemoved'));
+                                  await fetchTeamRoles();
+                                } catch (err) {
+                                  toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
+                                }
+                              }}
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </Button>
+                          )}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -451,22 +462,6 @@ export function TeamDetailPage() {
           </Card>
         </TabsContent>
 
-        {/* Budget tab */}
-        <TabsContent value="budget">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-base">{t('teamDetail.budget')}</CardTitle>
-            </CardHeader>
-            <CardContent>
-              <LimitsPanel
-                subjectKind="team"
-                subjectId={teamId}
-                surfaces={['ai_gateway', 'mcp_gateway']}
-                allowBudgets={true}
-              />
-            </CardContent>
-          </Card>
-        </TabsContent>
       </Tabs>
 
       {/* Edit team dialog */}
@@ -545,21 +540,6 @@ export function TeamDetailPage() {
                 </SelectContent>
               </Select>
             </div>
-            <div className="space-y-2">
-              <Label>{t('teams.role')}</Label>
-              <Select
-                value={pendingRole}
-                onValueChange={(v) => setPendingRole(v as 'member' | 'manager')}
-              >
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="member">{t('teams.roleMember')}</SelectItem>
-                  <SelectItem value="manager">{t('teams.roleManager')}</SelectItem>
-                </SelectContent>
-              </Select>
-            </div>
           </div>
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setAddMemberOpen(false)}>
@@ -572,6 +552,72 @@ export function TeamDetailPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Assign role dialog */}
+      <Dialog open={assignRoleOpen} onOpenChange={setAssignRoleOpen}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>{t('teamDetail.assignRole')}</DialogTitle>
+            <DialogDescription>{t('teamDetail.assignRoleDesc')}</DialogDescription>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div className="space-y-2">
+              <Label>{t('teamDetail.selectRole')}</Label>
+              <Select value={pendingRoleId} onValueChange={setPendingRoleId}>
+                <SelectTrigger>
+                  <SelectValue placeholder={t('teamDetail.selectRole')} />
+                </SelectTrigger>
+                <SelectContent>
+                  {availableRoles
+                    .filter((r) => !teamRoles.some((tr) => tr.role_id === r.id))
+                    .map((r) => (
+                      <SelectItem key={r.id} value={r.id}>
+                        {r.name}
+                        {r.is_system ? ` (${t('roles.systemRole')})` : ''}
+                      </SelectItem>
+                    ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          <DialogFooter>
+            <Button
+              disabled={!pendingRoleId}
+              onClick={async () => {
+                try {
+                  await apiPost(`/api/admin/teams/${teamId}/roles`, { role_id: pendingRoleId });
+                  toast.success(t('teamDetail.roleAssigned'));
+                  setAssignRoleOpen(false);
+                  await fetchTeamRoles();
+                } catch (err) {
+                  toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
+                }
+              }}
+            >
+              <Shield className="mr-2 h-4 w-4" />
+              {t('teamDetail.assignRole')}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <ConfirmDialog
+        open={deleteOpen}
+        onOpenChange={setDeleteOpen}
+        title={t('common.delete')}
+        description={t('teams.deleteConfirm', { team: team?.name ?? '' })}
+        confirmLabel={t('common.delete')}
+        variant="destructive"
+        onConfirm={async () => {
+          try {
+            await apiDelete(`/api/admin/teams/${teamId}`);
+            toast.success(t('teams.toast.deleted'));
+            navigate({ to: '/admin/teams' });
+          } catch (err) {
+            toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
+          }
+        }}
+      />
     </div>
   );
 }
