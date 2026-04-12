@@ -221,7 +221,7 @@ CREATE TABLE api_keys (
     -- `scopes` JSONB column is gone.
     surfaces                TEXT[] NOT NULL
         CHECK (cardinality(surfaces) > 0
-               AND surfaces <@ ARRAY['ai_gateway', 'mcp_gateway']),
+               AND surfaces <@ ARRAY['ai_gateway', 'mcp_gateway', 'console']),
     allowed_models          TEXT[],
     -- Rate limits and budget caps live in `rate_limit_rules` /
     -- `budget_caps` (subject_kind = 'api_key'). The previous fixed
