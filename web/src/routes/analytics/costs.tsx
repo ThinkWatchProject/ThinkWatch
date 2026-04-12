@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useCallback, useEffect, useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -9,6 +9,13 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { DollarSign, TrendingUp, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api } from '@/lib/api';
@@ -36,10 +43,22 @@ export function CostsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // Team filter
+  const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
+  const [selectedTeam, setSelectedTeam] = useState<string>('');
+
   useEffect(() => {
+    api<{ id: string; name: string }[]>('/api/admin/teams')
+      .then(setTeams)
+      .catch(() => []);
+  }, []);
+
+  const fetchData = useCallback((teamId: string) => {
+    setLoading(true);
+    const teamSuffix = teamId ? `?team_id=${teamId}` : '';
     Promise.all([
-      api<CostRow[]>('/api/analytics/costs'),
-      api<CostStats>('/api/analytics/costs/stats'),
+      api<CostRow[]>(`/api/analytics/costs${teamSuffix}`),
+      api<CostStats>(`/api/analytics/costs/stats${teamSuffix}`),
     ])
       .then(([costData, statsData]) => {
         setRows(costData);
@@ -48,6 +67,10 @@ export function CostsPage() {
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load cost data'))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    fetchData(selectedTeam);
+  }, [selectedTeam, fetchData]);
 
   // Chart: cost by model
   const chartData = useMemo(() => {
@@ -64,9 +87,30 @@ export function CostsPage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{t('analyticsCosts.title')}</h1>
-        <p className="text-muted-foreground">{t('analyticsCosts.subtitle')}</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('analyticsCosts.title')}</h1>
+          <p className="text-muted-foreground">{t('analyticsCosts.subtitle')}</p>
+        </div>
+        {teams.length > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">{t('analytics.teamFilter')}</span>
+            <Select
+              value={selectedTeam || 'all'}
+              onValueChange={(v) => setSelectedTeam(v === 'all' ? '' : v)}
+            >
+              <SelectTrigger className="w-48">
+                <SelectValue placeholder={t('analytics.allTeams')} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{t('analytics.allTeams')}</SelectItem>
+                {teams.map((team) => (
+                  <SelectItem key={team.id} value={team.id}>{team.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">

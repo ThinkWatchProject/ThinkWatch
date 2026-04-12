@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from '@tanstack/react-router';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -60,6 +61,7 @@ interface UserSummary {
 
 export function TeamsPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -284,7 +286,12 @@ export function TeamsPage() {
               <TableBody>
                 {teams.map((team) => (
                   <TableRow key={team.id}>
-                    <TableCell className="font-medium">{team.name}</TableCell>
+                    <TableCell
+                      className="cursor-pointer font-medium hover:underline"
+                      onClick={() => navigate({ to: '/admin/teams/$id', params: { id: team.id } })}
+                    >
+                      {team.name}
+                    </TableCell>
                     <TableCell className="text-sm text-muted-foreground">
                       {team.description || '—'}
                     </TableCell>
@@ -465,7 +472,38 @@ export function TeamsPage() {
                         <div className="text-xs text-muted-foreground">{m.email}</div>
                       </TableCell>
                       <TableCell>
-                        <Badge variant="outline">{m.role}</Badge>
+                        {hasPermission('team_members:write') ? (
+                          <Select
+                            value={m.role}
+                            onValueChange={async (newRole) => {
+                              if (!membersOpen || newRole === m.role) return;
+                              try {
+                                await apiPost(`/api/admin/teams/${membersOpen.id}/members`, {
+                                  user_id: m.user_id,
+                                  role: newRole,
+                                });
+                                const refreshed = await api<TeamMember[]>(
+                                  `/api/admin/teams/${membersOpen.id}/members`,
+                                );
+                                setMembers(refreshed);
+                              } catch (err) {
+                                toast.error(
+                                  err instanceof Error ? err.message : 'Failed to update role',
+                                );
+                              }
+                            }}
+                          >
+                            <SelectTrigger className="w-32">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="member">{t('teams.roleMember')}</SelectItem>
+                              <SelectItem value="manager">{t('teams.roleManager')}</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        ) : (
+                          <Badge variant="outline">{m.role}</Badge>
+                        )}
                       </TableCell>
                       <TableCell className="text-right">
                         <Button

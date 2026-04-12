@@ -17,7 +17,7 @@
 // Subject identification: every rule / cap is keyed by a (subject_kind,
 // subject_id) tuple. The kinds are pinned to a small closed enum:
 //
-//   rate_limit_rules.subject_kind ∈ { user, api_key, provider, mcp_server }
+//   rate_limit_rules.subject_kind ∈ { user, api_key, provider, mcp_server, team }
 //   budget_caps.subject_kind      ∈ { user, api_key, team, provider }
 //
 // At request time the proxy resolves which subjects apply (e.g. an AI
@@ -45,7 +45,7 @@ pub mod weight;
 /// Mapping to DB tables is implicit — `RateLimitSubject` covers the
 /// kinds allowed by `rate_limit_rules.subject_kind`, `BudgetSubject`
 /// covers `budget_caps.subject_kind`. They overlap on user / api_key /
-/// provider; only `mcp_server` is rate-only and only `team` is budget-only.
+/// provider / team; only `mcp_server` is rate-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitSubject {
@@ -53,6 +53,7 @@ pub enum RateLimitSubject {
     ApiKey,
     Provider,
     McpServer,
+    Team,
 }
 
 impl RateLimitSubject {
@@ -62,6 +63,7 @@ impl RateLimitSubject {
             Self::ApiKey => "api_key",
             Self::Provider => "provider",
             Self::McpServer => "mcp_server",
+            Self::Team => "team",
         }
     }
 
@@ -71,6 +73,7 @@ impl RateLimitSubject {
             "api_key" => Self::ApiKey,
             "provider" => Self::Provider,
             "mcp_server" => Self::McpServer,
+            "team" => Self::Team,
             _ => return None,
         })
     }

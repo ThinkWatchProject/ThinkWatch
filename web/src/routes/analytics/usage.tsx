@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useCallback, useEffect, useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
@@ -9,6 +9,13 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { BarChart3, Hash, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api } from '@/lib/api';
@@ -36,10 +43,22 @@ export function UsagePage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
+  // Team filter
+  const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
+  const [selectedTeam, setSelectedTeam] = useState<string>('');
+
   useEffect(() => {
+    api<{ id: string; name: string }[]>('/api/admin/teams')
+      .then(setTeams)
+      .catch(() => []);
+  }, []);
+
+  const fetchData = useCallback((teamId: string) => {
+    setLoading(true);
+    const teamSuffix = teamId ? `?team_id=${teamId}` : '';
     Promise.all([
-      api<UsageRow[]>('/api/analytics/usage'),
-      api<UsageStats>('/api/analytics/usage/stats'),
+      api<UsageRow[]>(`/api/analytics/usage${teamSuffix}`),
+      api<UsageStats>(`/api/analytics/usage/stats${teamSuffix}`),
     ])
       .then(([usageData, statsData]) => {
         setRows(usageData);
@@ -48,6 +67,10 @@ export function UsagePage() {
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load usage data'))
       .finally(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    fetchData(selectedTeam);
+  }, [selectedTeam, fetchData]);
 
   // Aggregate tokens by date for chart
   const chartData = useMemo(() => {
@@ -62,9 +85,30 @@ export function UsagePage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold tracking-tight">{t('analyticsUsage.title')}</h1>
-        <p className="text-muted-foreground">{t('analyticsUsage.subtitle')}</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('analyticsUsage.title')}</h1>
+          <p className="text-muted-foreground">{t('analyticsUsage.subtitle')}</p>
+        </div>
+        {teams.length > 0 && (
+          <div className="flex items-center gap-2">
+            <span className="text-sm text-muted-foreground">{t('analytics.teamFilter')}</span>
+            <Select
+              value={selectedTeam || 'all'}
+              onValueChange={(v) => setSelectedTeam(v === 'all' ? '' : v)}
+            >
+              <SelectTrigger className="w-48">
+                <SelectValue placeholder={t('analytics.allTeams')} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{t('analytics.allTeams')}</SelectItem>
+                {teams.map((team) => (
+                  <SelectItem key={team.id} value={team.id}>{team.name}</SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+        )}
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">

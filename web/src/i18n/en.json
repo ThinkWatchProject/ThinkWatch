@@ -180,6 +180,7 @@
     "createKey": "Create API Key",
     "keyPrefix": "Key Prefix",
     "team": "Team",
+    "teamNone": "Personal (no team)",
     "expires": "Expires",
     "allowedModels": "Allowed Models",
     "allowedModelsHint": "Comma-separated model names (leave empty for all)",
@@ -343,6 +344,18 @@
     "noLogs": "No MCP call logs yet.",
     "noLogsHint": "Logs will appear here as MCP tools are invoked.",
     "searchPlaceholder": "Search MCP logs..."
+  },
+  "teamDetail": {
+    "members": "Members",
+    "apiKeys": "API Keys",
+    "budget": "Budget & Limits",
+    "addMember": "Add Member",
+    "noApiKeys": "No API keys belong to this team",
+    "backToTeams": "Back to Teams"
+  },
+  "analytics": {
+    "teamFilter": "Team",
+    "allTeams": "All Teams"
   },
   "analyticsUsage": {
     "title": "Usage Analytics",

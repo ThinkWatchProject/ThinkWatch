@@ -53,7 +53,7 @@ use crate::middleware::auth_guard::AuthUser;
 fn parse_rate_subject(kind: &str) -> Result<RateLimitSubject, AppError> {
     RateLimitSubject::parse(kind).ok_or_else(|| {
         AppError::BadRequest(format!(
-            "Unknown rate-limit subject kind '{kind}' (allowed: user, api_key, provider, mcp_server)"
+            "Unknown rate-limit subject kind '{kind}' (allowed: user, api_key, provider, mcp_server, team)"
         ))
     })
 }
@@ -169,7 +169,7 @@ fn default_true() -> bool {
     tag = "Limits",
     security(("bearer_token" = [])),
     params(
-        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server)"),
+        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server, team)"),
         ("id" = uuid::Uuid, Path, description = "Subject ID"),
     ),
     responses(
@@ -200,7 +200,7 @@ pub async fn list_rules(
     tag = "Limits",
     security(("bearer_token" = [])),
     params(
-        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server)"),
+        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server, team)"),
         ("id" = uuid::Uuid, Path, description = "Subject ID"),
     ),
     request_body = UpsertRuleRequest,
@@ -282,7 +282,7 @@ pub async fn upsert_rule(
     tag = "Limits",
     security(("bearer_token" = [])),
     params(
-        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server)"),
+        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server, team)"),
         ("id" = uuid::Uuid, Path, description = "Subject ID"),
         ("rule_id" = uuid::Uuid, Path, description = "Rate-limit rule ID"),
     ),
@@ -498,7 +498,7 @@ pub struct UsageResponse {
     tag = "Limits",
     security(("bearer_token" = [])),
     params(
-        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server)"),
+        ("kind" = String, Path, description = "Subject kind (user, api_key, provider, mcp_server, team)"),
         ("id" = uuid::Uuid, Path, description = "Subject ID"),
     ),
     responses(
@@ -578,6 +578,7 @@ fn budget_kind_for(subject: RateLimitSubject) -> Option<BudgetSubject> {
         RateLimitSubject::User => Some(BudgetSubject::User),
         RateLimitSubject::ApiKey => Some(BudgetSubject::ApiKey),
         RateLimitSubject::Provider => Some(BudgetSubject::Provider),
+        RateLimitSubject::Team => Some(BudgetSubject::Team),
         RateLimitSubject::McpServer => None,
     }
 }

@@ -180,6 +180,7 @@
     "createKey": "创建 API 密钥",
     "keyPrefix": "密钥前缀",
     "team": "团队",
+    "teamNone": "个人（无团队）",
     "expires": "过期时间",
     "allowedModels": "允许的模型",
     "allowedModelsHint": "逗号分隔的模型名称（留空表示全部）",
@@ -343,6 +344,18 @@
     "noLogs": "暂无 MCP 调用日志。",
     "noLogsHint": "MCP 工具被调用后日志将显示在此处。",
     "searchPlaceholder": "搜索 MCP 日志..."
+  },
+  "teamDetail": {
+    "members": "成员",
+    "apiKeys": "API 密钥",
+    "budget": "预算与限额",
+    "addMember": "添加成员",
+    "noApiKeys": "该团队没有 API 密钥",
+    "backToTeams": "返回团队列表"
+  },
+  "analytics": {
+    "teamFilter": "团队",
+    "allTeams": "全部团队"
   },
   "analyticsUsage": {
     "title": "用量分析",
