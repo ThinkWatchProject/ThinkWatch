@@ -510,12 +510,14 @@ async fn auth_via_api_key(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let email = sqlx::query_scalar::<_, String>("SELECT email FROM users WHERE id = $1")
-        .bind(user_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    let email = sqlx::query_scalar::<_, String>(
+        "SELECT email FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .ok_or(StatusCode::UNAUTHORIZED)?;
 
     let roles = rbac::load_user_role_names(&state.db, user_id)
         .await
