@@ -381,7 +381,7 @@ async fn build_live_snapshot(
         sqlx::query_as::<_, (String,)>("SELECT name FROM mcp_servers").fetch_all(&state.db);
     // Highest per-minute RPM limit across all enabled rules — used as
     // a reference line on the request-rate sparkline.
-    let rpm_limit_fut = sqlx::query_scalar::<_, i64>(
+    let rpm_limit_fut = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT MAX(max_count) FROM rate_limit_rules \
          WHERE metric = 'requests' AND window_secs = 60 AND enabled = true",
     )
@@ -390,11 +390,7 @@ async fn build_live_snapshot(
     let (configured_providers, configured_mcp_servers, max_rpm_raw) =
         tokio::try_join!(providers_fut, mcp_servers_fut, rpm_limit_fut)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Dashboard PG query failed: {e}")))?;
-    let max_rpm_limit: Option<i32> = if max_rpm_raw > 0 {
-        Some(max_rpm_raw as i32)
-    } else {
-        None
-    };
+    let max_rpm_limit: Option<i32> = max_rpm_raw.filter(|&v| v > 0).map(|v| v as i32);
 
     // Snapshot the in-process CB registry once so we can decorate every
     // provider row with its real state below.

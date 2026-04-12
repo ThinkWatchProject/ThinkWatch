@@ -390,8 +390,18 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
 
     // User-level routes (any authenticated user)
     // Signature verification runs on POST/DELETE/PATCH (skipped for GET)
-    let user_routes = Router::new()
+    // Logout needs auth (to read the user_id) but NOT signature
+    // verification — the signing key may already be gone if another
+    // tab/device logged out first, and POST logout shouldn't fail
+    // with 403 in that race.
+    let logout_route = Router::new()
         .route("/api/auth/logout", post(handlers::auth::logout))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::auth_guard::require_auth,
+        ));
+
+    let user_routes = Router::new()
         .route("/api/auth/me", get(handlers::auth::me))
         .route("/api/auth/password", post(handlers::auth::change_password))
         .route("/api/auth/account", delete(handlers::auth::delete_account))
@@ -692,6 +702,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
     let app = Router::new()
         .merge(health)
         .merge(docs_routes)
+        .merge(logout_route)
         .merge(public_routes)
         .merge(user_routes)
         .merge(admin_routes)
