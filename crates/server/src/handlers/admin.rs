@@ -954,6 +954,9 @@ pub async fn update_oidc_settings(
         .map_err(AppError::Internal)?;
     }
     if let Some(ref issuer_url) = req.issuer_url {
+        // Validate issuer URL against SSRF: block private/internal
+        // addresses the same way we validate AI provider URLs.
+        super::providers::validate_url(issuer_url)?;
         dc.upsert(
             "oidc.issuer_url",
             &serde_json::json!(issuer_url),

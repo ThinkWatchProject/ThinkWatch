@@ -471,8 +471,19 @@ pub async fn register(
     let user = match user {
         Some(u) => u,
         None => {
+            // Return a generic 200 so attackers cannot enumerate which
+            // emails are registered. The response carries no signing_key
+            // or cookies — the frontend sees an empty signing_key and
+            // falls through to the login page.
             tx.rollback().await?;
-            return Err(AppError::Conflict("Email already registered".into()));
+            return Ok(Json(serde_json::json!({
+                "token_type": "Bearer",
+                "expires_in": 0,
+                "signing_key": "",
+                "permissions": [],
+                "roles": [],
+            }))
+            .into_response());
         }
     };
 
@@ -634,6 +645,22 @@ pub async fn refresh(
         return Err(AppError::Unauthorized);
     }
 
+    // Reject refresh tokens issued before the last password change.
+    // pw_epoch:{user_id} is set by change_password and has a TTL
+    // equal to the refresh token lifetime so it auto-expires.
+    let epoch_key = format!("pw_epoch:{}", claims.sub);
+    let pw_epoch: Option<String> = state.redis.get(&epoch_key).await.ok().flatten();
+    if pw_epoch
+        .and_then(|s| s.parse::<i64>().ok())
+        .is_some_and(|epoch| claims.iat < epoch)
+    {
+        tracing::warn!(
+            user_id = %claims.sub,
+            "refresh token issued before password change — rejecting"
+        );
+        return Err(AppError::Unauthorized);
+    }
+
     // Set the blacklist entry to expire when the OLD token would
     // have expired naturally — anything past that is a no-op anyway.
     let now = chrono::Utc::now().timestamp();
@@ -727,8 +754,17 @@ pub async fn refresh(
     ),
     security(()),
 )]
-pub async fn logout() -> axum::response::Response {
+pub async fn logout(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> axum::response::Response {
     use axum::http::header::SET_COOKIE;
+
+    // Revoke signing key so stolen keys can't forge HMAC signatures.
+    let signing_key = format!("signing_key:{}", auth_user.claims.sub);
+    let _: Result<(), _> =
+        fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &signing_key).await;
+
     let mut response = Json(serde_json::json!({"status": "ok"})).into_response();
     let headers = response.headers_mut();
     for cookie_str in verify_signature::clear_auth_cookies() {
@@ -886,6 +922,21 @@ pub async fn change_password(
     let signing_key = format!("signing_key:{}", user.id);
     let _: Result<(), _> =
         fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &signing_key).await;
+
+    // Store the password-change epoch so the refresh handler can reject
+    // refresh tokens issued before this moment (prevents a stolen refresh
+    // token from minting new access tokens after a password change).
+    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
+    let epoch_key = format!("pw_epoch:{}", user.id);
+    let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &epoch_key,
+        &chrono::Utc::now().timestamp().to_string(),
+        Some(fred::types::Expiration::EX(refresh_ttl_days * 86400)),
+        None,
+        false,
+    )
+    .await;
 
     state.audit.log(
         AuditEntry::platform("auth.password_changed")
