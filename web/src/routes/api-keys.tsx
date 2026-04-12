@@ -24,6 +24,13 @@ import {
 } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Checkbox } from '@/components/ui/checkbox';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Plus, Copy, Check, Ban, RotateCw, Pencil, KeyRound, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
@@ -182,6 +189,8 @@ export function ApiKeysPage() {
     'mcp_gateway',
   ]);
   const [expiresInDays, setExpiresInDays] = useState('');
+  const [createTeamId, setCreateTeamId] = useState<string>('');
+  const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
 
   // Edit dialog
   const [editDialogOpen, setEditDialogOpen] = useState(false);
@@ -220,6 +229,9 @@ export function ApiKeysPage() {
 
   useEffect(() => {
     fetchKeys();
+    api<{ id: string; name: string }[]>('/api/admin/teams')
+      .then(setTeams)
+      .catch(() => setTeams([]));
   }, []);
 
   // ---------------------------------------------------------------------------
@@ -244,6 +256,7 @@ export function ApiKeysPage() {
     setAllowedModels('');
     setCreateSurfaces(['ai_gateway', 'mcp_gateway']);
     setExpiresInDays('');
+    setCreateTeamId('');
     setFormError('');
     setCreatedKey(null);
     setCopied(false);
@@ -275,6 +288,7 @@ export function ApiKeysPage() {
         surfaces: createSurfaces,
         allowed_models: models.length > 0 ? models : undefined,
         expires_in_days: expiresInDays ? parseInt(expiresInDays, 10) : undefined,
+        team_id: createTeamId && createTeamId !== '__none__' ? createTeamId : undefined,
       });
       setCreatedKey(res.api_key);
       await fetchKeys();
@@ -477,6 +491,22 @@ export function ApiKeysPage() {
                       </label>
                     ))}
                   </div>
+                </div>
+                <div className="space-y-2">
+                  <Label>{t('apiKeys.team')}</Label>
+                  <Select value={createTeamId} onValueChange={setCreateTeamId}>
+                    <SelectTrigger>
+                      <SelectValue placeholder={t('apiKeys.teamNone')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="__none__">{t('apiKeys.teamNone')}</SelectItem>
+                      {teams.map((team) => (
+                        <SelectItem key={team.id} value={team.id}>
+                          {team.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="key-models">{t('apiKeys.allowedModels')}</Label>

@@ -47,7 +47,7 @@ import { api, apiPost, apiDelete } from '@/lib/api';
 // Types
 // ----------------------------------------------------------------------------
 
-export type SubjectKind = 'user' | 'api_key' | 'provider' | 'mcp_server';
+export type SubjectKind = 'user' | 'api_key' | 'provider' | 'mcp_server' | 'team';
 export type Surface = 'ai_gateway' | 'mcp_gateway';
 type Metric = 'requests' | 'tokens';
 type Period = 'daily' | 'weekly' | 'monthly';

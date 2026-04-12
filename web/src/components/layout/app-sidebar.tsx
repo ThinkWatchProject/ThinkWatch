@@ -46,11 +46,13 @@ import {
 } from 'lucide-react';
 import { useNavigate, useLocation } from '@tanstack/react-router';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
+import { hasPermission } from '@/lib/api';
 
 interface NavItem {
   titleKey: string;
   icon: typeof LayoutDashboard;
   href: string;
+  permission?: string;
 }
 interface NavGroup {
   labelKey: string;
@@ -69,44 +71,45 @@ const navGroups: NavGroup[] = [
   {
     labelKey: 'nav.aiGateway',
     items: [
-      { titleKey: 'nav.providers', icon: Plug, href: '/gateway/providers' },
-      { titleKey: 'nav.models', icon: BrainCircuit, href: '/gateway/models' },
-      { titleKey: 'nav.contentSecurity', icon: Filter, href: '/gateway/security' },
+      { titleKey: 'nav.providers', icon: Plug, href: '/gateway/providers', permission: 'providers:read' },
+      { titleKey: 'nav.models', icon: BrainCircuit, href: '/gateway/models', permission: 'models:read' },
+      { titleKey: 'nav.contentSecurity', icon: Filter, href: '/gateway/security', permission: 'content_filter:read' },
     ],
   },
   {
     labelKey: 'nav.mcpGateway',
     items: [
-      { titleKey: 'nav.mcpServers', icon: Server, href: '/mcp/servers' },
-      { titleKey: 'nav.tools', icon: Wrench, href: '/mcp/tools' },
+      { titleKey: 'nav.mcpServers', icon: Server, href: '/mcp/servers', permission: 'mcp_servers:read' },
+      { titleKey: 'nav.tools', icon: Wrench, href: '/mcp/tools', permission: 'mcp_servers:read' },
     ],
   },
   {
     labelKey: 'nav.analytics',
     items: [
-      { titleKey: 'nav.usage', icon: BarChart3, href: '/analytics/usage' },
-      { titleKey: 'nav.costs', icon: DollarSign, href: '/analytics/costs' },
+      { titleKey: 'nav.usage', icon: BarChart3, href: '/analytics/usage', permission: 'analytics:read_own' },
+      { titleKey: 'nav.costs', icon: DollarSign, href: '/analytics/costs', permission: 'analytics:read_own' },
     ],
   },
   {
     labelKey: 'nav.logs',
     items: [
-      { titleKey: 'nav.logExplorer', icon: ScrollText, href: '/logs' },
+      { titleKey: 'nav.logExplorer', icon: ScrollText, href: '/logs', permission: 'logs:read_all' },
       {
         titleKey: 'nav.logForwarders',
         icon: Forward,
         href: '/logs/forwarders',
+        permission: 'log_forwarders:read',
       },
     ],
   },
   {
     labelKey: 'nav.admin',
     items: [
-      { titleKey: 'nav.users', icon: Users, href: '/admin/users' },
-      { titleKey: 'nav.teams', icon: UsersRound, href: '/admin/teams' },
-      { titleKey: 'nav.roles', icon: Shield, href: '/admin/roles' },
-      { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings' },
-      { titleKey: 'nav.apiDocs', icon: FileCode2, href: '/admin/api-docs' },
+      { titleKey: 'nav.users', icon: Users, href: '/admin/users', permission: 'users:read' },
+      { titleKey: 'nav.teams', icon: UsersRound, href: '/admin/teams', permission: 'teams:read' },
+      { titleKey: 'nav.roles', icon: Shield, href: '/admin/roles', permission: 'roles:read' },
+      { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings', permission: 'settings:read' },
+      { titleKey: 'nav.apiDocs', icon: FileCode2, href: '/admin/api-docs', permission: 'settings:read' },
     ],
   },
 ];
@@ -226,7 +229,15 @@ export function AppSidebar({
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        {navGroups.map((group) => (
+        {navGroups
+          .map((group) => ({
+            ...group,
+            items: group.items.filter(
+              (item) => !item.permission || hasPermission(item.permission),
+            ),
+          }))
+          .filter((group) => group.items.length > 0)
+          .map((group) => (
           <SidebarGroup key={group.labelKey}>
             <SidebarGroupLabel>{t(group.labelKey)}</SidebarGroupLabel>
             <SidebarGroupContent>

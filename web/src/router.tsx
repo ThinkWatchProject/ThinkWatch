@@ -32,6 +32,7 @@ const UsagePage = lazyRouteComponent(() => import('@/routes/analytics/usage'), '
 const CostsPage = lazyRouteComponent(() => import('@/routes/analytics/costs'), 'CostsPage');
 const UsersPage = lazyRouteComponent(() => import('@/routes/admin/users'), 'UsersPage');
 const TeamsPage = lazyRouteComponent(() => import('@/routes/admin/teams'), 'TeamsPage');
+const TeamDetailPage = lazyRouteComponent(() => import('@/routes/admin/team-detail'), 'TeamDetailPage');
 const RolesPage = lazyRouteComponent(() => import('@/routes/admin/roles'), 'RolesPage');
 const SettingsPage = lazyRouteComponent(() => import('@/routes/admin/settings'), 'SettingsPage');
 const LogForwardersPage = lazyRouteComponent(() => import('@/routes/admin/log-forwarders'), 'LogForwardersPage');
@@ -267,6 +268,12 @@ const teamsRoute = createRoute({
   component: TeamsPage,
 });
 
+const teamDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/admin/teams/$id',
+  component: TeamDetailPage,
+});
+
 const rolesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/roles',
@@ -334,6 +341,7 @@ const routeTree = rootRoute.addChildren([
   costsRoute,
   usersRoute,
   teamsRoute,
+  teamDetailRoute,
   rolesRoute,
   settingsRoute,
   logForwardersRoute,
