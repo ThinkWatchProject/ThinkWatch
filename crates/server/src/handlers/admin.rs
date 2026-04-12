@@ -1798,6 +1798,15 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
+        "security.budget_alert_webhook_url" => {
+            let url = value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
+            if !url.is_empty() {
+                super::providers::validate_url(url)?;
+            }
+        }
+
         _ => {
             return Err(AppError::BadRequest(format!("Unknown setting: {key}")));
         }

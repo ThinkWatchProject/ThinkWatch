@@ -476,6 +476,39 @@ pub async fn rotate_key(
 
     tx.commit().await?;
 
+    // Copy rate-limit rules and budget caps from old key to new key.
+    {
+        use think_watch_common::limits::{self, BudgetSubject, RateLimitSubject, UpsertRule};
+        let old_rules = limits::list_rules(&state.db, RateLimitSubject::ApiKey, id).await?;
+        for r in &old_rules {
+            let _ = limits::upsert_rule(
+                &state.db,
+                UpsertRule {
+                    subject_kind: RateLimitSubject::ApiKey,
+                    subject_id: new_key.id,
+                    surface: r.surface,
+                    metric: r.metric,
+                    window_secs: r.window_secs,
+                    max_count: r.max_count,
+                    enabled: r.enabled,
+                },
+            )
+            .await;
+        }
+        let old_caps = limits::list_caps(&state.db, BudgetSubject::ApiKey, id).await?;
+        for c in &old_caps {
+            let _ = limits::upsert_cap(
+                &state.db,
+                BudgetSubject::ApiKey,
+                new_key.id,
+                c.period,
+                c.limit_tokens,
+                c.enabled,
+            )
+            .await;
+        }
+    }
+
     state.audit.log(
         AuditEntry::new("api_key.rotate")
             .user_id(auth_user.claims.sub)

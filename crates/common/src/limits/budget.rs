@@ -41,6 +41,19 @@ use super::{BudgetCap, BudgetSubject};
 // Threshold alerting
 // ----------------------------------------------------------------------------
 
+/// A budget threshold crossing event, emitted when `add_weighted_tokens`
+/// pushes spend past a configured percentage boundary.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BudgetCrossing {
+    pub cap_id: uuid::Uuid,
+    pub subject_kind: String,
+    pub subject_id: uuid::Uuid,
+    pub period: String,
+    pub threshold_pct: u8,
+    pub limit_tokens: i64,
+    pub current_tokens: i64,
+}
+
 /// Percentage thresholds at which a crossing fires a budget alert.
 /// Each crossing in this list bumps the metric exactly once per
 /// period bucket — once 80% has been crossed, subsequent calls in
@@ -180,12 +193,13 @@ pub async fn add_weighted_tokens(
     redis: &Client,
     caps: &[BudgetCap],
     weighted_tokens: i64,
-) -> Result<Vec<CapStatus>, fred::error::Error> {
+) -> Result<(Vec<CapStatus>, Vec<BudgetCrossing>), fred::error::Error> {
     if caps.is_empty() || weighted_tokens <= 0 {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let now = Utc::now();
     let mut out = Vec::with_capacity(caps.len());
+    let mut crossings = Vec::new();
     for cap in caps {
         let key = build_key(
             cap.subject_kind.as_str(),
@@ -225,6 +239,15 @@ pub async fn add_weighted_tokens(
                 current = new_total,
                 "budget threshold crossed"
             );
+            crossings.push(BudgetCrossing {
+                cap_id: cap.id,
+                subject_kind: cap.subject_kind.as_str().to_string(),
+                subject_id: cap.subject_id,
+                period: cap.period.as_str().to_string(),
+                threshold_pct: pct,
+                limit_tokens: cap.limit_tokens,
+                current_tokens: new_total,
+            });
         }
         // Refresh TTL on every write — cheap and keeps the key
         // alive across restarts so a forgotten counter never lingers.
@@ -239,7 +262,7 @@ pub async fn add_weighted_tokens(
             limit: cap.limit_tokens,
         });
     }
-    Ok(out)
+    Ok((out, crossings))
 }
 
 #[cfg(test)]
