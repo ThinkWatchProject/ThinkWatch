@@ -441,7 +441,7 @@ fn row_to_rule(row: sqlx::postgres::PgRow) -> Option<RateLimitRule> {
     })
 }
 
-fn row_to_cap(row: sqlx::postgres::PgRow) -> Option<BudgetCap> {
+pub fn row_to_cap(row: sqlx::postgres::PgRow) -> Option<BudgetCap> {
     let kind = BudgetSubject::parse(row.try_get::<String, _>("subject_kind").ok()?.as_str())?;
     let period = BudgetPeriod::parse(row.try_get::<String, _>("period").ok()?.as_str())?;
     Some(BudgetCap {

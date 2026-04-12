@@ -320,13 +320,62 @@ pub async fn get_cost_stats(
     use rust_decimal::prelude::ToPrimitive;
     let total_f64 = total.and_then(|d| d.to_f64()).unwrap_or(0.0);
 
-    // `budget_usage_pct` was previously the running MTD total divided
-    // by the sum of all team monthly_budget columns. That column is
-    // gone (budgets live in `budget_caps` now and are weighted-token
-    // denominated, not USD). Phase E rewires this against the new
-    // engine; until then the field is always None and the UI hides
-    // the bar.
-    let budget_usage_pct: Option<f64> = None;
+    // Budget usage percentage: sum of current spend / sum of limits
+    // across all enabled monthly budget caps visible to the caller.
+    let budget_usage_pct: Option<f64> =
+        {
+            use think_watch_common::limits::{self, BudgetSubject, budget};
+            // Gather monthly caps the caller can see. Global admins see all;
+            // team-scoped callers see only their teams' + their own user caps.
+            let caps: Vec<limits::BudgetCap> =
+                match &team_filter {
+                    None => sqlx::query(
+                        "SELECT id, subject_kind, subject_id, period, limit_tokens, enabled \
+                       FROM budget_caps WHERE period = 'monthly' AND enabled = true",
+                    )
+                    .fetch_all(&state.db)
+                    .await
+                    .ok()
+                    .map(|rows| rows.into_iter().filter_map(limits::row_to_cap).collect())
+                    .unwrap_or_default(),
+                    Some(team_ids) => {
+                        let mut all = Vec::new();
+                        // User's own caps
+                        if let Ok(user_caps) =
+                            limits::list_caps(&state.db, BudgetSubject::User, caller_id).await
+                        {
+                            all.extend(user_caps.into_iter().filter(|c| {
+                                c.period == limits::BudgetPeriod::Monthly && c.enabled
+                            }));
+                        }
+                        // Team caps
+                        for tid in team_ids {
+                            if let Ok(team_caps) =
+                                limits::list_caps(&state.db, BudgetSubject::Team, *tid).await
+                            {
+                                all.extend(team_caps.into_iter().filter(|c| {
+                                    c.period == limits::BudgetPeriod::Monthly && c.enabled
+                                }));
+                            }
+                        }
+                        all
+                    }
+                };
+            if caps.is_empty() {
+                None
+            } else {
+                let total_limit: i64 = caps.iter().map(|c| c.limit_tokens).sum();
+                if total_limit <= 0 {
+                    None
+                } else {
+                    let statuses = budget::current_spend(&state.redis, &caps)
+                        .await
+                        .unwrap_or_default();
+                    let total_current: i64 = statuses.iter().map(|s| s.current).sum();
+                    Some(total_current as f64 / total_limit as f64 * 100.0)
+                }
+            }
+        };
 
     // Hourly cost buckets for the past 24 hours
     let cost_buckets = {

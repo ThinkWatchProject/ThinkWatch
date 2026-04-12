@@ -138,6 +138,7 @@ fn resolve_budget_subjects(
 async fn post_flight_account(
     db: sqlx::PgPool,
     redis: fred::clients::Client,
+    dynamic_config: Arc<DynamicConfig>,
     weight_cache: weight::WeightCache,
     model: String,
     prompt_tokens: u32,
@@ -167,8 +168,34 @@ async fn post_flight_account(
     // Natural-period budget caps for the matching subjects.
     match limits::list_enabled_caps_for_subjects(&db, &budget_subjects).await {
         Ok(caps) if !caps.is_empty() => {
-            if let Err(e) = limits::budget::add_weighted_tokens(&redis, &caps, weighted).await {
-                tracing::warn!("budget add_weighted_tokens failed: {e}");
+            match limits::budget::add_weighted_tokens(&redis, &caps, weighted).await {
+                Ok((_statuses, crossings)) if !crossings.is_empty() => {
+                    // Fire budget alert webhook in the background so
+                    // the response stream isn't delayed. Uses a
+                    // one-shot reqwest::Client — we don't keep a long
+                    // lived client because alerts are rare.
+                    let dc = dynamic_config.clone();
+                    tokio::spawn(async move {
+                        let url = dc.get_string("security.budget_alert_webhook_url").await;
+                        let url = url.as_deref().unwrap_or("").trim();
+                        if url.is_empty() {
+                            return;
+                        }
+                        let client = reqwest::Client::builder()
+                            .timeout(std::time::Duration::from_secs(10))
+                            .build()
+                            .unwrap_or_default();
+                        for crossing in &crossings {
+                            if let Err(e) = client.post(url).json(crossing).send().await {
+                                tracing::warn!("budget alert webhook failed: {e}");
+                            }
+                        }
+                    });
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    tracing::warn!("budget add_weighted_tokens failed: {e}");
+                }
             }
         }
         Ok(_) => {}
@@ -406,6 +433,7 @@ pub async fn proxy_chat_completion(
         // `streaming::stream_to_sse` for the contract.
         let db = state.db.clone();
         let redis = state.redis.clone();
+        let dynamic_config = state.dynamic_config.clone();
         let weight_cache = state.weight_cache.clone();
         let model = request.model.clone();
         let request_rules_for_done = request_rules.clone();
@@ -424,6 +452,7 @@ pub async fn proxy_chat_completion(
                 post_flight_account(
                     db,
                     redis,
+                    dynamic_config,
                     weight_cache,
                     model,
                     u.prompt_tokens,
@@ -457,6 +486,7 @@ pub async fn proxy_chat_completion(
             post_flight_account(
                 state.db.clone(),
                 state.redis.clone(),
+                state.dynamic_config.clone(),
                 state.weight_cache.clone(),
                 request.model.clone(),
                 usage.prompt_tokens,
@@ -649,6 +679,7 @@ pub async fn proxy_anthropic_messages(
         // moving `request` into the provider stream.
         let db = state.db.clone();
         let redis = state.redis.clone();
+        let dynamic_config = state.dynamic_config.clone();
         let weight_cache = state.weight_cache.clone();
         let model_for_done = mapped_model.clone();
         let request_rules_for_done = request_rules.clone();
@@ -663,6 +694,7 @@ pub async fn proxy_anthropic_messages(
                 post_flight_account(
                     db,
                     redis,
+                    dynamic_config,
                     weight_cache,
                     model_for_done,
                     u.prompt_tokens,
@@ -690,6 +722,7 @@ pub async fn proxy_anthropic_messages(
             post_flight_account(
                 state.db.clone(),
                 state.redis.clone(),
+                state.dynamic_config.clone(),
                 state.weight_cache.clone(),
                 mapped_model.clone(),
                 usage.prompt_tokens,
@@ -869,6 +902,7 @@ pub async fn proxy_responses(
     if is_stream {
         let db = state.db.clone();
         let redis = state.redis.clone();
+        let dynamic_config = state.dynamic_config.clone();
         let weight_cache = state.weight_cache.clone();
         let model_for_done = mapped_model.clone();
         let request_rules_for_done = request_rules.clone();
@@ -883,6 +917,7 @@ pub async fn proxy_responses(
                 post_flight_account(
                     db,
                     redis,
+                    dynamic_config,
                     weight_cache,
                     model_for_done,
                     u.prompt_tokens,
@@ -901,6 +936,7 @@ pub async fn proxy_responses(
             post_flight_account(
                 state.db.clone(),
                 state.redis.clone(),
+                state.dynamic_config.clone(),
                 state.weight_cache.clone(),
                 mapped_model.clone(),
                 usage.prompt_tokens,

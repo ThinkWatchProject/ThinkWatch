@@ -373,20 +373,28 @@ async fn build_live_snapshot(
     // Errors propagate so the dashboard surfaces a real failure instead of
     // pretending data is empty when the DB is down.
     //
-    // `max_rpm_limit` is hard-wired to None until phase E rewires it to
-    // query the new `rate_limit_rules` table. The chart still renders;
-    // the reference line just won't appear.
     let providers_fut = sqlx::query_as::<_, (String,)>(
         "SELECT name FROM providers WHERE is_active = true AND deleted_at IS NULL",
     )
     .fetch_all(&state.db);
     let mcp_servers_fut =
         sqlx::query_as::<_, (String,)>("SELECT name FROM mcp_servers").fetch_all(&state.db);
+    // Highest per-minute RPM limit across all enabled rules — used as
+    // a reference line on the request-rate sparkline.
+    let rpm_limit_fut = sqlx::query_scalar::<_, i64>(
+        "SELECT MAX(max_count) FROM rate_limit_rules \
+         WHERE metric = 'requests' AND window_secs = 60 AND enabled = true",
+    )
+    .fetch_one(&state.db);
 
-    let (configured_providers, configured_mcp_servers) =
-        tokio::try_join!(providers_fut, mcp_servers_fut)
+    let (configured_providers, configured_mcp_servers, max_rpm_raw) =
+        tokio::try_join!(providers_fut, mcp_servers_fut, rpm_limit_fut)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Dashboard PG query failed: {e}")))?;
-    let max_rpm_limit: Option<i32> = None;
+    let max_rpm_limit: Option<i32> = if max_rpm_raw > 0 {
+        Some(max_rpm_raw as i32)
+    } else {
+        None
+    };
 
     // Snapshot the in-process CB registry once so we can decorate every
     // provider row with its real state below.
