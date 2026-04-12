@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from '@tanstack/react-router';
 import { Button } from '@/components/ui/button';
@@ -16,13 +16,6 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
   Table,
   TableBody,
   TableCell,
@@ -33,16 +26,10 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/confirm-dialog';
-import { AlertCircle, Pencil, Plus, Trash2, UserPlus, Users, X } from 'lucide-react';
-import { api, apiDelete, apiPatch, apiPost, hasPermission } from '@/lib/api';
-import type { Team, TeamMember } from '@/lib/types';
+import { AlertCircle, MoreHorizontal, Plus, Trash2, Users } from 'lucide-react';
+import { api, apiDelete, apiPost, hasPermission } from '@/lib/api';
+import type { Team } from '@/lib/types';
 import { toast } from 'sonner';
-
-interface UserSummary {
-  id: string;
-  email: string;
-  display_name: string;
-}
 
 export function TeamsPage() {
   const { t } = useTranslation();
@@ -51,9 +38,8 @@ export function TeamsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
-  // Create / edit
+  // Create
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [editing, setEditing] = useState<Team | null>(null);
   const [formName, setFormName] = useState('');
   const [formDesc, setFormDesc] = useState('');
   const [formError, setFormError] = useState('');
@@ -61,15 +47,6 @@ export function TeamsPage() {
 
   // Delete
   const [deleteTarget, setDeleteTarget] = useState<Team | null>(null);
-
-  // Members
-  const [membersOpen, setMembersOpen] = useState<Team | null>(null);
-  const [members, setMembers] = useState<TeamMember[]>([]);
-  const [membersLoading, setMembersLoading] = useState(false);
-  const [allUsers, setAllUsers] = useState<UserSummary[]>([]);
-  const [pendingUserId, setPendingUserId] = useState('');
-  const [pendingRole, setPendingRole] = useState<'member' | 'manager'>('member');
-  const [memberError, setMemberError] = useState('');
 
   const fetchTeams = async () => {
     setLoading(true);
@@ -88,20 +65,9 @@ export function TeamsPage() {
     void fetchTeams();
   }, []);
 
-  // ----- Create / edit -----
-
   const openCreate = () => {
-    setEditing(null);
     setFormName('');
     setFormDesc('');
-    setFormError('');
-    setDialogOpen(true);
-  };
-
-  const openEdit = (team: Team) => {
-    setEditing(team);
-    setFormName(team.name);
-    setFormDesc(team.description ?? '');
     setFormError('');
     setDialogOpen(true);
   };
@@ -115,16 +81,8 @@ export function TeamsPage() {
     }
     setSaving(true);
     try {
-      if (editing) {
-        await apiPatch(`/api/admin/teams/${editing.id}`, {
-          name: formName,
-          description: formDesc || null,
-        });
-        toast.success(t('teams.toast.updated'));
-      } else {
-        await apiPost('/api/admin/teams', { name: formName, description: formDesc || null });
-        toast.success(t('teams.toast.created'));
-      }
+      await apiPost('/api/admin/teams', { name: formName, description: formDesc || null });
+      toast.success(t('teams.toast.created'));
       setDialogOpen(false);
       await fetchTeams();
     } catch (err) {
@@ -145,79 +103,6 @@ export function TeamsPage() {
       toast.error(err instanceof Error ? err.message : 'Failed to delete');
     }
   };
-
-  // ----- Members -----
-
-  const openMembers = async (team: Team) => {
-    setMembersOpen(team);
-    setMembers([]);
-    setMembersLoading(true);
-    setMemberError('');
-    setPendingUserId('');
-    setPendingRole('member');
-    try {
-      const [m, users] = await Promise.all([
-        api<TeamMember[]>(`/api/admin/teams/${team.id}/members`),
-        // We need a way to look up candidate users to add. The
-        // existing /api/admin/users endpoint is gated by users:read
-        // — admins have it. team_managers will see only their own
-        // owned set, which is fine: they're typically adding
-        // existing employees who landed here via SSO or were created
-        // by a super_admin.
-        api<{ data: UserSummary[] }>('/api/admin/users?per_page=200').catch(() => ({ data: [] })),
-      ]);
-      setMembers(m);
-      setAllUsers(users.data ?? []);
-    } catch (err) {
-      setMemberError(err instanceof Error ? err.message : 'Failed to load members');
-    } finally {
-      setMembersLoading(false);
-    }
-  };
-
-  const addMember = async () => {
-    if (!membersOpen || !pendingUserId) return;
-    setMemberError('');
-    try {
-      await apiPost(`/api/admin/teams/${membersOpen.id}/members`, {
-        user_id: pendingUserId,
-        role: pendingRole,
-      });
-      setPendingUserId('');
-      // Refresh the members list
-      const m = await api<TeamMember[]>(`/api/admin/teams/${membersOpen.id}/members`);
-      setMembers(m);
-      // Bump the count locally so the table updates without a full fetch
-      setTeams((prev) =>
-        prev.map((t) =>
-          t.id === membersOpen.id ? { ...t, member_count: t.member_count + 1 } : t,
-        ),
-      );
-    } catch (err) {
-      setMemberError(err instanceof Error ? err.message : 'Failed to add member');
-    }
-  };
-
-  const removeMember = async (userId: string) => {
-    if (!membersOpen) return;
-    try {
-      await apiDelete(`/api/admin/teams/${membersOpen.id}/members/${userId}`);
-      setMembers((prev) => prev.filter((m) => m.user_id !== userId));
-      setTeams((prev) =>
-        prev.map((t) =>
-          t.id === membersOpen.id ? { ...t, member_count: Math.max(0, t.member_count - 1) } : t,
-        ),
-      );
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to remove member');
-    }
-  };
-
-  // Users not already in the team — for the add picker.
-  const candidateUsers = useMemo(() => {
-    const inTeam = new Set(members.map((m) => m.user_id));
-    return allUsers.filter((u) => !inTeam.has(u.id));
-  }, [allUsers, members]);
 
   return (
     <div className="space-y-6">
@@ -287,19 +172,10 @@ export function TeamsPage() {
                       <Button
                         variant="ghost"
                         size="icon"
-                        onClick={() => openMembers(team)}
-                        title={t('teams.manageMembers')}
+                        onClick={() => navigate({ to: '/admin/teams/$id', params: { id: team.id } })}
+                        title={t('teams.viewDetail')}
                       >
-                        <Users className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => openEdit(team)}
-                        title={t('common.edit')}
-                        disabled={!hasPermission('teams:update')}
-                      >
-                        <Pencil className="h-4 w-4" />
+                        <MoreHorizontal className="h-4 w-4" />
                       </Button>
                       <Button
                         variant="ghost"
@@ -319,14 +195,12 @@ export function TeamsPage() {
         </Card>
       )}
 
-      {/* --- Create / edit dialog --- */}
+      {/* --- Create dialog --- */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
         <DialogContent className="sm:max-w-md">
           <form onSubmit={submit}>
             <DialogHeader>
-              <DialogTitle>
-                {editing ? t('teams.editTitle') : t('teams.createTitle')}
-              </DialogTitle>
+              <DialogTitle>{t('teams.createTitle')}</DialogTitle>
               <DialogDescription>{t('teams.formHint')}</DialogDescription>
             </DialogHeader>
             <div className="space-y-4 py-4">
@@ -365,153 +239,6 @@ export function TeamsPage() {
               </Button>
             </DialogFooter>
           </form>
-        </DialogContent>
-      </Dialog>
-
-      {/* --- Members dialog --- */}
-      <Dialog open={membersOpen !== null} onOpenChange={(o) => !o && setMembersOpen(null)}>
-        <DialogContent className="sm:max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>
-              {t('teams.membersTitle', { team: membersOpen?.name ?? '' })}
-            </DialogTitle>
-            <DialogDescription>{t('teams.membersHint')}</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4">
-            {memberError && (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{memberError}</AlertDescription>
-              </Alert>
-            )}
-
-            {hasPermission('team_members:write') && (
-              <div className="flex items-end gap-2">
-                <div className="flex-1 space-y-1">
-                  <Label className="text-xs">{t('teams.addMemberUser')}</Label>
-                  <Select value={pendingUserId} onValueChange={setPendingUserId}>
-                    <SelectTrigger>
-                      <SelectValue placeholder={t('teams.selectUser')} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {candidateUsers.map((u) => (
-                        <SelectItem key={u.id} value={u.id}>
-                          {u.display_name || u.email}{' '}
-                          <span className="text-muted-foreground">({u.email})</span>
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">{t('teams.role')}</Label>
-                  <Select
-                    value={pendingRole}
-                    onValueChange={(v) => setPendingRole(v as 'member' | 'manager')}
-                  >
-                    <SelectTrigger className="w-32">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="member">{t('teams.roleMember')}</SelectItem>
-                      <SelectItem value="manager">{t('teams.roleManager')}</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <Button
-                  type="button"
-                  size="sm"
-                  onClick={addMember}
-                  disabled={!pendingUserId}
-                >
-                  <UserPlus className="mr-1 h-4 w-4" />
-                  {t('teams.add')}
-                </Button>
-              </div>
-            )}
-
-            {membersLoading ? (
-              <div className="space-y-2">
-                {[...Array(3)].map((_, i) => (
-                  <Skeleton key={i} className="h-10 w-full" />
-                ))}
-              </div>
-            ) : members.length === 0 ? (
-              <p className="py-8 text-center text-sm text-muted-foreground">
-                {t('teams.noMembers')}
-              </p>
-            ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>{t('teams.member')}</TableHead>
-                    <TableHead>{t('teams.role')}</TableHead>
-                    <TableHead className="text-right">{t('common.actions')}</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {members.map((m) => (
-                    <TableRow key={m.user_id}>
-                      <TableCell>
-                        <div className="font-medium">{m.display_name || m.email}</div>
-                        <div className="text-xs text-muted-foreground">{m.email}</div>
-                      </TableCell>
-                      <TableCell>
-                        {hasPermission('team_members:write') ? (
-                          <Select
-                            value={m.role}
-                            onValueChange={async (newRole) => {
-                              if (!membersOpen || newRole === m.role) return;
-                              try {
-                                await apiPost(`/api/admin/teams/${membersOpen.id}/members`, {
-                                  user_id: m.user_id,
-                                  role: newRole,
-                                });
-                                const refreshed = await api<TeamMember[]>(
-                                  `/api/admin/teams/${membersOpen.id}/members`,
-                                );
-                                setMembers(refreshed);
-                              } catch (err) {
-                                toast.error(
-                                  err instanceof Error ? err.message : 'Failed to update role',
-                                );
-                              }
-                            }}
-                          >
-                            <SelectTrigger className="w-32">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="member">{t('teams.roleMember')}</SelectItem>
-                              <SelectItem value="manager">{t('teams.roleManager')}</SelectItem>
-                            </SelectContent>
-                          </Select>
-                        ) : (
-                          <Badge variant="outline">{m.role}</Badge>
-                        )}
-                      </TableCell>
-                      <TableCell className="text-right">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => removeMember(m.user_id)}
-                          disabled={!hasPermission('team_members:write')}
-                          title={t('teams.remove')}
-                        >
-                          <X className="h-4 w-4" />
-                        </Button>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setMembersOpen(null)}>
-              {t('common.done')}
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
 

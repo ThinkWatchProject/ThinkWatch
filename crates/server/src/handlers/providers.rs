@@ -499,6 +499,9 @@ pub struct TestProviderResponse {
     /// Number of models returned by the upstream `/v1/models` (where applicable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_count: Option<usize>,
+    /// Model IDs returned by the upstream.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub models: Option<Vec<String>>,
 }
 
 /// Authenticated route — used by the providers admin page.
@@ -601,15 +604,29 @@ async fn run_provider_test(
             let status = resp.status();
             let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
             if status.is_success() {
-                // Try to count models from the standard shape: { "data": [...] }
-                // or anthropic's { "data": [...] } / google's { "models": [...] }.
-                let model_count = body
+                // Extract model list from standard shapes:
+                // OpenAI/Anthropic: { "data": [{ "id": "..." }, ...] }
+                // Google:           { "models": [{ "name": "models/..." }, ...] }
+                let models_array = body
                     .get("data")
-                    .and_then(|v| v.as_array().map(|a| a.len()))
-                    .or_else(|| {
-                        body.get("models")
-                            .and_then(|v| v.as_array().map(|a| a.len()))
-                    });
+                    .and_then(|v| v.as_array())
+                    .or_else(|| body.get("models").and_then(|v| v.as_array()));
+
+                let (model_count, models) = if let Some(arr) = models_array {
+                    let ids: Vec<String> = arr
+                        .iter()
+                        .filter_map(|m| {
+                            m.get("id")
+                                .or_else(|| m.get("name"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect();
+                    (Some(ids.len()), Some(ids))
+                } else {
+                    (None, None)
+                };
+
                 Ok(Json(TestProviderResponse {
                     success: true,
                     message: match model_count {
@@ -619,6 +636,7 @@ async fn run_provider_test(
                     status_code: Some(status.as_u16()),
                     latency_ms,
                     model_count,
+                    models,
                 }))
             } else {
                 let upstream_err = body
@@ -633,6 +651,7 @@ async fn run_provider_test(
                     status_code: Some(status.as_u16()),
                     latency_ms,
                     model_count: None,
+                    models: None,
                 }))
             }
         }
@@ -642,6 +661,7 @@ async fn run_provider_test(
             status_code: None,
             latency_ms,
             model_count: None,
+            models: None,
         })),
     }
 }

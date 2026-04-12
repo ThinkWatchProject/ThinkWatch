@@ -44,6 +44,12 @@ impl AuthUser {
     /// every role the user holds (see `rbac::compute_user_permissions`).
     /// Returns `AppError::Forbidden` if the permission is not present.
     pub fn require_permission(&self, perm: &str) -> Result<(), AppError> {
+        // Deny always wins over Allow.
+        if self.claims.denied_permissions.iter().any(|p| p == perm) {
+            return Err(AppError::Forbidden(format!(
+                "Permission explicitly denied: {perm}"
+            )));
+        }
         if self.claims.permissions.iter().any(|p| p == perm) {
             Ok(())
         } else {
@@ -106,12 +112,20 @@ impl AuthUser {
         pool: &sqlx::PgPool,
         perm: &str,
     ) -> Result<(), AppError> {
+        // Check direct global assignments + team-inherited roles
+        // (team-inherited roles act as global scope).
         let has: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM rbac_role_assignments ra
                    JOIN rbac_roles r ON r.id = ra.role_id
                   WHERE ra.user_id = $1
                     AND ra.scope_kind = 'global'
+                    AND $2 = ANY(r.permissions)
+                 UNION ALL
+                 SELECT 1 FROM team_members tm
+                   JOIN team_role_assignments tra ON tra.team_id = tm.team_id
+                   JOIN rbac_roles r ON r.id = tra.role_id
+                  WHERE tm.user_id = $1
                     AND $2 = ANY(r.permissions)
              )",
         )
@@ -161,6 +175,12 @@ impl AuthUser {
                                 SELECT team_id FROM team_members WHERE user_id = $3
                             ))
                     )
+                 UNION ALL
+                 SELECT 1 FROM team_members tm
+                   JOIN team_role_assignments tra ON tra.team_id = tm.team_id
+                   JOIN rbac_roles r ON r.id = tra.role_id
+                  WHERE tm.user_id = $1
+                    AND $2 = ANY(r.permissions)
              )",
         )
         .bind(self.claims.sub)
@@ -200,6 +220,12 @@ impl AuthUser {
                         ra.scope_kind = 'global'
                         OR (ra.scope_kind = 'team' AND ra.scope_id = $3)
                     )
+                 UNION ALL
+                 SELECT 1 FROM team_members tm
+                   JOIN team_role_assignments tra ON tra.team_id = tm.team_id
+                   JOIN rbac_roles r ON r.id = tra.role_id
+                  WHERE tm.user_id = $1
+                    AND $2 = ANY(r.permissions)
              )",
         )
         .bind(self.claims.sub)
@@ -246,15 +272,12 @@ impl AuthUser {
         pool: &sqlx::PgPool,
         perm: &str,
         subject_kind: &str,
-        subject_id: uuid::Uuid,
+        _subject_id: uuid::Uuid,
     ) -> Result<(), AppError> {
         match subject_kind {
-            "user" => self.assert_scope_for_user(pool, perm, subject_id).await,
-            "api_key" => self.assert_scope_for_api_key(pool, perm, subject_id).await,
-            "team" => self.assert_scope_for_team(pool, perm, subject_id).await,
-            "provider" | "mcp_server" => self.assert_scope_global(pool, perm).await,
+            "role" => self.assert_scope_global(pool, perm).await,
             other => Err(AppError::BadRequest(format!(
-                "unknown subject_kind '{other}' (expected user / api_key / team / provider / mcp_server)"
+                "unknown subject_kind '{other}' (expected: role)"
             ))),
         }
     }
@@ -277,12 +300,19 @@ impl AuthUser {
         pool: &sqlx::PgPool,
         perm: &str,
     ) -> Result<Option<std::collections::HashSet<uuid::Uuid>>, AppError> {
+        // Team-inherited roles grant global scope, so check both paths.
         let global: bool = sqlx::query_scalar(
             "SELECT EXISTS (
                  SELECT 1 FROM rbac_role_assignments ra
                    JOIN rbac_roles r ON r.id = ra.role_id
                   WHERE ra.user_id = $1
                     AND ra.scope_kind = 'global'
+                    AND $2 = ANY(r.permissions)
+                 UNION ALL
+                 SELECT 1 FROM team_members tm
+                   JOIN team_role_assignments tra ON tra.team_id = tm.team_id
+                   JOIN rbac_roles r ON r.id = tra.role_id
+                  WHERE tm.user_id = $1
                     AND $2 = ANY(r.permissions)
              )",
         )
@@ -506,6 +536,9 @@ async fn auth_via_api_key(
     let permissions = rbac::compute_user_permissions(&state.db, user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let denied_permissions = rbac::compute_denied_permissions(&state.db, user_id, &permissions)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let role_assignments = rbac::compute_user_role_assignments(&state.db, user_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -539,6 +572,7 @@ async fn auth_via_api_key(
         email,
         roles,
         permissions,
+        denied_permissions,
         role_assignments,
         exp: now + 86400,
         iat: now,

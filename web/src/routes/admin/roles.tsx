@@ -58,6 +58,7 @@ import {
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { LimitsPanel } from '@/components/limits/limits-panel';
 // Types, policy templates, and the simple↔policy conversion logic
 // live in `roles/types.ts`. The page component itself is still
 // large — owns every dialog, form, and member list — but the data
@@ -1194,6 +1195,14 @@ export function RolesPage() {
               </Tabs>
               {editMode === 'simple' && hasDangerous(editPerms, dangerousKeys) && (
                 <DangerPermissionWarning />
+              )}
+              {editRole && (
+                <LimitsPanel
+                  subjectKind="role"
+                  subjectId={editRole.id}
+                  surfaces={['ai_gateway', 'mcp_gateway']}
+                  allowBudgets={true}
+                />
               )}
             </div>
             <DialogFooter>

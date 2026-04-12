@@ -14,6 +14,7 @@ interface User {
   avatar_url: string | null;
   is_active: boolean;
   permissions?: string[];
+  denied_permissions?: string[];
 }
 
 interface LoginResponse {
@@ -21,6 +22,7 @@ interface LoginResponse {
   expires_in: number;
   signing_key: string;
   permissions?: string[];
+  denied_permissions?: string[];
   roles?: string[];
   password_change_required?: boolean;
   // When TOTP is required, only this field is returned
@@ -40,7 +42,7 @@ export function useAuth() {
     try {
       const u = await api<User>('/api/auth/me', { no401Redirect: true });
       setUser(u);
-      setCachedPermissions(u.permissions);
+      setCachedPermissions(u.permissions, u.denied_permissions);
     } catch {
       setUser(null);
       clearCachedPermissions();
@@ -63,7 +65,7 @@ export function useAuth() {
     // (for HMAC) and seed the permission cache so hasPermission()
     // works without a /me round-trip.
     sessionStorage.setItem('signing_key', res.signing_key);
-    setCachedPermissions(res.permissions);
+    setCachedPermissions(res.permissions, res.denied_permissions);
     await fetchUser();
     return res;
   };

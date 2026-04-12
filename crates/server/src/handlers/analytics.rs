@@ -322,60 +322,38 @@ pub async fn get_cost_stats(
 
     // Budget usage percentage: sum of current spend / sum of limits
     // across all enabled monthly budget caps visible to the caller.
-    let budget_usage_pct: Option<f64> =
-        {
-            use think_watch_common::limits::{self, BudgetSubject, budget};
-            // Gather monthly caps the caller can see. Global admins see all;
-            // team-scoped callers see only their teams' + their own user caps.
-            let caps: Vec<limits::BudgetCap> =
-                match &team_filter {
-                    None => sqlx::query(
-                        "SELECT id, subject_kind, subject_id, period, limit_tokens, enabled \
-                       FROM budget_caps WHERE period = 'monthly' AND enabled = true",
-                    )
-                    .fetch_all(&state.db)
-                    .await
-                    .ok()
-                    .map(|rows| rows.into_iter().filter_map(limits::row_to_cap).collect())
-                    .unwrap_or_default(),
-                    Some(team_ids) => {
-                        let mut all = Vec::new();
-                        // User's own caps
-                        if let Ok(user_caps) =
-                            limits::list_caps(&state.db, BudgetSubject::User, caller_id).await
-                        {
-                            all.extend(user_caps.into_iter().filter(|c| {
-                                c.period == limits::BudgetPeriod::Monthly && c.enabled
-                            }));
-                        }
-                        // Team caps
-                        for tid in team_ids {
-                            if let Ok(team_caps) =
-                                limits::list_caps(&state.db, BudgetSubject::Team, *tid).await
-                            {
-                                all.extend(team_caps.into_iter().filter(|c| {
-                                    c.period == limits::BudgetPeriod::Monthly && c.enabled
-                                }));
-                            }
-                        }
-                        all
-                    }
-                };
-            if caps.is_empty() {
+    let budget_usage_pct: Option<f64> = {
+        use think_watch_common::limits::{self, BudgetSubject, budget};
+        // Budget caps live on roles. Load the caller's role IDs and
+        // fetch all enabled monthly caps across those roles.
+        let role_ids = think_watch_auth::rbac::load_user_role_ids(&state.db, caller_id)
+            .await
+            .unwrap_or_default();
+        let mut caps: Vec<limits::BudgetCap> = Vec::new();
+        for rid in &role_ids {
+            if let Ok(role_caps) = limits::list_caps(&state.db, BudgetSubject::Role, *rid).await {
+                caps.extend(
+                    role_caps
+                        .into_iter()
+                        .filter(|c| c.period == limits::BudgetPeriod::Monthly && c.enabled),
+                );
+            }
+        }
+        if caps.is_empty() {
+            None
+        } else {
+            let total_limit: i64 = caps.iter().map(|c| c.limit_tokens).sum();
+            if total_limit <= 0 {
                 None
             } else {
-                let total_limit: i64 = caps.iter().map(|c| c.limit_tokens).sum();
-                if total_limit <= 0 {
-                    None
-                } else {
-                    let statuses = budget::current_spend(&state.redis, &caps)
-                        .await
-                        .unwrap_or_default();
-                    let total_current: i64 = statuses.iter().map(|s| s.current).sum();
-                    Some(total_current as f64 / total_limit as f64 * 100.0)
-                }
+                let statuses = budget::current_spend(&state.redis, &caps)
+                    .await
+                    .unwrap_or_default();
+                let total_current: i64 = statuses.iter().map(|s| s.current).sum();
+                Some(total_current as f64 / total_limit as f64 * 100.0)
             }
-        };
+        }
+    };
 
     // Hourly cost buckets for the past 24 hours
     let cost_buckets = {

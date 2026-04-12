@@ -23,12 +23,12 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, Trash2, Pencil, X, Plug, AlertCircle } from 'lucide-react';
+import { Plus, Trash2, Pencil, X, Plug, AlertCircle, Zap, Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
-import { LimitsPanel } from '@/components/limits/limits-panel';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { toast } from 'sonner';
 
 interface Provider {
@@ -78,6 +78,39 @@ export function ProvidersPage() {
   const [editError, setEditError] = useState('');
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
 
+  // Test connection state
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    success: boolean; message: string; latency_ms?: number;
+    model_count?: number; models?: string[];
+  } | null>(null);
+
+  const handleTestConnection = async (
+    type: string, url: string, key: string,
+    headers: [string, string][],
+  ) => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await apiPost<typeof testResult>(
+        '/api/admin/providers/test',
+        {
+          provider_type: type,
+          base_url: url,
+          api_key: key,
+          custom_headers: headers.length > 0
+            ? Object.fromEntries(headers.filter(([k]) => k.trim()))
+            : null,
+        },
+      );
+      setTestResult(res);
+    } catch (err) {
+      setTestResult({ success: false, message: err instanceof Error ? err.message : 'Connection failed' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   const fetchProviders = async () => {
     try {
       const data = await api<Provider[]>('/api/admin/providers');
@@ -99,6 +132,7 @@ export function ProvidersPage() {
     setApiKey('');
     setCustomHeaders([]);
     setFormError('');
+    setTestResult(null);
   };
 
   const handleCreate = async (e: FormEvent) => {
@@ -143,6 +177,7 @@ export function ProvidersPage() {
     setEditBaseUrl(p.base_url);
     setEditApiKey('');
     setEditError('');
+    setTestResult(null);
     const existing = p.config_json?.custom_headers ?? {};
     setEditCustomHeaders(Object.entries(existing));
     setEditDialogOpen(true);
@@ -263,7 +298,34 @@ export function ProvidersPage() {
                   <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
                 </Button>
               </div>
+              {testResult && (
+                <div className="space-y-2">
+                  <Alert variant={testResult.success ? 'default' : 'destructive'}>
+                    {testResult.success ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+                    <AlertDescription>
+                      {testResult.message}
+                      {testResult.latency_ms != null && ` (${testResult.latency_ms}ms)`}
+                    </AlertDescription>
+                  </Alert>
+                  {testResult.models && testResult.models.length > 0 && (
+                    <ScrollArea className="h-32 rounded-md border p-2">
+                      <ul className="space-y-0.5 text-xs font-mono">
+                        {testResult.models.map((m) => <li key={m}>{m}</li>)}
+                      </ul>
+                    </ScrollArea>
+                  )}
+                </div>
+              )}
               <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={testing || !baseUrl || !apiKey}
+                  onClick={() => handleTestConnection(providerType, baseUrl, apiKey, customHeaders)}
+                >
+                  {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
+                  {testing ? t('providers.testing') : t('providers.testConnection')}
+                </Button>
                 <Button type="submit" disabled={submitting}>
                   {submitting ? t('providers.creating') : t('providers.createProvider')}
                 </Button>
@@ -407,17 +469,36 @@ export function ProvidersPage() {
                 <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
               </Button>
             </div>
-            {editProvider && (
-              <LimitsPanel
-                subjectKind="provider"
-                subjectId={editProvider.id}
-                surfaces={['ai_gateway']}
-                allowBudgets={true}
-              />
-            )}
           </div>
+          {testResult && (
+            <div className="space-y-2">
+              <Alert variant={testResult.success ? 'default' : 'destructive'}>
+                {testResult.success ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+                <AlertDescription>
+                  {testResult.message}
+                  {testResult.latency_ms != null && ` (${testResult.latency_ms}ms)`}
+                </AlertDescription>
+              </Alert>
+              {testResult.models && testResult.models.length > 0 && (
+                <ScrollArea className="h-32 rounded-md border p-2">
+                  <ul className="space-y-0.5 text-xs font-mono">
+                    {testResult.models.map((m) => <li key={m}>{m}</li>)}
+                  </ul>
+                </ScrollArea>
+              )}
+            </div>
+          )}
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditDialogOpen(false)}>{t('common.cancel')}</Button>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={testing || !editBaseUrl || !editApiKey}
+              onClick={() => handleTestConnection(editProvider!.provider_type, editBaseUrl, editApiKey, editCustomHeaders)}
+            >
+              {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
+              {testing ? t('providers.testing') : t('providers.testConnection')}
+            </Button>
             <Button onClick={handleEdit} disabled={editSaving}>
               {editSaving ? t('common.loading') : t('common.save')}
             </Button>

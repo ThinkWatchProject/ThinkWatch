@@ -23,10 +23,10 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, Trash2, Search, Pencil, X, Server, AlertCircle } from 'lucide-react';
+import { Plus, Trash2, Search, Pencil, X, Server, AlertCircle, Zap, Loader2, CheckCircle2, XCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
-import { LimitsPanel } from '@/components/limits/limits-panel';
+import { ScrollArea } from '@/components/ui/scroll-area';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
@@ -78,6 +78,33 @@ export function McpServersPage() {
   const [editError, setEditError] = useState('');
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
 
+  // Test connection state
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    success: boolean; message: string; latency_ms?: number;
+    tools_count?: number; tools?: { name: string; description?: string }[];
+  } | null>(null);
+
+  const handleTestConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const res = await apiPost<typeof testResult>('/api/mcp/servers/test', {
+        endpoint_url: endpointUrl,
+        auth_type: authType,
+        auth_secret: authSecret || undefined,
+        custom_headers: customHeaders.length > 0
+          ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
+          : null,
+      });
+      setTestResult(res);
+    } catch (err) {
+      setTestResult({ success: false, message: err instanceof Error ? err.message : 'Connection failed' });
+    } finally {
+      setTesting(false);
+    }
+  };
+
   const fetchServers = async () => {
     try {
       const data = await api<McpServer[]>('/api/mcp/servers');
@@ -100,6 +127,7 @@ export function McpServersPage() {
     setAuthSecret('');
     setCustomHeaders([]);
     setFormError('');
+    setTestResult(null);
   };
 
   const handleCreate = async (e: FormEvent) => {
@@ -266,7 +294,39 @@ export function McpServersPage() {
                   <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
                 </Button>
               </div>
+              {testResult && (
+                <div className="space-y-2">
+                  <Alert variant={testResult.success ? 'default' : 'destructive'}>
+                    {testResult.success ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
+                    <AlertDescription>
+                      {testResult.message}
+                      {testResult.latency_ms != null && ` (${testResult.latency_ms}ms)`}
+                    </AlertDescription>
+                  </Alert>
+                  {testResult.tools && testResult.tools.length > 0 && (
+                    <ScrollArea className="h-32 rounded-md border p-2">
+                      <ul className="space-y-1 text-xs">
+                        {testResult.tools.map((tool) => (
+                          <li key={tool.name} className="flex items-baseline gap-2">
+                            <code className="font-medium">{tool.name}</code>
+                            {tool.description && <span className="text-muted-foreground truncate">{tool.description}</span>}
+                          </li>
+                        ))}
+                      </ul>
+                    </ScrollArea>
+                  )}
+                </div>
+              )}
               <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={testing || !endpointUrl}
+                  onClick={handleTestConnection}
+                >
+                  {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
+                  {testing ? t('providers.testing') : t('providers.testConnection')}
+                </Button>
                 <Button type="submit" disabled={submitting}>
                   {submitting ? t('mcpServers.registering') : t('mcpServers.registerServer')}
                 </Button>
@@ -402,14 +462,6 @@ export function McpServersPage() {
                 <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
               </Button>
             </div>
-            {editServer && (
-              <LimitsPanel
-                subjectKind="mcp_server"
-                subjectId={editServer.id}
-                surfaces={['mcp_gateway']}
-                allowBudgets={false}
-              />
-            )}
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setEditDialogOpen(false)}>{t('common.cancel')}</Button>

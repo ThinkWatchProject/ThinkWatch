@@ -69,19 +69,16 @@ pub struct TeamMemberRow {
     pub user_id: Uuid,
     pub email: String,
     pub display_name: String,
-    pub role: String, // 'member' | 'manager' on the team_members row
     pub joined_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AddMemberRequest {
     pub user_id: Uuid,
-    /// 'member' (default) or 'manager'. The team_members.role
-    /// column is informational — actual platform-level access
-    /// comes from RBAC role assignments scoped to the team.
-    #[serde(default)]
-    pub role: Option<String>,
 }
+
+/// Maximum number of teams a single user can belong to.
+const MAX_TEAMS_PER_USER: i64 = 10;
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -461,9 +458,9 @@ pub async fn list_members(
             .await?;
     }
 
-    type Row = (Uuid, String, String, String, DateTime<Utc>);
+    type Row = (Uuid, String, String, DateTime<Utc>);
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT u.id, u.email, u.display_name, tm.role, tm.joined_at \
+        "SELECT u.id, u.email, u.display_name, tm.joined_at \
            FROM team_members tm \
            JOIN users u ON u.id = tm.user_id \
           WHERE tm.team_id = $1 \
@@ -476,15 +473,12 @@ pub async fn list_members(
 
     Ok(Json(
         rows.into_iter()
-            .map(
-                |(user_id, email, display_name, role, joined_at)| TeamMemberRow {
-                    user_id,
-                    email,
-                    display_name,
-                    role,
-                    joined_at,
-                },
-            )
+            .map(|(user_id, email, display_name, joined_at)| TeamMemberRow {
+                user_id,
+                email,
+                display_name,
+                joined_at,
+            })
             .collect(),
     ))
 }
@@ -528,20 +522,24 @@ pub async fn add_member(
         return Err(AppError::NotFound("User not found".into()));
     }
 
-    let role = req.role.as_deref().unwrap_or("member");
-    if !matches!(role, "member" | "manager") {
-        return Err(AppError::BadRequest(
-            "role must be 'member' or 'manager'".into(),
-        ));
+    // Enforce max teams per user
+    let team_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM team_members WHERE user_id = $1")
+            .bind(req.user_id)
+            .fetch_one(&state.db)
+            .await?;
+    if team_count >= MAX_TEAMS_PER_USER {
+        return Err(AppError::BadRequest(format!(
+            "User already belongs to {MAX_TEAMS_PER_USER} teams (maximum)"
+        )));
     }
 
     sqlx::query(
-        "INSERT INTO team_members (user_id, team_id, role) VALUES ($1, $2, $3) \
-         ON CONFLICT (user_id, team_id) DO UPDATE SET role = EXCLUDED.role",
+        "INSERT INTO team_members (user_id, team_id) VALUES ($1, $2) \
+         ON CONFLICT (user_id, team_id) DO NOTHING",
     )
     .bind(req.user_id)
     .bind(team_id)
-    .bind(role)
     .execute(&state.db)
     .await?;
 
@@ -550,7 +548,7 @@ pub async fn add_member(
             .audit("team_member.add")
             .resource("team")
             .resource_id(team_id.to_string())
-            .detail(serde_json::json!({ "user_id": req.user_id, "role": role })),
+            .detail(serde_json::json!({ "user_id": req.user_id })),
     );
 
     Ok(Json(serde_json::json!({"status": "added"})))
@@ -599,6 +597,150 @@ pub async fn remove_member(
             .resource("team")
             .resource_id(team_id.to_string())
             .detail(serde_json::json!({ "user_id": user_id })),
+    );
+
+    Ok(Json(serde_json::json!({"status": "removed"})))
+}
+
+// ---------------------------------------------------------------------------
+// Team role assignments — roles assigned to a team are inherited by all
+// members. This turns teams into permission groups.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+pub struct TeamRoleRow {
+    pub role_id: Uuid,
+    pub name: String,
+    pub is_system: bool,
+    pub assigned_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/teams/{id}/roles",
+    tag = "Teams",
+    params(("id" = Uuid, Path, description = "Team ID")),
+    responses(
+        (status = 200, description = "List of roles assigned to team"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "Not found"),
+    ),
+    security(("bearer_token" = []))
+)]
+pub async fn list_team_roles(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(team_id): Path<Uuid>,
+) -> Result<Json<Vec<TeamRoleRow>>, AppError> {
+    auth_user.require_permission("teams:read")?;
+    auth_user
+        .assert_scope_for_team(&state.db, "teams:read", team_id)
+        .await?;
+
+    let rows: Vec<TeamRoleRow> = sqlx::query_as::<_, TeamRoleRow>(
+        "SELECT tra.role_id, r.name, r.is_system, tra.assigned_at \
+           FROM team_role_assignments tra \
+           JOIN rbac_roles r ON r.id = tra.role_id \
+          WHERE tra.team_id = $1 \
+          ORDER BY r.is_system DESC, r.name ASC",
+    )
+    .bind(team_id)
+    .fetch_all(&state.db)
+    .await?;
+
+    Ok(Json(rows))
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct AssignTeamRoleRequest {
+    pub role_id: Uuid,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/admin/teams/{id}/roles",
+    tag = "Teams",
+    params(("id" = Uuid, Path, description = "Team ID")),
+    request_body = AssignTeamRoleRequest,
+    responses(
+        (status = 200, description = "Role assigned to team"),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
+pub async fn assign_team_role(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(team_id): Path<Uuid>,
+    Json(req): Json<AssignTeamRoleRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("teams:update")?;
+    auth_user
+        .assert_scope_for_team(&state.db, "teams:update", team_id)
+        .await?;
+
+    sqlx::query(
+        "INSERT INTO team_role_assignments (team_id, role_id, assigned_by) \
+         VALUES ($1, $2, $3) \
+         ON CONFLICT (team_id, role_id) DO NOTHING",
+    )
+    .bind(team_id)
+    .bind(req.role_id)
+    .bind(auth_user.claims.sub)
+    .execute(&state.db)
+    .await?;
+
+    state.audit.log(
+        auth_user
+            .audit("team_role.assigned")
+            .resource("team")
+            .resource_id(team_id.to_string())
+            .detail(serde_json::json!({ "role_id": req.role_id })),
+    );
+
+    Ok(Json(serde_json::json!({"status": "assigned"})))
+}
+
+#[utoipa::path(
+    delete,
+    path = "/api/admin/teams/{id}/roles/{role_id}",
+    tag = "Teams",
+    params(
+        ("id" = Uuid, Path, description = "Team ID"),
+        ("role_id" = Uuid, Path, description = "Role ID"),
+    ),
+    responses(
+        (status = 200, description = "Role removed from team"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
+pub async fn remove_team_role(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path((team_id, role_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("teams:update")?;
+    auth_user
+        .assert_scope_for_team(&state.db, "teams:update", team_id)
+        .await?;
+
+    sqlx::query("DELETE FROM team_role_assignments WHERE team_id = $1 AND role_id = $2")
+        .bind(team_id)
+        .bind(role_id)
+        .execute(&state.db)
+        .await?;
+
+    state.audit.log(
+        auth_user
+            .audit("team_role.removed")
+            .resource("team")
+            .resource_id(team_id.to_string())
+            .detail(serde_json::json!({ "role_id": role_id })),
     );
 
     Ok(Json(serde_json::json!({"status": "removed"})))

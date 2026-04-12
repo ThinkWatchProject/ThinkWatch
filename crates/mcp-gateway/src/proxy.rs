@@ -153,12 +153,16 @@ impl McpProxy {
         &self,
         user_id: Uuid,
         user_roles: &[String],
+        role_ids: &[Uuid],
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
         match request.method.as_str() {
             "initialize" => self.handle_initialize(request).await,
             "tools/list" => self.handle_tools_list(user_id, user_roles, request).await,
-            "tools/call" => self.handle_tools_call(user_id, user_roles, request).await,
+            "tools/call" => {
+                self.handle_tools_call(user_id, user_roles, role_ids, request)
+                    .await
+            }
             _ => err_response(
                 request.id,
                 METHOD_NOT_FOUND,
@@ -236,6 +240,7 @@ impl McpProxy {
         &self,
         user_id: Uuid,
         user_roles: &[String],
+        role_ids: &[Uuid],
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
         // Resolve params + tool target up front so we know which MCP
@@ -274,15 +279,11 @@ impl McpProxy {
                 }
             };
 
-        // Rate limit pre-flight against the new generic engine.
-        // Subjects: (user, mcp_server). API keys aren't a thing on
-        // the MCP gateway today — auth is JWT-only — so the api_key
-        // subject is skipped. Only `requests`-metric rules are
-        // checked here; the MCP path doesn't have a tokens metric.
-        let subjects: Vec<(RateLimitSubject, Uuid)> = vec![
-            (RateLimitSubject::User, user_id),
-            (RateLimitSubject::McpServer, server.id),
-        ];
+        // Rate limit pre-flight — only role-based subjects.
+        let subjects: Vec<(RateLimitSubject, Uuid)> = role_ids
+            .iter()
+            .map(|&rid| (RateLimitSubject::Role, rid))
+            .collect();
         let rules = limits::list_enabled_rules_for_subjects(&self.db, &subjects)
             .await
             .unwrap_or_else(|e| {

@@ -39,13 +39,16 @@ interface ApiOptions<T = unknown> {
 // the cookie is opaque now.
 
 let permissionsCache: Set<string> = new Set();
+let deniedPermissionsCache: Set<string> = new Set();
 
-export function setCachedPermissions(perms: string[] | undefined): void {
+export function setCachedPermissions(perms: string[] | undefined, denied?: string[]): void {
   permissionsCache = new Set(perms ?? []);
+  deniedPermissionsCache = new Set(denied ?? []);
 }
 
 export function clearCachedPermissions(): void {
   permissionsCache = new Set();
+  deniedPermissionsCache = new Set();
 }
 
 // --- HMAC Signing (Web Crypto API) ---
@@ -146,7 +149,7 @@ async function tryRefreshToken(): Promise<boolean> {
         sessionStorage.setItem('signing_key', data.signing_key);
       }
       if (Array.isArray(data.permissions)) {
-        setCachedPermissions(data.permissions);
+        setCachedPermissions(data.permissions, data.denied_permissions);
       }
       return true;
     } catch {
@@ -250,6 +253,7 @@ export function currentUserPermissions(): string[] {
 }
 
 export function hasPermission(perm: string): boolean {
+  if (deniedPermissionsCache.has(perm)) return false;
   return permissionsCache.has(perm);
 }
 

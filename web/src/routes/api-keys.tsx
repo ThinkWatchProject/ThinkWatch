@@ -37,7 +37,6 @@ import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-import { LimitsPanel } from '@/components/limits/limits-panel';
 import { toast } from 'sonner';
 
 /// Gateway surfaces an API key may be enabled for. Mirrors the
@@ -581,14 +580,6 @@ export function ApiKeysPage() {
               <Label>{t('apiKeys.inactivityTimeout')}</Label>
               <Input type="number" value={editInactivityTimeout} onChange={(e) => setEditInactivityTimeout(e.target.value)} placeholder="0" min={0} />
             </div>
-            {editingKey && (
-              <LimitsPanel
-                subjectKind="api_key"
-                subjectId={editingKey.id}
-                surfaces={editingKey.surfaces ?? ['ai_gateway', 'mcp_gateway']}
-                allowBudgets={true}
-              />
-            )}
             <DialogFooter>
               <Button type="submit" disabled={editSubmitting}>
                 {editSubmitting ? t('common.loading') : t('common.save')}

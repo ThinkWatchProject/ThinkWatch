@@ -40,7 +40,6 @@ CREATE TABLE teams (
 CREATE TABLE team_members (
     user_id   UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     team_id   UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
-    role      VARCHAR(50) NOT NULL DEFAULT 'member',
     joined_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, team_id)
 );
@@ -105,6 +104,19 @@ CREATE TABLE rbac_role_assignments (
 CREATE INDEX idx_rbac_role_assignments_user  ON rbac_role_assignments(user_id);
 CREATE INDEX idx_rbac_role_assignments_role  ON rbac_role_assignments(role_id);
 CREATE INDEX idx_rbac_role_assignments_scope ON rbac_role_assignments(scope_kind, scope_id);
+
+-- Roles assigned to a team. All team members automatically inherit
+-- the permissions of these roles. Works like permission groups —
+-- adding a role here grants it to every current and future member.
+CREATE TABLE team_role_assignments (
+    team_id     UUID NOT NULL REFERENCES teams(id) ON DELETE CASCADE,
+    role_id     UUID NOT NULL REFERENCES rbac_roles(id) ON DELETE CASCADE,
+    assigned_by UUID REFERENCES users(id) ON DELETE SET NULL,
+    assigned_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (team_id, role_id)
+);
+
+CREATE INDEX idx_team_role_assignments_role ON team_role_assignments(role_id);
 
 -- Seed system roles. Permission catalog must stay in lockstep with the
 -- backend `PERMISSION_CATALOG` (crates/server/src/handlers/roles.rs).
@@ -373,7 +385,7 @@ CREATE TABLE rate_limit_rules (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- Who the rule applies to.
     subject_kind VARCHAR(20) NOT NULL
-        CHECK (subject_kind IN ('user', 'api_key', 'provider', 'mcp_server', 'team')),
+        CHECK (subject_kind IN ('role')),
     subject_id   UUID NOT NULL,
     -- Which gateway this rule guards. A user can have separate rules
     -- for the AI gateway and the MCP gateway.
@@ -403,7 +415,7 @@ CREATE INDEX idx_rlr_enabled  ON rate_limit_rules(enabled) WHERE enabled = TRUE;
 CREATE TABLE budget_caps (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     subject_kind VARCHAR(20) NOT NULL
-        CHECK (subject_kind IN ('user', 'api_key', 'team', 'provider')),
+        CHECK (subject_kind IN ('role')),
     subject_id   UUID NOT NULL,
     -- Natural calendar period — counters reset on the period boundary
     -- (system TZ). NOT a sliding window; that's what rate_limit_rules

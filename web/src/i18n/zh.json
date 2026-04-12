@@ -172,7 +172,10 @@
     "awsCredentials": "AWS 凭证",
     "bedrockUrlHint": "输入 AWS 区域（如 us-east-1）",
     "bedrockKeyHint": "格式：ACCESS_KEY_ID:SECRET_ACCESS_KEY",
-    "azureUrlHint": "输入 Azure OpenAI 资源端点"
+    "azureUrlHint": "输入 Azure OpenAI 资源端点",
+    "testConnection": "测试连接",
+    "testing": "测试中...",
+    "modelCount": "{{count}} 个模型"
   },
   "apiKeys": {
     "title": "API 密钥",
@@ -259,17 +262,18 @@
   },
   "teams": {
     "title": "团队",
-    "subtitle": "把用户分组,以便授予范围化的管理权限(只管某个团队的 API 密钥/成员/限速),而不必交出全局权限。",
+    "subtitle": "将用户分组并为团队分配角色，所有成员自动继承团队的角色和权限。",
     "addTeam": "添加团队",
     "allTeams": "全部团队",
     "noTeams": "尚无团队。",
     "noTeamsHint": "创建第一个团队以启用范围化管理。",
+    "viewDetail": "查看详情",
     "manageMembers": "管理成员",
     "createTitle": "创建团队",
     "editTitle": "编辑团队",
     "deleteTitle": "删除团队",
     "deleteConfirm": "删除团队 \"{{team}}\"?成员本身不会被删除,但所有针对该团队的范围化角色绑定、限速规则、预算上限都会被清理。",
-    "formHint": "团队是一个标签,其他管理员可以将 scoped 权限授予它。成员需要单独添加。",
+    "formHint": "团队将用户分组。在详情页分配角色即可授予所有成员相应权限。",
     "field": {
       "name": "名称",
       "description": "描述"
@@ -347,11 +351,20 @@
   },
   "teamDetail": {
     "members": "成员",
+    "roles": "角色",
     "apiKeys": "API 密钥",
     "budget": "预算与限额",
     "addMember": "添加成员",
     "noApiKeys": "该团队没有 API 密钥",
-    "backToTeams": "返回团队列表"
+    "backToTeams": "返回团队列表",
+    "assignRole": "分配角色",
+    "assignRoleDesc": "为团队分配角色，所有团队成员将自动继承该角色的权限。",
+    "selectRole": "选择角色",
+    "roleAssigned": "角色已分配给团队",
+    "roleRemoved": "角色已从团队移除",
+    "noRoles": "该团队未分配任何角色。",
+    "noRolesHint": "分配角色以授予所有团队成员相应权限。",
+    "assignedAt": "分配时间"
   },
   "analytics": {
     "teamFilter": "团队",
@@ -452,6 +465,8 @@
     "createUser": "创建用户",
     "roles": "角色",
     "teams": "团队",
+    "teamsHint": "用户所属的团队。权限通过团队角色继承。",
+    "addToTeam": "添加到团队...",
     "created": "创建时间",
     "forceLogout": "强制下线",
     "forceLogoutConfirm": "确定要强制该用户退出所有会话吗？",
@@ -744,6 +759,9 @@
     "zeroDisabled": "0 = 禁用",
     "allowRegistration": "开放注册",
     "allowRegistrationHint": "启用后，任何人都可以通过注册页面创建账号。",
+    "defaultRole": "新用户默认角色",
+    "defaultRoleHint": "注册或通过 SSO 登录的用户自动分配的角色。选择「无」则为零权限。",
+    "noRole": "无（零权限）",
     "clientIpTitle": "客户端 IP 解析",
     "clientIpSource": "IP 来源",
     "clientIpSourceHint": "选择如何获取客户端真实 IP 地址。",

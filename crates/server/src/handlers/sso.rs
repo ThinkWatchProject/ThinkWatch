@@ -109,14 +109,17 @@ pub async fn sso_callback(
             .fetch_one(&state.db)
             .await?;
 
-            // Assign default developer role via the unified table.
-            sqlx::query(
-                r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
-                   SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = 'developer'"#,
-            )
-            .bind(u.id)
-            .execute(&state.db)
-            .await?;
+            // Assign default role (configurable via settings; empty = no role)
+            if let Some(role_name) = state.dynamic_config.default_role().await {
+                sqlx::query(
+                    r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, assigned_by)
+                       SELECT $1, id, 'global', $1 FROM rbac_roles WHERE name = $2"#,
+                )
+                .bind(u.id)
+                .bind(&role_name)
+                .execute(&state.db)
+                .await?;
+            }
 
             u
         }
@@ -131,6 +134,9 @@ pub async fn sso_callback(
     // `rbac::compute_user_permissions` for merge semantics.
     let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user.id).await?;
     let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id).await?;
+    let denied_permissions =
+        think_watch_auth::rbac::compute_denied_permissions(&state.db, user.id, &permissions)
+            .await?;
     let role_assignments =
         think_watch_auth::rbac::compute_user_role_assignments(&state.db, user.id).await?;
 
@@ -142,6 +148,7 @@ pub async fn sso_callback(
         &user.email,
         roles.clone(),
         permissions.clone(),
+        denied_permissions.clone(),
         role_assignments.clone(),
         access_ttl,
     )?;
@@ -150,6 +157,7 @@ pub async fn sso_callback(
         &user.email,
         roles.clone(),
         permissions.clone(),
+        denied_permissions,
         role_assignments,
         refresh_ttl_days,
     )?;

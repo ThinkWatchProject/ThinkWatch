@@ -52,6 +52,11 @@ pub struct Claims {
     /// `role_assignments` field below + a live DB lookup.
     #[serde(default)]
     pub permissions: Vec<String>,
+    /// Permissions explicitly denied by policy documents. Deny wins
+    /// over Allow — if a permission appears in both `permissions` and
+    /// `denied_permissions`, it is effectively denied.
+    #[serde(default)]
+    pub denied_permissions: Vec<String>,
     /// Per-assignment scope info. Used by `auth_guard::AuthUser`'s
     /// `assert_scope_*` helpers to decide whether the caller's
     /// scope set covers the request's target subject.
@@ -87,17 +92,28 @@ impl JwtManager {
         email: &str,
         roles: Vec<String>,
         permissions: Vec<String>,
+        denied_permissions: Vec<String>,
         role_assignments: Vec<RoleAssignmentClaim>,
     ) -> anyhow::Result<String> {
-        self.create_access_token_with_ttl(user_id, email, roles, permissions, role_assignments, 900)
+        self.create_access_token_with_ttl(
+            user_id,
+            email,
+            roles,
+            permissions,
+            denied_permissions,
+            role_assignments,
+            900,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_access_token_with_ttl(
         &self,
         user_id: Uuid,
         email: &str,
         roles: Vec<String>,
         permissions: Vec<String>,
+        denied_permissions: Vec<String>,
         role_assignments: Vec<RoleAssignmentClaim>,
         ttl_secs: i64,
     ) -> anyhow::Result<String> {
@@ -107,6 +123,7 @@ impl JwtManager {
             email: email.to_string(),
             roles,
             permissions,
+            denied_permissions,
             role_assignments,
             exp: (now + Duration::seconds(ttl_secs)).timestamp(),
             iat: now.timestamp(),
@@ -114,8 +131,6 @@ impl JwtManager {
             aud: JWT_AUDIENCE.to_string(),
             iss: JWT_ISSUER.to_string(),
         };
-        // Pin algorithm to HS256 — Header::default() also returns HS256 today
-        // but we set it explicitly to defend against future default drift.
         Ok(encode(
             &Header::new(Algorithm::HS256),
             &claims,
@@ -129,17 +144,28 @@ impl JwtManager {
         email: &str,
         roles: Vec<String>,
         permissions: Vec<String>,
+        denied_permissions: Vec<String>,
         role_assignments: Vec<RoleAssignmentClaim>,
     ) -> anyhow::Result<String> {
-        self.create_refresh_token_with_ttl(user_id, email, roles, permissions, role_assignments, 7)
+        self.create_refresh_token_with_ttl(
+            user_id,
+            email,
+            roles,
+            permissions,
+            denied_permissions,
+            role_assignments,
+            7,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_refresh_token_with_ttl(
         &self,
         user_id: Uuid,
         email: &str,
         roles: Vec<String>,
         permissions: Vec<String>,
+        denied_permissions: Vec<String>,
         role_assignments: Vec<RoleAssignmentClaim>,
         ttl_days: i64,
     ) -> anyhow::Result<String> {
@@ -149,6 +175,7 @@ impl JwtManager {
             email: email.to_string(),
             roles,
             permissions,
+            denied_permissions,
             role_assignments,
             exp: (now + Duration::days(ttl_days)).timestamp(),
             iat: now.timestamp(),
@@ -236,6 +263,7 @@ mod tests {
                 vec!["admin".into()],
                 vec!["users:read".into(), "users:update".into()],
                 vec![],
+                vec![],
             )
             .expect("create should succeed");
 
@@ -259,6 +287,7 @@ mod tests {
                 "scoped@example.com",
                 vec!["team_manager".into()],
                 vec!["api_keys:update".into()],
+                vec![],
                 vec![
                     RoleAssignmentClaim {
                         role_id,
@@ -293,6 +322,7 @@ mod tests {
             email: "bob@example.com".into(),
             roles: vec![],
             permissions: vec![],
+            denied_permissions: vec![],
             role_assignments: vec![],
             exp: (now - Duration::hours(1)).timestamp(),
             iat: (now - Duration::hours(2)).timestamp(),
@@ -321,6 +351,7 @@ mod tests {
             email: "x@y.com".into(),
             roles: vec![],
             permissions: vec![],
+            denied_permissions: vec![],
             role_assignments: vec![],
             exp: (now + Duration::hours(1)).timestamp(),
             iat: now.timestamp(),
@@ -350,6 +381,7 @@ mod tests {
             email: "x@y.com".into(),
             roles: vec![],
             permissions: vec![],
+            denied_permissions: vec![],
             role_assignments: vec![],
             exp: (now + Duration::hours(1)).timestamp(),
             iat: now.timestamp(),
@@ -380,6 +412,7 @@ mod tests {
                 vec!["viewer".into()],
                 vec![],
                 vec![],
+                vec![],
             )
             .expect("create should succeed");
 
@@ -393,7 +426,15 @@ mod tests {
         let uid = test_user_id();
         let now = Utc::now().timestamp();
         let token = mgr
-            .create_access_token_with_ttl(uid, "ttl@example.com", vec![], vec![], vec![], 60)
+            .create_access_token_with_ttl(
+                uid,
+                "ttl@example.com",
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                60,
+            )
             .expect("create should succeed");
 
         let claims = mgr.verify_token(&token).expect("verify should succeed");
@@ -414,7 +455,15 @@ mod tests {
         let uid = test_user_id();
         let now = Utc::now().timestamp();
         let token = mgr
-            .create_refresh_token_with_ttl(uid, "ttl@example.com", vec![], vec![], vec![], 1)
+            .create_refresh_token_with_ttl(
+                uid,
+                "ttl@example.com",
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                1,
+            )
             .expect("create should succeed");
 
         let claims = mgr.verify_token(&token).expect("verify should succeed");

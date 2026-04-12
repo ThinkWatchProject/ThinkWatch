@@ -172,7 +172,10 @@
     "awsCredentials": "AWS Credentials",
     "bedrockUrlHint": "Enter AWS region (e.g. us-east-1)",
     "bedrockKeyHint": "Format: ACCESS_KEY_ID:SECRET_ACCESS_KEY",
-    "azureUrlHint": "Enter Azure OpenAI resource endpoint"
+    "azureUrlHint": "Enter Azure OpenAI resource endpoint",
+    "testConnection": "Test Connection",
+    "testing": "Testing...",
+    "modelCount": "{{count}} models"
   },
   "apiKeys": {
     "title": "API Keys",
@@ -259,17 +262,18 @@
   },
   "teams": {
     "title": "Teams",
-    "subtitle": "Group users so you can grant scoped admin powers (manage just one team's API keys, members, or rate limits) without handing out global access.",
+    "subtitle": "Group users and assign roles to the team. All members automatically inherit the team's roles and permissions.",
     "addTeam": "Add Team",
     "allTeams": "All Teams",
     "noTeams": "No teams yet.",
     "noTeamsHint": "Create your first team to start grouping users for scoped administration.",
+    "viewDetail": "View details",
     "manageMembers": "Manage members",
     "createTitle": "Create Team",
     "editTitle": "Edit Team",
     "deleteTitle": "Delete Team",
     "deleteConfirm": "Delete team \"{{team}}\"? Members are not deleted, but every scoped role assignment, rate-limit rule, and budget cap targeting this team is removed.",
-    "formHint": "A team is a label that other admins can grant scoped permissions to. Members are added separately.",
+    "formHint": "A team groups users together. Assign roles on the detail page to grant permissions to all members.",
     "field": {
       "name": "Name",
       "description": "Description"
@@ -347,11 +351,20 @@
   },
   "teamDetail": {
     "members": "Members",
+    "roles": "Roles",
     "apiKeys": "API Keys",
     "budget": "Budget & Limits",
     "addMember": "Add Member",
     "noApiKeys": "No API keys belong to this team",
-    "backToTeams": "Back to Teams"
+    "backToTeams": "Back to Teams",
+    "assignRole": "Assign Role",
+    "assignRoleDesc": "Assign a role to this team. All team members will inherit the role's permissions.",
+    "selectRole": "Select role",
+    "roleAssigned": "Role assigned to team",
+    "roleRemoved": "Role removed from team",
+    "noRoles": "No roles assigned to this team.",
+    "noRolesHint": "Assign roles to grant permissions to all team members.",
+    "assignedAt": "Assigned"
   },
   "analytics": {
     "teamFilter": "Team",
@@ -452,6 +465,8 @@
     "createUser": "Create User",
     "roles": "Roles",
     "teams": "Teams",
+    "teamsHint": "Teams this user belongs to. Permissions are inherited from team roles.",
+    "addToTeam": "Add to team...",
     "created": "Created",
     "forceLogout": "Force Logout",
     "forceLogoutConfirm": "Force logout this user from all sessions?",
@@ -744,6 +759,9 @@
     "zeroDisabled": "0 = disabled",
     "allowRegistration": "Allow Public Registration",
     "allowRegistrationHint": "When enabled, anyone can create an account through the registration page.",
+    "defaultRole": "Default Role for New Users",
+    "defaultRoleHint": "Role automatically assigned to users who register or sign in via SSO. Select 'None' for zero permissions.",
+    "noRole": "None (no permissions)",
     "clientIpTitle": "Client IP Resolution",
     "clientIpSource": "IP Source",
     "clientIpSourceHint": "How to determine the client's real IP address.",

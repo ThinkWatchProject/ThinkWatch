@@ -50,14 +50,12 @@ export default defineConfig({
       // Console API → console port (configurable via env). `ws: true`
       // forwards WebSocket upgrade requests so /api/dashboard/ws works in
       // dev exactly like in prod.
-      '/api': {
+      // Trailing slash prevents matching frontend routes like /api-keys.
+      '/api/': {
         target: process.env.VITE_CONSOLE_URL || 'http://localhost:3001',
         ws: true,
         changeOrigin: true,
       },
-      // Gateway API → gateway port (configurable via env)
-      '/v1': process.env.VITE_GATEWAY_URL || 'http://localhost:3000',
-      '/mcp': process.env.VITE_GATEWAY_URL || 'http://localhost:3000',
     },
   },
 })
