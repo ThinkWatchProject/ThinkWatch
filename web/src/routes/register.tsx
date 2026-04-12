@@ -48,6 +48,13 @@ export function RegisterPage({ onRegistered }: RegisterPageProps) {
         display_name: displayName,
         password,
       });
+      if (!res.signing_key) {
+        // Server returns 200 with empty signing_key for both success
+        // and duplicate-email to prevent user enumeration. Show a
+        // generic message so the user knows to try logging in.
+        setError(t('auth.registrationFailed'));
+        return;
+      }
       sessionStorage.setItem('signing_key', res.signing_key);
       setCachedPermissions(res.permissions);
       onRegistered(res.signing_key);
