@@ -61,10 +61,11 @@ pub struct GatewayLogsResponse {
     security(("bearer_token" = []))
 )]
 pub async fn list_gateway_logs(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Query(params): Query<GatewayLogsQuery>,
 ) -> Result<Json<GatewayLogsResponse>, AppError> {
+    auth_user.require_permission("logs:read_all")?;
     if !ch_available(&state) {
         return Ok(Json(GatewayLogsResponse {
             total: 0,

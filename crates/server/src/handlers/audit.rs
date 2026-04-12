@@ -58,10 +58,11 @@ struct ChAuditRow {
     security(("bearer_token" = []))
 )]
 pub async fn list_audit_logs(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Query(query): Query<AuditLogQuery>,
 ) -> Result<Json<AuditLogResponse>, AppError> {
+    auth_user.require_permission("logs:read_all")?;
     if !ch_available(&state) {
         return Ok(Json(AuditLogResponse {
             total: 0,

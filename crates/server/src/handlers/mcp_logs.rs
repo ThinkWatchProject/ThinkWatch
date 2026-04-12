@@ -58,10 +58,11 @@ pub struct McpLogsResponse {
     security(("bearer_token" = []))
 )]
 pub async fn list_mcp_logs(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Query(params): Query<McpLogsQuery>,
 ) -> Result<Json<McpLogsResponse>, AppError> {
+    auth_user.require_permission("logs:read_all")?;
     if !ch_available(&state) {
         return Ok(Json(McpLogsResponse {
             total: 0,

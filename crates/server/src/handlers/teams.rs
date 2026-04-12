@@ -517,9 +517,9 @@ pub async fn add_member(
         .assert_scope_for_team(&state.db, "team_members:write", team_id)
         .await?;
 
-    // Validate the user actually exists and isn't soft-deleted.
+    // Validate the user actually exists, is active, and isn't soft-deleted.
     let user_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
+        "SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL)",
     )
     .bind(req.user_id)
     .fetch_one(&state.db)

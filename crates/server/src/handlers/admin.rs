@@ -475,11 +475,37 @@ pub async fn force_logout_user(
     auth_user
         .assert_scope_for_user(&state.db, "sessions:revoke", user_id)
         .await?;
-    // Delete signing key
+    // Delete signing key (invalidates HMAC-signed requests)
     let _: () =
         fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_key:{user_id}"))
             .await
             .unwrap_or(());
+
+    // Set a password-change epoch so outstanding refresh tokens are
+    // rejected — without this the user can mint new access tokens
+    // for up to 7 days using a previously-issued refresh token.
+    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
+    let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &format!("pw_epoch:{user_id}"),
+        &chrono::Utc::now().timestamp().to_string(),
+        Some(fred::types::Expiration::EX(refresh_ttl_days * 86400)),
+        None,
+        false,
+    )
+    .await;
+
+    // Force-close live dashboard WebSockets for this user
+    let revoke_key = crate::handlers::dashboard::user_revoked_key(user_id);
+    let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &revoke_key,
+        "1",
+        Some(fred::types::Expiration::EX(300)),
+        None,
+        false,
+    )
+    .await;
 
     state.audit.log(
         auth_user
@@ -584,13 +610,19 @@ pub async fn update_user(
         }
     }
 
-    // Apply role assignment replacement. We enforce two escalation
-    // guards here:
+    // Apply role assignment replacement. Changing role assignments is
+    // a sensitive operation — require `roles:update` at global scope
+    // even for self-edits so `assert_scope_for_user`'s self-shortcut
+    // cannot be abused for privilege escalation.
     //   1. Only a super_admin can grant super_admin.
     //   2. Only admin/super_admin can grant admin.
     //   3. A super_admin cannot remove their own super_admin role
     //      (prevents locking everyone out).
     if let Some(ref assignments) = req.role_assignments {
+        auth_user.require_permission("roles:update")?;
+        auth_user
+            .assert_scope_global(&state.db, "roles:update")
+            .await?;
         let caller_has_super = auth_user.claims.roles.iter().any(|r| r == "super_admin");
         let caller_has_admin =
             caller_has_super || auth_user.claims.roles.iter().any(|r| r == "admin");
