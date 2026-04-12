@@ -97,6 +97,7 @@
     "registering": "Registering...",
     "passwordTooShort": "Password must be at least 8 characters",
     "passwordComplexity": "Password must contain at least one uppercase letter, one lowercase letter, and one digit",
+    "registrationFailed": "Registration could not be completed. If you already have an account, please sign in instead.",
     "totp": "Two-Factor Authentication",
     "totpDescription": "Add an extra layer of security with TOTP-based two-factor authentication.",
     "totpRequiredNotice": "Your administrator requires two-factor authentication. Please enable it now.",
