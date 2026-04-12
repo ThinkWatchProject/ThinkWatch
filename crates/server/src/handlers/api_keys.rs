@@ -138,7 +138,7 @@ fn normalize_surfaces(input: &[String]) -> Result<Vec<String>, AppError> {
     for s in input {
         if !ALLOWED_SURFACES.contains(&s.as_str()) {
             return Err(AppError::BadRequest(format!(
-                "Unknown surface '{s}' (allowed: ai_gateway, mcp_gateway)"
+                "Unknown surface '{s}' (allowed: ai_gateway, mcp_gateway, console)"
             )));
         }
         if !out.contains(s) {

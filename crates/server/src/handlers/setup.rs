@@ -150,8 +150,18 @@ pub async fn setup_initialize(
 
     // Validate inputs
     validate_password(&req.admin.password)?;
-    if !req.admin.email.contains('@') || !req.admin.email.contains('.') {
-        return Err(AppError::BadRequest("Invalid email format".into()));
+    {
+        let email = &req.admin.email;
+        let parts: Vec<&str> = email.splitn(2, '@').collect();
+        if parts.len() != 2
+            || parts[0].is_empty()
+            || parts[1].is_empty()
+            || !parts[1].contains('.')
+            || parts[1].starts_with('.')
+            || parts[1].ends_with('.')
+        {
+            return Err(AppError::BadRequest("Invalid email format".into()));
+        }
     }
 
     // 1. Create super_admin user
