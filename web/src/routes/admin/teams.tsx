@@ -35,23 +35,8 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { AlertCircle, Pencil, Plus, Trash2, UserPlus, Users, X } from 'lucide-react';
 import { api, apiDelete, apiPatch, apiPost, hasPermission } from '@/lib/api';
+import type { Team, TeamMember } from '@/lib/types';
 import { toast } from 'sonner';
-
-interface Team {
-  id: string;
-  name: string;
-  description: string | null;
-  member_count: number;
-  created_at: string;
-}
-
-interface TeamMember {
-  user_id: string;
-  email: string;
-  display_name: string;
-  role: string;
-  joined_at: string;
-}
 
 interface UserSummary {
   id: string;

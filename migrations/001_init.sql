@@ -27,6 +27,8 @@ CREATE TABLE users (
     UNIQUE(oidc_subject, oidc_issuer)
 );
 
+CREATE INDEX idx_users_not_deleted ON users(created_at) WHERE deleted_at IS NULL;
+
 CREATE TABLE teams (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            VARCHAR(255) NOT NULL UNIQUE,
@@ -44,6 +46,7 @@ CREATE TABLE team_members (
 );
 
 CREATE INDEX idx_team_members_user_id ON team_members(user_id);
+CREATE INDEX idx_team_members_team_id ON team_members(team_id);
 
 -- --------------------------------------------------------------------------
 -- RBAC — Unified roles + assignments
@@ -63,7 +66,7 @@ CREATE TABLE rbac_roles (
     allowed_models      TEXT[],
     allowed_mcp_servers UUID[],
     policy_document     JSONB,
-    created_by          UUID REFERENCES users(id),
+    created_by          UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -91,7 +94,7 @@ CREATE TABLE rbac_role_assignments (
         CHECK (scope_kind IN ('global', 'team')),
     scope_id     UUID REFERENCES teams(id) ON DELETE CASCADE,
     scope_marker UUID GENERATED ALWAYS AS (COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid)) STORED,
-    assigned_by  UUID REFERENCES users(id),
+    assigned_by  UUID REFERENCES users(id) ON DELETE SET NULL,
     assigned_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     PRIMARY KEY (user_id, role_id, scope_kind, scope_marker),
     CONSTRAINT chk_scope_consistency
@@ -231,7 +234,7 @@ CREATE TABLE api_keys (
     deleted_at              TIMESTAMPTZ,
     -- Lifecycle
     rotation_period_days    INTEGER,
-    rotated_from_id         UUID REFERENCES api_keys(id),
+    rotated_from_id         UUID REFERENCES api_keys(id) ON DELETE SET NULL,
     grace_period_ends_at    TIMESTAMPTZ,
     inactivity_timeout_days INTEGER,
     disabled_reason         VARCHAR(100),
@@ -250,6 +253,7 @@ CREATE INDEX idx_api_keys_key_prefix  ON api_keys(key_prefix);
 CREATE INDEX idx_api_keys_user_id     ON api_keys(user_id);
 CREATE INDEX idx_api_keys_is_active   ON api_keys(is_active)  WHERE is_active = true;
 CREATE INDEX idx_api_keys_expires_at  ON api_keys(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX idx_api_keys_not_deleted ON api_keys(created_at) WHERE deleted_at IS NULL;
 
 -- --------------------------------------------------------------------------
 -- Providers & Models
@@ -267,6 +271,8 @@ CREATE TABLE providers (
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at        TIMESTAMPTZ
 );
+
+CREATE INDEX idx_providers_not_deleted ON providers(created_at) WHERE deleted_at IS NULL;
 
 CREATE TABLE models (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -327,10 +333,10 @@ CREATE TABLE mcp_tools (
 
 CREATE TABLE usage_records (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    api_key_id      UUID REFERENCES api_keys(id),
-    user_id         UUID REFERENCES users(id),
-    team_id         UUID REFERENCES teams(id),
-    provider_id     UUID REFERENCES providers(id),
+    api_key_id      UUID REFERENCES api_keys(id) ON DELETE SET NULL,
+    user_id         UUID REFERENCES users(id) ON DELETE SET NULL,
+    team_id         UUID REFERENCES teams(id) ON DELETE SET NULL,
+    provider_id     UUID REFERENCES providers(id) ON DELETE SET NULL,
     model_id        VARCHAR(255) NOT NULL,
     request_type    VARCHAR(50)  NOT NULL,
     input_tokens    INTEGER NOT NULL DEFAULT 0,
@@ -367,7 +373,7 @@ CREATE TABLE rate_limit_rules (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- Who the rule applies to.
     subject_kind VARCHAR(20) NOT NULL
-        CHECK (subject_kind IN ('user', 'api_key', 'provider', 'mcp_server')),
+        CHECK (subject_kind IN ('user', 'api_key', 'provider', 'mcp_server', 'team')),
     subject_id   UUID NOT NULL,
     -- Which gateway this rule guards. A user can have separate rules
     -- for the AI gateway and the MCP gateway.
@@ -465,7 +471,7 @@ CREATE TABLE system_settings (
     value       JSONB NOT NULL,
     category    VARCHAR(100) NOT NULL,
     description TEXT,
-    updated_by  UUID REFERENCES users(id),
+    updated_by  UUID REFERENCES users(id) ON DELETE SET NULL,
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -516,7 +522,9 @@ INSERT INTO system_settings (key, value, category, description) VALUES
     {"name": "phone_cn",    "regex": "1[3-9]\\d{9}",                                                "placeholder_prefix": "PHONE"},
     {"name": "phone_us",    "regex": "\\b\\d{3}[-.]?\\d{3}[-.]?\\d{4}\\b",                          "placeholder_prefix": "PHONE"},
     {"name": "ipv4",        "regex": "\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b",             "placeholder_prefix": "IP"}
-]', 'security', 'PII redactor patterns (JSON array)');
+]', 'security', 'PII redactor patterns (JSON array)'),
+('security.budget_alert_webhook_url', '""', 'security', 'Webhook URL for budget cap alerts'),
+('security.trusted_proxies', '[]', 'security', 'JSON array of trusted reverse proxy IPs');
 
 -- Audit
 INSERT INTO system_settings (key, value, category, description) VALUES

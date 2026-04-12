@@ -485,15 +485,7 @@ pub async fn force_logout_user(
     // rejected — without this the user can mint new access tokens
     // for up to 7 days using a previously-issued refresh token.
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
-    let _: Result<(), _> = fred::interfaces::KeysInterface::set(
-        &state.redis,
-        &format!("pw_epoch:{user_id}"),
-        &chrono::Utc::now().timestamp().to_string(),
-        Some(fred::types::Expiration::EX(refresh_ttl_days * 86400)),
-        None,
-        false,
-    )
-    .await;
+    super::auth::invalidate_refresh_tokens(&state.redis, user_id, refresh_ttl_days).await;
 
     // Force-close live dashboard WebSockets for this user
     let revoke_key = crate::handlers::dashboard::user_revoked_key(user_id);

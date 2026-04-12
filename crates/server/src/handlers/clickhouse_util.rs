@@ -30,16 +30,6 @@ pub fn clamp_pagination(limit: Option<i64>, offset: Option<i64>, max_limit: i64)
     (limit, offset)
 }
 
-/// Helper: execute a count query and return the total.
-#[allow(dead_code)]
-pub async fn ch_count(client: &clickhouse::Client, query: &str) -> Result<u64, AppError> {
-    let total: u64 =
-        client.query(query).fetch_one().await.map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("ClickHouse count query failed: {e}"))
-        })?;
-    Ok(total)
-}
-
 /// How a column should be matched when emitted as an exclude clause.
 #[derive(Debug, Clone, Copy)]
 pub enum ExcludeMode {
