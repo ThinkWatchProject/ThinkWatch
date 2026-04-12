@@ -34,6 +34,7 @@ import {
 import { Plus, Copy, Check, Ban, RotateCw, Pencil, KeyRound, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { LimitsPanel } from '@/components/limits/limits-panel';
@@ -190,7 +191,7 @@ export function ApiKeysPage() {
   ]);
   const [expiresInDays, setExpiresInDays] = useState('');
   const [createTeamId, setCreateTeamId] = useState<string>('');
-  const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
+  const { teams } = useTeams();
 
   // Edit dialog
   const [editDialogOpen, setEditDialogOpen] = useState(false);
@@ -229,9 +230,6 @@ export function ApiKeysPage() {
 
   useEffect(() => {
     fetchKeys();
-    api<{ id: string; name: string }[]>('/api/admin/teams')
-      .then(setTeams)
-      .catch(() => setTeams([]));
   }, []);
 
   // ---------------------------------------------------------------------------

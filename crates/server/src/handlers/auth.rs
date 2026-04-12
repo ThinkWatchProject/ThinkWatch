@@ -18,6 +18,140 @@ use crate::middleware::verify_signature;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
+/// Parse a JSON request body from a raw `axum::extract::Request`,
+/// enforcing a maximum byte limit. Shared by login, register, and
+/// setup_initialize which all need to extract headers (e.g. client
+/// IP, user-agent) *before* consuming the body.
+pub(crate) async fn parse_json_body<T: serde::de::DeserializeOwned>(
+    request: axum::extract::Request,
+    max_bytes: usize,
+) -> Result<T, AppError> {
+    let body = axum::body::to_bytes(request.into_body(), max_bytes)
+        .await
+        .map_err(|_| AppError::BadRequest("Invalid request body".into()))?;
+    serde_json::from_slice(&body).map_err(|e| AppError::BadRequest(e.to_string()))
+}
+
+/// Intermediate result from [`issue_auth_session`] containing every
+/// piece of data needed to build the final HTTP response: the JWT
+/// cookies (pre-formatted as `Set-Cookie` header values) and the
+/// fields the JSON body exposes to the frontend.
+pub(crate) struct AuthSession {
+    pub signing_key: String,
+    pub permissions: Vec<String>,
+    pub roles: Vec<String>,
+    pub access_ttl: i64,
+    /// Pre-formatted Set-Cookie header values (signing, access, refresh).
+    cookie_headers: [String; 3],
+}
+
+impl AuthSession {
+    /// Append the three auth cookies to an existing response.
+    pub fn set_cookies(&self, response: &mut axum::response::Response) {
+        let headers = response.headers_mut();
+        for cookie_str in &self.cookie_headers {
+            if let Ok(v) = cookie_str.parse() {
+                headers.append(axum::http::header::SET_COOKIE, v);
+            }
+        }
+    }
+
+    /// Build a `LoginResponse`-shaped response with cookies attached.
+    pub fn into_login_response(self, password_change_required: bool) -> axum::response::Response {
+        let mut response = Json(LoginResponse {
+            token_type: "Bearer".into(),
+            expires_in: self.access_ttl,
+            signing_key: self.signing_key,
+            permissions: self.permissions,
+            roles: self.roles,
+            password_change_required: if password_change_required {
+                Some(true)
+            } else {
+                None
+            },
+        })
+        .into_response();
+        let headers = response.headers_mut();
+        for cookie_str in &self.cookie_headers {
+            if let Ok(v) = cookie_str.parse() {
+                headers.append(axum::http::header::SET_COOKIE, v);
+            }
+        }
+        response
+    }
+}
+
+/// Issue a full auth session: load RBAC, create JWT pair + signing key,
+/// and prepare cookie headers. Shared by login, register, refresh, and
+/// setup_initialize.
+pub(crate) async fn issue_auth_session(
+    state: &AppState,
+    user_id: uuid::Uuid,
+    email: &str,
+    client_ip: Option<&str>,
+) -> Result<AuthSession, AppError> {
+    let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user_id).await?;
+    let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user_id).await?;
+    let role_assignments =
+        think_watch_auth::rbac::compute_user_role_assignments(&state.db, user_id).await?;
+
+    let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
+    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
+
+    let access_token = state.jwt.create_access_token_with_ttl(
+        user_id,
+        email,
+        roles.clone(),
+        permissions.clone(),
+        role_assignments.clone(),
+        access_ttl,
+    )?;
+    let refresh_token = state.jwt.create_refresh_token_with_ttl(
+        user_id,
+        email,
+        roles.clone(),
+        permissions.clone(),
+        role_assignments,
+        refresh_ttl_days,
+    )?;
+
+    let signing_key = verify_signature::create_signing_key(&state.redis, &user_id, client_ip)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
+
+    let signing_cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
+    let access_cookie = verify_signature::access_token_cookie(&access_token, access_ttl);
+    let refresh_cookie =
+        verify_signature::refresh_token_cookie(&refresh_token, refresh_ttl_days * 86400);
+
+    Ok(AuthSession {
+        signing_key,
+        permissions,
+        roles,
+        access_ttl,
+        cookie_headers: [signing_cookie, access_cookie, refresh_cookie],
+    })
+}
+
+/// Store the password-change epoch in Redis so the refresh handler
+/// rejects refresh tokens issued before this moment. Used by
+/// `change_password` and admin `force_logout_user`.
+pub(crate) async fn invalidate_refresh_tokens(
+    redis: &fred::clients::Client,
+    user_id: uuid::Uuid,
+    refresh_ttl_days: i64,
+) {
+    let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+        redis,
+        &format!("pw_epoch:{user_id}"),
+        &chrono::Utc::now().timestamp().to_string(),
+        Some(fred::types::Expiration::EX(refresh_ttl_days * 86400)),
+        None,
+        false,
+    )
+    .await;
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ChangePasswordRequest {
     pub old_password: String,
@@ -62,11 +196,7 @@ pub async fn login(
         .map(|s| s.to_string());
 
     // Parse body
-    let body_bytes = axum::body::to_bytes(request.into_body(), 1024 * 1024)
-        .await
-        .map_err(|_| AppError::BadRequest("Invalid request body".into()))?;
-    let req: LoginRequest = serde_json::from_slice(&body_bytes)
-        .map_err(|_| AppError::BadRequest("Invalid JSON".into()))?;
+    let req: LoginRequest = parse_json_body(request, 1024 * 1024).await?;
 
     // Input validation
     if req.password.len() < 8 {
@@ -325,44 +455,6 @@ pub async fn login(
         .await
         .unwrap_or(0);
 
-    // Fetch the union of system + custom role names, the flat
-    // permission set (union of every role's `permissions`), and
-    // every (role_id, scope_kind, scope_id) assignment so the
-    // server-side scope checks have the raw assignment list. See
-    // `think_watch_auth::rbac::compute_user_permissions` for the
-    // multi-role merge semantics.
-    let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user.id).await?;
-    let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id).await?;
-    let role_assignments =
-        think_watch_auth::rbac::compute_user_role_assignments(&state.db, user.id).await?;
-
-    let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
-    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
-
-    let access_token = state.jwt.create_access_token_with_ttl(
-        user.id,
-        &user.email,
-        roles.clone(),
-        permissions.clone(),
-        role_assignments.clone(),
-        access_ttl,
-    )?;
-    let refresh_token = state.jwt.create_refresh_token_with_ttl(
-        user.id,
-        &user.email,
-        roles.clone(),
-        permissions.clone(),
-        role_assignments,
-        refresh_ttl_days,
-    )?;
-
-    let signing_key =
-        verify_signature::create_signing_key(&state.redis, &user.id, Some(&client_ip))
-            .await
-            .map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))
-            })?;
-
     let mut entry = AuditEntry::platform("auth.login")
         .user_id(user.id)
         .user_email(&user.email)
@@ -373,37 +465,8 @@ pub async fn login(
     }
     state.audit.log(entry);
 
-    // httpOnly cookies for the JWT tokens — frontend never sees
-    // them, XSS can't exfiltrate. The signing_key still goes via
-    // both cookie (server reads on signature verify) and body
-    // (page JS reads to compute write signatures, stashed in
-    // sessionStorage).
-    let signing_cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
-    let access_cookie = verify_signature::access_token_cookie(&access_token, access_ttl);
-    let refresh_cookie =
-        verify_signature::refresh_token_cookie(&refresh_token, refresh_ttl_days * 86400);
-
-    let mut response = Json(LoginResponse {
-        token_type: "Bearer".into(),
-        expires_in: access_ttl,
-        signing_key,
-        permissions: permissions.clone(),
-        roles: roles.clone(),
-        password_change_required: if user.password_change_required {
-            Some(true)
-        } else {
-            None
-        },
-    })
-    .into_response();
-
-    let headers = response.headers_mut();
-    for cookie_str in [&signing_cookie, &access_cookie, &refresh_cookie] {
-        if let Ok(v) = cookie_str.parse() {
-            headers.append(axum::http::header::SET_COOKIE, v);
-        }
-    }
-    Ok(response)
+    let session = issue_auth_session(&state, user.id, &user.email, Some(&client_ip)).await?;
+    Ok(session.into_login_response(user.password_change_required))
 }
 
 #[utoipa::path(
@@ -434,11 +497,7 @@ pub async fn register(
     .await
     .unwrap_or_else(|| "unknown".into());
 
-    let body = axum::body::to_bytes(request.into_body(), 1024 * 1024)
-        .await
-        .map_err(|_| AppError::BadRequest("Invalid request body".into()))?;
-    let req: CreateUserRequest =
-        serde_json::from_slice(&body).map_err(|e| AppError::BadRequest(e.to_string()))?;
+    let req: CreateUserRequest = parse_json_body(request, 1024 * 1024).await?;
 
     // Check if public registration is allowed
     if !state.dynamic_config.allow_registration().await {
@@ -498,40 +557,6 @@ pub async fn register(
 
     tx.commit().await?;
 
-    // Auto-login: issue tokens + cookies so the user is immediately
-    // authenticated — same flow as the login handler.
-    let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user.id).await?;
-    let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id).await?;
-    let role_assignments =
-        think_watch_auth::rbac::compute_user_role_assignments(&state.db, user.id).await?;
-
-    let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
-    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
-
-    let access_token = state.jwt.create_access_token_with_ttl(
-        user.id,
-        &user.email,
-        roles.clone(),
-        permissions.clone(),
-        role_assignments.clone(),
-        access_ttl,
-    )?;
-    let refresh_token = state.jwt.create_refresh_token_with_ttl(
-        user.id,
-        &user.email,
-        roles.clone(),
-        permissions.clone(),
-        role_assignments,
-        refresh_ttl_days,
-    )?;
-
-    let signing_key =
-        verify_signature::create_signing_key(&state.redis, &user.id, Some(&client_ip))
-            .await
-            .map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))
-            })?;
-
     state.audit.log(
         AuditEntry::platform("auth.register")
             .user_id(user.id)
@@ -540,28 +565,10 @@ pub async fn register(
             .ip_address(&client_ip),
     );
 
-    let signing_cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
-    let access_cookie = verify_signature::access_token_cookie(&access_token, access_ttl);
-    let refresh_cookie =
-        verify_signature::refresh_token_cookie(&refresh_token, refresh_ttl_days * 86400);
-
-    let mut response = Json(LoginResponse {
-        token_type: "Bearer".into(),
-        expires_in: access_ttl,
-        signing_key,
-        permissions,
-        roles,
-        password_change_required: None,
-    })
-    .into_response();
-
-    let headers = response.headers_mut();
-    for cookie_str in [&signing_cookie, &access_cookie, &refresh_cookie] {
-        if let Ok(v) = cookie_str.parse() {
-            headers.append(axum::http::header::SET_COOKIE, v);
-        }
-    }
-    Ok(response)
+    // Auto-login: issue tokens + cookies so the user is immediately
+    // authenticated — same flow as the login handler.
+    let session = issue_auth_session(&state, user.id, &user.email, Some(&client_ip)).await?;
+    Ok(session.into_login_response(false))
 }
 
 #[utoipa::path(
@@ -676,65 +683,13 @@ pub async fn refresh(
         )
         .await;
 
-    let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
-    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
-
     // Reload roles + permissions + assignments from the DB rather
     // than trusting the refresh token's snapshot. Critical: if an
     // admin revoked a role or changed scope between login and
     // refresh, the re-minted token must reflect the current state.
-    let roles = think_watch_auth::rbac::load_user_role_names(&state.db, claims.sub).await?;
-    let permissions =
-        think_watch_auth::rbac::compute_user_permissions(&state.db, claims.sub).await?;
-    let role_assignments =
-        think_watch_auth::rbac::compute_user_role_assignments(&state.db, claims.sub).await?;
-
-    let access_token = state.jwt.create_access_token_with_ttl(
-        claims.sub,
-        &claims.email,
-        roles.clone(),
-        permissions.clone(),
-        role_assignments.clone(),
-        access_ttl,
-    )?;
-    let refresh_token = state.jwt.create_refresh_token_with_ttl(
-        claims.sub,
-        &claims.email,
-        roles.clone(),
-        permissions.clone(),
-        role_assignments,
-        refresh_ttl_days,
-    )?;
-
-    let signing_key =
-        verify_signature::create_signing_key(&state.redis, &claims.sub, client_ip.as_deref())
-            .await
-            .map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))
-            })?;
-
-    let signing_cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
-    let access_cookie = verify_signature::access_token_cookie(&access_token, access_ttl);
-    let refresh_cookie =
-        verify_signature::refresh_token_cookie(&refresh_token, refresh_ttl_days * 86400);
-
-    let mut response = Json(LoginResponse {
-        token_type: "Bearer".into(),
-        expires_in: access_ttl,
-        signing_key,
-        permissions,
-        roles,
-        password_change_required: None,
-    })
-    .into_response();
-
-    let headers = response.headers_mut();
-    for cookie_str in [&signing_cookie, &access_cookie, &refresh_cookie] {
-        if let Ok(v) = cookie_str.parse() {
-            headers.append(axum::http::header::SET_COOKIE, v);
-        }
-    }
-    Ok(response)
+    let session =
+        issue_auth_session(&state, claims.sub, &claims.email, client_ip.as_deref()).await?;
+    Ok(session.into_login_response(false))
 }
 
 /// POST /api/auth/logout — clear all auth cookies.
@@ -927,16 +882,7 @@ pub async fn change_password(
     // refresh tokens issued before this moment (prevents a stolen refresh
     // token from minting new access tokens after a password change).
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
-    let epoch_key = format!("pw_epoch:{}", user.id);
-    let _: Result<(), _> = fred::interfaces::KeysInterface::set(
-        &state.redis,
-        &epoch_key,
-        &chrono::Utc::now().timestamp().to_string(),
-        Some(fred::types::Expiration::EX(refresh_ttl_days * 86400)),
-        None,
-        false,
-    )
-    .await;
+    invalidate_refresh_tokens(&state.redis, user.id, refresh_ttl_days).await;
 
     state.audit.log(
         AuditEntry::platform("auth.password_changed")

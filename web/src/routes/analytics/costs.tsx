@@ -9,16 +9,11 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { DollarSign, TrendingUp, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api } from '@/lib/api';
+import { useTeams } from '@/hooks/use-teams';
+import { TeamFilter } from '@/components/filters/team-filter';
 import { SimpleBarChart } from '@/components/ui/simple-chart';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
@@ -44,14 +39,8 @@ export function CostsPage() {
   const [error, setError] = useState('');
 
   // Team filter
-  const [teams, setTeams] = useState<{ id: string; name: string }[]>([]);
+  const { teams } = useTeams();
   const [selectedTeam, setSelectedTeam] = useState<string>('');
-
-  useEffect(() => {
-    api<{ id: string; name: string }[]>('/api/admin/teams')
-      .then(setTeams)
-      .catch(() => []);
-  }, []);
 
   const fetchData = useCallback((teamId: string) => {
     setLoading(true);
@@ -92,25 +81,7 @@ export function CostsPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('analyticsCosts.title')}</h1>
           <p className="text-muted-foreground">{t('analyticsCosts.subtitle')}</p>
         </div>
-        {teams.length > 0 && (
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-muted-foreground">{t('analytics.teamFilter')}</span>
-            <Select
-              value={selectedTeam || 'all'}
-              onValueChange={(v) => setSelectedTeam(v === 'all' ? '' : v)}
-            >
-              <SelectTrigger className="w-48">
-                <SelectValue placeholder={t('analytics.allTeams')} />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">{t('analytics.allTeams')}</SelectItem>
-                {teams.map((team) => (
-                  <SelectItem key={team.id} value={team.id}>{team.name}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-        )}
+        <TeamFilter teams={teams} value={selectedTeam} onChange={setSelectedTeam} />
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">

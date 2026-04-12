@@ -35,6 +35,8 @@ import {
 import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, Ban, CheckCircle, Users as UsersIcon, AlertCircle, Copy, Search, ChevronRight, ChevronDown } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import type { TeamSummary } from '@/lib/types';
+import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { LimitsPanel } from '@/components/limits/limits-panel';
 
@@ -72,16 +74,11 @@ interface AvailableRole {
   allowed_mcp_servers: string[] | null;
 }
 
-interface TeamSummary {
-  id: string;
-  name: string;
-}
-
 export function UsersPage() {
   const { t } = useTranslation();
   const [users, setUsers] = useState<User[]>([]);
   const [availableRoles, setAvailableRoles] = useState<AvailableRole[]>([]);
-  const [availableTeams, setAvailableTeams] = useState<TeamSummary[]>([]);
+  const { teams: availableTeams } = useTeams();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
@@ -115,13 +112,9 @@ export function UsersPage() {
 
   const fetchUsers = async () => {
     try {
-      const [usersRes, rolesRes, teamsRes] = await Promise.all([
+      const [usersRes, rolesRes] = await Promise.all([
         api<{ data: User[]; total: number }>('/api/admin/users'),
         api<{ items: AvailableRole[] }>('/api/admin/roles').catch(() => ({ items: [] })),
-        // Teams power the scope picker. team_managers can read this
-        // endpoint too — they'll just see only their own teams,
-        // which is exactly what we want for narrowing scope.
-        api<TeamSummary[]>('/api/admin/teams').catch(() => []),
       ]);
       setUsers(
         usersRes.data.map((u) => ({
@@ -131,7 +124,6 @@ export function UsersPage() {
       );
       // Unified picker — system + custom roles all show up together.
       setAvailableRoles(rolesRes.items);
-      setAvailableTeams(teamsRes);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load users');
     } finally {
