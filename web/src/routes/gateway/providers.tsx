@@ -65,6 +65,9 @@ export function ProvidersPage() {
   const [providerType, setProviderType] = useState('openai');
   const [baseUrl, setBaseUrl] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const [bedrockAuthMode, setBedrockAuthMode] = useState<'aksk' | 'imdsv2'>('aksk');
+  const [awsAccessKeyId, setAwsAccessKeyId] = useState('');
+  const [awsSecretKey, setAwsSecretKey] = useState('');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
 
   // Edit state
@@ -130,6 +133,9 @@ export function ProvidersPage() {
     setProviderType('openai');
     setBaseUrl('');
     setApiKey('');
+    setBedrockAuthMode('aksk');
+    setAwsAccessKeyId('');
+    setAwsSecretKey('');
     setCustomHeaders([]);
     setFormError('');
     setTestResult(null);
@@ -140,12 +146,15 @@ export function ProvidersPage() {
     setFormError('');
     setSubmitting(true);
     try {
+      const resolvedApiKey = providerType === 'bedrock'
+        ? (bedrockAuthMode === 'aksk' ? `${awsAccessKeyId}:${awsSecretKey}` : '')
+        : apiKey;
       await apiPost('/api/admin/providers', {
         name,
         display_name: displayName,
         provider_type: providerType,
         base_url: baseUrl,
-        api_key: apiKey,
+        api_key: resolvedApiKey,
         custom_headers: customHeaders.length > 0
           ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
           : null,
@@ -269,15 +278,40 @@ export function ProvidersPage() {
                   'https://api.openai.com'
                 } required />
               </div>
-              <div className="space-y-2">
-                <Label htmlFor="prov-key">{providerType === 'bedrock' ? t('providers.awsCredentials') : t('providers.apiKey')}</Label>
-                <Input id="prov-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={
-                  providerType === 'bedrock' ? 'ACCESS_KEY_ID:SECRET_ACCESS_KEY' : 'sk-...'
-                } required={providerType !== 'bedrock'} />
-                {providerType === 'bedrock' && (
-                  <p className="text-xs text-muted-foreground">{t('providers.bedrockKeyHint')}</p>
-                )}
-              </div>
+              {providerType === 'bedrock' ? (
+                <>
+                  <div className="space-y-2">
+                    <Label>{t('providers.awsAuthMode')}</Label>
+                    <Select value={bedrockAuthMode} onValueChange={(v) => setBedrockAuthMode(v as 'aksk' | 'imdsv2')}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="aksk">{t('providers.awsAuthAkSk')}</SelectItem>
+                        <SelectItem value="imdsv2">{t('providers.awsAuthImdsv2')}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {bedrockAuthMode === 'aksk' && (
+                    <>
+                      <div className="space-y-2">
+                        <Label htmlFor="prov-ak">Access Key ID</Label>
+                        <Input id="prov-ak" type="password" value={awsAccessKeyId} onChange={(e) => setAwsAccessKeyId(e.target.value)} placeholder="AKIA..." required />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="prov-sk">Secret Access Key</Label>
+                        <Input id="prov-sk" type="password" value={awsSecretKey} onChange={(e) => setAwsSecretKey(e.target.value)} placeholder="wJalr..." required />
+                      </div>
+                    </>
+                  )}
+                  {bedrockAuthMode === 'imdsv2' && (
+                    <p className="text-xs text-muted-foreground">{t('providers.awsImdsv2Hint')}</p>
+                  )}
+                </>
+              ) : (
+                <div className="space-y-2">
+                  <Label htmlFor="prov-key">{t('providers.apiKey')}</Label>
+                  <Input id="prov-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." required />
+                </div>
+              )}
               <div className="space-y-2">
                 <Label>{t('providers.customHeaders')}</Label>
                 <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
@@ -326,8 +360,13 @@ export function ProvidersPage() {
                 <Button
                   type="button"
                   variant="outline"
-                  disabled={testing || !baseUrl || !apiKey}
-                  onClick={() => handleTestConnection(providerType, baseUrl, apiKey, customHeaders)}
+                  disabled={testing || !baseUrl || (providerType !== 'bedrock' && !apiKey) || (providerType === 'bedrock' && bedrockAuthMode === 'aksk' && (!awsAccessKeyId || !awsSecretKey))}
+                  onClick={() => {
+                    const key = providerType === 'bedrock'
+                      ? (bedrockAuthMode === 'aksk' ? `${awsAccessKeyId}:${awsSecretKey}` : '')
+                      : apiKey;
+                    handleTestConnection(providerType, baseUrl, key, customHeaders);
+                  }}
                 >
                   {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
                   {testing ? t('providers.testing') : t('providers.testConnection')}
