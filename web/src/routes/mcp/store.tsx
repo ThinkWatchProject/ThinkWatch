@@ -14,8 +14,8 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import { Search, Download, CheckCircle2, Plus, Trash2, Loader2, Star } from 'lucide-react';
-import { api, apiPost } from '@/lib/api';
+import { Search, Download, CheckCircle2, Plus, Trash2, Loader2, Star, RefreshCw } from 'lucide-react';
+import { api, apiPost, hasPermission } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
 
@@ -63,6 +63,7 @@ export function McpStorePage() {
   const [endpointUrl, setEndpointUrl] = useState('');
   const [authSecret, setAuthSecret] = useState('');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
+  const [syncing, setSyncing] = useState(false);
   const [installing, setInstalling] = useState(false);
 
   const fetchTemplates = async () => {
@@ -155,9 +156,33 @@ export function McpStorePage() {
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold">{t('mcpStore.title')}</h1>
-        <p className="text-muted-foreground">{t('mcpStore.subtitle')}</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">{t('mcpStore.title')}</h1>
+          <p className="text-muted-foreground">{t('mcpStore.subtitle')}</p>
+        </div>
+        {hasPermission('settings:write') && (
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={syncing}
+            onClick={async () => {
+              setSyncing(true);
+              try {
+                const res = await apiPost<{ count: number }>('/api/admin/mcp-store/sync', {});
+                toast.success(t('mcpStore.syncSuccess', { count: res.count }));
+                await fetchTemplates();
+              } catch (err) {
+                toast.error(err instanceof Error ? err.message : 'Sync failed');
+              } finally {
+                setSyncing(false);
+              }
+            }}
+          >
+            {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            {t('mcpStore.syncRegistry')}
+          </Button>
+        )}
       </div>
 
       {/* Search */}

@@ -83,6 +83,8 @@
     "authSecret": "Auth Secret",
     "deployInstructions": "Deployment Instructions",
     "noTemplates": "No templates found",
+    "syncRegistry": "Sync Registry",
+    "syncSuccess": "Synced {{count}} templates from registry",
     "category": {
       "developer": "Developer",
       "database": "Database",
@@ -812,6 +814,9 @@
     "signatureDrift": "Signature Drift (seconds)",
     "nonceTtl": "Nonce TTL (seconds)",
     "cacheTtl": "Cache TTL (seconds)",
+    "mcpStoreTitle": "MCP Store",
+    "registryUrl": "Template Registry URL",
+    "registryUrlHint": "Remote JSON registry for syncing MCP store templates. Leave empty to use built-in templates only.",
     "zeroDisabled": "0 = disabled",
     "allowRegistration": "Allow Public Registration",
     "allowRegistrationHint": "When enabled, anyone can create an account through the registration page.",

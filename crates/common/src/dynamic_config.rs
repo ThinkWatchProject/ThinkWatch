@@ -442,6 +442,13 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("{key}: expected a boolean value"))?;
         }
 
+        // MCP store remote registry URL
+        "mcp_store.registry_url" => {
+            value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
+        }
+
         // Default role for new registrations (role name or empty string)
         "auth.default_role" => {
             value

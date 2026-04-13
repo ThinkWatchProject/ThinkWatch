@@ -83,6 +83,8 @@
     "authSecret": "认证密钥",
     "deployInstructions": "部署说明",
     "noTemplates": "未找到模板",
+    "syncRegistry": "同步仓库",
+    "syncSuccess": "已从仓库同步 {{count}} 个模板",
     "category": {
       "developer": "开发工具",
       "database": "数据库",
@@ -812,6 +814,9 @@
     "signatureDrift": "签名时间偏差（秒）",
     "nonceTtl": "Nonce 有效期（秒）",
     "cacheTtl": "缓存有效期（秒）",
+    "mcpStoreTitle": "MCP 商店",
+    "registryUrl": "模板仓库地址",
+    "registryUrlHint": "远程 JSON 仓库，用于同步 MCP 商店模板。留空则仅使用内置模板。",
     "zeroDisabled": "0 = 禁用",
     "allowRegistration": "开放注册",
     "allowRegistrationHint": "启用后，任何人都可以通过注册页面创建账号。",

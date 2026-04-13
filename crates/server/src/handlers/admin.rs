@@ -1644,7 +1644,7 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
-        "auth.default_role" => {
+        "auth.default_role" | "mcp_store.registry_url" => {
             value
                 .as_str()
                 .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;

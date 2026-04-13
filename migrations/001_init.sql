@@ -645,3 +645,7 @@ INSERT INTO mcp_store_templates (slug, name, description, category, tags, endpoi
 ('filesystem', 'Filesystem',   'Read and write local files, browse directories',                     'utility',        '{"files","local"}',           '',                             'none',   'Deploy locally — grants access to the configured directory',                                   'docker', false),
 ('web-search', 'Web Search',   'Search the web and fetch page content',                             'utility',        '{"search","web"}',            '',                             'api_key','Requires a search API key (Google, Bing, or Brave)',                                           'docker', true),
 ('puppeteer',  'Puppeteer',    'Browser automation — navigate, screenshot, and extract data',        'utility',        '{"browser","scraping"}',      '',                             'none',   'Deploy the Puppeteer MCP server with a headless Chrome instance',                              'docker', false);
+
+-- MCP Store
+INSERT INTO system_settings (key, value, category, description) VALUES
+('mcp_store.registry_url', '"https://thinkwatch.dev/registry/mcp-templates.json"', 'mcp_store', 'Remote registry URL for syncing MCP store templates');

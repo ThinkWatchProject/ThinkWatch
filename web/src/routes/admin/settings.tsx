@@ -68,6 +68,8 @@ export function SettingsPage() {
   const [allowRegistration, setAllowRegistration] = useState(false);
   const [defaultRole, setDefaultRole] = useState('');
   const [availableRoles, setAvailableRoles] = useState<{ id: string; name: string }[]>([]);
+  // MCP Store
+  const [registryUrl, setRegistryUrl] = useState('');
   // Gateway
   const [cacheTtl, setCacheTtl] = useState(0);
   const [requestTimeout, setRequestTimeout] = useState(30);
@@ -113,6 +115,7 @@ export function SettingsPage() {
     setNonceTtl(num(getSettingValue(data, 'security', 'signature_nonce_ttl_secs'), 600));
     setAllowRegistration(getSettingValue(data, 'auth', 'allow_registration') === true);
     setDefaultRole(str(getSettingValue(data, 'auth', 'default_role'), ''));
+    setRegistryUrl(str(getSettingValue(data, 'mcp_store', 'registry_url'), ''));
     setCacheTtl(num(getSettingValue(data, 'gateway', 'cache_ttl_secs'), 3600));
     setRequestTimeout(num(getSettingValue(data, 'gateway', 'request_timeout_secs'), 120));
     setBodyLimit(num(getSettingValue(data, 'gateway', 'body_limit_bytes'), 10485760));
@@ -185,6 +188,7 @@ export function SettingsPage() {
           'security.signature_nonce_ttl_secs': nonceTtl,
           'auth.allow_registration': allowRegistration,
           'auth.default_role': defaultRole,
+          'mcp_store.registry_url': registryUrl,
           'gateway.cache_ttl_secs': cacheTtl,
           'gateway.request_timeout_secs': requestTimeout,
           'gateway.body_limit_bytes': bodyLimit,
@@ -567,6 +571,19 @@ export function SettingsPage() {
                   readOnly
                   hint={t('settings.requiresRestart')}
                 />
+              </div>
+            </CardContent>
+          </Card>
+
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t('settings.mcpStoreTitle')}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2 max-w-2xl">
+                <Label className="text-sm">{t('settings.registryUrl')}</Label>
+                <p className="text-xs text-muted-foreground">{t('settings.registryUrlHint')}</p>
+                <Input value={registryUrl} onChange={(e) => setRegistryUrl(e.target.value)} placeholder="https://thinkwatch.dev/registry/mcp-templates.json" />
               </div>
             </CardContent>
           </Card>

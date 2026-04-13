@@ -576,6 +576,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             post(handlers::mcp_store::install_template),
         )
         .route(
+            "/api/admin/mcp-store/sync",
+            post(handlers::mcp_store::sync_registry),
+        )
+        .route(
             "/api/admin/users",
             get(handlers::admin::list_users).post(handlers::admin::create_user),
         )

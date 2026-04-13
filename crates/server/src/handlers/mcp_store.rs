@@ -293,3 +293,145 @@ pub async fn install_template(
 
     Ok(Json(server))
 }
+
+// ---------------------------------------------------------------------------
+// Remote registry sync
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+struct RegistryResponse {
+    #[allow(dead_code)]
+    version: Option<i32>,
+    templates: Vec<RegistryTemplate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RegistryTemplate {
+    slug: String,
+    name: String,
+    description: Option<String>,
+    category: Option<String>,
+    tags: Option<Vec<String>>,
+    endpoint_template: Option<String>,
+    transport_type: Option<String>,
+    auth_type: Option<String>,
+    auth_instructions: Option<String>,
+    deploy_type: Option<String>,
+    deploy_command: Option<String>,
+    deploy_docs_url: Option<String>,
+    homepage_url: Option<String>,
+    repo_url: Option<String>,
+    featured: Option<bool>,
+}
+
+/// POST /api/admin/mcp-store/sync — sync templates from a remote registry.
+/// If no body is provided, uses the configured `mcp_store.registry_url` setting.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct SyncRegistryRequest {
+    pub registry_url: Option<String>,
+}
+
+pub async fn sync_registry(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<SyncRegistryRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("settings:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "settings:write")
+        .await?;
+
+    let url = match req.registry_url {
+        Some(ref u) if !u.is_empty() => u.clone(),
+        _ => state
+            .dynamic_config
+            .get_string("mcp_store.registry_url")
+            .await
+            .unwrap_or_default(),
+    };
+
+    if url.is_empty() {
+        return Err(AppError::BadRequest(
+            "No registry URL configured. Set mcp_store.registry_url in settings or provide registry_url in the request body.".into(),
+        ));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("HTTP client error: {e}")))?;
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Failed to fetch registry: {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(AppError::BadRequest(format!(
+            "Registry returned HTTP {}",
+            resp.status()
+        )));
+    }
+
+    let registry: RegistryResponse = resp
+        .json()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Invalid registry JSON: {e}")))?;
+
+    let mut synced = 0u32;
+    for t in &registry.templates {
+        sqlx::query(
+            r#"INSERT INTO mcp_store_templates
+               (slug, name, description, category, tags, endpoint_template,
+                transport_type, auth_type, auth_instructions, deploy_type,
+                deploy_command, deploy_docs_url, homepage_url, repo_url, featured, updated_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+               ON CONFLICT (slug) DO UPDATE SET
+                 name = EXCLUDED.name,
+                 description = EXCLUDED.description,
+                 category = EXCLUDED.category,
+                 tags = EXCLUDED.tags,
+                 endpoint_template = EXCLUDED.endpoint_template,
+                 transport_type = EXCLUDED.transport_type,
+                 auth_type = EXCLUDED.auth_type,
+                 auth_instructions = EXCLUDED.auth_instructions,
+                 deploy_type = EXCLUDED.deploy_type,
+                 deploy_command = EXCLUDED.deploy_command,
+                 deploy_docs_url = EXCLUDED.deploy_docs_url,
+                 homepage_url = EXCLUDED.homepage_url,
+                 repo_url = EXCLUDED.repo_url,
+                 featured = EXCLUDED.featured,
+                 updated_at = now()"#,
+        )
+        .bind(&t.slug)
+        .bind(&t.name)
+        .bind(&t.description)
+        .bind(&t.category)
+        .bind(t.tags.as_deref().unwrap_or(&[]))
+        .bind(&t.endpoint_template)
+        .bind(t.transport_type.as_deref().unwrap_or("streamable_http"))
+        .bind(&t.auth_type)
+        .bind(&t.auth_instructions)
+        .bind(t.deploy_type.as_deref().unwrap_or("hosted"))
+        .bind(&t.deploy_command)
+        .bind(&t.deploy_docs_url)
+        .bind(&t.homepage_url)
+        .bind(&t.repo_url)
+        .bind(t.featured.unwrap_or(false))
+        .execute(&state.db)
+        .await?;
+        synced += 1;
+    }
+
+    state.audit.log(
+        auth_user
+            .audit("mcp_store.synced")
+            .resource("mcp_store")
+            .detail(serde_json::json!({ "registry_url": url, "synced": synced })),
+    );
+
+    Ok(Json(
+        serde_json::json!({"status": "synced", "count": synced, "registry_url": url}),
+    ))
+}
