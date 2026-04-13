@@ -164,6 +164,13 @@ export function ProvidersPage() {
     setTestResult(null);
   };
 
+  const defaultBaseUrl: Record<string, string> = {
+    openai: 'https://api.openai.com',
+    anthropic: 'https://api.anthropic.com',
+    google: 'https://generativelanguage.googleapis.com',
+    bedrock: 'us-east-1',
+  };
+
   const handleCreate = async (e: FormEvent) => {
     e.preventDefault();
     setFormError('');
@@ -173,7 +180,7 @@ export function ProvidersPage() {
         name,
         display_name: displayName,
         provider_type: providerType,
-        base_url: baseUrl,
+        base_url: baseUrl || defaultBaseUrl[providerType] || '',
         headers: headers.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
         ...(providerType === 'bedrock' && bedrockAuthMode === 'aksk' ? {
           config: { aws_access_key_id: awsAccessKeyId, aws_secret_access_key: awsSecretKey },
@@ -291,7 +298,7 @@ export function ProvidersPage() {
                   providerType === 'anthropic' ? 'https://api.anthropic.com' :
                   providerType === 'google' ? 'https://generativelanguage.googleapis.com' :
                   'https://api.openai.com'
-                } required />
+                } />
               </div>
               {authHeaderKey[providerType] && (
                 <div className="space-y-2">
