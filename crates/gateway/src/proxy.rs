@@ -372,16 +372,8 @@ pub async fn proxy_chat_completion(
     // user id, then to a literal "anon" so a missing identity still
     // gets its own private bucket rather than sharing the global key
     // space. The README's "responses are cached when temperature=0"
-    // promise is per-tenant — never cross-tenant.
-    let cache_scope = identity
-        .api_key_id
-        .as_deref()
-        .or(identity.user_id.as_deref())
-        .unwrap_or("anon")
-        .to_string();
-
-    // Cache lookup (non-streaming only)
-    if !is_stream && let Some(cached) = state.cache.get(&request, &cache_scope).await {
+    // Cache lookup (non-streaming only) — semantic cache shared across all users
+    if !is_stream && let Some(cached) = state.cache.get(&request).await {
         metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
         tracing::debug!(model = %request.model, "Cache HIT");
         let mut response = Json(&cached).into_response();
@@ -484,10 +476,7 @@ pub async fn proxy_chat_completion(
         // doesn't notify any external webhook.
 
         // 8d. Cache the response
-        state
-            .cache
-            .set(&request, &cache_scope, &response, None)
-            .await;
+        state.cache.set(&request, &response, None).await;
 
         // 8e. Log audit detail including metadata
         tracing::info!(

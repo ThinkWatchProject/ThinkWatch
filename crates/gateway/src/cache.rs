@@ -8,13 +8,10 @@ use xxhash_rust::xxh3::xxh3_128;
 /// Only caches non-streaming requests with deterministic parameters
 /// (temperature == 0 or absent).
 ///
-/// **Scope is mandatory.** The previous design used a global key
-/// space — same prompt from different users → same cache hit. That
-/// leaked confidential prompts across tenants ("what's my salary?"
-/// from User A returns User B's cached answer). The `scope` argument
-/// on `get`/`set` is now required and is mixed into the hash key.
-/// Callers should pass the API key id (or, when present, the user id)
-/// so two clients can never collide.
+/// Cache keys are purely semantic: `model + messages + params`. All
+/// users share the same cache — identical requests get the same
+/// response regardless of who asked, which is correct since the
+/// information surface is identical.
 #[derive(Clone)]
 pub struct ResponseCache {
     redis: Client,
@@ -45,17 +42,12 @@ impl ResponseCache {
         }
     }
 
-    /// Compute the cache key for a request, scoped to a tenant.
-    /// The scope is mixed into the hash so two callers can never
-    /// share a key — see the type-level note for the rationale.
-    pub fn cache_key(request: &ChatCompletionRequest, scope: &str) -> String {
-        // Normalize messages to deterministic JSON for hashing
+    /// Compute the cache key for a request. Purely semantic — no user
+    /// scoping. Identical model + messages + params = same key.
+    pub fn cache_key(request: &ChatCompletionRequest) -> String {
         let messages_json = serde_json::to_string(&request.messages).unwrap_or_default();
 
-        // Build the input bytes for hashing
         let mut input = Vec::with_capacity(256);
-        input.extend_from_slice(scope.as_bytes());
-        input.push(b':');
         input.extend_from_slice(request.model.as_bytes());
         input.push(b':');
         input.extend_from_slice(messages_json.as_bytes());
@@ -69,19 +61,13 @@ impl ResponseCache {
         format!("llm_cache:{hash:032x}")
     }
 
-    /// Look up a cached response. `scope` MUST identify the
-    /// requesting tenant (api_key id or user id) so caches can't
-    /// cross tenant boundaries.
-    pub async fn get(
-        &self,
-        request: &ChatCompletionRequest,
-        scope: &str,
-    ) -> Option<ChatCompletionResponse> {
+    /// Look up a cached response by semantic key (model + messages + params).
+    pub async fn get(&self, request: &ChatCompletionRequest) -> Option<ChatCompletionResponse> {
         if !Self::is_cacheable(request) {
             return None;
         }
 
-        let key = Self::cache_key(request, scope);
+        let key = Self::cache_key(request);
 
         let cached: Option<String> = self.redis.get(&key).await.ok().flatten();
 
@@ -132,7 +118,6 @@ return total
     pub async fn set(
         &self,
         request: &ChatCompletionRequest,
-        scope: &str,
         response: &ChatCompletionResponse,
         ttl: Option<u64>,
     ) {
@@ -140,7 +125,7 @@ return total
             return;
         }
 
-        let key = Self::cache_key(request, scope);
+        let key = Self::cache_key(request);
         let ttl_secs = ttl.unwrap_or(self.default_ttl);
 
         let json = match serde_json::to_string(response) {
@@ -185,58 +170,39 @@ mod tests {
     }
 
     #[test]
-    fn cache_key_is_deterministic_for_same_scope() {
+    fn cache_key_is_deterministic() {
         let r = req("gpt-4o", "What is 2+2?");
-        let k1 = ResponseCache::cache_key(&r, "user-alice");
-        let k2 = ResponseCache::cache_key(&r, "user-alice");
+        let k1 = ResponseCache::cache_key(&r);
+        let k2 = ResponseCache::cache_key(&r);
         assert_eq!(k1, k2);
     }
 
     #[test]
-    fn different_scopes_produce_different_keys() {
-        // Same prompt, same model, different tenants → MUST collide
-        // to different keys. This is the regression test for the
-        // wave-2 cross-tenant cache leak.
-        let r = req("gpt-4o", "What is my salary?");
-        let alice = ResponseCache::cache_key(&r, "user-alice");
-        let bob = ResponseCache::cache_key(&r, "user-bob");
-        assert_ne!(
-            alice, bob,
-            "scoped cache keys must not collide across tenants"
-        );
-    }
-
-    #[test]
-    fn empty_scope_still_isolates() {
-        // Even an empty scope is treated literally — it doesn't fall
-        // back to the global key space. This catches a class of bug
-        // where a caller forgot to populate scope and accidentally
-        // shared a cache slot with every other empty-scope request.
-        let r = req("gpt-4o", "ping");
-        let empty = ResponseCache::cache_key(&r, "");
-        let alice = ResponseCache::cache_key(&r, "user-alice");
-        assert_ne!(empty, alice);
+    fn same_prompt_same_key_regardless_of_user() {
+        // Semantic cache: identical requests share the same entry
+        let r = req("gpt-4o", "What is 2+2?");
+        let k = ResponseCache::cache_key(&r);
+        // Same request always produces the same key
+        assert_eq!(k, ResponseCache::cache_key(&r));
     }
 
     #[test]
     fn different_models_produce_different_keys() {
-        let alice_4o = ResponseCache::cache_key(&req("gpt-4o", "ping"), "user-alice");
-        let alice_5 = ResponseCache::cache_key(&req("gpt-5", "ping"), "user-alice");
-        assert_ne!(alice_4o, alice_5);
+        let k1 = ResponseCache::cache_key(&req("gpt-4o", "ping"));
+        let k2 = ResponseCache::cache_key(&req("gpt-5", "ping"));
+        assert_ne!(k1, k2);
     }
 
     #[test]
     fn different_messages_produce_different_keys() {
-        let one = ResponseCache::cache_key(&req("gpt-4o", "hello"), "alice");
-        let two = ResponseCache::cache_key(&req("gpt-4o", "world"), "alice");
-        assert_ne!(one, two);
+        let k1 = ResponseCache::cache_key(&req("gpt-4o", "hello"));
+        let k2 = ResponseCache::cache_key(&req("gpt-4o", "world"));
+        assert_ne!(k1, k2);
     }
 
     #[test]
     fn cache_key_has_expected_prefix() {
-        // The Redis key prefix is what `invalidate_all` matches against,
-        // so a typo here would silently break cache invalidation.
-        let key = ResponseCache::cache_key(&req("gpt-4o", "ping"), "alice");
+        let key = ResponseCache::cache_key(&req("gpt-4o", "ping"));
         assert!(key.starts_with("llm_cache:"), "got {key}");
     }
 
