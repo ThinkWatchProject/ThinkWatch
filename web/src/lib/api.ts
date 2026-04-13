@@ -27,11 +27,11 @@ interface ApiOptions<T = unknown> {
 // they can't be read out of the cookie either, so an XSS payload
 // can't exfiltrate them.
 //
-// `signing_key` is the one secret the page JS still needs to read,
-// because it has to compute HMAC signatures on write requests.
-// It's stored in sessionStorage (dies with the tab) and the server
-// also keeps a copy in an HttpOnly cookie that it reads to verify
-// the signature, so client-side and server-side stay in lock-step.
+// Request signing uses ECDSA P-256 with a client-generated key pair.
+// The private key is non-extractable (stored in IndexedDB) so XSS
+// cannot exfiltrate it. After login, the client generates a key pair
+// and registers the public key with the server via POST /api/auth/register-key.
+// No secret travels from server to client.
 //
 // `permissions` for hasPermission() come from the /api/auth/me
 // response (cached in `permissionsCache` below) — the JWT used to
@@ -51,18 +51,25 @@ export function clearCachedPermissions(): void {
   deniedPermissionsCache = new Set();
 }
 
-// --- HMAC Signing (Web Crypto API) ---
+// --- ECDSA P-256 Signing (Web Crypto API) ---
+
+/** Base64url-encode a Uint8Array (no padding). */
+function base64urlEncode(bytes: Uint8Array): string {
+  let binary = '';
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
 
 async function signRequest(
   method: string,
   path: string,
   bodyStr: string | undefined,
 ): Promise<Record<string, string>> {
-  // Signing key is stored as a non-extractable CryptoKey in IndexedDB.
+  // Private key is stored as a non-extractable CryptoKey in IndexedDB.
   // XSS cannot export the raw key material.
   const { getSigningKey } = await import('./crypto-store');
-  const cryptoKey = await getSigningKey();
-  if (!cryptoKey) return {};
+  const privateKey = await getSigningKey();
+  if (!privateKey) return {};
 
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const nonce = crypto.randomUUID();
@@ -73,22 +80,39 @@ async function signRequest(
     .map(b => b.toString(16).padStart(2, '0'))
     .join('');
 
-  // String-to-sign
+  // String-to-sign (same format as before)
   const stringToSign = `${method.toUpperCase()}\n${path}\n${timestamp}\n${nonce}\n${bodyHash}`;
 
-  // Sign with non-extractable key
+  // Sign with ECDSA P-256 + SHA-256
   const sigBytes = new Uint8Array(
-    await crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(stringToSign)),
+    await crypto.subtle.sign(
+      { name: 'ECDSA', hash: 'SHA-256' },
+      privateKey,
+      new TextEncoder().encode(stringToSign),
+    ),
   );
-  const sigHex = Array.from(sigBytes)
-    .map(b => b.toString(16).padStart(2, '0'))
-    .join('');
 
   return {
     'X-Signature-Timestamp': timestamp,
     'X-Signature-Nonce': nonce,
-    'X-Signature': `hmac-sha256:${sigHex}`,
+    'X-Signature': `ecdsa-p256:${base64urlEncode(sigBytes)}`,
   };
+}
+
+/**
+ * Generate an ECDSA key pair and register the public key with the server.
+ * Called after login, register, SSO callback, and token refresh.
+ */
+export async function registerKeyPair(): Promise<void> {
+  const { generateAndStoreKeyPair } = await import('./crypto-store');
+  const publicJwk = await generateAndStoreKeyPair();
+  // POST the public key to the server (no signature needed on this endpoint)
+  await fetch(`${API_BASE}/api/auth/register-key`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ public_key: publicJwk }),
+  });
 }
 
 // --- Token Refresh ---
@@ -136,12 +160,8 @@ async function tryRefreshToken(): Promise<boolean> {
       if (!res.ok) return false;
       const data = await res.json();
       // The new tokens are in cookies the browser already set;
-      // we only need to update sessionStorage with the new
-      // signing_key and the cached permissions.
-      if (typeof data.signing_key === 'string') {
-        const { storeSigningKey } = await import('./crypto-store');
-        await storeSigningKey(data.signing_key);
-      }
+      // generate a fresh ECDSA key pair and register the public key.
+      await registerKeyPair();
       if (Array.isArray(data.permissions)) {
         setCachedPermissions(data.permissions, data.denied_permissions);
       }
@@ -174,8 +194,8 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
   const method = options.method ?? 'GET';
   const bodyStr = options.body ? JSON.stringify(options.body) : undefined;
 
-  // Compute signature headers for write operations (sessionStorage
-  // signing_key, set by login/refresh response).
+  // Compute ECDSA signature headers for write operations (private key
+  // in IndexedDB, generated at login time).
   const sigHeaders = await signRequest(method, path, bodyStr);
 
   const res = await fetch(`${API_BASE}${path}`, {

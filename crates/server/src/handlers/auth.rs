@@ -37,17 +37,16 @@ pub(crate) async fn parse_json_body<T: serde::de::DeserializeOwned>(
 /// cookies (pre-formatted as `Set-Cookie` header values) and the
 /// fields the JSON body exposes to the frontend.
 pub(crate) struct AuthSession {
-    pub signing_key: String,
     pub permissions: Vec<String>,
     pub denied_permissions: Vec<String>,
     pub roles: Vec<String>,
     pub access_ttl: i64,
-    /// Pre-formatted Set-Cookie header values (signing, access, refresh).
-    cookie_headers: [String; 3],
+    /// Pre-formatted Set-Cookie header values (access, refresh).
+    cookie_headers: [String; 2],
 }
 
 impl AuthSession {
-    /// Append the three auth cookies to an existing response.
+    /// Append the auth cookies to an existing response.
     pub fn set_cookies(&self, response: &mut axum::response::Response) {
         let headers = response.headers_mut();
         for cookie_str in &self.cookie_headers {
@@ -62,7 +61,6 @@ impl AuthSession {
         let mut response = Json(LoginResponse {
             token_type: "Bearer".into(),
             expires_in: self.access_ttl,
-            signing_key: self.signing_key,
             permissions: self.permissions,
             denied_permissions: self.denied_permissions,
             roles: self.roles,
@@ -90,7 +88,7 @@ pub(crate) async fn issue_auth_session(
     state: &AppState,
     user_id: uuid::Uuid,
     email: &str,
-    client_ip: Option<&str>,
+    _client_ip: Option<&str>,
 ) -> Result<AuthSession, AppError> {
     // Load roles/permissions for the login response body (frontend needs them),
     // but they are NOT embedded in the JWT anymore.
@@ -113,22 +111,16 @@ pub(crate) async fn issue_auth_session(
             .jwt
             .create_refresh_token_with_ttl(user_id, email, refresh_ttl_days)?;
 
-    let signing_key = verify_signature::create_signing_key(&state.redis, &user_id, client_ip)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}")))?;
-
-    let signing_cookie = verify_signature::signing_key_cookie(&signing_key, 86400);
     let access_cookie = verify_signature::access_token_cookie(&access_token, access_ttl);
     let refresh_cookie =
         verify_signature::refresh_token_cookie(&refresh_token, refresh_ttl_days * 86400);
 
     Ok(AuthSession {
-        signing_key,
         permissions,
         denied_permissions,
         roles,
         access_ttl,
-        cookie_headers: [signing_cookie, access_cookie, refresh_cookie],
+        cookie_headers: [access_cookie, refresh_cookie],
     })
 }
 
@@ -468,6 +460,51 @@ pub async fn login(
     Ok(session.into_login_response(user.password_change_required))
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct RegisterKeyRequest {
+    pub public_key: serde_json::Value,
+}
+
+/// POST /api/auth/register-key — Register the client's ECDSA P-256 public
+/// key (JWK) for request signature verification. Called once after login.
+/// This endpoint is exempt from signature verification (chicken-and-egg).
+#[utoipa::path(
+    post,
+    path = "/api/auth/register-key",
+    tag = "Auth",
+    request_body = RegisterKeyRequest,
+    responses(
+        (status = 200, description = "Public key registered"),
+        (status = 400, description = "Invalid public key"),
+        (status = 401, description = "Unauthorized"),
+    ),
+)]
+pub async fn register_key(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<RegisterKeyRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let pubkey_json = serde_json::to_string(&req.public_key)
+        .map_err(|e| AppError::BadRequest(format!("Invalid public key JSON: {e}")))?;
+
+    // Validate that this is a valid P-256 public key by attempting to parse it
+    p256::PublicKey::from_jwk_str(&pubkey_json)
+        .map_err(|_| AppError::BadRequest("Invalid ECDSA P-256 public key JWK".into()))?;
+
+    let client_ip = auth_user.ip.as_deref();
+
+    verify_signature::store_public_key(
+        &state.redis,
+        &auth_user.claims.sub,
+        &pubkey_json,
+        client_ip,
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to store public key: {e}")))?;
+
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
 #[utoipa::path(
     post,
     path = "/api/auth/register",
@@ -530,14 +567,13 @@ pub async fn register(
         Some(u) => u,
         None => {
             // Return a generic 200 so attackers cannot enumerate which
-            // emails are registered. The response carries no signing_key
-            // or cookies — the frontend sees an empty signing_key and
-            // falls through to the login page.
+            // emails are registered. The response carries no cookies —
+            // the frontend sees expires_in=0 and falls through to the
+            // login page.
             tx.rollback().await?;
             return Ok(Json(serde_json::json!({
                 "token_type": "Bearer",
                 "expires_in": 0,
-                "signing_key": "",
                 "permissions": [],
                 "roles": [],
             }))
@@ -717,10 +753,10 @@ pub async fn logout(
 ) -> axum::response::Response {
     use axum::http::header::SET_COOKIE;
 
-    // Revoke signing key so stolen keys can't forge HMAC signatures.
-    let signing_key = format!("signing_key:{}", auth_user.claims.sub);
+    // Revoke public key so stolen sessions can't pass ECDSA verification.
+    let pubkey_key = format!("signing_pubkey:{}", auth_user.claims.sub);
     let _: Result<(), _> =
-        fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &signing_key).await;
+        fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &pubkey_key).await;
 
     let mut response = Json(serde_json::json!({"status": "ok"})).into_response();
     let headers = response.headers_mut();
@@ -880,10 +916,10 @@ pub async fn change_password(
         .execute(&state.db)
         .await?;
 
-    // Revoke all signing keys for this user (invalidates sessions)
-    let signing_key = format!("signing_key:{}", user.id);
+    // Revoke all signing public keys for this user (invalidates sessions)
+    let pubkey_key = format!("signing_pubkey:{}", user.id);
     let _: Result<(), _> =
-        fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &signing_key).await;
+        fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &pubkey_key).await;
 
     // Store the password-change epoch so the refresh handler can reject
     // refresh tokens issued before this moment (prevents a stolen refresh
@@ -929,7 +965,7 @@ pub async fn delete_account(
 
     // Revoke all sessions
     let _: () =
-        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_key:{user_id}"))
+        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_pubkey:{user_id}"))
             .await
             .unwrap_or(());
 
@@ -956,9 +992,9 @@ pub async fn revoke_sessions(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user_id = auth_user.claims.sub;
 
-    // Delete signing key (invalidates all signed requests)
+    // Delete signing public key (invalidates all signed requests)
     let _: () =
-        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_key:{user_id}"))
+        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_pubkey:{user_id}"))
             .await
             .unwrap_or(());
 

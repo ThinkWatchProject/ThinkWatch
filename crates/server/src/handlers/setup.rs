@@ -70,8 +70,6 @@ pub struct SetupInitResponse {
     pub api_key: Option<String>,
     pub provider_id: Option<uuid::Uuid>,
     pub message: String,
-    /// Per-session HMAC signing key — same as the login response.
-    pub signing_key: String,
 }
 
 /// POST /api/setup/initialize — public (only works if not initialized).
@@ -273,7 +271,6 @@ pub async fn setup_initialize(
         api_key: Some(generated.plaintext),
         provider_id,
         message: "Setup completed successfully.".into(),
-        signing_key: session.signing_key.clone(),
     })
     .into_response();
     session.set_cookies(&mut response);

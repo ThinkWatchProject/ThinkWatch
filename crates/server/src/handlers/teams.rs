@@ -35,7 +35,7 @@ use uuid::Uuid;
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
-use crate::middleware::auth_guard::AuthUser;
+use crate::middleware::auth_guard::{AuthUser, invalidate_team_perms, invalidate_user_perms};
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow, utoipa::ToSchema)]
 pub struct Team {
@@ -543,6 +543,8 @@ pub async fn add_member(
     .execute(&state.db)
     .await?;
 
+    invalidate_user_perms(&state.redis, req.user_id).await;
+
     state.audit.log(
         auth_user
             .audit("team_member.add")
@@ -590,6 +592,8 @@ pub async fn remove_member(
     if removed == 0 {
         return Err(AppError::NotFound("Member not found".into()));
     }
+
+    invalidate_user_perms(&state.redis, user_id).await;
 
     state.audit.log(
         auth_user
@@ -693,6 +697,8 @@ pub async fn assign_team_role(
     .execute(&state.db)
     .await?;
 
+    invalidate_team_perms(&state.db, &state.redis, team_id).await;
+
     state.audit.log(
         auth_user
             .audit("team_role.assigned")
@@ -734,6 +740,8 @@ pub async fn remove_team_role(
         .bind(role_id)
         .execute(&state.db)
         .await?;
+
+    invalidate_team_perms(&state.db, &state.redis, team_id).await;
 
     state.audit.log(
         auth_user

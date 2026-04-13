@@ -398,6 +398,20 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             crate::middleware::auth_guard::require_auth,
         ));
 
+    // Register-key needs auth but NOT signature verification (chicken-and-egg:
+    // the client has no key pair until this endpoint completes).
+    // The verify_signature middleware skips /api/auth/register-key explicitly.
+    let register_key_route = Router::new()
+        .route("/api/auth/register-key", post(handlers::auth::register_key))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::verify_signature::verify_signature,
+        ))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::auth_guard::require_auth,
+        ));
+
     let user_routes = Router::new()
         .route("/api/auth/me", get(handlers::auth::me))
         .route("/api/auth/password", post(handlers::auth::change_password))
@@ -725,6 +739,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .merge(health)
         .merge(docs_routes)
         .merge(logout_route)
+        .merge(register_key_route)
         .merge(public_routes)
         .merge(user_routes)
         .merge(admin_routes)

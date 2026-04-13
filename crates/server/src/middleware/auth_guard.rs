@@ -477,6 +477,59 @@ async fn load_user_permissions_cached(
     Ok((perms, denied))
 }
 
+/// Invalidate the cached permissions for a single user.
+pub async fn invalidate_user_perms(redis: &fred::clients::Client, user_id: uuid::Uuid) {
+    let _: Result<i64, _> =
+        fred::interfaces::KeysInterface::del(redis, &format!("user_perms:{user_id}")).await;
+}
+
+/// Invalidate cached permissions for ALL users who hold a given role
+/// (directly or via team membership).
+pub async fn invalidate_role_perms(
+    db: &sqlx::PgPool,
+    redis: &fred::clients::Client,
+    role_id: uuid::Uuid,
+) {
+    // Direct assignments
+    let direct: Vec<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT DISTINCT user_id FROM rbac_role_assignments WHERE role_id = $1")
+            .bind(role_id)
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
+    // Team-inherited
+    let team: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT DISTINCT tm.user_id FROM team_role_assignments tra \
+         JOIN team_members tm ON tm.team_id = tra.team_id \
+         WHERE tra.role_id = $1",
+    )
+    .bind(role_id)
+    .fetch_all(db)
+    .await
+    .unwrap_or_default();
+
+    for (uid,) in direct.into_iter().chain(team) {
+        invalidate_user_perms(redis, uid).await;
+    }
+}
+
+/// Invalidate cached permissions for ALL members of a team.
+pub async fn invalidate_team_perms(
+    db: &sqlx::PgPool,
+    redis: &fred::clients::Client,
+    team_id: uuid::Uuid,
+) {
+    let members: Vec<(uuid::Uuid,)> =
+        sqlx::query_as("SELECT user_id FROM team_members WHERE team_id = $1")
+            .bind(team_id)
+            .fetch_all(db)
+            .await
+            .unwrap_or_default();
+    for (uid,) in members {
+        invalidate_user_perms(redis, uid).await;
+    }
+}
+
 pub async fn require_auth(
     State(state): State<AppState>,
     mut request: Request<axum::body::Body>,

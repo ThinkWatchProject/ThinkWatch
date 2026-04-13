@@ -21,13 +21,12 @@ pub struct LoginRequest {
 /// that JS — cannot read them. The frontend never sees the JWT
 /// payload directly.
 ///
+/// **No signing key in the body.** Request signing uses ECDSA P-256
+/// with client-generated key pairs. The client generates a key pair
+/// after login and registers the public key via POST /api/auth/register-key.
+/// The private key (non-extractable) lives in IndexedDB.
+///
 /// What the body still carries:
-///   - `signing_key`: hex-encoded HMAC key. The browser CANNOT
-///     read the httpOnly cookie that holds this same value, but
-///     the page JS still needs the key to compute write-request
-///     signatures, so we hand it back in the body once and the
-///     frontend stashes it in `sessionStorage`. (sessionStorage,
-///     not localStorage, so it dies with the tab.)
 ///   - `permissions` / `roles`: the JWT claims the frontend used
 ///     to decode out of the access token to gate UI buttons. With
 ///     the token now opaque from JS, the server has to surface
@@ -38,9 +37,6 @@ pub struct LoginRequest {
 pub struct LoginResponse {
     pub token_type: String,
     pub expires_in: i64,
-    /// Per-session HMAC signing key (hex-encoded, 32 bytes).
-    /// Used by the frontend to sign state-changing requests.
-    pub signing_key: String,
     /// Flat union of every role's `permissions` field — the
     /// authoritative set the UI uses for hasPermission() checks.
     #[serde(default)]

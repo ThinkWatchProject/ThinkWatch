@@ -6,14 +6,14 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Shield, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { apiPost, setCachedPermissions } from '@/lib/api';
+import { apiPost, registerKeyPair, setCachedPermissions } from '@/lib/api';
 
 interface RegisterPageProps {
-  onRegistered: (signingKey: string) => void;
+  onRegistered: () => void;
 }
 
 interface RegisterResponse {
-  signing_key: string;
+  expires_in: number;
   permissions?: string[];
   denied_permissions?: string[];
 }
@@ -49,17 +49,17 @@ export function RegisterPage({ onRegistered }: RegisterPageProps) {
         display_name: displayName,
         password,
       });
-      if (!res.signing_key) {
-        // Server returns 200 with empty signing_key for both success
+      if (!res.expires_in) {
+        // Server returns 200 with expires_in=0 for both success
         // and duplicate-email to prevent user enumeration. Show a
         // generic message so the user knows to try logging in.
         setError(t('auth.registrationFailed'));
         return;
       }
-      const { storeSigningKey } = await import('@/lib/crypto-store');
-      await storeSigningKey(res.signing_key);
+      // Generate ECDSA key pair and register public key with server
+      await registerKeyPair();
       setCachedPermissions(res.permissions, res.denied_permissions);
-      onRegistered(res.signing_key);
+      onRegistered();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Registration failed');
     } finally {

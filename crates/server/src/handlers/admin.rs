@@ -43,7 +43,7 @@ use think_watch_common::models::User;
 use think_watch_common::validation::validate_password;
 
 use crate::app::AppState;
-use crate::middleware::auth_guard::AuthUser;
+use crate::middleware::auth_guard::{AuthUser, invalidate_user_perms};
 
 // --- User management ---
 
@@ -482,9 +482,9 @@ pub async fn force_logout_user(
     auth_user
         .assert_scope_for_user(&state.db, "sessions:revoke", user_id)
         .await?;
-    // Delete signing key (invalidates HMAC-signed requests)
+    // Delete signing public key (invalidates ECDSA-signed requests)
     let _: () =
-        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_key:{user_id}"))
+        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_pubkey:{user_id}"))
             .await
             .unwrap_or(());
 
@@ -598,11 +598,11 @@ pub async fn update_user(
             .execute(&state.db)
             .await?;
 
-        // If deactivating, also invalidate signing key
+        // If deactivating, also invalidate signing public key
         if !active {
             let _: () = fred::interfaces::KeysInterface::del(
                 &state.redis,
-                &format!("signing_key:{user_id}"),
+                &format!("signing_pubkey:{user_id}"),
             )
             .await
             .unwrap_or(());
@@ -664,6 +664,7 @@ pub async fn update_user(
         let mut tx = state.db.begin().await?;
         write_user_role_assignments(&mut tx, user_id, assignments, auth_user.claims.sub).await?;
         tx.commit().await?;
+        invalidate_user_perms(&state.redis, user_id).await;
     }
 
     state.audit.log(
@@ -723,9 +724,9 @@ pub async fn delete_user(
         return Err(AppError::NotFound("User not found".into()));
     }
 
-    // Invalidate signing key
+    // Invalidate signing public key
     let _: () =
-        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_key:{user_id}"))
+        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_pubkey:{user_id}"))
             .await
             .unwrap_or(());
 
@@ -786,9 +787,9 @@ pub async fn reset_user_password(
     .execute(&state.db)
     .await?;
 
-    // Invalidate signing key to force re-login
+    // Invalidate signing public key to force re-login
     let _: () =
-        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_key:{user_id}"))
+        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_pubkey:{user_id}"))
             .await
             .unwrap_or(());
 

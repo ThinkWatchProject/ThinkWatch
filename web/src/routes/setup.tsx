@@ -42,7 +42,6 @@ interface SetupResult {
   api_key?: string;
   provider_id?: string;
   message: string;
-  signing_key?: string;
 }
 
 function StepIndicator({ currentStep }: { currentStep: Step }) {
@@ -252,11 +251,10 @@ export function SetupPage() {
       }
       const data: SetupResult = await res.json();
       setResult(data);
-      // Store the signing key so the admin is authenticated immediately.
-      if (data.signing_key) {
-        const { storeSigningKey } = await import('@/lib/crypto-store');
-        await storeSigningKey(data.signing_key);
-      }
+      // Generate ECDSA key pair and register public key so the admin
+      // is authenticated immediately after setup completes.
+      const { registerKeyPair } = await import('@/lib/api');
+      await registerKeyPair();
       // Drop the cached setup status so the next router check re-fetches.
       // Without this the user has to hard-refresh after clicking
       // "go to login" because the cache still says needs_setup=true.

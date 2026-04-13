@@ -105,21 +105,15 @@ function RootComponent() {
       .catch(() => {});
   }, []);
 
-  // Handle SSO callback. The new (httpOnly cookie) flow leaves
-  // only `signing_key` in the URL fragment — access_token and
-  // refresh_token were set as cookies on the redirect response
-  // and the browser already has them. We still parse the legacy
-  // `access_token=...` shape so users mid-login during the
-  // migration don't get stranded.
+  // Handle SSO callback. Auth cookies were set on the redirect
+  // response; the fragment just signals that SSO completed. The
+  // client generates an ECDSA key pair and registers the public
+  // key with the server.
   useEffect(() => {
     const hash = window.location.hash;
-    if (hash.includes('signing_key=')) {
-      const params = new URLSearchParams(hash.slice(1));
-      const signingKey = params.get('signing_key');
-      if (signingKey) {
-        handleSsoCallback(signingKey);
-        window.history.replaceState(null, '', '/');
-      }
+    if (hash.includes('sso=ok')) {
+      handleSsoCallback();
+      window.history.replaceState(null, '', '/');
     }
   }, [handleSsoCallback]);
 

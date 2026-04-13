@@ -44,9 +44,9 @@ pub struct SsoCallbackParams {
 }
 
 /// GET /api/auth/sso/callback — handle OIDC callback. Sets the auth
-/// httpOnly cookies on the response and redirects to the frontend
-/// with only `signing_key` in the URL fragment (the page JS needs
-/// it for HMAC computation).
+/// httpOnly cookies on the response and redirects to the frontend.
+/// The client generates an ECDSA key pair locally and registers the
+/// public key with the server after the redirect.
 pub async fn sso_callback(
     State(state): State<AppState>,
     Query(params): Query<SsoCallbackParams>,
@@ -153,20 +153,10 @@ pub async fn sso_callback(
             })),
     );
 
-    // Create signing key for HMAC request signing
-    let signing_key =
-        crate::middleware::verify_signature::create_signing_key(&state.redis, &user.id, None)
-            .await
-            .map_err(|e| {
-                AppError::Internal(anyhow::anyhow!("Failed to create signing key: {e}"))
-            })?;
-
     // Build the redirect target. Tokens go via httpOnly cookies
-    // (set on this same response below); only the signing_key
-    // travels via the URL fragment so the page JS can stash it in
-    // sessionStorage for HMAC computation. Fragments aren't sent
-    // to the server on subsequent requests, so the signing_key
-    // doesn't end up in proxy logs even though it's not httpOnly.
+    // (set on this same response below). The client generates an
+    // ECDSA key pair and registers the public key via
+    // POST /api/auth/register-key after the redirect.
     let frontend_url = state
         .config
         .cors_origins
@@ -179,12 +169,7 @@ pub async fn sso_callback(
             "/"
         });
 
-    let redirect_url = format!(
-        "{}/#sso=ok&signing_key={}&expires_in={}",
-        frontend_url,
-        urlencoding::encode(&signing_key),
-        access_ttl,
-    );
+    let redirect_url = format!("{}/#sso=ok&expires_in={}", frontend_url, access_ttl,);
 
     use axum::http::header::{LOCATION, SET_COOKIE};
     let mut response = axum::response::Response::builder()
@@ -195,15 +180,13 @@ pub async fn sso_callback(
     if let Ok(loc) = redirect_url.parse() {
         headers.insert(LOCATION, loc);
     }
-    let signing_cookie =
-        crate::middleware::verify_signature::signing_key_cookie(&signing_key, 86400);
     let access_cookie =
         crate::middleware::verify_signature::access_token_cookie(&access_token, access_ttl);
     let refresh_cookie = crate::middleware::verify_signature::refresh_token_cookie(
         &refresh_token,
         refresh_ttl_days * 86400,
     );
-    for cookie_str in [&signing_cookie, &access_cookie, &refresh_cookie] {
+    for cookie_str in [&access_cookie, &refresh_cookie] {
         if let Ok(v) = cookie_str.parse() {
             headers.append(SET_COOKIE, v);
         }

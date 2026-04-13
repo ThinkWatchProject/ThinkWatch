@@ -7,7 +7,7 @@ use think_watch_auth::rbac;
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
-use crate::middleware::auth_guard::AuthUser;
+use crate::middleware::auth_guard::{AuthUser, invalidate_role_perms};
 
 /// One permission entry in the structured catalog.
 ///
@@ -702,6 +702,8 @@ pub async fn update_role(
             .await
             .unwrap_or(0);
 
+    invalidate_role_perms(&state.db, &state.redis, id).await;
+
     state.audit.log(
         auth_user
             .audit("role.updated")
@@ -791,6 +793,8 @@ pub async fn reset_role(
             .fetch_one(&state.db)
             .await
             .unwrap_or(0);
+
+    invalidate_role_perms(&state.db, &state.redis, id).await;
 
     state.audit.log(
         auth_user

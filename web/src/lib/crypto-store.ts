@@ -1,18 +1,29 @@
 /**
- * Stores the HMAC signing key as a non-extractable CryptoKey in IndexedDB.
+ * Stores an ECDSA P-256 key pair in IndexedDB with an expiry timestamp.
  *
- * XSS cannot export the raw key material — crypto.subtle.exportKey()
- * throws on non-extractable keys. The attacker can only use the key
- * while their script is running in the page context.
+ * The private key is non-extractable — XSS cannot call
+ * crypto.subtle.exportKey() on it. The public key JWK is exportable
+ * so it can be sent to the server via POST /api/auth/register-key.
+ *
+ * Replaces the previous HMAC symmetric signing key approach: no secret
+ * needs to travel from server to client.
  */
 
 const DB_NAME = 'thinkwatch-keys';
 const STORE_NAME = 'signing';
 const KEY_ID = 'current';
+/** Key lifetime matches the server-side Redis TTL (24 hours). */
+const KEY_TTL_MS = 24 * 60 * 60 * 1000;
+
+interface StoredEntry {
+  privateKey: CryptoKey;
+  publicJwk: JsonWebKey;
+  expiresAt: number; // Unix ms
+}
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
+    const req = indexedDB.open(DB_NAME, 3); // version 3: ECDSA key pair
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -24,41 +35,54 @@ function openDb(): Promise<IDBDatabase> {
   });
 }
 
-/** Import a hex signing key as a non-extractable CryptoKey and store in IndexedDB. */
-export async function storeSigningKey(hexKey: string): Promise<void> {
-  const keyBytes = new Uint8Array(hexKey.match(/.{2}/g)!.map(h => parseInt(h, 16)));
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw',
-    keyBytes,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false, // non-extractable
-    ['sign'],
+/**
+ * Generate an ECDSA P-256 key pair, store it in IndexedDB (private key
+ * non-extractable), and return the public key JWK to send to the server.
+ */
+export async function generateAndStoreKeyPair(): Promise<JsonWebKey> {
+  const keyPair = await crypto.subtle.generateKey(
+    { name: 'ECDSA', namedCurve: 'P-256' },
+    false, // private key non-extractable
+    ['sign', 'verify'],
   );
+  const publicJwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+  const entry: StoredEntry = {
+    privateKey: keyPair.privateKey,
+    publicJwk,
+    expiresAt: Date.now() + KEY_TTL_MS,
+  };
   const db = await openDb();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite');
-    tx.objectStore(STORE_NAME).put(cryptoKey, KEY_ID);
-    tx.oncomplete = () => resolve();
+    tx.objectStore(STORE_NAME).put(entry, KEY_ID);
+    tx.oncomplete = () => resolve(publicJwk);
     tx.onerror = () => reject(tx.error);
   });
 }
 
-/** Retrieve the CryptoKey from IndexedDB. Returns null if not found. */
+/** Retrieve the private CryptoKey from IndexedDB. Returns null if expired or not found. */
 export async function getSigningKey(): Promise<CryptoKey | null> {
   try {
     const db = await openDb();
-    return new Promise((resolve, reject) => {
+    const entry: StoredEntry | undefined = await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const req = tx.objectStore(STORE_NAME).get(KEY_ID);
-      req.onsuccess = () => resolve(req.result ?? null);
+      req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error);
     });
+    if (!entry?.privateKey) return null;
+    // Check expiry
+    if (Date.now() > entry.expiresAt) {
+      await clearSigningKey();
+      return null;
+    }
+    return entry.privateKey;
   } catch {
     return null;
   }
 }
 
-/** Delete the signing key from IndexedDB (logout). */
+/** Delete the key pair from IndexedDB (logout / expiry). */
 export async function clearSigningKey(): Promise<void> {
   try {
     const db = await openDb();

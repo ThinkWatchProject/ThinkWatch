@@ -4,6 +4,7 @@ import {
   apiPost,
   broadcastLogout,
   clearCachedPermissions,
+  registerKeyPair,
   setCachedPermissions,
 } from '@/lib/api';
 
@@ -20,7 +21,6 @@ interface User {
 interface LoginResponse {
   token_type: string;
   expires_in: number;
-  signing_key: string;
   permissions?: string[];
   denied_permissions?: string[];
   roles?: string[];
@@ -61,11 +61,9 @@ export function useAuth() {
       return res; // Caller must handle TOTP step
     }
     // Server set the access/refresh cookies on the response — the
-    // browser already has them. We only need to stash signing_key
-    // (for HMAC) and seed the permission cache so hasPermission()
-    // works without a /me round-trip.
-    const { storeSigningKey } = await import('@/lib/crypto-store');
-    await storeSigningKey(res.signing_key);
+    // browser already has them. Generate an ECDSA key pair and
+    // register the public key with the server.
+    await registerKeyPair();
     setCachedPermissions(res.permissions, res.denied_permissions);
     await fetchUser();
     return res;
@@ -84,9 +82,10 @@ export function useAuth() {
     setUser(null);
   }, []);
 
-  const handleSsoCallback = useCallback(async (signingKey: string) => {
-    const { storeSigningKey } = await import('@/lib/crypto-store');
-    await storeSigningKey(signingKey);
+  const handleSsoCallback = useCallback(async () => {
+    // SSO redirect set the auth cookies. Generate an ECDSA key pair
+    // and register the public key with the server.
+    await registerKeyPair();
     await fetchUser();
   }, [fetchUser]);
 

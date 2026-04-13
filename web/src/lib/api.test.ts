@@ -44,9 +44,7 @@ beforeEach(async () => {
 })
 
 describe('api client', () => {
-  it('sends GET request with auth header', async () => {
-    mockStorage['access_token'] = 'test-token-123'
-
+  it('sends GET request with credentials', async () => {
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -60,14 +58,12 @@ describe('api client', () => {
     const [url, options] = mockFetch.mock.calls[0]
     expect(url).toBe('/api/test')
     expect(options.method).toBe('GET')
-    expect(options.headers['Authorization']).toBe('Bearer test-token-123')
+    expect(options.credentials).toBe('include')
     expect(options.headers['Content-Type']).toBe('application/json')
     expect(result).toEqual({ data: 'test' })
   })
 
   it('sends POST with body and content-type', async () => {
-    mockStorage['access_token'] = 'test-token'
-
     const mockFetch = vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -97,9 +93,6 @@ describe('api client', () => {
   })
 
   it('attempts token refresh on 401', async () => {
-    mockStorage['access_token'] = 'expired-token'
-    mockStorage['refresh_token'] = 'valid-refresh-token'
-
     const mockFetch = vi.fn()
       // First call: 401
       .mockResolvedValueOnce({
@@ -112,10 +105,14 @@ describe('api client', () => {
         ok: true,
         status: 200,
         json: () => Promise.resolve({
-          access_token: 'new-access-token',
-          refresh_token: 'new-refresh-token',
-          signing_key: 'abc123',
+          permissions: ['read'],
         }),
+      })
+      // register-key call: success
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve({ status: 'ok' }),
       })
       // Retry call: success
       .mockResolvedValueOnce({
@@ -128,17 +125,15 @@ describe('api client', () => {
 
     const result = await apiModule.api('/api/protected')
 
-    expect(mockFetch).toHaveBeenCalledTimes(3)
+    // 4 calls: original, refresh, register-key, retry
+    expect(mockFetch).toHaveBeenCalledTimes(4)
     // Verify refresh was called
     const [refreshUrl, refreshOpts] = mockFetch.mock.calls[1]
     expect(refreshUrl).toBe('/api/auth/refresh')
     expect(refreshOpts.method).toBe('POST')
-    // Verify retry used new token
-    const [, retryOpts] = mockFetch.mock.calls[2]
-    expect(retryOpts.headers['Authorization']).toBe('Bearer new-access-token')
+    // Verify register-key was called
+    const [registerUrl] = mockFetch.mock.calls[2]
+    expect(registerUrl).toBe('/api/auth/register-key')
     expect(result).toEqual({ data: 'refreshed' })
-    // Verify tokens were stored
-    expect(mockStorage['access_token']).toBe('new-access-token')
-    expect(mockStorage['refresh_token']).toBe('new-refresh-token')
   })
 })
