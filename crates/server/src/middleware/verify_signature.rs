@@ -130,8 +130,13 @@ pub async fn verify_signature(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Result<Response, StatusCode> {
-    // Skip CORS preflight — browsers don't attach custom headers.
-    if *request.method() == Method::OPTIONS {
+    // Skip safe methods — GET/HEAD/OPTIONS are idempotent and don't
+    // need anti-replay protection. Only state-changing requests
+    // (POST/PATCH/DELETE) require HMAC signatures.
+    if matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
         return Ok(next.run(request).await);
     }
 
