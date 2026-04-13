@@ -27,9 +27,9 @@ pub struct McpConnection {
     /// `(header name, header value)` to attach to every upstream request.
     /// Resolved at connection creation from `RegisteredServer.auth_header`.
     auth_header: Option<(String, String)>,
-    /// Template headers for forwarding caller identity. Values may
-    /// contain `{{user_id}}` / `{{user_email}}`, resolved per-request.
-    identity_headers: Vec<(String, String)>,
+    /// Custom headers with optional template variables (`{{user_id}}`,
+    /// `{{user_email}}`), resolved per-request.
+    custom_headers: Vec<(String, String)>,
 }
 
 impl McpConnection {
@@ -40,7 +40,7 @@ impl McpConnection {
             client,
             session_id: Arc::new(RwLock::new(None)),
             auth_header: server.auth_header.clone(),
-            identity_headers: server.identity_headers.clone(),
+            custom_headers: server.custom_headers.clone(),
         }
     }
 
@@ -145,14 +145,18 @@ impl ConnectionPool {
             builder = builder.header(name.as_str(), value.as_str());
         }
 
-        // Attach identity headers with template variable resolution.
-        if let Some(caller) = caller {
-            for (key, template) in &conn.identity_headers {
-                let value = template
-                    .replace("{{user_id}}", &caller.user_id)
-                    .replace("{{user_email}}", &caller.user_email);
-                builder = builder.header(key.as_str(), value);
-            }
+        // Attach custom headers with template variable resolution.
+        // Values containing {{user_id}} or {{user_email}} are resolved
+        // per-request; plain values pass through as-is.
+        for (key, template) in &conn.custom_headers {
+            let value = if let Some(c) = caller {
+                template
+                    .replace("{{user_id}}", &c.user_id)
+                    .replace("{{user_email}}", &c.user_email)
+            } else {
+                template.clone()
+            };
+            builder = builder.header(key.as_str(), value);
         }
 
         // Attach upstream session header if we have one.

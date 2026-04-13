@@ -187,17 +187,9 @@ pub struct CreateMcpServerRequest {
     pub auth_type: Option<String>,
     pub auth_secret: Option<String>,
     /// Custom HTTP headers forwarded when connecting to this MCP server.
+    /// Values may contain `{{user_id}}` and `{{user_email}}` template
+    /// variables which are resolved per-request from the caller's identity.
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
-    /// Headers with template variables for forwarding caller identity.
-    /// Each entry has `key` and `value`; values may contain `{{user_id}}`
-    /// and `{{user_email}}` which are resolved per-request.
-    pub identity_headers: Option<Vec<IdentityHeader>>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, utoipa::ToSchema)]
-pub struct IdentityHeader {
-    pub key: String,
-    pub value: String,
 }
 
 // --- Pagination ---

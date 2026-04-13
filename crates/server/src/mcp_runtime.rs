@@ -144,19 +144,15 @@ pub async fn build_registered_server(
         }
     };
 
-    // Parse identity headers from config_json.identity_headers
-    // Format: [{"key": "X-User-Id", "value": "{{user_id}}"}, ...]
-    let identity_headers: Vec<(String, String)> = server
+    // Parse custom headers from config_json.custom_headers (key→value map)
+    // Values may contain {{user_id}} / {{user_email}} template variables.
+    let custom_headers: Vec<(String, String)> = server
         .config_json
-        .get("identity_headers")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| {
-                    let key = item.get("key")?.as_str()?;
-                    let value = item.get("value")?.as_str()?;
-                    Some((key.to_string(), value.to_string()))
-                })
+        .get("custom_headers")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
                 .collect()
         })
         .unwrap_or_default();
@@ -170,7 +166,7 @@ pub async fn build_registered_server(
         status: parse_server_status(&server.status),
         last_health_check: server.last_health_check,
         auth_header,
-        identity_headers,
+        custom_headers,
     })
 }
 

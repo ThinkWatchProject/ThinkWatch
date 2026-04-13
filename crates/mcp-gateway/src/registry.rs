@@ -46,11 +46,11 @@ pub struct RegisteredServer {
     /// the secret through any debug/log surface.
     #[serde(skip)]
     pub auth_header: Option<(String, String)>,
-    /// Template headers for forwarding caller identity to the upstream
-    /// MCP server. Values may contain `{{user_id}}` and `{{user_email}}`
-    /// which are resolved per-request.
+    /// Custom headers attached to every upstream request. Values may
+    /// contain `{{user_id}}` and `{{user_email}}` template variables
+    /// which are resolved per-request from the caller's identity.
     #[serde(skip)]
-    pub identity_headers: Vec<(String, String)>,
+    pub custom_headers: Vec<(String, String)>,
 }
 
 /// The namespace separator used to prefix tool names with their server name.
@@ -193,7 +193,7 @@ mod tests {
             status: ServerStatus::Connected,
             last_health_check: None,
             auth_header: None,
-            identity_headers: Vec::new(),
+            custom_headers: Vec::new(),
         }
     }
 
