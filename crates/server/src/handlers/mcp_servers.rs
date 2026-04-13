@@ -259,6 +259,9 @@ pub async fn create_server(
             super::providers::validate_custom_headers(headers)?;
             config["custom_headers"] = serde_json::to_value(headers).unwrap_or_default();
         }
+        if let Some(ref ih) = req.identity_headers {
+            config["identity_headers"] = serde_json::to_value(ih).unwrap_or_default();
+        }
         config
     })
     .fetch_one(&state.db)
@@ -344,6 +347,8 @@ pub struct UpdateMcpServerRequest {
     pub endpoint_url: Option<String>,
     /// Custom HTTP headers forwarded when connecting to this MCP server.
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
+    /// Identity headers with template variables for caller forwarding.
+    pub identity_headers: Option<Vec<think_watch_common::dto::IdentityHeader>>,
 }
 
 #[utoipa::path(
@@ -393,16 +398,16 @@ pub async fn update_server(
         super::providers::validate_url(endpoint_url)?;
     }
 
-    // Merge custom_headers into existing config_json
-    let config_json = if let Some(ref headers) = req.custom_headers {
+    // Merge custom_headers + identity_headers into existing config_json
+    let mut config_json = existing.config_json.clone();
+    if let Some(ref headers) = req.custom_headers {
         super::providers::validate_custom_headers(headers)?;
-        let mut config = existing.config_json.clone();
-        config["custom_headers"] = serde_json::to_value(headers)
+        config_json["custom_headers"] = serde_json::to_value(headers)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to serialize headers: {e}")))?;
-        config
-    } else {
-        existing.config_json.clone()
-    };
+    }
+    if let Some(ref ih) = req.identity_headers {
+        config_json["identity_headers"] = serde_json::to_value(ih).unwrap_or_default();
+    }
 
     let updated = sqlx::query_as::<_, McpServer>(
         r#"UPDATE mcp_servers SET name = $2, description = $3, endpoint_url = $4, config_json = $5

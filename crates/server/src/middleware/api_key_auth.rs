@@ -211,8 +211,15 @@ pub fn require_api_key(
                     );
                     return Err(StatusCode::UNAUTHORIZED);
                 };
+                let user_email: String =
+                    sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+                        .bind(uid)
+                        .fetch_one(&state.db)
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                 let mcp_identity = McpRequestIdentity {
                     user_id: uid,
+                    user_email,
                     user_roles: identity.user_roles.clone(),
                     role_ids: role_ids.clone(),
                 };

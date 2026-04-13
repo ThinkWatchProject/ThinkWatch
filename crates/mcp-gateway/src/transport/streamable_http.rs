@@ -30,6 +30,7 @@ pub struct McpGatewayState {
 #[derive(Debug, Clone)]
 pub struct McpRequestIdentity {
     pub user_id: Uuid,
+    pub user_email: String,
     /// Role names the underlying user holds. Used by the access
     /// controller to gate per-tool ACLs. Empty for service-account
     /// keys (no associated user) — those will be denied any tool
@@ -76,6 +77,7 @@ pub async fn handle_post(
         .proxy
         .handle_request(
             identity.user_id,
+            &identity.user_email,
             &identity.user_roles,
             &identity.role_ids,
             request,

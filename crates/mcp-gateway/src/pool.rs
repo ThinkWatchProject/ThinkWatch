@@ -8,6 +8,13 @@ use uuid::Uuid;
 use crate::proxy::{JsonRpcRequest, JsonRpcResponse};
 use crate::registry::RegisteredServer;
 
+/// Caller identity passed per-request for template header resolution.
+#[derive(Debug, Clone)]
+pub struct CallerIdentity {
+    pub user_id: String,
+    pub user_email: String,
+}
+
 /// A single connection to an upstream MCP server.
 #[derive(Debug, Clone)]
 pub struct McpConnection {
@@ -20,6 +27,9 @@ pub struct McpConnection {
     /// `(header name, header value)` to attach to every upstream request.
     /// Resolved at connection creation from `RegisteredServer.auth_header`.
     auth_header: Option<(String, String)>,
+    /// Template headers for forwarding caller identity. Values may
+    /// contain `{{user_id}}` / `{{user_email}}`, resolved per-request.
+    identity_headers: Vec<(String, String)>,
 }
 
 impl McpConnection {
@@ -30,6 +40,7 @@ impl McpConnection {
             client,
             session_id: Arc::new(RwLock::new(None)),
             auth_header: server.auth_header.clone(),
+            identity_headers: server.identity_headers.clone(),
         }
     }
 
@@ -121,6 +132,7 @@ impl ConnectionPool {
         &self,
         conn: &McpConnection,
         request: &JsonRpcRequest,
+        caller: Option<&CallerIdentity>,
     ) -> Result<JsonRpcResponse, PoolError> {
         let mut builder = conn
             .client
@@ -131,6 +143,16 @@ impl ConnectionPool {
         // Attach upstream auth header if the server has one configured.
         if let Some((name, value)) = &conn.auth_header {
             builder = builder.header(name.as_str(), value.as_str());
+        }
+
+        // Attach identity headers with template variable resolution.
+        if let Some(caller) = caller {
+            for (key, template) in &conn.identity_headers {
+                let value = template
+                    .replace("{{user_id}}", &caller.user_id)
+                    .replace("{{user_email}}", &caller.user_email);
+                builder = builder.header(key.as_str(), value);
+            }
         }
 
         // Attach upstream session header if we have one.

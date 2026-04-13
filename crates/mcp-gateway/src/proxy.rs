@@ -152,6 +152,7 @@ impl McpProxy {
     pub async fn handle_request(
         &self,
         user_id: Uuid,
+        user_email: &str,
         user_roles: &[String],
         role_ids: &[Uuid],
         request: JsonRpcRequest,
@@ -160,7 +161,7 @@ impl McpProxy {
             "initialize" => self.handle_initialize(request).await,
             "tools/list" => self.handle_tools_list(user_id, user_roles, request).await,
             "tools/call" => {
-                self.handle_tools_call(user_id, user_roles, role_ids, request)
+                self.handle_tools_call(user_id, user_email, user_roles, role_ids, request)
                     .await
             }
             _ => err_response(
@@ -239,6 +240,7 @@ impl McpProxy {
     async fn handle_tools_call(
         &self,
         user_id: Uuid,
+        user_email: &str,
         user_roles: &[String],
         role_ids: &[Uuid],
         request: JsonRpcRequest,
@@ -381,7 +383,15 @@ impl McpProxy {
 
         // Get (or create) a connection and forward the request.
         let conn = self.pool.get_or_create(&server).await;
-        match self.pool.send_request(&conn, &upstream_request).await {
+        let caller = crate::pool::CallerIdentity {
+            user_id: user_id.to_string(),
+            user_email: user_email.to_string(),
+        };
+        match self
+            .pool
+            .send_request(&conn, &upstream_request, Some(&caller))
+            .await
+        {
             Ok(resp) => {
                 // JSON-RPC error responses still count as failures so the
                 // breaker reflects upstream tool errors, not just transport

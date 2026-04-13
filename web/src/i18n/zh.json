@@ -311,6 +311,8 @@
     "transportType": "传输类型",
     "authType": "认证类型",
     "authSecret": "认证密钥",
+    "identityHeaders": "身份转发头",
+    "identityHeadersDesc": "将调用者身份转发给上游服务器。值中可使用 {{user_id}} 和 {{user_email}} 模板变量。",
     "lastHealthCheck": "最近健康检查",
     "toolsCount": "工具数",
     "discoverTools": "发现工具",

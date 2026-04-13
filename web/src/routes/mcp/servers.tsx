@@ -40,7 +40,7 @@ interface McpServer {
   status: string;
   last_health_check: string | null;
   tools_count: number;
-  config_json?: { custom_headers?: Record<string, string> };
+  config_json?: { custom_headers?: Record<string, string>; identity_headers?: { key: string; value: string }[] };
   created_at: string;
 }
 
@@ -66,6 +66,7 @@ export function McpServersPage() {
   const [authType, setAuthType] = useState('none');
   const [authSecret, setAuthSecret] = useState('');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
+  const [identityHeaders, setIdentityHeaders] = useState<[string, string][]>([]);
 
   // Edit state
   const [editDialogOpen, setEditDialogOpen] = useState(false);
@@ -74,6 +75,7 @@ export function McpServersPage() {
   const [editDescription, setEditDescription] = useState('');
   const [editEndpointUrl, setEditEndpointUrl] = useState('');
   const [editCustomHeaders, setEditCustomHeaders] = useState<[string, string][]>([]);
+  const [editIdentityHeaders, setEditIdentityHeaders] = useState<[string, string][]>([]);
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState('');
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -126,6 +128,7 @@ export function McpServersPage() {
     setAuthType('none');
     setAuthSecret('');
     setCustomHeaders([]);
+    setIdentityHeaders([]);
     setFormError('');
     setTestResult(null);
   };
@@ -144,6 +147,9 @@ export function McpServersPage() {
         auth_secret: authSecret || undefined,
         custom_headers: customHeaders.length > 0
           ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
+          : null,
+        identity_headers: identityHeaders.length > 0
+          ? identityHeaders.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v }))
           : null,
       });
       setDialogOpen(false);
@@ -184,6 +190,8 @@ export function McpServersPage() {
     setEditError('');
     const existing = s.config_json?.custom_headers ?? {};
     setEditCustomHeaders(Object.entries(existing));
+    const ih = (s.config_json?.identity_headers ?? []) as { key: string; value: string }[];
+    setEditIdentityHeaders(ih.map((h) => [h.key, h.value] as [string, string]));
     setEditDialogOpen(true);
   };
 
@@ -199,6 +207,9 @@ export function McpServersPage() {
         custom_headers: editCustomHeaders.length > 0
           ? Object.fromEntries(editCustomHeaders.filter(([k]) => k.trim()))
           : {},
+        identity_headers: editIdentityHeaders.length > 0
+          ? editIdentityHeaders.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v }))
+          : [],
       });
       setEditDialogOpen(false);
       setEditServer(null);
@@ -291,6 +302,24 @@ export function McpServersPage() {
                   </div>
                 ))}
                 <Button type="button" variant="outline" size="sm" onClick={() => setCustomHeaders([...customHeaders, ['', '']])}>
+                  <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
+                </Button>
+              </div>
+              <div className="space-y-2">
+                <Label>{t('mcpServers.identityHeaders')}</Label>
+                <p className="text-xs text-muted-foreground">{t('mcpServers.identityHeadersDesc')}</p>
+                {identityHeaders.map(([k, v], i) => (
+                  <div key={i} className="flex gap-2 items-center">
+                    <Input className="flex-1" placeholder="X-User-Id" value={k}
+                      onChange={(e) => { const next = [...identityHeaders]; next[i] = [e.target.value, v]; setIdentityHeaders(next); }} />
+                    <Input className="flex-1" placeholder="{{user_id}}" value={v}
+                      onChange={(e) => { const next = [...identityHeaders]; next[i] = [k, e.target.value]; setIdentityHeaders(next); }} />
+                    <Button type="button" variant="ghost" size="icon-sm" onClick={() => setIdentityHeaders(identityHeaders.filter((_, j) => j !== i))}>
+                      <X className="h-3 w-3" />
+                    </Button>
+                  </div>
+                ))}
+                <Button type="button" variant="outline" size="sm" onClick={() => setIdentityHeaders([...identityHeaders, ['', '']])}>
                   <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
                 </Button>
               </div>
@@ -459,6 +488,24 @@ export function McpServersPage() {
                 </div>
               ))}
               <Button type="button" variant="outline" size="sm" onClick={() => setEditCustomHeaders([...editCustomHeaders, ['', '']])}>
+                <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
+              </Button>
+            </div>
+            <div className="space-y-2">
+              <Label>{t('mcpServers.identityHeaders')}</Label>
+              <p className="text-xs text-muted-foreground">{t('mcpServers.identityHeadersDesc')}</p>
+              {editIdentityHeaders.map(([k, v], i) => (
+                <div key={i} className="flex gap-2 items-center">
+                  <Input className="flex-1" placeholder="X-User-Id" value={k}
+                    onChange={(e) => { const next = [...editIdentityHeaders]; next[i] = [e.target.value, v]; setEditIdentityHeaders(next); }} />
+                  <Input className="flex-1" placeholder="{{user_id}}" value={v}
+                    onChange={(e) => { const next = [...editIdentityHeaders]; next[i] = [k, e.target.value]; setEditIdentityHeaders(next); }} />
+                  <Button type="button" variant="ghost" size="icon-sm" onClick={() => setEditIdentityHeaders(editIdentityHeaders.filter((_, j) => j !== i))}>
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+              ))}
+              <Button type="button" variant="outline" size="sm" onClick={() => setEditIdentityHeaders([...editIdentityHeaders, ['', '']])}>
                 <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
               </Button>
             </div>

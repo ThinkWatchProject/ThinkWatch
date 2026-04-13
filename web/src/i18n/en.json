@@ -311,6 +311,8 @@
     "transportType": "Transport Type",
     "authType": "Auth Type",
     "authSecret": "Auth Secret",
+    "identityHeaders": "Identity Headers",
+    "identityHeadersDesc": "Forward caller identity to the upstream server. Use {{user_id}} and {{user_email}} as template variables in the value.",
     "lastHealthCheck": "Last Health Check",
     "toolsCount": "Tools",
     "discoverTools": "Discover Tools",

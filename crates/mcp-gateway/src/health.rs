@@ -46,7 +46,7 @@ impl HealthChecker {
 
         let conn = self.pool.get_or_create(server).await;
         let start = tokio::time::Instant::now();
-        let result = self.pool.send_request(&conn, &request).await;
+        let result = self.pool.send_request(&conn, &request, None).await;
         let elapsed = start.elapsed();
 
         match result {

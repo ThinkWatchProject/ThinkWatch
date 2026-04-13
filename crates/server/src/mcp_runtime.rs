@@ -144,6 +144,23 @@ pub async fn build_registered_server(
         }
     };
 
+    // Parse identity headers from config_json.identity_headers
+    // Format: [{"key": "X-User-Id", "value": "{{user_id}}"}, ...]
+    let identity_headers: Vec<(String, String)> = server
+        .config_json
+        .get("identity_headers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let key = item.get("key")?.as_str()?;
+                    let value = item.get("value")?.as_str()?;
+                    Some((key.to_string(), value.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     Ok(RegisteredServer {
         id: server.id,
         name: server.name.clone(),
@@ -153,6 +170,7 @@ pub async fn build_registered_server(
         status: parse_server_status(&server.status),
         last_health_check: server.last_health_check,
         auth_header,
+        identity_headers,
     })
 }
 
