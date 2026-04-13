@@ -484,12 +484,21 @@ pub async fn register_key(
     State(state): State<AppState>,
     Json(req): Json<RegisterKeyRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let pubkey_json = serde_json::to_string(&req.public_key)
+    // Web Crypto JWK includes extra fields (key_ops, ext) that the p256 crate
+    // doesn't understand. Extract only the fields p256 needs: kty, crv, x, y.
+    let jwk = &req.public_key;
+    let minimal_jwk = serde_json::json!({
+        "kty": jwk.get("kty").cloned().unwrap_or(serde_json::Value::Null),
+        "crv": jwk.get("crv").cloned().unwrap_or(serde_json::Value::Null),
+        "x": jwk.get("x").cloned().unwrap_or(serde_json::Value::Null),
+        "y": jwk.get("y").cloned().unwrap_or(serde_json::Value::Null),
+    });
+    let pubkey_json = serde_json::to_string(&minimal_jwk)
         .map_err(|e| AppError::BadRequest(format!("Invalid public key JSON: {e}")))?;
 
-    // Validate that this is a valid P-256 public key by attempting to parse it
+    // Validate that this is a valid P-256 public key
     p256::PublicKey::from_jwk_str(&pubkey_json)
-        .map_err(|_| AppError::BadRequest("Invalid ECDSA P-256 public key JWK".into()))?;
+        .map_err(|e| AppError::BadRequest(format!("Invalid ECDSA P-256 public key JWK: {e}")))?;
 
     let client_ip = auth_user.ip.as_deref();
 

@@ -147,11 +147,24 @@ pub async fn verify_signature(
         .map(|u| u.claims.sub)
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    // If no signature headers at all → the client hasn't registered a key pair yet
-    // (race between register-key and the first request after login). Allow through —
-    // the request is still authenticated via JWT cookie, just not signed.
+    // If no signature headers: check whether a public key is registered.
+    // - No key registered → grace window (login just happened, register-key in flight)
+    // - Key registered but no signature → reject (attacker stripping headers)
     let has_sig_headers = request.headers().contains_key(HEADER_SIGNATURE);
     if !has_sig_headers {
+        let has_pubkey: bool = fred::interfaces::KeysInterface::exists::<bool, _>(
+            &state.redis,
+            &format!("signing_pubkey:{user_id}"),
+        )
+        .await
+        .unwrap_or(false);
+        if has_pubkey {
+            tracing::warn!(
+                "Signature headers missing but public key registered for user {user_id}"
+            );
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        // No key registered yet — allow through (grace window)
         return Ok(next.run(request).await);
     }
 
