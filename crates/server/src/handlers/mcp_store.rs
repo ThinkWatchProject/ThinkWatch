@@ -305,17 +305,36 @@ struct RegistryResponse {
     templates: Vec<RegistryTemplate>,
 }
 
+/// Extract a localized string — accepts either `"plain"` or `{"en": "...", "zh": "..."}`.
+/// Returns `"en | zh"` joined, or the plain string.
+fn flatten_i18n(val: &serde_json::Value) -> Option<String> {
+    match val {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Object(map) => {
+            let en = map.get("en").and_then(|v| v.as_str()).unwrap_or("");
+            let zh = map.get("zh").and_then(|v| v.as_str()).unwrap_or("");
+            if en.is_empty() && zh.is_empty() {
+                None
+            } else {
+                // Store both languages separated by \n---\n for the frontend to split
+                Some(format!("{en}\n---\n{zh}"))
+            }
+        }
+        _ => None,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RegistryTemplate {
     slug: String,
     name: String,
-    description: Option<String>,
+    description: Option<serde_json::Value>,
     category: Option<String>,
     tags: Option<Vec<String>>,
     endpoint_template: Option<String>,
     transport_type: Option<String>,
     auth_type: Option<String>,
-    auth_instructions: Option<String>,
+    auth_instructions: Option<serde_json::Value>,
     deploy_type: Option<String>,
     deploy_command: Option<String>,
     deploy_docs_url: Option<String>,
@@ -406,13 +425,18 @@ pub async fn sync_registry(
         )
         .bind(&t.slug)
         .bind(&t.name)
-        .bind(&t.description)
+        .bind(t.description.as_ref().and_then(flatten_i18n).as_deref())
         .bind(&t.category)
         .bind(t.tags.as_deref().unwrap_or(&[]))
         .bind(&t.endpoint_template)
         .bind(t.transport_type.as_deref().unwrap_or("streamable_http"))
         .bind(&t.auth_type)
-        .bind(&t.auth_instructions)
+        .bind(
+            t.auth_instructions
+                .as_ref()
+                .and_then(flatten_i18n)
+                .as_deref(),
+        )
         .bind(t.deploy_type.as_deref().unwrap_or("hosted"))
         .bind(&t.deploy_command)
         .bind(&t.deploy_docs_url)

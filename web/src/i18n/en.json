@@ -85,12 +85,16 @@
     "noTemplates": "No templates found",
     "syncRegistry": "Sync Registry",
     "syncSuccess": "Synced {{count}} templates from registry",
+    "authRequired": "Auth Required",
+    "noAuth": "No Auth",
     "category": {
       "developer": "Developer",
       "database": "Database",
       "communication": "Communication",
       "cloud": "Cloud",
-      "utility": "Utility"
+      "utility": "Utility",
+      "knowledge": "Knowledge",
+      "productivity": "Productivity"
     }
   },
   "auth": {

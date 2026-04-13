@@ -47,10 +47,18 @@ interface CategoryCount {
   count: number;
 }
 
-const CATEGORIES = ['developer', 'database', 'communication', 'cloud', 'utility'] as const;
+const CATEGORIES = ['developer', 'database', 'communication', 'cloud', 'utility', 'knowledge', 'productivity'] as const;
+
+/** Pick the right language from a bilingual string stored as "en\n---\nzh". */
+function i18nText(text: string | null | undefined, lang: string): string {
+  if (!text) return '';
+  const parts = text.split('\n---\n');
+  if (parts.length < 2) return text;
+  return lang.startsWith('zh') ? (parts[1] || parts[0]) : parts[0];
+}
 
 export function McpStorePage() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const [templates, setTemplates] = useState<StoreTemplate[]>([]);
   const [categories, setCategories] = useState<CategoryCount[]>([]);
@@ -251,6 +259,7 @@ export function McpStorePage() {
                     template={tmpl}
                     onInstall={() => openInstallDialog(tmpl)}
                     t={t}
+                    lang={i18n.language}
                   />
                 ))}
               </div>
@@ -266,6 +275,7 @@ export function McpStorePage() {
                   template={tmpl}
                   onInstall={() => openInstallDialog(tmpl)}
                   t={t}
+                  lang={i18n.language}
                 />
               ))}
             </div>
@@ -286,7 +296,7 @@ export function McpStorePage() {
               {t('mcpStore.installTitle', { name: installTemplate?.name })}
             </DialogTitle>
             <DialogDescription>
-              {installTemplate?.description}
+              {i18nText(installTemplate?.description, i18n.language)}
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleInstall} className="space-y-4">
@@ -301,7 +311,7 @@ export function McpStorePage() {
                     : t('mcpStore.deployInstructions')}
                 </p>
                 <p className="text-muted-foreground whitespace-pre-wrap">
-                  {installTemplate.auth_instructions}
+                  {i18nText(installTemplate.auth_instructions, i18n.language)}
                 </p>
               </div>
             )}
@@ -397,8 +407,10 @@ function TemplateCard({
   template,
   onInstall,
   t,
+  lang,
 }: {
   template: StoreTemplate;
+  lang: string;
   onInstall: () => void;
   t: (key: string) => string;
 }) {
@@ -419,12 +431,17 @@ function TemplateCard({
       </CardHeader>
       <CardContent className="flex flex-col gap-3">
         <p className="line-clamp-2 text-sm text-muted-foreground">
-          {template.description}
+          {i18nText(template.description, lang)}
         </p>
         <div className="flex items-center justify-between">
-          <span className="text-xs text-muted-foreground">
-            {template.install_count} installs
-          </span>
+          <div className="flex items-center gap-2">
+            <Badge variant={template.auth_type && template.auth_type !== 'none' ? 'secondary' : 'outline'} className="text-[10px]">
+              {template.auth_type && template.auth_type !== 'none' ? t('mcpStore.authRequired') : t('mcpStore.noAuth')}
+            </Badge>
+            <span className="text-xs text-muted-foreground">
+              {template.install_count} installs
+            </span>
+          </div>
           {template.installed ? (
             <Badge variant="outline" className="gap-1">
               <CheckCircle2 className="h-3 w-3" />

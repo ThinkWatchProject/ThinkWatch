@@ -85,12 +85,16 @@
     "noTemplates": "未找到模板",
     "syncRegistry": "同步仓库",
     "syncSuccess": "已从仓库同步 {{count}} 个模板",
+    "authRequired": "需要认证",
+    "noAuth": "无需认证",
     "category": {
       "developer": "开发工具",
       "database": "数据库",
       "communication": "通信",
       "cloud": "云服务",
-      "utility": "工具"
+      "utility": "工具",
+      "knowledge": "知识库",
+      "productivity": "生产力"
     }
   },
   "auth": {
