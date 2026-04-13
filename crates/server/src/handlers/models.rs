@@ -20,10 +20,12 @@ use axum::Json;
 use axum::extract::{Path, State};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use uuid::Uuid;
 
+use think_watch_common::dto::ProviderHeader;
 use think_watch_common::errors::AppError;
-use think_watch_common::models::Model;
+use think_watch_common::models::{Model, Provider};
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
@@ -313,4 +315,105 @@ pub async fn delete_model(
             .detail(serde_json::json!({ "model_id": model_id })),
     );
     Ok(Json(serde_json::json!({"status": "deleted"})))
+}
+
+// ---------------------------------------------------------------------------
+// Sync models from upstream provider
+// ---------------------------------------------------------------------------
+
+pub async fn sync_models(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(provider_id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
+
+    // Load the provider
+    let provider = sqlx::query_as::<_, Provider>(
+        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(provider_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound("Provider not found".into()))?;
+
+    // Build test request from provider data
+    let headers: Vec<ProviderHeader> = provider
+        .config_json
+        .get("headers")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let test_req = super::providers::TestProviderRequest {
+        provider_type: provider.provider_type.clone(),
+        base_url: provider.base_url.clone(),
+        headers,
+    };
+
+    // Run the connectivity test
+    let Json(resp) = super::providers::run_provider_test(test_req).await?;
+    if !resp.success {
+        return Err(AppError::BadRequest(format!(
+            "Provider test failed: {}",
+            resp.message
+        )));
+    }
+
+    let remote_models = resp.models.unwrap_or_default();
+    if remote_models.is_empty() {
+        return Ok(Json(serde_json::json!({"synced": 0, "deactivated": 0})));
+    }
+
+    // Insert new models (ON CONFLICT DO NOTHING)
+    let mut synced: i64 = 0;
+    for model_id in &remote_models {
+        let result = sqlx::query(
+            r#"INSERT INTO models (provider_id, model_id, display_name)
+               VALUES ($1, $2, $2)
+               ON CONFLICT (provider_id, model_id) DO NOTHING"#,
+        )
+        .bind(provider_id)
+        .bind(model_id)
+        .execute(&state.db)
+        .await?;
+        synced += result.rows_affected() as i64;
+    }
+
+    // Deactivate models not in the remote list
+    let deactivated = sqlx::query(
+        r#"UPDATE models SET is_active = false
+           WHERE provider_id = $1 AND model_id != ALL($2) AND is_active = true"#,
+    )
+    .bind(provider_id)
+    .bind(&remote_models)
+    .execute(&state.db)
+    .await?;
+
+    // Re-activate models that are in the remote list but were previously deactivated
+    sqlx::query(
+        r#"UPDATE models SET is_active = true
+           WHERE provider_id = $1 AND model_id = ANY($2) AND is_active = false"#,
+    )
+    .bind(provider_id)
+    .bind(&remote_models)
+    .execute(&state.db)
+    .await?;
+
+    state.audit.log(
+        auth_user
+            .audit("models.synced")
+            .resource("provider")
+            .resource_id(provider_id.to_string())
+            .detail(serde_json::json!({
+                "synced": synced,
+                "deactivated": deactivated.rows_affected(),
+            })),
+    );
+
+    Ok(Json(serde_json::json!({
+        "synced": synced,
+        "deactivated": deactivated.rows_affected(),
+    })))
 }

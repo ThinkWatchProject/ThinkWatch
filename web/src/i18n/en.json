@@ -183,7 +183,9 @@
     "azureUrlHint": "Enter Azure OpenAI resource endpoint",
     "testConnection": "Test Connection",
     "testing": "Testing...",
-    "modelCount": "{{count}} models"
+    "modelCount": "{{count}} models",
+    "creatingAndSyncing": "Creating & syncing models...",
+    "createdAndSynced": "Provider created and models synced."
   },
   "apiKeys": {
     "title": "API Keys",
@@ -262,6 +264,9 @@
     "errors": {
       "multiplierMustBePositive": "Multipliers must be positive numbers."
     },
+    "syncModels": "Sync Models",
+    "syncing": "Syncing...",
+    "syncSuccess": "Synced {{count}} models",
     "toast": {
       "created": "Model added.",
       "updated": "Model updated.",
@@ -514,7 +519,7 @@
     "effectivePermissions": "Effective permissions",
     "effectivePermissionsDesc": "Union of every selected role. This is what the user will be able to do once you save.",
     "effectiveModels": "Models",
-    "effectiveServers": "MCP servers",
+    "effectiveTools": "MCP tools",
     "unrestricted": "unrestricted",
     "searchPlaceholder": "Search by UUID, email, name, or role",
     "noMatches": "No users match your search.",
@@ -583,8 +588,8 @@
     "importMissingName": "Role missing required `name` field.",
     "allowedModels": "Allowed Models",
     "allowedModelsDesc": "Restrict which AI models this role can use. Leave empty for unrestricted access.",
-    "allowedMcpServers": "Allowed MCP Servers",
-    "allowedMcpServersDesc": "Restrict which MCP servers this role can access. Leave empty for unrestricted access.",
+    "allowedMcpTools": "Allowed MCP Tools",
+    "allowedMcpToolsDesc": "Restrict which MCP tools this role can access. Leave empty for unrestricted access.",
     "allModels": "All models (unrestricted)",
     "allServers": "All servers (unrestricted)",
     "simpleMode": "Simple Mode",
@@ -593,7 +598,13 @@
     "policyDocument": "Policy Document",
     "policyDocumentDesc": "JSON policy document with Allow/Deny statements for fine-grained access control",
     "invalidJson": "Invalid JSON format",
-    "policySyncLossy": "Some policy statements (Deny rules or scoped Resource patterns) cannot be expressed in simple mode and were dropped."
+    "policySyncLossy": "Some policy statements (Deny rules or scoped Resource patterns) cannot be expressed in simple mode and were dropped.",
+    "mcpToolsLabel": "MCP Tool Access",
+    "modelsLabel": "Model Access",
+    "unrestricted": "Unrestricted",
+    "custom": "Custom",
+    "allTools": "All tools",
+    "allModelsShort": "All models"
   },
   "permissions": {
     "resource": {

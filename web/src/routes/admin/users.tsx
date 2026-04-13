@@ -71,7 +71,7 @@ interface AvailableRole {
   /// every assignment in real time.
   permissions: string[];
   allowed_models: string[] | null;
-  allowed_mcp_servers: string[] | null;
+  allowed_mcp_tools: string[] | null;
 }
 
 export function UsersPage() {
@@ -905,7 +905,7 @@ function RoleAssignmentEditor({
 // ----------------------------------------------------------------------------
 // Effective permissions preview
 //
-// Shows the union of permissions / allowed_models / allowed_mcp_servers
+// Shows the union of permissions / allowed_models / allowed_mcp_tools
 // across the currently-selected role assignments. Computed live from
 // the catalog so the admin sees what they're about to grant BEFORE
 // hitting save. Mirrors the union semantics enforced server-side in
@@ -931,8 +931,8 @@ function EffectivePermissionsPreview({
   const perms = new Set<string>();
   let modelsUnrestricted = false;
   const models = new Set<string>();
-  let serversUnrestricted = false;
-  const servers = new Set<string>();
+  let toolsUnrestricted = false;
+  const tools = new Set<string>();
 
   for (const a of assignments) {
     const role = rolesById.get(a.role_id);
@@ -940,8 +940,8 @@ function EffectivePermissionsPreview({
     for (const p of role.permissions) perms.add(p);
     if (role.allowed_models === null) modelsUnrestricted = true;
     else for (const m of role.allowed_models) models.add(m);
-    if (role.allowed_mcp_servers === null) serversUnrestricted = true;
-    else for (const s of role.allowed_mcp_servers) servers.add(s);
+    if (role.allowed_mcp_tools === null) toolsUnrestricted = true;
+    else for (const t of role.allowed_mcp_tools) tools.add(t);
   }
 
   // Group permissions by their resource prefix for a compact list.
@@ -960,9 +960,9 @@ function EffectivePermissionsPreview({
   const modelsLabel = modelsUnrestricted
     ? t('users.unrestricted')
     : `${models.size}`;
-  const serversLabel = serversUnrestricted
+  const toolsLabel = toolsUnrestricted
     ? t('users.unrestricted')
-    : `${servers.size}`;
+    : `${tools.size}`;
 
   return (
     <details className="rounded-md border bg-muted/20 px-3 py-2 [&[open]>summary>svg]:rotate-90">
@@ -979,7 +979,7 @@ function EffectivePermissionsPreview({
           </span>
           <span>·</span>
           <span>
-            {t('users.effectiveServers')} {serversLabel}
+            {t('users.effectiveTools')} {toolsLabel}
           </span>
         </span>
       </summary>

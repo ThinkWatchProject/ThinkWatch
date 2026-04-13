@@ -183,7 +183,9 @@
     "azureUrlHint": "输入 Azure OpenAI 资源端点",
     "testConnection": "测试连接",
     "testing": "测试中...",
-    "modelCount": "{{count}} 个模型"
+    "modelCount": "{{count}} 个模型",
+    "creatingAndSyncing": "创建并同步模型中...",
+    "createdAndSynced": "提供商已创建并同步模型。"
   },
   "apiKeys": {
     "title": "API 密钥",
@@ -262,6 +264,9 @@
     "errors": {
       "multiplierMustBePositive": "倍率必须为正数。"
     },
+    "syncModels": "同步模型",
+    "syncing": "同步中...",
+    "syncSuccess": "已同步 {{count}} 个模型",
     "toast": {
       "created": "模型已添加。",
       "updated": "模型已更新。",
@@ -514,7 +519,7 @@
     "effectivePermissions": "有效权限",
     "effectivePermissionsDesc": "所有所选角色的并集。这就是保存后用户能够执行的全部操作。",
     "effectiveModels": "模型",
-    "effectiveServers": "MCP 服务器",
+    "effectiveTools": "MCP 工具",
     "unrestricted": "不限制",
     "searchPlaceholder": "按 UUID、邮箱、用户名或角色搜索",
     "noMatches": "没有匹配的用户。",
@@ -583,8 +588,8 @@
     "importMissingName": "角色缺少必填的 `name` 字段。",
     "allowedModels": "允许的模型",
     "allowedModelsDesc": "限制此角色可使用的 AI 模型。留空表示允许所有模型。",
-    "allowedMcpServers": "允许的 MCP 服务器",
-    "allowedMcpServersDesc": "限制此角色可访问的 MCP 服务器。留空表示允许所有服务器。",
+    "allowedMcpTools": "允许的 MCP 工具",
+    "allowedMcpToolsDesc": "限制此角色可访问的 MCP 工具。留空表示允许所有工具。",
     "allModels": "所有模型（无限制）",
     "allServers": "所有服务器（无限制）",
     "simpleMode": "简单模式",
@@ -593,7 +598,13 @@
     "policyDocument": "策略文档",
     "policyDocumentDesc": "包含 Allow / Deny 语句的 JSON 策略文档，用于细粒度访问控制",
     "invalidJson": "JSON 格式无效",
-    "policySyncLossy": "部分策略语句（Deny 规则或受限的 Resource 模式）无法在简单模式下表达，已被忽略。"
+    "policySyncLossy": "部分策略语句（Deny 规则或受限的 Resource 模式）无法在简单模式下表达，已被忽略。",
+    "mcpToolsLabel": "MCP 工具权限",
+    "modelsLabel": "模型权限",
+    "unrestricted": "不限制",
+    "custom": "自定义",
+    "allTools": "所有工具",
+    "allModelsShort": "所有模型"
   },
   "permissions": {
     "resource": {

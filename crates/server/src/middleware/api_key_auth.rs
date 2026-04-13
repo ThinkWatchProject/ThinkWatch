@@ -174,7 +174,7 @@ pub fn require_api_key(
                 (
                     rbac::UserResourceLimits {
                         allowed_models: None,
-                        allowed_mcp_servers: None,
+                        allowed_mcp_tools: None,
                     },
                     Vec::new(),
                     Vec::new(),
@@ -235,6 +235,7 @@ pub fn require_api_key(
                     user_email,
                     user_roles: identity.user_roles.clone(),
                     role_ids: role_ids.clone(),
+                    allowed_mcp_tools: role_limits.allowed_mcp_tools.clone(),
                 };
                 request.extensions_mut().insert(mcp_identity);
             }

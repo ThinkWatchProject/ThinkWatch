@@ -24,7 +24,7 @@ export interface RoleResponse {
   is_system: boolean;
   permissions: string[];
   allowed_models: string[] | null;
-  allowed_mcp_servers: string[] | null;
+  allowed_mcp_tools: string[] | null;
   policy_document: PolicyDocument | null;
   user_count: number;
   created_at: string;
@@ -68,6 +68,23 @@ export interface PolicyStatement {
 export interface McpServer {
   id: string;
   name: string;
+}
+
+export interface McpToolRow {
+  id: string;
+  server_id: string;
+  tool_name: string;
+  description: string | null;
+  is_active: boolean;
+}
+
+export interface ModelRow {
+  id: string;
+  provider_id: string;
+  provider_name: string;
+  model_id: string;
+  display_name: string;
+  is_active: boolean;
 }
 
 // ----------------------------------------------------------------------------

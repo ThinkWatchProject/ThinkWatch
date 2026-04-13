@@ -399,8 +399,8 @@ pub struct RoleResponse {
     pub permissions: Vec<String>,
     /// Allowed model IDs. `null` = unrestricted (all models).
     pub allowed_models: Option<Vec<String>>,
-    /// Allowed MCP server UUIDs. `null` = unrestricted (all servers).
-    pub allowed_mcp_servers: Option<Vec<Uuid>>,
+    /// Allowed MCP tool patterns. `null` = unrestricted (all tools).
+    pub allowed_mcp_tools: Option<Vec<String>>,
     /// Optional structured policy document (Allow/Deny statements
     /// against action/resource patterns). When `null`, the flat
     /// `permissions` array is the sole source of truth.
@@ -424,14 +424,14 @@ type RoleRow = (
     bool,
     Vec<String>,
     Option<Vec<String>>,
-    Option<Vec<Uuid>>,
+    Option<Vec<String>>,
     Option<serde_json::Value>,
     chrono::DateTime<chrono::Utc>,
     chrono::DateTime<chrono::Utc>,
 );
 
 const ROLE_SELECT: &str = "SELECT id, name, description, is_system, permissions, \
-                                  allowed_models, allowed_mcp_servers, policy_document, \
+                                  allowed_models, allowed_mcp_tools, policy_document, \
                                   created_at, updated_at \
                            FROM rbac_roles";
 
@@ -443,7 +443,7 @@ fn row_to_response(row: RoleRow, user_count: i64) -> RoleResponse {
         is_system: row.3,
         permissions: row.4,
         allowed_models: row.5,
-        allowed_mcp_servers: row.6,
+        allowed_mcp_tools: row.6,
         policy_document: row.7,
         user_count,
         created_at: row.8.to_rfc3339(),
@@ -513,7 +513,7 @@ pub struct CreateRoleRequest {
     pub description: Option<String>,
     pub permissions: Vec<String>,
     pub allowed_models: Option<Vec<String>>,
-    pub allowed_mcp_servers: Option<Vec<Uuid>>,
+    pub allowed_mcp_tools: Option<Vec<String>>,
     pub policy_document: Option<serde_json::Value>,
 }
 
@@ -555,17 +555,17 @@ pub async fn create_role(
 
     let row: RoleRow = sqlx::query_as(
         "INSERT INTO rbac_roles (name, description, is_system, permissions, \
-                                 allowed_models, allowed_mcp_servers, policy_document, created_by) \
+                                 allowed_models, allowed_mcp_tools, policy_document, created_by) \
          VALUES ($1, $2, FALSE, $3, $4, $5, $6, $7) \
          RETURNING id, name, description, is_system, permissions, \
-                   allowed_models, allowed_mcp_servers, policy_document, \
+                   allowed_models, allowed_mcp_tools, policy_document, \
                    created_at, updated_at",
     )
     .bind(name)
     .bind(&payload.description)
     .bind(&payload.permissions)
     .bind(&payload.allowed_models)
-    .bind(&payload.allowed_mcp_servers)
+    .bind(&payload.allowed_mcp_tools)
     .bind(&payload.policy_document)
     .bind(auth_user.claims.sub)
     .fetch_one(&state.db)
@@ -598,7 +598,7 @@ pub struct UpdateRoleRequest {
     pub description: Option<String>,
     pub permissions: Option<Vec<String>>,
     pub allowed_models: Option<Vec<String>>,
-    pub allowed_mcp_servers: Option<Vec<Uuid>>,
+    pub allowed_mcp_tools: Option<Vec<String>>,
     pub policy_document: Option<serde_json::Value>,
 }
 
@@ -675,7 +675,7 @@ pub async fn update_role(
             description       = COALESCE($3, description), \
             permissions       = COALESCE($4, permissions), \
             allowed_models    = $5, \
-            allowed_mcp_servers = $6, \
+            allowed_mcp_tools = $6, \
             policy_document   = $7, \
             updated_at        = now() \
          WHERE id = $1",
@@ -685,7 +685,7 @@ pub async fn update_role(
     .bind(payload.description.as_deref())
     .bind(payload.permissions.as_ref())
     .bind(payload.allowed_models.as_ref())
-    .bind(payload.allowed_mcp_servers.as_ref())
+    .bind(payload.allowed_mcp_tools.as_ref())
     .bind(payload.policy_document.as_ref())
     .execute(&state.db)
     .await?;
@@ -717,7 +717,7 @@ pub async fn update_role(
 //
 // Re-applies the catalog-default permission set for a system role
 // (whatever `SYSTEM_ROLE_DEFAULTS` says) and clears any
-// allowed_models / allowed_mcp_servers / policy_document overrides
+// allowed_models / allowed_mcp_tools / policy_document overrides
 // that have accumulated. Useful after an in-place edit goes wrong.
 //
 // Custom roles have no canonical defaults, so this endpoint is
@@ -771,7 +771,7 @@ pub async fn reset_role(
         "UPDATE rbac_roles SET \
             permissions         = $2, \
             allowed_models      = NULL, \
-            allowed_mcp_servers = NULL, \
+            allowed_mcp_tools = NULL, \
             policy_document     = NULL, \
             updated_at          = now() \
          WHERE id = $1",

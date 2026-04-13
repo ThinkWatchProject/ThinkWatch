@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use think_watch_common::limits::{self, RateLimitSubject, RateMetric, sliding};
 
-use crate::access_control::AccessController;
+use crate::access_control::is_tool_allowed;
 use crate::circuit_breaker::McpCircuitBreakers;
 use crate::pool::ConnectionPool;
 use crate::registry::Registry;
@@ -117,7 +117,6 @@ fn rate_label(rule: &limits::RateLimitRule) -> String {
 #[derive(Clone)]
 pub struct McpProxy {
     pub registry: Registry,
-    pub access_controller: AccessController,
     pub pool: ConnectionPool,
     pub circuit_breakers: McpCircuitBreakers,
     pub db: PgPool,
@@ -128,7 +127,6 @@ pub struct McpProxy {
 impl McpProxy {
     pub fn new(
         registry: Registry,
-        access_controller: AccessController,
         pool: ConnectionPool,
         db: PgPool,
         redis: fred::clients::Client,
@@ -136,7 +134,6 @@ impl McpProxy {
     ) -> Self {
         Self {
             registry,
-            access_controller,
             pool,
             circuit_breakers: McpCircuitBreakers::new(),
             db,
@@ -153,15 +150,15 @@ impl McpProxy {
         &self,
         user_id: Uuid,
         user_email: &str,
-        user_roles: &[String],
         role_ids: &[Uuid],
+        allowed_mcp_tools: Option<&[String]>,
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
         match request.method.as_str() {
             "initialize" => self.handle_initialize(request).await,
-            "tools/list" => self.handle_tools_list(user_id, user_roles, request).await,
+            "tools/list" => self.handle_tools_list(allowed_mcp_tools, request).await,
             "tools/call" => {
-                self.handle_tools_call(user_id, user_email, user_roles, role_ids, request)
+                self.handle_tools_call(user_id, user_email, role_ids, allowed_mcp_tools, request)
                     .await
             }
             _ => err_response(
@@ -199,36 +196,22 @@ impl McpProxy {
 
     async fn handle_tools_list(
         &self,
-        user_id: Uuid,
-        user_roles: &[String],
+        allowed_mcp_tools: Option<&[String]>,
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
         let all_tools = self.registry.get_all_tools(None).await;
 
-        let mut tools = Vec::new();
-        for (namespaced_name, info) in all_tools {
-            // Resolve the server so we can run an access check.
-            if let Some((server, original_name)) =
-                self.registry.find_server_for_tool(&namespaced_name).await
-            {
-                let allowed = self
-                    .access_controller
-                    .check_tool_access(user_id, server.id, &original_name, user_roles)
-                    .await;
-                if !allowed {
-                    continue;
-                }
-            } else {
-                // No server resolved → can't check policy → don't expose
-                continue;
-            }
-
-            tools.push(serde_json::json!({
-                "name": namespaced_name,
-                "description": info.description.unwrap_or_default(),
-                "inputSchema": info.input_schema.unwrap_or(serde_json::json!({"type": "object"})),
-            }));
-        }
+        let tools: Vec<serde_json::Value> = all_tools
+            .into_iter()
+            .filter(|(name, _)| is_tool_allowed(allowed_mcp_tools, name))
+            .map(|(namespaced_name, info)| {
+                serde_json::json!({
+                    "name": namespaced_name,
+                    "description": info.description.unwrap_or_default(),
+                    "inputSchema": info.input_schema.unwrap_or(serde_json::json!({"type": "object"})),
+                })
+            })
+            .collect();
 
         ok_response(request.id, serde_json::json!({ "tools": tools }))
     }
@@ -241,8 +224,8 @@ impl McpProxy {
         &self,
         user_id: Uuid,
         user_email: &str,
-        user_roles: &[String],
         role_ids: &[Uuid],
+        allowed_mcp_tools: Option<&[String]>,
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
         // Resolve params + tool target up front so we know which MCP
@@ -336,13 +319,8 @@ impl McpProxy {
             }
         }
 
-        // Access control check (default-deny: requires explicit policy
-        // for non-admin users).
-        let allowed = self
-            .access_controller
-            .check_tool_access(user_id, server.id, &original_tool_name, user_roles)
-            .await;
-        if !allowed {
+        // Access control: check tool against the user's allowed_mcp_tools patterns.
+        if !is_tool_allowed(allowed_mcp_tools, namespaced_name) {
             return err_response(request.id, INVALID_REQUEST, "Access denied for this tool");
         }
 

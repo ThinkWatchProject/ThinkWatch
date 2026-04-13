@@ -8,7 +8,7 @@ use uuid::Uuid;
 // A user with multiple role assignments gets the UNION of every role's
 // `permissions` field. If ANY role grants a permission, the user has it.
 //
-// The same rule holds for `allowed_models` and `allowed_mcp_servers`:
+// The same rule holds for `allowed_models` and `allowed_mcp_tools`:
 // - If ANY role has `allowed_* = NULL` (unrestricted), the user is
 //   unrestricted for that resource type.
 // - Otherwise the effective allow-list is the union of every role's
@@ -148,7 +148,7 @@ pub async fn compute_user_role_assignments(
 }
 
 /// Effective resource constraints for a user, derived by union'ing
-/// every role's `allowed_models` and `allowed_mcp_servers`. Mirrors
+/// every role's `allowed_models` and `allowed_mcp_tools`. Mirrors
 /// the same union semantics documented at the top of this file:
 ///
 ///   - If ANY role has `allowed_* = NULL` (unrestricted), the field
@@ -161,16 +161,18 @@ pub async fn compute_user_role_assignments(
 /// allow-list (if any) before calling into the proxy.
 pub struct UserResourceLimits {
     pub allowed_models: Option<Vec<String>>,
-    pub allowed_mcp_servers: Option<Vec<Uuid>>,
+    /// MCP tool patterns: `NULL` = unrestricted, `["mysql__*"]` = server
+    /// wildcard, `["mysql__query"]` = exact tool.
+    pub allowed_mcp_tools: Option<Vec<String>>,
 }
 
 pub async fn compute_user_resource_limits(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<UserResourceLimits, sqlx::Error> {
-    type Row = (Option<Vec<String>>, Option<Vec<Uuid>>);
+    type Row = (Option<Vec<String>>, Option<Vec<String>>);
     let rows: Vec<Row> = sqlx::query_as(
-        "SELECT r.allowed_models, r.allowed_mcp_servers FROM ( \
+        "SELECT r.allowed_models, r.allowed_mcp_tools FROM ( \
            SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
            UNION \
            SELECT tra.role_id \
@@ -185,28 +187,24 @@ pub async fn compute_user_resource_limits(
     .await?;
 
     if rows.is_empty() {
-        // No roles → no constraints from the role side. The caller
-        // will fall back to whatever the API key carries.
         return Ok(UserResourceLimits {
             allowed_models: None,
-            allowed_mcp_servers: None,
+            allowed_mcp_tools: None,
         });
     }
 
-    // Union with the "ANY null wins" rule: a single unrestricted
-    // role makes the whole user unrestricted, since RBAC is additive.
     let mut models_unrestricted = false;
-    let mut servers_unrestricted = false;
+    let mut tools_unrestricted = false;
     let mut models: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut servers: std::collections::BTreeSet<Uuid> = std::collections::BTreeSet::new();
-    for (m, s) in rows {
+    let mut tools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for (m, t) in rows {
         match m {
             None => models_unrestricted = true,
             Some(list) => models.extend(list),
         }
-        match s {
-            None => servers_unrestricted = true,
-            Some(list) => servers.extend(list),
+        match t {
+            None => tools_unrestricted = true,
+            Some(list) => tools.extend(list),
         }
     }
     Ok(UserResourceLimits {
@@ -215,12 +213,25 @@ pub async fn compute_user_resource_limits(
         } else {
             Some(models.into_iter().collect())
         },
-        allowed_mcp_servers: if servers_unrestricted {
+        allowed_mcp_tools: if tools_unrestricted {
             None
         } else {
-            Some(servers.into_iter().collect())
+            Some(tools.into_iter().collect())
         },
     })
+}
+
+/// Check if a namespaced MCP tool name matches any of the allowed patterns.
+/// Patterns: `"*"` matches all, `"mysql__*"` matches prefix, exact otherwise.
+pub fn is_mcp_tool_allowed(patterns: Option<&[String]>, namespaced_name: &str) -> bool {
+    match patterns {
+        None => true, // NULL = unrestricted
+        Some(pats) => pats.iter().any(|p| {
+            p == "*"
+                || (p.ends_with("__*") && namespaced_name.starts_with(&p[..p.len() - 1]))
+                || p == namespaced_name
+        }),
+    }
 }
 
 /// Compute the set of permissions that are explicitly denied to `user_id`

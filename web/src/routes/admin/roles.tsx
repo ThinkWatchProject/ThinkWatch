@@ -67,6 +67,8 @@ import { LimitsPanel } from '@/components/limits/limits-panel';
 import {
   groupByResource,
   type McpServer,
+  type McpToolRow,
+  type ModelRow,
   type PermissionDef,
   POLICY_TEMPLATES,
   type PolicyDocument,
@@ -91,8 +93,9 @@ export function RolesPage() {
   const { t } = useTranslation();
   const [roles, setRoles] = useState<RoleResponse[]>([]);
   const [permissions, setPermissions] = useState<PermissionDef[]>([]);
-  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [availableModelRows, setAvailableModelRows] = useState<ModelRow[]>([]);
   const [availableServers, setAvailableServers] = useState<McpServer[]>([]);
+  const [availableMcpTools, setAvailableMcpTools] = useState<McpToolRow[]>([]);
   // Team list — used to render scope badges as "team: engineering"
   // instead of the raw `team:<uuid>` the wire format carries.
   const [teamsById, setTeamsById] = useState<Map<string, { id: string; name: string }>>(
@@ -183,19 +186,21 @@ export function RolesPage() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [rolesRes, perms, modelsRes, serversRes, teamsRes] = await Promise.all([
+      const [rolesRes, perms, modelsRes, serversRes, teamsRes, toolsRes] = await Promise.all([
         api<{ items: RoleResponse[] }>('/api/admin/roles'),
         api<PermissionDef[]>('/api/admin/permissions'),
-        api<{ model_id: string }[]>('/api/admin/models').catch(() => []),
-        api<{ items: McpServer[] }>('/api/mcp/servers').catch(() => ({ items: [] })),
+        api<ModelRow[]>('/api/admin/models').catch(() => [] as ModelRow[]),
+        api<{ items: McpServer[] }>('/api/mcp/servers').catch(() => ({ items: [] as McpServer[] })),
         // Teams power the scope badge on member rows. team_managers
         // can read this endpoint too — they just see fewer teams.
         api<Array<{ id: string; name: string }>>('/api/admin/teams').catch(() => []),
+        api<McpToolRow[]>('/api/mcp/tools').catch(() => [] as McpToolRow[]),
       ]);
       setRoles(rolesRes.items);
       setPermissions(perms);
-      setAvailableModels(modelsRes.map((m) => m.model_id));
+      setAvailableModelRows(modelsRes);
       setAvailableServers(serversRes.items);
+      setAvailableMcpTools(toolsRes);
       setTeamsById(new Map(teamsRes.map((t) => [t.id, t])));
     } catch {
       // silently fail (auth / network); leave previous state
@@ -213,6 +218,45 @@ export function RolesPage() {
     () => new Set(permissions.filter((p) => p.dangerous).map((p) => p.key)),
     [permissions],
   );
+
+  // Build a server-id → server-name lookup for MCP tools tree.
+  const serverNameById = useMemo(
+    () => new Map(availableServers.map((s) => [s.id, s.name])),
+    [availableServers],
+  );
+
+  // MCP tools grouped by server name. Each tool's namespaced key is
+  // `${serverName}__${toolName}`.
+  const mcpToolsByServer = useMemo(() => {
+    const out = new Map<string, { serverName: string; tools: { key: string; toolName: string }[] }>();
+    for (const tool of availableMcpTools) {
+      const serverName = serverNameById.get(tool.server_id) ?? tool.server_id;
+      let group = out.get(serverName);
+      if (!group) {
+        group = { serverName, tools: [] };
+        out.set(serverName, group);
+      }
+      group.tools.push({
+        key: `${serverName}__${tool.tool_name}`,
+        toolName: tool.tool_name,
+      });
+    }
+    return out;
+  }, [availableMcpTools, serverNameById]);
+
+  // Models grouped by provider name.
+  const modelsByProvider = useMemo(() => {
+    const out = new Map<string, { modelId: string; displayName: string }[]>();
+    for (const m of availableModelRows) {
+      let group = out.get(m.provider_name);
+      if (!group) {
+        group = [];
+        out.set(m.provider_name, group);
+      }
+      group.push({ modelId: m.model_id, displayName: m.display_name });
+    }
+    return out;
+  }, [availableModelRows]);
 
   // System roles are locked in the UI: no edit button on the row,
   // no reset button in the dialog. The backend `roles:edit_system`
@@ -367,7 +411,7 @@ export function RolesPage() {
           description: formDesc || null,
           permissions: formMode === 'simple' ? Array.from(formPerms) : [],
           allowed_models: formRestrictModels ? Array.from(formModels) : null,
-          allowed_mcp_servers: formRestrictServers ? Array.from(formServers) : null,
+          allowed_mcp_tools: formRestrictServers ? Array.from(formServers) : null,
           policy_document: policyDocument,
         });
         setCreateOpen(false);
@@ -398,8 +442,8 @@ export function RolesPage() {
     setEditPerms(new Set(r.permissions));
     setEditRestrictModels(r.allowed_models !== null);
     setEditModels(new Set(r.allowed_models ?? []));
-    setEditRestrictServers(r.allowed_mcp_servers !== null);
-    setEditServers(new Set(r.allowed_mcp_servers ?? []));
+    setEditRestrictServers(r.allowed_mcp_tools !== null);
+    setEditServers(new Set(r.allowed_mcp_tools ?? []));
     setEditMode(r.policy_document ? 'policy' : 'simple');
     setEditPolicyJson(r.policy_document ? JSON.stringify(r.policy_document, null, 2) : '');
     setEditPolicyError('');
@@ -427,7 +471,7 @@ export function RolesPage() {
           description: editDesc || null,
           permissions: editMode === 'simple' ? Array.from(editPerms) : [],
           allowed_models: editRestrictModels ? Array.from(editModels) : null,
-          allowed_mcp_servers: editRestrictServers ? Array.from(editServers) : null,
+          allowed_mcp_tools: editRestrictServers ? Array.from(editServers) : null,
           policy_document: policyDocument,
         });
         setEditOpen(false);
@@ -467,7 +511,7 @@ export function RolesPage() {
     description: string | null;
     permissions: string[];
     allowed_models: string[] | null;
-    allowed_mcp_servers: string[] | null;
+    allowed_mcp_tools: string[] | null;
     policy_document: PolicyDocument | null;
   };
 
@@ -491,7 +535,7 @@ export function RolesPage() {
           description: r.description,
           permissions: r.permissions,
           allowed_models: r.allowed_models,
-          allowed_mcp_servers: r.allowed_mcp_servers,
+          allowed_mcp_tools: r.allowed_mcp_tools,
           policy_document: r.policy_document,
         })),
     };
@@ -557,7 +601,7 @@ export function RolesPage() {
             description: r.description ?? null,
             permissions: Array.isArray(r.permissions) ? r.permissions : [],
             allowed_models: r.allowed_models ?? null,
-            allowed_mcp_servers: r.allowed_mcp_servers ?? null,
+            allowed_mcp_tools: r.allowed_mcp_tools ?? null,
             policy_document: r.policy_document ?? null,
           });
           created += 1;
@@ -593,8 +637,8 @@ export function RolesPage() {
       setEditPerms(new Set(updated.permissions));
       setEditRestrictModels(updated.allowed_models !== null);
       setEditModels(new Set(updated.allowed_models ?? []));
-      setEditRestrictServers(updated.allowed_mcp_servers !== null);
-      setEditServers(new Set(updated.allowed_mcp_servers ?? []));
+      setEditRestrictServers(updated.allowed_mcp_tools !== null);
+      setEditServers(new Set(updated.allowed_mcp_tools ?? []));
       setEditMode(updated.policy_document ? 'policy' : 'simple');
       setEditPolicyJson(
         updated.policy_document ? JSON.stringify(updated.policy_document, null, 2) : '',
@@ -820,8 +864,8 @@ export function RolesPage() {
                             setFormPerms(new Set(src.permissions));
                             setFormRestrictModels(src.allowed_models !== null);
                             setFormModels(new Set(src.allowed_models ?? []));
-                            setFormRestrictServers(src.allowed_mcp_servers !== null);
-                            setFormServers(new Set(src.allowed_mcp_servers ?? []));
+                            setFormRestrictServers(src.allowed_mcp_tools !== null);
+                            setFormServers(new Set(src.allowed_mcp_tools ?? []));
                           }}
                         >
                           <SelectTrigger>
@@ -883,31 +927,6 @@ export function RolesPage() {
                       onToggleGroup={(perms) => toggleResourceGroup(formPerms, setFormPerms, perms)}
                       onSelectAll={() => setFormPerms(new Set(permissions.map((p) => p.key)))}
                       onClear={() => setFormPerms(new Set())}
-                      renderExtras={(resource) => {
-                        if (resource === 'ai_gateway' && formPerms.has('ai_gateway:use')) {
-                          return (
-                            <ModelConstraint
-                              restrict={formRestrictModels}
-                              onRestrictChange={setFormRestrictModels}
-                              selected={formModels}
-                              onToggle={(id) => togglePerm(formModels, setFormModels, id)}
-                              available={availableModels}
-                            />
-                          );
-                        }
-                        if (resource === 'mcp_gateway' && formPerms.has('mcp_gateway:use')) {
-                          return (
-                            <ServerConstraint
-                              restrict={formRestrictServers}
-                              onRestrictChange={setFormRestrictServers}
-                              selected={formServers}
-                              onToggle={(id) => togglePerm(formServers, setFormServers, id)}
-                              available={availableServers}
-                            />
-                          );
-                        }
-                        return null;
-                      }}
                     />
                   </TabsContent>
                   <TabsContent value="policy" className="mt-3">
@@ -919,6 +938,24 @@ export function RolesPage() {
                     />
                   </TabsContent>
                 </Tabs>
+
+                {/* Model access tree selector */}
+                <ModelTreeSelector
+                  restrict={formRestrictModels}
+                  onRestrictChange={setFormRestrictModels}
+                  selected={formModels}
+                  setSelected={setFormModels}
+                  modelsByProvider={modelsByProvider}
+                />
+
+                {/* MCP tool access tree selector */}
+                <McpToolTreeSelector
+                  restrict={formRestrictServers}
+                  onRestrictChange={setFormRestrictServers}
+                  selected={formServers}
+                  setSelected={setFormServers}
+                  mcpToolsByServer={mcpToolsByServer}
+                />
 
                 {formMode === 'simple' && hasDangerous(formPerms, dangerousKeys) && (
                   <DangerPermissionWarning />
@@ -1157,31 +1194,6 @@ export function RolesPage() {
                     onToggleGroup={(perms) => toggleResourceGroup(editPerms, setEditPerms, perms)}
                     onSelectAll={() => setEditPerms(new Set(permissions.map((p) => p.key)))}
                     onClear={() => setEditPerms(new Set())}
-                    renderExtras={(resource) => {
-                      if (resource === 'ai_gateway' && editPerms.has('ai_gateway:use')) {
-                        return (
-                          <ModelConstraint
-                            restrict={editRestrictModels}
-                            onRestrictChange={setEditRestrictModels}
-                            selected={editModels}
-                            onToggle={(id) => togglePerm(editModels, setEditModels, id)}
-                            available={availableModels}
-                          />
-                        );
-                      }
-                      if (resource === 'mcp_gateway' && editPerms.has('mcp_gateway:use')) {
-                        return (
-                          <ServerConstraint
-                            restrict={editRestrictServers}
-                            onRestrictChange={setEditRestrictServers}
-                            selected={editServers}
-                            onToggle={(id) => togglePerm(editServers, setEditServers, id)}
-                            available={availableServers}
-                          />
-                        );
-                      }
-                      return null;
-                    }}
                   />
                 </TabsContent>
                 <TabsContent value="policy" className="mt-3">
@@ -1193,6 +1205,25 @@ export function RolesPage() {
                   />
                 </TabsContent>
               </Tabs>
+
+              {/* Model access tree selector */}
+              <ModelTreeSelector
+                restrict={editRestrictModels}
+                onRestrictChange={setEditRestrictModels}
+                selected={editModels}
+                setSelected={setEditModels}
+                modelsByProvider={modelsByProvider}
+              />
+
+              {/* MCP tool access tree selector */}
+              <McpToolTreeSelector
+                restrict={editRestrictServers}
+                onRestrictChange={setEditRestrictServers}
+                selected={editServers}
+                setSelected={setEditServers}
+                mcpToolsByServer={mcpToolsByServer}
+              />
+
               {editMode === 'simple' && hasDangerous(editPerms, dangerousKeys) && (
                 <DangerPermissionWarning />
               )}
@@ -1556,7 +1587,6 @@ function PermissionTree({
   onToggleGroup,
   onSelectAll,
   onClear,
-  renderExtras,
 }: {
   grouped: Map<string, PermissionDef[]>;
   selected: Set<string>;
@@ -1564,7 +1594,6 @@ function PermissionTree({
   onToggleGroup: (perms: PermissionDef[]) => void;
   onSelectAll: () => void;
   onClear: () => void;
-  renderExtras?: (resource: string) => ReactNode;
 }) {
   const { t } = useTranslation();
   const groups = Array.from(grouped.entries());
@@ -1637,7 +1666,6 @@ function PermissionTree({
                     </label>
                   ))}
                 </div>
-                {renderExtras?.(resource)}
               </div>
             );
           })}
@@ -1647,103 +1675,268 @@ function PermissionTree({
   );
 }
 
-/// Inline allowed-models picker rendered under the `ai_gateway` permission
-/// group. Collapsed by default — admin must opt in to "limit to specific
-/// models", which then exposes the per-model checkbox grid.
-function ModelConstraint({
+/// Model access tree selector — models grouped by provider with
+/// unrestricted / custom radio toggle. Provider-level checkbox
+/// selects/deselects all models from that provider.
+function ModelTreeSelector({
   restrict,
   onRestrictChange,
   selected,
-  onToggle,
-  available,
+  setSelected,
+  modelsByProvider,
 }: {
   restrict: boolean;
   onRestrictChange: (v: boolean) => void;
   selected: Set<string>;
-  onToggle: (id: string) => void;
-  available: string[];
+  setSelected: (s: Set<string>) => void;
+  modelsByProvider: Map<string, { modelId: string; displayName: string }[]>;
 }) {
   const { t } = useTranslation();
+
+  const toggleModel = (modelId: string) => {
+    const next = new Set(selected);
+    if (next.has(modelId)) next.delete(modelId);
+    else next.add(modelId);
+    setSelected(next);
+  };
+
+  const toggleProvider = (models: { modelId: string }[]) => {
+    const next = new Set(selected);
+    const allOn = models.every((m) => next.has(m.modelId));
+    if (allOn) {
+      for (const m of models) next.delete(m.modelId);
+    } else {
+      for (const m of models) next.add(m.modelId);
+    }
+    setSelected(next);
+  };
+
   return (
-    <div className="mt-2 ml-6 rounded border bg-muted/20 p-2 space-y-1.5">
-      <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
-        <Checkbox checked={restrict} onCheckedChange={(v) => onRestrictChange(!!v)} />
-        <span>{t('roles.allowedModels')}</span>
-        <span className="font-normal text-muted-foreground">
-          — {restrict ? `${selected.size}` : t('roles.allModels')}
-        </span>
-      </label>
-      {restrict &&
-        (available.length > 0 ? (
-          <ScrollArea className="max-h-32">
-            <div className="grid grid-cols-2 gap-1 pl-5">
-              {available.map((model) => (
-                <label
-                  key={model}
-                  className="flex cursor-pointer items-center gap-1.5 text-xs"
-                >
-                  <Checkbox
-                    checked={selected.has(model)}
-                    onCheckedChange={() => onToggle(model)}
-                  />
-                  <span className="truncate">{model}</span>
-                </label>
-              ))}
-            </div>
-          </ScrollArea>
-        ) : (
-          <p className="pl-5 text-xs italic text-muted-foreground">{t('common.noData')}</p>
-        ))}
+    <div className="space-y-2">
+      <Label>{t('roles.modelsLabel')}</Label>
+      <div className="flex gap-4">
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="radio"
+            name="model-access-mode"
+            checked={!restrict}
+            onChange={() => onRestrictChange(false)}
+          />
+          {t('roles.unrestricted')}
+        </label>
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="radio"
+            name="model-access-mode"
+            checked={restrict}
+            onChange={() => onRestrictChange(true)}
+          />
+          {t('roles.custom')}
+        </label>
+      </div>
+      {restrict && (
+        <div className="border rounded-md p-3 max-h-48 overflow-y-auto space-y-2">
+          {modelsByProvider.size === 0 ? (
+            <p className="text-xs italic text-muted-foreground">{t('common.noData')}</p>
+          ) : (
+            Array.from(modelsByProvider.entries()).map(([provider, models]) => {
+              const checkedCount = models.filter((m) => selected.has(m.modelId)).length;
+              const allOn = checkedCount === models.length;
+              const someOn = checkedCount > 0 && !allOn;
+              return (
+                <div key={provider}>
+                  <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
+                    <Checkbox
+                      checked={allOn}
+                      data-state={someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'}
+                      onCheckedChange={() => toggleProvider(models)}
+                    />
+                    <span className="font-mono text-muted-foreground">{provider}</span>
+                    <span className="text-muted-foreground font-normal">
+                      ({checkedCount}/{models.length})
+                    </span>
+                  </label>
+                  <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5 pl-6">
+                    {models.map((m) => (
+                      <label
+                        key={m.modelId}
+                        className="flex cursor-pointer items-center gap-1.5 text-xs"
+                      >
+                        <Checkbox
+                          checked={selected.has(m.modelId)}
+                          onCheckedChange={() => toggleModel(m.modelId)}
+                        />
+                        <span className="truncate" title={m.modelId}>
+                          {m.displayName || m.modelId}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
-/// Inline allowed-MCP-servers picker rendered under the `mcp_gateway`
-/// permission group. Same opt-in model as `ModelConstraint`.
-function ServerConstraint({
+/// MCP tool access tree selector — tools grouped by server with
+/// unrestricted / custom radio toggle. Server-level checkbox uses
+/// wildcard `serverName__*`; individual tools are `serverName__toolName`.
+function McpToolTreeSelector({
   restrict,
   onRestrictChange,
   selected,
-  onToggle,
-  available,
+  setSelected,
+  mcpToolsByServer,
 }: {
   restrict: boolean;
   onRestrictChange: (v: boolean) => void;
   selected: Set<string>;
-  onToggle: (id: string) => void;
-  available: McpServer[];
+  setSelected: (s: Set<string>) => void;
+  mcpToolsByServer: Map<string, { serverName: string; tools: { key: string; toolName: string }[] }>;
 }) {
   const { t } = useTranslation();
+
+  /// Check whether the server is fully selected — either via wildcard
+  /// or via all individual tools being present.
+  const isServerFullySelected = (
+    serverName: string,
+    tools: { key: string }[],
+  ): boolean => {
+    if (selected.has(`${serverName}__*`)) return true;
+    return tools.every((tool) => selected.has(tool.key));
+  };
+
+  /// Count how many tools are effectively selected for a server.
+  const countSelected = (
+    serverName: string,
+    tools: { key: string }[],
+  ): number => {
+    if (selected.has(`${serverName}__*`)) return tools.length;
+    return tools.filter((tool) => selected.has(tool.key)).length;
+  };
+
+  const toggleServer = (serverName: string, tools: { key: string }[]) => {
+    const next = new Set(selected);
+    const fullySelected = isServerFullySelected(serverName, tools);
+    if (fullySelected) {
+      // Uncheck: remove wildcard and all individual tools
+      next.delete(`${serverName}__*`);
+      for (const tool of tools) next.delete(tool.key);
+    } else {
+      // Check: add wildcard, remove individual entries
+      for (const tool of tools) next.delete(tool.key);
+      next.add(`${serverName}__*`);
+    }
+    setSelected(next);
+  };
+
+  const toggleTool = (serverName: string, toolKey: string, tools: { key: string }[]) => {
+    const next = new Set(selected);
+    const wildcard = `${serverName}__*`;
+
+    if (next.has(wildcard)) {
+      // Expand wildcard into individual tools minus the toggled one
+      next.delete(wildcard);
+      for (const tool of tools) {
+        if (tool.key !== toolKey) next.add(tool.key);
+      }
+    } else if (next.has(toolKey)) {
+      // Uncheck this tool
+      next.delete(toolKey);
+    } else {
+      // Check this tool
+      next.add(toolKey);
+      // If all tools are now selected, collapse to wildcard
+      const allSelected = tools.every((tool) =>
+        tool.key === toolKey ? true : next.has(tool.key),
+      );
+      if (allSelected) {
+        for (const tool of tools) next.delete(tool.key);
+        next.add(wildcard);
+      }
+    }
+    setSelected(next);
+  };
+
+  /// Check if an individual tool is effectively selected (via wildcard
+  /// or direct entry).
+  const isToolSelected = (serverName: string, toolKey: string): boolean => {
+    return selected.has(`${serverName}__*`) || selected.has(toolKey);
+  };
+
   return (
-    <div className="mt-2 ml-6 rounded border bg-muted/20 p-2 space-y-1.5">
-      <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
-        <Checkbox checked={restrict} onCheckedChange={(v) => onRestrictChange(!!v)} />
-        <span>{t('roles.allowedMcpServers')}</span>
-        <span className="font-normal text-muted-foreground">
-          — {restrict ? `${selected.size}` : t('roles.allServers')}
-        </span>
-      </label>
-      {restrict &&
-        (available.length > 0 ? (
-          <ScrollArea className="max-h-32">
-            <div className="grid grid-cols-1 gap-1 pl-5">
-              {available.map((srv) => (
-                <label
-                  key={srv.id}
-                  className="flex cursor-pointer items-center gap-1.5 text-xs"
-                >
-                  <Checkbox
-                    checked={selected.has(srv.id)}
-                    onCheckedChange={() => onToggle(srv.id)}
-                  />
-                  <span className="truncate">{srv.name}</span>
-                </label>
-              ))}
-            </div>
-          </ScrollArea>
-        ) : (
-          <p className="pl-5 text-xs italic text-muted-foreground">{t('common.noData')}</p>
-        ))}
+    <div className="space-y-2">
+      <Label>{t('roles.mcpToolsLabel')}</Label>
+      <div className="flex gap-4">
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="radio"
+            name="mcp-tool-access-mode"
+            checked={!restrict}
+            onChange={() => onRestrictChange(false)}
+          />
+          {t('roles.unrestricted')}
+        </label>
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input
+            type="radio"
+            name="mcp-tool-access-mode"
+            checked={restrict}
+            onChange={() => onRestrictChange(true)}
+          />
+          {t('roles.custom')}
+        </label>
+      </div>
+      {restrict && (
+        <div className="border rounded-md p-3 max-h-48 overflow-y-auto space-y-2">
+          {mcpToolsByServer.size === 0 ? (
+            <p className="text-xs italic text-muted-foreground">{t('common.noData')}</p>
+          ) : (
+            Array.from(mcpToolsByServer.entries()).map(([serverName, group]) => {
+              const count = countSelected(serverName, group.tools);
+              const allOn = isServerFullySelected(serverName, group.tools);
+              const someOn = count > 0 && !allOn;
+              return (
+                <div key={serverName}>
+                  <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
+                    <Checkbox
+                      checked={allOn}
+                      data-state={someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'}
+                      onCheckedChange={() => toggleServer(serverName, group.tools)}
+                    />
+                    <span className="font-mono text-muted-foreground">{serverName}</span>
+                    <span className="text-muted-foreground font-normal">
+                      ({count}/{group.tools.length})
+                    </span>
+                  </label>
+                  <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5 pl-6">
+                    {group.tools.map((tool) => (
+                      <label
+                        key={tool.key}
+                        className="flex cursor-pointer items-center gap-1.5 text-xs"
+                      >
+                        <Checkbox
+                          checked={isToolSelected(serverName, tool.key)}
+                          onCheckedChange={() =>
+                            toggleTool(serverName, tool.key, group.tools)
+                          }
+                        />
+                        <span className="truncate" title={tool.key}>
+                          {tool.toolName}
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              );
+            })
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1997,7 +2190,7 @@ function RoleDetail({
             </div>
           </div>
         )}
-        {(role.allowed_models !== null || role.allowed_mcp_servers !== null) && (
+        {(role.allowed_models !== null || role.allowed_mcp_tools !== null) && (
           <div className="space-y-2">
             {role.allowed_models !== null && (
               <ConstraintRow
@@ -2006,10 +2199,10 @@ function RoleDetail({
                 resolveLabel={(s) => s}
               />
             )}
-            {role.allowed_mcp_servers !== null && (
+            {role.allowed_mcp_tools !== null && (
               <ConstraintRow
-                label={t('roles.allowedMcpServers')}
-                items={role.allowed_mcp_servers}
+                label={t('roles.allowedMcpTools')}
+                items={role.allowed_mcp_tools}
                 resolveLabel={(id) =>
                   availableServers.find((s) => s.id === id)?.name ?? id.slice(0, 8)
                 }

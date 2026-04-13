@@ -7,13 +7,6 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Switch } from '@/components/ui/switch';
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -29,7 +22,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { AlertCircle, Brain, Pencil, Plus, Trash2 } from 'lucide-react';
+import { AlertCircle, Brain, Loader2, Pencil, RefreshCw, Trash2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -130,11 +123,19 @@ export function ModelsPage() {
     void fetchAll();
   }, []);
 
-  const openCreate = () => {
-    setEditing(null);
-    setForm({ ...emptyForm, provider_id: providers[0]?.id ?? '' });
-    setFormError('');
-    setDialogOpen(true);
+  const [syncingProvider, setSyncingProvider] = useState<string | null>(null);
+
+  const syncModels = async (providerId: string) => {
+    setSyncingProvider(providerId);
+    try {
+      const res = await apiPost<{ count: number }>(`/api/admin/providers/${providerId}/sync-models`, {});
+      toast.success(t('models.syncSuccess', { count: res.count }));
+      await fetchAll();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Sync failed');
+    } finally {
+      setSyncingProvider(null);
+    }
   };
 
   const openEdit = (m: ModelRow) => {
@@ -163,7 +164,6 @@ export function ModelsPage() {
       return;
     }
     const body = {
-      ...(editing ? {} : { provider_id: form.provider_id, model_id: form.model_id }),
       display_name: form.display_name,
       input_price: form.input_price === '' ? null : form.input_price,
       output_price: form.output_price === '' ? null : form.output_price,
@@ -176,9 +176,6 @@ export function ModelsPage() {
       if (editing) {
         await apiPatch(`/api/admin/models/${editing.id}`, body);
         toast.success(t('models.toast.updated'));
-      } else {
-        await apiPost('/api/admin/models', body);
-        toast.success(t('models.toast.created'));
       }
       setDialogOpen(false);
       await fetchAll();
@@ -217,10 +214,6 @@ export function ModelsPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('models.title')}</h1>
           <p className="text-muted-foreground">{t('models.subtitle')}</p>
         </div>
-        <Button onClick={openCreate} disabled={providers.length === 0}>
-          <Plus className="mr-2 h-4 w-4" />
-          {t('models.addModel')}
-        </Button>
       </div>
 
       {error && (
@@ -260,6 +253,22 @@ export function ModelsPage() {
                 <CardTitle className="flex items-center gap-2 text-base">
                   <span>{providerName}</span>
                   <Badge variant={providerColors[ptype]}>{ptype}</Badge>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="ml-auto"
+                    disabled={syncingProvider === rows[0].provider_id}
+                    onClick={() => syncModels(rows[0].provider_id)}
+                  >
+                    {syncingProvider === rows[0].provider_id ? (
+                      <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <RefreshCw className="mr-1 h-3.5 w-3.5" />
+                    )}
+                    {syncingProvider === rows[0].provider_id
+                      ? t('models.syncing')
+                      : t('models.syncModels')}
+                  </Button>
                 </CardTitle>
               </CardHeader>
               <CardContent>
@@ -326,44 +335,10 @@ export function ModelsPage() {
         <DialogContent className="sm:max-w-lg">
           <form onSubmit={submit}>
             <DialogHeader>
-              <DialogTitle>
-                {editing ? t('models.editTitle') : t('models.createTitle')}
-              </DialogTitle>
+              <DialogTitle>{t('models.editTitle')}</DialogTitle>
               <DialogDescription>{t('models.formHint')}</DialogDescription>
             </DialogHeader>
             <div className="space-y-4 py-4">
-              {!editing && (
-                <>
-                  <div className="space-y-2">
-                    <Label htmlFor="provider">{t('models.field.provider')}</Label>
-                    <Select
-                      value={form.provider_id}
-                      onValueChange={(v) => setForm({ ...form, provider_id: v })}
-                    >
-                      <SelectTrigger id="provider">
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {providers.map((p) => (
-                          <SelectItem key={p.id} value={p.id}>
-                            {p.display_name} ({p.name})
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="model_id">{t('models.field.modelId')}</Label>
-                    <Input
-                      id="model_id"
-                      value={form.model_id}
-                      onChange={(e) => setForm({ ...form, model_id: e.target.value })}
-                      placeholder="gpt-4o"
-                      required
-                    />
-                  </div>
-                </>
-              )}
               <div className="space-y-2">
                 <Label htmlFor="display_name">{t('models.field.displayName')}</Label>
                 <Input

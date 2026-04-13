@@ -63,7 +63,7 @@ CREATE TABLE rbac_roles (
     is_system           BOOLEAN NOT NULL DEFAULT FALSE,
     permissions         TEXT[]   NOT NULL DEFAULT ARRAY[]::TEXT[],
     allowed_models      TEXT[],
-    allowed_mcp_servers UUID[],
+    allowed_mcp_tools   TEXT[],
     policy_document     JSONB,
     created_by          UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),

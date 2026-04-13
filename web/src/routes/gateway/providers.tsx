@@ -188,6 +188,7 @@ export function ProvidersPage() {
       });
       setDialogOpen(false);
       resetForm();
+      toast.success(t('providers.createdAndSynced'));
       await fetchProviders();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Failed to create provider');
@@ -405,7 +406,9 @@ export function ProvidersPage() {
                   {testing ? t('providers.testing') : t('providers.testConnection')}
                 </Button>
                 <Button type="submit" disabled={submitting}>
-                  {submitting ? t('providers.creating') : t('providers.createProvider')}
+                  {submitting ? (
+                    <><Loader2 className="mr-1 h-4 w-4 animate-spin" />{t('providers.creatingAndSyncing')}</>
+                  ) : t('providers.createProvider')}
                 </Button>
               </DialogFooter>
             </form>

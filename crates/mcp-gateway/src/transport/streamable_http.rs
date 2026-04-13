@@ -38,6 +38,8 @@ pub struct McpRequestIdentity {
     pub user_roles: Vec<String>,
     /// Role IDs for rate-limit subject resolution.
     pub role_ids: Vec<Uuid>,
+    /// MCP tool access patterns from role union. `None` = unrestricted.
+    pub allowed_mcp_tools: Option<Vec<String>>,
 }
 
 /// Header name used to carry the MCP session identifier.
@@ -78,8 +80,8 @@ pub async fn handle_post(
         .handle_request(
             identity.user_id,
             &identity.user_email,
-            &identity.user_roles,
             &identity.role_ids,
+            identity.allowed_mcp_tools.as_deref(),
             request,
         )
         .await;

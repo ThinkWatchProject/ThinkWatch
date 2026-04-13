@@ -25,7 +25,6 @@ use think_watch_gateway::pii_redactor::PiiRedactor;
 use think_watch_gateway::proxy::{self as gateway_proxy, GatewayState};
 use think_watch_gateway::quota::QuotaManager;
 use think_watch_gateway::router::ModelRouter;
-use think_watch_mcp_gateway::access_control::AccessController;
 use think_watch_mcp_gateway::proxy::McpProxy;
 use think_watch_mcp_gateway::session::SessionManager;
 use think_watch_mcp_gateway::transport::streamable_http::{self, McpGatewayState};
@@ -191,7 +190,6 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
     // console CRUD handlers can sync runtime state when admins add/remove
     // servers, and so the dashboard can reflect real CB state.
     let registry = state.mcp_registry.clone();
-    let access_controller = AccessController::new();
     let pool = state.mcp_pool.clone();
 
     // Initial load: hydrate the in-memory registry from Postgres so the
@@ -219,7 +217,6 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
 
     let mut mcp_proxy = McpProxy::new(
         registry,
-        access_controller,
         pool,
         state.db.clone(),
         state.redis.clone(),
@@ -489,6 +486,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             get(handlers::providers::get_provider)
                 .patch(handlers::providers::update_provider)
                 .delete(handlers::providers::delete_provider),
+        )
+        .route(
+            "/api/admin/providers/{id}/sync-models",
+            post(handlers::models::sync_models),
         )
         .route(
             "/api/admin/models",

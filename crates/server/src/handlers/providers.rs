@@ -266,9 +266,62 @@ pub async fn create_provider(
     .bind(&req.display_name)
     .bind(&req.provider_type)
     .bind(&req.base_url)
-    .bind(config)
+    .bind(&config)
     .fetch_one(&state.db)
     .await?;
+
+    // Auto-test connectivity and bulk-insert discovered models
+    let test_headers: Vec<ProviderHeader> = config
+        .get("headers")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let test_req = TestProviderRequest {
+        provider_type: req.provider_type.clone(),
+        base_url: req.base_url.clone(),
+        headers: test_headers,
+    };
+    match run_provider_test(test_req).await {
+        Ok(Json(resp)) if resp.success => {
+            if let Some(models) = resp.models {
+                for model_id in &models {
+                    if let Err(e) = sqlx::query(
+                        r#"INSERT INTO models (provider_id, model_id, display_name)
+                           VALUES ($1, $2, $2)
+                           ON CONFLICT (provider_id, model_id) DO NOTHING"#,
+                    )
+                    .bind(provider.id)
+                    .bind(model_id)
+                    .execute(&state.db)
+                    .await
+                    {
+                        tracing::warn!(
+                            provider_id = %provider.id,
+                            model_id = %model_id,
+                            "Failed to insert discovered model: {e}"
+                        );
+                    }
+                }
+                tracing::info!(
+                    provider_id = %provider.id,
+                    model_count = models.len(),
+                    "Auto-discovered and inserted models for new provider"
+                );
+            }
+        }
+        Ok(Json(resp)) => {
+            tracing::warn!(
+                provider_id = %provider.id,
+                message = %resp.message,
+                "Provider connectivity test failed after creation; provider saved without models"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                provider_id = %provider.id,
+                "Provider connectivity test errored after creation: {e}; provider saved without models"
+            );
+        }
+    }
 
     state.audit.log(
         auth_user
@@ -514,7 +567,7 @@ pub async fn test_provider_unauthenticated(
     run_provider_test(req).await
 }
 
-async fn run_provider_test(
+pub(crate) async fn run_provider_test(
     req: TestProviderRequest,
 ) -> Result<Json<TestProviderResponse>, AppError> {
     if req.base_url.is_empty() {
