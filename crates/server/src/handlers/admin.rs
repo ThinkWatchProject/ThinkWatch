@@ -1638,7 +1638,7 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
-        "auth.allow_registration" => {
+        "auth.allow_registration" | "security.rate_limit_fail_closed" => {
             if !value.is_boolean() {
                 return Err(AppError::BadRequest(format!("{key} must be a boolean")));
             }

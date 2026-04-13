@@ -538,7 +538,7 @@ export function SettingsPage() {
         {/* ---------------------------------------------------------------- */}
         {/* Gateway Tab                                                       */}
         {/* ---------------------------------------------------------------- */}
-        <TabsContent value="gateway">
+        <TabsContent value="gateway" className="space-y-6">
           <Card>
             <CardHeader>
               <CardTitle className="text-base">{t('settings.gateway')}</CardTitle>
