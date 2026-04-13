@@ -273,7 +273,7 @@ export function ProvidersPage() {
                   <div key={i} className="flex gap-2 items-center">
                     <Input className="flex-1" placeholder="Header-Name" value={k}
                       onChange={(e) => { const next = [...headers]; next[i] = [e.target.value, v]; setHeaders(next); }} />
-                    <Input className="flex-1" type={/key|secret|token|auth/i.test(k) ? 'password' : 'text'}
+                    <Input className="flex-1" type="text"
                       placeholder={t('mcpServers.headerValuePlaceholder')} value={v}
                       onChange={(e) => { const next = [...headers]; next[i] = [k, e.target.value]; setHeaders(next); }} />
                     <Button type="button" variant="ghost" size="icon-sm" onClick={() => setHeaders(headers.filter((_, j) => j !== i))}>
@@ -449,7 +449,7 @@ export function ProvidersPage() {
                 <div key={i} className="flex gap-2 items-center">
                   <Input className="flex-1" placeholder="Header-Name" value={k}
                     onChange={(e) => { const next = [...editHeaders]; next[i] = [e.target.value, v]; setEditHeaders(next); }} />
-                  <Input className="flex-1" type={/key|secret|token|auth/i.test(k) ? 'password' : 'text'}
+                  <Input className="flex-1" type="text"
                     placeholder={t('mcpServers.headerValuePlaceholder')} value={v}
                     onChange={(e) => { const next = [...editHeaders]; next[i] = [k, e.target.value]; setEditHeaders(next); }} />
                   <Button type="button" variant="ghost" size="icon-sm" onClick={() => setEditHeaders(editHeaders.filter((_, j) => j !== i))}>
