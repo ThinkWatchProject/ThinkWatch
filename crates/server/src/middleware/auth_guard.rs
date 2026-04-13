@@ -22,6 +22,11 @@ pub struct ApiKeyAuthenticated;
 pub struct AuthUser {
     pub claims: Claims,
     pub ip: Option<String>,
+    /// Flat union of every role's permissions — loaded at request time
+    /// from Redis cache (60s TTL) or DB fallback. Never from the JWT.
+    pub permissions: Vec<String>,
+    /// Permissions explicitly denied by policy documents.
+    pub denied_permissions: Vec<String>,
 }
 
 impl AuthUser {
@@ -45,12 +50,12 @@ impl AuthUser {
     /// Returns `AppError::Forbidden` if the permission is not present.
     pub fn require_permission(&self, perm: &str) -> Result<(), AppError> {
         // Deny always wins over Allow.
-        if self.claims.denied_permissions.iter().any(|p| p == perm) {
+        if self.denied_permissions.iter().any(|p| p == perm) {
             return Err(AppError::Forbidden(format!(
                 "Permission explicitly denied: {perm}"
             )));
         }
-        if self.claims.permissions.iter().any(|p| p == perm) {
+        if self.permissions.iter().any(|p| p == perm) {
             Ok(())
         } else {
             Err(AppError::Forbidden(format!(
@@ -65,7 +70,7 @@ impl AuthUser {
     pub fn require_any_permission(&self, perms: &[&str]) -> Result<(), AppError> {
         if perms
             .iter()
-            .any(|p| self.claims.permissions.iter().any(|c| c == *p))
+            .any(|p| self.permissions.iter().any(|c| c == *p))
         {
             Ok(())
         } else {
@@ -97,9 +102,8 @@ impl AuthUser {
     // on every call. That's one indexed-join SQL query per request
     // (~1ms) — cheap, and crucially the lookup is against LIVE data,
     // so revoking a role takes effect on the next request, not the
-    // next refresh. The JWT's `role_assignments` field is only used
-    // by callers that need the raw assignment list without checking
-    // a specific permission (e.g. the /api/auth/me endpoint).
+    // next refresh. Permissions are no longer in the JWT; they are
+    // loaded at request time into AuthUser.permissions.
     // ------------------------------------------------------------------------
 
     /// Assert the caller has `perm` at GLOBAL scope.
@@ -428,6 +432,51 @@ pub async fn extract_client_ip(
     }
 }
 
+/// Load permissions from Redis cache (`user_perms:{user_id}`, 60s TTL)
+/// with DB fallback. Returns `(permissions, denied_permissions)`.
+async fn load_user_permissions_cached(
+    state: &AppState,
+    user_id: uuid::Uuid,
+) -> Result<(Vec<String>, Vec<String>), anyhow::Error> {
+    use fred::interfaces::KeysInterface;
+
+    let cache_key = format!("user_perms:{user_id}");
+    let cached: Option<String> = state.redis.get(&cache_key).await.ok().flatten();
+
+    if let Some(json) = cached
+        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&json)
+    {
+        let perms: Vec<String> = val
+            .get("p")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        let denied: Vec<String> = val
+            .get("d")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default();
+        return Ok((perms, denied));
+    }
+
+    // Cache miss — compute from DB
+    let perms = rbac::compute_user_permissions(&state.db, user_id).await?;
+    let denied = rbac::compute_denied_permissions(&state.db, user_id, &perms).await?;
+
+    // Best-effort cache write (60s TTL)
+    let cache_val = serde_json::json!({"p": perms, "d": denied});
+    let _: Result<(), _> = state
+        .redis
+        .set(
+            &cache_key,
+            cache_val.to_string(),
+            Some(fred::types::Expiration::EX(60)),
+            None,
+            false,
+        )
+        .await;
+
+    Ok((perms, denied))
+}
+
 pub async fn require_auth(
     State(state): State<AppState>,
     mut request: Request<axum::body::Body>,
@@ -479,6 +528,11 @@ pub async fn require_auth(
 
     let ip = extract_client_ip(&state, request.headers(), request.extensions()).await;
 
+    // Load permissions from Redis cache (60s TTL) → DB fallback.
+    let (permissions, denied_permissions) = load_user_permissions_cached(&state, claims.sub)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     if let Some(slot) = request
         .extensions()
         .get::<crate::middleware::access_log::AccessLogUserSlot>()
@@ -486,7 +540,12 @@ pub async fn require_auth(
         let _ = slot.0.set(claims.sub);
     }
 
-    request.extensions_mut().insert(AuthUser { claims, ip });
+    request.extensions_mut().insert(AuthUser {
+        claims,
+        ip,
+        permissions,
+        denied_permissions,
+    });
 
     Ok(next.run(request).await)
 }
@@ -539,9 +598,6 @@ async fn auth_via_api_key(
     let denied_permissions = rbac::compute_denied_permissions(&state.db, user_id, &permissions)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let role_assignments = rbac::compute_user_role_assignments(&state.db, user_id)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let email = sqlx::query_scalar::<_, String>(
         "SELECT email FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
@@ -551,10 +607,6 @@ async fn auth_via_api_key(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
     .ok_or(StatusCode::UNAUTHORIZED)?;
-
-    let roles = rbac::load_user_role_names(&state.db, user_id)
-        .await
-        .unwrap_or_default();
 
     // Best-effort last_used_at update (same pattern as gateway path).
     let db = state.db.clone();
@@ -570,10 +622,6 @@ async fn auth_via_api_key(
     let claims = Claims {
         sub: user_id,
         email,
-        roles,
-        permissions,
-        denied_permissions,
-        role_assignments,
         exp: now + 86400,
         iat: now,
         token_type: "access".into(),
@@ -588,9 +636,12 @@ async fn auth_via_api_key(
         let _ = slot.0.set(user_id);
     }
 
-    request
-        .extensions_mut()
-        .insert(AuthUser { claims, ip: None });
+    request.extensions_mut().insert(AuthUser {
+        claims,
+        ip: None,
+        permissions,
+        denied_permissions,
+    });
     request.extensions_mut().insert(ApiKeyAuthenticated);
 
     Ok(next.run(request).await)

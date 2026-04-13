@@ -92,35 +92,26 @@ pub(crate) async fn issue_auth_session(
     email: &str,
     client_ip: Option<&str>,
 ) -> Result<AuthSession, AppError> {
+    // Load roles/permissions for the login response body (frontend needs them),
+    // but they are NOT embedded in the JWT anymore.
     let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user_id).await?;
     let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user_id).await?;
     let denied_permissions =
         think_watch_auth::rbac::compute_denied_permissions(&state.db, user_id, &permissions)
             .await?;
-    let role_assignments =
-        think_watch_auth::rbac::compute_user_role_assignments(&state.db, user_id).await?;
 
     let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
 
-    let access_token = state.jwt.create_access_token_with_ttl(
-        user_id,
-        email,
-        roles.clone(),
-        permissions.clone(),
-        denied_permissions.clone(),
-        role_assignments.clone(),
-        access_ttl,
-    )?;
-    let refresh_token = state.jwt.create_refresh_token_with_ttl(
-        user_id,
-        email,
-        roles.clone(),
-        permissions.clone(),
-        denied_permissions.clone(),
-        role_assignments,
-        refresh_ttl_days,
-    )?;
+    // JWT tokens only carry identity (sub, email) — permissions are
+    // computed at request time from DB (with Redis cache).
+    let access_token = state
+        .jwt
+        .create_access_token_with_ttl(user_id, email, access_ttl)?;
+    let refresh_token =
+        state
+            .jwt
+            .create_refresh_token_with_ttl(user_id, email, refresh_ttl_days)?;
 
     let signing_key = verify_signature::create_signing_key(&state.redis, &user_id, client_ip)
         .await

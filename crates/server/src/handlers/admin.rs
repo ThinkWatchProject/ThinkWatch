@@ -375,8 +375,13 @@ pub async fn create_user(
     // super_admin/admin additionally requires the caller to hold that
     // role themselves. Without this gate a user with `users:create`
     // could bootstrap themselves a super_admin account.
-    let caller_has_super = auth_user.claims.roles.iter().any(|r| r == "super_admin");
-    let caller_has_admin = caller_has_super || auth_user.claims.roles.iter().any(|r| r == "admin");
+    // Load caller's role names from DB for privilege escalation checks.
+    let caller_roles =
+        think_watch_auth::rbac::load_user_role_names(&state.db, auth_user.claims.sub)
+            .await
+            .unwrap_or_default();
+    let caller_has_super = caller_roles.iter().any(|r| r == "super_admin");
+    let caller_has_admin = caller_has_super || caller_roles.iter().any(|r| r == "admin");
     // Look up requested role names in one query to check privilege.
     let role_ids: Vec<uuid::Uuid> = req.role_assignments.iter().map(|a| a.role_id).collect();
     let requested: Vec<(String,)> =
@@ -617,9 +622,13 @@ pub async fn update_user(
         auth_user
             .assert_scope_global(&state.db, "roles:update")
             .await?;
-        let caller_has_super = auth_user.claims.roles.iter().any(|r| r == "super_admin");
-        let caller_has_admin =
-            caller_has_super || auth_user.claims.roles.iter().any(|r| r == "admin");
+        // Load caller's role names from DB for privilege escalation checks.
+        let caller_roles =
+            think_watch_auth::rbac::load_user_role_names(&state.db, auth_user.claims.sub)
+                .await
+                .unwrap_or_default();
+        let caller_has_super = caller_roles.iter().any(|r| r == "super_admin");
+        let caller_has_admin = caller_has_super || caller_roles.iter().any(|r| r == "admin");
 
         let role_ids: Vec<uuid::Uuid> = assignments.iter().map(|a| a.role_id).collect();
         let requested: Vec<(String,)> =
