@@ -458,12 +458,12 @@ export function SettingsPage() {
                 <div className="space-y-2 max-w-2xl">
                   <Label className="text-sm">{t('settings.defaultRole')}</Label>
                   <p className="text-xs text-muted-foreground">{t('settings.defaultRoleHint')}</p>
-                  <Select value={defaultRole} onValueChange={setDefaultRole}>
+                  <Select value={defaultRole || '__none__'} onValueChange={(v) => setDefaultRole(v === '__none__' ? '' : v)}>
                     <SelectTrigger className="w-64">
                       <SelectValue placeholder={t('settings.noRole')} />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="">{t('settings.noRole')}</SelectItem>
+                      <SelectItem value="__none__">{t('settings.noRole')}</SelectItem>
                       {availableRoles.map((r) => (
                         <SelectItem key={r.id} value={r.name}>{r.name}</SelectItem>
                       ))}
