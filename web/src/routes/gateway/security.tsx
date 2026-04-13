@@ -366,6 +366,21 @@ export function GatewaySecurityPage() {
                 <Plus className="h-4 w-4" />
                 {t('settings.pii.addPattern')}
               </Button>
+              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setPiiPatterns([...piiPatterns, { name: 'email', regex: '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}', placeholder_prefix: 'EMAIL' }])}>
+                + Email
+              </Button>
+              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setPiiPatterns([...piiPatterns, { name: 'phone', regex: '(?:\\+?\\d{1,3}[-.\\s]?)?\\(?\\d{2,4}\\)?[-.\\s]?\\d{3,4}[-.\\s]?\\d{3,4}', placeholder_prefix: 'PHONE' }])}>
+                + Phone
+              </Button>
+              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setPiiPatterns([...piiPatterns, { name: 'uuid', regex: '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', placeholder_prefix: 'UUID' }])}>
+                + UUID
+              </Button>
+              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setPiiPatterns([...piiPatterns, { name: 'credit_card', regex: '\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b', placeholder_prefix: 'CARD' }])}>
+                + Card
+              </Button>
+              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setPiiPatterns([...piiPatterns, { name: 'ip_address', regex: '\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b', placeholder_prefix: 'IP' }])}>
+                + IP
+              </Button>
             </div>
           </div>
         </CardHeader>
