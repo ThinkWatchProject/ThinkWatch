@@ -256,7 +256,11 @@ export function ProvidersPage() {
                 </Select>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="prov-url">{t('providers.baseUrl')}</Label>
+                <Label htmlFor="prov-url">
+                  {providerType === 'bedrock' ? t('providers.awsRegion') :
+                   providerType === 'azure_openai' ? t('providers.azureEndpoint') :
+                   t('providers.baseUrl')}
+                </Label>
                 <Input id="prov-url" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={
                   providerType === 'azure_openai' ? 'https://your-resource.openai.azure.com' :
                   providerType === 'bedrock' ? 'us-east-1' :
@@ -264,12 +268,6 @@ export function ProvidersPage() {
                   providerType === 'google' ? 'https://generativelanguage.googleapis.com' :
                   'https://api.openai.com'
                 } required />
-                {providerType === 'bedrock' && (
-                  <p className="text-xs text-muted-foreground">{t('providers.bedrockUrlHint', 'Enter AWS region (e.g. us-east-1)')}</p>
-                )}
-                {providerType === 'azure_openai' && (
-                  <p className="text-xs text-muted-foreground">{t('providers.azureUrlHint', 'Enter Azure OpenAI resource endpoint')}</p>
-                )}
               </div>
               <div className="space-y-2">
                 <Label htmlFor="prov-key">{providerType === 'bedrock' ? t('providers.awsCredentials', 'AWS Credentials') : t('providers.apiKey')}</Label>

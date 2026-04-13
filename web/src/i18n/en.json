@@ -153,6 +153,8 @@
     "displayName": "Display Name",
     "providerType": "Provider Type",
     "baseUrl": "Base URL",
+    "awsRegion": "AWS Region",
+    "azureEndpoint": "Azure Endpoint",
     "apiKey": "API Key",
     "deleteConfirm": "Are you sure you want to delete this provider?",
     "allProviders": "All Providers",

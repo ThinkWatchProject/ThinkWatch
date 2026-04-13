@@ -153,6 +153,8 @@
     "displayName": "显示名称",
     "providerType": "提供商类型",
     "baseUrl": "基础 URL",
+    "awsRegion": "AWS 区域",
+    "azureEndpoint": "Azure 端点",
     "apiKey": "API 密钥",
     "deleteConfirm": "确定要删除此提供商吗？",
     "allProviders": "所有提供商",
