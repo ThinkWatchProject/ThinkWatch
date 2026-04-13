@@ -190,7 +190,7 @@ export function RolesPage() {
         api<{ items: RoleResponse[] }>('/api/admin/roles'),
         api<PermissionDef[]>('/api/admin/permissions'),
         api<ModelRow[]>('/api/admin/models').catch(() => [] as ModelRow[]),
-        api<{ items: McpServer[] }>('/api/mcp/servers').catch(() => ({ items: [] as McpServer[] })),
+        api<McpServer[]>('/api/mcp/servers').catch(() => [] as McpServer[]),
         // Teams power the scope badge on member rows. team_managers
         // can read this endpoint too — they just see fewer teams.
         api<Array<{ id: string; name: string }>>('/api/admin/teams').catch(() => []),
@@ -199,7 +199,7 @@ export function RolesPage() {
       setRoles(rolesRes.items);
       setPermissions(perms);
       setAvailableModelRows(modelsRes);
-      setAvailableServers(serversRes.items);
+      setAvailableServers(serversRes);
       setAvailableMcpTools(toolsRes);
       setTeamsById(new Map(teamsRes.map((t) => [t.id, t])));
     } catch {
