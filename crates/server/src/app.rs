@@ -24,7 +24,7 @@ use think_watch_gateway::model_mapping::ModelMapper;
 use think_watch_gateway::pii_redactor::PiiRedactor;
 use think_watch_gateway::proxy::{self as gateway_proxy, GatewayState};
 use think_watch_gateway::quota::QuotaManager;
-use think_watch_gateway::router::ModelRouter;
+use think_watch_gateway::router::{ModelRouter, RouteEntry};
 use think_watch_mcp_gateway::proxy::McpProxy;
 use think_watch_mcp_gateway::session::SessionManager;
 use think_watch_mcp_gateway::transport::streamable_http::{self, McpGatewayState};
@@ -500,6 +500,15 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             patch(handlers::models::update_model).delete(handlers::models::delete_model),
         )
         .route(
+            "/api/admin/models/{model_id}/routes",
+            get(handlers::models::list_model_routes).post(handlers::models::create_model_route),
+        )
+        .route(
+            "/api/admin/model-routes/{route_id}",
+            patch(handlers::models::update_model_route)
+                .delete(handlers::models::delete_model_route),
+        )
+        .route(
             "/api/admin/teams",
             get(handlers::teams::list_teams).post(handlers::teams::create_team),
         )
@@ -759,6 +768,7 @@ async fn load_providers_into_router(
     state: &AppState,
     router: &mut ModelRouter,
 ) -> anyhow::Result<()> {
+    use std::collections::HashMap;
     use think_watch_gateway::providers::{
         anthropic::AnthropicProvider, azure_openai::AzureOpenAiProvider, bedrock::BedrockProvider,
         custom::CustomProvider, google::GoogleProvider, openai::OpenAiProvider,
@@ -769,6 +779,15 @@ async fn load_providers_into_router(
     )
     .fetch_all(&state.db)
     .await?;
+
+    // Build provider map: id -> (Arc<dyn DynAiProvider>, provider_type)
+    let mut provider_map: HashMap<
+        uuid::Uuid,
+        (
+            Arc<dyn think_watch_gateway::providers::DynAiProvider>,
+            String,
+        ),
+    > = HashMap::new();
 
     for provider in &providers {
         // Parse unified headers from config_json
@@ -840,40 +859,89 @@ async fn load_providers_into_router(
             ),
         };
 
-        // Register models from the models table
-        let models = sqlx::query_scalar::<_, String>(
-            "SELECT model_id FROM models WHERE provider_id = $1 AND is_active = true",
-        )
-        .bind(provider.id)
-        .fetch_all(&state.db)
-        .await?;
-
-        if models.is_empty() {
-            // No specific models registered — use default prefixes
-            for prefix in default_model_prefixes(&provider.provider_type) {
-                router.register_provider(prefix, Arc::clone(&dyn_provider), provider.id);
-            }
-        } else {
-            for model_id in &models {
-                router.register_provider(model_id, Arc::clone(&dyn_provider), provider.id);
-            }
-        }
+        provider_map.insert(provider.id, (dyn_provider, provider.provider_type.clone()));
 
         tracing::info!(
             provider = %provider.name,
             provider_type = %provider.provider_type,
-            model_count = if models.is_empty() {
-                default_model_prefixes(&provider.provider_type).len()
-            } else {
-                models.len()
-            },
-            "Provider loaded"
+            "Provider instantiated"
         );
     }
 
+    // Load all enabled routes from the model_routes table
+    #[derive(sqlx::FromRow)]
+    struct RouteRow {
+        model_id: String,
+        provider_id: uuid::Uuid,
+        upstream_model: Option<String>,
+        weight: i32,
+        priority: i32,
+    }
+
+    let route_rows = sqlx::query_as::<_, RouteRow>(
+        r#"SELECT mr.model_id, mr.provider_id, mr.upstream_model, mr.weight, mr.priority
+           FROM model_routes mr
+           JOIN providers p ON p.id = mr.provider_id
+           WHERE mr.enabled = true AND p.is_active = true AND p.deleted_at IS NULL
+           ORDER BY mr.model_id, mr.priority ASC, mr.weight DESC"#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    let mut route_count = 0usize;
+    let mut providers_with_routes: std::collections::HashSet<uuid::Uuid> =
+        std::collections::HashSet::new();
+
+    for row in &route_rows {
+        if let Some((dyn_provider, _)) = provider_map.get(&row.provider_id) {
+            router.register_route(
+                &row.model_id,
+                RouteEntry {
+                    provider: Arc::clone(dyn_provider),
+                    provider_id: row.provider_id,
+                    upstream_model: row.upstream_model.clone(),
+                    weight: row.weight as u32,
+                    priority: row.priority as u32,
+                },
+            );
+            providers_with_routes.insert(row.provider_id);
+            route_count += 1;
+        }
+    }
+
+    // Default prefix fallback for providers with no specific model routes
+    for (provider_id, (dyn_provider, provider_type)) in &provider_map {
+        if !providers_with_routes.contains(provider_id) {
+            let prefixes = default_model_prefixes(provider_type);
+            for prefix in &prefixes {
+                router.register_route(
+                    prefix,
+                    RouteEntry {
+                        provider: Arc::clone(dyn_provider),
+                        provider_id: *provider_id,
+                        upstream_model: None,
+                        weight: 100,
+                        priority: 0,
+                    },
+                );
+            }
+            if !prefixes.is_empty() {
+                tracing::info!(
+                    provider_type = %provider_type,
+                    prefix_count = prefixes.len(),
+                    "Provider has no routes — using default prefix fallback"
+                );
+            }
+        }
+    }
+
+    // Sort all routes by (priority ASC, weight DESC)
+    router.sort_routes();
+
     tracing::info!(
         total_providers = providers.len(),
-        total_routes = router.list_models().len(),
+        total_routes = route_count,
+        total_models = router.list_models().len(),
         "All providers loaded into model router"
     );
 

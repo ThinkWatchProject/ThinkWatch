@@ -3,24 +3,27 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// One row in the router's model → provider table. The trait object
-/// dispatches the actual upstream call; the UUID is the provider's
-/// `providers.id` so the rate-limit engine can scope quotas per
-/// provider without re-querying the DB on the hot path.
-type ProviderEntry = (Arc<dyn DynAiProvider>, Uuid);
+/// A single route entry mapping a model to a provider with weight/priority.
+pub struct RouteEntry {
+    pub provider: Arc<dyn DynAiProvider>,
+    pub provider_id: Uuid,
+    pub upstream_model: Option<String>,
+    pub weight: u32,
+    pub priority: u32,
+}
 
-/// Routes model names to AI provider implementations.
+/// Routes model names to AI provider implementations with multi-provider
+/// failover and weighted traffic splitting.
 ///
-/// Supports exact-match routing (e.g. `"gpt-4o" -> OpenAiProvider`) and
-/// prefix-match as a fallback (e.g. `"gpt-" -> OpenAiProvider`).
+/// Each model can have multiple routes at different priority levels.
+/// Within a priority group, routes are selected by weighted random.
+/// If all routes in a group fail, the next priority group is tried.
 ///
-/// In addition to the trait-object route, the router stores the
-/// `providers.id` UUID for every registered model so the rate-limit
-/// engine can resolve `(model → provider_id)` at request time and
-/// apply per-provider quotas.
+/// Also supports prefix-match as a fallback (e.g. `"gpt-" -> OpenAiProvider`)
+/// for providers that have no explicit model routes configured.
 pub struct ModelRouter {
-    /// Exact model name -> (provider trait, provider DB UUID).
-    providers: HashMap<String, ProviderEntry>,
+    /// Exact model name -> list of routes sorted by (priority ASC, weight DESC).
+    routes: HashMap<String, Vec<RouteEntry>>,
 }
 
 impl Default for ModelRouter {
@@ -32,71 +35,69 @@ impl Default for ModelRouter {
 impl ModelRouter {
     pub fn new() -> Self {
         Self {
-            providers: HashMap::new(),
+            routes: HashMap::new(),
         }
     }
 
-    /// Register a provider for a given model pattern.
-    ///
-    /// The pattern is used for both exact and prefix matching.
-    /// For example, registering `"gpt-4o"` will match the exact model name,
-    /// and registering `"gpt-"` will match any model starting with `"gpt-"`.
-    /// `provider_id` is the `providers.id` UUID this pattern belongs to —
-    /// used by `provider_id_for` so the rate-limit engine can scope
-    /// quotas per provider.
-    pub fn register_provider(
-        &mut self,
-        model_pattern: &str,
-        provider: Arc<dyn DynAiProvider>,
-        provider_id: Uuid,
-    ) {
-        self.providers
-            .insert(model_pattern.to_string(), (provider, provider_id));
+    /// Register a route for a given model.
+    pub fn register_route(&mut self, model_id: &str, entry: RouteEntry) {
+        self.routes
+            .entry(model_id.to_string())
+            .or_default()
+            .push(entry);
     }
 
-    /// Look up the provider for a given model name.
-    ///
-    /// First tries an exact match, then falls back to the longest prefix match.
-    pub fn route(&self, model: &str) -> Option<Arc<dyn DynAiProvider>> {
-        self.lookup(model).map(|(p, _)| Arc::clone(p))
+    /// Sort all route vecs by (priority ASC, weight DESC). Call once after
+    /// all routes have been registered.
+    pub fn sort_routes(&mut self) {
+        for entries in self.routes.values_mut() {
+            entries.sort_by(|a, b| {
+                a.priority
+                    .cmp(&b.priority)
+                    .then_with(|| b.weight.cmp(&a.weight))
+            });
+        }
     }
 
-    /// Look up the provider DB id for a given model name. Same exact-
-    /// then-longest-prefix lookup as `route`. Returns `None` when no
-    /// pattern matches — the rate-limit engine treats that as
-    /// "no provider scope for this request".
-    pub fn provider_id_for(&self, model: &str) -> Option<Uuid> {
-        self.lookup(model).map(|(_, id)| *id)
-    }
-
-    /// Shared lookup core for `route` and `provider_id_for`.
-    fn lookup(&self, model: &str) -> Option<&ProviderEntry> {
+    /// Look up all routes for a model (exact match then prefix fallback).
+    /// Returns routes sorted by priority ASC, weight DESC.
+    pub fn route(&self, model: &str) -> Option<&Vec<RouteEntry>> {
         // Exact match.
-        if let Some(entry) = self.providers.get(model) {
-            return Some(entry);
+        if let Some(entries) = self.routes.get(model)
+            && !entries.is_empty()
+        {
+            return Some(entries);
         }
 
         // Prefix match — pick the longest matching prefix for specificity.
-        let mut best_match: Option<(&str, &ProviderEntry)> = None;
-        for (pattern, entry) in &self.providers {
-            if model.starts_with(pattern.as_str()) {
+        let mut best_match: Option<(&str, &Vec<RouteEntry>)> = None;
+        for (pattern, entries) in &self.routes {
+            if model.starts_with(pattern.as_str()) && !entries.is_empty() {
                 match best_match {
                     Some((current_best, _)) if pattern.len() > current_best.len() => {
-                        best_match = Some((pattern.as_str(), entry));
+                        best_match = Some((pattern.as_str(), entries));
                     }
                     None => {
-                        best_match = Some((pattern.as_str(), entry));
+                        best_match = Some((pattern.as_str(), entries));
                     }
                     _ => {}
                 }
             }
         }
-        best_match.map(|(_, entry)| entry)
+        best_match.map(|(_, entries)| entries)
+    }
+
+    /// Look up the first provider DB id for a given model name.
+    /// Used for backward compatibility with rate limiting.
+    pub fn provider_id_for(&self, model: &str) -> Option<Uuid> {
+        self.route(model)
+            .and_then(|entries| entries.first())
+            .map(|e| e.provider_id)
     }
 
     /// List all registered model patterns.
     pub fn list_models(&self) -> Vec<String> {
-        let mut models: Vec<String> = self.providers.keys().cloned().collect();
+        let mut models: Vec<String> = self.routes.keys().cloned().collect();
         models.sort();
         models
     }
@@ -139,11 +140,20 @@ mod tests {
         let provider: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
             provider_name: "openai".into(),
         });
-        router.register_provider("gpt-4o", provider, Uuid::nil());
+        router.register_route(
+            "gpt-4o",
+            RouteEntry {
+                provider,
+                provider_id: Uuid::nil(),
+                upstream_model: None,
+                weight: 100,
+                priority: 0,
+            },
+        );
 
         let found = router.route("gpt-4o");
         assert!(found.is_some());
-        assert_eq!(found.unwrap().name(), "openai");
+        assert_eq!(found.unwrap()[0].provider.name(), "openai");
     }
 
     #[test]
@@ -152,11 +162,20 @@ mod tests {
         let provider: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
             provider_name: "openai".into(),
         });
-        router.register_provider("gpt-", provider, Uuid::nil());
+        router.register_route(
+            "gpt-",
+            RouteEntry {
+                provider,
+                provider_id: Uuid::nil(),
+                upstream_model: None,
+                weight: 100,
+                priority: 0,
+            },
+        );
 
         let found = router.route("gpt-4o-mini");
         assert!(found.is_some());
-        assert_eq!(found.unwrap().name(), "openai");
+        assert_eq!(found.unwrap()[0].provider.name(), "openai");
     }
 
     #[test]
@@ -174,13 +193,31 @@ mod tests {
         let specific: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
             provider_name: "specific".into(),
         });
-        router.register_provider("gpt-", generic, Uuid::nil());
-        router.register_provider("gpt-4o", specific, Uuid::nil());
+        router.register_route(
+            "gpt-",
+            RouteEntry {
+                provider: generic,
+                provider_id: Uuid::nil(),
+                upstream_model: None,
+                weight: 100,
+                priority: 0,
+            },
+        );
+        router.register_route(
+            "gpt-4o",
+            RouteEntry {
+                provider: specific,
+                provider_id: Uuid::nil(),
+                upstream_model: None,
+                weight: 100,
+                priority: 0,
+            },
+        );
 
         let found = router.route("gpt-4o-mini");
         assert!(found.is_some());
         // "gpt-4o" is a longer prefix than "gpt-" for "gpt-4o-mini"
-        assert_eq!(found.unwrap().name(), "specific");
+        assert_eq!(found.unwrap()[0].provider.name(), "specific");
     }
 
     #[test]
@@ -190,8 +227,54 @@ mod tests {
         let provider: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
             provider_name: "openai".into(),
         });
-        router.register_provider("gpt-4o", provider, openai_id);
+        router.register_route(
+            "gpt-4o",
+            RouteEntry {
+                provider,
+                provider_id: openai_id,
+                upstream_model: None,
+                weight: 100,
+                priority: 0,
+            },
+        );
         assert_eq!(router.provider_id_for("gpt-4o"), Some(openai_id));
         assert_eq!(router.provider_id_for("unknown"), None);
+    }
+
+    #[test]
+    fn multiple_routes_sorted() {
+        let mut router = ModelRouter::new();
+        let primary: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
+            provider_name: "primary".into(),
+        });
+        let fallback: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
+            provider_name: "fallback".into(),
+        });
+        router.register_route(
+            "gpt-4o",
+            RouteEntry {
+                provider: fallback,
+                provider_id: Uuid::nil(),
+                upstream_model: None,
+                weight: 100,
+                priority: 1,
+            },
+        );
+        router.register_route(
+            "gpt-4o",
+            RouteEntry {
+                provider: primary,
+                provider_id: Uuid::nil(),
+                upstream_model: None,
+                weight: 100,
+                priority: 0,
+            },
+        );
+        router.sort_routes();
+
+        let entries = router.route("gpt-4o").unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].provider.name(), "primary");
+        assert_eq!(entries[1].provider.name(), "fallback");
     }
 }

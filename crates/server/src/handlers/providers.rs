@@ -284,12 +284,12 @@ pub async fn create_provider(
         Ok(Json(resp)) if resp.success => {
             if let Some(models) = resp.models {
                 for model_id in &models {
+                    // Insert model (standalone, no provider_id) — ON CONFLICT DO NOTHING
                     if let Err(e) = sqlx::query(
-                        r#"INSERT INTO models (provider_id, model_id, display_name)
-                           VALUES ($1, $2, $2)
-                           ON CONFLICT (provider_id, model_id) DO NOTHING"#,
+                        r#"INSERT INTO models (model_id, display_name)
+                           VALUES ($1, $1)
+                           ON CONFLICT (model_id) DO NOTHING"#,
                     )
-                    .bind(provider.id)
                     .bind(model_id)
                     .execute(&state.db)
                     .await
@@ -299,12 +299,48 @@ pub async fn create_provider(
                             model_id = %model_id,
                             "Failed to insert discovered model: {e}"
                         );
+                        continue;
+                    }
+
+                    // Check if a route already exists for this model from another provider
+                    let existing_route: Option<i32> = sqlx::query_scalar(
+                        "SELECT MAX(priority) FROM model_routes WHERE model_id = $1",
+                    )
+                    .bind(model_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten();
+
+                    // If routes exist, this new one becomes a fallback (priority=1+)
+                    let priority = match existing_route {
+                        Some(max_prio) => max_prio + 1,
+                        None => 0,
+                    };
+
+                    // Insert route — ON CONFLICT DO NOTHING on (model_id, provider_id)
+                    if let Err(e) = sqlx::query(
+                        r#"INSERT INTO model_routes (model_id, provider_id, weight, priority)
+                           VALUES ($1, $2, 100, $3)
+                           ON CONFLICT (model_id, provider_id) DO NOTHING"#,
+                    )
+                    .bind(model_id)
+                    .bind(provider.id)
+                    .bind(priority)
+                    .execute(&state.db)
+                    .await
+                    {
+                        tracing::warn!(
+                            provider_id = %provider.id,
+                            model_id = %model_id,
+                            "Failed to insert model route: {e}"
+                        );
                     }
                 }
                 tracing::info!(
                     provider_id = %provider.id,
                     model_count = models.len(),
-                    "Auto-discovered and inserted models for new provider"
+                    "Auto-discovered and inserted models + routes for new provider"
                 );
             }
         }

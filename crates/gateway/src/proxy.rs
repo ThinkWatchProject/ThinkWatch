@@ -3,6 +3,7 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
+use rand::RngExt;
 use sqlx::PgPool;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ use crate::pii_redactor::PiiRedactor;
 use crate::providers::traits::{ChatCompletionRequest, GatewayError};
 use crate::quota::QuotaManager;
 use crate::rate_limiter::RateLimiter;
-use crate::router::ModelRouter;
+use crate::router::{ModelRouter, RouteEntry};
 use crate::streaming::stream_to_sse;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::{
@@ -249,6 +250,238 @@ async fn preflight_request_limits(
     Ok((_provider_id, request_rules))
 }
 
+// ---------------------------------------------------------------------------
+// Multi-route selection: failover + weighted random + session affinity
+// ---------------------------------------------------------------------------
+
+/// Check Redis for session affinity: `affinity:{user_id}:{model_id}`.
+/// Returns the cached provider_id if present and still in the given
+/// route entries, so the caller can skip weighted random selection.
+async fn check_affinity(
+    redis: &fred::clients::Client,
+    user_id: Option<&str>,
+    model: &str,
+    entries: &[&RouteEntry],
+) -> Option<Uuid> {
+    use fred::interfaces::KeysInterface;
+    let uid = user_id?;
+    let key = format!("affinity:{uid}:{model}");
+    let val: Option<String> = redis.get(&key).await.ok().flatten();
+    let pid = val.and_then(|s| Uuid::parse_str(&s).ok())?;
+    // Only use affinity if the provider is actually in the current group
+    if entries.iter().any(|e| e.provider_id == pid) {
+        Some(pid)
+    } else {
+        None
+    }
+}
+
+/// Store session affinity in Redis with a 5-minute TTL.
+async fn set_affinity(
+    redis: &fred::clients::Client,
+    user_id: Option<&str>,
+    model: &str,
+    provider_id: Uuid,
+) {
+    use fred::interfaces::KeysInterface;
+    let Some(uid) = user_id else { return };
+    let key = format!("affinity:{uid}:{model}");
+    let _: Result<(), _> = redis
+        .set::<(), _, _>(
+            &key,
+            provider_id.to_string(),
+            Some(fred::types::Expiration::EX(300)),
+            None,
+            false,
+        )
+        .await;
+}
+
+/// Pick one route from a slice of entries by weighted random selection.
+/// If `affinity_provider` matches one in the slice, use that instead.
+fn pick_weighted<'a>(
+    entries: &[&'a RouteEntry],
+    affinity_provider: Option<Uuid>,
+) -> Option<&'a RouteEntry> {
+    if entries.is_empty() {
+        return None;
+    }
+    // Affinity override
+    if let Some(pid) = affinity_provider
+        && let Some(entry) = entries.iter().find(|e| e.provider_id == pid)
+    {
+        return Some(entry);
+    }
+    // Weighted random
+    let total_weight: u32 = entries.iter().map(|e| e.weight).sum();
+    if total_weight == 0 {
+        return entries.first().copied();
+    }
+    let mut rng = rand::rng();
+    let mut pick = rng.random_range(0..total_weight);
+    for entry in entries {
+        if pick < entry.weight {
+            return Some(entry);
+        }
+        pick -= entry.weight;
+    }
+    entries.last().copied()
+}
+
+/// Returns true if the error is retryable (network, 502, 503, 429).
+fn is_retryable(err: &GatewayError) -> bool {
+    matches!(
+        err,
+        GatewayError::NetworkError(_)
+            | GatewayError::ProviderError(_)
+            | GatewayError::UpstreamRateLimited
+    )
+}
+
+/// Group route entries by priority and attempt each group in order.
+/// Within a priority group, use weighted random + affinity, then
+/// failover to other members of the group before advancing.
+///
+/// Returns the selected provider and the upstream model name to use.
+/// On success sets session affinity.
+async fn select_route_with_failover<'a>(
+    routes: &'a [RouteEntry],
+    redis: &fred::clients::Client,
+    user_id: Option<&str>,
+    model: &str,
+    request: &ChatCompletionRequest,
+    is_stream: bool,
+) -> Result<
+    (
+        &'a RouteEntry,
+        crate::providers::traits::ChatCompletionResponse,
+    ),
+    GatewayError,
+> {
+    // Group by priority
+    let mut priority_groups: Vec<(u32, Vec<&RouteEntry>)> = Vec::new();
+    for entry in routes {
+        if let Some(group) = priority_groups.last_mut()
+            && group.0 == entry.priority
+        {
+            group.1.push(entry);
+            continue;
+        }
+        priority_groups.push((entry.priority, vec![entry]));
+    }
+
+    let mut last_error: Option<GatewayError> = None;
+
+    for (_prio, group) in &priority_groups {
+        let affinity = check_affinity(redis, user_id, model, group).await;
+        let mut tried: Vec<Uuid> = Vec::new();
+
+        // Try up to group.len() times within this priority group
+        for _ in 0..group.len() {
+            // Filter out already-tried providers
+            let remaining: Vec<&RouteEntry> = group
+                .iter()
+                .filter(|e| !tried.contains(&e.provider_id))
+                .copied()
+                .collect();
+            if remaining.is_empty() {
+                break;
+            }
+
+            let affinity_for_pick = if tried.is_empty() { affinity } else { None };
+            let Some(entry) = pick_weighted(&remaining, affinity_for_pick) else {
+                break;
+            };
+            tried.push(entry.provider_id);
+
+            // Build request with upstream_model if set
+            let mut req = request.clone();
+            if let Some(ref upstream) = entry.upstream_model {
+                req.model = upstream.clone();
+            }
+
+            let result = if is_stream {
+                // For streaming: we can't retry once streaming starts,
+                // so do a non-streaming probe. Actually for streaming we
+                // just return the entry and let the caller set up the stream.
+                // We return a dummy response — the caller will use the entry directly.
+                return Ok((
+                    entry,
+                    crate::providers::traits::ChatCompletionResponse {
+                        id: String::new(),
+                        object: "chat.completion".into(),
+                        created: 0,
+                        model: model.to_string(),
+                        choices: vec![],
+                        usage: None,
+                    },
+                ));
+            } else {
+                entry.provider.chat_completion_boxed(req).await
+            };
+
+            match result {
+                Ok(response) => {
+                    set_affinity(redis, user_id, model, entry.provider_id).await;
+                    return Ok((entry, response));
+                }
+                Err(e) if is_retryable(&e) => {
+                    tracing::warn!(
+                        provider = %entry.provider.name(),
+                        provider_id = %entry.provider_id,
+                        error = %e,
+                        "Route failed, trying next"
+                    );
+                    last_error = Some(e);
+                    continue;
+                }
+                Err(e) => {
+                    // Non-retryable error — fail immediately
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| {
+        GatewayError::ProviderError(format!("All routes failed for model: {model}"))
+    }))
+}
+
+/// Streaming variant: selects a route with affinity + failover but does
+/// NOT actually call the provider. Returns the chosen entry so the caller
+/// can set up the stream. For streaming, retry is only possible before
+/// the first chunk, so we just pick the best route.
+async fn select_route_for_stream<'a>(
+    routes: &'a [RouteEntry],
+    redis: &fred::clients::Client,
+    user_id: Option<&str>,
+    model: &str,
+) -> Result<&'a RouteEntry, GatewayError> {
+    // Group by priority, pick from the first group with affinity support
+    let mut priority_groups: Vec<(u32, Vec<&RouteEntry>)> = Vec::new();
+    for entry in routes {
+        if let Some(group) = priority_groups.last_mut()
+            && group.0 == entry.priority
+        {
+            group.1.push(entry);
+            continue;
+        }
+        priority_groups.push((entry.priority, vec![entry]));
+    }
+
+    if let Some((_prio, group)) = priority_groups.first() {
+        let affinity = check_affinity(redis, user_id, model, group).await;
+        if let Some(entry) = pick_weighted(group, affinity) {
+            return Ok(entry);
+        }
+    }
+
+    Err(GatewayError::ProviderError(format!(
+        "No provider found for model: {model}"
+    )))
+}
+
 /// Build a human-readable label for "which rule rejected the request",
 /// used as the error body so callers know what to lift. The label
 /// shape is `<subject>:<metric>/<window>` (e.g. `api_key:tokens/1h`).
@@ -391,33 +624,50 @@ pub async fn proxy_chat_completion(
         metrics::counter!("gateway_cache_total", "result" => "miss").increment(1);
     }
 
-    // Route to provider
-    let provider = state.router.route(&request.model).ok_or_else(|| {
+    // Route to provider — multi-route failover
+    let original_model = request.model.clone();
+    let routes = state.router.route(&request.model).ok_or_else(|| {
         GatewayError::ProviderError(format!("No provider found for model: {}", request.model))
     })?;
 
     if is_stream {
+        // Select route (with affinity) for streaming — no retry after
+        // first chunk, so pick the best candidate up front.
+        let entry = select_route_for_stream(
+            routes,
+            &state.redis,
+            identity.user_id.as_deref(),
+            &original_model,
+        )
+        .await?;
+
+        // Replace model with upstream_model if configured
+        if let Some(ref upstream) = entry.upstream_model {
+            request.model = upstream.clone();
+        }
+
+        set_affinity(
+            &state.redis,
+            identity.user_id.as_deref(),
+            &original_model,
+            entry.provider_id,
+        )
+        .await;
+
         // Capture everything the post-flight callback needs BEFORE
-        // moving `request` into the provider stream. The callback
-        // runs from inside `stream_to_sse` after the SSE source is
-        // drained but before the `[DONE]` sentinel — see
-        // `streaming::stream_to_sse` for the contract.
+        // moving `request` into the provider stream.
         let db = state.db.clone();
         let redis = state.redis.clone();
         let dynamic_config = state.dynamic_config.clone();
         let weight_cache = state.weight_cache.clone();
-        let model = request.model.clone();
+        let model = original_model.clone();
         let request_rules_for_done = request_rules.clone();
         let budget_subjects = resolve_budget_subjects(&identity);
-        let stream = provider.stream_chat_completion(request);
+        let stream = entry.provider.stream_chat_completion(request);
         let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
                 let Some(u) = usage else {
-                    // Upstream didn't surface usage on the stream
-                    // (client likely didn't set
-                    // `stream_options.include_usage`). Nothing to
-                    // account for here; the streaming gap stays.
                     return;
                 };
                 post_flight_account(
@@ -436,7 +686,20 @@ pub async fn proxy_chat_completion(
         };
         Ok(stream_to_sse(stream, on_done).into_response())
     } else {
-        let mut response = provider.chat_completion_boxed(request.clone()).await?;
+        // Non-streaming: full failover with retry across priority groups
+        let (_entry, mut response) = select_route_with_failover(
+            routes,
+            &state.redis,
+            identity.user_id.as_deref(),
+            &original_model,
+            &request,
+            false,
+        )
+        .await
+        .map_err(GatewayErrorResponse::from)?;
+
+        // Restore original model name in response (don't leak upstream_model)
+        response.model = original_model.clone();
 
         // 8a. Restore PII in the response
         pii_redactor.restore_response(&mut response, &redaction_ctx);
@@ -446,20 +709,17 @@ pub async fn proxy_chat_completion(
             let total = usage.total_tokens;
             if let Err(e) = state.quota.consume(&quota_key, total).await {
                 tracing::warn!("Failed to consume quota: {e}");
-                // Don't fail the request — usage already happened
             }
         }
 
-        // 8b.1. Post-flight accounting against the new limits engine.
-        // Same path the streaming branch takes via `on_done`, so the
-        // two surfaces stay symmetric.
+        // 8b.1. Post-flight accounting against the limits engine.
         if let Some(ref usage) = response.usage {
             post_flight_account(
                 state.db.clone(),
                 state.redis.clone(),
                 state.dynamic_config.clone(),
                 state.weight_cache.clone(),
-                request.model.clone(),
+                original_model.clone(),
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 request_rules.clone(),
@@ -467,13 +727,6 @@ pub async fn proxy_chat_completion(
             )
             .await;
         }
-
-        // 8c. Budget threshold alerting was previously fired here
-        // by `BudgetAlertManager`. Removed in the limits refactor —
-        // alerts will be re-introduced as a subscriber on
-        // `budget_caps` cap-crossings in a follow-up phase. The
-        // current path still records spend (8b.1 above), it just
-        // doesn't notify any external webhook.
 
         // 8d. Cache the response
         state.cache.set(&request, &response, None).await;
@@ -584,15 +837,10 @@ pub async fn proxy_anthropic_messages(
         }
     }
 
-    // Route to provider
-    let provider = state.router.route(&mapped_model).ok_or_else(|| {
+    // Route to provider — multi-route failover
+    let routes = state.router.route(&mapped_model).ok_or_else(|| {
         GatewayError::ProviderError(format!("No provider found for model: {mapped_model}"))
     })?;
-
-    // For Anthropic providers, we can access the underlying provider details.
-    // Build the upstream request by forwarding the body as-is.
-    // We need the provider's base_url and api_key — use the DynAiProvider
-    // to make a direct Anthropic API call.
 
     // Convert to OpenAI format internally, let the provider handle the rest
     let max_tokens = body
@@ -621,15 +869,7 @@ pub async fn proxy_anthropic_messages(
         }
     }
 
-    // PII redaction — same path as `proxy_chat_completion`. Without
-    // this, every email/phone/id-card sent through Claude Code
-    // (which uses the Anthropic Messages surface) was being
-    // forwarded verbatim to the upstream, defeating the entire PII
-    // policy on a tool that's specifically marketed for enterprise
-    // safety. Streaming responses can't currently undo the
-    // redaction (the chunks would each need a per-frame restore),
-    // so streaming clients see the placeholder text — same trade-off
-    // proxy_chat_completion makes.
+    // PII redaction
     let pii_redactor = state.pii_redactor.load();
     let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&messages);
 
@@ -645,8 +885,27 @@ pub async fn proxy_anthropic_messages(
     };
 
     if is_stream {
-        // Capture state needed by the post-flight closure before
-        // moving `request` into the provider stream.
+        let entry = select_route_for_stream(
+            routes,
+            &state.redis,
+            identity.user_id.as_deref(),
+            &mapped_model,
+        )
+        .await?;
+
+        let mut stream_request = request.clone();
+        if let Some(ref upstream) = entry.upstream_model {
+            stream_request.model = upstream.clone();
+        }
+
+        set_affinity(
+            &state.redis,
+            identity.user_id.as_deref(),
+            &mapped_model,
+            entry.provider_id,
+        )
+        .await;
+
         let db = state.db.clone();
         let redis = state.redis.clone();
         let dynamic_config = state.dynamic_config.clone();
@@ -654,7 +913,7 @@ pub async fn proxy_anthropic_messages(
         let model_for_done = mapped_model.clone();
         let request_rules_for_done = request_rules.clone();
         let budget_subjects = resolve_budget_subjects(&identity);
-        let stream = provider.stream_chat_completion(request);
+        let stream = entry.provider.stream_chat_completion(stream_request);
         let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
@@ -677,12 +936,20 @@ pub async fn proxy_anthropic_messages(
         };
         Ok(stream_to_sse(stream, on_done).into_response())
     } else {
-        let mut response = provider.chat_completion_boxed(request).await?;
+        let (_entry, mut response) = select_route_with_failover(
+            routes,
+            &state.redis,
+            identity.user_id.as_deref(),
+            &mapped_model,
+            &request,
+            false,
+        )
+        .await
+        .map_err(GatewayErrorResponse::from)?;
 
-        // Restore PII placeholders before the response leaves the
-        // gateway. Without this, callers see `{{EMAIL_xxx_1}}`
-        // instead of the original address whenever the upstream
-        // echoed it back.
+        // Restore original model name
+        response.model = mapped_model.clone();
+
         pii_redactor.restore_response(&mut response, &redaction_ctx);
 
         // Post-flight: same accounting path the chat-completions
@@ -866,12 +1133,33 @@ pub async fn proxy_responses(
         caller_user_email: identity.user_email.clone(),
     };
 
-    // Route to provider
-    let provider = state.router.route(&mapped_model).ok_or_else(|| {
+    // Route to provider — multi-route failover
+    let routes = state.router.route(&mapped_model).ok_or_else(|| {
         GatewayError::ProviderError(format!("No provider found for model: {mapped_model}"))
     })?;
 
     if is_stream {
+        let entry = select_route_for_stream(
+            routes,
+            &state.redis,
+            identity.user_id.as_deref(),
+            &mapped_model,
+        )
+        .await?;
+
+        let mut stream_request = request.clone();
+        if let Some(ref upstream) = entry.upstream_model {
+            stream_request.model = upstream.clone();
+        }
+
+        set_affinity(
+            &state.redis,
+            identity.user_id.as_deref(),
+            &mapped_model,
+            entry.provider_id,
+        )
+        .await;
+
         let db = state.db.clone();
         let redis = state.redis.clone();
         let dynamic_config = state.dynamic_config.clone();
@@ -879,7 +1167,7 @@ pub async fn proxy_responses(
         let model_for_done = mapped_model.clone();
         let request_rules_for_done = request_rules.clone();
         let budget_subjects = resolve_budget_subjects(&identity);
-        let stream = provider.stream_chat_completion(request);
+        let stream = entry.provider.stream_chat_completion(stream_request);
         let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
@@ -902,7 +1190,19 @@ pub async fn proxy_responses(
         };
         Ok(stream_to_sse(stream, on_done).into_response())
     } else {
-        let response = provider.chat_completion_boxed(request).await?;
+        let (_entry, mut response) = select_route_with_failover(
+            routes,
+            &state.redis,
+            identity.user_id.as_deref(),
+            &mapped_model,
+            &request,
+            false,
+        )
+        .await
+        .map_err(GatewayErrorResponse::from)?;
+
+        // Restore original model name
+        response.model = mapped_model.clone();
 
         if let Some(ref usage) = response.usage {
             post_flight_account(

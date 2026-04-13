@@ -285,27 +285,41 @@ CREATE TABLE providers (
 
 CREATE INDEX idx_providers_not_deleted ON providers(created_at) WHERE deleted_at IS NULL;
 
+-- Models are first-class entities — not tied to a single provider.
+-- Pricing and quota multipliers are global per model.
 CREATE TABLE models (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    provider_id       UUID NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
-    model_id          VARCHAR(255) NOT NULL,
+    model_id          VARCHAR(255) NOT NULL UNIQUE,
     display_name      VARCHAR(255) NOT NULL,
-    -- Real USD/token cost — drives billing reports.
     input_price       DECIMAL(10, 6),
     output_price      DECIMAL(10, 6),
-    -- Quota multipliers — relative to a virtual baseline (1.0).
-    -- Used by the rate-limit / budget-cap engine to convert raw
-    -- token counts into "weighted tokens" so a quota of 1M tokens
-    -- can't be drained by a single gpt-4o burst. Defaults to 1.0
-    -- so existing models behave as raw-token quotas until an admin
-    -- tunes them.
     input_multiplier  DECIMAL(8, 4) NOT NULL DEFAULT 1.0
         CHECK (input_multiplier > 0),
     output_multiplier DECIMAL(8, 4) NOT NULL DEFAULT 1.0
         CHECK (output_multiplier > 0),
     is_active         BOOLEAN NOT NULL DEFAULT TRUE,
-    UNIQUE(provider_id, model_id)
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Routes map models to providers with traffic splitting + failover.
+-- Same model_id can route to multiple providers.
+CREATE TABLE model_routes (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id        VARCHAR(255) NOT NULL REFERENCES models(model_id) ON DELETE CASCADE,
+    provider_id     UUID NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    -- Upstream model name sent to the provider (NULL = same as model_id)
+    upstream_model  VARCHAR(255),
+    -- Traffic weight (same priority group: weighted random selection)
+    weight          INTEGER NOT NULL DEFAULT 100 CHECK (weight >= 0),
+    -- Failover priority (0 = primary, 1 = first fallback, etc.)
+    priority        INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
+    enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(model_id, provider_id)
+);
+
+CREATE INDEX idx_model_routes_model ON model_routes(model_id);
+CREATE INDEX idx_model_routes_provider ON model_routes(provider_id);
 
 -- --------------------------------------------------------------------------
 -- MCP Servers & Tools

@@ -20,15 +20,10 @@ pub struct Provider {
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
 pub struct Model {
     pub id: Uuid,
-    pub provider_id: Uuid,
     pub model_id: String,
     pub display_name: String,
     pub input_price: Option<Decimal>,
     pub output_price: Option<Decimal>,
-    /// Quota multiplier on input tokens. The limits engine multiplies
-    /// raw token counts by this to get "weighted tokens" so a budget
-    /// cap can survive a single gpt-4o burst. Defaults to 1.0 in the
-    /// schema; tune via the admin Models page.
     pub input_multiplier: Decimal,
     pub output_multiplier: Decimal,
     pub is_active: bool,
