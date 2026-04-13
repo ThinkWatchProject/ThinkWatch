@@ -114,6 +114,9 @@ export function SetupPage() {
   const [providerDisplayName, setProviderDisplayName] = useState('');
   const [providerBaseUrl, setProviderBaseUrl] = useState('');
   const [providerHeaders, setProviderHeaders] = useState<[string, string][]>([]);
+  // Bedrock-specific
+  const [awsAccessKeyId, setAwsAccessKeyId] = useState('');
+  const [awsSecretKey, setAwsSecretKey] = useState('');
   // Provider connection test state
   const [providerTesting, setProviderTesting] = useState(false);
   const [providerTestResult, setProviderTestResult] = useState<{
@@ -209,7 +212,7 @@ export function SetupPage() {
       anthropic: [['x-api-key', ''], ['anthropic-version', '2023-06-01']],
       google: [['x-goog-api-key', '']],
       azure_openai: [['api-key', '']],
-      bedrock: [['X-Aws-Access-Key-Id', ''], ['X-Aws-Secret-Access-Key', '']],
+      bedrock: [], // Bedrock uses SigV4 signing, not HTTP auth headers
     };
     setProviderHeaders(defaults[value] ?? []);
   };
@@ -231,6 +234,9 @@ export function SetupPage() {
         provider_type: providerType,
         base_url: providerBaseUrl,
         headers: providerHeaders.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
+        ...(providerType === 'bedrock' && awsAccessKeyId ? {
+          config: { aws_access_key_id: awsAccessKeyId, aws_secret_access_key: awsSecretKey },
+        } : {}),
       };
     }
 
@@ -454,6 +460,19 @@ export function SetupPage() {
                 <p className="text-xs text-muted-foreground">{t('providers.azureUrlHint', 'Enter Azure OpenAI resource endpoint')}</p>
               )}
             </div>
+            {providerType === 'bedrock' && (
+              <>
+                <div className="space-y-2">
+                  <Label htmlFor="setup-ak">Access Key ID</Label>
+                  <Input id="setup-ak" value={awsAccessKeyId} onChange={(e) => setAwsAccessKeyId(e.target.value)} placeholder="AKIA..." />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="setup-sk">Secret Access Key</Label>
+                  <Input id="setup-sk" value={awsSecretKey} onChange={(e) => setAwsSecretKey(e.target.value)} placeholder="wJalr..." />
+                </div>
+                <p className="text-xs text-muted-foreground">{t('providers.awsImdsv2Hint')}</p>
+              </>
+            )}
             <div className="space-y-2">
               <Label>{t('providers.headers')}</Label>
               <p className="text-xs text-muted-foreground">{t('providers.headersDesc')}</p>

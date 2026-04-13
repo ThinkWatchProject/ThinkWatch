@@ -48,7 +48,7 @@ const defaultHeadersForType = (type: string): [string, string][] => {
     case 'anthropic': return [['x-api-key', ''], ['anthropic-version', '2023-06-01']];
     case 'google': return [['x-goog-api-key', '']];
     case 'azure_openai': return [['api-key', '']];
-    case 'bedrock': return [['X-Aws-Access-Key-Id', ''], ['X-Aws-Secret-Access-Key', '']];
+    case 'bedrock': return []; // Bedrock uses SigV4, not HTTP auth headers
     default: return [];
   }
 };
@@ -76,6 +76,10 @@ export function ProvidersPage() {
   const [providerType, setProviderType] = useState('openai');
   const [baseUrl, setBaseUrl] = useState('');
   const [headers, setHeaders] = useState<[string, string][]>(defaultHeadersForType('openai'));
+  // Bedrock-specific auth (SigV4, not HTTP headers)
+  const [bedrockAuthMode, setBedrockAuthMode] = useState<'aksk' | 'imdsv2'>('aksk');
+  const [awsAccessKeyId, setAwsAccessKeyId] = useState('');
+  const [awsSecretKey, setAwsSecretKey] = useState('');
 
   // Edit state
   const [editDialogOpen, setEditDialogOpen] = useState(false);
@@ -136,6 +140,9 @@ export function ProvidersPage() {
     setProviderType('openai');
     setBaseUrl('');
     setHeaders(defaultHeadersForType('openai'));
+    setBedrockAuthMode('aksk');
+    setAwsAccessKeyId('');
+    setAwsSecretKey('');
     setFormError('');
     setTestResult(null);
   };
@@ -151,6 +158,9 @@ export function ProvidersPage() {
         provider_type: providerType,
         base_url: baseUrl,
         headers: headers.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
+        ...(providerType === 'bedrock' && bedrockAuthMode === 'aksk' ? {
+          config: { aws_access_key_id: awsAccessKeyId, aws_secret_access_key: awsSecretKey },
+        } : {}),
       });
       setDialogOpen(false);
       resetForm();
@@ -266,6 +276,35 @@ export function ProvidersPage() {
                   'https://api.openai.com'
                 } required />
               </div>
+              {providerType === 'bedrock' && (
+                <>
+                  <div className="space-y-2">
+                    <Label>{t('providers.awsAuthMode')}</Label>
+                    <Select value={bedrockAuthMode} onValueChange={(v) => setBedrockAuthMode(v as 'aksk' | 'imdsv2')}>
+                      <SelectTrigger><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="aksk">{t('providers.awsAuthAkSk')}</SelectItem>
+                        <SelectItem value="imdsv2">{t('providers.awsAuthImdsv2')}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  {bedrockAuthMode === 'aksk' && (
+                    <>
+                      <div className="space-y-2">
+                        <Label htmlFor="prov-ak">Access Key ID</Label>
+                        <Input id="prov-ak" value={awsAccessKeyId} onChange={(e) => setAwsAccessKeyId(e.target.value)} placeholder="AKIA..." required />
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="prov-sk">Secret Access Key</Label>
+                        <Input id="prov-sk" value={awsSecretKey} onChange={(e) => setAwsSecretKey(e.target.value)} placeholder="wJalr..." required />
+                      </div>
+                    </>
+                  )}
+                  {bedrockAuthMode === 'imdsv2' && (
+                    <p className="text-xs text-muted-foreground">{t('providers.awsImdsv2Hint')}</p>
+                  )}
+                </>
+              )}
               <div className="space-y-2">
                 <Label>{t('providers.headers')}</Label>
                 <p className="text-xs text-muted-foreground">{t('providers.headersDesc')}</p>

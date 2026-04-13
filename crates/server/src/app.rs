@@ -812,35 +812,25 @@ async fn load_providers_into_router(
                 )
             }
             "bedrock" => {
-                // Extract AWS credentials from headers for SigV4 signing
-                let access_key = headers
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("X-Aws-Access-Key-Id"))
-                    .map(|(_, v)| v.clone())
+                // AWS credentials stored as separate config_json fields, not headers
+                let access_key = provider
+                    .config_json
+                    .get("aws_access_key_id")
+                    .and_then(|v| v.as_str())
                     .unwrap_or_default();
-                let secret_key = headers
-                    .iter()
-                    .find(|(k, _)| k.eq_ignore_ascii_case("X-Aws-Secret-Access-Key"))
-                    .map(|(_, v)| v.clone())
+                let secret_key = provider
+                    .config_json
+                    .get("aws_secret_access_key")
+                    .and_then(|v| v.as_str())
                     .unwrap_or_default();
                 let credentials = if access_key.is_empty() && secret_key.is_empty() {
                     String::new() // IMDSv2 mode
                 } else {
                     format!("{access_key}:{secret_key}")
                 };
-                // Filter out the AWS credential headers — they're consumed by SigV4,
-                // not forwarded as plain HTTP headers.
-                let custom_headers: Vec<(String, String)> = headers
-                    .iter()
-                    .filter(|(k, _)| {
-                        !k.eq_ignore_ascii_case("X-Aws-Access-Key-Id")
-                            && !k.eq_ignore_ascii_case("X-Aws-Secret-Access-Key")
-                    })
-                    .cloned()
-                    .collect();
                 Arc::new(
                     BedrockProvider::new(provider.base_url.clone(), credentials)
-                        .with_custom_headers(custom_headers),
+                        .with_custom_headers(headers.clone()),
                 )
             }
             _ => Arc::new(

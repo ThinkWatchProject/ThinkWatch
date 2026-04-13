@@ -59,6 +59,8 @@ pub struct ProviderSetup {
     /// Unified request headers (auth + custom + identity templates).
     #[serde(default)]
     pub headers: Vec<think_watch_common::dto::ProviderHeader>,
+    /// Extra config (e.g. Bedrock AWS credentials).
+    pub config: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -193,7 +195,7 @@ pub async fn setup_initialize(
     // 2. Create first provider (optional)
     let mut provider_id = None;
     if let Some(ref provider) = req.provider {
-        let mut config_json = serde_json::json!({});
+        let mut config_json = provider.config.clone().unwrap_or(serde_json::json!({}));
         config_json["headers"] = serde_json::to_value(&provider.headers)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to serialize headers: {e}")))?;
 
