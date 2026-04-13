@@ -5,16 +5,14 @@ use std::pin::Pin;
 
 pub struct GoogleProvider {
     pub base_url: String,
-    pub api_key: String,
     pub client: reqwest::Client,
     pub custom_headers: Vec<(String, String)>,
 }
 
 impl GoogleProvider {
-    pub fn new(base_url: String, api_key: String) -> Self {
+    pub fn new(base_url: String) -> Self {
         Self {
             base_url,
-            api_key,
             client: reqwest::Client::new(),
             custom_headers: Vec::new(),
         }
@@ -200,10 +198,7 @@ impl AiProvider for GoogleProvider {
         let headers = self.resolve_headers(&request);
         let gemini_req = convert_request(&request);
 
-        let url = format!(
-            "{}/v1beta/models/{}:generateContent?key={}",
-            self.base_url, model, self.api_key
-        );
+        let url = format!("{}/v1beta/models/{}:generateContent", self.base_url, model);
 
         let mut builder = self.client.post(&url);
         for (k, v) in &headers {
@@ -240,7 +235,6 @@ impl AiProvider for GoogleProvider {
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.client.clone();
         let base_url = self.base_url.clone();
-        let api_key = self.api_key.clone();
         let model = request.model.clone();
         let headers = self.resolve_headers(&request);
 
@@ -248,8 +242,8 @@ impl AiProvider for GoogleProvider {
 
         Box::pin(async_stream::stream! {
             let url = format!(
-                "{}/v1beta/models/{}:streamGenerateContent?alt=sse&key={}",
-                base_url, model, api_key
+                "{}/v1beta/models/{}:streamGenerateContent?alt=sse",
+                base_url, model
             );
 
             let mut builder = client.post(&url);

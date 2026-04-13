@@ -56,7 +56,9 @@ pub struct ProviderSetup {
     pub display_name: String,
     pub provider_type: String,
     pub base_url: String,
-    pub api_key: String,
+    /// Unified request headers (auth + custom + identity templates).
+    #[serde(default)]
+    pub headers: Vec<think_watch_common::dto::ProviderHeader>,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -191,24 +193,19 @@ pub async fn setup_initialize(
     // 2. Create first provider (optional)
     let mut provider_id = None;
     if let Some(ref provider) = req.provider {
-        let encryption_key =
-            think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))?;
-        let encrypted_api_key =
-            think_watch_common::crypto::encrypt(provider.api_key.as_bytes(), &encryption_key)
-                .map_err(|e| {
-                    AppError::Internal(anyhow::anyhow!("Failed to encrypt API key: {e}"))
-                })?;
+        let mut config_json = serde_json::json!({});
+        config_json["headers"] = serde_json::to_value(&provider.headers)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to serialize headers: {e}")))?;
 
         let pid = sqlx::query_scalar::<_, uuid::Uuid>(
-            r#"INSERT INTO providers (name, display_name, provider_type, base_url, api_key_encrypted)
+            r#"INSERT INTO providers (name, display_name, provider_type, base_url, config_json)
                VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
         )
         .bind(&provider.name)
         .bind(&provider.display_name)
         .bind(&provider.provider_type)
         .bind(&provider.base_url)
-        .bind(&encrypted_api_key)
+        .bind(&config_json)
         .fetch_one(&mut *tx)
         .await?;
 

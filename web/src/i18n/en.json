@@ -168,6 +168,8 @@
     "editProvider": "Edit Provider",
     "editDescription": "Update provider settings.",
     "apiKeyUnchanged": "Leave blank to keep current key",
+    "headers": "Request Headers",
+    "headersDesc": "Headers sent with every request to this provider. Use {{user_id}} or {{user_email}} in values to forward caller identity.",
     "customHeaders": "Custom Headers",
     "customHeadersDesc": "Custom HTTP headers forwarded with requests. Use {{user_id}} or {{user_email}} in values to forward caller identity.",
     "addHeader": "Add Header",

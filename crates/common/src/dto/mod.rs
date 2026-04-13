@@ -170,10 +170,17 @@ pub struct CreateProviderRequest {
     pub display_name: String,
     pub provider_type: String,
     pub base_url: String,
-    pub api_key: String,
+    /// Unified request headers (auth + custom + identity templates).
+    /// Stored in config_json.headers as `[{key, value}]`.
+    #[serde(default)]
+    pub headers: Vec<ProviderHeader>,
     pub config: Option<serde_json::Value>,
-    /// Custom HTTP headers forwarded when proxying requests to this provider.
-    pub custom_headers: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, utoipa::ToSchema)]
+pub struct ProviderHeader {
+    pub key: String,
+    pub value: String,
 }
 
 // --- MCP Server DTOs ---

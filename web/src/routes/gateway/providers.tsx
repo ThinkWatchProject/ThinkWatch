@@ -38,9 +38,20 @@ interface Provider {
   provider_type: string;
   base_url: string;
   is_active: boolean;
-  config_json?: { custom_headers?: Record<string, string> };
+  config_json?: { headers?: { key: string; value: string }[] };
   created_at: string;
 }
+
+const defaultHeadersForType = (type: string): [string, string][] => {
+  switch (type) {
+    case 'openai': return [['Authorization', 'Bearer ']];
+    case 'anthropic': return [['x-api-key', ''], ['anthropic-version', '2023-06-01']];
+    case 'google': return [['x-goog-api-key', '']];
+    case 'azure_openai': return [['api-key', '']];
+    case 'bedrock': return [['X-Aws-Access-Key-Id', ''], ['X-Aws-Secret-Access-Key', '']];
+    default: return [];
+  }
+};
 
 const providerTypeColors: Record<string, 'default' | 'secondary' | 'outline'> = {
   openai: 'default',
@@ -64,19 +75,14 @@ export function ProvidersPage() {
   const [displayName, setDisplayName] = useState('');
   const [providerType, setProviderType] = useState('openai');
   const [baseUrl, setBaseUrl] = useState('');
-  const [apiKey, setApiKey] = useState('');
-  const [bedrockAuthMode, setBedrockAuthMode] = useState<'aksk' | 'imdsv2'>('aksk');
-  const [awsAccessKeyId, setAwsAccessKeyId] = useState('');
-  const [awsSecretKey, setAwsSecretKey] = useState('');
-  const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
+  const [headers, setHeaders] = useState<[string, string][]>(defaultHeadersForType('openai'));
 
   // Edit state
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editProvider, setEditProvider] = useState<Provider | null>(null);
   const [editDisplayName, setEditDisplayName] = useState('');
   const [editBaseUrl, setEditBaseUrl] = useState('');
-  const [editApiKey, setEditApiKey] = useState('');
-  const [editCustomHeaders, setEditCustomHeaders] = useState<[string, string][]>([]);
+  const [editHeaders, setEditHeaders] = useState<[string, string][]>([]);
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState('');
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -89,8 +95,8 @@ export function ProvidersPage() {
   } | null>(null);
 
   const handleTestConnection = async (
-    type: string, url: string, key: string,
-    headers: [string, string][],
+    type: string, url: string,
+    hdrs: [string, string][],
   ) => {
     setTesting(true);
     setTestResult(null);
@@ -100,10 +106,7 @@ export function ProvidersPage() {
         {
           provider_type: type,
           base_url: url,
-          api_key: key,
-          custom_headers: headers.length > 0
-            ? Object.fromEntries(headers.filter(([k]) => k.trim()))
-            : null,
+          headers: hdrs.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
         },
       );
       setTestResult(res);
@@ -132,11 +135,7 @@ export function ProvidersPage() {
     setDisplayName('');
     setProviderType('openai');
     setBaseUrl('');
-    setApiKey('');
-    setBedrockAuthMode('aksk');
-    setAwsAccessKeyId('');
-    setAwsSecretKey('');
-    setCustomHeaders([]);
+    setHeaders(defaultHeadersForType('openai'));
     setFormError('');
     setTestResult(null);
   };
@@ -146,18 +145,12 @@ export function ProvidersPage() {
     setFormError('');
     setSubmitting(true);
     try {
-      const resolvedApiKey = providerType === 'bedrock'
-        ? (bedrockAuthMode === 'aksk' ? `${awsAccessKeyId}:${awsSecretKey}` : '')
-        : apiKey;
       await apiPost('/api/admin/providers', {
         name,
         display_name: displayName,
         provider_type: providerType,
         base_url: baseUrl,
-        api_key: resolvedApiKey,
-        custom_headers: customHeaders.length > 0
-          ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
-          : null,
+        headers: headers.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
       });
       setDialogOpen(false);
       resetForm();
@@ -184,11 +177,10 @@ export function ProvidersPage() {
     setEditProvider(p);
     setEditDisplayName(p.display_name);
     setEditBaseUrl(p.base_url);
-    setEditApiKey('');
     setEditError('');
     setTestResult(null);
-    const existing = p.config_json?.custom_headers ?? {};
-    setEditCustomHeaders(Object.entries(existing));
+    const existing = (p.config_json?.headers ?? []) as { key: string; value: string }[];
+    setEditHeaders(existing.map(h => [h.key, h.value] as [string, string]));
     setEditDialogOpen(true);
   };
 
@@ -197,15 +189,11 @@ export function ProvidersPage() {
     setEditError('');
     setEditSaving(true);
     try {
-      const body: Record<string, unknown> = {
+      await apiPatch(`/api/admin/providers/${editProvider.id}`, {
         display_name: editDisplayName,
         base_url: editBaseUrl,
-      };
-      if (editApiKey) body.api_key = editApiKey;
-      body.custom_headers = editCustomHeaders.length > 0
-        ? Object.fromEntries(editCustomHeaders.filter(([k]) => k.trim()))
-        : {};
-      await apiPatch(`/api/admin/providers/${editProvider.id}`, body);
+        headers: editHeaders.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
+      });
       setEditDialogOpen(false);
       setEditProvider(null);
       await fetchProviders();
@@ -252,7 +240,7 @@ export function ProvidersPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="prov-type">{t('providers.providerType')}</Label>
-                <Select value={providerType} onValueChange={(v) => setProviderType(v ?? 'openai')}>
+                <Select value={providerType} onValueChange={(v) => { setProviderType(v ?? 'openai'); setHeaders(defaultHeadersForType(v ?? 'openai')); }}>
                   <SelectTrigger><SelectValue /></SelectTrigger>
                   <SelectContent>
                     <SelectItem value="openai">OpenAI</SelectItem>
@@ -278,62 +266,29 @@ export function ProvidersPage() {
                   'https://api.openai.com'
                 } required />
               </div>
-              {providerType === 'bedrock' ? (
-                <>
-                  <div className="space-y-2">
-                    <Label>{t('providers.awsAuthMode')}</Label>
-                    <Select value={bedrockAuthMode} onValueChange={(v) => setBedrockAuthMode(v as 'aksk' | 'imdsv2')}>
-                      <SelectTrigger><SelectValue /></SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="aksk">{t('providers.awsAuthAkSk')}</SelectItem>
-                        <SelectItem value="imdsv2">{t('providers.awsAuthImdsv2')}</SelectItem>
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  {bedrockAuthMode === 'aksk' && (
-                    <>
-                      <div className="space-y-2">
-                        <Label htmlFor="prov-ak">Access Key ID</Label>
-                        <Input id="prov-ak" type="password" value={awsAccessKeyId} onChange={(e) => setAwsAccessKeyId(e.target.value)} placeholder="AKIA..." required />
-                      </div>
-                      <div className="space-y-2">
-                        <Label htmlFor="prov-sk">Secret Access Key</Label>
-                        <Input id="prov-sk" type="password" value={awsSecretKey} onChange={(e) => setAwsSecretKey(e.target.value)} placeholder="wJalr..." required />
-                      </div>
-                    </>
-                  )}
-                  {bedrockAuthMode === 'imdsv2' && (
-                    <p className="text-xs text-muted-foreground">{t('providers.awsImdsv2Hint')}</p>
-                  )}
-                </>
-              ) : (
-                <div className="space-y-2">
-                  <Label htmlFor="prov-key">{t('providers.apiKey')}</Label>
-                  <Input id="prov-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-..." required />
-                </div>
-              )}
               <div className="space-y-2">
-                <Label>{t('providers.customHeaders')}</Label>
-                <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
-                {customHeaders.map(([k, v], i) => (
+                <Label>{t('providers.headers')}</Label>
+                <p className="text-xs text-muted-foreground">{t('providers.headersDesc')}</p>
+                {headers.map(([k, v], i) => (
                   <div key={i} className="flex gap-2 items-center">
-                    <Input className="flex-1" placeholder="X-Custom-Header" value={k}
-                      onChange={(e) => { const next = [...customHeaders]; next[i] = [e.target.value, v]; setCustomHeaders(next); }} />
-                    <Input className="flex-1" placeholder={t('mcpServers.headerValuePlaceholder')} value={v}
-                      onChange={(e) => { const next = [...customHeaders]; next[i] = [k, e.target.value]; setCustomHeaders(next); }} />
-                    <Button type="button" variant="ghost" size="icon-sm" onClick={() => setCustomHeaders(customHeaders.filter((_, j) => j !== i))}>
+                    <Input className="flex-1" placeholder="Header-Name" value={k}
+                      onChange={(e) => { const next = [...headers]; next[i] = [e.target.value, v]; setHeaders(next); }} />
+                    <Input className="flex-1" type={/key|secret|token|auth/i.test(k) ? 'password' : 'text'}
+                      placeholder={t('mcpServers.headerValuePlaceholder')} value={v}
+                      onChange={(e) => { const next = [...headers]; next[i] = [k, e.target.value]; setHeaders(next); }} />
+                    <Button type="button" variant="ghost" size="icon-sm" onClick={() => setHeaders(headers.filter((_, j) => j !== i))}>
                       <X className="h-3 w-3" />
                     </Button>
                   </div>
                 ))}
                 <div className="flex flex-wrap gap-2">
-                  <Button type="button" variant="outline" size="sm" onClick={() => setCustomHeaders([...customHeaders, ['', '']])}>
+                  <Button type="button" variant="outline" size="sm" onClick={() => setHeaders([...headers, ['', '']])}>
                     <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
                   </Button>
-                  <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setCustomHeaders([...customHeaders, ['X-User-Id', '{{user_id}}']])}>
+                  <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setHeaders([...headers, ['X-User-Id', '{{user_id}}']])}>
                     + {t('mcpServers.presetUserId')}
                   </Button>
-                  <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setCustomHeaders([...customHeaders, ['X-User-Email', '{{user_email}}']])}>
+                  <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setHeaders([...headers, ['X-User-Email', '{{user_email}}']])}>
                     + {t('mcpServers.presetUserEmail')}
                   </Button>
                 </div>
@@ -360,13 +315,8 @@ export function ProvidersPage() {
                 <Button
                   type="button"
                   variant="outline"
-                  disabled={testing || !baseUrl || (providerType !== 'bedrock' && !apiKey) || (providerType === 'bedrock' && bedrockAuthMode === 'aksk' && (!awsAccessKeyId || !awsSecretKey))}
-                  onClick={() => {
-                    const key = providerType === 'bedrock'
-                      ? (bedrockAuthMode === 'aksk' ? `${awsAccessKeyId}:${awsSecretKey}` : '')
-                      : apiKey;
-                    handleTestConnection(providerType, baseUrl, key, customHeaders);
-                  }}
+                  disabled={testing || !baseUrl}
+                  onClick={() => handleTestConnection(providerType, baseUrl, headers)}
                 >
                   {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
                   {testing ? t('providers.testing') : t('providers.testConnection')}
@@ -493,31 +443,28 @@ export function ProvidersPage() {
               <Input value={editBaseUrl} onChange={(e) => setEditBaseUrl(e.target.value)} />
             </div>
             <div className="space-y-2">
-              <Label>{t('providers.apiKey')}</Label>
-              <Input type="password" value={editApiKey} onChange={(e) => setEditApiKey(e.target.value)} placeholder={t('providers.apiKeyUnchanged')} />
-            </div>
-            <div className="space-y-2">
-              <Label>{t('providers.customHeaders')}</Label>
-              <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
-              {editCustomHeaders.map(([k, v], i) => (
+              <Label>{t('providers.headers')}</Label>
+              <p className="text-xs text-muted-foreground">{t('providers.headersDesc')}</p>
+              {editHeaders.map(([k, v], i) => (
                 <div key={i} className="flex gap-2 items-center">
-                  <Input className="flex-1" placeholder="X-Custom-Header" value={k}
-                    onChange={(e) => { const next = [...editCustomHeaders]; next[i] = [e.target.value, v]; setEditCustomHeaders(next); }} />
-                  <Input className="flex-1" placeholder={t('mcpServers.headerValuePlaceholder')} value={v}
-                    onChange={(e) => { const next = [...editCustomHeaders]; next[i] = [k, e.target.value]; setEditCustomHeaders(next); }} />
-                  <Button type="button" variant="ghost" size="icon-sm" onClick={() => setEditCustomHeaders(editCustomHeaders.filter((_, j) => j !== i))}>
+                  <Input className="flex-1" placeholder="Header-Name" value={k}
+                    onChange={(e) => { const next = [...editHeaders]; next[i] = [e.target.value, v]; setEditHeaders(next); }} />
+                  <Input className="flex-1" type={/key|secret|token|auth/i.test(k) ? 'password' : 'text'}
+                    placeholder={t('mcpServers.headerValuePlaceholder')} value={v}
+                    onChange={(e) => { const next = [...editHeaders]; next[i] = [k, e.target.value]; setEditHeaders(next); }} />
+                  <Button type="button" variant="ghost" size="icon-sm" onClick={() => setEditHeaders(editHeaders.filter((_, j) => j !== i))}>
                     <X className="h-3 w-3" />
                   </Button>
                 </div>
               ))}
               <div className="flex flex-wrap gap-2">
-                <Button type="button" variant="outline" size="sm" onClick={() => setEditCustomHeaders([...editCustomHeaders, ['', '']])}>
+                <Button type="button" variant="outline" size="sm" onClick={() => setEditHeaders([...editHeaders, ['', '']])}>
                   <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
                 </Button>
-                <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setEditCustomHeaders([...editCustomHeaders, ['X-User-Id', '{{user_id}}']])}>
+                <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setEditHeaders([...editHeaders, ['X-User-Id', '{{user_id}}']])}>
                   + {t('mcpServers.presetUserId')}
                 </Button>
-                <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setEditCustomHeaders([...editCustomHeaders, ['X-User-Email', '{{user_email}}']])}>
+                <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setEditHeaders([...editHeaders, ['X-User-Email', '{{user_email}}']])}>
                   + {t('mcpServers.presetUserEmail')}
                 </Button>
               </div>
@@ -546,8 +493,8 @@ export function ProvidersPage() {
             <Button
               type="button"
               variant="outline"
-              disabled={testing || !editBaseUrl || !editApiKey}
-              onClick={() => handleTestConnection(editProvider!.provider_type, editBaseUrl, editApiKey, editCustomHeaders)}
+              disabled={testing || !editBaseUrl}
+              onClick={() => handleTestConnection(editProvider!.provider_type, editBaseUrl, editHeaders)}
             >
               {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
               {testing ? t('providers.testing') : t('providers.testConnection')}

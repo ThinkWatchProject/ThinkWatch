@@ -7,16 +7,14 @@ use std::pin::Pin;
 
 pub struct AnthropicProvider {
     pub base_url: String,
-    pub api_key: String,
     pub client: reqwest::Client,
     pub custom_headers: Vec<(String, String)>,
 }
 
 impl AnthropicProvider {
-    pub fn new(base_url: String, api_key: String) -> Self {
+    pub fn new(base_url: String) -> Self {
         Self {
             base_url,
-            api_key,
             client: reqwest::Client::new(),
             custom_headers: Vec::new(),
         }
@@ -243,7 +241,6 @@ impl AiProvider for AnthropicProvider {
         let mut builder = self
             .client
             .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
         for (k, v) in &headers {
@@ -283,7 +280,6 @@ impl AiProvider for AnthropicProvider {
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.client.clone();
         let url = format!("{}/v1/messages", self.base_url);
-        let api_key = self.api_key.clone();
         let headers = self.resolve_headers(&request);
 
         let mut anthropic_req = convert_request(request);
@@ -292,7 +288,6 @@ impl AiProvider for AnthropicProvider {
         Box::pin(async_stream::stream! {
             let mut builder = client
                 .post(&url)
-                .header("x-api-key", &api_key)
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json");
             for (k, v) in &headers {

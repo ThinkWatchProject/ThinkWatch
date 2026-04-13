@@ -168,6 +168,8 @@
     "editProvider": "编辑提供商",
     "editDescription": "更新提供商设置。",
     "apiKeyUnchanged": "留空以保留当前密钥",
+    "headers": "请求头",
+    "headersDesc": "发送给此提供商的请求头。值中可使用 {{user_id}} 或 {{user_email}} 转发调用者身份。",
     "customHeaders": "自定义请求头",
     "customHeadersDesc": "随请求转发的自定义 HTTP 头。值中可使用 {{user_id}} 或 {{user_email}} 转发调用者身份。",
     "addHeader": "添加请求头",

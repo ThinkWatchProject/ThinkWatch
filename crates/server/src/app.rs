@@ -769,60 +769,85 @@ async fn load_providers_into_router(
     .fetch_all(&state.db)
     .await?;
 
-    let encryption_key =
-        think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)?;
-
     for provider in &providers {
-        let api_key_bytes =
-            think_watch_common::crypto::decrypt(&provider.api_key_encrypted, &encryption_key)?;
-        let api_key = String::from_utf8(api_key_bytes)?;
-
-        // Parse custom headers from config_json (supports {{user_id}} / {{user_email}} templates)
-        let custom_headers: Vec<(String, String)> = provider
+        // Parse unified headers from config_json
+        let headers: Vec<(String, String)> = provider
             .config_json
-            .get("custom_headers")
-            .and_then(|v| v.as_object())
-            .map(|obj| {
-                obj.iter()
-                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+            .get("headers")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let key = item.get("key")?.as_str()?.to_string();
+                        let value = item.get("value")?.as_str()?.to_string();
+                        Some((key, value))
+                    })
                     .collect()
             })
             .unwrap_or_default();
 
-        let dyn_provider: Arc<dyn think_watch_gateway::providers::DynAiProvider> =
-            match provider.provider_type.as_str() {
-                "openai" => Arc::new(
-                    OpenAiProvider::new(provider.base_url.clone(), api_key)
+        let dyn_provider: Arc<dyn think_watch_gateway::providers::DynAiProvider> = match provider
+            .provider_type
+            .as_str()
+        {
+            "openai" => Arc::new(
+                OpenAiProvider::new(provider.base_url.clone()).with_custom_headers(headers.clone()),
+            ),
+            "anthropic" => Arc::new(
+                AnthropicProvider::new(provider.base_url.clone())
+                    .with_custom_headers(headers.clone()),
+            ),
+            "google" => Arc::new(
+                GoogleProvider::new(provider.base_url.clone()).with_custom_headers(headers.clone()),
+            ),
+            "azure_openai" => {
+                let api_version = provider
+                    .config_json
+                    .get("api_version")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                Arc::new(
+                    AzureOpenAiProvider::new(provider.base_url.clone(), api_version)
+                        .with_custom_headers(headers.clone()),
+                )
+            }
+            "bedrock" => {
+                // Extract AWS credentials from headers for SigV4 signing
+                let access_key = headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("X-Aws-Access-Key-Id"))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                let secret_key = headers
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("X-Aws-Secret-Access-Key"))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                let credentials = if access_key.is_empty() && secret_key.is_empty() {
+                    String::new() // IMDSv2 mode
+                } else {
+                    format!("{access_key}:{secret_key}")
+                };
+                // Filter out the AWS credential headers — they're consumed by SigV4,
+                // not forwarded as plain HTTP headers.
+                let custom_headers: Vec<(String, String)> = headers
+                    .iter()
+                    .filter(|(k, _)| {
+                        !k.eq_ignore_ascii_case("X-Aws-Access-Key-Id")
+                            && !k.eq_ignore_ascii_case("X-Aws-Secret-Access-Key")
+                    })
+                    .cloned()
+                    .collect();
+                Arc::new(
+                    BedrockProvider::new(provider.base_url.clone(), credentials)
                         .with_custom_headers(custom_headers),
-                ),
-                "anthropic" => Arc::new(
-                    AnthropicProvider::new(provider.base_url.clone(), api_key)
-                        .with_custom_headers(custom_headers),
-                ),
-                "google" => Arc::new(
-                    GoogleProvider::new(provider.base_url.clone(), api_key)
-                        .with_custom_headers(custom_headers),
-                ),
-                "azure_openai" => {
-                    let api_version = provider
-                        .config_json
-                        .get("api_version")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-                    Arc::new(
-                        AzureOpenAiProvider::new(provider.base_url.clone(), api_key, api_version)
-                            .with_custom_headers(custom_headers),
-                    )
-                }
-                "bedrock" => Arc::new(
-                    BedrockProvider::new(provider.base_url.clone(), api_key)
-                        .with_custom_headers(custom_headers),
-                ),
-                _ => Arc::new(
-                    CustomProvider::new(provider.name.clone(), provider.base_url.clone(), api_key)
-                        .with_custom_headers(custom_headers),
-                ),
-            };
+                )
+            }
+            _ => Arc::new(
+                CustomProvider::new(provider.name.clone(), provider.base_url.clone())
+                    .with_custom_headers(headers.clone()),
+            ),
+        };
 
         // Register models from the models table
         let models = sqlx::query_scalar::<_, String>(

@@ -11,8 +11,6 @@ pub struct Provider {
     pub display_name: String,
     pub provider_type: String,
     pub base_url: String,
-    #[serde(skip_serializing)]
-    pub api_key_encrypted: Vec<u8>,
     pub is_active: bool,
     pub config_json: serde_json::Value,
     pub created_at: DateTime<Utc>,

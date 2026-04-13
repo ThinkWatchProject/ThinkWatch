@@ -13,17 +13,15 @@ use std::pin::Pin;
 /// Auth header: `api-key: {api_key}` (not `Authorization: Bearer`)
 pub struct AzureOpenAiProvider {
     pub base_url: String,
-    pub api_key: String,
     pub api_version: String,
     pub client: reqwest::Client,
     pub custom_headers: Vec<(String, String)>,
 }
 
 impl AzureOpenAiProvider {
-    pub fn new(base_url: String, api_key: String, api_version: Option<String>) -> Self {
+    pub fn new(base_url: String, api_version: Option<String>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            api_key,
             api_version: api_version.unwrap_or_else(|| "2024-12-01-preview".to_string()),
             client: reqwest::Client::new(),
             custom_headers: Vec::new(),
@@ -74,7 +72,6 @@ impl AiProvider for AzureOpenAiProvider {
         let mut builder = self
             .client
             .post(&url)
-            .header("api-key", &self.api_key)
             .header("content-type", "application/json");
         for (k, v) in &headers {
             builder = builder.header(k.as_str(), v.as_str());
@@ -113,7 +110,6 @@ impl AiProvider for AzureOpenAiProvider {
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.client.clone();
         let url = self.completions_url(&request.model);
-        let api_key = self.api_key.clone();
         let headers = self.resolve_headers(&request);
 
         let mut stream_request = request;
@@ -122,7 +118,6 @@ impl AiProvider for AzureOpenAiProvider {
         Box::pin(async_stream::stream! {
             let mut builder = client
                 .post(&url)
-                .header("api-key", &api_key)
                 .header("content-type", "application/json");
             for (k, v) in &headers {
                 builder = builder.header(k.as_str(), v.as_str());

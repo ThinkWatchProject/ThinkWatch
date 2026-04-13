@@ -6,16 +6,14 @@ use std::pin::Pin;
 
 pub struct OpenAiProvider {
     pub base_url: String,
-    pub api_key: String,
     pub client: reqwest::Client,
     pub custom_headers: Vec<(String, String)>,
 }
 
 impl OpenAiProvider {
-    pub fn new(base_url: String, api_key: String) -> Self {
+    pub fn new(base_url: String) -> Self {
         Self {
             base_url,
-            api_key,
             client: reqwest::Client::new(),
             custom_headers: Vec::new(),
         }
@@ -54,8 +52,7 @@ impl AiProvider for OpenAiProvider {
         let headers = self.resolve_headers(&request);
         let mut builder = self
             .client
-            .post(format!("{}/v1/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key);
+            .post(format!("{}/v1/chat/completions", self.base_url));
         for (k, v) in &headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
@@ -90,7 +87,6 @@ impl AiProvider for OpenAiProvider {
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.client.clone();
         let url = format!("{}/v1/chat/completions", self.base_url);
-        let api_key = self.api_key.clone();
         let headers = self.resolve_headers(&request);
 
         // Ensure stream is set to true in the outgoing request
@@ -99,8 +95,7 @@ impl AiProvider for OpenAiProvider {
 
         Box::pin(async_stream::stream! {
             let mut builder = client
-                .post(&url)
-                .bearer_auth(&api_key);
+                .post(&url);
             for (k, v) in &headers {
                 builder = builder.header(k.as_str(), v.as_str());
             }

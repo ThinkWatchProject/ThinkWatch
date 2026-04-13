@@ -2,8 +2,7 @@ use axum::Json;
 use axum::extract::{Path, State};
 use uuid::Uuid;
 
-use think_watch_common::crypto;
-use think_watch_common::dto::CreateProviderRequest;
+use think_watch_common::dto::{CreateProviderRequest, ProviderHeader};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Provider;
 
@@ -197,11 +196,6 @@ fn is_link_local(ip: &std::net::IpAddr) -> bool {
     }
 }
 
-fn encryption_key(state: &AppState) -> Result<[u8; 32], AppError> {
-    crypto::parse_encryption_key(&state.config.encryption_key)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))
-}
-
 #[utoipa::path(
     get,
     path = "/api/admin/providers",
@@ -255,35 +249,23 @@ pub async fn create_provider(
             "name and base_url are required".into(),
         ));
     }
-    // api_key is optional for Bedrock (IMDSv2 mode)
-    if req.api_key.is_empty() && req.provider_type != "bedrock" {
-        return Err(AppError::BadRequest("api_key is required".into()));
-    }
 
     // SSRF prevention: validate base_url
     validate_url(&req.base_url)?;
 
-    let key = encryption_key(&state)?;
-    let encrypted_key = crypto::encrypt(req.api_key.as_bytes(), &key)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption failed: {e}")))?;
-
-    // Merge custom_headers into config_json
+    // Store unified headers in config_json
     let mut config = req.config.unwrap_or(serde_json::json!({}));
-    if let Some(headers) = &req.custom_headers {
-        validate_custom_headers(headers)?;
-        config["custom_headers"] = serde_json::to_value(headers)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to serialize headers: {e}")))?;
-    }
+    config["headers"] = serde_json::to_value(&req.headers)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to serialize headers: {e}")))?;
 
     let provider = sqlx::query_as::<_, Provider>(
-        r#"INSERT INTO providers (name, display_name, provider_type, base_url, api_key_encrypted, config_json)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING *"#,
+        r#"INSERT INTO providers (name, display_name, provider_type, base_url, config_json)
+           VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
     )
     .bind(&req.name)
     .bind(&req.display_name)
     .bind(&req.provider_type)
     .bind(&req.base_url)
-    .bind(&encrypted_key)
     .bind(config)
     .fetch_one(&state.db)
     .await?;
@@ -303,9 +285,8 @@ pub async fn create_provider(
 pub struct UpdateProviderRequest {
     pub display_name: Option<String>,
     pub base_url: Option<String>,
-    pub api_key: Option<String>,
-    /// Custom HTTP headers forwarded when proxying requests to this provider.
-    pub custom_headers: Option<std::collections::HashMap<String, String>>,
+    /// Unified request headers (auth + custom + identity templates).
+    pub headers: Option<Vec<ProviderHeader>>,
 }
 
 #[utoipa::path(
@@ -334,12 +315,6 @@ pub async fn update_provider(
     auth_user
         .assert_scope_global(&state.db, "providers:update")
         .await?;
-    if req.api_key.is_some() {
-        auth_user.require_permission("providers:rotate_key")?;
-        auth_user
-            .assert_scope_global(&state.db, "providers:rotate_key")
-            .await?;
-    }
     let existing = sqlx::query_as::<_, Provider>(
         "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
     )
@@ -358,19 +333,10 @@ pub async fn update_provider(
         validate_url(base_url)?;
     }
 
-    let api_key_encrypted = if let Some(ref new_key) = req.api_key {
-        let key = encryption_key(&state)?;
-        crypto::encrypt(new_key.as_bytes(), &key)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption failed: {e}")))?
-    } else {
-        existing.api_key_encrypted.clone()
-    };
-
-    // Merge custom_headers into existing config_json
-    let config_json = if let Some(ref headers) = req.custom_headers {
-        validate_custom_headers(headers)?;
+    // Update headers in config_json if provided
+    let config_json = if let Some(ref headers) = req.headers {
         let mut config = existing.config_json.clone();
-        config["custom_headers"] = serde_json::to_value(headers)
+        config["headers"] = serde_json::to_value(headers)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to serialize headers: {e}")))?;
         config
     } else {
@@ -378,13 +344,12 @@ pub async fn update_provider(
     };
 
     let updated = sqlx::query_as::<_, Provider>(
-        r#"UPDATE providers SET display_name = $2, base_url = $3, api_key_encrypted = $4, config_json = $5
+        r#"UPDATE providers SET display_name = $2, base_url = $3, config_json = $4
            WHERE id = $1 RETURNING *"#,
     )
     .bind(id)
     .bind(display_name)
     .bind(base_url)
-    .bind(&api_key_encrypted)
     .bind(&config_json)
     .fetch_one(&state.db)
     .await?;
@@ -487,8 +452,9 @@ pub async fn delete_provider(
 pub struct TestProviderRequest {
     pub provider_type: String,
     pub base_url: String,
-    pub api_key: String,
-    pub custom_headers: Option<std::collections::HashMap<String, String>>,
+    /// Unified request headers (auth + custom).
+    #[serde(default)]
+    pub headers: Vec<ProviderHeader>,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -554,23 +520,13 @@ async fn run_provider_test(
     if req.base_url.is_empty() {
         return Err(AppError::BadRequest("base_url is required".into()));
     }
-    if req.api_key.is_empty() && req.provider_type != "bedrock" {
-        return Err(AppError::BadRequest("api_key is required".into()));
-    }
     validate_url(&req.base_url)?;
-    if let Some(headers) = &req.custom_headers {
-        validate_custom_headers(headers)?;
-    }
 
-    // Provider-specific probe URL + auth header. We always hit a cheap,
-    // read-only endpoint that requires auth so a wrong key is detected too.
+    // Provider-specific probe URL. We always hit a cheap, read-only
+    // endpoint that requires auth so a wrong key is detected too.
     let url = match req.provider_type.as_str() {
         "anthropic" => format!("{}/v1/models", req.base_url.trim_end_matches('/')),
-        "google" => format!(
-            "{}/v1beta/models?key={}",
-            req.base_url.trim_end_matches('/'),
-            urlencoding::encode(&req.api_key)
-        ),
+        "google" => format!("{}/v1beta/models", req.base_url.trim_end_matches('/')),
         // openai / azure / custom — all OpenAI-compatible /v1/models
         _ => format!("{}/v1/models", req.base_url.trim_end_matches('/')),
     };
@@ -581,23 +537,9 @@ async fn run_provider_test(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {e}")))?;
 
     let mut builder = client.get(&url);
-    match req.provider_type.as_str() {
-        "anthropic" => {
-            builder = builder
-                .header("x-api-key", &req.api_key)
-                .header("anthropic-version", "2023-06-01");
-        }
-        "google" => {
-            // key is in the query string already
-        }
-        _ => {
-            builder = builder.bearer_auth(&req.api_key);
-        }
-    }
-    if let Some(headers) = req.custom_headers.as_ref() {
-        for (k, v) in headers {
-            builder = builder.header(k, v);
-        }
+    // Apply all headers directly — auth is now part of the unified headers list
+    for h in &req.headers {
+        builder = builder.header(&h.key, &h.value);
     }
 
     let started = std::time::Instant::now();

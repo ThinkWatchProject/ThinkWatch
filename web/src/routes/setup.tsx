@@ -113,7 +113,6 @@ export function SetupPage() {
   const [providerName, setProviderName] = useState('');
   const [providerDisplayName, setProviderDisplayName] = useState('');
   const [providerBaseUrl, setProviderBaseUrl] = useState('');
-  const [providerApiKey, setProviderApiKey] = useState('');
   const [providerHeaders, setProviderHeaders] = useState<[string, string][]>([]);
   // Provider connection test state
   const [providerTesting, setProviderTesting] = useState(false);
@@ -164,18 +163,13 @@ export function SetupPage() {
     setProviderTesting(true);
     setProviderTestResult(null);
     try {
-      const customHeaders: Record<string, string> = {};
-      for (const [k, v] of providerHeaders) {
-        if (k && v) customHeaders[k] = v;
-      }
       const res = await fetch(`${API_BASE}/api/setup/test-provider`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           provider_type: providerType,
           base_url: providerBaseUrl,
-          api_key: providerApiKey,
-          custom_headers: Object.keys(customHeaders).length > 0 ? customHeaders : undefined,
+          headers: providerHeaders.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
         }),
       });
       const data = await res.json();
@@ -209,6 +203,15 @@ export function SetupPage() {
       if (!providerName) setProviderName(value);
       if (!providerDisplayName) setProviderDisplayName(found.label);
     }
+    // Auto-populate default auth headers for the selected type
+    const defaults: Record<string, [string, string][]> = {
+      openai: [['Authorization', 'Bearer ']],
+      anthropic: [['x-api-key', ''], ['anthropic-version', '2023-06-01']],
+      google: [['x-goog-api-key', '']],
+      azure_openai: [['api-key', '']],
+      bedrock: [['X-Aws-Access-Key-Id', ''], ['X-Aws-Secret-Access-Key', '']],
+    };
+    setProviderHeaders(defaults[value] ?? []);
   };
 
   const handleSubmit = async (skipProvider = false) => {
@@ -221,14 +224,13 @@ export function SetupPage() {
     if (siteName && siteName !== 'ThinkWatch') {
       body.site_name = siteName;
     }
-    if (!skipProvider && providerType && providerName && providerBaseUrl && providerApiKey) {
+    if (!skipProvider && providerType && providerName && providerBaseUrl) {
       body.provider = {
         name: providerName,
         display_name: providerDisplayName || providerName,
         provider_type: providerType,
         base_url: providerBaseUrl,
-        api_key: providerApiKey,
-        custom_headers: Object.fromEntries(providerHeaders.filter(([k, v]) => k && v)),
+        headers: providerHeaders.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
       };
     }
 
@@ -453,26 +455,14 @@ export function SetupPage() {
               )}
             </div>
             <div className="space-y-2">
-              <Label htmlFor="setup-provider-api-key">{providerType === 'bedrock' ? t('providers.awsCredentials', 'AWS Credentials') : t('setup.provider.apiKey')}</Label>
-              <Input
-                id="setup-provider-api-key"
-                type="password"
-                value={providerApiKey}
-                onChange={(e) => setProviderApiKey(e.target.value)}
-                placeholder={providerType === 'bedrock' ? 'ACCESS_KEY_ID:SECRET_ACCESS_KEY' : 'sk-...'}
-              />
-              {providerType === 'bedrock' && (
-                <p className="text-xs text-muted-foreground">{t('providers.bedrockKeyHint', 'Format: ACCESS_KEY_ID:SECRET_ACCESS_KEY')}</p>
-              )}
-            </div>
-            <div className="space-y-2">
-              <Label>{t('providers.customHeaders')}</Label>
-              <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
+              <Label>{t('providers.headers')}</Label>
+              <p className="text-xs text-muted-foreground">{t('providers.headersDesc')}</p>
               {providerHeaders.map(([k, v], i) => (
                 <div key={i} className="flex gap-2 items-center">
                   <Input className="flex-1" placeholder="Header-Name" value={k}
                     onChange={(e) => { const next = [...providerHeaders]; next[i] = [e.target.value, v]; setProviderHeaders(next); }} />
-                  <Input className="flex-1" placeholder="value" value={v}
+                  <Input className="flex-1" type={/key|secret|token|auth/i.test(k) ? 'password' : 'text'}
+                    placeholder={t('mcpServers.headerValuePlaceholder')} value={v}
                     onChange={(e) => { const next = [...providerHeaders]; next[i] = [k, e.target.value]; setProviderHeaders(next); }} />
                   <Button type="button" variant="ghost" size="icon-sm" onClick={() => setProviderHeaders(providerHeaders.filter((_, j) => j !== i))}>
                     <X className="h-3 w-3" />
@@ -490,7 +480,7 @@ export function SetupPage() {
                 type="button"
                 variant="outline"
                 size="sm"
-                disabled={providerTesting || !providerBaseUrl || !providerApiKey}
+                disabled={providerTesting || !providerBaseUrl}
                 onClick={handleTestProvider}
               >
                 {providerTesting ? t('common.loading') : t('setup.provider.testConnection')}

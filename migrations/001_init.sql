@@ -277,7 +277,6 @@ CREATE TABLE providers (
     display_name      VARCHAR(255) NOT NULL,
     provider_type     VARCHAR(50)  NOT NULL,
     base_url          VARCHAR(512) NOT NULL,
-    api_key_encrypted BYTEA NOT NULL,
     is_active         BOOLEAN NOT NULL DEFAULT TRUE,
     config_json       JSONB DEFAULT '{}',
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),

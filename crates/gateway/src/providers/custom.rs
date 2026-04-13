@@ -10,9 +10,9 @@ pub struct CustomProvider {
 }
 
 impl CustomProvider {
-    pub fn new(name: String, base_url: String, api_key: String) -> Self {
+    pub fn new(name: String, base_url: String) -> Self {
         Self {
-            inner: OpenAiProvider::new(base_url, api_key),
+            inner: OpenAiProvider::new(base_url),
             provider_name: name,
         }
     }
