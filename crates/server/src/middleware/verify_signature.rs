@@ -146,12 +146,6 @@ pub async fn verify_signature(
         return Ok(next.run(request).await);
     }
 
-    // Safe (idempotent) methods get signature + timestamp verification
-    // but skip nonce rate-limiting and replay detection — they're
-    // read-only so replaying them is harmless, and page refreshes
-    // shouldn't exhaust a nonce budget.
-    let is_safe_method = matches!(*request.method(), Method::GET | Method::HEAD);
-
     // Extract auth user from extensions (set by require_auth middleware)
     let user_id = request
         .extensions()
@@ -209,46 +203,6 @@ pub async fn verify_signature(
     if !was_set {
         tracing::warn!("Duplicate nonce detected: {nonce}");
         return Err(StatusCode::UNAUTHORIZED);
-    }
-
-    // Per-user write rate limit: max 120 state-changing requests per
-    // rolling minute. Only applied to POST/PATCH/DELETE — GET/HEAD
-    // are read-only and shouldn't be throttled.
-    if !is_safe_method {
-        use fred::interfaces::SortedSetsInterface;
-        let nonce_rate_key = format!("nonce_rate_zset:{user_id}");
-        let now_ms: i64 = chrono::Utc::now().timestamp_millis();
-        let window_start_ms = now_ms - 60_000;
-        let _: i64 = SortedSetsInterface::zremrangebyscore(
-            &state.redis,
-            &nonce_rate_key,
-            0,
-            window_start_ms,
-        )
-        .await
-        .unwrap_or(0);
-        let in_window: i64 = SortedSetsInterface::zcard(&state.redis, &nonce_rate_key)
-            .await
-            .unwrap_or(0);
-        if in_window >= 120 {
-            tracing::warn!("Write rate limit exceeded for user {user_id} ({in_window}/120/min)");
-            return Err(StatusCode::TOO_MANY_REQUESTS);
-        }
-        let _: i64 = SortedSetsInterface::zadd(
-            &state.redis,
-            &nonce_rate_key,
-            None,
-            None,
-            false,
-            false,
-            (now_ms as f64, nonce.to_string()),
-        )
-        .await
-        .unwrap_or(0);
-        let _: () =
-            fred::interfaces::KeysInterface::expire(&state.redis, &nonce_rate_key, 120, None)
-                .await
-                .unwrap_or(());
     }
 
     // Get signing key: try httpOnly cookie first, then Redis lookup
