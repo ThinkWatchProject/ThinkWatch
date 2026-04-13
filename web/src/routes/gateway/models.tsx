@@ -174,10 +174,10 @@ export function ModelsPage() {
     setLoading(true);
     try {
       const [res, p] = await Promise.all([
-        api<{ data: ModelRow[] }>('/api/admin/models'),
+        api<ModelRow[]>('/api/admin/models'),
         api<Provider[]>('/api/admin/providers'),
       ]);
-      setModels(res.data);
+      setModels(res);
       setProviders(p);
       setError('');
     } catch (err) {
