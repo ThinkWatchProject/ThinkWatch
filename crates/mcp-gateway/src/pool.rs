@@ -138,7 +138,7 @@ impl ConnectionPool {
             .client
             .post(&conn.endpoint_url)
             .header("Content-Type", "application/json")
-            .header("Accept", "application/json");
+            .header("Accept", "application/json, text/event-stream");
 
         // Attach upstream auth header if the server has one configured.
         if let Some((name, value)) = &conn.auth_header {
@@ -182,10 +182,28 @@ impl ConnectionPool {
             });
         }
 
-        let json_resp: JsonRpcResponse = resp
-            .json()
-            .await
-            .map_err(|e| PoolError::ParseError(e.to_string()))?;
+        // The MCP Streamable HTTP spec allows the server to reply with
+        // either `application/json` (plain JSON-RPC) or `text/event-stream`
+        // (SSE wrapping a JSON-RPC message in a `data:` line).  We must
+        // handle both.
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_lowercase();
+
+        let json_resp: JsonRpcResponse = if content_type.contains("text/event-stream") {
+            let text = resp
+                .text()
+                .await
+                .map_err(|e| PoolError::ParseError(e.to_string()))?;
+            parse_sse_json_rpc(&text)?
+        } else {
+            resp.json()
+                .await
+                .map_err(|e| PoolError::ParseError(e.to_string()))?
+        };
 
         // Validate JSON-RPC version
         if json_resp.jsonrpc != "2.0" {
@@ -200,4 +218,45 @@ impl Default for ConnectionPool {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Extract the first JSON-RPC response from an SSE body.
+///
+/// SSE format is:
+/// ```text
+/// event: message
+/// data: {"jsonrpc":"2.0", ...}
+/// ```
+///
+/// We scan for `data:` lines and try to parse each as JSON-RPC until one
+/// succeeds.  Multi-line `data:` fields are concatenated per the SSE spec.
+fn parse_sse_json_rpc(text: &str) -> Result<JsonRpcResponse, PoolError> {
+    let mut data_buf = String::new();
+
+    for line in text.lines() {
+        if let Some(payload) = line.strip_prefix("data:") {
+            let payload = payload.trim_start();
+            if !data_buf.is_empty() {
+                data_buf.push('\n');
+            }
+            data_buf.push_str(payload);
+        } else if line.is_empty() && !data_buf.is_empty() {
+            // End of an SSE event — try to parse what we have.
+            if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&data_buf) {
+                return Ok(resp);
+            }
+            data_buf.clear();
+        }
+    }
+
+    // Handle case where stream ends without a trailing blank line.
+    if !data_buf.is_empty()
+        && let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&data_buf)
+    {
+        return Ok(resp);
+    }
+
+    Err(PoolError::ParseError(
+        "No valid JSON-RPC response found in SSE stream".into(),
+    ))
 }

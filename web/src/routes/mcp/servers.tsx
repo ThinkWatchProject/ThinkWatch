@@ -37,6 +37,7 @@ interface McpServer {
   description: string;
   endpoint_url: string;
   transport_type: string;
+  auth_type: string | null;
   status: string;
   last_health_check: string | null;
   tools_count: number;
@@ -62,7 +63,6 @@ export function McpServersPage() {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [endpointUrl, setEndpointUrl] = useState('');
-  const [transportType, setTransportType] = useState('streamable_http');
   const [authType, setAuthType] = useState('none');
   const [authSecret, setAuthSecret] = useState('');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
@@ -73,6 +73,8 @@ export function McpServersPage() {
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [editEndpointUrl, setEditEndpointUrl] = useState('');
+  const [editAuthType, setEditAuthType] = useState('none');
+  const [editAuthSecret, setEditAuthSecret] = useState('');
   const [editCustomHeaders, setEditCustomHeaders] = useState<[string, string][]>([]);
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState('');
@@ -122,7 +124,6 @@ export function McpServersPage() {
     setName('');
     setDescription('');
     setEndpointUrl('');
-    setTransportType('streamable_http');
     setAuthType('none');
     setAuthSecret('');
     setCustomHeaders([]);
@@ -139,7 +140,6 @@ export function McpServersPage() {
         name,
         description,
         endpoint_url: endpointUrl,
-        transport_type: transportType,
         auth_type: authType,
         auth_secret: authSecret || undefined,
         custom_headers: customHeaders.length > 0
@@ -167,12 +167,18 @@ export function McpServersPage() {
     }
   };
 
+  const [discoveringId, setDiscoveringId] = useState<string | null>(null);
+
   const handleDiscover = async (id: string) => {
+    setDiscoveringId(id);
     try {
-      await apiPost(`/api/mcp/servers/${id}/discover`, {});
+      const res = await apiPost<{ tools_discovered: number }>(`/api/mcp/servers/${id}/discover`, {});
+      toast.success(t('mcpServers.discoverTools') + `: ${res.tools_discovered} tools`);
       await fetchServers();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to discover tools');
+      toast.error(err instanceof Error ? err.message : 'Failed to discover tools');
+    } finally {
+      setDiscoveringId(null);
     }
   };
 
@@ -181,6 +187,8 @@ export function McpServersPage() {
     setEditName(s.name);
     setEditDescription(s.description);
     setEditEndpointUrl(s.endpoint_url);
+    setEditAuthType(s.auth_type ?? 'none');
+    setEditAuthSecret('');
     setEditError('');
     const existing = s.config_json?.custom_headers ?? {};
     setEditCustomHeaders(Object.entries(existing));
@@ -196,6 +204,8 @@ export function McpServersPage() {
         name: editName,
         description: editDescription,
         endpoint_url: editEndpointUrl,
+        auth_type: editAuthType,
+        auth_secret: editAuthSecret || undefined,
         custom_headers: editCustomHeaders.length > 0
           ? Object.fromEntries(editCustomHeaders.filter(([k]) => k.trim()))
           : {},
@@ -247,17 +257,6 @@ export function McpServersPage() {
               <div className="space-y-2">
                 <Label htmlFor="mcp-url">{t('mcpServers.endpointUrl')}</Label>
                 <Input id="mcp-url" value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} placeholder="http://localhost:8081/mcp" required />
-              </div>
-              <div className="space-y-2">
-                <Label>{t('mcpServers.transportType')}</Label>
-                <Select value={transportType} onValueChange={(v) => { if (v) setTransportType(v); }}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="streamable_http">Streamable HTTP</SelectItem>
-                    <SelectItem value="sse">SSE</SelectItem>
-                    <SelectItem value="stdio">Stdio</SelectItem>
-                  </SelectContent>
-                </Select>
               </div>
               <div className="space-y-2">
                 <Label>{t('mcpServers.authType')}</Label>
@@ -410,8 +409,8 @@ export function McpServersPage() {
                         <Button variant="ghost" size="icon-sm" onClick={() => openEditDialog(s)} title={t('common.edit')}>
                           <Pencil className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="icon-sm" onClick={() => handleDiscover(s.id)} title={t('mcpServers.discoverTools')}>
-                          <Search className="h-4 w-4" />
+                        <Button variant="ghost" size="icon-sm" onClick={() => handleDiscover(s.id)} disabled={discoveringId === s.id} title={t('mcpServers.discoverTools')}>
+                          {discoveringId === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
                         </Button>
                         <Button variant="ghost" size="icon-sm" onClick={() => setDeleteTargetId(s.id)} title={t('common.delete')}>
                           <Trash2 className="h-4 w-4" />
@@ -452,6 +451,23 @@ export function McpServersPage() {
               <Label htmlFor="edit-mcp-url">{t('mcpServers.endpointUrl')}</Label>
               <Input id="edit-mcp-url" value={editEndpointUrl} onChange={(e) => setEditEndpointUrl(e.target.value)} />
             </div>
+            <div className="space-y-2">
+              <Label>{t('mcpServers.authType')}</Label>
+              <Select value={editAuthType} onValueChange={(v) => { if (v) setEditAuthType(v); }}>
+                <SelectTrigger><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="none">None</SelectItem>
+                  <SelectItem value="bearer">Bearer Token</SelectItem>
+                  <SelectItem value="api_key">API Key</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            {editAuthType !== 'none' && (
+              <div className="space-y-2">
+                <Label>{t('mcpServers.authSecret')}</Label>
+                <Input type="password" value={editAuthSecret} onChange={(e) => setEditAuthSecret(e.target.value)} placeholder="Leave empty to keep current" />
+              </div>
+            )}
             <div className="space-y-2">
               <Label>{t('providers.customHeaders')}</Label>
               <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>

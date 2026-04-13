@@ -172,6 +172,25 @@ pub async fn install_template(
 
     super::providers::validate_url(&endpoint_url)?;
 
+    // Auto-detect transport type for hosted endpoints
+    let transport_type = {
+        let auth_hdr = super::mcp_servers::build_auth_probe_header(
+            template.auth_type.as_deref(),
+            req.auth_secret.as_deref(),
+        );
+        let auth_ref = auth_hdr.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
+        match think_watch_mcp_gateway::detect::detect_transport(
+            &state.http_client,
+            &endpoint_url,
+            auth_ref,
+        )
+        .await
+        {
+            Ok(detected) => detected.as_str().to_owned(),
+            Err(_) => "streamable_http".to_owned(),
+        }
+    };
+
     // Encrypt auth secret if provided
     let auth_encrypted = if let Some(ref secret) = req.auth_secret {
         let key = crypto::parse_encryption_key(&state.config.encryption_key)
@@ -194,7 +213,9 @@ pub async fn install_template(
         config
     };
 
-    // c. Create mcp_servers row
+    // c–e. Create server, install record, and increment count — all in one transaction
+    let mut tx = state.db.begin().await?;
+
     let server = sqlx::query_as::<_, McpServer>(
         r#"INSERT INTO mcp_servers (name, description, endpoint_url, transport_type, auth_type, auth_secret_encrypted, config_json)
            VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *"#,
@@ -202,28 +223,28 @@ pub async fn install_template(
     .bind(&template.name)
     .bind(&template.description)
     .bind(&endpoint_url)
-    .bind(&template.transport_type)
+    .bind(&transport_type)
     .bind(&template.auth_type)
     .bind(&auth_encrypted)
     .bind(&config_json)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
 
-    // d. Insert into mcp_store_installs
     sqlx::query(
         "INSERT INTO mcp_store_installs (template_id, server_id, installed_by) VALUES ($1, $2, $3)",
     )
     .bind(template.id)
     .bind(server.id)
     .bind(auth_user.claims.sub)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
-    // e. Increment install_count on template
     sqlx::query("UPDATE mcp_store_templates SET install_count = install_count + 1 WHERE id = $1")
         .bind(template.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+
+    tx.commit().await?;
 
     // Sync the in-memory MCP registry
     if let Ok(registered) = crate::mcp_runtime::build_registered_server(
@@ -332,7 +353,6 @@ struct RegistryTemplate {
     category: Option<String>,
     tags: Option<Vec<String>>,
     endpoint_template: Option<String>,
-    transport_type: Option<String>,
     auth_type: Option<String>,
     auth_instructions: Option<serde_json::Value>,
     deploy_type: Option<String>,
@@ -403,16 +423,15 @@ pub async fn sync_registry(
         sqlx::query(
             r#"INSERT INTO mcp_store_templates
                (slug, name, description, category, tags, endpoint_template,
-                transport_type, auth_type, auth_instructions, deploy_type,
+                auth_type, auth_instructions, deploy_type,
                 deploy_command, deploy_docs_url, homepage_url, repo_url, featured, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now())
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
                ON CONFLICT (slug) DO UPDATE SET
                  name = EXCLUDED.name,
                  description = EXCLUDED.description,
                  category = EXCLUDED.category,
                  tags = EXCLUDED.tags,
                  endpoint_template = EXCLUDED.endpoint_template,
-                 transport_type = EXCLUDED.transport_type,
                  auth_type = EXCLUDED.auth_type,
                  auth_instructions = EXCLUDED.auth_instructions,
                  deploy_type = EXCLUDED.deploy_type,
@@ -429,7 +448,6 @@ pub async fn sync_registry(
         .bind(&t.category)
         .bind(t.tags.as_deref().unwrap_or(&[]))
         .bind(&t.endpoint_template)
-        .bind(t.transport_type.as_deref().unwrap_or("streamable_http"))
         .bind(&t.auth_type)
         .bind(
             t.auth_instructions
@@ -448,14 +466,31 @@ pub async fn sync_registry(
         synced += 1;
     }
 
+    // Remove templates that are no longer in the registry (but keep those with active installs)
+    let registry_slugs: Vec<&str> = registry.templates.iter().map(|t| t.slug.as_str()).collect();
+    let removed = sqlx::query_scalar::<_, i64>(
+        r#"WITH deleted AS (
+             DELETE FROM mcp_store_templates
+             WHERE slug != ALL($1)
+               AND id NOT IN (SELECT template_id FROM mcp_store_installs)
+             RETURNING 1
+           )
+           SELECT COUNT(*) FROM deleted"#,
+    )
+    .bind(&registry_slugs)
+    .fetch_one(&state.db)
+    .await?;
+
     state.audit.log(
         auth_user
             .audit("mcp_store.synced")
             .resource("mcp_store")
-            .detail(serde_json::json!({ "registry_url": url, "synced": synced })),
+            .detail(
+                serde_json::json!({ "registry_url": url, "synced": synced, "removed": removed }),
+            ),
     );
 
     Ok(Json(
-        serde_json::json!({"status": "synced", "count": synced, "registry_url": url}),
+        serde_json::json!({"status": "synced", "count": synced, "removed": removed, "registry_url": url}),
     ))
 }

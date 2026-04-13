@@ -23,6 +23,10 @@ pub struct McpServer {
     pub last_error: Option<String>,
     pub config_json: serde_json::Value,
     pub created_at: DateTime<Utc>,
+    /// Computed field: number of active tools discovered for this server.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub tools_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

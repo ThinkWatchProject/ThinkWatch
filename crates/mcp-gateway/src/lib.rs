@@ -1,5 +1,6 @@
 pub mod access_control;
 pub mod circuit_breaker;
+pub mod detect;
 pub mod health;
 pub mod pool;
 pub mod proxy;

@@ -14,7 +14,6 @@ pub struct McpStoreTemplate {
     pub category: Option<String>,
     pub tags: Vec<String>,
     pub endpoint_template: Option<String>,
-    pub transport_type: String,
     pub auth_type: Option<String>,
     pub auth_instructions: Option<String>,
     pub deploy_type: Option<String>,

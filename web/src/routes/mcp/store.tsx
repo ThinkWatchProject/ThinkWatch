@@ -29,7 +29,6 @@ interface StoreTemplate {
   category: string | null;
   tags: string[];
   endpoint_template: string | null;
-  transport_type: string;
   auth_type: string | null;
   auth_instructions: string | null;
   deploy_type: string | null;

@@ -212,6 +212,7 @@ pub async fn discover_and_persist_tools(
     let mut req = http
         .post(&server.endpoint_url)
         .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
         .json(&body);
 
     if let Some((name, value)) = resolve_mcp_auth_header(server, encryption_key)? {
@@ -230,7 +231,20 @@ pub async fn discover_and_persist_tools(
         anyhow::bail!("MCP server returned HTTP {}", resp.status());
     }
 
-    let json: serde_json::Value = resp.json().await?;
+    // Handle both plain JSON and SSE response formats
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let json: serde_json::Value = if content_type.contains("text/event-stream") {
+        let text = resp.text().await?;
+        parse_sse_json(&text)?
+    } else {
+        resp.json().await?
+    };
     // Strict: require a `result` field. The previous fallback to the
     // whole JSON body silently swallowed malformed responses (a server
     // that returned `{"error": ...}` without `result` would still appear
@@ -419,4 +433,32 @@ pub fn spawn_mcp_health_loop(
             }
         }
     });
+}
+
+/// Extract JSON from an SSE response body by scanning `data:` lines.
+fn parse_sse_json(text: &str) -> anyhow::Result<serde_json::Value> {
+    let mut data_buf = String::new();
+
+    for line in text.lines() {
+        if let Some(payload) = line.strip_prefix("data:") {
+            let payload = payload.trim_start();
+            if !data_buf.is_empty() {
+                data_buf.push('\n');
+            }
+            data_buf.push_str(payload);
+        } else if line.is_empty() && !data_buf.is_empty() {
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(&data_buf) {
+                return Ok(val);
+            }
+            data_buf.clear();
+        }
+    }
+
+    if !data_buf.is_empty()
+        && let Ok(val) = serde_json::from_str::<serde_json::Value>(&data_buf)
+    {
+        return Ok(val);
+    }
+
+    anyhow::bail!("No valid JSON found in SSE stream")
 }

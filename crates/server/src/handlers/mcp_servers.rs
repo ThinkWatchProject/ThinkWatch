@@ -193,10 +193,15 @@ pub async fn list_servers(
     auth_user
         .assert_scope_global(&state.db, "mcp_servers:read")
         .await?;
-    let servers =
-        sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers ORDER BY created_at DESC")
-            .fetch_all(&state.db)
-            .await?;
+    let servers = sqlx::query_as::<_, McpServer>(
+        r#"SELECT s.*, COALESCE(t.cnt, 0) AS tools_count
+           FROM mcp_servers s
+           LEFT JOIN (SELECT server_id, COUNT(*) AS cnt FROM mcp_tools WHERE is_active = true GROUP BY server_id) t
+             ON t.server_id = s.id
+           ORDER BY s.created_at DESC"#,
+    )
+    .fetch_all(&state.db)
+    .await?;
 
     Ok(Json(servers))
 }
@@ -243,6 +248,25 @@ pub async fn create_server(
         None
     };
 
+    // Auto-detect transport type if not explicitly specified
+    let transport_type = if let Some(ref tt) = req.transport_type {
+        tt.clone()
+    } else {
+        let auth_hdr =
+            build_auth_probe_header(req.auth_type.as_deref(), req.auth_secret.as_deref());
+        let auth_ref = auth_hdr.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
+        match think_watch_mcp_gateway::detect::detect_transport(
+            &state.http_client,
+            &req.endpoint_url,
+            auth_ref,
+        )
+        .await
+        {
+            Ok(detected) => detected.as_str().to_owned(),
+            Err(_) => "streamable_http".to_owned(),
+        }
+    };
+
     let server = sqlx::query_as::<_, McpServer>(
         r#"INSERT INTO mcp_servers (name, description, endpoint_url, transport_type, auth_type, auth_secret_encrypted, config_json)
            VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *"#,
@@ -250,7 +274,7 @@ pub async fn create_server(
     .bind(&req.name)
     .bind(&req.description)
     .bind(&req.endpoint_url)
-    .bind(req.transport_type.as_deref().unwrap_or("streamable_http"))
+    .bind(&transport_type)
     .bind(&req.auth_type)
     .bind(&auth_encrypted)
     .bind({
@@ -342,6 +366,9 @@ pub struct UpdateMcpServerRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub endpoint_url: Option<String>,
+    pub transport_type: Option<String>,
+    pub auth_type: Option<String>,
+    pub auth_secret: Option<String>,
     /// Custom HTTP headers forwarded when connecting to this MCP server.
     /// Values may contain `{{user_id}}` / `{{user_email}}` template variables.
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
@@ -389,10 +416,47 @@ pub async fn update_server(
         .endpoint_url
         .as_deref()
         .unwrap_or(&existing.endpoint_url);
+    let auth_type = req.auth_type.as_deref().or(existing.auth_type.as_deref());
 
     if req.endpoint_url.is_some() {
         super::providers::validate_url(endpoint_url)?;
     }
+
+    // Auto-detect transport type when endpoint changes, otherwise keep existing
+    let transport_type = if req.endpoint_url.is_some() {
+        let auth_hdr = build_auth_probe_header(auth_type, req.auth_secret.as_deref());
+        let auth_ref = auth_hdr.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
+        match think_watch_mcp_gateway::detect::detect_transport(
+            &state.http_client,
+            endpoint_url,
+            auth_ref,
+        )
+        .await
+        {
+            Ok(detected) => detected.as_str().to_owned(),
+            Err(_) => existing.transport_type.clone(),
+        }
+    } else if let Some(ref tt) = req.transport_type {
+        tt.clone()
+    } else {
+        existing.transport_type.clone()
+    };
+
+    // Encrypt new auth secret if provided
+    let auth_encrypted = if let Some(ref secret) = req.auth_secret {
+        if secret.is_empty() {
+            None
+        } else {
+            let key = crypto::parse_encryption_key(&state.config.encryption_key)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))?;
+            Some(
+                crypto::encrypt(secret.as_bytes(), &key)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption failed: {e}")))?,
+            )
+        }
+    } else {
+        existing.auth_secret_encrypted.clone()
+    };
 
     // Merge custom_headers + identity_headers into existing config_json
     let mut config_json = existing.config_json.clone();
@@ -403,13 +467,17 @@ pub async fn update_server(
     }
 
     let updated = sqlx::query_as::<_, McpServer>(
-        r#"UPDATE mcp_servers SET name = $2, description = $3, endpoint_url = $4, config_json = $5
+        r#"UPDATE mcp_servers SET name = $2, description = $3, endpoint_url = $4,
+           transport_type = $5, auth_type = $6, auth_secret_encrypted = $7, config_json = $8
            WHERE id = $1 RETURNING *"#,
     )
     .bind(id)
     .bind(name)
     .bind(description)
     .bind(endpoint_url)
+    .bind(transport_type)
+    .bind(auth_type)
+    .bind(&auth_encrypted)
     .bind(&config_json)
     .fetch_one(&state.db)
     .await?;
@@ -504,6 +572,15 @@ pub async fn delete_server(
         .fetch_optional(&state.db)
         .await?;
 
+    // Decrement install_count if this server was installed from the store
+    sqlx::query(
+        r#"UPDATE mcp_store_templates SET install_count = GREATEST(install_count - 1, 0)
+           WHERE id = (SELECT template_id FROM mcp_store_installs WHERE server_id = $1)"#,
+    )
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+
     sqlx::query("DELETE FROM mcp_servers WHERE id = $1")
         .bind(id)
         .execute(&state.db)
@@ -524,4 +601,17 @@ pub async fn delete_server(
     );
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
+}
+
+/// Build an `(header_name, header_value)` pair for transport-detection probes.
+pub fn build_auth_probe_header(
+    auth_type: Option<&str>,
+    auth_secret: Option<&str>,
+) -> Option<(String, String)> {
+    let secret = auth_secret.filter(|s| !s.is_empty())?;
+    match auth_type? {
+        "bearer" => Some(("Authorization".to_owned(), format!("Bearer {secret}"))),
+        "api_key" => Some(("X-API-Key".to_owned(), secret.to_owned())),
+        _ => None,
+    }
 }

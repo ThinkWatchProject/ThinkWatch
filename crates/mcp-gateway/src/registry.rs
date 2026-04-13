@@ -19,6 +19,7 @@ pub struct McpToolInfo {
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
     StreamableHttp,
+    Sse,
 }
 
 /// Runtime status of a registered MCP server.

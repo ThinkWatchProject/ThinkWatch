@@ -393,13 +393,29 @@ async fn main() -> anyhow::Result<()> {
     // tokio runtime is dropped at the end of `main` they get torn
     // down anyway. The win here is the in-flight requests, which is
     // what k8s actually cares about.
-    let gateway_shutdown = wait_for_shutdown_signal();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // First Ctrl+C / SIGTERM → graceful shutdown.
+    // Second Ctrl+C → force exit (covers long-lived SSE / keep-alive connections).
+    tokio::spawn(async move {
+        wait_for_shutdown_signal().await;
+        tracing::info!("Graceful shutdown started — press Ctrl+C again to force quit");
+        let _ = shutdown_tx.send(true);
+
+        wait_for_shutdown_signal().await;
+        tracing::warn!("Forced shutdown");
+        std::process::exit(1);
+    });
+
+    let mut gw_rx = shutdown_rx.clone();
     let gateway_handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(
             gateway_listener,
             gateway_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
-        .with_graceful_shutdown(gateway_shutdown)
+        .with_graceful_shutdown(async move {
+            let _ = gw_rx.wait_for(|&v| v).await;
+        })
         .await
         {
             tracing::error!("Gateway server crashed: {e}");
@@ -412,13 +428,15 @@ async fn main() -> anyhow::Result<()> {
     let console_listener = tokio::net::TcpListener::bind(&console_addr).await?;
     tracing::info!("Console listening on {console_addr} (Web UI + Admin API)");
 
-    let console_shutdown = wait_for_shutdown_signal();
+    let mut con_rx = shutdown_rx.clone();
     let console_handle = tokio::spawn(async move {
         if let Err(e) = axum::serve(
             console_listener,
             console_app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
         )
-        .with_graceful_shutdown(console_shutdown)
+        .with_graceful_shutdown(async move {
+            let _ = con_rx.wait_for(|&v| v).await;
+        })
         .await
         {
             tracing::error!("Console server crashed: {e}");
