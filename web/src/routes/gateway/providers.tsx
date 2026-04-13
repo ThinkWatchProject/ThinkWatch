@@ -53,6 +53,23 @@ const defaultHeadersForType = (type: string): [string, string][] => {
   }
 };
 
+// Map provider type → the header key that carries the API key.
+// null = no API key input (bedrock uses SigV4, custom is freeform).
+const authHeaderKey: Record<string, string | null> = {
+  openai: 'Authorization',
+  anthropic: 'x-api-key',
+  google: 'x-goog-api-key',
+  azure_openai: 'api-key',
+  bedrock: null,
+  custom: null,
+};
+
+// For OpenAI the value is "Bearer <token>", others store the token directly.
+const wrapAuthValue = (type: string, token: string) =>
+  type === 'openai' ? `Bearer ${token}` : token;
+const unwrapAuthValue = (type: string, value: string) =>
+  type === 'openai' ? value.replace(/^Bearer\s*/i, '') : value;
+
 const providerTypeColors: Record<string, 'default' | 'secondary' | 'outline'> = {
   openai: 'default',
   anthropic: 'secondary',
@@ -276,6 +293,22 @@ export function ProvidersPage() {
                   'https://api.openai.com'
                 } required />
               </div>
+              {authHeaderKey[providerType] && (
+                <div className="space-y-2">
+                  <Label htmlFor="prov-apikey">{t('providers.apiKey')}</Label>
+                  <Input
+                    id="prov-apikey"
+                    value={unwrapAuthValue(providerType, headers.find(([k]) => k === authHeaderKey[providerType])?.[1] ?? '')}
+                    onChange={(e) => {
+                      const hk = authHeaderKey[providerType]!;
+                      const wrapped = wrapAuthValue(providerType, e.target.value);
+                      setHeaders(headers.map(([k, v]) => k === hk ? [k, wrapped] : [k, v]));
+                    }}
+                    placeholder={providerType === 'openai' ? 'sk-...' : t('providers.apiKey')}
+                    required
+                  />
+                </div>
+              )}
               {providerType === 'bedrock' && (
                 <>
                   <div className="space-y-2">
@@ -481,6 +514,20 @@ export function ProvidersPage() {
               <Label>{t('providers.baseUrl')}</Label>
               <Input value={editBaseUrl} onChange={(e) => setEditBaseUrl(e.target.value)} />
             </div>
+            {editProvider && authHeaderKey[editProvider.provider_type] && (
+              <div className="space-y-2">
+                <Label>{t('providers.apiKey')}</Label>
+                <Input
+                  value={unwrapAuthValue(editProvider.provider_type, editHeaders.find(([k]) => k === authHeaderKey[editProvider.provider_type])?.[1] ?? '')}
+                  onChange={(e) => {
+                    const hk = authHeaderKey[editProvider.provider_type]!;
+                    const wrapped = wrapAuthValue(editProvider.provider_type, e.target.value);
+                    setEditHeaders(editHeaders.map(([k, v]) => k === hk ? [k, wrapped] : [k, v]));
+                  }}
+                  placeholder={t('providers.apiKey')}
+                />
+              </div>
+            )}
             <div className="space-y-2">
               <Label>{t('providers.headers')}</Label>
               <p className="text-xs text-muted-foreground">{t('providers.headersDesc')}</p>
