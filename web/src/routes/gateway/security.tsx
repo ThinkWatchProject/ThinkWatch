@@ -84,10 +84,19 @@ export function GatewaySecurityPage() {
     setSaving(true);
     setStatusMsg(null);
     try {
+      // Deduplicate rules before saving
+      const dedupCf = contentFilters.filter((r, i, arr) =>
+        arr.findIndex(o => o.pattern === r.pattern && o.match_type === r.match_type && o.action === r.action) === i,
+      );
+      const dedupPii = piiPatterns.filter((p, i, arr) =>
+        arr.findIndex(o => o.name === p.name || o.regex === p.regex) === i,
+      );
+      setContentFilters(dedupCf);
+      setPiiPatterns(dedupPii);
       await apiPatch('/api/admin/settings', {
         settings: {
-          'security.content_filter_patterns': contentFilters,
-          'security.pii_redactor_patterns': piiPatterns,
+          'security.content_filter_patterns': dedupCf,
+          'security.pii_redactor_patterns': dedupPii,
         },
       });
       setStatusMsg({ type: 'success', text: t('settings.saved') });
