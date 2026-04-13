@@ -54,8 +54,11 @@ pub async fn create_signing_key(
 }
 
 /// Build an httpOnly cookie header value for the signing key.
-pub fn signing_key_cookie(key: &str, max_age_secs: i64) -> String {
-    format!("signing_key={key}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age={max_age_secs}")
+pub fn signing_key_cookie(_key: &str, _max_age_secs: i64) -> String {
+    // Signing key is stored in sessionStorage (for JS) and Redis (for
+    // server-side verification). No cookie needed — avoids sending 75
+    // extra bytes on every request.
+    String::new()
 }
 
 /// Build the httpOnly access-token cookie. SameSite=Lax (not Strict)
@@ -105,14 +108,6 @@ pub fn extract_cookie(
         }
     }
     None
-}
-
-/// Extract signing key from the `signing_key` httpOnly cookie, falling back
-/// to the `X-Signing-Key` header for backwards compatibility.
-pub fn extract_signing_key_from_request(
-    request: &axum::http::Request<axum::body::Body>,
-) -> Option<String> {
-    extract_cookie(request, "signing_key")
 }
 
 /// Middleware that verifies HMAC-SHA256 request signatures on state-changing methods.
@@ -205,15 +200,11 @@ pub async fn verify_signature(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Get signing key: try httpOnly cookie first, then Redis lookup
+    // Get signing key from Redis (the single source of truth)
     let signing_key_hex: Option<String> =
-        if let Some(cookie_key) = extract_signing_key_from_request(&request) {
-            Some(cookie_key)
-        } else {
-            fred::interfaces::KeysInterface::get(&state.redis, &format!("signing_key:{user_id}"))
-                .await
-                .unwrap_or(None)
-        };
+        fred::interfaces::KeysInterface::get(&state.redis, &format!("signing_key:{user_id}"))
+            .await
+            .unwrap_or(None);
 
     let signing_key_hex = signing_key_hex.ok_or_else(|| {
         tracing::warn!("No signing key found for user {user_id}");
@@ -312,51 +303,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn signing_key_cookie_format() {
+    fn signing_key_cookie_is_empty() {
         let cookie = signing_key_cookie("abcdef1234567890", 86400);
-        assert!(cookie.starts_with("signing_key=abcdef1234567890"));
-        assert!(cookie.contains("HttpOnly"));
-        assert!(cookie.contains("Secure"));
-        assert!(cookie.contains("SameSite=Strict"));
-        assert!(cookie.contains("Max-Age=86400"));
+        assert!(cookie.is_empty(), "signing key should not be set as cookie");
     }
 
     #[test]
-    fn extract_signing_key_from_cookie_header() {
-        let request = Request::builder()
-            .header("cookie", "other=x; signing_key=deadbeef1234; session=y")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        let key = extract_signing_key_from_request(&request);
-        assert_eq!(key.as_deref(), Some("deadbeef1234"));
-    }
-
-    #[test]
-    fn extract_signing_key_missing() {
-        let request = Request::builder()
-            .header("cookie", "session=abc")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        assert!(extract_signing_key_from_request(&request).is_none());
-    }
-
-    #[test]
-    fn extract_signing_key_no_cookie_header() {
-        let request = Request::builder().body(axum::body::Body::empty()).unwrap();
-        assert!(extract_signing_key_from_request(&request).is_none());
-    }
-
-    #[test]
-    fn extract_signing_key_empty_value() {
-        let request = Request::builder()
-            .header("cookie", "signing_key=; other=x")
-            .body(axum::body::Body::empty())
-            .unwrap();
-        assert!(extract_signing_key_from_request(&request).is_none());
-    }
-
     // ----- Wave-C cookie helpers -----
-
     #[test]
     fn access_token_cookie_has_required_attrs() {
         let cookie = access_token_cookie("eyJhbGciOiJIUzI1NiJ9.test", 900);
