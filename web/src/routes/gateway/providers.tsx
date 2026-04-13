@@ -302,10 +302,14 @@ export function ProvidersPage() {
                     onChange={(e) => {
                       const hk = authHeaderKey[providerType]!;
                       const wrapped = wrapAuthValue(providerType, e.target.value);
-                      setHeaders(headers.map(([k, v]) => k === hk ? [k, wrapped] : [k, v]));
+                      const exists = headers.some(([k]) => k === hk);
+                      if (exists) {
+                        setHeaders(headers.map(([k, v]) => k === hk ? [k, wrapped] : [k, v]));
+                      } else {
+                        setHeaders([[hk, wrapped], ...headers]);
+                      }
                     }}
                     placeholder={providerType === 'openai' ? 'sk-...' : t('providers.apiKey')}
-                    required
                   />
                 </div>
               )}
@@ -522,7 +526,12 @@ export function ProvidersPage() {
                   onChange={(e) => {
                     const hk = authHeaderKey[editProvider.provider_type]!;
                     const wrapped = wrapAuthValue(editProvider.provider_type, e.target.value);
-                    setEditHeaders(editHeaders.map(([k, v]) => k === hk ? [k, wrapped] : [k, v]));
+                    const exists = editHeaders.some(([k]) => k === hk);
+                    if (exists) {
+                      setEditHeaders(editHeaders.map(([k, v]) => k === hk ? [k, wrapped] : [k, v]));
+                    } else {
+                      setEditHeaders([[hk, wrapped], ...editHeaders]);
+                    }
                   }}
                   placeholder={t('providers.apiKey')}
                 />
