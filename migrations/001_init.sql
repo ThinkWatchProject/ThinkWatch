@@ -648,4 +648,4 @@ INSERT INTO mcp_store_templates (slug, name, description, category, tags, endpoi
 
 -- MCP Store
 INSERT INTO system_settings (key, value, category, description) VALUES
-('mcp_store.registry_url', '"https://thinkwatch.dev/registry/mcp-templates.json"', 'mcp_store', 'Remote registry URL for syncing MCP store templates');
+('mcp_store.registry_url', '"https://thinkwat.ch/registry/mcp-templates.json"', 'mcp_store', 'Remote registry URL for syncing MCP store templates');
