@@ -190,67 +190,65 @@ pub async fn verify_signature(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Nonce rate-limit + replay detection — only for state-changing methods.
-    // GET/HEAD skip this: they're idempotent, replaying is harmless,
-    // and page refreshes shouldn't burn nonce quota.
-    if !is_safe_method {
-        // Per-user nonce rate limit: max 120 nonces per rolling minute.
-        {
-            use fred::interfaces::SortedSetsInterface;
-            let nonce_rate_key = format!("nonce_rate_zset:{user_id}");
-            let now_ms: i64 = chrono::Utc::now().timestamp_millis();
-            let window_start_ms = now_ms - 60_000;
-            let _: i64 = SortedSetsInterface::zremrangebyscore(
-                &state.redis,
-                &nonce_rate_key,
-                0,
-                window_start_ms,
-            )
-            .await
-            .unwrap_or(0);
-            let in_window: i64 = SortedSetsInterface::zcard(&state.redis, &nonce_rate_key)
-                .await
-                .unwrap_or(0);
-            if in_window >= 120 {
-                tracing::warn!(
-                    "Nonce rate limit exceeded for user {user_id} ({in_window}/120/min)"
-                );
-                return Err(StatusCode::TOO_MANY_REQUESTS);
-            }
-            let _: i64 = SortedSetsInterface::zadd(
-                &state.redis,
-                &nonce_rate_key,
-                None,
-                None,
-                false,
-                false,
-                (now_ms as f64, nonce.to_string()),
-            )
-            .await
-            .unwrap_or(0);
-            let _: () =
-                fred::interfaces::KeysInterface::expire(&state.redis, &nonce_rate_key, 120, None)
-                    .await
-                    .unwrap_or(());
-        }
+    // Nonce uniqueness: every request (including GET) must carry a
+    // unique nonce. Since timestamp differs per request, the frontend
+    // generates a fresh nonce each time, so legitimate requests never
+    // collide. Replaying an intercepted request is rejected here.
+    let nonce_key = format!("nonce:{user_id}:{nonce}");
+    let was_set: bool = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &nonce_key,
+        "1",
+        Some(fred::types::Expiration::EX(nonce_ttl)),
+        Some(fred::types::SetOptions::NX),
+        false,
+    )
+    .await
+    .unwrap_or(false);
 
-        // Check nonce uniqueness (prevent replay)
-        let nonce_key = format!("nonce:{user_id}:{nonce}");
-        let was_set: bool = fred::interfaces::KeysInterface::set(
+    if !was_set {
+        tracing::warn!("Duplicate nonce detected: {nonce}");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Per-user write rate limit: max 120 state-changing requests per
+    // rolling minute. Only applied to POST/PATCH/DELETE — GET/HEAD
+    // are read-only and shouldn't be throttled.
+    if !is_safe_method {
+        use fred::interfaces::SortedSetsInterface;
+        let nonce_rate_key = format!("nonce_rate_zset:{user_id}");
+        let now_ms: i64 = chrono::Utc::now().timestamp_millis();
+        let window_start_ms = now_ms - 60_000;
+        let _: i64 = SortedSetsInterface::zremrangebyscore(
             &state.redis,
-            &nonce_key,
-            "1",
-            Some(fred::types::Expiration::EX(nonce_ttl)),
-            Some(fred::types::SetOptions::NX),
-            false,
+            &nonce_rate_key,
+            0,
+            window_start_ms,
         )
         .await
-        .unwrap_or(false);
-
-        if !was_set {
-            tracing::warn!("Duplicate nonce detected: {nonce}");
-            return Err(StatusCode::UNAUTHORIZED);
+        .unwrap_or(0);
+        let in_window: i64 = SortedSetsInterface::zcard(&state.redis, &nonce_rate_key)
+            .await
+            .unwrap_or(0);
+        if in_window >= 120 {
+            tracing::warn!("Write rate limit exceeded for user {user_id} ({in_window}/120/min)");
+            return Err(StatusCode::TOO_MANY_REQUESTS);
         }
+        let _: i64 = SortedSetsInterface::zadd(
+            &state.redis,
+            &nonce_rate_key,
+            None,
+            None,
+            false,
+            false,
+            (now_ms as f64, nonce.to_string()),
+        )
+        .await
+        .unwrap_or(0);
+        let _: () =
+            fred::interfaces::KeysInterface::expire(&state.redis, &nonce_rate_key, 120, None)
+                .await
+                .unwrap_or(());
     }
 
     // Get signing key: try httpOnly cookie first, then Redis lookup
