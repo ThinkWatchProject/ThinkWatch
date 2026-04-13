@@ -108,6 +108,8 @@ mod tests {
             max_tokens: None,
             stream: None,
             extra: serde_json::json!({}),
+            caller_user_id: None,
+            caller_user_email: None,
         }
     }
 
@@ -122,6 +124,8 @@ mod tests {
             max_tokens: None,
             stream: None,
             extra: serde_json::json!({ "metadata": metadata }),
+            caller_user_id: None,
+            caller_user_email: None,
         }
     }
 

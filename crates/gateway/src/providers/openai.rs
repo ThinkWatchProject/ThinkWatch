@@ -8,6 +8,7 @@ pub struct OpenAiProvider {
     pub base_url: String,
     pub api_key: String,
     pub client: reqwest::Client,
+    pub custom_headers: Vec<(String, String)>,
 }
 
 impl OpenAiProvider {
@@ -16,7 +17,28 @@ impl OpenAiProvider {
             base_url,
             api_key,
             client: reqwest::Client::new(),
+            custom_headers: Vec::new(),
         }
+    }
+
+    pub fn with_custom_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.custom_headers = headers;
+        self
+    }
+
+    fn resolve_headers(&self, request: &ChatCompletionRequest) -> Vec<(String, String)> {
+        let uid = request.caller_user_id.as_deref().unwrap_or("");
+        let email = request.caller_user_email.as_deref().unwrap_or("");
+        self.custom_headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.replace("{{user_id}}", uid)
+                        .replace("{{user_email}}", email),
+                )
+            })
+            .collect()
     }
 }
 
@@ -29,10 +51,15 @@ impl AiProvider for OpenAiProvider {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, GatewayError> {
-        let resp = self
+        let headers = self.resolve_headers(&request);
+        let mut builder = self
             .client
             .post(format!("{}/v1/chat/completions", self.base_url))
-            .bearer_auth(&self.api_key)
+            .bearer_auth(&self.api_key);
+        for (k, v) in &headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+        let resp = builder
             .json(&request)
             .send()
             .await
@@ -64,15 +91,20 @@ impl AiProvider for OpenAiProvider {
         let client = self.client.clone();
         let url = format!("{}/v1/chat/completions", self.base_url);
         let api_key = self.api_key.clone();
+        let headers = self.resolve_headers(&request);
 
         // Ensure stream is set to true in the outgoing request
         let mut request = request;
         request.stream = Some(true);
 
         Box::pin(async_stream::stream! {
-            let resp = client
+            let mut builder = client
                 .post(&url)
-                .bearer_auth(&api_key)
+                .bearer_auth(&api_key);
+            for (k, v) in &headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            let resp = builder
                 .json(&request)
                 .send()
                 .await;

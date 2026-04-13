@@ -777,34 +777,51 @@ async fn load_providers_into_router(
             think_watch_common::crypto::decrypt(&provider.api_key_encrypted, &encryption_key)?;
         let api_key = String::from_utf8(api_key_bytes)?;
 
+        // Parse custom headers from config_json (supports {{user_id}} / {{user_email}} templates)
+        let custom_headers: Vec<(String, String)> = provider
+            .config_json
+            .get("custom_headers")
+            .and_then(|v| v.as_object())
+            .map(|obj| {
+                obj.iter()
+                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let dyn_provider: Arc<dyn think_watch_gateway::providers::DynAiProvider> =
             match provider.provider_type.as_str() {
-                "openai" => Arc::new(OpenAiProvider::new(provider.base_url.clone(), api_key)),
-                "anthropic" => Arc::new(AnthropicProvider::new(provider.base_url.clone(), api_key)),
-                "google" => Arc::new(GoogleProvider::new(provider.base_url.clone(), api_key)),
+                "openai" => Arc::new(
+                    OpenAiProvider::new(provider.base_url.clone(), api_key)
+                        .with_custom_headers(custom_headers),
+                ),
+                "anthropic" => Arc::new(
+                    AnthropicProvider::new(provider.base_url.clone(), api_key)
+                        .with_custom_headers(custom_headers),
+                ),
+                "google" => Arc::new(
+                    GoogleProvider::new(provider.base_url.clone(), api_key)
+                        .with_custom_headers(custom_headers),
+                ),
                 "azure_openai" => {
-                    // Azure: base_url is the resource endpoint, api_key is the Azure API key
-                    // api_version from config_json or default
                     let api_version = provider
                         .config_json
                         .get("api_version")
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
-                    Arc::new(AzureOpenAiProvider::new(
-                        provider.base_url.clone(),
-                        api_key,
-                        api_version,
-                    ))
+                    Arc::new(
+                        AzureOpenAiProvider::new(provider.base_url.clone(), api_key, api_version)
+                            .with_custom_headers(custom_headers),
+                    )
                 }
-                "bedrock" => {
-                    // Bedrock: base_url stores the AWS region, api_key stores "access_key_id:secret_access_key"
-                    Arc::new(BedrockProvider::new(provider.base_url.clone(), api_key))
-                }
-                _ => Arc::new(CustomProvider::new(
-                    provider.name.clone(),
-                    provider.base_url.clone(),
-                    api_key,
-                )),
+                "bedrock" => Arc::new(
+                    BedrockProvider::new(provider.base_url.clone(), api_key)
+                        .with_custom_headers(custom_headers),
+                ),
+                _ => Arc::new(
+                    CustomProvider::new(provider.name.clone(), provider.base_url.clone(), api_key)
+                        .with_custom_headers(custom_headers),
+                ),
             };
 
         // Register models from the models table

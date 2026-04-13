@@ -16,6 +16,11 @@ impl CustomProvider {
             provider_name: name,
         }
     }
+
+    pub fn with_custom_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.inner = self.inner.with_custom_headers(headers);
+        self
+    }
 }
 
 impl AiProvider for CustomProvider {

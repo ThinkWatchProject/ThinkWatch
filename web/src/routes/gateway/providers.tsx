@@ -285,18 +285,26 @@ export function ProvidersPage() {
                 <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
                 {customHeaders.map(([k, v], i) => (
                   <div key={i} className="flex gap-2 items-center">
-                    <Input className="flex-1" placeholder="Header-Name" value={k}
+                    <Input className="flex-1" placeholder="X-Custom-Header" value={k}
                       onChange={(e) => { const next = [...customHeaders]; next[i] = [e.target.value, v]; setCustomHeaders(next); }} />
-                    <Input className="flex-1" placeholder="value" value={v}
+                    <Input className="flex-1" placeholder={t('mcpServers.headerValuePlaceholder')} value={v}
                       onChange={(e) => { const next = [...customHeaders]; next[i] = [k, e.target.value]; setCustomHeaders(next); }} />
                     <Button type="button" variant="ghost" size="icon-sm" onClick={() => setCustomHeaders(customHeaders.filter((_, j) => j !== i))}>
                       <X className="h-3 w-3" />
                     </Button>
                   </div>
                 ))}
-                <Button type="button" variant="outline" size="sm" onClick={() => setCustomHeaders([...customHeaders, ['', '']])}>
-                  <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
-                </Button>
+                <div className="flex flex-wrap gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={() => setCustomHeaders([...customHeaders, ['', '']])}>
+                    <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setCustomHeaders([...customHeaders, ['X-User-Id', '{{user_id}}']])}>
+                    + {t('mcpServers.presetUserId')}
+                  </Button>
+                  <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setCustomHeaders([...customHeaders, ['X-User-Email', '{{user_email}}']])}>
+                    + {t('mcpServers.presetUserEmail')}
+                  </Button>
+                </div>
               </div>
               {testResult && (
                 <div className="space-y-2">
@@ -456,18 +464,26 @@ export function ProvidersPage() {
               <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
               {editCustomHeaders.map(([k, v], i) => (
                 <div key={i} className="flex gap-2 items-center">
-                  <Input className="flex-1" placeholder="Header-Name" value={k}
+                  <Input className="flex-1" placeholder="X-Custom-Header" value={k}
                     onChange={(e) => { const next = [...editCustomHeaders]; next[i] = [e.target.value, v]; setEditCustomHeaders(next); }} />
-                  <Input className="flex-1" placeholder="value" value={v}
+                  <Input className="flex-1" placeholder={t('mcpServers.headerValuePlaceholder')} value={v}
                     onChange={(e) => { const next = [...editCustomHeaders]; next[i] = [k, e.target.value]; setEditCustomHeaders(next); }} />
                   <Button type="button" variant="ghost" size="icon-sm" onClick={() => setEditCustomHeaders(editCustomHeaders.filter((_, j) => j !== i))}>
                     <X className="h-3 w-3" />
                   </Button>
                 </div>
               ))}
-              <Button type="button" variant="outline" size="sm" onClick={() => setEditCustomHeaders([...editCustomHeaders, ['', '']])}>
-                <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button type="button" variant="outline" size="sm" onClick={() => setEditCustomHeaders([...editCustomHeaders, ['', '']])}>
+                  <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
+                </Button>
+                <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setEditCustomHeaders([...editCustomHeaders, ['X-User-Id', '{{user_id}}']])}>
+                  + {t('mcpServers.presetUserId')}
+                </Button>
+                <Button type="button" variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setEditCustomHeaders([...editCustomHeaders, ['X-User-Email', '{{user_email}}']])}>
+                  + {t('mcpServers.presetUserEmail')}
+                </Button>
+              </div>
             </div>
           </div>
           {testResult && (

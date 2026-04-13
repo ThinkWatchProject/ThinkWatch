@@ -16,6 +16,7 @@ pub struct AzureOpenAiProvider {
     pub api_key: String,
     pub api_version: String,
     pub client: reqwest::Client,
+    pub custom_headers: Vec<(String, String)>,
 }
 
 impl AzureOpenAiProvider {
@@ -25,7 +26,28 @@ impl AzureOpenAiProvider {
             api_key,
             api_version: api_version.unwrap_or_else(|| "2024-12-01-preview".to_string()),
             client: reqwest::Client::new(),
+            custom_headers: Vec::new(),
         }
+    }
+
+    pub fn with_custom_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.custom_headers = headers;
+        self
+    }
+
+    fn resolve_headers(&self, request: &ChatCompletionRequest) -> Vec<(String, String)> {
+        let uid = request.caller_user_id.as_deref().unwrap_or("");
+        let email = request.caller_user_email.as_deref().unwrap_or("");
+        self.custom_headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.replace("{{user_id}}", uid)
+                        .replace("{{user_email}}", email),
+                )
+            })
+            .collect()
     }
 
     fn completions_url(&self, deployment: &str) -> String {
@@ -47,12 +69,17 @@ impl AiProvider for AzureOpenAiProvider {
     ) -> Result<ChatCompletionResponse, GatewayError> {
         // In Azure, the "model" field is the deployment name
         let url = self.completions_url(&request.model);
+        let headers = self.resolve_headers(&request);
 
-        let resp = self
+        let mut builder = self
             .client
             .post(&url)
             .header("api-key", &self.api_key)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        for (k, v) in &headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+        let resp = builder
             .json(&request)
             .send()
             .await
@@ -87,15 +114,20 @@ impl AiProvider for AzureOpenAiProvider {
         let client = self.client.clone();
         let url = self.completions_url(&request.model);
         let api_key = self.api_key.clone();
+        let headers = self.resolve_headers(&request);
 
         let mut stream_request = request;
         stream_request.stream = Some(true);
 
         Box::pin(async_stream::stream! {
-            let resp = client
+            let mut builder = client
                 .post(&url)
                 .header("api-key", &api_key)
-                .header("content-type", "application/json")
+                .header("content-type", "application/json");
+            for (k, v) in &headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            let resp = builder
                 .json(&stream_request)
                 .send()
                 .await;

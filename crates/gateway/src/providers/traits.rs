@@ -14,6 +14,13 @@ pub struct ChatCompletionRequest {
     pub stream: Option<bool>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
+    /// Caller identity for template header resolution. Not serialized
+    /// to upstream — used only by the provider to resolve {{user_id}}
+    /// and {{user_email}} in custom headers.
+    #[serde(skip)]
+    pub caller_user_id: Option<String>,
+    #[serde(skip)]
+    pub caller_user_email: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -65,6 +65,7 @@ pub struct GatewayState {
 #[derive(Debug, Clone, Default)]
 pub struct GatewayRequestIdentity {
     pub user_id: Option<String>,
+    pub user_email: Option<String>,
     pub api_key_id: Option<String>,
     pub allowed_models: Option<Vec<String>>,
     /// Role IDs the user holds — used to apply role-level rate limits.
@@ -343,12 +344,16 @@ pub async fn proxy_chat_completion(
         }
     }
 
-    // 5. PII redaction — redact user messages before sending upstream
+    // 5. Attach caller identity for custom header template resolution
+    request.caller_user_id = identity.user_id.clone();
+    request.caller_user_email = identity.user_email.clone();
+
+    // 6. PII redaction — redact user messages before sending upstream
     let pii_redactor = state.pii_redactor.load();
     let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&request.messages);
     request.messages = redacted_messages;
 
-    // 6. Check token quota — use user/api_key as quota key when available
+    // 7. Check token quota — use user/api_key as quota key when available
     let quota_key = identity
         .user_id
         .as_deref()
@@ -646,6 +651,8 @@ pub async fn proxy_anthropic_messages(
         max_tokens: Some(max_tokens),
         stream: Some(is_stream),
         extra: serde_json::json!({}),
+        caller_user_id: identity.user_id.clone(),
+        caller_user_email: identity.user_email.clone(),
     };
 
     if is_stream {
@@ -866,6 +873,8 @@ pub async fn proxy_responses(
         max_tokens: Some(max_tokens),
         stream: Some(is_stream),
         extra: serde_json::json!({}),
+        caller_user_id: identity.user_id.clone(),
+        caller_user_email: identity.user_email.clone(),
     };
 
     // Route to provider

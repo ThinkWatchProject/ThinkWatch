@@ -183,8 +183,21 @@ pub fn require_api_key(
             let merged_models =
                 intersect_allowlists(row.allowed_models.clone(), role_limits.allowed_models);
 
+            // Load email for template header resolution ({{user_email}})
+            let user_email: Option<String> = if let Some(uid) = row.user_id {
+                sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
+                    .bind(uid)
+                    .fetch_optional(&state.db)
+                    .await
+                    .ok()
+                    .flatten()
+            } else {
+                None
+            };
+
             let gateway_identity = GatewayRequestIdentity {
                 user_id: row.user_id.map(|u| u.to_string()),
+                user_email,
                 api_key_id: Some(row.id.to_string()),
                 allowed_models: merged_models.clone(),
                 role_ids: role_ids.iter().map(|id| id.to_string()).collect(),

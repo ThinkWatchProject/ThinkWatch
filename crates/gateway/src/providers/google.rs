@@ -7,6 +7,7 @@ pub struct GoogleProvider {
     pub base_url: String,
     pub api_key: String,
     pub client: reqwest::Client,
+    pub custom_headers: Vec<(String, String)>,
 }
 
 impl GoogleProvider {
@@ -15,7 +16,28 @@ impl GoogleProvider {
             base_url,
             api_key,
             client: reqwest::Client::new(),
+            custom_headers: Vec::new(),
         }
+    }
+
+    pub fn with_custom_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.custom_headers = headers;
+        self
+    }
+
+    fn resolve_headers(&self, request: &ChatCompletionRequest) -> Vec<(String, String)> {
+        let uid = request.caller_user_id.as_deref().unwrap_or("");
+        let email = request.caller_user_email.as_deref().unwrap_or("");
+        self.custom_headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.replace("{{user_id}}", uid)
+                        .replace("{{user_email}}", email),
+                )
+            })
+            .collect()
     }
 }
 
@@ -175,6 +197,7 @@ impl AiProvider for GoogleProvider {
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         let model = &request.model;
+        let headers = self.resolve_headers(&request);
         let gemini_req = convert_request(&request);
 
         let url = format!(
@@ -182,9 +205,11 @@ impl AiProvider for GoogleProvider {
             self.base_url, model, self.api_key
         );
 
-        let resp = self
-            .client
-            .post(&url)
+        let mut builder = self.client.post(&url);
+        for (k, v) in &headers {
+            builder = builder.header(k.as_str(), v.as_str());
+        }
+        let resp = builder
             .json(&gemini_req)
             .send()
             .await
@@ -217,6 +242,7 @@ impl AiProvider for GoogleProvider {
         let base_url = self.base_url.clone();
         let api_key = self.api_key.clone();
         let model = request.model.clone();
+        let headers = self.resolve_headers(&request);
 
         let gemini_req = convert_request(&request);
 
@@ -226,7 +252,11 @@ impl AiProvider for GoogleProvider {
                 base_url, model, api_key
             );
 
-            let resp = match client.post(&url).json(&gemini_req).send().await {
+            let mut builder = client.post(&url);
+            for (k, v) in &headers {
+                builder = builder.header(k.as_str(), v.as_str());
+            }
+            let resp = match builder.json(&gemini_req).send().await {
                 Ok(r) => r,
                 Err(e) => {
                     yield Err(GatewayError::NetworkError(e.to_string()));
