@@ -6,15 +6,16 @@ use std::pin::Pin;
 
 /// AWS Bedrock provider using the Converse API.
 ///
-/// Authentication uses AWS SigV4 signing via the `aws-sigv4` crate.
-/// Requires: access_key_id, secret_access_key, region.
+/// Authentication uses AWS SigV4 signing. Two modes:
+/// - Static credentials: `api_key` = `{access_key_id}:{secret_access_key}`
+/// - IMDSv2 (EC2): `api_key` is empty — credentials are fetched from
+///   the instance metadata service at request time.
 ///
-/// The `api_key` field stores credentials as `{access_key_id}:{secret_access_key}` format.
 /// The `base_url` field stores the region (e.g. "us-east-1").
 pub struct BedrockProvider {
     pub region: String,
-    pub access_key_id: String,
-    pub secret_access_key: String,
+    pub access_key_id: Option<String>,
+    pub secret_access_key: Option<String>,
     pub client: reqwest::Client,
     pub custom_headers: Vec<(String, String)>,
 }
@@ -23,12 +24,17 @@ impl BedrockProvider {
     /// Create a new Bedrock provider.
     ///
     /// - `region`: AWS region (e.g. "us-east-1")
-    /// - `credentials`: Formatted as `{access_key_id}:{secret_access_key}`
+    /// - `credentials`: `{access_key_id}:{secret_access_key}`, or empty for IMDSv2
     pub fn new(region: String, credentials: String) -> Self {
-        let (access_key_id, secret_access_key) = credentials
-            .split_once(':')
-            .map(|(a, s)| (a.to_string(), s.to_string()))
-            .unwrap_or_else(|| (credentials.clone(), String::new()));
+        let (access_key_id, secret_access_key) = if credentials.is_empty() {
+            (None, None)
+        } else {
+            let (a, s) = credentials
+                .split_once(':')
+                .map(|(a, s)| (a.to_string(), s.to_string()))
+                .unwrap_or_else(|| (credentials.clone(), String::new()));
+            (Some(a), Some(s))
+        };
 
         Self {
             region,
@@ -73,6 +79,68 @@ impl BedrockProvider {
         )
     }
 
+    /// Fetch temporary credentials from EC2 IMDSv2.
+    async fn fetch_imdsv2_credentials(
+        &self,
+    ) -> Result<aws_credential_types::Credentials, GatewayError> {
+        use aws_credential_types::Credentials;
+
+        let imds_base = "http://169.254.169.254";
+        let client = &self.client;
+
+        // Step 1: Get IMDSv2 token
+        let token = client
+            .put(format!("{imds_base}/latest/api/token"))
+            .header("X-aws-ec2-metadata-token-ttl-seconds", "300")
+            .send()
+            .await
+            .map_err(|e| GatewayError::ProviderError(format!("IMDSv2 token request failed: {e}")))?
+            .text()
+            .await
+            .map_err(|e| GatewayError::ProviderError(format!("IMDSv2 token read failed: {e}")))?;
+
+        // Step 2: Get IAM role name
+        let role = client
+            .get(format!(
+                "{imds_base}/latest/meta-data/iam/security-credentials/"
+            ))
+            .header("X-aws-ec2-metadata-token", &token)
+            .send()
+            .await
+            .map_err(|e| GatewayError::ProviderError(format!("IMDSv2 role lookup failed: {e}")))?
+            .text()
+            .await
+            .map_err(|e| GatewayError::ProviderError(format!("IMDSv2 role read failed: {e}")))?;
+        let role = role.trim();
+
+        // Step 3: Get credentials for that role
+        let creds_json: serde_json::Value = client
+            .get(format!(
+                "{imds_base}/latest/meta-data/iam/security-credentials/{role}"
+            ))
+            .header("X-aws-ec2-metadata-token", &token)
+            .send()
+            .await
+            .map_err(|e| {
+                GatewayError::ProviderError(format!("IMDSv2 credentials fetch failed: {e}"))
+            })?
+            .json()
+            .await
+            .map_err(|e| {
+                GatewayError::ProviderError(format!("IMDSv2 credentials parse failed: {e}"))
+            })?;
+
+        let ak = creds_json["AccessKeyId"]
+            .as_str()
+            .ok_or_else(|| GatewayError::ProviderError("IMDSv2: missing AccessKeyId".into()))?;
+        let sk = creds_json["SecretAccessKey"]
+            .as_str()
+            .ok_or_else(|| GatewayError::ProviderError("IMDSv2: missing SecretAccessKey".into()))?;
+        let session_token = creds_json["Token"].as_str().map(|s| s.to_string());
+
+        Ok(Credentials::new(ak, sk, session_token, None, "imdsv2"))
+    }
+
     async fn sign_request(
         &self,
         url: &str,
@@ -86,13 +154,10 @@ impl BedrockProvider {
         use aws_sigv4::sign::v4;
         use std::time::SystemTime;
 
-        let credentials = Credentials::new(
-            &self.access_key_id,
-            &self.secret_access_key,
-            None,
-            None,
-            "think-watch",
-        );
+        let credentials = match (&self.access_key_id, &self.secret_access_key) {
+            (Some(ak), Some(sk)) => Credentials::new(ak, sk, None, None, "think-watch"),
+            _ => self.fetch_imdsv2_credentials().await?,
+        };
 
         let identity = credentials.into();
         let mut signing_settings = SigningSettings::default();
@@ -365,6 +430,7 @@ impl AiProvider for BedrockProvider {
         let region = self.region.clone();
         let access_key_id = self.access_key_id.clone();
         let secret_access_key = self.secret_access_key.clone();
+        let provider_client = self.client.clone();
         let custom_headers = self.resolve_headers(&request);
 
         let bedrock_req = convert_to_bedrock(&request);
@@ -381,7 +447,7 @@ impl AiProvider for BedrockProvider {
             // Sign the request
             let provider = BedrockProvider {
                 region, access_key_id, secret_access_key,
-                client: client.clone(),
+                client: provider_client,
                 custom_headers: Vec::new(),
             };
             let signed_headers = match provider.sign_request(&url, &body_bytes).await {

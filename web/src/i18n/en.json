@@ -173,7 +173,7 @@
     "addHeader": "Add Header",
     "awsCredentials": "AWS Credentials",
     "bedrockUrlHint": "Enter AWS region (e.g. us-east-1)",
-    "bedrockKeyHint": "Format: ACCESS_KEY_ID:SECRET_ACCESS_KEY",
+    "bedrockKeyHint": "Format: ACCESS_KEY_ID:SECRET_ACCESS_KEY. Leave empty on EC2 to use IMDSv2 instance role.",
     "azureUrlHint": "Enter Azure OpenAI resource endpoint",
     "testConnection": "Test Connection",
     "testing": "Testing...",

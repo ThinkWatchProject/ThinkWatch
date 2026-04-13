@@ -270,12 +270,12 @@ export function ProvidersPage() {
                 } required />
               </div>
               <div className="space-y-2">
-                <Label htmlFor="prov-key">{providerType === 'bedrock' ? t('providers.awsCredentials', 'AWS Credentials') : t('providers.apiKey')}</Label>
+                <Label htmlFor="prov-key">{providerType === 'bedrock' ? t('providers.awsCredentials') : t('providers.apiKey')}</Label>
                 <Input id="prov-key" type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder={
                   providerType === 'bedrock' ? 'ACCESS_KEY_ID:SECRET_ACCESS_KEY' : 'sk-...'
-                } required />
+                } required={providerType !== 'bedrock'} />
                 {providerType === 'bedrock' && (
-                  <p className="text-xs text-muted-foreground">{t('providers.bedrockKeyHint', 'Format: ACCESS_KEY_ID:SECRET_ACCESS_KEY')}</p>
+                  <p className="text-xs text-muted-foreground">{t('providers.bedrockKeyHint')}</p>
                 )}
               </div>
               <div className="space-y-2">

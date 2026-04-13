@@ -250,10 +250,14 @@ pub async fn create_provider(
     auth_user
         .assert_scope_global(&state.db, "providers:create")
         .await?;
-    if req.name.is_empty() || req.base_url.is_empty() || req.api_key.is_empty() {
+    if req.name.is_empty() || req.base_url.is_empty() {
         return Err(AppError::BadRequest(
-            "name, base_url, and api_key are required".into(),
+            "name and base_url are required".into(),
         ));
+    }
+    // api_key is optional for Bedrock (IMDSv2 mode)
+    if req.api_key.is_empty() && req.provider_type != "bedrock" {
+        return Err(AppError::BadRequest("api_key is required".into()));
     }
 
     // SSRF prevention: validate base_url
@@ -547,10 +551,11 @@ pub async fn test_provider_unauthenticated(
 async fn run_provider_test(
     req: TestProviderRequest,
 ) -> Result<Json<TestProviderResponse>, AppError> {
-    if req.base_url.is_empty() || req.api_key.is_empty() {
-        return Err(AppError::BadRequest(
-            "base_url and api_key are required".into(),
-        ));
+    if req.base_url.is_empty() {
+        return Err(AppError::BadRequest("base_url is required".into()));
+    }
+    if req.api_key.is_empty() && req.provider_type != "bedrock" {
+        return Err(AppError::BadRequest("api_key is required".into()));
     }
     validate_url(&req.base_url)?;
     if let Some(headers) = &req.custom_headers {

@@ -173,7 +173,7 @@
     "addHeader": "添加请求头",
     "awsCredentials": "AWS 凭证",
     "bedrockUrlHint": "输入 AWS 区域（如 us-east-1）",
-    "bedrockKeyHint": "格式：ACCESS_KEY_ID:SECRET_ACCESS_KEY",
+    "bedrockKeyHint": "格式：ACCESS_KEY_ID:SECRET_ACCESS_KEY。在 EC2 上留空可自动通过 IMDSv2 获取实例角色凭证。",
     "azureUrlHint": "输入 Azure OpenAI 资源端点",
     "testConnection": "测试连接",
     "testing": "测试中...",
