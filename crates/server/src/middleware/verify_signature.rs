@@ -147,6 +147,14 @@ pub async fn verify_signature(
         .map(|u| u.claims.sub)
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
+    // If no signature headers at all → the client hasn't registered a key pair yet
+    // (race between register-key and the first request after login). Allow through —
+    // the request is still authenticated via JWT cookie, just not signed.
+    let has_sig_headers = request.headers().contains_key(HEADER_SIGNATURE);
+    if !has_sig_headers {
+        return Ok(next.run(request).await);
+    }
+
     // Extract signature headers (clone to release borrow on request)
     let timestamp_str = request
         .headers()
