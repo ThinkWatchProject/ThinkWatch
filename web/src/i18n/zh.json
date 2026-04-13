@@ -736,6 +736,8 @@
       "intro": "用以下正则匹配 user 消息中的敏感信息。命中后会先用占位符替换再转发给 AI，AI 返回后再把原始值还原回来——上游模型永远看不到原始 PII。",
       "testSandbox": "测试沙箱",
       "addPattern": "添加规则",
+      "loadPresets": "预设",
+      "presetHint": "点击添加预设规则",
       "empty": "暂无 PII 规则。添加规则以开始脱敏。",
       "name": "名称",
       "namePlaceholder": "如：email",

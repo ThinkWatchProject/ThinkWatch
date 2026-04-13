@@ -736,6 +736,8 @@
       "intro": "These regex patterns are matched against user messages before they are forwarded to the AI provider. Each match is replaced with a placeholder; the AI's response is then post-processed to restore the original values, so the upstream model never sees the raw PII.",
       "testSandbox": "Test sandbox",
       "addPattern": "Add Pattern",
+      "loadPresets": "Presets",
+      "presetHint": "Click to add a preset pattern",
       "empty": "No PII patterns configured. Add a pattern to start redacting.",
       "name": "Name",
       "namePlaceholder": "e.g. email",

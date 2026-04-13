@@ -22,6 +22,7 @@ import {
 } from '@/components/ui/table';
 import { Plus, Trash2, AlertCircle, CheckCircle, FlaskConical, Sparkles } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Dialog,
@@ -362,24 +363,40 @@ export function GatewaySecurityPage() {
                 <FlaskConical className="h-4 w-4" />
                 {t('settings.pii.testSandbox')}
               </Button>
+              <Popover>
+                <PopoverTrigger asChild>
+                  <Button variant="outline" size="sm">
+                    <Sparkles className="h-4 w-4" />
+                    {t('settings.pii.loadPresets')}
+                  </Button>
+                </PopoverTrigger>
+                <PopoverContent className="w-72 p-2" align="start">
+                  <div className="space-y-1">
+                    <p className="text-xs font-medium text-muted-foreground px-2 py-1">{t('settings.pii.presetHint')}</p>
+                    {[
+                      { name: 'email', regex: '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}', placeholder_prefix: 'EMAIL', label: 'Email' },
+                      { name: 'phone', regex: '(?:\\+?\\d{1,3}[-.\\s]?)?\\(?\\d{2,4}\\)?[-.\\s]?\\d{3,4}[-.\\s]?\\d{3,4}', placeholder_prefix: 'PHONE', label: 'Phone' },
+                      { name: 'uuid', regex: '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', placeholder_prefix: 'UUID', label: 'UUID' },
+                      { name: 'credit_card', regex: '\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b', placeholder_prefix: 'CARD', label: 'Credit Card' },
+                      { name: 'ip_address', regex: '\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b', placeholder_prefix: 'IP', label: 'IP Address' },
+                      { name: 'ssn', regex: '\\b\\d{3}-\\d{2}-\\d{4}\\b', placeholder_prefix: 'SSN', label: 'SSN (US)' },
+                      { name: 'id_card', regex: '\\b\\d{17}[\\dXx]\\b', placeholder_prefix: 'IDCARD', label: 'ID Card (CN)' },
+                    ].filter(p => !piiPatterns.some(pp => pp.name === p.name)).map(p => (
+                      <button
+                        key={p.name}
+                        className="w-full text-left rounded px-2 py-1.5 text-sm hover:bg-muted flex justify-between items-center"
+                        onClick={() => setPiiPatterns([...piiPatterns, { name: p.name, regex: p.regex, placeholder_prefix: p.placeholder_prefix }])}
+                      >
+                        <span>{p.label}</span>
+                        <span className="text-xs text-muted-foreground font-mono">[{p.placeholder_prefix}]</span>
+                      </button>
+                    ))}
+                  </div>
+                </PopoverContent>
+              </Popover>
               <Button variant="outline" size="sm" onClick={addPiiPattern}>
                 <Plus className="h-4 w-4" />
                 {t('settings.pii.addPattern')}
-              </Button>
-              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setPiiPatterns([...piiPatterns, { name: 'email', regex: '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}', placeholder_prefix: 'EMAIL' }])}>
-                + Email
-              </Button>
-              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setPiiPatterns([...piiPatterns, { name: 'phone', regex: '(?:\\+?\\d{1,3}[-.\\s]?)?\\(?\\d{2,4}\\)?[-.\\s]?\\d{3,4}[-.\\s]?\\d{3,4}', placeholder_prefix: 'PHONE' }])}>
-                + Phone
-              </Button>
-              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setPiiPatterns([...piiPatterns, { name: 'uuid', regex: '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', placeholder_prefix: 'UUID' }])}>
-                + UUID
-              </Button>
-              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setPiiPatterns([...piiPatterns, { name: 'credit_card', regex: '\\b\\d{4}[- ]?\\d{4}[- ]?\\d{4}[- ]?\\d{4}\\b', placeholder_prefix: 'CARD' }])}>
-                + Card
-              </Button>
-              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => setPiiPatterns([...piiPatterns, { name: 'ip_address', regex: '\\b\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\b', placeholder_prefix: 'IP' }])}>
-                + IP
               </Button>
             </div>
           </div>
