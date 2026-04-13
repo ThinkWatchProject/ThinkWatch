@@ -56,7 +56,8 @@ export function RegisterPage({ onRegistered }: RegisterPageProps) {
         setError(t('auth.registrationFailed'));
         return;
       }
-      sessionStorage.setItem('signing_key', res.signing_key);
+      const { storeSigningKey } = await import('@/lib/crypto-store');
+      await storeSigningKey(res.signing_key);
       setCachedPermissions(res.permissions, res.denied_permissions);
       onRegistered(res.signing_key);
     } catch (err) {

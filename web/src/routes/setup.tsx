@@ -254,7 +254,8 @@ export function SetupPage() {
       setResult(data);
       // Store the signing key so the admin is authenticated immediately.
       if (data.signing_key) {
-        sessionStorage.setItem('signing_key', data.signing_key);
+        const { storeSigningKey } = await import('@/lib/crypto-store');
+        await storeSigningKey(data.signing_key);
       }
       // Drop the cached setup status so the next router check re-fetches.
       // Without this the user has to hard-refresh after clicking

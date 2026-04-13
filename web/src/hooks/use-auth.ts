@@ -64,31 +64,29 @@ export function useAuth() {
     // browser already has them. We only need to stash signing_key
     // (for HMAC) and seed the permission cache so hasPermission()
     // works without a /me round-trip.
-    sessionStorage.setItem('signing_key', res.signing_key);
+    const { storeSigningKey } = await import('@/lib/crypto-store');
+    await storeSigningKey(res.signing_key);
     setCachedPermissions(res.permissions, res.denied_permissions);
     await fetchUser();
     return res;
   };
 
   const logout = useCallback(async () => {
-    // Tell the server to clear the auth cookies. We don't depend
-    // on this succeeding — the local cleanup happens regardless.
     try {
       await apiPost('/api/auth/logout', {});
     } catch {
       // ignore
     }
-    sessionStorage.removeItem('signing_key');
+    const { clearSigningKey } = await import('@/lib/crypto-store');
+    await clearSigningKey();
     clearCachedPermissions();
     broadcastLogout();
     setUser(null);
   }, []);
 
   const handleSsoCallback = useCallback(async (signingKey: string) => {
-    // The SSO callback already set the auth cookies via Set-Cookie
-    // on the redirect response — only the signing_key travels via
-    // URL fragment for the page JS to stash.
-    sessionStorage.setItem('signing_key', signingKey);
+    const { storeSigningKey } = await import('@/lib/crypto-store');
+    await storeSigningKey(signingKey);
     await fetchUser();
   }, [fetchUser]);
 

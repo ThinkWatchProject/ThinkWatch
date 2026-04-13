@@ -58,8 +58,11 @@ async function signRequest(
   path: string,
   bodyStr: string | undefined,
 ): Promise<Record<string, string>> {
-  const signingKeyHex = sessionStorage.getItem('signing_key');
-  if (!signingKeyHex) return {};
+  // Signing key is stored as a non-extractable CryptoKey in IndexedDB.
+  // XSS cannot export the raw key material.
+  const { getSigningKey } = await import('./crypto-store');
+  const cryptoKey = await getSigningKey();
+  if (!cryptoKey) return {};
 
   const timestamp = Math.floor(Date.now() / 1000).toString();
   const nonce = crypto.randomUUID();
@@ -73,17 +76,7 @@ async function signRequest(
   // String-to-sign
   const stringToSign = `${method.toUpperCase()}\n${path}\n${timestamp}\n${nonce}\n${bodyHash}`;
 
-  // Import HMAC key
-  const keyBytes = new Uint8Array(signingKeyHex.match(/.{2}/g)!.map(h => parseInt(h, 16)));
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw',
-    keyBytes,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  );
-
-  // Sign
+  // Sign with non-extractable key
   const sigBytes = new Uint8Array(
     await crypto.subtle.sign('HMAC', cryptoKey, new TextEncoder().encode(stringToSign)),
   );
@@ -120,7 +113,7 @@ const authChannel: BroadcastChannel | null =
 if (authChannel) {
   authChannel.onmessage = (ev: MessageEvent<{ type: string }>) => {
     if (ev.data?.type === 'logged-out') {
-      sessionStorage.removeItem('signing_key');
+      import('./crypto-store').then(m => m.clearSigningKey());
       clearCachedPermissions();
       // Don't redirect inside the message handler — let the existing
       // 401 path handle it the next time this tab makes a request.
@@ -146,7 +139,8 @@ async function tryRefreshToken(): Promise<boolean> {
       // we only need to update sessionStorage with the new
       // signing_key and the cached permissions.
       if (typeof data.signing_key === 'string') {
-        sessionStorage.setItem('signing_key', data.signing_key);
+        const { storeSigningKey } = await import('./crypto-store');
+        await storeSigningKey(data.signing_key);
       }
       if (Array.isArray(data.permissions)) {
         setCachedPermissions(data.permissions, data.denied_permissions);
@@ -217,7 +211,7 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
     // Skip eviction for probe calls like /api/auth/me on mount —
     // a 401 there means "not logged in yet", not "session expired".
     if (!options.no401Redirect) {
-      sessionStorage.removeItem('signing_key');
+      import('./crypto-store').then(m => m.clearSigningKey());
       clearCachedPermissions();
       authChannel?.postMessage({ type: 'logged-out' });
       void fetch(`${API_BASE}/api/auth/logout`, {

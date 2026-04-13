@@ -93,10 +93,11 @@ export function ProfilePage() {
     }
   };
 
-  const clearTokensAndRedirect = () => {
+  const clearTokensAndRedirect = async () => {
     localStorage.removeItem('access_token');
     localStorage.removeItem('refresh_token');
-    sessionStorage.removeItem('signing_key');
+    const { clearSigningKey } = await import('@/lib/crypto-store');
+    await clearSigningKey();
     navigate({ to: '/' });
   };
 
