@@ -20,7 +20,8 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, Trash2, AlertCircle, CheckCircle, FlaskConical, Sparkles } from 'lucide-react';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Plus, Trash2, AlertCircle, CheckCircle, FlaskConical, Sparkles, ShieldCheck, Eye } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Textarea } from '@/components/ui/textarea';
@@ -54,19 +55,18 @@ export function GatewaySecurityPage() {
   const [contentFilters, setContentFilters] = useState<ContentFilterRule[]>([]);
   const [piiPatterns, setPiiPatterns] = useState<PiiPattern[]>([]);
 
-  // Content filter sandbox + presets
-  const [cfSandboxOpen, setCfSandboxOpen] = useState(false);
-  const [cfSandboxText, setCfSandboxText] = useState('');
+  // Unified sandbox state
+  const [sandboxOpen, setSandboxOpen] = useState(false);
+  const [sandboxText, setSandboxText] = useState('');
+  const [sandboxTab, setSandboxTab] = useState('filter');
   const [cfSandboxResult, setCfSandboxResult] = useState<ContentFilterTestMatch[] | null>(null);
   const [cfSandboxLoading, setCfSandboxLoading] = useState(false);
-  const [cfPresetsOpen, setCfPresetsOpen] = useState(false);
-  const [cfPresets, setCfPresets] = useState<ContentFilterPreset[]>([]);
-
-  // PII sandbox
-  const [piiSandboxOpen, setPiiSandboxOpen] = useState(false);
-  const [piiSandboxText, setPiiSandboxText] = useState('');
   const [piiSandboxResult, setPiiSandboxResult] = useState<PiiTestResponse | null>(null);
   const [piiSandboxLoading, setPiiSandboxLoading] = useState(false);
+
+  // Content filter presets
+  const [cfPresetsOpen, setCfPresetsOpen] = useState(false);
+  const [cfPresets, setCfPresets] = useState<ContentFilterPreset[]>([]);
 
   useEffect(() => {
     api<Record<string, SettingEntry[]>>('/api/admin/settings')
@@ -128,22 +128,6 @@ export function GatewaySecurityPage() {
       contentFilters.map((p, idx) => (idx === i ? { ...p, [field]: value } : p)),
     );
 
-  const runContentFilterSandbox = async () => {
-    setCfSandboxLoading(true);
-    setCfSandboxResult(null);
-    try {
-      const res = await apiPost<{ matches: ContentFilterTestMatch[] }>(
-        '/api/admin/settings/content-filter/test',
-        { text: cfSandboxText, rules: contentFilters },
-      );
-      setCfSandboxResult(res.matches);
-    } catch {
-      setCfSandboxResult([]);
-    } finally {
-      setCfSandboxLoading(false);
-    }
-  };
-
   const openCfPresets = async () => {
     setCfPresetsOpen(true);
     if (cfPresets.length === 0) {
@@ -180,20 +164,40 @@ export function GatewaySecurityPage() {
   const updatePiiPattern = (i: number, field: keyof PiiPattern, value: string) =>
     setPiiPatterns(piiPatterns.map((p, idx) => (idx === i ? { ...p, [field]: value } : p)));
 
-  const runPiiSandbox = async () => {
-    setPiiSandboxLoading(true);
+  // ---------------------------------------------------------------------------
+  // Unified sandbox
+  // ---------------------------------------------------------------------------
+
+  const openSandbox = () => {
+    setSandboxOpen(true);
+    setCfSandboxResult(null);
     setPiiSandboxResult(null);
-    try {
-      const res = await apiPost<PiiTestResponse>(
-        '/api/admin/settings/pii-redactor/test',
-        { text: piiSandboxText, patterns: piiPatterns },
-      );
-      setPiiSandboxResult(res);
-    } catch {
-      setPiiSandboxResult({ redacted_text: '', matches: [] });
-    } finally {
-      setPiiSandboxLoading(false);
-    }
+  };
+
+  const sandboxRunning = cfSandboxLoading || piiSandboxLoading;
+
+  const runSandbox = async () => {
+    if (!sandboxText.trim()) return;
+    setCfSandboxLoading(true);
+    setPiiSandboxLoading(true);
+    setCfSandboxResult(null);
+    setPiiSandboxResult(null);
+
+    const cfPromise = apiPost<{ matches: ContentFilterTestMatch[] }>(
+      '/api/admin/settings/content-filter/test',
+      { text: sandboxText, rules: contentFilters },
+    ).then(res => setCfSandboxResult(res.matches))
+      .catch(() => setCfSandboxResult([]))
+      .finally(() => setCfSandboxLoading(false));
+
+    const piiPromise = apiPost<PiiTestResponse>(
+      '/api/admin/settings/pii-redactor/test',
+      { text: sandboxText, patterns: piiPatterns },
+    ).then(res => setPiiSandboxResult(res))
+      .catch(() => setPiiSandboxResult({ redacted_text: '', matches: [] }))
+      .finally(() => setPiiSandboxLoading(false));
+
+    await Promise.all([cfPromise, piiPromise]);
   };
 
   // ---------------------------------------------------------------------------
@@ -208,6 +212,8 @@ export function GatewaySecurityPage() {
     );
   }
 
+  const hasResults = cfSandboxResult !== null || piiSandboxResult !== null;
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between">
@@ -215,9 +221,15 @@ export function GatewaySecurityPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('nav.contentSecurity')}</h1>
           <p className="text-muted-foreground">{t('contentSecurity.subtitle')}</p>
         </div>
-        <Button onClick={handleSave} disabled={saving}>
-          {saving ? t('common.loading') : t('common.save')}
-        </Button>
+        <div className="flex gap-2">
+          <Button variant="outline" onClick={openSandbox}>
+            <FlaskConical className="h-4 w-4" />
+            {t('settings.sandbox.title')}
+          </Button>
+          <Button onClick={handleSave} disabled={saving}>
+            {saving ? t('common.loading') : t('common.save')}
+          </Button>
+        </div>
       </div>
 
       {statusMsg && (
@@ -243,17 +255,6 @@ export function GatewaySecurityPage() {
               <Button variant="outline" size="sm" onClick={openCfPresets}>
                 <Sparkles className="h-4 w-4" />
                 {t('settings.contentFilter.loadPresets')}
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setCfSandboxOpen(true);
-                  setCfSandboxResult(null);
-                }}
-              >
-                <FlaskConical className="h-4 w-4" />
-                {t('settings.contentFilter.testSandbox')}
               </Button>
               <Button variant="outline" size="sm" onClick={addContentFilter}>
                 <Plus className="h-4 w-4" />
@@ -361,17 +362,6 @@ export function GatewaySecurityPage() {
               </p>
             </div>
             <div className="flex gap-2 shrink-0">
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  setPiiSandboxOpen(true);
-                  setPiiSandboxResult(null);
-                }}
-              >
-                <FlaskConical className="h-4 w-4" />
-                {t('settings.pii.testSandbox')}
-              </Button>
               <Popover>
                 <PopoverTrigger asChild>
                   <Button variant="outline" size="sm">
@@ -468,67 +458,131 @@ export function GatewaySecurityPage() {
         </CardContent>
       </Card>
 
-      {/* Content filter test sandbox */}
-      <Dialog open={cfSandboxOpen} onOpenChange={setCfSandboxOpen}>
+      {/* Unified test sandbox dialog */}
+      <Dialog open={sandboxOpen} onOpenChange={setSandboxOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
-            <DialogTitle>{t('settings.contentFilter.sandboxTitle')}</DialogTitle>
-            <DialogDescription>{t('settings.contentFilter.sandboxDesc')}</DialogDescription>
+            <DialogTitle>{t('settings.sandbox.title')}</DialogTitle>
+            <DialogDescription>{t('settings.sandbox.desc')}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-3">
+          <div className="space-y-4">
             <Textarea
               rows={5}
-              value={cfSandboxText}
-              onChange={(e) => setCfSandboxText(e.target.value)}
-              placeholder={t('settings.contentFilter.sandboxPlaceholder')}
+              value={sandboxText}
+              onChange={(e) => setSandboxText(e.target.value)}
+              placeholder={t('settings.sandbox.placeholder')}
               className="font-mono text-sm"
             />
-            {cfSandboxResult !== null && (
-              <div className="border rounded-md p-3 max-h-64 overflow-y-auto">
-                {cfSandboxResult.length === 0 ? (
-                  <p className="text-sm text-muted-foreground text-center py-2">
-                    {t('settings.contentFilter.sandboxNoMatches')}
-                  </p>
-                ) : (
-                  <div className="space-y-2">
-                    <p className="text-sm font-medium">
-                      {t('settings.contentFilter.sandboxMatchCount', { count: cfSandboxResult.length })}
-                    </p>
-                    {cfSandboxResult.map((m, i) => (
-                      <div key={i} className="text-xs border-l-2 pl-3 py-1" style={{
-                        borderColor: m.action === 'block' ? 'hsl(var(--destructive))' : m.action === 'warn' ? 'rgb(217 119 6)' : 'hsl(var(--muted-foreground))',
-                      }}>
-                        <div className="flex items-center gap-2">
-                          <span className="font-semibold">{m.name || m.pattern}</span>
-                          <Badge variant="outline" className="text-[10px]">{m.match_type}</Badge>
-                          <Badge
-                            variant={m.action === 'block' ? 'destructive' : m.action === 'warn' ? 'default' : 'secondary'}
-                            className="text-[10px]"
-                          >
-                            {m.action}
-                          </Badge>
+
+            {hasResults && (
+              <Tabs value={sandboxTab} onValueChange={setSandboxTab}>
+                <TabsList className="w-full">
+                  <TabsTrigger value="filter" className="flex-1 gap-1.5">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    {t('settings.contentFilter.title')}
+                    {cfSandboxResult && cfSandboxResult.length > 0 && (
+                      <Badge variant="destructive" className="text-[10px] ml-1 px-1.5 py-0">
+                        {cfSandboxResult.length}
+                      </Badge>
+                    )}
+                  </TabsTrigger>
+                  <TabsTrigger value="pii" className="flex-1 gap-1.5">
+                    <Eye className="h-3.5 w-3.5" />
+                    {t('settings.pii.title')}
+                    {piiSandboxResult && piiSandboxResult.matches.length > 0 && (
+                      <Badge variant="secondary" className="text-[10px] ml-1 px-1.5 py-0">
+                        {piiSandboxResult.matches.length}
+                      </Badge>
+                    )}
+                  </TabsTrigger>
+                </TabsList>
+
+                {/* Content filter results */}
+                <TabsContent value="filter">
+                  {cfSandboxLoading ? (
+                    <p className="text-xs text-muted-foreground text-center py-3">{t('common.loading')}</p>
+                  ) : cfSandboxResult !== null && (
+                    <div className="border rounded-md p-3 max-h-64 overflow-y-auto">
+                      {cfSandboxResult.length === 0 ? (
+                        <p className="text-sm text-muted-foreground text-center py-2">
+                          {t('settings.contentFilter.sandboxNoMatches')}
+                        </p>
+                      ) : (
+                        <div className="space-y-2">
+                          <p className="text-xs font-medium text-muted-foreground">
+                            {t('settings.contentFilter.sandboxMatchCount', { count: cfSandboxResult.length })}
+                          </p>
+                          {cfSandboxResult.map((m, i) => (
+                            <div key={i} className="text-xs border-l-2 pl-3 py-1" style={{
+                              borderColor: m.action === 'block' ? 'hsl(var(--destructive))' : m.action === 'warn' ? 'rgb(217 119 6)' : 'hsl(var(--muted-foreground))',
+                            }}>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-semibold">{m.name || m.pattern}</span>
+                                <Badge variant="outline" className="text-[10px]">{m.match_type}</Badge>
+                                <Badge
+                                  variant={m.action === 'block' ? 'destructive' : m.action === 'warn' ? 'default' : 'secondary'}
+                                  className="text-[10px]"
+                                >
+                                  {m.action}
+                                </Badge>
+                              </div>
+                              <p className="font-mono text-muted-foreground mt-1 break-all">{m.matched_snippet}</p>
+                            </div>
+                          ))}
                         </div>
-                        <p className="font-mono text-muted-foreground mt-1">{m.matched_snippet}</p>
+                      )}
+                    </div>
+                  )}
+                </TabsContent>
+
+                {/* PII results */}
+                <TabsContent value="pii">
+                  {piiSandboxLoading ? (
+                    <p className="text-xs text-muted-foreground text-center py-3">{t('common.loading')}</p>
+                  ) : piiSandboxResult !== null && (
+                    <div className="border rounded-md p-3 max-h-64 overflow-y-auto space-y-3">
+                      <div>
+                        <Label className="text-xs text-muted-foreground">{t('settings.pii.redactedOutput')}</Label>
+                        <pre className="font-mono text-xs bg-muted p-2 rounded mt-1 whitespace-pre-wrap break-all">
+                          {piiSandboxResult.redacted_text || t('settings.pii.sandboxNoMatches')}
+                        </pre>
                       </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+                      {piiSandboxResult.matches.length > 0 && (
+                        <div>
+                          <Label className="text-xs text-muted-foreground">
+                            {t('settings.pii.sandboxMatchCount', { count: piiSandboxResult.matches.length })}
+                          </Label>
+                          <div className="space-y-1 mt-1">
+                            {piiSandboxResult.matches.map((m, i) => (
+                              <div key={i} className="text-xs flex items-center gap-2 flex-wrap">
+                                <Badge variant="outline" className="text-[10px]">{m.name}</Badge>
+                                <span className="font-mono text-destructive break-all">{m.original}</span>
+                                <span className="text-muted-foreground">→</span>
+                                <span className="font-mono text-muted-foreground break-all">{m.placeholder}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </TabsContent>
+              </Tabs>
             )}
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setCfSandboxOpen(false)}>
+            <Button variant="outline" onClick={() => setSandboxOpen(false)}>
               {t('common.cancel')}
             </Button>
-            <Button onClick={runContentFilterSandbox} disabled={cfSandboxLoading || !cfSandboxText.trim()}>
+            <Button onClick={runSandbox} disabled={sandboxRunning || !sandboxText.trim()}>
               <FlaskConical className="h-4 w-4" />
-              {cfSandboxLoading ? t('common.loading') : t('settings.contentFilter.runTest')}
+              {sandboxRunning ? t('common.loading') : t('settings.sandbox.runAll')}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Content filter presets */}
+      {/* Content filter presets dialog */}
       <Dialog open={cfPresetsOpen} onOpenChange={setCfPresetsOpen}>
         <DialogContent className="max-w-2xl">
           <DialogHeader>
@@ -568,61 +622,6 @@ export function GatewaySecurityPage() {
               ))
             )}
           </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* PII redactor test sandbox */}
-      <Dialog open={piiSandboxOpen} onOpenChange={setPiiSandboxOpen}>
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{t('settings.pii.sandboxTitle')}</DialogTitle>
-            <DialogDescription>{t('settings.pii.sandboxDesc')}</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            <Textarea
-              rows={5}
-              value={piiSandboxText}
-              onChange={(e) => setPiiSandboxText(e.target.value)}
-              placeholder={t('settings.pii.sandboxPlaceholder')}
-              className="font-mono text-sm"
-            />
-            {piiSandboxResult !== null && (
-              <div className="border rounded-md p-3 max-h-64 overflow-y-auto space-y-3">
-                <div>
-                  <Label className="text-xs text-muted-foreground">{t('settings.pii.redactedOutput')}</Label>
-                  <pre className="font-mono text-xs bg-muted p-2 rounded mt-1 whitespace-pre-wrap break-all">
-                    {piiSandboxResult.redacted_text || t('settings.pii.sandboxNoMatches')}
-                  </pre>
-                </div>
-                {piiSandboxResult.matches.length > 0 && (
-                  <div>
-                    <Label className="text-xs text-muted-foreground">
-                      {t('settings.pii.sandboxMatchCount', { count: piiSandboxResult.matches.length })}
-                    </Label>
-                    <div className="space-y-1 mt-1">
-                      {piiSandboxResult.matches.map((m, i) => (
-                        <div key={i} className="text-xs flex items-center gap-2">
-                          <Badge variant="outline" className="text-[10px]">{m.name}</Badge>
-                          <span className="font-mono text-destructive">{m.original}</span>
-                          <span className="text-muted-foreground">→</span>
-                          <span className="font-mono text-muted-foreground">{m.placeholder}</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setPiiSandboxOpen(false)}>
-              {t('common.cancel')}
-            </Button>
-            <Button onClick={runPiiSandbox} disabled={piiSandboxLoading || !piiSandboxText.trim()}>
-              <FlaskConical className="h-4 w-4" />
-              {piiSandboxLoading ? t('common.loading') : t('settings.pii.runTest')}
-            </Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
     </div>

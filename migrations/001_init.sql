@@ -588,3 +588,60 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 ('general.public_protocol', '""', 'general', 'Public gateway protocol: "http", "https", or empty for auto-detect from browser'),
 ('general.public_host',     '""', 'general', 'Public gateway host (empty = auto-detect from browser)'),
 ('general.public_port',     '0',  'general', 'Public gateway port (0 = use the gateway listening port)');
+
+-- --------------------------------------------------------------------------
+-- MCP Store — template marketplace for one-click MCP server installation
+-- --------------------------------------------------------------------------
+
+CREATE TABLE mcp_store_templates (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug                VARCHAR(100) NOT NULL UNIQUE,
+    name                VARCHAR(255) NOT NULL,
+    description         TEXT,
+    icon_url            VARCHAR(512),
+    author              VARCHAR(255) DEFAULT 'Community',
+    category            VARCHAR(100),
+    tags                TEXT[] DEFAULT ARRAY[]::TEXT[],
+    endpoint_template   VARCHAR(512),
+    transport_type      VARCHAR(50) DEFAULT 'streamable_http',
+    auth_type           VARCHAR(50),
+    auth_instructions   TEXT,
+    deploy_type         VARCHAR(50) DEFAULT 'hosted',
+    deploy_command      TEXT,
+    deploy_docs_url     VARCHAR(512),
+    homepage_url        VARCHAR(512),
+    repo_url            VARCHAR(512),
+    featured            BOOLEAN DEFAULT FALSE,
+    install_count       INTEGER DEFAULT 0,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_mcp_store_category ON mcp_store_templates(category);
+
+CREATE TABLE mcp_store_installs (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    template_id     UUID NOT NULL REFERENCES mcp_store_templates(id),
+    server_id       UUID NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+    installed_by    UUID REFERENCES users(id),
+    installed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE(server_id)
+);
+
+-- Seed: built-in MCP store templates
+INSERT INTO mcp_store_templates (slug, name, description, category, tags, endpoint_template, auth_type, auth_instructions, deploy_type, featured) VALUES
+('github',     'GitHub',       'Manage repositories, issues, pull requests, and code search',        'developer',      '{"git","code","vcs"}',        'https://api.github.com/mcp',  'bearer', 'Go to GitHub → Settings → Developer settings → Personal access tokens → Generate new token', 'hosted', true),
+('gitlab',     'GitLab',       'Manage projects, merge requests, and CI/CD pipelines',               'developer',      '{"git","code","cicd"}',       '',                             'bearer', 'Go to GitLab → Preferences → Access Tokens → Create personal access token',                  'manual', false),
+('linear',     'Linear',       'Project management — issues, projects, and cycles',                  'developer',      '{"project","agile"}',         'https://mcp.linear.app',      'bearer', 'Go to Linear → Settings → API → Create personal API key',                                     'hosted', false),
+('sentry',     'Sentry',       'Error tracking and performance monitoring',                          'developer',      '{"monitoring","errors"}',     '',                             'bearer', 'Go to Sentry → Settings → Auth Tokens → Create new token',                                    'manual', false),
+('postgresql', 'PostgreSQL',   'Query databases, browse schemas, and manage tables',                 'database',       '{"sql","relational"}',        '',                             'none',   'Deploy the PostgreSQL MCP server with your connection string',                                 'docker', true),
+('mysql',      'MySQL',        'Query databases, browse schemas, and manage tables',                 'database',       '{"sql","relational"}',        '',                             'none',   'Deploy the MySQL MCP server with your connection string',                                      'docker', false),
+('redis',      'Redis',        'Key-value operations, pub/sub, and data inspection',                 'database',       '{"cache","nosql"}',           '',                             'none',   'Deploy the Redis MCP server pointing to your Redis instance',                                  'docker', false),
+('mongodb',    'MongoDB',      'Document operations, aggregation, and collection management',        'database',       '{"nosql","document"}',        '',                             'none',   'Deploy the MongoDB MCP server with your connection URI',                                       'docker', false),
+('slack',      'Slack',        'Send messages, manage channels, and search workspace',               'communication',  '{"chat","messaging"}',        'https://mcp.slack.com',       'bearer', 'Go to Slack → Apps → Create App → OAuth & Permissions → Install to workspace → Copy bot token', 'hosted', true),
+('discord',    'Discord',      'Send messages, manage channels, and moderate servers',               'communication',  '{"chat","gaming"}',           '',                             'bearer', 'Go to Discord Developer Portal → Applications → Bot → Copy token',                             'manual', false),
+('aws',        'AWS',          'Manage S3 buckets, Lambda functions, EC2 instances, and more',       'cloud',          '{"infrastructure","devops"}', '',                             'api_key','Configure with AWS Access Key ID and Secret Access Key',                                       'docker', false),
+('cloudflare', 'Cloudflare',   'Manage DNS records, Workers, and edge configuration',                'cloud',          '{"cdn","dns","edge"}',        'https://mcp.cloudflare.com',  'bearer', 'Go to Cloudflare → My Profile → API Tokens → Create Token',                                   'hosted', false),
+('filesystem', 'Filesystem',   'Read and write local files, browse directories',                     'utility',        '{"files","local"}',           '',                             'none',   'Deploy locally — grants access to the configured directory',                                   'docker', false),
+('web-search', 'Web Search',   'Search the web and fetch page content',                             'utility',        '{"search","web"}',            '',                             'api_key','Requires a search API key (Google, Bing, or Brave)',                                           'docker', true),
+('puppeteer',  'Puppeteer',    'Browser automation — navigate, screenshot, and extract data',        'utility',        '{"browser","scraping"}',      '',                             'none',   'Deploy the Puppeteer MCP server with a headless Chrome instance',                              'docker', false);

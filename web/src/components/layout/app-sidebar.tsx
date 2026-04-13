@@ -43,6 +43,7 @@ import {
   User,
   FileCode2,
   Filter,
+  Store,
 } from 'lucide-react';
 import { useNavigate, useLocation } from '@tanstack/react-router';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
@@ -81,6 +82,7 @@ const navGroups: NavGroup[] = [
     items: [
       { titleKey: 'nav.mcpServers', icon: Server, href: '/mcp/servers', permission: 'mcp_servers:read' },
       { titleKey: 'nav.tools', icon: Wrench, href: '/mcp/tools', permission: 'mcp_servers:read' },
+      { titleKey: 'nav.mcpStore', icon: Store, href: '/mcp/store', permission: 'mcp_servers:read' },
     ],
   },
   {

@@ -459,6 +459,11 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             post(handlers::dashboard::create_dashboard_ws_ticket),
         )
         .route("/api/mcp/tools", get(handlers::mcp_tools::list_tools))
+        .route("/api/mcp/store", get(handlers::mcp_store::list_templates))
+        .route(
+            "/api/mcp/store/categories",
+            get(handlers::mcp_store::list_categories),
+        )
         .route("/api/mcp/logs", get(handlers::mcp_logs::list_mcp_logs))
         .route(
             "/api/gateway/logs",
@@ -565,6 +570,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route(
             "/api/mcp/servers/{id}/discover",
             post(handlers::mcp_tools::discover_tools),
+        )
+        .route(
+            "/api/mcp/store/{slug}/install",
+            post(handlers::mcp_store::install_template),
         )
         .route(
             "/api/admin/users",

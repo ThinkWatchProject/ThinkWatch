@@ -62,10 +62,34 @@
     "platformLogs": "Platform Logs",
     "configGuide": "Configuration Guide",
     "apiDocs": "API Docs",
-    "contentSecurity": "Content Security"
+    "contentSecurity": "Content Security",
+    "mcpStore": "Store"
   },
   "contentSecurity": {
     "subtitle": "Content filter rules and PII redaction patterns applied to AI gateway requests"
+  },
+  "mcpStore": {
+    "title": "MCP Store",
+    "subtitle": "Browse and install MCP server templates",
+    "search": "Search templates...",
+    "allCategories": "All",
+    "featured": "Featured",
+    "install": "Install",
+    "installed": "Installed",
+    "installing": "Installing...",
+    "installSuccess": "MCP server installed successfully",
+    "installTitle": "Install {{name}}",
+    "endpointUrl": "Endpoint URL",
+    "authSecret": "Auth Secret",
+    "deployInstructions": "Deployment Instructions",
+    "noTemplates": "No templates found",
+    "category": {
+      "developer": "Developer",
+      "database": "Database",
+      "communication": "Communication",
+      "cloud": "Cloud",
+      "utility": "Utility"
+    }
   },
   "auth": {
     "signIn": "Sign in",
@@ -689,11 +713,16 @@
     "saveError": "Failed to save settings",
     "requiresRestart": "Requires restart to take effect",
     "addRule": "Add Rule",
+    "sandbox": {
+      "title": "Test Sandbox",
+      "desc": "Paste a sample user message to test both content filter rules and PII redaction at once. Results use your current (unsaved) rules.",
+      "placeholder": "Type or paste sample text here…",
+      "runAll": "Run test"
+    },
     "contentFilter": {
       "title": "Content Filter Rules",
       "intro": "Each AI request is checked against these rules. When the user message matches a rule, the gateway runs the rule's action: Block rejects the request, Warn allows it but logs an alert, Log silently records the hit. Changes apply immediately, no restart needed.",
-      "loadPresets": "Load presets",
-      "testSandbox": "Test sandbox",
+      "loadPresets": "Presets",
       "empty": "No rules yet. Add rules manually or load a preset to get started.",
       "ruleName": "Rule name",
       "namePlaceholder": "e.g. Jailbreak",
@@ -708,12 +737,8 @@
       "actionBlockHint": "Reject the request with an error.",
       "actionWarnHint": "Allow the request, raise a warning in audit logs.",
       "actionLogHint": "Allow the request silently, only record in logs.",
-      "sandboxTitle": "Test Content Filter Rules",
-      "sandboxDesc": "Paste a sample user message to see which of your current (unsaved) rules would fire and which action would run.",
-      "sandboxPlaceholder": "Type or paste sample text here…",
       "sandboxNoMatches": "No rules matched.",
       "sandboxMatchCount": "{{count}} rule(s) matched",
-      "runTest": "Run test",
       "presetsTitle": "Built-in Rule Presets",
       "presetsDesc": "Click a preset to append its rules to your current list. Existing rules are kept. You can edit each rule afterward.",
       "preset": {
@@ -734,7 +759,6 @@
     "pii": {
       "title": "PII Redactor",
       "intro": "These regex patterns are matched against user messages before they are forwarded to the AI provider. Each match is replaced with a placeholder; the AI's response is then post-processed to restore the original values, so the upstream model never sees the raw PII.",
-      "testSandbox": "Test sandbox",
       "addPattern": "Add Pattern",
       "loadPresets": "Presets",
       "presetHint": "Click to add a preset pattern",
@@ -744,13 +768,9 @@
       "regex": "Regex pattern",
       "placeholderLabel": "Placeholder prefix",
       "behavior": "Each pattern: 1) finds matches in user input, 2) replaces them with {{PREFIX_xxxx_n}} placeholders before sending upstream, 3) restores original values in the response. Changes apply immediately, no restart needed.",
-      "sandboxTitle": "Test PII Redactor",
-      "sandboxDesc": "Paste sample text to see how it would look after the current (unsaved) PII patterns are applied.",
-      "sandboxPlaceholder": "Type or paste sample text containing emails, phone numbers, etc.",
       "sandboxNoMatches": "(no PII detected — text unchanged)",
       "sandboxMatchCount": "{{count}} item(s) redacted",
-      "redactedOutput": "Redacted output (what the AI receives)",
-      "runTest": "Run test"
+      "redactedOutput": "Redacted output (what the AI receives)"
     },
     "thresholds": "Alert Thresholds",
     "webhookUrl": "Webhook URL",

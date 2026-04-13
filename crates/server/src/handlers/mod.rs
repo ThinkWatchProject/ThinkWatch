@@ -13,6 +13,7 @@ pub mod limits;
 pub mod log_forwarders;
 pub mod mcp_logs;
 pub mod mcp_servers;
+pub mod mcp_store;
 pub mod mcp_tools;
 pub mod metrics;
 pub mod models;

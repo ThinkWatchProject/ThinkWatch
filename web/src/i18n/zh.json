@@ -62,10 +62,34 @@
     "platformLogs": "平台日志",
     "configGuide": "配置指南",
     "apiDocs": "API 文档",
-    "contentSecurity": "内容安全"
+    "contentSecurity": "内容安全",
+    "mcpStore": "商店"
   },
   "contentSecurity": {
     "subtitle": "应用于 AI 网关请求的内容过滤规则和 PII 脱敏配置"
+  },
+  "mcpStore": {
+    "title": "MCP 商店",
+    "subtitle": "浏览和安装 MCP 服务器模板",
+    "search": "搜索模板...",
+    "allCategories": "全部",
+    "featured": "推荐",
+    "install": "安装",
+    "installed": "已安装",
+    "installing": "安装中...",
+    "installSuccess": "MCP 服务器安装成功",
+    "installTitle": "安装 {{name}}",
+    "endpointUrl": "端点地址",
+    "authSecret": "认证密钥",
+    "deployInstructions": "部署说明",
+    "noTemplates": "未找到模板",
+    "category": {
+      "developer": "开发工具",
+      "database": "数据库",
+      "communication": "通信",
+      "cloud": "云服务",
+      "utility": "工具"
+    }
   },
   "auth": {
     "signIn": "登录",
@@ -689,11 +713,16 @@
     "saveError": "保存设置失败",
     "requiresRestart": "需要重启生效",
     "addRule": "添加规则",
+    "sandbox": {
+      "title": "测试沙箱",
+      "desc": "粘贴一段示例用户消息，同时测试内容过滤规则和 PII 脱敏效果。使用当前（未保存）的规则。",
+      "placeholder": "在此输入或粘贴示例文本…",
+      "runAll": "运行测试"
+    },
     "contentFilter": {
       "title": "内容过滤规则",
       "intro": "网关在转发请求前会用以下规则逐条检查 user 消息内容。命中后按规则的「动作」执行：拦截会拒绝请求，告警会放行但写入审计告警，记录则只写日志。修改后立即生效，无需重启。",
-      "loadPresets": "加载预设",
-      "testSandbox": "测试沙箱",
+      "loadPresets": "预设",
       "empty": "暂无规则。手动添加或加载预设以开始使用。",
       "ruleName": "规则名称",
       "namePlaceholder": "如：越狱检测",
@@ -708,12 +737,8 @@
       "actionBlockHint": "拒绝请求并返回错误。",
       "actionWarnHint": "放行请求，在审计日志中记录告警。",
       "actionLogHint": "放行请求，仅在日志中静默记录。",
-      "sandboxTitle": "测试内容过滤规则",
-      "sandboxDesc": "粘贴一段示例 user 消息，立即查看当前（未保存）的规则中哪些会命中、会执行什么动作。",
-      "sandboxPlaceholder": "在此输入或粘贴示例文本…",
       "sandboxNoMatches": "没有规则命中。",
       "sandboxMatchCount": "命中 {{count}} 条规则",
-      "runTest": "运行测试",
       "presetsTitle": "内置规则预设",
       "presetsDesc": "点击预设可将其规则追加到当前列表，已有规则保留。追加后可随时编辑每条规则。",
       "preset": {
@@ -734,7 +759,6 @@
     "pii": {
       "title": "PII 脱敏",
       "intro": "用以下正则匹配 user 消息中的敏感信息。命中后会先用占位符替换再转发给 AI，AI 返回后再把原始值还原回来——上游模型永远看不到原始 PII。",
-      "testSandbox": "测试沙箱",
       "addPattern": "添加规则",
       "loadPresets": "预设",
       "presetHint": "点击添加预设规则",
@@ -744,13 +768,9 @@
       "regex": "正则表达式",
       "placeholderLabel": "占位符前缀",
       "behavior": "每条规则会：1）在 user 输入中查找匹配 2）发送上游前替换为 {{PREFIX_xxxx_n}} 占位符 3）在响应中还原原始值。修改后立即生效，无需重启。",
-      "sandboxTitle": "测试 PII 脱敏",
-      "sandboxDesc": "粘贴一段示例文本，立即查看当前（未保存）的 PII 规则应用后的效果。",
-      "sandboxPlaceholder": "输入或粘贴包含邮箱、电话等敏感信息的示例文本…",
       "sandboxNoMatches": "（未检测到 PII — 文本未变化）",
       "sandboxMatchCount": "脱敏 {{count}} 项",
-      "redactedOutput": "脱敏后输出（AI 接收到的内容）",
-      "runTest": "运行测试"
+      "redactedOutput": "脱敏后输出（AI 接收到的内容）"
     },
     "thresholds": "告警阈值",
     "webhookUrl": "Webhook URL",

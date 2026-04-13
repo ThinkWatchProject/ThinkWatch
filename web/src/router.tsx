@@ -28,6 +28,7 @@ const UnifiedLogsPage = lazyRouteComponent(() => import('@/routes/logs'), 'Unifi
 const GuidePage = lazyRouteComponent(() => import('@/routes/guide'), 'GuidePage');
 const McpServersPage = lazyRouteComponent(() => import('@/routes/mcp/servers'), 'McpServersPage');
 const McpToolsPage = lazyRouteComponent(() => import('@/routes/mcp/tools'), 'McpToolsPage');
+const McpStorePage = lazyRouteComponent(() => import('@/routes/mcp/store'), 'McpStorePage');
 const UsagePage = lazyRouteComponent(() => import('@/routes/analytics/usage'), 'UsagePage');
 const CostsPage = lazyRouteComponent(() => import('@/routes/analytics/costs'), 'CostsPage');
 const UsersPage = lazyRouteComponent(() => import('@/routes/admin/users'), 'UsersPage');
@@ -236,6 +237,11 @@ const mcpToolsRoute = createRoute({
   component: McpToolsPage,
 });
 
+const mcpStoreRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/mcp/store',
+  component: McpStorePage,
+});
 
 const usageRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -331,6 +337,7 @@ const routeTree = rootRoute.addChildren([
   guideRoute,
   mcpServersRoute,
   mcpToolsRoute,
+  mcpStoreRoute,
   usageRoute,
   costsRoute,
   usersRoute,
