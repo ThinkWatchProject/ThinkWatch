@@ -65,8 +65,9 @@ export function StepBasics({
     if (!tpl) return;
     const valid = new Set(permissions.map((p) => p.key));
     scopeState.setPerms(new Set(tpl.permissions.filter((k) => valid.has(k))));
-    scopeState.setModels(null);
-    scopeState.setMcpTools(null);
+    // Templates may pin a model/tool allowlist; undefined = leave open.
+    scopeState.setModels(tpl.models === undefined ? null : new Set(tpl.models));
+    scopeState.setMcpTools(tpl.mcpTools === undefined ? null : new Set(tpl.mcpTools));
   };
 
   return (

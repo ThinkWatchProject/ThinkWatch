@@ -13,7 +13,7 @@ import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { RoleWizard } from '@/components/roles/RoleWizard';
-import { useRoleForm, fromRoleResponse, emptyRoleForm } from '@/components/roles/useRoleForm';
+import { useRoleForm, fromRoleResponse, emptyRoleForm, buildRolePayload } from '@/components/roles/useRoleForm';
 import { PermissionTree } from '@/components/roles/PermissionTree';
 import { StepBasics } from '@/components/roles/steps/StepBasics';
 import { StepReview } from '@/components/roles/steps/StepReview';
@@ -373,10 +373,9 @@ export function RolesPage() {
   const handleCreate = async (e?: FormEvent) => {
     e?.preventDefault();
     createForm.setPolicyError('');
-    let policyDocument: PolicyDocument | null = null;
     if (createForm.mode === 'policy' && createForm.policyJson.trim()) {
       try {
-        policyDocument = JSON.parse(createForm.policyJson) as PolicyDocument;
+        JSON.parse(createForm.policyJson);
       } catch {
         createForm.setPolicyError(t('roles.invalidJson'));
         return;
@@ -388,10 +387,7 @@ export function RolesPage() {
         await apiPost('/api/admin/roles', {
           name: createForm.name,
           description: createForm.description || null,
-          permissions: createForm.mode === 'simple' ? Array.from(createForm.perms) : [],
-          allowed_models: createForm.models === null ? null : Array.from(createForm.models),
-          allowed_mcp_tools: createForm.mcpTools === null ? null : Array.from(createForm.mcpTools),
-          policy_document: policyDocument,
+          ...buildRolePayload(createForm, permissions),
         });
         setCreateOpen(false);
         resetCreateForm();
@@ -424,10 +420,9 @@ export function RolesPage() {
     e?.preventDefault();
     if (!editRole) return;
     editForm.setPolicyError('');
-    let policyDocument: PolicyDocument | null = null;
     if (editForm.mode === 'policy' && editForm.policyJson.trim()) {
       try {
-        policyDocument = JSON.parse(editForm.policyJson) as PolicyDocument;
+        JSON.parse(editForm.policyJson);
       } catch {
         editForm.setPolicyError(t('roles.invalidJson'));
         return;
@@ -439,10 +434,7 @@ export function RolesPage() {
         await apiPatch(`/api/admin/roles/${editRole.id}`, {
           name: editForm.name,
           description: editForm.description || null,
-          permissions: editForm.mode === 'simple' ? Array.from(editForm.perms) : [],
-          allowed_models: editForm.models === null ? null : Array.from(editForm.models),
-          allowed_mcp_tools: editForm.mcpTools === null ? null : Array.from(editForm.mcpTools),
-          policy_document: policyDocument,
+          ...buildRolePayload(editForm, permissions),
         });
         setEditOpen(false);
         setEditRole(null);

@@ -175,6 +175,14 @@ export interface SimpleTemplate {
   /// PERMISSION_CATALOG before being applied — anything not in the
   /// catalog is silently dropped.
   permissions: string[];
+  /// Optional model-id allowlist preset. `undefined` = unrestricted
+  /// (template doesn't constrain models). Empty array = explicit
+  /// "no models reachable" — useful for read-only roles that shouldn't
+  /// invoke any model even if granted ai_gateway:use.
+  models?: string[];
+  /// Optional MCP-tool allowlist preset (matches `mcpToolKey` patterns
+  /// like `mysql__*` or `github__list_issues`).
+  mcpTools?: string[];
 }
 
 export const SIMPLE_TEMPLATES: SimpleTemplate[] = [
@@ -196,6 +204,8 @@ export const SIMPLE_TEMPLATES: SimpleTemplate[] = [
     ],
   },
   // Read-only across the surface a non-admin can browse.
+  // Models / MCP tools are explicitly empty so a read-only viewer can't
+  // accidentally rack up usage on someone else's quota.
   {
     id: 'read_only',
     permissions: [
@@ -212,6 +222,8 @@ export const SIMPLE_TEMPLATES: SimpleTemplate[] = [
       'content_filter:read',
       'pii_redactor:read',
     ],
+    models: [],
+    mcpTools: [],
   },
   // Operational admin that can run the platform but cannot touch
   // users, roles, or system-level OIDC config. Useful for an SRE who
