@@ -336,31 +336,30 @@ export function RolesPage() {
   const switchMode = (
     next: 'simple' | 'policy',
     current: 'simple' | 'policy',
-    state: {
-      perms: Set<string>;
-      setPerms: (p: Set<string>) => void;
-      policyJson: string;
-      setPolicyJson: (j: string) => void;
-      setPolicyError: (e: string) => void;
-      setMode: (m: 'simple' | 'policy') => void;
-    },
+    form: ReturnType<typeof useRoleForm>,
   ) => {
     if (next === current) return;
     if (next === 'policy') {
-      state.setPolicyJson(JSON.stringify(permsToPolicy(state.perms), null, 2));
-      state.setPolicyError('');
-      state.setMode('policy');
+      // Encode perms + model/tool scope into one JSON document so the
+      // admin sees their full configuration round-trip into policy mode.
+      form.setPolicyJson(
+        JSON.stringify(permsToPolicy(form.perms, form.models, form.mcpTools), null, 2),
+      );
+      form.setPolicyError('');
+      form.setMode('policy');
       return;
     }
     // policy → simple
-    const result = policyToPerms(state.policyJson, permissions);
+    const result = policyToPerms(form.policyJson, permissions);
     if (result.parseError) {
-      state.setPolicyError(t('roles.invalidJson'));
+      form.setPolicyError(t('roles.invalidJson'));
       return; // refuse the switch — invalid JSON would silently nuke perms
     }
-    state.setPerms(result.perms);
-    state.setPolicyError(result.lossy ? t('roles.policySyncLossy') : '');
-    state.setMode('simple');
+    form.setPerms(result.perms);
+    form.setModels(result.models);
+    form.setMcpTools(result.mcpTools);
+    form.setPolicyError(result.lossy ? t('roles.policySyncLossy') : '');
+    form.setMode('simple');
   };
 
   const resetCreateForm = () => createForm.reset(emptyRoleForm());
@@ -810,14 +809,7 @@ export function RolesPage() {
                       <Tabs
                         value={createForm.mode}
                         onValueChange={(v) =>
-                          switchMode(v as 'simple' | 'policy', createForm.mode, {
-                            perms: createForm.perms,
-                            setPerms: createForm.setPerms,
-                            policyJson: createForm.policyJson,
-                            setPolicyJson: createForm.setPolicyJson,
-                            setPolicyError: createForm.setPolicyError,
-                            setMode: createForm.setMode,
-                          })
+                          switchMode(v as 'simple' | 'policy', createForm.mode, createForm)
                         }
                       >
                         <TabsList className="grid w-full grid-cols-2">
@@ -1079,14 +1071,7 @@ export function RolesPage() {
                     <Tabs
                       value={editForm.mode}
                       onValueChange={(v) =>
-                        switchMode(v as 'simple' | 'policy', editForm.mode, {
-                          perms: editForm.perms,
-                          setPerms: editForm.setPerms,
-                          policyJson: editForm.policyJson,
-                          setPolicyJson: editForm.setPolicyJson,
-                          setPolicyError: editForm.setPolicyError,
-                          setMode: editForm.setMode,
-                        })
+                        switchMode(v as 'simple' | 'policy', editForm.mode, editForm)
                       }
                     >
                       <TabsList className="grid w-full grid-cols-2">

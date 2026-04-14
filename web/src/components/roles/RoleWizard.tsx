@@ -1,9 +1,9 @@
-import { useState, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { cn } from '@/lib/utils';
-import { CheckCircle2 } from 'lucide-react';
+import { CheckCircle2, AlertCircle } from 'lucide-react';
 
 export interface WizardStep {
   id: string;
@@ -80,43 +80,81 @@ export function RoleWizard({
     onSubmit();
   };
 
+  // Keyboard shortcuts: Cmd/Ctrl+Enter to advance (or submit on the last
+  // step), Cmd/Ctrl+Shift+Enter to go back. Skipped when focus is in a
+  // textarea so JSON editing isn't hijacked.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key !== 'Enter') return;
+      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
+      if (tag === 'textarea') return;
+      e.preventDefault();
+      if (e.shiftKey) goPrev();
+      else if (isLast) handleSubmit();
+      else goNext();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentIdx, isLast]);
+
   return (
     <Tabs
       orientation="vertical"
       value={currentId}
       onValueChange={setCurrentId}
-      className="flex flex-1 flex-row gap-6 min-h-[30rem]"
+      className="flex flex-1 flex-col gap-4 min-h-[30rem] md:flex-row md:gap-6"
     >
-      <TabsList className="flex h-auto flex-col items-stretch gap-1 bg-transparent p-0 w-52 shrink-0">
-        {steps.map((s, i) => (
-          <TabsTrigger
-            key={s.id}
-            value={s.id}
-            className={cn(
-              'justify-start gap-3 rounded-md px-3 py-2 text-left',
-              'data-[state=active]:bg-accent data-[state=active]:text-accent-foreground',
-            )}
-          >
-            <span
+      <TabsList
+        className={cn(
+          'flex h-auto bg-transparent p-0',
+          // Mobile: horizontal scrollable rail. Desktop: vertical column.
+          'flex-row items-stretch gap-1 overflow-x-auto md:w-52 md:shrink-0 md:flex-col',
+        )}
+      >
+        {steps.map((s, i) => {
+          const stepErr = errors[s.id];
+          return (
+            <TabsTrigger
+              key={s.id}
+              value={s.id}
               className={cn(
-                'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-medium',
-                i < currentIdx
-                  ? 'border-primary bg-primary text-primary-foreground'
-                  : i === currentIdx
-                    ? 'border-primary text-primary'
-                    : 'border-muted-foreground/30 text-muted-foreground',
+                'justify-start gap-3 rounded-md px-3 py-2 text-left shrink-0 md:shrink',
+                'data-[state=active]:bg-accent data-[state=active]:text-accent-foreground',
+                stepErr && 'data-[state=inactive]:text-destructive',
               )}
             >
-              {i < currentIdx ? <CheckCircle2 className="h-3.5 w-3.5" /> : i + 1}
-            </span>
-            <span className="flex min-w-0 flex-1 flex-col">
-              <span className="truncate text-sm">{s.label}</span>
-              {s.hint && (
-                <span className="truncate text-[10px] text-muted-foreground">{s.hint}</span>
-              )}
-            </span>
-          </TabsTrigger>
-        ))}
+              <span
+                className={cn(
+                  'flex h-6 w-6 shrink-0 items-center justify-center rounded-full border text-xs font-medium',
+                  stepErr
+                    ? 'border-destructive bg-destructive/10 text-destructive'
+                    : i < currentIdx
+                      ? 'border-primary bg-primary text-primary-foreground'
+                      : i === currentIdx
+                        ? 'border-primary text-primary'
+                        : 'border-muted-foreground/30 text-muted-foreground',
+                )}
+              >
+                {stepErr ? (
+                  <AlertCircle className="h-3.5 w-3.5" />
+                ) : i < currentIdx ? (
+                  <CheckCircle2 className="h-3.5 w-3.5" />
+                ) : (
+                  i + 1
+                )}
+              </span>
+              <span className="hidden min-w-0 flex-1 flex-col md:flex">
+                <span className="truncate text-sm">{s.label}</span>
+                {s.hint && (
+                  <span className="truncate text-[10px] text-muted-foreground">{s.hint}</span>
+                )}
+              </span>
+              <span className="md:hidden text-sm">{s.label}</span>
+            </TabsTrigger>
+          );
+        })}
       </TabsList>
 
       <div className="flex min-w-0 flex-1 flex-col">
@@ -128,13 +166,14 @@ export function RoleWizard({
           ))}
         </div>
 
-        {currentErr && (
-          <p className="mt-3 text-xs text-destructive">{currentErr}</p>
-        )}
+        {currentErr && <p className="mt-3 text-xs text-destructive">{currentErr}</p>}
 
         <div className="mt-4 flex items-center gap-2 border-t pt-4">
           {footerExtras}
           <div className="ml-auto flex items-center gap-2">
+            <span className="hidden text-[10px] text-muted-foreground md:inline">
+              ⌘↵ {isLast ? submitLabel : t('common.next', 'Next')}
+            </span>
             {!isFirst && (
               <Button type="button" variant="outline" onClick={goPrev} disabled={submitting}>
                 {t('common.previous', 'Previous')}

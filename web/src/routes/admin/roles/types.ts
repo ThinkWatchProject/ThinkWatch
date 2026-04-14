@@ -286,19 +286,52 @@ export function groupByResource(perms: PermissionDef[]): Map<string, PermissionD
 // the admin before they overwrite the JSON.
 // ----------------------------------------------------------------------------
 
-export function permsToPolicy(perms: Set<string>): PolicyDocument {
-  if (perms.size === 0) return { Version: '2024-01-01', Statement: [] };
-  return {
-    Version: '2024-01-01',
-    Statement: [
-      {
-        Sid: 'AllowPermissions',
-        Effect: 'Allow',
-        Action: Array.from(perms).sort(),
-        Resource: '*',
-      },
-    ],
-  };
+/// Encode the simple-mode form into a policy document. Permissions become
+/// a wildcard-Resource Allow; model/MCP-tool scope become additional Allow
+/// statements with `model:` / `mcp_tool:` prefixed Resources. `null` scope
+/// (= unrestricted) is omitted entirely so the JSON only carries explicit
+/// constraints.
+export function permsToPolicy(
+  perms: Set<string>,
+  models?: Set<string> | null,
+  mcpTools?: Set<string> | null,
+): PolicyDocument {
+  const statements: PolicyStatement[] = [];
+  if (perms.size > 0) {
+    statements.push({
+      Sid: 'AllowPermissions',
+      Effect: 'Allow',
+      Action: Array.from(perms).sort(),
+      Resource: '*',
+    });
+  }
+  if (models != null) {
+    statements.push({
+      Sid: 'ModelScope',
+      Effect: 'Allow',
+      Action: 'ai_gateway:use',
+      Resource:
+        models.size === 0
+          ? []
+          : Array.from(models)
+              .sort()
+              .map((m) => `model:${m}`),
+    });
+  }
+  if (mcpTools != null) {
+    statements.push({
+      Sid: 'McpToolScope',
+      Effect: 'Allow',
+      Action: 'mcp_gateway:use',
+      Resource:
+        mcpTools.size === 0
+          ? []
+          : Array.from(mcpTools)
+              .sort()
+              .map((t) => `mcp_tool:${t}`),
+    });
+  }
+  return { Version: '2024-01-01', Statement: statements };
 }
 
 export function isWildcardResource(r: PolicyStatement['Resource']): boolean {
@@ -307,38 +340,74 @@ export function isWildcardResource(r: PolicyStatement['Resource']): boolean {
   return false;
 }
 
-export function policyToPerms(
-  json: string,
-  available: PermissionDef[],
-): { perms: Set<string>; lossy: boolean; parseError: boolean } {
-  const out = new Set<string>();
-  if (!json.trim()) return { perms: out, lossy: false, parseError: false };
+export interface PolicyParseResult {
+  perms: Set<string>;
+  /** `null` = unrestricted (no ModelScope statement seen); Set = restrict. */
+  models: Set<string> | null;
+  /** Same shape, for MCP tools scope. */
+  mcpTools: Set<string> | null;
+  /** True if any statement couldn't be expressed in simple mode. */
+  lossy: boolean;
+  parseError: boolean;
+}
+
+export function policyToPerms(json: string, available: PermissionDef[]): PolicyParseResult {
+  const out: PolicyParseResult = {
+    perms: new Set(),
+    models: null,
+    mcpTools: null,
+    lossy: false,
+    parseError: false,
+  };
+  if (!json.trim()) return out;
   let doc: PolicyDocument;
   try {
     doc = JSON.parse(json) as PolicyDocument;
   } catch {
-    return { perms: out, lossy: false, parseError: true };
+    out.parseError = true;
+    return out;
   }
-  let lossy = false;
   const valid = new Set(available.map((p) => p.key));
   for (const st of doc.Statement ?? []) {
-    if (st.Effect !== 'Allow' || !isWildcardResource(st.Resource)) {
-      lossy = true;
+    if (st.Effect !== 'Allow') {
+      out.lossy = true;
+      continue;
+    }
+    // Detect scope statements by their Resource shape — any non-wildcard
+    // Resource with `model:` / `mcp_tool:` prefixes is treated as a scope
+    // restriction rather than a regular permission grant.
+    const resources = Array.isArray(st.Resource) ? st.Resource : [st.Resource];
+    const modelResources = resources.filter(
+      (r): r is string => typeof r === 'string' && r.startsWith('model:'),
+    );
+    const toolResources = resources.filter(
+      (r): r is string => typeof r === 'string' && r.startsWith('mcp_tool:'),
+    );
+    if (modelResources.length > 0 || st.Sid === 'ModelScope') {
+      out.models = new Set(modelResources.map((r) => r.slice('model:'.length)));
+      continue;
+    }
+    if (toolResources.length > 0 || st.Sid === 'McpToolScope') {
+      out.mcpTools = new Set(toolResources.map((r) => r.slice('mcp_tool:'.length)));
+      continue;
+    }
+    if (!isWildcardResource(st.Resource)) {
+      out.lossy = true;
       continue;
     }
     const actions = Array.isArray(st.Action) ? st.Action : [st.Action];
     for (const a of actions) {
       if (a === '*') {
-        for (const p of available) out.add(p.key);
+        for (const p of available) out.perms.add(p.key);
       } else if (a.endsWith(':*')) {
         const prefix = a.slice(0, -1); // includes the colon
-        for (const p of available) if (p.key.startsWith(prefix)) out.add(p.key);
+        for (const p of available) if (p.key.startsWith(prefix)) out.perms.add(p.key);
       } else if (valid.has(a)) {
-        out.add(a);
+        out.perms.add(a);
       } else {
-        lossy = true;
+        out.lossy = true;
       }
     }
   }
-  return { perms: out, lossy, parseError: false };
+  return out;
 }
