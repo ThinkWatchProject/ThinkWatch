@@ -18,6 +18,7 @@ import { PermissionTree } from '@/components/roles/PermissionTree';
 import { StepBasics } from '@/components/roles/steps/StepBasics';
 import { StepReview } from '@/components/roles/steps/StepReview';
 import { RoleHistory } from '@/components/roles/RoleHistory';
+import { RoleMembers } from '@/components/roles/RoleMembers';
 import { LimitsDraftEditor, persistDrafts } from '@/components/roles/LimitsDraftEditor';
 import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
@@ -1181,6 +1182,23 @@ export function RolesPage() {
                 ) : null,
               },
               {
+                id: 'members',
+                label: t('roles.stepMembers'),
+                hint: t('roles.stepMembersHint'),
+                content: editRole ? (
+                  <div className="space-y-3">
+                    <p className="text-[11px] italic text-muted-foreground">
+                      {t('roles.membersImmediateNote')}
+                    </p>
+                    <RoleMembers
+                      role={editRole}
+                      teamsById={teamsById}
+                      onMembersChanged={fetchData}
+                    />
+                  </div>
+                ) : null,
+              },
+              {
                 id: 'history',
                 label: t('roles.stepHistory'),
                 hint: t('roles.stepHistoryHint'),
@@ -1571,117 +1589,6 @@ function RoleDetail({
   const { t } = useTranslation();
   const selected = new Set(role.permissions);
 
-  // Fetch members lazily on open. The list lives outside the cached
-  // /api/admin/roles snapshot so it can be slow without slowing the
-  // initial table render.
-  const [members, setMembers] = useState<RoleMember[] | null>(null);
-  const [membersError, setMembersError] = useState(false);
-  const reloadMembers = useCallback(async () => {
-    try {
-      const res = await api<{ items: RoleMember[] }>(`/api/admin/roles/${role.id}/members`);
-      setMembers(res.items);
-      setMembersError(false);
-    } catch {
-      setMembersError(true);
-    }
-  }, [role.id]);
-  useEffect(() => {
-    setMembers(null);
-    setMembersError(false);
-    reloadMembers();
-  }, [reloadMembers]);
-
-  // Lazy user picker for the "add member" form. Fetched on demand
-  // (clicking the add button) so opening the dialog doesn't always
-  // pay the cost — most viewings are read-only.
-  const [users, setUsers] = useState<PickableUser[] | null>(null);
-  const [pickerOpen, setPickerOpen] = useState(false);
-  const [picking, setPicking] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [memberError, setMemberError] = useState('');
-  const ensureUsers = async () => {
-    if (users !== null) return;
-    try {
-      const res = await api<{ data: PickableUser[] }>('/api/admin/users');
-      setUsers(res.data);
-    } catch (e) {
-      setMemberError(e instanceof Error ? e.message : 'Failed to load users');
-    }
-  };
-
-  /// Update one user's role_assignments via PATCH /api/admin/users/{id}.
-  /// Used by both the add and remove flows. The backend's update_user
-  /// applies replace-all semantics, so we have to send the full
-  /// assignment list, not a diff.
-  const writeAssignments = async (
-    user: PickableUser,
-    next: PickableUser['role_assignments'],
-  ) => {
-    await apiPatch(`/api/admin/users/${user.id}`, {
-      role_assignments: next.map((a) => ({ role_id: a.role_id, scope: a.scope })),
-    });
-  };
-
-  const addMember = async () => {
-    if (!picking || !users) return;
-    const user = users.find((u) => u.id === picking);
-    if (!user) return;
-    if (user.role_assignments.some((a) => a.role_id === role.id && a.scope === 'global')) {
-      setMemberError(t('roles.memberAlreadyAssigned'));
-      return;
-    }
-    setBusy(true);
-    setMemberError('');
-    try {
-      const next = [
-        ...user.role_assignments,
-        { role_id: role.id, name: role.name, is_system: role.is_system, scope: 'global' },
-      ];
-      await writeAssignments(user, next);
-      // Locally patch the cached user list so subsequent picks reflect
-      // the change without a refetch.
-      setUsers(
-        (users ?? []).map((u) => (u.id === user.id ? { ...u, role_assignments: next } : u)),
-      );
-      setPicking('');
-      setPickerOpen(false);
-      await reloadMembers();
-      onMembersChanged();
-    } catch (e) {
-      setMemberError(e instanceof Error ? e.message : 'Failed');
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const removeMember = async (m: RoleMember) => {
-    setBusy(true);
-    setMemberError('');
-    try {
-      // Read-modify-write the user. We could be operating on stale
-      // local state but the backend's PATCH is replace-all, so we
-      // refetch this user's current assignments first.
-      const fresh = await api<{ data: PickableUser[] }>(
-        `/api/admin/users?per_page=1000`,
-      );
-      const user = fresh.data.find((u) => u.id === m.user_id);
-      if (!user) {
-        setMemberError(t('roles.memberNotFound'));
-        return;
-      }
-      const next = user.role_assignments.filter(
-        (a) => !(a.role_id === role.id && a.scope === m.scope),
-      );
-      await writeAssignments(user, next);
-      setUsers(fresh.data);
-      await reloadMembers();
-      onMembersChanged();
-    } catch (e) {
-      setMemberError(e instanceof Error ? e.message : 'Failed');
-    } finally {
-      setBusy(false);
-    }
-  };
 
   // History tab is lazy-loaded the first time the user clicks it.
   // ClickHouse may be unavailable in dev — the endpoint returns an
@@ -1807,148 +1714,10 @@ function RoleDetail({
             )}
           </div>
         )}
-        {/* Members — who's actually using this role today, with
-            inline add / remove. */}
-        <div>
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-xs uppercase tracking-wider text-muted-foreground">
-              {t('roles.members')}
-            </span>
-            {!pickerOpen && (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="h-6 px-2 text-xs"
-                onClick={async () => {
-                  setMemberError('');
-                  setPickerOpen(true);
-                  await ensureUsers();
-                }}
-              >
-                <Plus className="mr-1 h-3 w-3" />
-                {t('roles.addMember')}
-              </Button>
-            )}
-          </div>
-          {pickerOpen && (
-            <div className="mb-2 flex items-center gap-2 rounded-md border bg-muted/20 p-2">
-              <div className="flex-1">
-                <Select value={picking} onValueChange={setPicking}>
-                  <SelectTrigger className="h-8">
-                    <SelectValue placeholder={t('roles.pickUser')} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {users === null ? (
-                      <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                        {t('common.loading')}
-                      </div>
-                    ) : (
-                      users
-                        // Hide users who already hold this role at global scope.
-                        .filter(
-                          (u) =>
-                            !u.role_assignments.some(
-                              (a) => a.role_id === role.id && a.scope === 'global',
-                            ),
-                        )
-                        .map((u) => (
-                          <SelectItem key={u.id} value={u.id}>
-                            <span className="font-mono text-xs">{u.email}</span>
-                            {u.display_name && (
-                              <span className="ml-2 text-[10px] text-muted-foreground">
-                                {u.display_name}
-                              </span>
-                            )}
-                          </SelectItem>
-                        ))
-                    )}
-                  </SelectContent>
-                </Select>
-              </div>
-              <Button
-                type="button"
-                size="sm"
-                className="h-8"
-                disabled={!picking || busy}
-                onClick={addMember}
-              >
-                {busy ? t('common.loading') : t('common.add')}
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className="h-8"
-                onClick={() => {
-                  setPickerOpen(false);
-                  setPicking('');
-                  setMemberError('');
-                }}
-              >
-                {t('common.cancel')}
-              </Button>
-            </div>
-          )}
-          {memberError && (
-            <p className="mb-1 text-[11px] text-destructive">{memberError}</p>
-          )}
-          {members === null ? (
-            <div className="text-xs text-muted-foreground italic">
-              {membersError ? t('common.error') : t('common.loading')}
-            </div>
-          ) : members.length === 0 ? (
-            <div className="text-xs italic text-muted-foreground">{t('roles.noMembers')}</div>
-          ) : (
-            <ScrollArea className="max-h-48 rounded-md border">
-              <div className="divide-y">
-                {members.map((m) => (
-                  <div
-                    key={`${m.user_id}-${m.source}-${m.scope}`}
-                    className="flex items-center gap-2 px-3 py-1.5 text-xs"
-                  >
-                    <span className="min-w-0 flex-1 truncate font-mono">{m.email}</span>
-                    {m.display_name && (
-                      <span className="hidden truncate text-muted-foreground sm:inline">
-                        {m.display_name}
-                      </span>
-                    )}
-                    {m.scope !== 'global' && (
-                      <Badge variant="outline" className="text-[9px]">
-                        {(() => {
-                          const teamId = m.scope.startsWith('team:')
-                            ? m.scope.slice(5)
-                            : '';
-                          const team = teamsById.get(teamId);
-                          return team
-                            ? `${t('users.scopeTeam')}: ${team.name}`
-                            : m.scope;
-                        })()}
-                      </Badge>
-                    )}
-                    <Badge
-                      variant={m.source === 'system' ? 'secondary' : 'outline'}
-                      className="text-[9px]"
-                    >
-                      {m.source === 'system' ? t('roles.systemRole') : t('roles.customRoles')}
-                    </Badge>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 text-destructive"
-                      disabled={busy}
-                      onClick={() => removeMember(m)}
-                      aria-label={t('common.delete')}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            </ScrollArea>
-          )}
-        </div>
+        {/* Members — who's actually using this role today. The full
+            picker / add / remove UI lives in <RoleMembers>; reused
+            here and in the edit-wizard "Members" step. */}
+        <RoleMembers role={role} teamsById={teamsById} onMembersChanged={onMembersChanged} />
         </TabsContent>
         <TabsContent value="history" className="py-2">
           {history === null ? (

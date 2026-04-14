@@ -7,7 +7,9 @@
 //
 // Notes
 // - Dynamic keys built from template literals like  t(`foo.${x}`)  are
-//   reported as "dynamic" and skipped (we can't statically resolve them).
+//   resolved against DYNAMIC_ENUMS below — each pattern lists the enum
+//   values it can take, so we can expand+verify the full set. Patterns
+//   without an enum entry are reported as "skipped".
 // - This script is intentionally dependency-free so it runs anywhere Node 18+ is available.
 
 import { readFileSync, readdirSync, statSync } from 'node:fs';
@@ -19,6 +21,52 @@ const webRoot = resolve(__dirname, '..');
 const srcDir = join(webRoot, 'src');
 const enPath = join(webRoot, 'src/i18n/en.json');
 const zhPath = join(webRoot, 'src/i18n/zh.json');
+
+// Dynamic template-literal patterns → list of enum values the variable(s)
+// can take. The pattern is the raw inside of the backticks, e.g.
+// `limits.period_${cap.period}` → key "limits.period_${...}". We resolve
+// on the literal pattern after collapsing the ${...} placeholder to
+// `${_}`, then substitute each value to produce concrete keys.
+//
+// If a source file's dynamic pattern isn't listed here, it falls back to
+// being reported as "skipped" so the author is prompted to add it.
+const DYNAMIC_ENUMS = {
+  'limits.surfaceShort_${_}': ['ai_gateway', 'mcp_gateway', 'console'],
+  'limits.surface_${_}': ['ai_gateway', 'mcp_gateway', 'console'],
+  'limits.period_${_}': ['daily', 'weekly', 'monthly'],
+  'apiKeys.surface_${_}': ['ai_gateway', 'mcp_gateway', 'console'],
+  'apiKeys.surfaceShort_${_}': ['ai_gateway', 'mcp_gateway', 'console'],
+  'permissions.resource.${_}': [
+    'ai_gateway', 'mcp_gateway', 'api_keys', 'providers', 'mcp_servers',
+    'users', 'team', 'sessions', 'roles', 'analytics', 'audit_logs',
+    'logs', 'log_forwarders', 'webhooks', 'content_filter', 'pii_redactor',
+    'settings', 'system',
+  ],
+  'permissions.action.${_}': [
+    'use', 'read', 'create', 'update', 'delete', 'rotate', 'rotate_key',
+    'revoke', 'write', 'read_own', 'read_team', 'read_all',
+    'configure_oidc', 'edit_system',
+  ],
+  'roles.template_${_}': ['gateway_user', 'read_only', 'ops_admin', 'analytics_only'],
+  'logs.preset.${_}': ['last1h', 'last6h', 'last24h', 'last3d', 'last7d', 'last30d'],
+  'settings.contentFilter.preset.${_}.name': ['basic', 'strict', 'chinese'],
+  'settings.contentFilter.preset.${_}.description': ['basic', 'strict', 'chinese'],
+  'mcpStore.category.${_}': [
+    'developer', 'database', 'communication', 'cloud',
+    'utility', 'knowledge', 'productivity',
+  ],
+  'setup.steps.${_}': ['welcome', 'admin', 'settings', 'provider', 'complete'],
+  'unifiedLogs.${_}': ['platform', 'audit', 'gateway', 'mcp', 'access', 'app'],
+  'unifiedLogs.${_}Desc': ['platform', 'audit', 'gateway', 'mcp', 'access', 'app'],
+  // Conditional ternary — enumerate the three literal outcomes.
+  "common.${_}": ['healthy', 'down', 'unknown'],
+};
+
+// Normalize an observed dynamic pattern (from source) to the form used as
+// a key in DYNAMIC_ENUMS: replace every ${...} with ${_}.
+function normalizeDynamic(pattern) {
+  return pattern.replace(/\$\{[^}]*\}/g, '${_}');
+}
 
 const RED = '\x1b[31m';
 const GREEN = '\x1b[32m';
@@ -127,11 +175,51 @@ if (undefinedKeys.length > 0) {
   console.log(`${GREEN}✓${RESET} all ${usedKeys.size} statically-used keys exist in en.json`);
 }
 
-if (dynamicHits.size > 0) {
-  console.log(
-    `${YELLOW}ℹ${RESET} ${dynamicHits.size} dynamic key pattern(s) skipped (cannot be statically verified):`,
+// ---------------------------------------------------------------------------
+// Step 3: expand each dynamic pattern via DYNAMIC_ENUMS and verify
+// ---------------------------------------------------------------------------
+
+const unresolvedPatterns = [];
+const missingDynamicKeys = [];
+let resolvedPatternCount = 0;
+let resolvedKeyCount = 0;
+
+for (const [pattern, file] of dynamicHits) {
+  const norm = normalizeDynamic(pattern);
+  const values = DYNAMIC_ENUMS[norm];
+  if (!values) {
+    unresolvedPatterns.push({ pattern, file });
+    continue;
+  }
+  resolvedPatternCount += 1;
+  for (const v of values) {
+    const key = norm.replace('${_}', v);
+    resolvedKeyCount += 1;
+    if (!enKeys.has(key)) {
+      missingDynamicKeys.push({ key, pattern, file });
+    }
+  }
+}
+
+if (missingDynamicKeys.length > 0) {
+  console.error(
+    `${RED}✗ Dynamic keys expanded from DYNAMIC_ENUMS but missing from en.json:${RESET}`,
   );
-  for (const [pattern, file] of dynamicHits) {
+  for (const { key, pattern } of missingDynamicKeys) {
+    console.error(`    ${key}  (from \`${pattern}\`)`);
+  }
+  failed = true;
+} else if (resolvedPatternCount > 0) {
+  console.log(
+    `${GREEN}✓${RESET} ${resolvedPatternCount} dynamic pattern(s) expanded — all ${resolvedKeyCount} enumerated keys exist`,
+  );
+}
+
+if (unresolvedPatterns.length > 0) {
+  console.log(
+    `${YELLOW}ℹ${RESET} ${unresolvedPatterns.length} dynamic pattern(s) lack a DYNAMIC_ENUMS entry — add one to enable static checking:`,
+  );
+  for (const { pattern, file } of unresolvedPatterns) {
     console.log(`    \`${pattern}\` in ${file.replace(webRoot + '/', '')}`);
   }
 }
