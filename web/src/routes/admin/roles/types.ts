@@ -78,8 +78,6 @@ export interface McpToolRow {
   server_id: string;
   /** Display name of the server this tool belongs to. */
   server_name: string;
-  /** Server's `namespace_prefix` — authoritative ACL key. */
-  server_prefix: string;
   /** Raw tool name from the upstream MCP server (e.g. `list_issues`). */
   name: string;
   /** Fully namespaced id used in ACLs (e.g. `github__list_issues`). */

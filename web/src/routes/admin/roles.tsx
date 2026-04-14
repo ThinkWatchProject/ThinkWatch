@@ -215,27 +215,28 @@ export function RolesPage() {
   );
   // server_id → namespace_prefix — authoritative ACL key used for the
   // `<prefix>__*` wildcard when "select all" is clicked on a server.
-  // Prefer this over the tool row's server_prefix (which may be stale
-  // on cached responses) or reverse-derivation (which breaks when the
-  // prefix itself contains `__`).
+  // Sourced from /api/mcp/servers (always present) rather than reverse-
+  // deriving from `namespaced_name` (would break when prefix contains
+  // `__`).
   const serverPrefixById = useMemo(
     () => new Map(availableServers.map((s) => [s.id, s.namespace_prefix])),
     [availableServers],
   );
 
-  // MCP tools grouped by server display name. `prefix` is the
-  // authoritative ACL key sent by the backend — never reverse-derived
-  // from `namespaced_name` because user-set prefixes may themselves
-  // contain `__`.
+  // MCP tools grouped by server display name. Both name and prefix
+  // come from the /api/mcp/servers response (serverNameById /
+  // serverPrefixById) — tools without a corresponding server row are
+  // skipped rather than falling back to server_id, which would leak
+  // an unusable UUID into the picker.
   const mcpToolsByServer = useMemo(() => {
     const out = new Map<
       string,
       { serverName: string; prefix: string; tools: { key: string; toolName: string }[] }
     >();
     for (const tool of availableMcpTools) {
-      const serverName = tool.server_name ?? serverNameById.get(tool.server_id) ?? tool.server_id;
-      const prefix =
-        serverPrefixById.get(tool.server_id) ?? tool.server_prefix ?? tool.server_id;
+      const serverName = serverNameById.get(tool.server_id);
+      const prefix = serverPrefixById.get(tool.server_id);
+      if (!serverName || !prefix) continue; // server removed / out-of-sync
       let group = out.get(serverName);
       if (!group) {
         group = { serverName, prefix, tools: [] };
