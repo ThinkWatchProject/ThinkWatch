@@ -34,6 +34,10 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
+import { Progress } from '@/components/ui/progress';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { ConfirmDialog } from '@/components/confirm-dialog';
+import { toast } from 'sonner';
 import {
   Select,
   SelectContent,
@@ -181,21 +185,24 @@ export function LimitsPanel({
   }, [reload]);
 
   return (
-    <details className="rounded-md border bg-muted/20 px-3 py-2 [&[open]>summary>svg]:rotate-90">
-      <summary className="flex cursor-pointer items-center gap-2 text-sm">
-        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform" />
-        <Label className="cursor-pointer font-medium">{t('limits.title')}</Label>
-        <span className="ml-auto text-[11px] text-muted-foreground">
-          {t('limits.summary', {
-            rules: rules.length,
-            caps: allowBudgets ? caps.length : 0,
-          })}
-        </span>
-      </summary>
-      <div className="mt-3 space-y-4">
-        {error && (
-          <p className="text-xs text-destructive">{error}</p>
-        )}
+    <Collapsible className="rounded-md border bg-muted/20 px-3 py-2">
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="group flex w-full cursor-pointer items-center gap-2 text-sm"
+        >
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+          <Label className="cursor-pointer font-medium">{t('limits.title')}</Label>
+          <span className="ml-auto text-[11px] text-muted-foreground">
+            {t('limits.summary', {
+              rules: rules.length,
+              caps: allowBudgets ? caps.length : 0,
+            })}
+          </span>
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-3 space-y-4">
+        {error && <p className="text-xs text-destructive">{error}</p>}
         {loading && rules.length === 0 && caps.length === 0 ? (
           <p className="text-xs italic text-muted-foreground">{t('common.loading')}</p>
         ) : (
@@ -217,8 +224,8 @@ export function LimitsPanel({
             )}
           </>
         )}
-      </div>
-    </details>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
@@ -240,6 +247,8 @@ function RulesSection({
   onChanged: () => void;
 }) {
   const { t } = useTranslation();
+  const [deleteTarget, setDeleteTarget] = useState<RuleRow | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   // Map rule_id → current count for the inline "X / Y" display.
   // Rules without a usage entry (newly created, never hit) show as
@@ -248,19 +257,17 @@ function RulesSection({
     (usage?.rules ?? []).map((u) => [u.rule_id, u.current]),
   );
 
-  const removeRule = async (rule: RuleRow) => {
-    if (
-      !window.confirm(
-        t('limits.confirmDeleteRule', { label: ruleLabel(rule, t) }),
-      )
-    ) {
-      return;
-    }
+  const confirmRemoveRule = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
     try {
-      await apiDelete(`${base}/rules/${rule.id}`);
+      await apiDelete(`${base}/rules/${deleteTarget.id}`);
+      setDeleteTarget(null);
       onChanged();
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : t('common.operationFailed'));
+      toast.error(e instanceof Error ? e.message : t('common.operationFailed'));
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -321,12 +328,16 @@ function RulesSection({
                     <td className="px-2 py-1.5">
                       <div className="flex items-center gap-1.5">
                         <span className="font-mono tabular-nums">{current}</span>
-                        <div className="h-1 w-12 overflow-hidden rounded bg-muted">
-                          <div
-                            className={`h-full ${pct >= 100 ? 'bg-destructive' : pct >= 80 ? 'bg-yellow-500' : 'bg-primary'}`}
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
+                        <Progress
+                          value={Math.min(100, pct)}
+                          className={`h-1 w-12 bg-muted ${
+                            pct >= 100
+                              ? '[&>[data-slot=progress-indicator]]:bg-destructive'
+                              : pct >= 80
+                                ? '[&>[data-slot=progress-indicator]]:bg-yellow-500'
+                                : ''
+                          }`}
+                        />
                       </div>
                     </td>
                     <td className="px-2 py-1.5">
@@ -341,7 +352,7 @@ function RulesSection({
                         variant="ghost"
                         size="icon"
                         className="h-6 w-6"
-                        onClick={() => removeRule(r)}
+                        onClick={() => setDeleteTarget(r)}
                         aria-label={t('common.delete')}
                       >
                         <Trash2 className="h-3 w-3" />
@@ -356,6 +367,20 @@ function RulesSection({
       )}
 
       <AddRuleRow base={base} surfaces={surfaces} onChanged={onChanged} />
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        onOpenChange={(v) => !v && setDeleteTarget(null)}
+        title={t('common.delete')}
+        description={
+          deleteTarget
+            ? t('limits.confirmDeleteRule', { label: ruleLabel(deleteTarget, t) })
+            : ''
+        }
+        variant="destructive"
+        confirmLabel={t('common.delete')}
+        onConfirm={confirmRemoveRule}
+        loading={deleting}
+      />
     </div>
   );
 }
@@ -561,12 +586,16 @@ function CapsSection({
                     <td className="px-2 py-1.5">
                       <div className="flex items-center gap-1.5">
                         <span className="font-mono tabular-nums">{current}</span>
-                        <div className="h-1 w-16 overflow-hidden rounded bg-muted">
-                          <div
-                            className={`h-full ${pct >= 100 ? 'bg-destructive' : pct >= 80 ? 'bg-yellow-500' : 'bg-primary'}`}
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
+                        <Progress
+                          value={Math.min(100, pct)}
+                          className={`h-1 w-16 bg-muted ${
+                            pct >= 100
+                              ? '[&>[data-slot=progress-indicator]]:bg-destructive'
+                              : pct >= 80
+                                ? '[&>[data-slot=progress-indicator]]:bg-yellow-500'
+                                : ''
+                          }`}
+                        />
                       </div>
                     </td>
                     <td className="px-2 py-1.5">

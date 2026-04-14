@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -965,25 +966,28 @@ function EffectivePermissionsPreview({
     : `${tools.size}`;
 
   return (
-    <details className="rounded-md border bg-muted/20 px-3 py-2 [&[open]>summary>svg]:rotate-90">
-      <summary className="flex cursor-pointer items-center gap-2 text-sm">
-        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform" />
-        <Label className="cursor-pointer font-medium">
-          {t('users.effectivePermissions')}
-        </Label>
-        <span className="ml-auto flex items-center gap-2 text-[11px] text-muted-foreground">
-          <span className="font-mono tabular-nums">{perms.size}</span>
-          <span>·</span>
-          <span>
-            {t('users.effectiveModels')} {modelsLabel}
+    <Collapsible className="rounded-md border bg-muted/20 px-3 py-2">
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="group flex w-full cursor-pointer items-center gap-2 text-sm"
+        >
+          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+          <Label className="cursor-pointer font-medium">{t('users.effectivePermissions')}</Label>
+          <span className="ml-auto flex items-center gap-2 text-[11px] text-muted-foreground">
+            <span className="font-mono tabular-nums">{perms.size}</span>
+            <span>·</span>
+            <span>
+              {t('users.effectiveModels')} {modelsLabel}
+            </span>
+            <span>·</span>
+            <span>
+              {t('users.effectiveTools')} {toolsLabel}
+            </span>
           </span>
-          <span>·</span>
-          <span>
-            {t('users.effectiveTools')} {toolsLabel}
-          </span>
-        </span>
-      </summary>
-      <div className="mt-2 space-y-2">
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 space-y-2">
         <p className="text-[11px] text-muted-foreground">
           {t('users.effectivePermissionsDesc')}
         </p>
@@ -1005,7 +1009,7 @@ function EffectivePermissionsPreview({
             ))}
           </div>
         )}
-      </div>
-    </details>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }

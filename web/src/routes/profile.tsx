@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { QRCodeSVG } from 'qrcode.react';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -266,10 +267,16 @@ export function ProfilePage() {
                 <div className="flex justify-center rounded-lg bg-white p-4 w-fit mx-auto">
                   <QRCodeSVG value={totpSetup.otpauth_uri} size={200} level="M" />
                 </div>
-                <details className="text-xs">
-                  <summary className="cursor-pointer text-muted-foreground hover:text-foreground">{t('auth.totpManualEntry', 'Manual entry')}</summary>
-                  <code className="mt-1 block rounded bg-muted p-2 break-all">{totpSetup.otpauth_uri}</code>
-                </details>
+                <Collapsible className="text-xs">
+                  <CollapsibleTrigger className="cursor-pointer text-muted-foreground hover:text-foreground">
+                    {t('auth.totpManualEntry', 'Manual entry')}
+                  </CollapsibleTrigger>
+                  <CollapsibleContent>
+                    <code className="mt-1 block rounded bg-muted p-2 break-all">
+                      {totpSetup.otpauth_uri}
+                    </code>
+                  </CollapsibleContent>
+                </Collapsible>
               </div>
               <div className="space-y-2">
                 <p className="text-sm font-medium">{t('auth.totpRecoveryCodes')}</p>

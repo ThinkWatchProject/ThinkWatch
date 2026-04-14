@@ -1,4 +1,5 @@
 import { Server } from 'lucide-react';
+import { Avatar, AvatarFallback } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
 
 interface ServiceLogoProps {
@@ -8,43 +9,34 @@ interface ServiceLogoProps {
 }
 
 /**
- * Small visual "logo chip" for a named service. Not true brand logos
- * (avoids trademark risk) — uses a lettermark with brand-adjacent colors.
- * Unknown services fall back to a generic server icon.
+ * Small lettermark for a named service. Composes shadcn `Avatar` with a
+ * per-service tint on the fallback — no trademark risk (uses initials,
+ * not real logos) while still carrying visual identity for brands like
+ * OpenAI / Anthropic / GitHub.
  */
 export function ServiceLogo({ service, className }: ServiceLogoProps) {
-  const key = service.toLowerCase();
-  const spec = resolve(key);
-
-  if (!spec) {
-    return (
-      <span
-        className={cn(
-          'inline-flex h-6 w-6 items-center justify-center rounded border border-border bg-muted text-muted-foreground',
-          className,
-        )}
-      >
-        <Server className="h-3.5 w-3.5" />
-      </span>
-    );
-  }
+  const spec = resolve(service.toLowerCase());
 
   return (
-    <span
-      className={cn(
-        'inline-flex h-6 w-6 items-center justify-center rounded font-mono text-[10px] font-bold',
-        spec.className,
-        className,
+    <Avatar className={cn('h-6 w-6 rounded', className)}>
+      {spec ? (
+        <AvatarFallback
+          className={cn('rounded font-mono text-[10px] font-bold', spec.className)}
+          title={service}
+        >
+          {spec.letter}
+        </AvatarFallback>
+      ) : (
+        <AvatarFallback className="rounded bg-muted text-muted-foreground">
+          <Server className="h-3.5 w-3.5" />
+        </AvatarFallback>
       )}
-      title={service}
-    >
-      {spec.letter}
-    </span>
+    </Avatar>
   );
 }
 
 function resolve(key: string): { letter: string; className: string } | null {
-  // Provider / AI services
+  // AI providers
   if (key.includes('openai') || key === 'gpt') return { letter: 'O', className: 'bg-emerald-500/15 text-emerald-500' };
   if (key.includes('anthropic') || key.includes('claude')) return { letter: 'A', className: 'bg-amber-500/15 text-amber-500' };
   if (key.includes('google') || key.includes('gemini')) return { letter: 'G', className: 'bg-blue-500/15 text-blue-500' };

@@ -14,6 +14,7 @@ import { Search, FileText, ChevronDown, ChevronRight, Plus, Minus } from 'lucide
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { DateTimeRangePicker } from '@/components/ui/datetime-picker';
 import { Pagination, PaginationContent, PaginationItem, PaginationNext, PaginationPrevious } from '@/components/ui/pagination';
 
@@ -318,14 +319,16 @@ function LogDetail({
           </div>
         ))}
       </div>
-      <details className="text-xs">
-        <summary className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
+      <Collapsible className="text-xs">
+        <CollapsibleTrigger className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
           Raw JSON
-        </summary>
-        <pre className="mt-2 rounded bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
-          {JSON.stringify(log, null, 2)}
-        </pre>
-      </details>
+        </CollapsibleTrigger>
+        <CollapsibleContent>
+          <pre className="mt-2 rounded bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
+            {JSON.stringify(log, null, 2)}
+          </pre>
+        </CollapsibleContent>
+      </Collapsible>
     </div>
   );
 }

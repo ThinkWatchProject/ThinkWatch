@@ -30,6 +30,8 @@
     "clearAll": "Clear",
     "add": "Add",
     "remove": "Remove",
+    "previous": "Previous",
+    "next": "Next",
     "deleteSuccess": "Deleted successfully",
     "operationFailed": "Operation failed",
     "yes": "Yes",
@@ -603,6 +605,18 @@
     "customRoles": "Custom",
     "addRole": "Add Role",
     "addRoleDescription": "Create a new custom role with specific permissions.",
+    "nameRequired": "Name is required",
+    "stepBasics": "Basics",
+    "stepBasicsHint": "Name & starting point",
+    "stepPermissions": "Permissions",
+    "stepPermissionsHint": "What this role can do",
+    "stepLimits": "Rate Limits",
+    "stepLimitsHint": "Quotas & budgets",
+    "stepReview": "Review",
+    "stepReviewHint": "Confirm & save",
+    "reviewPermsCount": "{{count}} permission(s) selected",
+    "reviewPolicyMode": "Using policy JSON document",
+    "reviewScopedCount": "Restricted to {{count}} item(s)",
     "cloneFrom": "Start from existing role",
     "cloneFromDesc": "Pick a role to copy its permissions and constraints into this draft. You can edit them afterwards.",
     "cloneFromPlaceholder": "Pick a role to clone…",
@@ -673,7 +687,9 @@
     "unrestricted": "Unrestricted",
     "custom": "Custom",
     "allTools": "All tools",
-    "allModelsShort": "All models"
+    "allModelsShort": "All models",
+    "selected": "selected",
+    "allIncludingFuture": "all incl. future"
   },
   "permissions": {
     "resource": {

@@ -73,9 +73,13 @@ export interface McpServer {
 export interface McpToolRow {
   id: string;
   server_id: string;
-  tool_name: string;
+  /** Display name of the server this tool belongs to. */
+  server_name: string;
+  /** Raw tool name from the upstream MCP server (e.g. `list_issues`). */
+  name: string;
+  /** Fully namespaced id used in ACLs (e.g. `github__list_issues`). */
+  namespaced_name: string;
   description: string | null;
-  is_active: boolean;
 }
 
 export interface ModelRow {

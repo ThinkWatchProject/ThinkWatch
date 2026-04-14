@@ -30,6 +30,8 @@
     "clearAll": "清空",
     "add": "添加",
     "remove": "移除",
+    "previous": "上一步",
+    "next": "下一步",
     "deleteSuccess": "删除成功",
     "operationFailed": "操作失败",
     "yes": "是",
@@ -603,6 +605,18 @@
     "customRoles": "自定义",
     "addRole": "添加角色",
     "addRoleDescription": "创建具有特定权限的自定义角色。",
+    "nameRequired": "名称不能为空",
+    "stepBasics": "基础信息",
+    "stepBasicsHint": "名称 & 起点",
+    "stepPermissions": "权限",
+    "stepPermissionsHint": "允许做什么",
+    "stepLimits": "速率限制",
+    "stepLimitsHint": "配额和预算",
+    "stepReview": "审阅",
+    "stepReviewHint": "确认并保存",
+    "reviewPermsCount": "已选 {{count}} 个权限",
+    "reviewPolicyMode": "使用策略 JSON 文档",
+    "reviewScopedCount": "限制为 {{count}} 项",
     "cloneFrom": "基于现有角色创建",
     "cloneFromDesc": "选择一个角色将其权限和约束复制到当前草稿。复制后仍可继续修改。",
     "cloneFromPlaceholder": "选择要克隆的角色…",
@@ -673,7 +687,9 @@
     "unrestricted": "不限制",
     "custom": "自定义",
     "allTools": "所有工具",
-    "allModelsShort": "所有模型"
+    "allModelsShort": "所有模型",
+    "selected": "已选",
+    "allIncludingFuture": "全部（含未来新增）"
   },
   "permissions": {
     "resource": {

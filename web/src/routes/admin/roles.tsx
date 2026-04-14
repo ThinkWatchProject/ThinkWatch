@@ -11,6 +11,12 @@ import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/confirm-dialog';
+import { RoleWizard } from '@/components/roles/RoleWizard';
+import { useRoleForm, fromRoleResponse, emptyRoleForm } from '@/components/roles/useRoleForm';
+import { PermissionTree } from '@/components/roles/PermissionTree';
+import { StepBasics } from '@/components/roles/steps/StepBasics';
+import { StepReview } from '@/components/roles/steps/StepReview';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -38,7 +44,6 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
-import { Checkbox } from '@/components/ui/checkbox';
 import CodeMirror, { EditorView } from '@uiw/react-codemirror';
 import { json } from '@codemirror/lang-json';
 import { useTheme } from '@/hooks/use-theme';
@@ -78,7 +83,6 @@ import {
   type RoleHistoryEntry,
   type RoleMember,
   type RoleResponse,
-  SIMPLE_TEMPLATES,
 } from './roles/types';
 
 // (Types, POLICY_TEMPLATES, SIMPLE_TEMPLATES, and the simple↔policy
@@ -107,33 +111,18 @@ export function RolesPage() {
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState<'all' | 'system' | 'custom'>('all');
 
-  // Create dialog
-  const [createOpen, setCreateOpen] = useState(false);
-  const [formName, setFormName] = useState('');
-  const [formDesc, setFormDesc] = useState('');
-  const [formPerms, setFormPerms] = useState<Set<string>>(new Set());
-  const [formModels, setFormModels] = useState<Set<string>>(new Set());
-  const [formServers, setFormServers] = useState<Set<string>>(new Set());
-  const [formRestrictModels, setFormRestrictModels] = useState(false);
-  const [formRestrictServers, setFormRestrictServers] = useState(false);
-  const [formMode, setFormMode] = useState<'simple' | 'policy'>('simple');
-  const [formPolicyJson, setFormPolicyJson] = useState('');
-  const [formPolicyError, setFormPolicyError] = useState('');
-  const [creating, setCreating] = useState(false);
+  // Create + edit forms — consolidated into `useRoleForm` hook.
+  // Each hook owns one instance of the form state bag (name, perms,
+  // model/tool scope, policy JSON, mode). The two instances stay
+  // independent so the edit dialog never clobbers a half-typed create,
+  // and closing either dialog doesn't reset the other.
+  const createForm = useRoleForm();
+  const editForm = useRoleForm();
 
-  // Edit dialog
+  const [createOpen, setCreateOpen] = useState(false);
+  const [creating, setCreating] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [editRole, setEditRole] = useState<RoleResponse | null>(null);
-  const [editName, setEditName] = useState('');
-  const [editDesc, setEditDesc] = useState('');
-  const [editPerms, setEditPerms] = useState<Set<string>>(new Set());
-  const [editModels, setEditModels] = useState<Set<string>>(new Set());
-  const [editServers, setEditServers] = useState<Set<string>>(new Set());
-  const [editRestrictModels, setEditRestrictModels] = useState(false);
-  const [editRestrictServers, setEditRestrictServers] = useState(false);
-  const [editMode, setEditMode] = useState<'simple' | 'policy'>('simple');
-  const [editPolicyJson, setEditPolicyJson] = useState('');
-  const [editPolicyError, setEditPolicyError] = useState('');
   const [saving, setSaving] = useState(false);
 
   // Detail (read-only inspector for system roles)
@@ -230,15 +219,17 @@ export function RolesPage() {
   const mcpToolsByServer = useMemo(() => {
     const out = new Map<string, { serverName: string; tools: { key: string; toolName: string }[] }>();
     for (const tool of availableMcpTools) {
-      const serverName = serverNameById.get(tool.server_id) ?? tool.server_id;
+      const serverName = tool.server_name ?? serverNameById.get(tool.server_id) ?? tool.server_id;
       let group = out.get(serverName);
       if (!group) {
         group = { serverName, tools: [] };
         out.set(serverName, group);
       }
+      // Use the backend-computed namespaced_name so the key matches the
+      // namespace_prefix (not the server's display name).
       group.tools.push({
-        key: `${serverName}__${tool.tool_name}`,
-        toolName: tool.tool_name,
+        key: tool.namespaced_name,
+        toolName: tool.name,
       });
     }
     return out;
@@ -372,18 +363,7 @@ export function RolesPage() {
     state.setMode('simple');
   };
 
-  const resetCreateForm = () => {
-    setFormName('');
-    setFormDesc('');
-    setFormPerms(new Set());
-    setFormModels(new Set());
-    setFormServers(new Set());
-    setFormRestrictModels(false);
-    setFormRestrictServers(false);
-    setFormPolicyJson('');
-    setFormMode('simple');
-    setFormPolicyError('');
-  };
+  const resetCreateForm = () => createForm.reset(emptyRoleForm());
 
   /// Compute the set of dangerous permission keys currently selected
   /// in the given perms set. Used to decide whether to gate the
@@ -391,15 +371,15 @@ export function RolesPage() {
   const dangerKeysIn = (set: Set<string>): string[] =>
     Array.from(set).filter((k) => dangerousKeys.has(k));
 
-  const handleCreate = async (e: FormEvent) => {
-    e.preventDefault();
-    setFormPolicyError('');
+  const handleCreate = async (e?: FormEvent) => {
+    e?.preventDefault();
+    createForm.setPolicyError('');
     let policyDocument: PolicyDocument | null = null;
-    if (formMode === 'policy' && formPolicyJson.trim()) {
+    if (createForm.mode === 'policy' && createForm.policyJson.trim()) {
       try {
-        policyDocument = JSON.parse(formPolicyJson) as PolicyDocument;
+        policyDocument = JSON.parse(createForm.policyJson) as PolicyDocument;
       } catch {
-        setFormPolicyError(t('roles.invalidJson'));
+        createForm.setPolicyError(t('roles.invalidJson'));
         return;
       }
     }
@@ -407,11 +387,11 @@ export function RolesPage() {
       setCreating(true);
       try {
         await apiPost('/api/admin/roles', {
-          name: formName,
-          description: formDesc || null,
-          permissions: formMode === 'simple' ? Array.from(formPerms) : [],
-          allowed_models: formRestrictModels ? Array.from(formModels) : null,
-          allowed_mcp_tools: formRestrictServers ? Array.from(formServers) : null,
+          name: createForm.name,
+          description: createForm.description || null,
+          permissions: createForm.mode === 'simple' ? Array.from(createForm.perms) : [],
+          allowed_models: createForm.models === null ? null : Array.from(createForm.models),
+          allowed_mcp_tools: createForm.mcpTools === null ? null : Array.from(createForm.mcpTools),
           policy_document: policyDocument,
         });
         setCreateOpen(false);
@@ -427,7 +407,7 @@ export function RolesPage() {
     // Only the simple-mode danger set is checked in the gate. Policy
     // mode is power-user territory and the policy doc may opt out via
     // explicit Deny rules; we don't try to second-guess it here.
-    const danger = formMode === 'simple' ? dangerKeysIn(formPerms) : [];
+    const danger = createForm.mode === 'simple' ? dangerKeysIn(createForm.perms) : [];
     if (danger.length > 0) {
       setDangerConfirm({ keys: danger, run: performCreate });
     } else {
@@ -437,29 +417,20 @@ export function RolesPage() {
 
   const openEdit = (r: RoleResponse) => {
     setEditRole(r);
-    setEditName(r.name);
-    setEditDesc(r.description || '');
-    setEditPerms(new Set(r.permissions));
-    setEditRestrictModels(r.allowed_models !== null);
-    setEditModels(new Set(r.allowed_models ?? []));
-    setEditRestrictServers(r.allowed_mcp_tools !== null);
-    setEditServers(new Set(r.allowed_mcp_tools ?? []));
-    setEditMode(r.policy_document ? 'policy' : 'simple');
-    setEditPolicyJson(r.policy_document ? JSON.stringify(r.policy_document, null, 2) : '');
-    setEditPolicyError('');
+    editForm.reset(fromRoleResponse(r));
     setEditOpen(true);
   };
 
-  const handleEdit = async (e: FormEvent) => {
-    e.preventDefault();
+  const handleEdit = async (e?: FormEvent) => {
+    e?.preventDefault();
     if (!editRole) return;
-    setEditPolicyError('');
+    editForm.setPolicyError('');
     let policyDocument: PolicyDocument | null = null;
-    if (editMode === 'policy' && editPolicyJson.trim()) {
+    if (editForm.mode === 'policy' && editForm.policyJson.trim()) {
       try {
-        policyDocument = JSON.parse(editPolicyJson) as PolicyDocument;
+        policyDocument = JSON.parse(editForm.policyJson) as PolicyDocument;
       } catch {
-        setEditPolicyError(t('roles.invalidJson'));
+        editForm.setPolicyError(t('roles.invalidJson'));
         return;
       }
     }
@@ -467,11 +438,11 @@ export function RolesPage() {
       setSaving(true);
       try {
         await apiPatch(`/api/admin/roles/${editRole.id}`, {
-          name: editName,
-          description: editDesc || null,
-          permissions: editMode === 'simple' ? Array.from(editPerms) : [],
-          allowed_models: editRestrictModels ? Array.from(editModels) : null,
-          allowed_mcp_tools: editRestrictServers ? Array.from(editServers) : null,
+          name: editForm.name,
+          description: editForm.description || null,
+          permissions: editForm.mode === 'simple' ? Array.from(editForm.perms) : [],
+          allowed_models: editForm.models === null ? null : Array.from(editForm.models),
+          allowed_mcp_tools: editForm.mcpTools === null ? null : Array.from(editForm.mcpTools),
           policy_document: policyDocument,
         });
         setEditOpen(false);
@@ -489,7 +460,7 @@ export function RolesPage() {
     // no new dangerous perms shouldn't pester the admin.
     const oldDanger = new Set((editRole.permissions ?? []).filter((k) => dangerousKeys.has(k)));
     const newDanger =
-      editMode === 'simple' ? dangerKeysIn(editPerms).filter((k) => !oldDanger.has(k)) : [];
+      editForm.mode === 'simple' ? dangerKeysIn(editForm.perms).filter((k) => !oldDanger.has(k)) : [];
     if (newDanger.length > 0) {
       setDangerConfirm({ keys: newDanger, run: performEdit });
     } else {
@@ -625,24 +596,17 @@ export function RolesPage() {
   /// operator on a yes/no the simple way — wiring it through the
   /// danger-confirm dialog would obscure that this is a destructive
   /// reset of the entire role, not just the new permissions.
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
   const handleResetSystemRole = async () => {
     if (!editRole) return;
-    if (!window.confirm(t('roles.resetSystemConfirm', { name: editRole.name }))) return;
+    setResetConfirmOpen(false);
     setSaving(true);
     try {
       const updated = await apiPost<RoleResponse>(
         `/api/admin/roles/${editRole.id}/reset`,
         {},
       );
-      setEditPerms(new Set(updated.permissions));
-      setEditRestrictModels(updated.allowed_models !== null);
-      setEditModels(new Set(updated.allowed_models ?? []));
-      setEditRestrictServers(updated.allowed_mcp_tools !== null);
-      setEditServers(new Set(updated.allowed_mcp_tools ?? []));
-      setEditMode(updated.policy_document ? 'policy' : 'simple');
-      setEditPolicyJson(
-        updated.policy_document ? JSON.stringify(updated.policy_document, null, 2) : '',
-      );
+      editForm.reset(fromRoleResponse(updated));
       await fetchData();
     } catch {
       // surfaced via toast
@@ -802,174 +766,119 @@ export function RolesPage() {
               {t('roles.addRole')}
             </Button>
           </DialogTrigger>
-          <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-            <form onSubmit={handleCreate}>
-              <DialogHeader>
-                <DialogTitle>{t('roles.addRole')}</DialogTitle>
-                <DialogDescription>{t('roles.addRoleDescription')}</DialogDescription>
-              </DialogHeader>
-              <div className="space-y-4 py-4">
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div>
-                    <Label htmlFor="role-name">{t('common.name')}</Label>
-                    <Input
-                      id="role-name"
-                      value={formName}
-                      onChange={(e) => setFormName(e.target.value)}
-                      required
+          <DialogContent className="w-[min(95vw,80rem)] max-w-none max-h-[90vh] overflow-y-auto flex flex-col sm:max-w-none">
+            <DialogHeader>
+              <DialogTitle>{t('roles.addRole')}</DialogTitle>
+              <DialogDescription>{t('roles.addRoleDescription')}</DialogDescription>
+            </DialogHeader>
+            <RoleWizard
+              submitting={creating}
+              submitLabel={t('common.create')}
+              onSubmit={() => void handleCreate()}
+              steps={[
+                {
+                  id: 'basics',
+                  label: t('roles.stepBasics'),
+                  hint: t('roles.stepBasicsHint'),
+                  validate: () => (!createForm.name.trim() ? t('roles.nameRequired') : null),
+                  content: (
+                    <StepBasics
+                      mode="create"
+                      name={createForm.name}
+                      onNameChange={createForm.setName}
+                      description={createForm.description}
+                      onDescriptionChange={createForm.setDescription}
+                      roles={roles}
+                      permissions={permissions}
+                      scopeState={{
+                        perms: createForm.perms,
+                        setPerms: createForm.setPerms,
+                        models: createForm.models,
+                        setModels: createForm.setModels,
+                        mcpTools: createForm.mcpTools,
+                        setMcpTools: createForm.setMcpTools,
+                      }}
                     />
-                  </div>
-                  <div>
-                    <Label htmlFor="role-desc">{t('common.description')}</Label>
-                    <Input
-                      id="role-desc"
-                      value={formDesc}
-                      onChange={(e) => setFormDesc(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <Tabs
-                  value={formMode}
-                  onValueChange={(v) =>
-                    switchMode(v as 'simple' | 'policy', formMode, {
-                      perms: formPerms,
-                      setPerms: setFormPerms,
-                      policyJson: formPolicyJson,
-                      setPolicyJson: setFormPolicyJson,
-                      setPolicyError: setFormPolicyError,
-                      setMode: setFormMode,
-                    })
-                  }
-                >
-                  <TabsList className="grid w-full grid-cols-2">
-                    <TabsTrigger value="simple">{t('roles.simpleMode')}</TabsTrigger>
-                    <TabsTrigger value="policy">{t('roles.policyMode')}</TabsTrigger>
-                  </TabsList>
-                  <TabsContent value="simple" className="space-y-4 mt-3">
-                    {/* Starter pickers — admins can either clone an
-                        existing role or drop in one of the curated
-                        from-scratch templates. Both reset the rest of
-                        the form fields. */}
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <div>
-                        <Label className="text-sm font-medium">{t('roles.cloneFrom')}</Label>
-                        <p className="text-xs text-muted-foreground mb-1.5">
-                          {t('roles.cloneFromDesc')}
-                        </p>
-                        <Select
-                          value=""
-                          onValueChange={(roleId) => {
-                            const src = roles.find((r) => r.id === roleId);
-                            if (!src) return;
-                            setFormPerms(new Set(src.permissions));
-                            setFormRestrictModels(src.allowed_models !== null);
-                            setFormModels(new Set(src.allowed_models ?? []));
-                            setFormRestrictServers(src.allowed_mcp_tools !== null);
-                            setFormServers(new Set(src.allowed_mcp_tools ?? []));
-                          }}
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder={t('roles.cloneFromPlaceholder')} />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {roles.map((r) => (
-                              <SelectItem key={r.id} value={r.id}>
-                                <span className="font-mono text-xs">{r.name}</span>
-                                {r.is_system && (
-                                  <span className="ml-2 text-[10px] text-muted-foreground">
-                                    {t('roles.systemRole')}
-                                  </span>
-                                )}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div>
-                        <Label className="text-sm font-medium">{t('roles.startFromTemplate')}</Label>
-                        <p className="text-xs text-muted-foreground mb-1.5">
-                          {t('roles.startFromTemplateDesc')}
-                        </p>
-                        <Select
-                          value=""
-                          onValueChange={(tplId) => {
-                            const tpl = SIMPLE_TEMPLATES.find((x) => x.id === tplId);
-                            if (!tpl) return;
-                            // Drop any keys not in the live catalog so a
-                            // stale template never injects unknown perms.
-                            const valid = new Set(permissions.map((p) => p.key));
-                            setFormPerms(new Set(tpl.permissions.filter((k) => valid.has(k))));
-                            setFormRestrictModels(false);
-                            setFormModels(new Set());
-                            setFormRestrictServers(false);
-                            setFormServers(new Set());
-                          }}
-                        >
-                          <SelectTrigger>
-                            <SelectValue placeholder={t('roles.pickTemplate')} />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {SIMPLE_TEMPLATES.map((tpl) => (
-                              <SelectItem key={tpl.id} value={tpl.id}>
-                                {t(`roles.template_${tpl.id}` as const, {
-                                  defaultValue: tpl.id,
-                                })}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
+                  ),
+                },
+                {
+                  id: 'permissions',
+                  label: t('roles.stepPermissions'),
+                  hint: t('roles.stepPermissionsHint'),
+                  content: (
+                    <div className="space-y-4">
+                      <Tabs
+                        value={createForm.mode}
+                        onValueChange={(v) =>
+                          switchMode(v as 'simple' | 'policy', createForm.mode, {
+                            perms: createForm.perms,
+                            setPerms: createForm.setPerms,
+                            policyJson: createForm.policyJson,
+                            setPolicyJson: createForm.setPolicyJson,
+                            setPolicyError: createForm.setPolicyError,
+                            setMode: createForm.setMode,
+                          })
+                        }
+                      >
+                        <TabsList className="grid w-full grid-cols-2">
+                          <TabsTrigger value="simple">{t('roles.simpleMode')}</TabsTrigger>
+                          <TabsTrigger value="policy">{t('roles.policyMode')}</TabsTrigger>
+                        </TabsList>
+                        <TabsContent value="simple" className="mt-3">
+                          <PermissionTree
+                            grouped={grouped}
+                            selected={createForm.perms}
+                            onTogglePerm={(p) => togglePerm(createForm.perms, createForm.setPerms, p)}
+                            onToggleGroup={(perms) =>
+                              toggleResourceGroup(createForm.perms, createForm.setPerms, perms)
+                            }
+                            onSelectAll={() =>
+                              createForm.setPerms(new Set(permissions.map((p) => p.key)))
+                            }
+                            onClear={() => createForm.setPerms(new Set())}
+                            models={createForm.models}
+                            onModelsChange={createForm.setModels}
+                            modelsByProvider={modelsByProvider}
+                            mcpTools={createForm.mcpTools}
+                            onMcpToolsChange={createForm.setMcpTools}
+                            mcpToolsByServer={mcpToolsByServer}
+                          />
+                        </TabsContent>
+                        <TabsContent value="policy" className="mt-3">
+                          <PolicyEditor
+                            value={createForm.policyJson}
+                            onChange={createForm.setPolicyJson}
+                            error={createForm.policyError}
+                            onApplyTemplate={(tpl) =>
+                              createForm.setPolicyJson(JSON.stringify(tpl, null, 2))
+                            }
+                          />
+                        </TabsContent>
+                      </Tabs>
+                      {createForm.mode === 'simple' && hasDangerous(createForm.perms, dangerousKeys) && (
+                        <DangerPermissionWarning />
+                      )}
                     </div>
-                    <PermissionTree
-                      grouped={grouped}
-                      selected={formPerms}
-                      onTogglePerm={(p) => togglePerm(formPerms, setFormPerms, p)}
-                      onToggleGroup={(perms) => toggleResourceGroup(formPerms, setFormPerms, perms)}
-                      onSelectAll={() => setFormPerms(new Set(permissions.map((p) => p.key)))}
-                      onClear={() => setFormPerms(new Set())}
+                  ),
+                },
+                {
+                  id: 'review',
+                  label: t('roles.stepReview'),
+                  hint: t('roles.stepReviewHint'),
+                  content: (
+                    <StepReview
+                      name={createForm.name}
+                      description={createForm.description}
+                      mode={createForm.mode}
+                      perms={createForm.perms}
+                      policyJson={createForm.policyJson}
+                      models={createForm.models}
+                      mcpTools={createForm.mcpTools}
                     />
-                  </TabsContent>
-                  <TabsContent value="policy" className="mt-3">
-                    <PolicyEditor
-                      value={formPolicyJson}
-                      onChange={setFormPolicyJson}
-                      error={formPolicyError}
-                      onApplyTemplate={(tpl) => setFormPolicyJson(JSON.stringify(tpl, null, 2))}
-                    />
-                  </TabsContent>
-                </Tabs>
-
-                {/* Model access tree selector */}
-                <ModelTreeSelector
-                  restrict={formRestrictModels}
-                  onRestrictChange={setFormRestrictModels}
-                  selected={formModels}
-                  setSelected={setFormModels}
-                  modelsByProvider={modelsByProvider}
-                />
-
-                {/* MCP tool access tree selector */}
-                <McpToolTreeSelector
-                  restrict={formRestrictServers}
-                  onRestrictChange={setFormRestrictServers}
-                  selected={formServers}
-                  setSelected={setFormServers}
-                  mcpToolsByServer={mcpToolsByServer}
-                />
-
-                {formMode === 'simple' && hasDangerous(formPerms, dangerousKeys) && (
-                  <DangerPermissionWarning />
-                )}
-              </div>
-              <DialogFooter>
-                <Button variant="outline" type="button" onClick={() => setCreateOpen(false)}>
-                  {t('common.cancel')}
-                </Button>
-                <Button type="submit" disabled={creating || !formName}>
-                  {creating ? t('common.loading') : t('common.create')}
-                </Button>
-              </DialogFooter>
-            </form>
+                  ),
+                },
+              ]}
+            />
           </DialogContent>
         </Dialog>
         </div>
@@ -1114,150 +1023,158 @@ export function RolesPage() {
 
       {/* Edit dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
-          <form onSubmit={handleEdit}>
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2">
-                {t('roles.editRole')}
-                {editRole?.is_system && (
-                  <Badge variant="secondary" className="text-[10px]">
-                    {t('roles.systemRole')}
-                  </Badge>
-                )}
-              </DialogTitle>
+        <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {t('roles.editRole')}
               {editRole?.is_system && (
-                <DialogDescription>{t('roles.editSystemWarning')}</DialogDescription>
+                <Badge variant="secondary" className="text-[10px]">
+                  {t('roles.systemRole')}
+                </Badge>
               )}
-            </DialogHeader>
-            <div className="space-y-4 py-4">
-              {editRole?.is_system ? (
-                /* System roles: name is immutable, only description can
-                   be tweaked. We surface the locked name as a read-only
-                   field so the admin still sees what they're editing. */
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div>
-                    <Label>{t('common.name')}</Label>
-                    <Input value={editName} disabled className="font-mono" />
-                  </div>
-                  <div>
-                    <Label htmlFor="edit-desc">{t('common.description')}</Label>
-                    <Input
-                      id="edit-desc"
-                      value={editDesc}
-                      onChange={(e) => setEditDesc(e.target.value)}
-                    />
-                  </div>
-                </div>
-              ) : (
-                <div className="grid gap-3 md:grid-cols-2">
-                  <div>
-                    <Label htmlFor="edit-name">{t('common.name')}</Label>
-                    <Input
-                      id="edit-name"
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      required
-                    />
-                  </div>
-                  <div>
-                    <Label htmlFor="edit-desc">{t('common.description')}</Label>
-                    <Input
-                      id="edit-desc"
-                      value={editDesc}
-                      onChange={(e) => setEditDesc(e.target.value)}
-                    />
-                  </div>
-                </div>
-              )}
-              <Tabs
-                value={editMode}
-                onValueChange={(v) =>
-                  switchMode(v as 'simple' | 'policy', editMode, {
-                    perms: editPerms,
-                    setPerms: setEditPerms,
-                    policyJson: editPolicyJson,
-                    setPolicyJson: setEditPolicyJson,
-                    setPolicyError: setEditPolicyError,
-                    setMode: setEditMode,
-                  })
-                }
-              >
-                <TabsList className="grid w-full grid-cols-2">
-                  <TabsTrigger value="simple">{t('roles.simpleMode')}</TabsTrigger>
-                  <TabsTrigger value="policy">{t('roles.policyMode')}</TabsTrigger>
-                </TabsList>
-                <TabsContent value="simple" className="space-y-4 mt-3">
-                  <PermissionTree
-                    grouped={grouped}
-                    selected={editPerms}
-                    onTogglePerm={(p) => togglePerm(editPerms, setEditPerms, p)}
-                    onToggleGroup={(perms) => toggleResourceGroup(editPerms, setEditPerms, perms)}
-                    onSelectAll={() => setEditPerms(new Set(permissions.map((p) => p.key)))}
-                    onClear={() => setEditPerms(new Set())}
-                  />
-                </TabsContent>
-                <TabsContent value="policy" className="mt-3">
-                  <PolicyEditor
-                    value={editPolicyJson}
-                    onChange={setEditPolicyJson}
-                    error={editPolicyError}
-                    onApplyTemplate={(tpl) => setEditPolicyJson(JSON.stringify(tpl, null, 2))}
-                  />
-                </TabsContent>
-              </Tabs>
-
-              {/* Model access tree selector */}
-              <ModelTreeSelector
-                restrict={editRestrictModels}
-                onRestrictChange={setEditRestrictModels}
-                selected={editModels}
-                setSelected={setEditModels}
-                modelsByProvider={modelsByProvider}
-              />
-
-              {/* MCP tool access tree selector */}
-              <McpToolTreeSelector
-                restrict={editRestrictServers}
-                onRestrictChange={setEditRestrictServers}
-                selected={editServers}
-                setSelected={setEditServers}
-                mcpToolsByServer={mcpToolsByServer}
-              />
-
-              {editMode === 'simple' && hasDangerous(editPerms, dangerousKeys) && (
-                <DangerPermissionWarning />
-              )}
-              {editRole && (
-                <LimitsPanel
-                  subjectKind="role"
-                  subjectId={editRole.id}
-                  surfaces={['ai_gateway', 'mcp_gateway']}
-                  allowBudgets={true}
-                />
-              )}
-            </div>
-            <DialogFooter>
-              {editRole?.is_system && (
+            </DialogTitle>
+            {editRole?.is_system && (
+              <DialogDescription>{t('roles.editSystemWarning')}</DialogDescription>
+            )}
+          </DialogHeader>
+          <RoleWizard
+            submitting={saving}
+            submitLabel={t('common.save')}
+            onSubmit={() => void handleEdit()}
+            footerExtras={
+              editRole?.is_system ? (
                 <Button
                   type="button"
                   variant="outline"
-                  className="mr-auto"
                   disabled={saving}
-                  onClick={handleResetSystemRole}
+                  onClick={() => setResetConfirmOpen(true)}
                 >
                   {t('roles.resetToDefaults')}
                 </Button>
-              )}
-              <Button variant="outline" type="button" onClick={() => setEditOpen(false)}>
-                {t('common.cancel')}
-              </Button>
-              <Button type="submit" disabled={saving || !editName}>
-                {saving ? t('common.loading') : t('common.save')}
-              </Button>
-            </DialogFooter>
-          </form>
+              ) : undefined
+            }
+            steps={[
+              {
+                id: 'basics',
+                label: t('roles.stepBasics'),
+                hint: t('roles.stepBasicsHint'),
+                validate: () => (!editForm.name.trim() ? t('roles.nameRequired') : null),
+                content: (
+                  <StepBasics
+                    mode="edit"
+                    name={editForm.name}
+                    onNameChange={editForm.setName}
+                    description={editForm.description}
+                    onDescriptionChange={editForm.setDescription}
+                    nameDisabled={editRole?.is_system}
+                  />
+                ),
+              },
+              {
+                id: 'permissions',
+                label: t('roles.stepPermissions'),
+                hint: t('roles.stepPermissionsHint'),
+                content: (
+                  <div className="space-y-4">
+                    <Tabs
+                      value={editForm.mode}
+                      onValueChange={(v) =>
+                        switchMode(v as 'simple' | 'policy', editForm.mode, {
+                          perms: editForm.perms,
+                          setPerms: editForm.setPerms,
+                          policyJson: editForm.policyJson,
+                          setPolicyJson: editForm.setPolicyJson,
+                          setPolicyError: editForm.setPolicyError,
+                          setMode: editForm.setMode,
+                        })
+                      }
+                    >
+                      <TabsList className="grid w-full grid-cols-2">
+                        <TabsTrigger value="simple">{t('roles.simpleMode')}</TabsTrigger>
+                        <TabsTrigger value="policy">{t('roles.policyMode')}</TabsTrigger>
+                      </TabsList>
+                      <TabsContent value="simple" className="mt-3">
+                        <PermissionTree
+                          grouped={grouped}
+                          selected={editForm.perms}
+                          onTogglePerm={(p) => togglePerm(editForm.perms, editForm.setPerms, p)}
+                          onToggleGroup={(perms) =>
+                            toggleResourceGroup(editForm.perms, editForm.setPerms, perms)
+                          }
+                          onSelectAll={() => editForm.setPerms(new Set(permissions.map((p) => p.key)))}
+                          onClear={() => editForm.setPerms(new Set())}
+                          models={editForm.models}
+                          onModelsChange={editForm.setModels}
+                          modelsByProvider={modelsByProvider}
+                          mcpTools={editForm.mcpTools}
+                          onMcpToolsChange={editForm.setMcpTools}
+                          mcpToolsByServer={mcpToolsByServer}
+                        />
+                      </TabsContent>
+                      <TabsContent value="policy" className="mt-3">
+                        <PolicyEditor
+                          value={editForm.policyJson}
+                          onChange={editForm.setPolicyJson}
+                          error={editForm.policyError}
+                          onApplyTemplate={(tpl) =>
+                            editForm.setPolicyJson(JSON.stringify(tpl, null, 2))
+                          }
+                        />
+                      </TabsContent>
+                    </Tabs>
+                    {editForm.mode === 'simple' && hasDangerous(editForm.perms, dangerousKeys) && (
+                      <DangerPermissionWarning />
+                    )}
+                  </div>
+                ),
+              },
+              {
+                id: 'limits',
+                label: t('roles.stepLimits'),
+                hint: t('roles.stepLimitsHint'),
+                content: editRole ? (
+                  <LimitsPanel
+                    subjectKind="role"
+                    subjectId={editRole.id}
+                    surfaces={['ai_gateway', 'mcp_gateway']}
+                    allowBudgets={true}
+                  />
+                ) : null,
+              },
+              {
+                id: 'review',
+                label: t('roles.stepReview'),
+                hint: t('roles.stepReviewHint'),
+                content: (
+                  <StepReview
+                    name={editForm.name}
+                    description={editForm.description}
+                    mode={editForm.mode}
+                    perms={editForm.perms}
+                    policyJson={editForm.policyJson}
+                    models={editForm.models}
+                    mcpTools={editForm.mcpTools}
+                  />
+                ),
+              },
+            ]}
+          />
         </DialogContent>
       </Dialog>
+
+      {/* Reset system role to defaults — destructive confirm */}
+      <ConfirmDialog
+        open={resetConfirmOpen}
+        onOpenChange={setResetConfirmOpen}
+        title={t('roles.resetToDefaults')}
+        description={
+          editRole ? t('roles.resetSystemConfirm', { name: editRole.name }) : ''
+        }
+        variant="destructive"
+        confirmLabel={t('roles.resetToDefaults')}
+        onConfirm={handleResetSystemRole}
+        loading={saving}
+      />
 
       {/* Delete with optional reassign */}
       <Dialog
@@ -1570,373 +1487,6 @@ function DangerPermissionWarning() {
     <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
       <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
       <div>{t('roles.dangerWarning')}</div>
-    </div>
-  );
-}
-
-/// Tree-style permission picker grouped by resource. Each resource section
-/// has a parent checkbox that toggles all of its actions; dangerous actions
-/// are highlighted so the admin notices what they're granting. The header
-/// row exposes Select All / Clear shortcuts. `renderExtras` lets the caller
-/// inject resource-scoped constraint UI (e.g. allowed-models picker for
-/// `ai_gateway`) directly under the matching permission group.
-function PermissionTree({
-  grouped,
-  selected,
-  onTogglePerm,
-  onToggleGroup,
-  onSelectAll,
-  onClear,
-}: {
-  grouped: Map<string, PermissionDef[]>;
-  selected: Set<string>;
-  onTogglePerm: (key: string) => void;
-  onToggleGroup: (perms: PermissionDef[]) => void;
-  onSelectAll: () => void;
-  onClear: () => void;
-}) {
-  const { t } = useTranslation();
-  const groups = Array.from(grouped.entries());
-  return (
-    <div>
-      <div className="flex items-center justify-between">
-        <Label className="text-sm font-medium">{t('roles.permissions')}</Label>
-        <div className="flex items-center gap-1">
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-xs"
-            onClick={onSelectAll}
-          >
-            {t('common.selectAll')}
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-6 px-2 text-xs"
-            onClick={onClear}
-          >
-            {t('common.clearAll')}
-          </Button>
-        </div>
-      </div>
-      <ScrollArea className="mt-2 h-72 rounded-md border">
-        <div className="divide-y">
-          {groups.map(([resource, perms]) => {
-            const allOn = perms.every((p) => selected.has(p.key));
-            const someOn = !allOn && perms.some((p) => selected.has(p.key));
-            return (
-              <div key={resource} className="px-3 py-2">
-                <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
-                  <Checkbox
-                    checked={allOn}
-                    data-state={someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'}
-                    onCheckedChange={() => onToggleGroup(perms)}
-                  />
-                  <span className="font-mono uppercase tracking-wider text-muted-foreground">
-                    {t(`permissions.resource.${resource}` as const, {
-                      defaultValue: resource,
-                    })}
-                  </span>
-                </label>
-                <div className="mt-1.5 grid grid-cols-2 gap-x-4 gap-y-1 pl-6">
-                  {perms.map((p) => (
-                    <label
-                      key={p.key}
-                      className="flex cursor-pointer items-center gap-1.5 text-xs"
-                      title={p.key}
-                    >
-                      <Checkbox
-                        checked={selected.has(p.key)}
-                        onCheckedChange={() => onTogglePerm(p.key)}
-                      />
-                      <span className={p.dangerous ? 'text-destructive' : ''}>
-                        {t(`permissions.action.${p.action}` as const, {
-                          defaultValue: p.action,
-                        })}
-                      </span>
-                      {p.dangerous && (
-                        <AlertTriangle
-                          className="h-3 w-3 shrink-0 text-destructive"
-                          aria-label={t('roles.dangerous')}
-                        />
-                      )}
-                    </label>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </ScrollArea>
-    </div>
-  );
-}
-
-/// Model access tree selector — models grouped by provider with
-/// unrestricted / custom radio toggle. Provider-level checkbox
-/// selects/deselects all models from that provider.
-function ModelTreeSelector({
-  restrict,
-  onRestrictChange,
-  selected,
-  setSelected,
-  modelsByProvider,
-}: {
-  restrict: boolean;
-  onRestrictChange: (v: boolean) => void;
-  selected: Set<string>;
-  setSelected: (s: Set<string>) => void;
-  modelsByProvider: Map<string, { modelId: string; displayName: string }[]>;
-}) {
-  const { t } = useTranslation();
-
-  const toggleModel = (modelId: string) => {
-    const next = new Set(selected);
-    if (next.has(modelId)) next.delete(modelId);
-    else next.add(modelId);
-    setSelected(next);
-  };
-
-  const toggleProvider = (models: { modelId: string }[]) => {
-    const next = new Set(selected);
-    const allOn = models.every((m) => next.has(m.modelId));
-    if (allOn) {
-      for (const m of models) next.delete(m.modelId);
-    } else {
-      for (const m of models) next.add(m.modelId);
-    }
-    setSelected(next);
-  };
-
-  return (
-    <div className="space-y-2">
-      <Label>{t('roles.modelsLabel')}</Label>
-      <div className="flex gap-4">
-        <label className="flex items-center gap-2 text-sm cursor-pointer">
-          <input
-            type="radio"
-            name="model-access-mode"
-            checked={!restrict}
-            onChange={() => onRestrictChange(false)}
-          />
-          {t('roles.unrestricted')}
-        </label>
-        <label className="flex items-center gap-2 text-sm cursor-pointer">
-          <input
-            type="radio"
-            name="model-access-mode"
-            checked={restrict}
-            onChange={() => onRestrictChange(true)}
-          />
-          {t('roles.custom')}
-        </label>
-      </div>
-      {restrict && (
-        <div className="border rounded-md p-3 max-h-48 overflow-y-auto space-y-2">
-          {modelsByProvider.size === 0 ? (
-            <p className="text-xs italic text-muted-foreground">{t('common.noData')}</p>
-          ) : (
-            Array.from(modelsByProvider.entries()).map(([provider, models]) => {
-              const checkedCount = models.filter((m) => selected.has(m.modelId)).length;
-              const allOn = checkedCount === models.length;
-              const someOn = checkedCount > 0 && !allOn;
-              return (
-                <div key={provider}>
-                  <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
-                    <Checkbox
-                      checked={allOn}
-                      data-state={someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'}
-                      onCheckedChange={() => toggleProvider(models)}
-                    />
-                    <span className="font-mono text-muted-foreground">{provider}</span>
-                    <span className="text-muted-foreground font-normal">
-                      ({checkedCount}/{models.length})
-                    </span>
-                  </label>
-                  <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5 pl-6">
-                    {models.map((m) => (
-                      <label
-                        key={m.modelId}
-                        className="flex cursor-pointer items-center gap-1.5 text-xs"
-                      >
-                        <Checkbox
-                          checked={selected.has(m.modelId)}
-                          onCheckedChange={() => toggleModel(m.modelId)}
-                        />
-                        <span className="truncate" title={m.modelId}>
-                          {m.displayName || m.modelId}
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/// MCP tool access tree selector — tools grouped by server with
-/// unrestricted / custom radio toggle. Server-level checkbox uses
-/// wildcard `serverName__*`; individual tools are `serverName__toolName`.
-function McpToolTreeSelector({
-  restrict,
-  onRestrictChange,
-  selected,
-  setSelected,
-  mcpToolsByServer,
-}: {
-  restrict: boolean;
-  onRestrictChange: (v: boolean) => void;
-  selected: Set<string>;
-  setSelected: (s: Set<string>) => void;
-  mcpToolsByServer: Map<string, { serverName: string; tools: { key: string; toolName: string }[] }>;
-}) {
-  const { t } = useTranslation();
-
-  /// Check whether the server is fully selected — either via wildcard
-  /// or via all individual tools being present.
-  const isServerFullySelected = (
-    serverName: string,
-    tools: { key: string }[],
-  ): boolean => {
-    if (selected.has(`${serverName}__*`)) return true;
-    return tools.every((tool) => selected.has(tool.key));
-  };
-
-  /// Count how many tools are effectively selected for a server.
-  const countSelected = (
-    serverName: string,
-    tools: { key: string }[],
-  ): number => {
-    if (selected.has(`${serverName}__*`)) return tools.length;
-    return tools.filter((tool) => selected.has(tool.key)).length;
-  };
-
-  const toggleServer = (serverName: string, tools: { key: string }[]) => {
-    const next = new Set(selected);
-    const fullySelected = isServerFullySelected(serverName, tools);
-    if (fullySelected) {
-      // Uncheck: remove wildcard and all individual tools
-      next.delete(`${serverName}__*`);
-      for (const tool of tools) next.delete(tool.key);
-    } else {
-      // Check: add wildcard, remove individual entries
-      for (const tool of tools) next.delete(tool.key);
-      next.add(`${serverName}__*`);
-    }
-    setSelected(next);
-  };
-
-  const toggleTool = (serverName: string, toolKey: string, tools: { key: string }[]) => {
-    const next = new Set(selected);
-    const wildcard = `${serverName}__*`;
-
-    if (next.has(wildcard)) {
-      // Expand wildcard into individual tools minus the toggled one
-      next.delete(wildcard);
-      for (const tool of tools) {
-        if (tool.key !== toolKey) next.add(tool.key);
-      }
-    } else if (next.has(toolKey)) {
-      // Uncheck this tool
-      next.delete(toolKey);
-    } else {
-      // Check this tool
-      next.add(toolKey);
-      // If all tools are now selected, collapse to wildcard
-      const allSelected = tools.every((tool) =>
-        tool.key === toolKey ? true : next.has(tool.key),
-      );
-      if (allSelected) {
-        for (const tool of tools) next.delete(tool.key);
-        next.add(wildcard);
-      }
-    }
-    setSelected(next);
-  };
-
-  /// Check if an individual tool is effectively selected (via wildcard
-  /// or direct entry).
-  const isToolSelected = (serverName: string, toolKey: string): boolean => {
-    return selected.has(`${serverName}__*`) || selected.has(toolKey);
-  };
-
-  return (
-    <div className="space-y-2">
-      <Label>{t('roles.mcpToolsLabel')}</Label>
-      <div className="flex gap-4">
-        <label className="flex items-center gap-2 text-sm cursor-pointer">
-          <input
-            type="radio"
-            name="mcp-tool-access-mode"
-            checked={!restrict}
-            onChange={() => onRestrictChange(false)}
-          />
-          {t('roles.unrestricted')}
-        </label>
-        <label className="flex items-center gap-2 text-sm cursor-pointer">
-          <input
-            type="radio"
-            name="mcp-tool-access-mode"
-            checked={restrict}
-            onChange={() => onRestrictChange(true)}
-          />
-          {t('roles.custom')}
-        </label>
-      </div>
-      {restrict && (
-        <div className="border rounded-md p-3 max-h-48 overflow-y-auto space-y-2">
-          {mcpToolsByServer.size === 0 ? (
-            <p className="text-xs italic text-muted-foreground">{t('common.noData')}</p>
-          ) : (
-            Array.from(mcpToolsByServer.entries()).map(([serverName, group]) => {
-              const count = countSelected(serverName, group.tools);
-              const allOn = isServerFullySelected(serverName, group.tools);
-              const someOn = count > 0 && !allOn;
-              return (
-                <div key={serverName}>
-                  <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
-                    <Checkbox
-                      checked={allOn}
-                      data-state={someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'}
-                      onCheckedChange={() => toggleServer(serverName, group.tools)}
-                    />
-                    <span className="font-mono text-muted-foreground">{serverName}</span>
-                    <span className="text-muted-foreground font-normal">
-                      ({count}/{group.tools.length})
-                    </span>
-                  </label>
-                  <div className="mt-1 grid grid-cols-2 gap-x-4 gap-y-0.5 pl-6">
-                    {group.tools.map((tool) => (
-                      <label
-                        key={tool.key}
-                        className="flex cursor-pointer items-center gap-1.5 text-xs"
-                      >
-                        <Checkbox
-                          checked={isToolSelected(serverName, tool.key)}
-                          onCheckedChange={() =>
-                            toggleTool(serverName, tool.key, group.tools)
-                          }
-                        />
-                        <span className="truncate" title={tool.key}>
-                          {tool.toolName}
-                        </span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-              );
-            })
-          )}
-        </div>
-      )}
     </div>
   );
 }
