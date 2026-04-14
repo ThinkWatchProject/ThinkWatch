@@ -5,7 +5,6 @@ import {
   useState,
   useCallback,
   type FormEvent,
-  type ReactNode,
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/card';
@@ -19,6 +18,22 @@ import { StepBasics } from '@/components/roles/steps/StepBasics';
 import { StepReview } from '@/components/roles/steps/StepReview';
 import { RoleHistory } from '@/components/roles/RoleHistory';
 import { RoleMembers } from '@/components/roles/RoleMembers';
+import { RoleDetail } from '@/components/roles/RoleDetail';
+
+/** Subset of the admin user-list row we need for the delete-reassign
+ *  flow: PATCH /api/admin/users/{id} expects the full role_assignments
+ *  array (replace-all semantics), so we read-modify-write it here. */
+interface PickableUser {
+  id: string;
+  email: string;
+  display_name: string;
+  role_assignments: Array<{
+    role_id: string;
+    name: string;
+    is_system: boolean;
+    scope: string;
+  }>;
+}
 import { LimitsDraftEditor, persistDrafts } from '@/components/roles/LimitsDraftEditor';
 import { lazy, Suspense } from 'react';
 // Lazy — pulls in codemirror + @codemirror/lang-json (~418 KB). Only
@@ -60,7 +75,6 @@ import {
   Plus,
   Pencil,
   Trash2,
-  FileJson,
   Search,
   AlertTriangle,
   Lock,
@@ -86,7 +100,6 @@ import {
   type PolicyStatement,
   permsToPolicy,
   policyToPerms,
-  type RoleHistoryEntry,
   type RoleMember,
   type RoleResponse,
 } from './roles/types';
@@ -1562,218 +1575,6 @@ function DangerPermissionWarning() {
   );
 }
 
-/// One row from the admin user list, used by RoleDetail's "add
-/// member" picker. Only the fields the picker needs to display and
-/// to PATCH a role assignment back are pulled in here.
-interface PickableUser {
-  id: string;
-  email: string;
-  display_name: string;
-  role_assignments: Array<{
-    role_id: string;
-    name: string;
-    is_system: boolean;
-    scope: string;
-  }>;
-}
-
-function RoleDetail({
-  role,
-  grouped,
-  dangerousKeys,
-  availableServers,
-  teamsById,
-  onMembersChanged,
-}: {
-  role: RoleResponse;
-  grouped: Map<string, PermissionDef[]>;
-  dangerousKeys: Set<string>;
-  availableServers: McpServer[];
-  teamsById: Map<string, { id: string; name: string }>;
-  onMembersChanged: () => void;
-}) {
-  const { t } = useTranslation();
-  const selected = new Set(role.permissions);
-
-
-  // History tab is lazy-loaded the first time the user clicks it.
-  // ClickHouse may be unavailable in dev — the endpoint returns an
-  // empty array in that case, which we render as a friendly message.
-  const [detailTab, setDetailTab] = useState<'overview' | 'history'>('overview');
-  const [history, setHistory] = useState<RoleHistoryEntry[] | null>(null);
-  const [historyError, setHistoryError] = useState(false);
-  useEffect(() => {
-    if (detailTab !== 'history' || history !== null) return;
-    let cancelled = false;
-    api<{ items: RoleHistoryEntry[] }>(`/api/admin/roles/${role.id}/history`)
-      .then((res) => {
-        if (!cancelled) setHistory(res.items);
-      })
-      .catch(() => {
-        if (!cancelled) setHistoryError(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [detailTab, history, role.id]);
-
-  return (
-    <>
-      <DialogHeader>
-        <DialogTitle className="flex items-center gap-2">
-          {role.is_system ? (
-            <Lock className="h-4 w-4 text-muted-foreground" />
-          ) : (
-            <Shield className="h-4 w-4 text-muted-foreground" />
-          )}
-          <span className="font-mono">{role.name}</span>
-          {role.is_system && (
-            <Badge variant="secondary" className="text-[10px]">
-              {t('roles.systemRole')}
-            </Badge>
-          )}
-        </DialogTitle>
-        <DialogDescription>{role.description || '—'}</DialogDescription>
-      </DialogHeader>
-      <Tabs
-        value={detailTab}
-        onValueChange={(v) => setDetailTab(v as 'overview' | 'history')}
-      >
-        <TabsList className="grid w-full grid-cols-2">
-          <TabsTrigger value="overview">{t('roles.detailOverview')}</TabsTrigger>
-          <TabsTrigger value="history">{t('roles.detailHistory')}</TabsTrigger>
-        </TabsList>
-        <TabsContent value="overview" className="space-y-4 py-2">
-        <div>
-          <div className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
-            {t('roles.colUsers')}
-          </div>
-          <div className="font-mono text-2xl tabular-nums">{role.user_count}</div>
-        </div>
-        {role.policy_document ? (
-          <div>
-            <div className="mb-2 flex items-center gap-1.5 text-xs uppercase tracking-wider text-muted-foreground">
-              <FileJson className="h-3.5 w-3.5" />
-              {t('roles.policyDocument')}
-            </div>
-            <pre className="max-h-72 overflow-auto rounded-md border bg-muted/30 p-3 font-mono text-[10px]">
-              {JSON.stringify(role.policy_document, null, 2)}
-            </pre>
-          </div>
-        ) : (
-          <div>
-            <div className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
-              {t('roles.permissions')}
-            </div>
-            <div className="space-y-2 rounded-md border p-3">
-              {Array.from(grouped.entries()).map(([resource, perms]) => {
-                const granted = perms.filter((p) => selected.has(p.key));
-                if (granted.length === 0) return null;
-                return (
-                  <div key={resource}>
-                    <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                      {t(`permissions.resource.${resource}` as const, {
-                        defaultValue: resource,
-                      })}
-                    </div>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {granted.map((p) => (
-                        <Badge
-                          key={p.key}
-                          variant={dangerousKeys.has(p.key) ? 'destructive' : 'outline'}
-                          className="text-[10px]"
-                        >
-                          {t(`permissions.action.${p.action}` as const, {
-                            defaultValue: p.action,
-                          })}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                );
-              })}
-              {role.permissions.length === 0 && (
-                <span className="text-xs text-muted-foreground italic">
-                  {t('common.none')}
-                </span>
-              )}
-            </div>
-          </div>
-        )}
-        {(role.allowed_models !== null || role.allowed_mcp_tools !== null) && (
-          <div className="space-y-2">
-            {role.allowed_models !== null && (
-              <ConstraintRow
-                label={t('roles.allowedModels')}
-                items={role.allowed_models}
-                resolveLabel={(s) => s}
-              />
-            )}
-            {role.allowed_mcp_tools !== null && (
-              <ConstraintRow
-                label={t('roles.allowedMcpTools')}
-                items={role.allowed_mcp_tools}
-                resolveLabel={(id) =>
-                  availableServers.find((s) => s.id === id)?.name ?? id.slice(0, 8)
-                }
-              />
-            )}
-          </div>
-        )}
-        {/* Members — who's actually using this role today. The full
-            picker / add / remove UI lives in <RoleMembers>; reused
-            here and in the edit-wizard "Members" step. */}
-        <RoleMembers role={role} teamsById={teamsById} onMembersChanged={onMembersChanged} />
-        </TabsContent>
-        <TabsContent value="history" className="py-2">
-          {history === null ? (
-            <p className="text-xs italic text-muted-foreground">
-              {historyError ? t('common.error') : t('common.loading')}
-            </p>
-          ) : history.length === 0 ? (
-            <p className="text-xs italic text-muted-foreground">
-              {t('roles.noHistory')}
-            </p>
-          ) : (
-            <ScrollArea className="max-h-96 rounded-md border">
-              <ul className="divide-y">
-                {history.map((h) => (
-                  <li key={h.id} className="px-3 py-2 text-xs">
-                    <div className="flex items-center justify-between gap-2">
-                      <Badge
-                        variant={
-                          h.action === 'role.deleted' ? 'destructive' : 'outline'
-                        }
-                        className="font-mono text-[10px]"
-                      >
-                        {h.action}
-                      </Badge>
-                      <span className="font-mono text-[10px] text-muted-foreground">
-                        {new Date(h.created_at).toLocaleString()}
-                      </span>
-                    </div>
-                    {(h.user_email || h.ip_address) && (
-                      <div className="mt-1 text-[10px] text-muted-foreground">
-                        {h.user_email ?? h.user_id ?? '—'}
-                        {h.ip_address && ` · ${h.ip_address}`}
-                      </div>
-                    )}
-                    {h.detail && (
-                      <pre className="mt-1 max-h-32 overflow-auto rounded bg-muted/30 p-1.5 font-mono text-[10px]">
-                        {JSON.stringify(h.detail, null, 2)}
-                      </pre>
-                    )}
-                  </li>
-                ))}
-              </ul>
-            </ScrollArea>
-          )}
-        </TabsContent>
-      </Tabs>
-    </>
-  );
-}
-
 /// Estimate the effective permission count for a policy_document by
 /// expanding wildcard Allow actions against the static catalog and
 /// subtracting Deny matches. Used in the role list to show a single
@@ -1843,33 +1644,4 @@ function PolicyPermSummary({
   );
 }
 
-function ConstraintRow({
-  label,
-  items,
-  resolveLabel,
-}: {
-  label: ReactNode;
-  items: string[];
-  resolveLabel: (s: string) => string;
-}) {
-  const { t } = useTranslation();
-  return (
-    <div>
-      <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-        {label}
-      </div>
-      <div className="mt-1 flex flex-wrap gap-1">
-        {items.length === 0 ? (
-          <span className="text-xs italic text-muted-foreground">{t('common.none')}</span>
-        ) : (
-          items.map((s) => (
-            <Badge key={s} variant="outline" className="text-[10px]">
-              {resolveLabel(s)}
-            </Badge>
-          ))
-        )}
-      </div>
-    </div>
-  );
-}
 
