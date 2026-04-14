@@ -20,6 +20,13 @@ import { StepReview } from '@/components/roles/steps/StepReview';
 import { RoleHistory } from '@/components/roles/RoleHistory';
 import { RoleMembers } from '@/components/roles/RoleMembers';
 import { LimitsDraftEditor, persistDrafts } from '@/components/roles/LimitsDraftEditor';
+import { lazy, Suspense } from 'react';
+// Lazy — pulls in codemirror + @codemirror/lang-json (~418 KB). Only
+// users who toggle "Policy JSON" mode on a role ever pay the download.
+const PolicyEditor = lazy(() => import('@/components/roles/PolicyEditor'));
+function PolicyEditorFallback() {
+  return <Skeleton className="h-[380px] w-full rounded-md" />;
+}
 import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -48,15 +55,11 @@ import {
   DialogTitle,
   DialogTrigger,
 } from '@/components/ui/dialog';
-import CodeMirror, { EditorView } from '@uiw/react-codemirror';
-import { json } from '@codemirror/lang-json';
-import { useTheme } from '@/hooks/use-theme';
 import {
   Shield,
   Plus,
   Pencil,
   Trash2,
-  Copy,
   FileJson,
   Search,
   AlertTriangle,
@@ -79,7 +82,6 @@ import {
   type McpToolRow,
   type ModelRow,
   type PermissionDef,
-  POLICY_TEMPLATES,
   type PolicyDocument,
   type PolicyStatement,
   permsToPolicy,
@@ -869,14 +871,16 @@ export function RolesPage() {
                           />
                         </TabsContent>
                         <TabsContent value="policy" className="mt-3">
-                          <PolicyEditor
-                            value={createForm.policyJson}
-                            onChange={createForm.setPolicyJson}
-                            error={createForm.policyError}
-                            onApplyTemplate={(tpl) =>
-                              createForm.setPolicyJson(JSON.stringify(tpl, null, 2))
-                            }
-                          />
+                          <Suspense fallback={<PolicyEditorFallback />}>
+                            <PolicyEditor
+                              value={createForm.policyJson}
+                              onChange={createForm.setPolicyJson}
+                              error={createForm.policyError}
+                              onApplyTemplate={(tpl) =>
+                                createForm.setPolicyJson(JSON.stringify(tpl, null, 2))
+                              }
+                            />
+                          </Suspense>
                         </TabsContent>
                       </Tabs>
                       {createForm.mode === 'simple' && hasDangerous(createForm.perms, dangerousKeys) && (
@@ -1152,14 +1156,16 @@ export function RolesPage() {
                         />
                       </TabsContent>
                       <TabsContent value="policy" className="mt-3">
-                        <PolicyEditor
-                          value={editForm.policyJson}
-                          onChange={editForm.setPolicyJson}
-                          error={editForm.policyError}
-                          onApplyTemplate={(tpl) =>
-                            editForm.setPolicyJson(JSON.stringify(tpl, null, 2))
-                          }
-                        />
+                        <Suspense fallback={<PolicyEditorFallback />}>
+                          <PolicyEditor
+                            value={editForm.policyJson}
+                            onChange={editForm.setPolicyJson}
+                            error={editForm.policyError}
+                            onApplyTemplate={(tpl) =>
+                              editForm.setPolicyJson(JSON.stringify(tpl, null, 2))
+                            }
+                          />
+                        </Suspense>
                       </TabsContent>
                     </Tabs>
                     {editForm.mode === 'simple' && hasDangerous(editForm.perms, dangerousKeys) && (
@@ -1867,79 +1873,3 @@ function ConstraintRow({
   );
 }
 
-function PolicyEditor({
-  value,
-  onChange,
-  error,
-  onApplyTemplate,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  error: string;
-  onApplyTemplate: (tpl: PolicyDocument) => void;
-}) {
-  const { t } = useTranslation();
-  // Resolve the `system` theme value at render time so the editor
-  // matches whatever class is currently on <html>. We listen to the
-  // dark-mode media query AND to a MutationObserver on the html
-  // class so the theme toggle in the header is picked up live.
-  const { theme } = useTheme();
-  const [isDark, setIsDark] = useState(() =>
-    typeof document !== 'undefined' && document.documentElement.classList.contains('dark'),
-  );
-  useEffect(() => {
-    const update = () => setIsDark(document.documentElement.classList.contains('dark'));
-    update();
-    const obs = new MutationObserver(update);
-    obs.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
-    return () => obs.disconnect();
-  }, [theme]);
-
-  return (
-    <div className="space-y-3">
-      <div>
-        <Label className="text-sm font-medium">{t('roles.policyTemplates')}</Label>
-        <div className="flex flex-wrap gap-1.5 mt-1.5">
-          {Object.entries(POLICY_TEMPLATES).map(([key, tpl]) => (
-            <Button
-              key={key}
-              variant="outline"
-              size="sm"
-              type="button"
-              className="text-xs h-7"
-              onClick={() => onApplyTemplate(tpl)}
-            >
-              <Copy className="mr-1 h-3 w-3" />
-              {t(`roles.template_${key}` as const, { defaultValue: key })}
-            </Button>
-          ))}
-        </div>
-      </div>
-      <div>
-        <Label className="text-sm font-medium">{t('roles.policyDocument')}</Label>
-        <p className="text-xs text-muted-foreground mb-1.5">{t('roles.policyDocumentDesc')}</p>
-        <div className="overflow-hidden rounded-md border">
-          <CodeMirror
-            value={value}
-            onChange={onChange}
-            theme={isDark ? 'dark' : 'light'}
-            extensions={[json(), EditorView.lineWrapping]}
-            placeholder={JSON.stringify(POLICY_TEMPLATES.developer, null, 2)}
-            basicSetup={{
-              lineNumbers: true,
-              foldGutter: true,
-              highlightActiveLine: true,
-              bracketMatching: true,
-              closeBrackets: true,
-              autocompletion: false,
-              indentOnInput: true,
-            }}
-            height="320px"
-            className="text-xs"
-          />
-        </div>
-        {error && <p className="text-xs text-destructive mt-1">{error}</p>}
-      </div>
-    </div>
-  );
-}
