@@ -154,6 +154,7 @@
   "dashboard": {
     "title": "Dashboard",
     "subtitle": "Overview of your AI API and MCP gateway",
+    "loadFailed": "Failed to load: {{what}}",
     "overviewEyebrow": "Overview · today",
     "logsEyebrow": "Live requests",
     "tokensUsedToday": "Tokens used (today)",
@@ -266,7 +267,8 @@
     "inactivityTimeout": "Inactivity Timeout (days)",
     "expiringSoon": "Expiring Soon",
     "expired": "Expired",
-    "rotated": "Rotated"
+    "rotated": "Rotated",
+    "gracePeriod": "Grace Period"
   },
   "models": {
     "title": "Models",

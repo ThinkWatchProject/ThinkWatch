@@ -501,32 +501,106 @@ fn validate_forwarder_config(
 ) -> Result<(), AppError> {
     match forwarder_type {
         "udp_syslog" | "tcp_syslog" => {
-            if config.get("address").and_then(|v| v.as_str()).is_none() {
-                return Err(AppError::BadRequest(
-                    "Syslog config requires 'address' field (e.g. \"127.0.0.1:514\")".into(),
-                ));
-            }
+            let addr = config
+                .get("address")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "Syslog config requires 'address' field (e.g. \"127.0.0.1:514\")".into(),
+                    )
+                })?;
+            validate_host_port(addr)?;
         }
         "kafka" => {
-            if config.get("broker_url").and_then(|v| v.as_str()).is_none() {
-                return Err(AppError::BadRequest(
-                    "Kafka config requires 'broker_url' field".into(),
-                ));
-            }
-            if config.get("topic").and_then(|v| v.as_str()).is_none() {
-                return Err(AppError::BadRequest(
-                    "Kafka config requires 'topic' field".into(),
-                ));
-            }
+            let broker_url = config
+                .get("broker_url")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    AppError::BadRequest("Kafka config requires 'broker_url' field".into())
+                })?;
+            // SSRF: Kafka REST proxy URL must be a public HTTP(S) host.
+            super::providers::validate_url(broker_url)?;
+            let topic = config
+                .get("topic")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    AppError::BadRequest("Kafka config requires 'topic' field".into())
+                })?;
+            validate_kafka_topic(topic)?;
         }
         "webhook" => {
-            if config.get("url").and_then(|v| v.as_str()).is_none() {
-                return Err(AppError::BadRequest(
-                    "Webhook config requires 'url' field".into(),
-                ));
-            }
+            let url = config.get("url").and_then(|v| v.as_str()).ok_or_else(|| {
+                AppError::BadRequest("Webhook config requires 'url' field".into())
+            })?;
+            // SSRF: reject localhost / private IPs / cloud metadata endpoints.
+            super::providers::validate_url(url)?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+/// Validate a `host:port` syslog address. Rejects malformed strings and
+/// hostnames that resolve to private/loopback IPs.
+fn validate_host_port(addr: &str) -> Result<(), AppError> {
+    let (host, port) = addr
+        .rsplit_once(':')
+        .ok_or_else(|| AppError::BadRequest("Syslog address must be host:port".into()))?;
+    let port: u16 = port.parse().map_err(|_| {
+        AppError::BadRequest("Syslog address port must be a number (1-65535)".into())
+    })?;
+    if port == 0 {
+        return Err(AppError::BadRequest(
+            "Syslog address port must be >= 1".into(),
+        ));
+    }
+    if host.is_empty() {
+        return Err(AppError::BadRequest("Syslog address missing host".into()));
+    }
+
+    // Block obvious SSRF targets — hostname blocklist + private/loopback IPs.
+    const BLOCKED: &[&str] = &[
+        "localhost",
+        "127.0.0.1",
+        "0.0.0.0",
+        "169.254.169.254",
+        "::1",
+        "metadata.google.internal",
+    ];
+    if BLOCKED.contains(&host) {
+        return Err(AppError::BadRequest("Syslog host is blocked".into()));
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>()
+        && super::providers::is_blocked_ip(&ip)
+    {
+        return Err(AppError::BadRequest(
+            "Syslog host points to private network".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Kafka topic names must match `[a-zA-Z0-9._-]{1,249}` per the Kafka
+/// spec. We also enforce our own stricter rule (no leading dot, no `..`)
+/// to prevent surprises when the topic is interpolated into an HTTP path.
+fn validate_kafka_topic(topic: &str) -> Result<(), AppError> {
+    if topic.is_empty() || topic.len() > 249 {
+        return Err(AppError::BadRequest(
+            "Kafka topic must be 1-249 characters".into(),
+        ));
+    }
+    if topic.starts_with('.') || topic.contains("..") {
+        return Err(AppError::BadRequest(
+            "Kafka topic cannot start with '.' or contain '..'".into(),
+        ));
+    }
+    if !topic
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return Err(AppError::BadRequest(
+            "Kafka topic may only contain letters, digits, '.', '_', '-'".into(),
+        ));
     }
     Ok(())
 }

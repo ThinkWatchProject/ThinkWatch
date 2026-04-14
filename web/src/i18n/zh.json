@@ -154,6 +154,7 @@
   "dashboard": {
     "title": "仪表盘",
     "subtitle": "AI API 和 MCP 网关概览",
+    "loadFailed": "加载失败：{{what}}",
     "overviewEyebrow": "总览 · 今日",
     "logsEyebrow": "实时请求",
     "tokensUsedToday": "今日 Token 用量",
@@ -266,7 +267,8 @@
     "inactivityTimeout": "不活跃超时（天）",
     "expiringSoon": "即将过期",
     "expired": "已过期",
-    "rotated": "已轮换"
+    "rotated": "已轮换",
+    "gracePeriod": "过渡期"
   },
   "models": {
     "title": "模型",

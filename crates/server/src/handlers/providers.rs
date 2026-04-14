@@ -130,7 +130,7 @@ pub(crate) fn validate_url(url_str: &str) -> Result<(), AppError> {
 /// Aggregate "do not connect to" check covering loopback, unspecified
 /// (0.0.0.0 / ::), private ranges, link-local, ULA, IPv4-mapped IPv6,
 /// 6to4, and IPv6 multicast.
-fn is_blocked_ip(ip: &std::net::IpAddr) -> bool {
+pub(crate) fn is_blocked_ip(ip: &std::net::IpAddr) -> bool {
     if ip.is_loopback() || ip.is_unspecified() || is_private_ip(ip) || is_link_local(ip) {
         return true;
     }

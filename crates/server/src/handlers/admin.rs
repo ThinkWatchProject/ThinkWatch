@@ -437,6 +437,21 @@ pub async fn create_user(
 
     tx.commit().await?;
 
+    // Sensitive operation — audit the creation with role details so
+    // tenant admins can trace who provisioned whom. Password itself is
+    // not logged (only whether a reset was forced).
+    state.audit.log(
+        auth_user
+            .audit("admin.create_user")
+            .resource("user")
+            .resource_id(user.id.to_string())
+            .detail(serde_json::json!({
+                "email": &user.email,
+                "role_ids": &role_ids,
+                "force_password_change": force_change,
+            })),
+    );
+
     Ok(Json(CreateUserByAdminResponse {
         user: UserResponse {
             id: user.id,
@@ -578,51 +593,14 @@ pub async fn update_user(
         return Err(AppError::NotFound("User not found".into()));
     }
 
-    // Apply display_name update
-    if let Some(ref name) = req.display_name {
-        if name.trim().is_empty() {
-            return Err(AppError::BadRequest("Display name cannot be empty".into()));
-        }
-        sqlx::query("UPDATE users SET display_name = $1, updated_at = now() WHERE id = $2")
-            .bind(name.trim())
-            .bind(user_id)
-            .execute(&state.db)
-            .await?;
-    }
-
-    // Apply is_active toggle
-    if let Some(active) = req.is_active {
-        sqlx::query("UPDATE users SET is_active = $1, updated_at = now() WHERE id = $2")
-            .bind(active)
-            .bind(user_id)
-            .execute(&state.db)
-            .await?;
-
-        // If deactivating, also invalidate signing public key
-        if !active {
-            let _: () = fred::interfaces::KeysInterface::del(
-                &state.redis,
-                &format!("signing_pubkey:{user_id}"),
-            )
-            .await
-            .unwrap_or(());
-        }
-    }
-
-    // Apply role assignment replacement. Changing role assignments is
-    // a sensitive operation — require `roles:update` at global scope
-    // even for self-edits so `assert_scope_for_user`'s self-shortcut
-    // cannot be abused for privilege escalation.
-    //   1. Only a super_admin can grant super_admin.
-    //   2. Only admin/super_admin can grant admin.
-    //   3. A super_admin cannot remove their own super_admin role
-    //      (prevents locking everyone out).
-    if let Some(ref assignments) = req.role_assignments {
+    // Pre-check role-assignment authorization BEFORE starting the tx —
+    // this avoids holding row locks while doing additional DB reads for
+    // caller-role lookups.
+    let authorized_role_assignments = if let Some(ref assignments) = req.role_assignments {
         auth_user.require_permission("roles:update")?;
         auth_user
             .assert_scope_global(&state.db, "roles:update")
             .await?;
-        // Load caller's role names from DB for privilege escalation checks.
         let caller_roles =
             think_watch_auth::rbac::load_user_role_names(&state.db, auth_user.claims.sub)
                 .await
@@ -660,10 +638,53 @@ pub async fn update_user(
                 "Cannot remove your own super_admin role".into(),
             ));
         }
+        Some(assignments)
+    } else {
+        None
+    };
 
-        let mut tx = state.db.begin().await?;
+    // Apply all DB mutations atomically. Prior code fired three separate
+    // UPDATEs without a transaction — a mid-flight error could leave the
+    // user with display_name changed but is_active and roles unchanged,
+    // which then required manual DB cleanup to fix.
+    let mut tx = state.db.begin().await?;
+
+    if let Some(ref name) = req.display_name {
+        if name.trim().is_empty() {
+            return Err(AppError::BadRequest("Display name cannot be empty".into()));
+        }
+        sqlx::query("UPDATE users SET display_name = $1, updated_at = now() WHERE id = $2")
+            .bind(name.trim())
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    if let Some(active) = req.is_active {
+        sqlx::query("UPDATE users SET is_active = $1, updated_at = now() WHERE id = $2")
+            .bind(active)
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    if let Some(assignments) = authorized_role_assignments {
         write_user_role_assignments(&mut tx, user_id, assignments, auth_user.claims.sub).await?;
-        tx.commit().await?;
+    }
+
+    tx.commit().await?;
+
+    // Post-commit side effects: Redis session/permission invalidation.
+    // These can race with concurrent requests but are idempotent.
+    if req.is_active == Some(false) {
+        let _: () = fred::interfaces::KeysInterface::del(
+            &state.redis,
+            &format!("signing_pubkey:{user_id}"),
+        )
+        .await
+        .unwrap_or(());
+    }
+    if req.role_assignments.is_some() {
         invalidate_user_perms(&state.redis, user_id).await;
     }
 

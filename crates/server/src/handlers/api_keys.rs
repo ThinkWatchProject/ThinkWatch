@@ -382,10 +382,64 @@ pub async fn update_key(
     .fetch_one(&state.db)
     .await?;
 
+    // Record what actually changed in the audit detail. Surfaces /
+    // allowed_models / limits carry real security weight, so capturing
+    // before/after values lets admins trace who loosened a key's scope.
+    let mut changes = serde_json::Map::new();
+    if req.allowed_models.is_some() && req.allowed_models != key.allowed_models {
+        changes.insert(
+            "allowed_models".into(),
+            serde_json::json!({
+                "before": key.allowed_models,
+                "after": updated.allowed_models,
+            }),
+        );
+    }
+    if normalized_surfaces.is_some()
+        && normalized_surfaces.as_deref() != Some(key.surfaces.as_slice())
+    {
+        changes.insert(
+            "surfaces".into(),
+            serde_json::json!({
+                "before": key.surfaces,
+                "after": updated.surfaces,
+            }),
+        );
+    }
+    if expires_at != key.expires_at {
+        changes.insert(
+            "expires_at".into(),
+            serde_json::json!({
+                "before": key.expires_at,
+                "after": updated.expires_at,
+            }),
+        );
+    }
+    if req.rotation_period_days.is_some() && req.rotation_period_days != key.rotation_period_days {
+        changes.insert(
+            "rotation_period_days".into(),
+            serde_json::json!({
+                "before": key.rotation_period_days,
+                "after": updated.rotation_period_days,
+            }),
+        );
+    }
+    if req.inactivity_timeout_days.is_some()
+        && req.inactivity_timeout_days != key.inactivity_timeout_days
+    {
+        changes.insert(
+            "inactivity_timeout_days".into(),
+            serde_json::json!({
+                "before": key.inactivity_timeout_days,
+                "after": updated.inactivity_timeout_days,
+            }),
+        );
+    }
     state.audit.log(
         AuditEntry::new("api_key.update")
             .user_id(auth_user.claims.sub)
-            .resource(format!("api_key:{id}")),
+            .resource(format!("api_key:{id}"))
+            .detail(serde_json::Value::Object(changes)),
     );
 
     Ok(Json(updated))

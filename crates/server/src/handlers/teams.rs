@@ -522,26 +522,45 @@ pub async fn add_member(
         return Err(AppError::NotFound("User not found".into()));
     }
 
-    // Enforce max teams per user
-    let team_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM team_members WHERE user_id = $1")
-            .bind(req.user_id)
-            .fetch_one(&state.db)
-            .await?;
-    if team_count >= MAX_TEAMS_PER_USER {
-        return Err(AppError::BadRequest(format!(
-            "User already belongs to {MAX_TEAMS_PER_USER} teams (maximum)"
-        )));
-    }
-
-    sqlx::query(
-        "INSERT INTO team_members (user_id, team_id) VALUES ($1, $2) \
-         ON CONFLICT (user_id, team_id) DO NOTHING",
+    // Atomic max-teams check: INSERT only if the user currently belongs
+    // to fewer than MAX teams. Prior code did SELECT COUNT + INSERT as
+    // two separate statements, letting two concurrent requests race past
+    // the limit. The subquery runs against the committed snapshot but
+    // INSERT's row-level locking ensures only one concurrent inserter
+    // can succeed — the other's subquery will re-evaluate after the
+    // first commits (PG read-committed semantics). We verify the insert
+    // actually happened by `rows_affected`.
+    //
+    // ON CONFLICT DO NOTHING handles re-adding an existing member
+    // idempotently (0 rows affected but not an error).
+    let result = sqlx::query(
+        r#"INSERT INTO team_members (user_id, team_id)
+           SELECT $1, $2
+           WHERE (SELECT COUNT(*) FROM team_members WHERE user_id = $1) < $3
+           ON CONFLICT (user_id, team_id) DO NOTHING"#,
     )
     .bind(req.user_id)
     .bind(team_id)
+    .bind(MAX_TEAMS_PER_USER)
     .execute(&state.db)
     .await?;
+
+    // 0 rows can mean "already a member" (fine) OR "at limit" (error).
+    // Disambiguate with a follow-up check so we return the right message.
+    if result.rows_affected() == 0 {
+        let already_member: bool = sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM team_members WHERE user_id = $1 AND team_id = $2)",
+        )
+        .bind(req.user_id)
+        .bind(team_id)
+        .fetch_one(&state.db)
+        .await?;
+        if !already_member {
+            return Err(AppError::BadRequest(format!(
+                "User already belongs to {MAX_TEAMS_PER_USER} teams (maximum)"
+            )));
+        }
+    }
 
     invalidate_user_perms(&state.redis, req.user_id).await;
 

@@ -27,6 +27,7 @@ import { api } from '@/lib/api';
 import { StatusIndicator } from '@/components/ui/status-indicator';
 import { ServiceLogo } from '@/components/ui/service-logo';
 import { DashboardLiveSchema, WsTicketSchema } from '@/lib/schemas';
+import { toast } from 'sonner';
 
 interface DashboardStats {
   total_requests_today: number;
@@ -207,7 +208,14 @@ function useLiveDashboard() {
         if (liveRef.current === null) {
           api<DashboardLive>('/api/dashboard/live', { schema: DashboardLiveSchema })
             .then(setLive)
-            .catch(() => {});
+            .catch((err) => {
+              // The WS closed and HTTP fallback also failed — the user
+              // will see the "disconnected" indicator but should also
+              // know data is missing. Log to console for debugging.
+              // Don't toast here: the reconnect loop will retry shortly
+              // and a toast per close would spam the UI.
+              console.warn('[dashboard] live fallback fetch failed:', err);
+            });
         }
         scheduleReconnect();
       };
@@ -366,10 +374,24 @@ export function DashboardPage() {
   const { live, connected } = useLiveDashboard();
 
   useEffect(() => {
-    api<DashboardStats>('/api/dashboard/stats').then(setStats).catch(() => {});
-    api<UsageStats>('/api/analytics/usage/stats').then(setUsage).catch(() => {});
-    api<CostStats>('/api/analytics/costs/stats').then(setCost).catch(() => {});
-  }, []);
+    // Any of the three stats endpoints failing used to leave cards stuck
+    // on "…" with zero feedback. Surface a single toast if *anything*
+    // fails so the user knows the numbers are stale, while still letting
+    // the partial successes render.
+    const fetches: Array<[string, Promise<unknown>]> = [
+      ['stats', api<DashboardStats>('/api/dashboard/stats').then(setStats)],
+      ['usage', api<UsageStats>('/api/analytics/usage/stats').then(setUsage)],
+      ['cost', api<CostStats>('/api/analytics/costs/stats').then(setCost)],
+    ];
+    Promise.allSettled(fetches.map(([, p]) => p)).then((results) => {
+      const failed = results
+        .map((r, i) => (r.status === 'rejected' ? fetches[i][0] : null))
+        .filter((x): x is string => !!x);
+      if (failed.length > 0) {
+        toast.error(t('dashboard.loadFailed', { what: failed.join(', ') }));
+      }
+    });
+  }, [t]);
 
   const tokensSpark = useMemo(() => usage?.tokens_buckets ?? Array(24).fill(0), [usage]);
   const costSpark = useMemo(() => cost?.cost_buckets ?? Array(24).fill(0), [cost]);

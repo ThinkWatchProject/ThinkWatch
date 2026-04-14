@@ -34,6 +34,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { api, apiPatch, apiPost } from '@/lib/api';
+import { toast } from 'sonner';
 import {
   type ContentFilterPreset,
   type ContentFilterRule,
@@ -76,7 +77,10 @@ export function GatewaySecurityPage() {
         const pp = getSettingValue(data, 'security', 'pii_redactor_patterns');
         setPiiPatterns(Array.isArray(pp) ? pp : []);
       })
-      .catch(() => {})
+      .catch((err) => {
+        // Previously silent — left the form blank with no feedback.
+        toast.error(err instanceof Error ? err.message : 'Failed to load security settings');
+      })
       .finally(() => setLoading(false));
   }, []);
 

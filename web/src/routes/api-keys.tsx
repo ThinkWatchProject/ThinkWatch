@@ -127,15 +127,33 @@ function StatusBadge({ apiKey }: { apiKey: ApiKey }) {
 
 function ExpiryCell({ apiKey }: { apiKey: ApiKey }) {
   const { t } = useTranslation();
-  if (!apiKey.expires_at) return <span>{t('apiKeys.never')}</span>;
+  // Rotated keys expire at grace_period_ends_at even if expires_at is null.
+  // Take whichever of the two dates comes first so the UI reflects the
+  // effective deadline, not just the user-configured one.
+  const effectiveExpiry =
+    apiKey.expires_at && apiKey.grace_period_ends_at
+      ? new Date(apiKey.expires_at) < new Date(apiKey.grace_period_ends_at)
+        ? apiKey.expires_at
+        : apiKey.grace_period_ends_at
+      : apiKey.expires_at ?? apiKey.grace_period_ends_at;
 
-  const days = daysUntilExpiry(apiKey.expires_at);
-  const dateStr = new Date(apiKey.expires_at).toLocaleDateString();
+  if (!effectiveExpiry) return <span>{t('apiKeys.never')}</span>;
+
+  const days = daysUntilExpiry(effectiveExpiry);
+  const dateStr = new Date(effectiveExpiry).toLocaleDateString();
+  const inGrace = !!apiKey.grace_period_ends_at && effectiveExpiry === apiKey.grace_period_ends_at;
+
+  const graceTag = inGrace ? (
+    <Badge className="bg-amber-500/15 text-amber-700 dark:text-amber-400 border-amber-500/30 text-[10px] px-1 py-0">
+      {t('apiKeys.gracePeriod')}
+    </Badge>
+  ) : null;
 
   if (days !== null && days < 0) {
     return (
       <span className="flex items-center gap-1.5">
         {dateStr}
+        {graceTag}
         <Badge variant="destructive" className="text-[10px] px-1 py-0">{t('apiKeys.expired')}</Badge>
       </span>
     );
@@ -145,6 +163,7 @@ function ExpiryCell({ apiKey }: { apiKey: ApiKey }) {
     return (
       <span className="flex items-center gap-1.5">
         {dateStr}
+        {graceTag}
         <Badge variant="destructive" className="text-[10px] px-1 py-0">&lt;1d</Badge>
       </span>
     );
@@ -154,6 +173,7 @@ function ExpiryCell({ apiKey }: { apiKey: ApiKey }) {
     return (
       <span className="flex items-center gap-1.5">
         {dateStr}
+        {graceTag}
         <Badge className="bg-yellow-500/15 text-yellow-700 dark:text-yellow-400 border-yellow-500/30 text-[10px] px-1 py-0">
           {Math.ceil(days)}d
         </Badge>
@@ -161,7 +181,12 @@ function ExpiryCell({ apiKey }: { apiKey: ApiKey }) {
     );
   }
 
-  return <span>{dateStr}</span>;
+  return (
+    <span className="flex items-center gap-1.5">
+      {dateStr}
+      {graceTag}
+    </span>
+  );
 }
 
 // ---------------------------------------------------------------------------
