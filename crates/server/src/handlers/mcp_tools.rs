@@ -13,6 +13,11 @@ pub struct McpToolRow {
     pub id: uuid::Uuid,
     pub server_id: uuid::Uuid,
     pub server_name: String,
+    /// Server's `namespace_prefix` — the authoritative key for ACL
+    /// matching. Surfaced separately so the frontend doesn't have to
+    /// reverse-engineer it from `namespaced_name` (prefixes may
+    /// themselves contain `__`).
+    pub server_prefix: String,
     pub name: String,
     pub namespaced_name: String,
     pub description: Option<String>,
@@ -39,6 +44,7 @@ pub async fn list_tools(
              t.id,
              t.server_id,
              s.name AS server_name,
+             s.namespace_prefix AS server_prefix,
              t.tool_name AS name,
              s.namespace_prefix || '__' || t.tool_name AS namespaced_name,
              t.description,
