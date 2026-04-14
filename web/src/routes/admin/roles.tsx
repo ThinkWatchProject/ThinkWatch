@@ -18,6 +18,7 @@ import { PermissionTree } from '@/components/roles/PermissionTree';
 import { StepBasics } from '@/components/roles/steps/StepBasics';
 import { StepReview } from '@/components/roles/steps/StepReview';
 import { RoleHistory } from '@/components/roles/RoleHistory';
+import { LimitsDraftEditor, persistDrafts } from '@/components/roles/LimitsDraftEditor';
 import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -123,6 +124,10 @@ export function RolesPage() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
+  // Preset rate-limit / budget ids the admin checked in the create
+  // wizard. Persisted right after the role row is created so a fresh
+  // role lands with sensible guard-rails on day one.
+  const [createLimitDrafts, setCreateLimitDrafts] = useState<Set<string>>(new Set());
   const [editOpen, setEditOpen] = useState(false);
   const [editRole, setEditRole] = useState<RoleResponse | null>(null);
   const [saving, setSaving] = useState(false);
@@ -401,22 +406,30 @@ export function RolesPage() {
     const performCreate = async () => {
       setCreating(true);
       try {
-        // Capture the created role so we can auto-open it in the edit
-        // wizard for limit/budget configuration — there's no good way
-        // to set per-role rate limits before the row exists.
         const created = await apiPost<RoleResponse>('/api/admin/roles', {
           name: createForm.name,
           description: createForm.description || null,
           ...buildRolePayload(createForm, permissions),
         });
+        // Persist any preset rate-limit / budget drafts the admin
+        // checked. Best-effort: if a single draft fails we toast but
+        // still close the dialog (the role itself is saved).
+        if (createLimitDrafts.size > 0) {
+          try {
+            await persistDrafts(created.id, createLimitDrafts, apiPost);
+          } catch (err) {
+            toast.error(
+              `${t('roles.draftPersistFailed')}: ${
+                err instanceof Error ? err.message : 'unknown'
+              }`,
+            );
+          }
+        }
         setCreateOpen(false);
         resetCreateForm();
+        setCreateLimitDrafts(new Set());
         await fetchData();
-        // Re-open in edit mode at the Limits step. The toast lets the
-        // admin know what just happened so the second dialog isn't
-        // surprising.
-        toast.success(t('roles.createdAndConfigureLimits', { name: created.name }));
-        openEditAtStep(created, 'limits');
+        toast.success(t('roles.createdSuccessfully', { name: created.name }));
         return;
       } catch {
         // surfaced via toast elsewhere; keep dialog open
@@ -436,22 +449,9 @@ export function RolesPage() {
     }
   };
 
-  /// Optional step id to jump to when the edit wizard opens — used by
-  /// the auto-reopen-after-create flow so the admin lands directly on
-  /// the Limits configuration page.
-  const [editInitialStep, setEditInitialStep] = useState<string | undefined>();
-
   const openEdit = (r: RoleResponse) => {
     setEditRole(r);
     editForm.reset(fromRoleResponse(r));
-    setEditInitialStep(undefined);
-    setEditOpen(true);
-  };
-
-  const openEditAtStep = (r: RoleResponse, stepId: string) => {
-    setEditRole(r);
-    editForm.reset(fromRoleResponse(r));
-    setEditInitialStep(stepId);
     setEditOpen(true);
   };
 
@@ -885,6 +885,17 @@ export function RolesPage() {
                   ),
                 },
                 {
+                  id: 'limits',
+                  label: t('roles.stepLimits'),
+                  hint: t('roles.stepLimitsHint'),
+                  content: (
+                    <LimitsDraftEditor
+                      selected={createLimitDrafts}
+                      onChange={setCreateLimitDrafts}
+                    />
+                  ),
+                },
+                {
                   id: 'review',
                   label: t('roles.stepReview'),
                   hint: t('roles.stepReviewHint'),
@@ -1064,7 +1075,6 @@ export function RolesPage() {
           </DialogHeader>
           <RoleWizard
             key={editRole?.id ?? 'edit'}
-            initialStepId={editInitialStep}
             submitting={saving}
             submitLabel={t('common.save')}
             onSubmit={() => void handleEdit()}
@@ -1099,6 +1109,7 @@ export function RolesPage() {
                         ? {
                             created_at: editRole.created_at,
                             updated_at: editRole.updated_at,
+                            created_by_email: editRole.created_by_email,
                           }
                         : undefined
                     }

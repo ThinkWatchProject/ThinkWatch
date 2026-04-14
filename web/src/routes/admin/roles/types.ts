@@ -27,6 +27,9 @@ export interface RoleResponse {
   allowed_mcp_tools: string[] | null;
   policy_document: PolicyDocument | null;
   user_count: number;
+  /** Email of the user who created this role. `null` for seeded
+   *  system roles or roles whose creator was deleted. */
+  created_by_email: string | null;
   created_at: string;
   updated_at: string;
 }

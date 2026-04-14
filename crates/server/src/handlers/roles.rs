@@ -407,6 +407,10 @@ pub struct RoleResponse {
     pub policy_document: Option<serde_json::Value>,
     /// Number of users currently assigned to this role.
     pub user_count: i64,
+    /// Email of the user who created this role. `None` for system
+    /// roles seeded by migrations and for any role whose creator was
+    /// later soft-deleted.
+    pub created_by_email: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -416,7 +420,8 @@ pub struct RolesListResponse {
     pub items: Vec<RoleResponse>,
 }
 
-/// One row from `rbac_roles` mapped 1:1 by sqlx.
+/// One row from `rbac_roles` (with creator email LEFT JOINed in)
+/// mapped 1:1 by sqlx.
 type RoleRow = (
     Uuid,
     String,
@@ -426,14 +431,17 @@ type RoleRow = (
     Option<Vec<String>>,
     Option<Vec<String>>,
     Option<serde_json::Value>,
+    Option<String>,
     chrono::DateTime<chrono::Utc>,
     chrono::DateTime<chrono::Utc>,
 );
 
-const ROLE_SELECT: &str = "SELECT id, name, description, is_system, permissions, \
-                                  allowed_models, allowed_mcp_tools, policy_document, \
-                                  created_at, updated_at \
-                           FROM rbac_roles";
+const ROLE_SELECT: &str = "SELECT r.id, r.name, r.description, r.is_system, r.permissions, \
+                                  r.allowed_models, r.allowed_mcp_tools, r.policy_document, \
+                                  u.email AS created_by_email, \
+                                  r.created_at, r.updated_at \
+                           FROM rbac_roles r \
+                           LEFT JOIN users u ON u.id = r.created_by";
 
 fn row_to_response(row: RoleRow, user_count: i64) -> RoleResponse {
     RoleResponse {
@@ -446,8 +454,9 @@ fn row_to_response(row: RoleRow, user_count: i64) -> RoleResponse {
         allowed_mcp_tools: row.6,
         policy_document: row.7,
         user_count,
-        created_at: row.8.to_rfc3339(),
-        updated_at: row.9.to_rfc3339(),
+        created_by_email: row.8,
+        created_at: row.9.to_rfc3339(),
+        updated_at: row.10.to_rfc3339(),
     }
 }
 
@@ -554,12 +563,18 @@ pub async fn create_role(
     }
 
     let row: RoleRow = sqlx::query_as(
-        "INSERT INTO rbac_roles (name, description, is_system, permissions, \
-                                 allowed_models, allowed_mcp_tools, policy_document, created_by) \
-         VALUES ($1, $2, FALSE, $3, $4, $5, $6, $7) \
-         RETURNING id, name, description, is_system, permissions, \
-                   allowed_models, allowed_mcp_tools, policy_document, \
-                   created_at, updated_at",
+        "WITH inserted AS ( \
+            INSERT INTO rbac_roles (name, description, is_system, permissions, \
+                                    allowed_models, allowed_mcp_tools, policy_document, created_by) \
+            VALUES ($1, $2, FALSE, $3, $4, $5, $6, $7) \
+            RETURNING * \
+         ) \
+         SELECT i.id, i.name, i.description, i.is_system, i.permissions, \
+                i.allowed_models, i.allowed_mcp_tools, i.policy_document, \
+                u.email AS created_by_email, \
+                i.created_at, i.updated_at \
+         FROM inserted i \
+         LEFT JOIN users u ON u.id = i.created_by",
     )
     .bind(name)
     .bind(&payload.description)

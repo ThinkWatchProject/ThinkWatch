@@ -36,6 +36,7 @@ interface StepBasicsProps {
   metadata?: {
     created_at?: string;
     updated_at?: string;
+    created_by_email?: string | null;
   };
 }
 
@@ -145,8 +146,14 @@ export function StepBasics({
         </div>
       )}
 
-      {metadata && (metadata.created_at || metadata.updated_at) && (
+      {metadata && (metadata.created_at || metadata.updated_at || metadata.created_by_email) && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t pt-3 text-[10px] text-muted-foreground">
+          {metadata.created_by_email && (
+            <span>
+              {t('roles.metaCreatedBy')}:{' '}
+              <span className="font-mono">{metadata.created_by_email}</span>
+            </span>
+          )}
           {metadata.created_at && (
             <span>
               {t('roles.metaCreatedAt')}:{' '}
