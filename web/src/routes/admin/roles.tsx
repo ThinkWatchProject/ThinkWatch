@@ -213,6 +213,15 @@ export function RolesPage() {
     () => new Map(availableServers.map((s) => [s.id, s.name])),
     [availableServers],
   );
+  // server_id → namespace_prefix — authoritative ACL key used for the
+  // `<prefix>__*` wildcard when "select all" is clicked on a server.
+  // Prefer this over the tool row's server_prefix (which may be stale
+  // on cached responses) or reverse-derivation (which breaks when the
+  // prefix itself contains `__`).
+  const serverPrefixById = useMemo(
+    () => new Map(availableServers.map((s) => [s.id, s.namespace_prefix])),
+    [availableServers],
+  );
 
   // MCP tools grouped by server display name. `prefix` is the
   // authoritative ACL key sent by the backend — never reverse-derived
@@ -225,9 +234,11 @@ export function RolesPage() {
     >();
     for (const tool of availableMcpTools) {
       const serverName = tool.server_name ?? serverNameById.get(tool.server_id) ?? tool.server_id;
+      const prefix =
+        serverPrefixById.get(tool.server_id) ?? tool.server_prefix ?? tool.server_id;
       let group = out.get(serverName);
       if (!group) {
-        group = { serverName, prefix: tool.server_prefix, tools: [] };
+        group = { serverName, prefix, tools: [] };
         out.set(serverName, group);
       }
       group.tools.push({
@@ -236,7 +247,7 @@ export function RolesPage() {
       });
     }
     return out;
-  }, [availableMcpTools, serverNameById]);
+  }, [availableMcpTools, serverNameById, serverPrefixById]);
 
   // Models grouped by provider name.
   const modelsByProvider = useMemo(() => {

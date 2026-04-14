@@ -68,6 +68,9 @@ export interface PolicyStatement {
 export interface McpServer {
   id: string;
   name: string;
+  /** Short identifier used as the tool-namespace prefix. Tools are
+   *  exposed as `<namespace_prefix>__<tool_name>` in ACLs. */
+  namespace_prefix: string;
 }
 
 export interface McpToolRow {
