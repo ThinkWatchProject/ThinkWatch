@@ -31,6 +31,12 @@ interface StepBasicsProps {
   /** Only used in create mode — writes all scope state atomically when a
    *  clone source or simple-template is picked. */
   scopeState?: RoleScopeState;
+  /** Edit mode: surfaced as small read-only metadata at the bottom of
+   *  the step so the admin sees who/when before they make changes. */
+  metadata?: {
+    created_at?: string;
+    updated_at?: string;
+  };
 }
 
 /**
@@ -47,6 +53,7 @@ export function StepBasics({
   roles,
   permissions,
   scopeState,
+  metadata,
 }: StepBasicsProps) {
   const { t } = useTranslation();
 
@@ -135,6 +142,23 @@ export function StepBasics({
               </SelectContent>
             </Select>
           </div>
+        </div>
+      )}
+
+      {metadata && (metadata.created_at || metadata.updated_at) && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-t pt-3 text-[10px] text-muted-foreground">
+          {metadata.created_at && (
+            <span>
+              {t('roles.metaCreatedAt')}:{' '}
+              <span className="font-mono">{new Date(metadata.created_at).toLocaleString()}</span>
+            </span>
+          )}
+          {metadata.updated_at && metadata.updated_at !== metadata.created_at && (
+            <span>
+              {t('roles.metaUpdatedAt')}:{' '}
+              <span className="font-mono">{new Date(metadata.updated_at).toLocaleString()}</span>
+            </span>
+          )}
         </div>
       )}
     </div>

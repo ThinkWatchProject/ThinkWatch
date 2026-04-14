@@ -23,6 +23,10 @@ interface RoleWizardProps {
   onSubmit: () => void;
   /** Optional: extra footer content shown between Prev and Next (e.g. "Reset to defaults" for system roles). */
   footerExtras?: ReactNode;
+  /** Force the wizard to open on a particular step on mount/key-change.
+   *  Used by the create-then-edit auto-flow to land on the Limits step
+   *  immediately after a role is freshly created. */
+  initialStepId?: string;
 }
 
 /**
@@ -40,9 +44,10 @@ export function RoleWizard({
   submitLabel,
   onSubmit,
   footerExtras,
+  initialStepId,
 }: RoleWizardProps) {
   const { t } = useTranslation();
-  const [currentId, setCurrentId] = useState(steps[0]?.id);
+  const [currentId, setCurrentId] = useState(initialStepId ?? steps[0]?.id);
   const [errors, setErrors] = useState<Record<string, string | null>>({});
 
   const currentIdx = steps.findIndex((s) => s.id === currentId);

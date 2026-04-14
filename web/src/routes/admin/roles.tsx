@@ -17,6 +17,8 @@ import { useRoleForm, fromRoleResponse, emptyRoleForm, buildRolePayload } from '
 import { PermissionTree } from '@/components/roles/PermissionTree';
 import { StepBasics } from '@/components/roles/steps/StepBasics';
 import { StepReview } from '@/components/roles/steps/StepReview';
+import { RoleHistory } from '@/components/roles/RoleHistory';
+import { toast } from 'sonner';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -399,14 +401,23 @@ export function RolesPage() {
     const performCreate = async () => {
       setCreating(true);
       try {
-        await apiPost('/api/admin/roles', {
+        // Capture the created role so we can auto-open it in the edit
+        // wizard for limit/budget configuration — there's no good way
+        // to set per-role rate limits before the row exists.
+        const created = await apiPost<RoleResponse>('/api/admin/roles', {
           name: createForm.name,
           description: createForm.description || null,
           ...buildRolePayload(createForm, permissions),
         });
         setCreateOpen(false);
         resetCreateForm();
-        fetchData();
+        await fetchData();
+        // Re-open in edit mode at the Limits step. The toast lets the
+        // admin know what just happened so the second dialog isn't
+        // surprising.
+        toast.success(t('roles.createdAndConfigureLimits', { name: created.name }));
+        openEditAtStep(created, 'limits');
+        return;
       } catch {
         // surfaced via toast elsewhere; keep dialog open
       } finally {
@@ -425,9 +436,22 @@ export function RolesPage() {
     }
   };
 
+  /// Optional step id to jump to when the edit wizard opens — used by
+  /// the auto-reopen-after-create flow so the admin lands directly on
+  /// the Limits configuration page.
+  const [editInitialStep, setEditInitialStep] = useState<string | undefined>();
+
   const openEdit = (r: RoleResponse) => {
     setEditRole(r);
     editForm.reset(fromRoleResponse(r));
+    setEditInitialStep(undefined);
+    setEditOpen(true);
+  };
+
+  const openEditAtStep = (r: RoleResponse, stepId: string) => {
+    setEditRole(r);
+    editForm.reset(fromRoleResponse(r));
+    setEditInitialStep(stepId);
     setEditOpen(true);
   };
 
@@ -873,6 +897,8 @@ export function RolesPage() {
                       policyJson={createForm.policyJson}
                       models={createForm.models}
                       mcpTools={createForm.mcpTools}
+                      permissions={permissions}
+                      dangerousKeys={dangerousKeys}
                     />
                   ),
                 },
@@ -1037,6 +1063,8 @@ export function RolesPage() {
             )}
           </DialogHeader>
           <RoleWizard
+            key={editRole?.id ?? 'edit'}
+            initialStepId={editInitialStep}
             submitting={saving}
             submitLabel={t('common.save')}
             onSubmit={() => void handleEdit()}
@@ -1066,6 +1094,14 @@ export function RolesPage() {
                     description={editForm.description}
                     onDescriptionChange={editForm.setDescription}
                     nameDisabled={editRole?.is_system}
+                    metadata={
+                      editRole
+                        ? {
+                            created_at: editRole.created_at,
+                            updated_at: editRole.updated_at,
+                          }
+                        : undefined
+                    }
                   />
                 ),
               },
@@ -1134,6 +1170,12 @@ export function RolesPage() {
                 ) : null,
               },
               {
+                id: 'history',
+                label: t('roles.stepHistory'),
+                hint: t('roles.stepHistoryHint'),
+                content: editRole ? <RoleHistory roleId={editRole.id} /> : null,
+              },
+              {
                 id: 'review',
                 label: t('roles.stepReview'),
                 hint: t('roles.stepReviewHint'),
@@ -1146,6 +1188,8 @@ export function RolesPage() {
                     policyJson={editForm.policyJson}
                     models={editForm.models}
                     mcpTools={editForm.mcpTools}
+                    permissions={permissions}
+                    dangerousKeys={dangerousKeys}
                   />
                 ),
               },
