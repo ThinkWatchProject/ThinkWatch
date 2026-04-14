@@ -11,7 +11,14 @@ import type { PermissionDef } from '@/routes/admin/roles/types';
 
 export type McpToolsByServer = Map<
   string,
-  { serverName: string; tools: { key: string; toolName: string }[] }
+  {
+    serverName: string;
+    /** `namespace_prefix` of the server — used for the `<prefix>__*`
+     *  wildcard so "select all" matches the same keys as individual
+     *  tool checkboxes (their key is `<prefix>__<tool_name>`). */
+    prefix: string;
+    tools: { key: string; toolName: string }[];
+  }
 >;
 export type ModelsByProvider = Map<string, { modelId: string; displayName: string }[]>;
 
@@ -281,9 +288,12 @@ function ToolScopeDropdown({
     else next.add(key);
     onChange(next);
   };
-  const toggleServer = (server: string, tools: { key: string }[]) => {
+  /// Toggle the per-server "select all" — uses `<prefix>__*` wildcard
+  /// rather than `<displayName>__*` so the key matches what the backend
+  /// stores in `allowed_mcp_tools` and what individual checkboxes use.
+  const toggleServer = (prefix: string, tools: { key: string }[]) => {
     const next = new Set(selected ?? []);
-    const wildcard = `${server}__*`;
+    const wildcard = `${prefix}__*`;
     const hasAll = next.has(wildcard) || tools.every((x) => next.has(x.key));
     if (hasAll) {
       next.delete(wildcard);
@@ -334,7 +344,10 @@ function ToolScopeDropdown({
                   <p className="px-1 text-xs italic text-muted-foreground">{t('common.noData')}</p>
                 ) : (
                   Array.from(mcpToolsByServer.entries()).map(([server, group]) => {
-                    const wildcard = `${server}__*`;
+                    // Wildcard uses the namespace_prefix, NOT the display
+                    // name — display name may have spaces / capitals that
+                    // wouldn't match individual tool keys.
+                    const wildcard = `${group.prefix}__*`;
                     const hasWildcard = selected.has(wildcard);
                     const checkedCount = hasWildcard
                       ? group.tools.length
@@ -347,7 +360,7 @@ function ToolScopeDropdown({
                           <Checkbox
                             checked={allOn}
                             data-state={someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'}
-                            onCheckedChange={() => toggleServer(server, group.tools)}
+                            onCheckedChange={() => toggleServer(group.prefix, group.tools)}
                           />
                           <span className="font-mono text-muted-foreground">{server}</span>
                           <span className="text-[10px] font-normal text-muted-foreground">

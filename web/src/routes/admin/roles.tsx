@@ -214,19 +214,26 @@ export function RolesPage() {
     [availableServers],
   );
 
-  // MCP tools grouped by server name. Each tool's namespaced key is
-  // `${serverName}__${toolName}`.
+  // MCP tools grouped by server display name. The `prefix` carried on
+  // each group is what the backend uses for ACL matching — we extract
+  // it from `namespaced_name` (= `prefix__tool_name`) so the wildcard
+  // in "select all" matches the tool keys exactly.
   const mcpToolsByServer = useMemo(() => {
-    const out = new Map<string, { serverName: string; tools: { key: string; toolName: string }[] }>();
+    const out = new Map<
+      string,
+      { serverName: string; prefix: string; tools: { key: string; toolName: string }[] }
+    >();
     for (const tool of availableMcpTools) {
       const serverName = tool.server_name ?? serverNameById.get(tool.server_id) ?? tool.server_id;
+      // namespaced_name is `prefix__tool_name`; split at the FIRST `__`
+      // because tool names themselves may contain underscores.
+      const sep = tool.namespaced_name.indexOf('__');
+      const prefix = sep > 0 ? tool.namespaced_name.slice(0, sep) : tool.namespaced_name;
       let group = out.get(serverName);
       if (!group) {
-        group = { serverName, tools: [] };
+        group = { serverName, prefix, tools: [] };
         out.set(serverName, group);
       }
-      // Use the backend-computed namespaced_name so the key matches the
-      // namespace_prefix (not the server's display name).
       group.tools.push({
         key: tool.namespaced_name,
         toolName: tool.name,
