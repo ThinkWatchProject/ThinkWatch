@@ -23,3 +23,4 @@ pub mod roles;
 pub mod setup;
 pub mod sso;
 pub mod teams;
+pub mod test_rate_limit;

@@ -29,6 +29,7 @@
     "selectAll": "Select all",
     "clearAll": "Clear",
     "add": "Add",
+    "remove": "Remove",
     "deleteSuccess": "Deleted successfully",
     "operationFailed": "Operation failed",
     "yes": "Yes",
@@ -80,6 +81,9 @@
     "featured": "Featured",
     "install": "Install",
     "installed": "Installed",
+    "customHeaders": "Custom Headers",
+    "headerName": "Header name",
+    "headerValue": "Value",
     "installAgain": "Install Again",
     "installAgainHint": "Already installed. Install another copy (useful for multiple instances).",
     "installAgainWarning": "This template is already installed. A new copy will be created with a numeric suffix on the name and prefix.",
@@ -263,6 +267,7 @@
     "rotateSuccess": "Key rotated successfully. Save the new key below.",
     "editKey": "Edit Key",
     "expiresIn": "Expires In",
+    "expiresInHint": "New expiry from now (days). Leave empty to keep current.",
     "rotationPeriod": "Rotation Period (days)",
     "inactivityTimeout": "Inactivity Timeout (days)",
     "expiringSoon": "Expiring Soon",
@@ -730,6 +735,14 @@
     "connected": "Connected"
   },
   "settings": {
+    "oidc": {
+      "clientSecret": "Client Secret",
+      "secretKeepPlaceholder": "••••••• (leave empty to keep current)",
+      "secretEnterPlaceholder": "Enter client secret",
+      "secretConfiguredHint": "Secret is configured. Leave empty to keep unchanged.",
+      "redirectUrl": "Redirect URL",
+      "redirectUrlHint": "Must match the callback URL registered with your OIDC provider"
+    },
     "general": "General",
     "auth": "Authentication",
     "gateway": "Gateway",

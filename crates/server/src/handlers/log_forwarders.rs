@@ -369,6 +369,14 @@ pub async fn test_forwarder(
     auth_user
         .assert_scope_global(&state.db, "log_forwarders:write")
         .await?;
+    // Test endpoint fires outbound HTTP — cap at 5 calls/min/user to
+    // prevent abuse as a network probe.
+    super::test_rate_limit::check_test_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        "log_forwarder",
+    )
+    .await?;
     let forwarder = sqlx::query_as::<_, LogForwarder>("SELECT * FROM log_forwarders WHERE id = $1")
         .bind(id)
         .fetch_optional(&state.db)

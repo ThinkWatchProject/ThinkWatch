@@ -29,6 +29,7 @@
     "selectAll": "全选",
     "clearAll": "清空",
     "add": "添加",
+    "remove": "移除",
     "deleteSuccess": "删除成功",
     "operationFailed": "操作失败",
     "yes": "是",
@@ -80,6 +81,9 @@
     "featured": "推荐",
     "install": "安装",
     "installed": "已安装",
+    "customHeaders": "自定义请求头",
+    "headerName": "请求头名称",
+    "headerValue": "值",
     "installAgain": "再次安装",
     "installAgainHint": "已安装。可以再装一份（适用于多实例场景）。",
     "installAgainWarning": "此模板已安装。将创建一份新副本，名称和前缀会自动加数字后缀。",
@@ -263,6 +267,7 @@
     "rotateSuccess": "密钥轮换成功，请保存下方新密钥。",
     "editKey": "编辑密钥",
     "expiresIn": "过期时间",
+    "expiresInHint": "从现在起的过期天数。留空则保持当前设置。",
     "rotationPeriod": "轮换周期（天）",
     "inactivityTimeout": "不活跃超时（天）",
     "expiringSoon": "即将过期",
@@ -730,6 +735,14 @@
     "connected": "已连接"
   },
   "settings": {
+    "oidc": {
+      "clientSecret": "客户端密钥",
+      "secretKeepPlaceholder": "••••••• （留空则保留现有值）",
+      "secretEnterPlaceholder": "输入客户端密钥",
+      "secretConfiguredHint": "已配置密钥。留空则保持不变。",
+      "redirectUrl": "回调地址",
+      "redirectUrlHint": "必须与在 OIDC 提供商处注册的回调 URL 一致"
+    },
     "general": "通用",
     "auth": "认证",
     "gateway": "网关",

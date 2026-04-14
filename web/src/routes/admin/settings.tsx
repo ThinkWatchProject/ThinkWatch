@@ -508,25 +508,25 @@ export function SettingsPage() {
                       />
                     </div>
                     <div className="space-y-1">
-                      <Label className="text-sm">Client Secret</Label>
+                      <Label className="text-sm">{t('settings.oidc.clientSecret')}</Label>
                       <Input
                         type="password"
                         value={oidcClientSecret}
                         onChange={(e) => setOidcClientSecret(e.target.value)}
-                        placeholder={oidcHasSecret ? '••••••• (leave empty to keep current)' : 'Enter client secret'}
+                        placeholder={oidcHasSecret ? t('settings.oidc.secretKeepPlaceholder') : t('settings.oidc.secretEnterPlaceholder')}
                       />
                       {oidcHasSecret && (
-                        <p className="text-xs text-muted-foreground">Secret is configured. Leave empty to keep unchanged.</p>
+                        <p className="text-xs text-muted-foreground">{t('settings.oidc.secretConfiguredHint')}</p>
                       )}
                     </div>
                     <div className="space-y-1">
-                      <Label className="text-sm">Redirect URL</Label>
+                      <Label className="text-sm">{t('settings.oidc.redirectUrl')}</Label>
                       <Input
                         value={oidcRedirectUrl}
                         onChange={(e) => setOidcRedirectUrl(e.target.value)}
                         placeholder="https://thinkwatch.example.com/api/auth/sso/callback"
                       />
-                      <p className="text-xs text-muted-foreground">Must match the callback URL registered with your OIDC provider</p>
+                      <p className="text-xs text-muted-foreground">{t('settings.oidc.redirectUrlHint')}</p>
                     </div>
                   </div>
                 )}

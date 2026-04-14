@@ -595,7 +595,7 @@ export function ApiKeysPage() {
             <div className="space-y-2">
               <Label>{t('apiKeys.expiresIn')}</Label>
               <Input type="number" value={editExpiresInDays} onChange={(e) => setEditExpiresInDays(e.target.value)} placeholder="90" min={1} />
-              <p className="text-xs text-muted-foreground">New expiry from now (days). Leave empty to keep current.</p>
+              <p className="text-xs text-muted-foreground">{t('apiKeys.expiresInHint')}</p>
             </div>
             <div className="space-y-2">
               <Label>{t('apiKeys.rotationPeriod')}</Label>

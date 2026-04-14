@@ -427,7 +427,7 @@ export function McpStorePage() {
             {/* Custom headers */}
             <div className="space-y-2">
               <div className="flex items-center justify-between">
-                <Label className="text-sm">Custom Headers</Label>
+                <Label className="text-sm">{t('mcpStore.customHeaders')}</Label>
                 <Button type="button" variant="ghost" size="sm" onClick={addHeader}>
                   <Plus className="mr-1 h-3 w-3" /> {t('common.add')}
                 </Button>
@@ -435,13 +435,15 @@ export function McpStorePage() {
               {customHeaders.map(([k, v], i) => (
                 <div key={i} className="flex items-center gap-2">
                   <Input
-                    placeholder="Header name"
+                    placeholder={t('mcpStore.headerName')}
+                    aria-label={t('mcpStore.headerName')}
                     value={k}
                     onChange={(e) => updateHeader(i, 0, e.target.value)}
                     className="flex-1"
                   />
                   <Input
-                    placeholder="Value"
+                    placeholder={t('mcpStore.headerValue')}
+                    aria-label={t('mcpStore.headerValue')}
                     value={v}
                     onChange={(e) => updateHeader(i, 1, e.target.value)}
                     className="flex-1"
@@ -450,6 +452,8 @@ export function McpStorePage() {
                     type="button"
                     variant="ghost"
                     size="icon"
+                    aria-label={t('common.remove')}
+                    title={t('common.remove')}
                     onClick={() => removeHeader(i)}
                   >
                     <Trash2 className="h-4 w-4" />

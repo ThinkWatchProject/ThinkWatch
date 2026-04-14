@@ -972,11 +972,22 @@ pub async fn delete_account(
         .await?;
     tx.commit().await?;
 
-    // Revoke all sessions
-    let _: () =
-        fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_pubkey:{user_id}"))
-            .await
-            .unwrap_or(());
+    // Revoke all sessions. Proceed even if Redis is unreachable — the
+    // account's DB flags (is_active = false) already invalidate future
+    // logins; this just shortens the current signing-key TTL window.
+    // We do want visibility on Redis failures though, so log them.
+    if let Err(e) = fred::interfaces::KeysInterface::del::<(), _>(
+        &state.redis,
+        &format!("signing_pubkey:{user_id}"),
+    )
+    .await
+    {
+        tracing::warn!(
+            user_id = %user_id,
+            error = %e,
+            "Failed to revoke signing_pubkey in Redis during account deletion"
+        );
+    }
 
     state
         .audit

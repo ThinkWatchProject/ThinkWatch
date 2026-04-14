@@ -65,6 +65,10 @@ pub async fn test_mcp_server(
     auth_user
         .assert_scope_global(&state.db, "mcp_servers:create")
         .await?;
+    // The test endpoint makes arbitrary outbound HTTP requests, so
+    // cap per-user calls at 5/min to prevent abuse as a port scanner.
+    super::test_rate_limit::check_test_rate_limit(&state.redis, auth_user.claims.sub, "mcp")
+        .await?;
 
     if req.endpoint_url.is_empty() {
         return Err(AppError::BadRequest("endpoint_url is required".into()));
@@ -164,13 +168,32 @@ pub async fn test_mcp_server(
                 .to_lowercase();
             let json: serde_json::Value = if content_type.contains("text/event-stream") {
                 match resp.text().await {
-                    Ok(text) => {
-                        crate::mcp_runtime::parse_sse_json(&text).unwrap_or(serde_json::Value::Null)
+                    Ok(text) => crate::mcp_runtime::parse_sse_json(&text).unwrap_or_else(|e| {
+                        tracing::warn!(
+                            endpoint = %req.endpoint_url,
+                            error = %e,
+                            "MCP test: failed to parse SSE JSON response"
+                        );
+                        serde_json::Value::Null
+                    }),
+                    Err(e) => {
+                        tracing::warn!(
+                            endpoint = %req.endpoint_url,
+                            error = %e,
+                            "MCP test: failed to read SSE response body"
+                        );
+                        serde_json::Value::Null
                     }
-                    Err(_) => serde_json::Value::Null,
                 }
             } else {
-                resp.json().await.unwrap_or(serde_json::Value::Null)
+                resp.json().await.unwrap_or_else(|e| {
+                    tracing::warn!(
+                        endpoint = %req.endpoint_url,
+                        error = %e,
+                        "MCP test: failed to parse JSON response"
+                    );
+                    serde_json::Value::Null
+                })
             };
             let result_field = json.get("result");
 

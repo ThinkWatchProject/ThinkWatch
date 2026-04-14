@@ -530,10 +530,6 @@ pub async fn rotate_key(
 
     tx.commit().await?;
 
-    // Rate limits now live on roles, not individual API keys — nothing
-    // to copy during key rotation.
-    {}
-
     state.audit.log(
         AuditEntry::new("api_key.rotate")
             .user_id(auth_user.claims.sub)
