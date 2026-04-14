@@ -1,4 +1,5 @@
 import {
+  memo,
   useEffect,
   useMemo,
   useRef,
@@ -621,6 +622,59 @@ function ProviderFilterTabs({
 // Live log feed
 // ----------------------------------------------------------------------------
 
+// Memoized row — WS pushes a fresh `rows` array every 4s but most rows
+// are unchanged. Memoizing by row object identity skips the bulk of the
+// re-render work. `i` (used only for fade opacity) is a prop so it too
+// participates in memo equality.
+const LiveLogRowItem = memo(function LiveLogRowItem({
+  r,
+  i,
+  cols,
+}: {
+  r: LiveLogRow;
+  i: number;
+  cols: string;
+}) {
+  return (
+    <li
+      className={`grid gap-3 border-b px-4 py-2 last:border-b-0 hover:bg-muted/30 lg:items-center ${cols}`}
+      style={{ opacity: 1 - i * 0.022 }}
+    >
+      <div className="hidden text-muted-foreground lg:block">
+        {fmtTime(new Date(r.created_at + 'Z'))}
+      </div>
+      <div className="hidden lg:block">
+        <span
+          className={`rounded border px-1 py-0.5 text-[9px] font-medium uppercase ${kindBadgeClass(r.kind)}`}
+        >
+          {r.kind}
+        </span>
+      </div>
+      <div className="truncate">{shortId(r.user_id || null, 12)}</div>
+      <div className="hidden truncate lg:block">{r.subject || '—'}</div>
+      <div className="hidden text-right tabular-nums lg:block">
+        {r.kind === 'api' ? r.tokens.toLocaleString() : '—'}
+      </div>
+      <div className="hidden text-right tabular-nums text-muted-foreground lg:block">
+        {r.latency_ms || '—'}
+      </div>
+      <div className="truncate text-[10px] text-muted-foreground lg:hidden">
+        <span className={`mr-1 rounded border px-1 text-[9px] uppercase ${kindBadgeClass(r.kind)}`}>
+          {r.kind}
+        </span>
+        {r.subject}
+      </div>
+      <div className="text-right">
+        <span
+          className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${statusBadgeClass(r.kind, r.status)}`}
+        >
+          {r.status || '—'}
+        </span>
+      </div>
+    </li>
+  );
+});
+
 function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
   const { t } = useTranslation();
   // Mirror what the row layout will be so headers and rows align perfectly.
@@ -654,45 +708,7 @@ function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
       ) : (
         <ul className="min-h-0 flex-1 overflow-y-auto font-mono text-xs">
           {rows.map((r, i) => (
-            <li
-              key={r.id}
-              className={`grid gap-3 border-b px-4 py-2 last:border-b-0 hover:bg-muted/30 lg:items-center ${cols}`}
-              style={{ opacity: 1 - i * 0.022 }}
-            >
-              <div className="hidden text-muted-foreground lg:block">
-                {fmtTime(new Date(r.created_at + 'Z'))}
-              </div>
-              <div className="hidden lg:block">
-                <span
-                  className={`rounded border px-1 py-0.5 text-[9px] font-medium uppercase ${kindBadgeClass(r.kind)}`}
-                >
-                  {r.kind}
-                </span>
-              </div>
-              <div className="truncate">{shortId(r.user_id || null, 12)}</div>
-              <div className="hidden truncate lg:block">{r.subject || '—'}</div>
-              <div className="hidden text-right tabular-nums lg:block">
-                {r.kind === 'api' ? r.tokens.toLocaleString() : '—'}
-              </div>
-              <div className="hidden text-right tabular-nums text-muted-foreground lg:block">
-                {r.latency_ms || '—'}
-              </div>
-              <div className="truncate text-[10px] text-muted-foreground lg:hidden">
-                <span
-                  className={`mr-1 rounded border px-1 text-[9px] uppercase ${kindBadgeClass(r.kind)}`}
-                >
-                  {r.kind}
-                </span>
-                {r.subject}
-              </div>
-              <div className="text-right">
-                <span
-                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${statusBadgeClass(r.kind, r.status)}`}
-                >
-                  {r.status || '—'}
-                </span>
-              </div>
-            </li>
+            <LiveLogRowItem key={r.id} r={r} i={i} cols={cols} />
           ))}
         </ul>
       )}
@@ -707,8 +723,51 @@ function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
 // Fixed-height upstream-health panel with a scrollable list. Each row is a
 // single line so 10+ providers fit comfortably without making the panel
 // taller than the chart next to it.
+const ProviderRow = memo(function ProviderRow({
+  row,
+  healthyLabel,
+  degradedLabel,
+  downLabel,
+}: {
+  row: ProviderHealth;
+  healthyLabel: string;
+  degradedLabel: string;
+  downLabel: string;
+}) {
+  const cbReal = row.cb_state || '';
+  const inferred: 'Closed' | 'HalfOpen' | 'Open' =
+    row.success_rate >= 99 ? 'Closed' : row.success_rate >= 90 ? 'HalfOpen' : 'Open';
+  const cb = (cbReal || inferred) as 'Closed' | 'HalfOpen' | 'Open';
+  const status: 'healthy' | 'degraded' | 'down' =
+    cb === 'Closed' ? 'healthy' : cb === 'HalfOpen' ? 'degraded' : 'down';
+  const statusLabel =
+    status === 'healthy' ? healthyLabel : status === 'degraded' ? degradedLabel : downLabel;
+  const latency = Math.round(row.avg_latency_ms);
+  return (
+    <li className="flex items-center gap-2.5 px-3 py-2 text-xs hover:bg-muted/30">
+      <ServiceLogo service={row.provider} className="shrink-0" />
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate font-mono">{row.provider}</span>
+        <span className="truncate text-[10px] uppercase tracking-wide text-muted-foreground">
+          {row.kind} · {row.requests.toLocaleString()} req · {latency}ms
+        </span>
+      </div>
+      <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
+        {row.success_rate.toFixed(0)}%
+      </span>
+      <StatusIndicator status={status} label={statusLabel} pulse />
+    </li>
+  );
+});
+
 function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
   const { t } = useTranslation();
+  // Resolve labels once per render; ProviderRow is memoized by prop
+  // identity so passing strings (not function references) keeps the row
+  // stable across renders where only an adjacent row's metrics changed.
+  const healthyLabel = t('common.healthy');
+  const degradedLabel = t('dashboard.degraded');
+  const downLabel = t('dashboard.down');
   return (
     <Card className="flex h-full min-h-0 flex-col gap-0 py-0">
       {rows === null ? (
@@ -721,35 +780,15 @@ function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
         </div>
       ) : (
         <ul className="min-h-0 flex-1 divide-y overflow-y-auto">
-          {rows.map((p) => {
-            const cbReal = p.cb_state || '';
-            const inferred: 'Closed' | 'HalfOpen' | 'Open' =
-              p.success_rate >= 99 ? 'Closed' : p.success_rate >= 90 ? 'HalfOpen' : 'Open';
-            const cb = (cbReal || inferred) as 'Closed' | 'HalfOpen' | 'Open';
-            const status: 'healthy' | 'degraded' | 'down' =
-              cb === 'Closed' ? 'healthy' : cb === 'HalfOpen' ? 'degraded' : 'down';
-            const statusLabel =
-              status === 'healthy' ? t('common.healthy') : status === 'degraded' ? t('dashboard.degraded') : t('dashboard.down');
-            const latency = Math.round(p.avg_latency_ms);
-            return (
-              <li
-                key={`${p.kind}-${p.provider}`}
-                className="flex items-center gap-2.5 px-3 py-2 text-xs hover:bg-muted/30"
-              >
-                <ServiceLogo service={p.provider} className="shrink-0" />
-                <div className="flex min-w-0 flex-1 flex-col">
-                  <span className="truncate font-mono">{p.provider}</span>
-                  <span className="truncate text-[10px] uppercase tracking-wide text-muted-foreground">
-                    {p.kind} · {p.requests.toLocaleString()} req · {latency}ms
-                  </span>
-                </div>
-                <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
-                  {p.success_rate.toFixed(0)}%
-                </span>
-                <StatusIndicator status={status} label={statusLabel} pulse />
-              </li>
-            );
-          })}
+          {rows.map((p) => (
+            <ProviderRow
+              key={`${p.kind}-${p.provider}`}
+              row={p}
+              healthyLabel={healthyLabel}
+              degradedLabel={degradedLabel}
+              downLabel={downLabel}
+            />
+          ))}
         </ul>
       )}
     </Card>

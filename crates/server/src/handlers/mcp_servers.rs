@@ -263,8 +263,17 @@ pub async fn list_servers(
             server_id: String,
             calls: u64,
         }
+        // Bound to last 90 days — TTL already drops older parts but the
+        // WHERE clause lets ClickHouse prune monthly partitions up-front
+        // instead of scanning every retained part.
         let rows = ch
-            .query("SELECT server_id, count() AS calls FROM mcp_logs WHERE server_id IS NOT NULL GROUP BY server_id")
+            .query(
+                "SELECT server_id, count() AS calls
+                 FROM mcp_logs
+                 WHERE server_id IS NOT NULL
+                   AND created_at >= now() - INTERVAL 90 DAY
+                 GROUP BY server_id",
+            )
             .fetch_all::<CallRow>()
             .await
             .unwrap_or_default();

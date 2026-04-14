@@ -95,10 +95,19 @@ pub async fn list_audit_logs(
         conditions.push("ip_address = ?".into());
         binds.push(v.clone());
     }
-    if let Some(ref v) = query.from {
-        conditions.push("created_at >= ?".into());
-        binds.push(v.clone());
-    }
+    // Enforce a date-range floor so a query without `from` can't scan the
+    // full retained history (90 days × many rows). Default window = last 7
+    // days when the caller didn't provide `from`. ClickHouse partitions
+    // audit_logs by month, so this lets the planner prune old parts.
+    let from_default = {
+        let now = chrono::Utc::now();
+        (now - chrono::Duration::days(7))
+            .format("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    };
+    let from_val = query.from.clone().unwrap_or(from_default);
+    conditions.push("created_at >= ?".into());
+    binds.push(from_val);
     if let Some(ref v) = query.to {
         conditions.push("created_at <= ?".into());
         binds.push(v.clone());

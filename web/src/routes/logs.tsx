@@ -490,10 +490,16 @@ export function UnifiedLogsPage() {
     updateSearch({ q: next, page: 0 });
   };
 
-  const handleAddFilter = (key: string, rawValue: unknown) =>
-    updateFilter(key, rawValue, false);
-  const handleExcludeFilter = (key: string, rawValue: unknown) =>
-    updateFilter(key, rawValue, true);
+  // Stable references so memoized children (LogRow) don't re-render every
+  // time the parent's state changes unrelated to filters.
+  const handleAddFilter = useCallback(
+    (key: string, rawValue: unknown) => updateFilter(key, rawValue, false),
+    [updateFilter],
+  );
+  const handleExcludeFilter = useCallback(
+    (key: string, rawValue: unknown) => updateFilter(key, rawValue, true),
+    [updateFilter],
+  );
 
   const handleCategoryChange = (v: string) => {
     if (!isLogCategory(v)) return;

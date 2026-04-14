@@ -340,32 +340,29 @@ pub async fn sync_models(
         return Ok(Json(serde_json::json!({"synced": 0, "deactivated": 0})));
     }
 
-    // Insert new models (ON CONFLICT DO NOTHING on model_id)
-    // and insert routes (ON CONFLICT DO NOTHING on model_id + provider_id)
-    let mut synced: i64 = 0;
-    for model_id in &remote_models {
-        // Insert model (standalone, no provider_id)
-        let result = sqlx::query(
-            r#"INSERT INTO models (model_id, display_name)
-               VALUES ($1, $1)
-               ON CONFLICT (model_id) DO NOTHING"#,
-        )
-        .bind(model_id)
-        .execute(&state.db)
-        .await?;
-        synced += result.rows_affected() as i64;
+    // Bulk-insert models + routes using UNNEST arrays. Prior loop issued
+    // 2 round-trips per model (hundreds for large provider catalogs like
+    // OpenRouter). Now it's 2 total round-trips regardless of catalog size.
+    let model_slice: &[String] = &remote_models;
+    let model_result = sqlx::query(
+        r#"INSERT INTO models (model_id, display_name)
+           SELECT m, m FROM UNNEST($1::TEXT[]) AS t(m)
+           ON CONFLICT (model_id) DO NOTHING"#,
+    )
+    .bind(model_slice)
+    .execute(&state.db)
+    .await?;
+    let synced: i64 = model_result.rows_affected() as i64;
 
-        // Insert route for this provider
-        sqlx::query(
-            r#"INSERT INTO model_routes (model_id, provider_id, weight, priority)
-               VALUES ($1, $2, 100, 0)
-               ON CONFLICT (model_id, provider_id) DO NOTHING"#,
-        )
-        .bind(model_id)
-        .bind(provider_id)
-        .execute(&state.db)
-        .await?;
-    }
+    sqlx::query(
+        r#"INSERT INTO model_routes (model_id, provider_id, weight, priority)
+           SELECT m, $2, 100, 0 FROM UNNEST($1::TEXT[]) AS t(m)
+           ON CONFLICT (model_id, provider_id) DO NOTHING"#,
+    )
+    .bind(model_slice)
+    .bind(provider_id)
+    .execute(&state.db)
+    .await?;
 
     // Deactivate routes for models not in the remote list
     let deactivated = sqlx::query(
