@@ -1,8 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
+import { StatusIndicator } from '@/components/ui/status-indicator';
+import { TransportBadge } from '@/components/ui/transport-badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -23,9 +24,10 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, Trash2, Search, Pencil, X, Server, AlertCircle, Zap, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { Plus, Trash2, Pencil, X, Server, AlertCircle, Zap, Loader2, CheckCircle2, XCircle, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { slugifyPrefix, resolveCollision, sanitizePrefixInput } from '@/lib/prefix-utils';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -34,6 +36,7 @@ import { toast } from 'sonner';
 interface McpServer {
   id: string;
   name: string;
+  namespace_prefix: string;
   description: string;
   endpoint_url: string;
   transport_type: string;
@@ -41,15 +44,10 @@ interface McpServer {
   status: string;
   last_health_check: string | null;
   tools_count: number;
+  call_count: number;
   config_json?: { custom_headers?: Record<string, string> };
   created_at: string;
 }
-
-const statusVariants: Record<string, 'default' | 'secondary' | 'destructive' | 'outline'> = {
-  connected: 'default',
-  disconnected: 'destructive',
-  pending: 'outline',
-};
 
 export function McpServersPage() {
   const { t } = useTranslation();
@@ -61,6 +59,10 @@ export function McpServersPage() {
   const [submitting, setSubmitting] = useState(false);
 
   const [name, setName] = useState('');
+  const [namespacePrefix, setNamespacePrefix] = useState('');
+  // When true, stop auto-deriving `namespacePrefix` from `name` — the user
+  // has taken manual control of the prefix field.
+  const [prefixManuallyEdited, setPrefixManuallyEdited] = useState(false);
   const [description, setDescription] = useState('');
   const [endpointUrl, setEndpointUrl] = useState('');
   const [authType, setAuthType] = useState('none');
@@ -73,6 +75,7 @@ export function McpServersPage() {
   const [editName, setEditName] = useState('');
   const [editDescription, setEditDescription] = useState('');
   const [editEndpointUrl, setEditEndpointUrl] = useState('');
+  const [editNamespacePrefix, setEditNamespacePrefix] = useState('');
   const [editAuthType, setEditAuthType] = useState('none');
   const [editAuthSecret, setEditAuthSecret] = useState('');
   const [editCustomHeaders, setEditCustomHeaders] = useState<[string, string][]>([]);
@@ -120,8 +123,27 @@ export function McpServersPage() {
 
   useEffect(() => { fetchServers(); }, []);
 
+  // Live preview of the name/prefix that will actually be written to the DB.
+  // Resolves collisions against already-registered servers by appending
+  // `#2`, `_2`, etc. — mirrors the backend's `resolve_server_collisions`.
+  const taken = useMemo(() => ({
+    names: new Set(servers.map((s) => s.name)),
+    prefixes: new Set(servers.map((s) => s.namespace_prefix)),
+  }), [servers]);
+
+  const resolved = useMemo(() => {
+    if (!name.trim()) return null;
+    const basePrefix = prefixManuallyEdited && namespacePrefix
+      ? namespacePrefix
+      : slugifyPrefix(name);
+    if (!basePrefix) return null;
+    return resolveCollision(name.trim(), basePrefix, taken.names, taken.prefixes);
+  }, [name, namespacePrefix, prefixManuallyEdited, taken]);
+
   const resetForm = () => {
     setName('');
+    setNamespacePrefix('');
+    setPrefixManuallyEdited(false);
     setDescription('');
     setEndpointUrl('');
     setAuthType('none');
@@ -136,15 +158,33 @@ export function McpServersPage() {
     setFormError('');
     setSubmitting(true);
     try {
+      // Test connection first — refuse to save if we can't list tools
+      const headers = customHeaders.length > 0
+        ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
+        : null;
+      const test = await apiPost<{ success: boolean; message: string; tools_count?: number }>(
+        '/api/mcp/servers/test',
+        {
+          endpoint_url: endpointUrl,
+          auth_type: authType,
+          auth_secret: authSecret || undefined,
+          custom_headers: headers,
+        },
+      );
+      setTestResult(test);
+      if (!test.success) {
+        setFormError(t('mcpServers.testFailedBlocking', { msg: test.message }));
+        return;
+      }
+
       await apiPost('/api/mcp/servers', {
-        name,
+        name: resolved?.name ?? name,
+        namespace_prefix: resolved?.prefix ?? (namespacePrefix || undefined),
         description,
         endpoint_url: endpointUrl,
         auth_type: authType,
         auth_secret: authSecret || undefined,
-        custom_headers: customHeaders.length > 0
-          ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
-          : null,
+        custom_headers: headers,
       });
       setDialogOpen(false);
       resetForm();
@@ -187,6 +227,7 @@ export function McpServersPage() {
     setEditName(s.name);
     setEditDescription(s.description);
     setEditEndpointUrl(s.endpoint_url);
+    setEditNamespacePrefix(s.namespace_prefix ?? '');
     setEditAuthType(s.auth_type ?? 'none');
     setEditAuthSecret('');
     setEditError('');
@@ -200,15 +241,38 @@ export function McpServersPage() {
     setEditError('');
     setEditSaving(true);
     try {
+      const headers = editCustomHeaders.length > 0
+        ? Object.fromEntries(editCustomHeaders.filter(([k]) => k.trim()))
+        : {};
+
+      // Test connection first — refuse to save if we can't list tools
+      const test = await apiPost<{ success: boolean; message: string }>(
+        '/api/mcp/servers/test',
+        {
+          endpoint_url: editEndpointUrl,
+          auth_type: editAuthType,
+          // If user didn't re-enter the secret, the backend will keep the
+          // existing one during save. But test needs a value to actually
+          // probe auth, so only pass when provided.
+          auth_secret: editAuthSecret || undefined,
+          custom_headers: headers,
+          // Fall back to stored credentials when the secret field is empty
+          server_id: editServer.id,
+        },
+      );
+      if (!test.success) {
+        setEditError(t('mcpServers.testFailedBlocking', { msg: test.message }));
+        return;
+      }
+
       await apiPatch(`/api/mcp/servers/${editServer.id}`, {
         name: editName,
+        namespace_prefix: editNamespacePrefix || undefined,
         description: editDescription,
         endpoint_url: editEndpointUrl,
         auth_type: editAuthType,
         auth_secret: editAuthSecret || undefined,
-        custom_headers: editCustomHeaders.length > 0
-          ? Object.fromEntries(editCustomHeaders.filter(([k]) => k.trim()))
-          : {},
+        custom_headers: headers,
       });
       setEditDialogOpen(false);
       setEditServer(null);
@@ -249,6 +313,29 @@ export function McpServersPage() {
               <div className="space-y-2">
                 <Label htmlFor="mcp-name">{t('common.name')}</Label>
                 <Input id="mcp-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-mcp-server" required />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="mcp-prefix">{t('mcpServers.namespacePrefix')}</Label>
+                <Input
+                  id="mcp-prefix"
+                  value={prefixManuallyEdited ? namespacePrefix : (resolved?.prefix ?? slugifyPrefix(name))}
+                  onChange={(e) => {
+                    setPrefixManuallyEdited(true);
+                    setNamespacePrefix(sanitizePrefixInput(e.target.value));
+                  }}
+                  placeholder={t('mcpServers.namespacePrefixPlaceholder')}
+                  pattern="[a-z0-9_]{1,32}"
+                  maxLength={32}
+                />
+                {resolved && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('mcpServers.willBeStoredAs')}{' '}
+                    <code className="rounded bg-muted px-1 font-mono">{resolved.name}</code>
+                    {' / '}
+                    <code className="rounded bg-muted px-1 font-mono">{resolved.prefix}</code>
+                  </p>
+                )}
+                <p className="text-xs text-muted-foreground">{t('mcpServers.namespacePrefixHint')}</p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="mcp-desc">{t('common.description')}</Label>
@@ -384,6 +471,7 @@ export function McpServersPage() {
                   <TableHead>{t('common.status')}</TableHead>
                   <TableHead>{t('mcpServers.lastHealthCheck')}</TableHead>
                   <TableHead>{t('mcpServers.toolsCount')}</TableHead>
+                  <TableHead>{t('mcpServers.callsCount')}</TableHead>
                   <TableHead className="w-20" />
                 </TableRow>
               </TableHeader>
@@ -393,24 +481,30 @@ export function McpServersPage() {
                     <TableCell className="font-medium">{s.name}</TableCell>
                     <TableCell className="font-mono text-xs">{s.endpoint_url}</TableCell>
                     <TableCell>
-                      <Badge variant="outline">{s.transport_type}</Badge>
+                      <TransportBadge transport={s.transport_type} />
                     </TableCell>
                     <TableCell>
-                      <Badge variant={statusVariants[s.status] ?? 'outline'}>
-                        {s.status}
-                      </Badge>
+                      <StatusIndicator
+                        status={s.status === 'connected' ? 'healthy' : s.status === 'disconnected' ? 'down' : 'unknown'}
+                        label={t(`common.${s.status === 'connected' ? 'healthy' : s.status === 'disconnected' ? 'down' : 'unknown'}`, s.status)}
+                        showLabel
+                        pulse
+                      />
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {s.last_health_check ? new Date(s.last_health_check).toLocaleString() : '—'}
                     </TableCell>
                     <TableCell className="text-sm">{s.tools_count}</TableCell>
+                    <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
+                      {(s.call_count ?? 0).toLocaleString()}
+                    </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
                         <Button variant="ghost" size="icon-sm" onClick={() => openEditDialog(s)} title={t('common.edit')}>
                           <Pencil className="h-4 w-4" />
                         </Button>
                         <Button variant="ghost" size="icon-sm" onClick={() => handleDiscover(s.id)} disabled={discoveringId === s.id} title={t('mcpServers.discoverTools')}>
-                          {discoveringId === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Search className="h-4 w-4" />}
+                          {discoveringId === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                         </Button>
                         <Button variant="ghost" size="icon-sm" onClick={() => setDeleteTargetId(s.id)} title={t('common.delete')}>
                           <Trash2 className="h-4 w-4" />
@@ -442,6 +536,17 @@ export function McpServersPage() {
             <div className="space-y-2">
               <Label htmlFor="edit-mcp-name">{t('common.name')}</Label>
               <Input id="edit-mcp-name" value={editName} onChange={(e) => setEditName(e.target.value)} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-mcp-prefix">{t('mcpServers.namespacePrefix')}</Label>
+              <Input
+                id="edit-mcp-prefix"
+                value={editNamespacePrefix}
+                onChange={(e) => setEditNamespacePrefix(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '_'))}
+                pattern="[a-z0-9_]{1,32}"
+                maxLength={32}
+              />
+              <p className="text-xs text-muted-foreground">{t('mcpServers.namespacePrefixHint')}</p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="edit-mcp-desc">{t('common.description')}</Label>

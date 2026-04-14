@@ -1,11 +1,23 @@
 use axum::Json;
 use axum::extract::State;
+use serde::Serialize;
+use sqlx::FromRow;
 
 use think_watch_common::errors::AppError;
-use think_watch_common::models::McpTool;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+
+#[derive(Debug, Serialize, FromRow)]
+pub struct McpToolRow {
+    pub id: uuid::Uuid,
+    pub server_id: uuid::Uuid,
+    pub server_name: String,
+    pub name: String,
+    pub namespaced_name: String,
+    pub description: Option<String>,
+    pub input_schema: Option<serde_json::Value>,
+}
 
 #[utoipa::path(
     get,
@@ -21,9 +33,20 @@ use crate::middleware::auth_guard::AuthUser;
 pub async fn list_tools(
     _auth_user: AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<McpTool>>, AppError> {
-    let tools = sqlx::query_as::<_, McpTool>(
-        "SELECT * FROM mcp_tools WHERE is_active = true ORDER BY server_id, tool_name",
+) -> Result<Json<Vec<McpToolRow>>, AppError> {
+    let tools = sqlx::query_as::<_, McpToolRow>(
+        r#"SELECT
+             t.id,
+             t.server_id,
+             s.name AS server_name,
+             t.tool_name AS name,
+             s.namespace_prefix || '__' || t.tool_name AS namespaced_name,
+             t.description,
+             t.input_schema
+           FROM mcp_tools t
+           JOIN mcp_servers s ON s.id = t.server_id
+           WHERE t.is_active = true
+           ORDER BY s.name, t.tool_name"#,
     )
     .fetch_all(&state.db)
     .await?;

@@ -39,6 +39,11 @@ pub struct InstallTemplateRequest {
     pub endpoint_url: Option<String>,
     pub auth_secret: Option<String>,
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
+    /// Optional overrides for name + namespace_prefix. Frontend pre-resolves
+    /// collisions and passes the already-deconflicted values; backend still
+    /// validates uniqueness so concurrent installs stay safe.
+    pub name: Option<String>,
+    pub namespace_prefix: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -216,11 +221,30 @@ pub async fn install_template(
     // c–e. Create server, install record, and increment count — all in one transaction
     let mut tx = state.db.begin().await?;
 
+    // Frontend typically sends already-deconflicted name/prefix. If not,
+    // fall back to template defaults and resolve collisions server-side.
+    let base_name = req
+        .name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&template.name);
+    let default_prefix = template.slug.replace('-', "_");
+    let base_prefix = req
+        .namespace_prefix
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&default_prefix);
+    // Validate the prefix shape regardless of source.
+    super::mcp_servers::normalize_namespace_prefix(Some(base_prefix), base_name)?;
+    let (resolved_name, resolved_prefix) =
+        resolve_server_collisions(&mut tx, base_name, base_prefix).await?;
+
     let server = sqlx::query_as::<_, McpServer>(
-        r#"INSERT INTO mcp_servers (name, description, endpoint_url, transport_type, auth_type, auth_secret_encrypted, config_json)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *"#,
+        r#"INSERT INTO mcp_servers (name, namespace_prefix, description, endpoint_url, transport_type, auth_type, auth_secret_encrypted, config_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
     )
-    .bind(&template.name)
+    .bind(&resolved_name)
+    .bind(&resolved_prefix)
     .bind(&template.description)
     .bind(&endpoint_url)
     .bind(&transport_type)
@@ -492,5 +516,36 @@ pub async fn sync_registry(
 
     Ok(Json(
         serde_json::json!({"status": "synced", "count": synced, "removed": removed, "registry_url": url}),
+    ))
+}
+
+/// Find an available `(name, namespace_prefix)` pair by appending `_2`, `_3`, …
+/// when the base values are already taken. Runs inside the caller's tx so
+/// two concurrent installs of the same template can't pick the same suffix.
+async fn resolve_server_collisions(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    base_name: &str,
+    base_prefix: &str,
+) -> Result<(String, String), AppError> {
+    for i in 1..100 {
+        let (n, p) = if i == 1 {
+            (base_name.to_owned(), base_prefix.to_owned())
+        } else {
+            (format!("{base_name} #{i}"), format!("{base_prefix}_{i}"))
+        };
+        let conflict: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM mcp_servers WHERE name = $1 OR namespace_prefix = $2 LIMIT 1",
+        )
+        .bind(&n)
+        .bind(&p)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if conflict.is_none() {
+            return Ok((n, p));
+        }
+    }
+    Err(AppError::BadRequest(
+        "Too many installations of this template (>99) — remove some before installing again"
+            .into(),
     ))
 }

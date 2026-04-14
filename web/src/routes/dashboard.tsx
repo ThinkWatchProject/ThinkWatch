@@ -24,6 +24,8 @@ import {
   type ChartConfig,
 } from '@/components/ui/chart';
 import { api } from '@/lib/api';
+import { StatusIndicator } from '@/components/ui/status-indicator';
+import { ServiceLogo } from '@/components/ui/service-logo';
 import { DashboardLiveSchema, WsTicketSchema } from '@/lib/schemas';
 
 interface DashboardStats {
@@ -702,52 +704,27 @@ function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
             const inferred: 'Closed' | 'HalfOpen' | 'Open' =
               p.success_rate >= 99 ? 'Closed' : p.success_rate >= 90 ? 'HalfOpen' : 'Open';
             const cb = (cbReal || inferred) as 'Closed' | 'HalfOpen' | 'Open';
-            const dotClass =
-              cb === 'Closed'
-                ? 'bg-foreground'
-                : cb === 'HalfOpen'
-                  ? 'bg-muted-foreground'
-                  : 'bg-destructive';
-            const cbBorder =
-              cb === 'Open'
-                ? 'border-destructive/40 text-destructive'
-                : cb === 'HalfOpen'
-                  ? 'border-muted-foreground/40 text-muted-foreground'
-                  : 'border-border text-muted-foreground';
-            const latency = Math.round(p.avg_latency_ms);
-            // Accessible status label for the colored dot — colorblind users
-            // and screen readers need a non-color text alternative.
+            const status: 'healthy' | 'degraded' | 'down' =
+              cb === 'Closed' ? 'healthy' : cb === 'HalfOpen' ? 'degraded' : 'down';
             const statusLabel =
-              cb === 'Closed' ? t('common.healthy') : cb === 'HalfOpen' ? t('dashboard.degraded') : t('dashboard.down');
+              status === 'healthy' ? t('common.healthy') : status === 'degraded' ? t('dashboard.degraded') : t('dashboard.down');
+            const latency = Math.round(p.avg_latency_ms);
             return (
               <li
                 key={`${p.kind}-${p.provider}`}
-                className="flex items-center gap-2 px-3 py-2 text-xs hover:bg-muted/30"
+                className="flex items-center gap-2.5 px-3 py-2 text-xs hover:bg-muted/30"
               >
-                {/* status dot — color encodes the CB state, so we can drop
-                    the textual "Healthy/Degraded/Down" label entirely */}
-                <span
-                  role="img"
-                  aria-label={statusLabel}
-                  title={statusLabel}
-                  className={`h-1.5 w-1.5 shrink-0 rounded-full ${dotClass}`}
-                />
-                <span
-                  className={`shrink-0 rounded border px-1 py-px font-mono text-[9px] uppercase ${kindBadgeClass(p.kind)}`}
-                >
-                  {p.kind}
-                </span>
-                <span className="min-w-0 flex-1 truncate font-mono">{p.provider}</span>
-                <span className="font-mono tabular-nums text-muted-foreground">
-                  {p.requests.toLocaleString()}r
-                </span>
-                <span className="font-mono tabular-nums">{latency}ms</span>
-                <span className="w-11 text-right font-mono tabular-nums text-muted-foreground">
+                <ServiceLogo service={p.provider} className="shrink-0" />
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate font-mono">{p.provider}</span>
+                  <span className="truncate text-[10px] uppercase tracking-wide text-muted-foreground">
+                    {p.kind} · {p.requests.toLocaleString()} req · {latency}ms
+                  </span>
+                </div>
+                <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
                   {p.success_rate.toFixed(0)}%
                 </span>
-                <span className={`shrink-0 rounded border px-1 font-mono text-[9px] ${cbBorder}`}>
-                  {cb}
-                </span>
+                <StatusIndicator status={status} label={statusLabel} pulse />
               </li>
             );
           })}
@@ -826,16 +803,24 @@ function RpmWindowPanel({
                 <stop offset="5%" stopColor="var(--color-count)" stopOpacity={0.45} />
                 <stop offset="95%" stopColor="var(--color-count)" stopOpacity={0.05} />
               </linearGradient>
+              <filter id="rpm-glow" x="-20%" y="-20%" width="140%" height="140%">
+                <feGaussianBlur stdDeviation="2" result="blur" />
+                <feMerge>
+                  <feMergeNode in="blur" />
+                  <feMergeNode in="SourceGraphic" />
+                </feMerge>
+              </filter>
             </defs>
-            <CartesianGrid vertical={false} />
+            <CartesianGrid vertical={false} stroke="var(--border)" strokeOpacity={0.4} />
             <YAxis hide domain={[0, 'dataMax']} />
             <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="line" />} />
             <Area
               dataKey="count"
               type="natural"
               stroke="var(--color-count)"
-              strokeWidth={1.6}
+              strokeWidth={2}
               fill="url(#rpm-fill)"
+              filter="url(#rpm-glow)"
               isAnimationActive={false}
             />
             {maxRpm != null && (

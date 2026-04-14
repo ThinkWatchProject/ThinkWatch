@@ -1,9 +1,10 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from '@tanstack/react-router';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
+import { AuthBadge } from '@/components/ui/auth-badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -16,6 +17,7 @@ import {
 } from '@/components/ui/dialog';
 import { Search, Download, CheckCircle2, Plus, Trash2, Loader2, Star, RefreshCw } from 'lucide-react';
 import { api, apiPost, hasPermission } from '@/lib/api';
+import { slugifyPrefix, resolveCollision, sanitizePrefixInput } from '@/lib/prefix-utils';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
 
@@ -70,6 +72,14 @@ export function McpStorePage() {
   const [endpointUrl, setEndpointUrl] = useState('');
   const [authSecret, setAuthSecret] = useState('');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
+  const [serverName, setServerName] = useState('');
+  const [serverPrefix, setServerPrefix] = useState('');
+  // Whether the user has manually edited the prefix — if so, we stop
+  // auto-regenerating it from the server name.
+  const [prefixManuallyEdited, setPrefixManuallyEdited] = useState(false);
+  // Existing servers — used client-side to preview what name/prefix a fresh
+  // install will actually receive after collision resolution.
+  const [existingServers, setExistingServers] = useState<{ name: string; namespace_prefix: string }[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [installing, setInstalling] = useState(false);
 
@@ -99,6 +109,11 @@ export function McpStorePage() {
 
   useEffect(() => {
     void fetchCategories();
+    // Snapshot existing servers once — used only for client-side collision
+    // preview. Backend still has authoritative UNIQUE enforcement.
+    api<{ name: string; namespace_prefix: string }[]>('/api/mcp/servers')
+      .then(setExistingServers)
+      .catch(() => { /* ignore — preview will just not show collisions */ });
   }, []);
 
   useEffect(() => {
@@ -114,7 +129,27 @@ export function McpStorePage() {
     setEndpointUrl(tmpl.endpoint_template ?? '');
     setAuthSecret('');
     setCustomHeaders([]);
+    setServerName(tmpl.name);
+    setServerPrefix(tmpl.slug.replace(/-/g, '_'));
+    setPrefixManuallyEdited(false);
   };
+
+  // Live preview: what will `name` and `namespace_prefix` actually look like
+  // once the backend resolves collisions? Mirrors backend logic, runs on
+  // the current snapshot of `existingServers`.
+  const takenSets = useMemo(() => ({
+    names: new Set(existingServers.map((s) => s.name)),
+    prefixes: new Set(existingServers.map((s) => s.namespace_prefix)),
+  }), [existingServers]);
+
+  const resolvedInstall = useMemo(() => {
+    if (!installTemplate || !serverName.trim()) return null;
+    const basePrefix = prefixManuallyEdited && serverPrefix
+      ? serverPrefix
+      : slugifyPrefix(serverName);
+    if (!basePrefix) return null;
+    return resolveCollision(serverName.trim(), basePrefix, takenSets.names, takenSets.prefixes);
+  }, [installTemplate, serverName, serverPrefix, prefixManuallyEdited, takenSets]);
 
   const handleInstall = async (e: FormEvent) => {
     e.preventDefault();
@@ -122,6 +157,8 @@ export function McpStorePage() {
     setInstalling(true);
     try {
       await apiPost(`/api/mcp/store/${installTemplate.slug}/install`, {
+        name: resolvedInstall?.name ?? serverName,
+        namespace_prefix: resolvedInstall?.prefix ?? serverPrefix,
         endpoint_url: endpointUrl || undefined,
         auth_secret: authSecret || undefined,
         custom_headers:
@@ -299,6 +336,47 @@ export function McpStorePage() {
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleInstall} className="space-y-4">
+            {installTemplate?.installed && (
+              <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400">
+                <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>{t('mcpStore.installAgainWarning')}</span>
+              </div>
+            )}
+
+            {/* Name + Namespace prefix — pre-populated from template, editable */}
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1.5">
+                <Label htmlFor="install-name">{t('common.name')}</Label>
+                <Input
+                  id="install-name"
+                  value={serverName}
+                  onChange={(e) => setServerName(e.target.value)}
+                  required
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="install-prefix">{t('mcpServers.namespacePrefix')}</Label>
+                <Input
+                  id="install-prefix"
+                  value={prefixManuallyEdited ? serverPrefix : (resolvedInstall?.prefix ?? slugifyPrefix(serverName))}
+                  onChange={(e) => {
+                    setPrefixManuallyEdited(true);
+                    setServerPrefix(sanitizePrefixInput(e.target.value));
+                  }}
+                  pattern="[a-z0-9_]{1,32}"
+                  maxLength={32}
+                />
+              </div>
+            </div>
+            {resolvedInstall && (resolvedInstall.name !== serverName || resolvedInstall.prefix !== serverPrefix) && (
+              <p className="text-xs text-muted-foreground">
+                {t('mcpServers.willBeStoredAs')}{' '}
+                <code className="rounded bg-muted px-1 font-mono">{resolvedInstall.name}</code>
+                {' / '}
+                <code className="rounded bg-muted px-1 font-mono">{resolvedInstall.prefix}</code>
+              </p>
+            )}
+
             {/* Auth / deploy instructions */}
             {installTemplate?.auth_instructions && (
               <div className="rounded-md border bg-muted/50 p-3 text-sm">
@@ -414,12 +492,20 @@ function TemplateCard({
   t: (key: string) => string;
 }) {
   return (
-    <Card className="flex flex-col justify-between">
+    <Card className="card-interactive flex flex-col justify-between">
       <CardHeader className="pb-2">
-        <div className="flex items-start justify-between">
-          <CardTitle className="text-base">{template.name}</CardTitle>
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex min-w-0 items-center gap-1.5">
+            {template.installed && (
+              <span
+                title={t('mcpStore.installedTooltip')}
+                className="inline-flex h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500 shadow-[0_0_6px_theme(colors.emerald.500/0.7)]"
+              />
+            )}
+            <CardTitle className="truncate text-base">{template.name}</CardTitle>
+          </div>
           {template.category && (
-            <Badge variant="secondary" className="text-xs">
+            <Badge variant="secondary" className="shrink-0 text-xs">
               {t(`mcpStore.category.${template.category}`)}
             </Badge>
           )}
@@ -434,24 +520,33 @@ function TemplateCard({
         </p>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Badge variant={template.auth_type && template.auth_type !== 'none' ? 'secondary' : 'outline'} className="text-[10px]">
-              {template.auth_type && template.auth_type !== 'none' ? t('mcpStore.authRequired') : t('mcpStore.noAuth')}
-            </Badge>
+            <AuthBadge
+              authType={template.auth_type}
+              requiredLabel={t('mcpStore.authRequired')}
+              noneLabel={t('mcpStore.noAuth')}
+            />
             <span className="text-xs text-muted-foreground">
               {template.install_count} installs
             </span>
           </div>
-          {template.installed ? (
-            <Badge variant="outline" className="gap-1">
-              <CheckCircle2 className="h-3 w-3" />
-              {t('mcpStore.installed')}
-            </Badge>
-          ) : (
-            <Button size="sm" onClick={onInstall}>
-              <Download className="mr-1 h-3 w-3" />
-              {t('mcpStore.install')}
-            </Button>
-          )}
+          <Button
+            size="sm"
+            variant={template.installed ? 'outline' : 'default'}
+            onClick={onInstall}
+            title={template.installed ? t('mcpStore.installAgainHint') : undefined}
+          >
+            {template.installed ? (
+              <>
+                <CheckCircle2 className="mr-1 h-3 w-3 text-emerald-500" />
+                {t('mcpStore.installAgain')}
+              </>
+            ) : (
+              <>
+                <Download className="mr-1 h-3 w-3" />
+                {t('mcpStore.install')}
+              </>
+            )}
+          </Button>
         </div>
       </CardContent>
     </Card>

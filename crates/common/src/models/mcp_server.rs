@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub struct McpServer {
     pub id: Uuid,
     pub name: String,
+    pub namespace_prefix: String,
     pub description: Option<String>,
     pub endpoint_url: String,
     pub transport_type: String,
@@ -27,6 +28,11 @@ pub struct McpServer {
     #[sqlx(default)]
     #[serde(default)]
     pub tools_count: i64,
+    /// Computed field: lifetime call count (from ClickHouse mcp_logs).
+    /// 0 when ClickHouse is unavailable.
+    #[sqlx(default)]
+    #[serde(default)]
+    pub call_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, FromRow)]

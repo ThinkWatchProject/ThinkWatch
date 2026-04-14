@@ -160,6 +160,7 @@ pub async fn build_registered_server(
     Ok(RegisteredServer {
         id: server.id,
         name: server.name.clone(),
+        namespace_prefix: server.namespace_prefix.clone(),
         endpoint_url: server.endpoint_url.clone(),
         transport_type: parse_transport_type(&server.transport_type),
         tools,
@@ -436,7 +437,7 @@ pub fn spawn_mcp_health_loop(
 }
 
 /// Extract JSON from an SSE response body by scanning `data:` lines.
-fn parse_sse_json(text: &str) -> anyhow::Result<serde_json::Value> {
+pub fn parse_sse_json(text: &str) -> anyhow::Result<serde_json::Value> {
     let mut data_buf = String::new();
 
     for line in text.lines() {

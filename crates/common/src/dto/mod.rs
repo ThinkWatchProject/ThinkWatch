@@ -184,6 +184,9 @@ pub struct ProviderHeader {
 #[derive(Debug, Deserialize)]
 pub struct CreateMcpServerRequest {
     pub name: String,
+    /// Optional short identifier used as tool namespace prefix. If omitted,
+    /// derived automatically from `name`. Must match `[a-z0-9_]{1,32}`.
+    pub namespace_prefix: Option<String>,
     pub description: Option<String>,
     pub endpoint_url: String,
     pub transport_type: Option<String>,

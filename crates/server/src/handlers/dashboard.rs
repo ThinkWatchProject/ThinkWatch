@@ -378,7 +378,8 @@ async fn build_live_snapshot(
     )
     .fetch_all(&state.db);
     let mcp_servers_fut =
-        sqlx::query_as::<_, (String,)>("SELECT name FROM mcp_servers").fetch_all(&state.db);
+        sqlx::query_as::<_, (String, String)>("SELECT name, status FROM mcp_servers")
+            .fetch_all(&state.db);
     // Highest per-minute RPM limit across all enabled rules — used as
     // a reference line on the request-rate sparkline.
     let rpm_limit_fut = sqlx::query_scalar::<_, Option<i64>>(
@@ -407,6 +408,27 @@ async fn build_live_snapshot(
             .map(|c| c.as_str().to_string())
             .unwrap_or_else(|| "Closed".to_string()),
     };
+    // MCP servers surface health from `mcp_servers.status` when there's no
+    // traffic — a disconnected server should appear red on the dashboard
+    // even if its gateway circuit breaker hasn't tripped.
+    let seed_mcp = |name: &str, status: &str| {
+        let cb_state = if status == "disconnected" {
+            "Open".to_string()
+        } else {
+            cb_states
+                .get(name)
+                .map(|c| c.as_str().to_string())
+                .unwrap_or_else(|| "Closed".to_string())
+        };
+        ProviderHealth {
+            kind: "mcp".to_string(),
+            provider: name.to_string(),
+            requests: 0,
+            avg_latency_ms: 0.0,
+            success_rate: if status == "disconnected" { 0.0 } else { 100.0 },
+            cb_state,
+        }
+    };
 
     if !ch_available(state) {
         let mut providers: Vec<ProviderHealth> = configured_providers
@@ -416,7 +438,7 @@ async fn build_live_snapshot(
         providers.extend(
             configured_mcp_servers
                 .iter()
-                .map(|(name,)| seed_provider("mcp", name)),
+                .map(|(name, status)| seed_mcp(name, status)),
         );
         return Ok(DashboardLive {
             providers,
@@ -439,7 +461,7 @@ async fn build_live_snapshot(
                 .chain(
                     configured_mcp_servers
                         .iter()
-                        .map(|(name,)| seed_provider("mcp", name)),
+                        .map(|(name, status)| seed_mcp(name, status)),
                 )
                 .collect(),
             rpm_buckets: vec![0; 30],
@@ -699,12 +721,12 @@ async fn build_live_snapshot(
             providers.push(seed_provider("ai", name));
         }
     }
-    for (name,) in &configured_mcp_servers {
+    for (name, status) in &configured_mcp_servers {
         if !providers
             .iter()
             .any(|p| p.kind == "mcp" && &p.provider == name)
         {
-            providers.push(seed_provider("mcp", name));
+            providers.push(seed_mcp(name, status));
         }
     }
 

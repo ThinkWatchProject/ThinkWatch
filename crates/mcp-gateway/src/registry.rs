@@ -36,6 +36,10 @@ pub enum ServerStatus {
 pub struct RegisteredServer {
     pub id: Uuid,
     pub name: String,
+    /// Short identifier used as the tool namespace prefix. Tools are
+    /// exposed as `<namespace_prefix>__<tool_name>`. Must be stable —
+    /// clients may have the prefixed names in their prompts.
+    pub namespace_prefix: String,
     pub endpoint_url: String,
     pub transport_type: TransportType,
     pub tools: Vec<McpToolInfo>,
@@ -131,13 +135,16 @@ impl Registry {
         &self,
         namespaced_tool: &str,
     ) -> Option<(RegisteredServer, String)> {
-        let (server_name, tool_name) = namespaced_tool.split_once(NAMESPACE_SEPARATOR)?;
-        if server_name.is_empty() || tool_name.is_empty() {
+        let (prefix, tool_name) = namespaced_tool.split_once(NAMESPACE_SEPARATOR)?;
+        if prefix.is_empty() || tool_name.is_empty() {
             return None;
         }
 
         let servers = self.inner.read().await;
-        let server = servers.values().find(|s| s.name == server_name)?.clone();
+        let server = servers
+            .values()
+            .find(|s| s.namespace_prefix == prefix)?
+            .clone();
 
         Some((server, tool_name.to_owned()))
     }
@@ -158,7 +165,10 @@ impl Registry {
                 continue;
             }
             for tool in &server.tools {
-                let namespaced = format!("{}{NAMESPACE_SEPARATOR}{}", server.name, tool.name);
+                let namespaced = format!(
+                    "{}{NAMESPACE_SEPARATOR}{}",
+                    server.namespace_prefix, tool.name
+                );
                 result.push((namespaced, tool.clone()));
             }
         }
@@ -181,6 +191,7 @@ mod tests {
         RegisteredServer {
             id: Uuid::new_v4(),
             name: name.to_string(),
+            namespace_prefix: name.to_string(),
             endpoint_url: format!("http://{name}.local/mcp"),
             transport_type: TransportType::StreamableHttp,
             tools: tools

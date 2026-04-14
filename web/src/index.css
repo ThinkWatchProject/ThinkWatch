@@ -128,3 +128,45 @@
     @apply font-sans;
     }
 }
+
+/* -------------------------------------------------------------------------
+ * Visual polish utilities — P2 improvements
+ * ---------------------------------------------------------------------- */
+
+/* Interactive card: lift + soft glow on hover. */
+.card-interactive {
+    transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                box-shadow 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                border-color 180ms ease;
+}
+.card-interactive:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 8px 24px -8px oklch(0.5 0.15 260 / 0.25),
+                0 2px 6px -2px oklch(0 0 0 / 0.1);
+    border-color: oklch(0.65 0.18 260 / 0.35);
+}
+
+/* Shimmer skeleton — gradient sweep instead of opacity pulse. */
+@keyframes tw-shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+.skeleton-shimmer {
+    background: linear-gradient(
+        90deg,
+        var(--muted) 0%,
+        oklch(from var(--muted) calc(l + 0.04) c h) 50%,
+        var(--muted) 100%
+    );
+    background-size: 200% 100%;
+    animation: tw-shimmer 1.6s ease-in-out infinite;
+}
+
+/* Subtle animated glow for "alive" elements. */
+@keyframes tw-glow-pulse {
+    0%, 100% { opacity: 0.6; }
+    50% { opacity: 1; }
+}
+.glow-pulse {
+    animation: tw-glow-pulse 2s ease-in-out infinite;
+}

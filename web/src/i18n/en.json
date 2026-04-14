@@ -35,6 +35,10 @@
     "no": "No",
     "saving": "Saving..."
   },
+  "commandPalette": {
+    "placeholder": "Search actions or pages...",
+    "empty": "No matches"
+  },
   "nav": {
     "dashboard": "Dashboard",
     "overview": "Overview",
@@ -76,6 +80,10 @@
     "featured": "Featured",
     "install": "Install",
     "installed": "Installed",
+    "installAgain": "Install Again",
+    "installAgainHint": "Already installed. Install another copy (useful for multiple instances).",
+    "installAgainWarning": "This template is already installed. A new copy will be created with a numeric suffix on the name and prefix.",
+    "installedTooltip": "Already installed",
     "installing": "Installing...",
     "installSuccess": "MCP server installed successfully",
     "installTitle": "Install {{name}}",
@@ -232,8 +240,10 @@
     "surfacesRequired": "Pick at least one gateway",
     "surface_ai_gateway": "AI gateway (/v1/...)",
     "surface_mcp_gateway": "MCP gateway (/mcp)",
+    "surface_console": "Console (admin API)",
     "surfaceShort_ai_gateway": "AI",
     "surfaceShort_mcp_gateway": "MCP",
+    "surfaceShort_console": "Console",
     "expiresInDays": "Expires in (days)",
     "keyCreated": "API Key Created",
     "keyCreatedHint": "Copy this key now. It will not be shown again.",
@@ -371,6 +381,7 @@
     "presetUserEmail": "User Email",
     "lastHealthCheck": "Last Health Check",
     "toolsCount": "Tools",
+    "callsCount": "Calls",
     "discoverTools": "Discover Tools",
     "deleteConfirm": "Are you sure you want to delete this MCP server?",
     "allServers": "All MCP Servers",
@@ -381,7 +392,12 @@
     "registering": "Registering...",
     "transport": "Transport",
     "editServer": "Edit MCP Server",
-    "editDescription": "Update MCP server settings."
+    "editDescription": "Update MCP server settings.",
+    "testFailedBlocking": "Connection test failed: {{msg}}. Fix the issue and try again.",
+    "namespacePrefix": "Namespace Prefix",
+    "namespacePrefixPlaceholder": "e.g. github (auto-derived if empty)",
+    "namespacePrefixHint": "Tools are exposed as <prefix>__<tool_name>. Lowercase letters, digits, underscores only. Max 32 chars.",
+    "willBeStoredAs": "Will be stored as:"
   },
   "mcpTools": {
     "title": "MCP Tools",
@@ -391,7 +407,9 @@
     "noTools": "No tools discovered yet.",
     "noToolsHint": "Use \"Discover Tools\" on a server to populate this list.",
     "inputSchema": "Input Schema",
-    "noDescription": "No description"
+    "noDescription": "No description",
+    "searchPlaceholder": "Search tools by name or description",
+    "toolsFound": "tools"
   },
   "mcpLogs": {
     "title": "MCP Call Logs",
@@ -506,8 +524,10 @@
     "period_monthly": "Monthly",
     "surface_ai_gateway": "AI gateway",
     "surface_mcp_gateway": "MCP gateway",
+    "surface_console": "Console",
     "surfaceShort_ai_gateway": "AI",
-    "surfaceShort_mcp_gateway": "MCP"
+    "surfaceShort_mcp_gateway": "MCP",
+    "surfaceShort_console": "Console"
   },
   "users": {
     "title": "Users",

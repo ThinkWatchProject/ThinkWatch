@@ -2,7 +2,8 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
+import { StatusIndicator } from '@/components/ui/status-indicator';
+import { ProviderTypeBadge } from '@/components/ui/provider-type-badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -70,14 +71,6 @@ const wrapAuthValue = (type: string, token: string) =>
 const unwrapAuthValue = (type: string, value: string) =>
   type === 'openai' ? value.replace(/^Bearer\s*/i, '') : value;
 
-const providerTypeColors: Record<string, 'default' | 'secondary' | 'outline'> = {
-  openai: 'default',
-  anthropic: 'secondary',
-  google: 'outline',
-  azure_openai: 'default',
-  bedrock: 'secondary',
-  custom: 'outline',
-};
 
 export function ProvidersPage() {
   const { t } = useTranslation();
@@ -463,15 +456,15 @@ export function ProvidersPage() {
                   <TableRow key={p.id}>
                     <TableCell className="font-medium">{p.display_name || p.name}</TableCell>
                     <TableCell>
-                      <Badge variant={providerTypeColors[p.provider_type] ?? 'outline'}>
-                        {p.provider_type}
-                      </Badge>
+                      <ProviderTypeBadge type={p.provider_type} />
                     </TableCell>
                     <TableCell className="font-mono text-xs">{p.base_url}</TableCell>
                     <TableCell>
-                      <Badge variant={p.is_active ? 'default' : 'destructive'}>
-                        {p.is_active ? t('common.active') : t('common.inactive')}
-                      </Badge>
+                      <StatusIndicator
+                        status={p.is_active ? 'healthy' : 'inactive'}
+                        label={p.is_active ? t('common.active') : t('common.inactive')}
+                        showLabel
+                      />
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {new Date(p.created_at).toLocaleDateString()}

@@ -252,8 +252,10 @@ CREATE TABLE api_keys (
     disabled_reason         VARCHAR(100),
     last_rotation_at        TIMESTAMPTZ,
     -- Constraints
-    CONSTRAINT chk_api_key_rotation_consistency
-        CHECK (rotated_from_id IS NULL OR grace_period_ends_at IS NOT NULL),
+    -- Note: grace_period_ends_at lives on the OLD key (to schedule its
+    -- retirement), while rotated_from_id lives on the NEW key (to record
+    -- its lineage). They're never set on the same row, so no cross-column
+    -- consistency constraint applies here.
     CONSTRAINT chk_api_key_rotation_period_positive
         CHECK (rotation_period_days IS NULL OR rotation_period_days > 0),
     CONSTRAINT chk_api_key_inactivity_timeout_positive
@@ -328,6 +330,10 @@ CREATE INDEX idx_model_routes_provider ON model_routes(provider_id);
 CREATE TABLE mcp_servers (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name                  VARCHAR(255) NOT NULL UNIQUE,
+    -- Short identifier used as the tool namespace prefix. Tools are exposed
+    -- to clients as `<namespace_prefix>__<tool_name>`. Must match
+    -- [a-z0-9_]{1,32}. Unique so we never collide two servers' prefixes.
+    namespace_prefix      VARCHAR(32) NOT NULL UNIQUE,
     description           TEXT,
     endpoint_url          VARCHAR(512) NOT NULL,
     transport_type        VARCHAR(50)  NOT NULL DEFAULT 'streamable_http',

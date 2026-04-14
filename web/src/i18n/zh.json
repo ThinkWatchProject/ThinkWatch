@@ -35,6 +35,10 @@
     "no": "否",
     "saving": "保存中..."
   },
+  "commandPalette": {
+    "placeholder": "搜索操作或页面...",
+    "empty": "无匹配项"
+  },
   "nav": {
     "dashboard": "仪表盘",
     "overview": "概览",
@@ -76,6 +80,10 @@
     "featured": "推荐",
     "install": "安装",
     "installed": "已安装",
+    "installAgain": "再次安装",
+    "installAgainHint": "已安装。可以再装一份（适用于多实例场景）。",
+    "installAgainWarning": "此模板已安装。将创建一份新副本，名称和前缀会自动加数字后缀。",
+    "installedTooltip": "已安装",
     "installing": "安装中...",
     "installSuccess": "MCP 服务器安装成功",
     "installTitle": "安装 {{name}}",
@@ -232,8 +240,10 @@
     "surfacesRequired": "至少选择一个网关",
     "surface_ai_gateway": "AI 网关 (/v1/...)",
     "surface_mcp_gateway": "MCP 网关 (/mcp)",
+    "surface_console": "控制台（管理 API）",
     "surfaceShort_ai_gateway": "AI",
     "surfaceShort_mcp_gateway": "MCP",
+    "surfaceShort_console": "控制台",
     "expiresInDays": "过期天数",
     "keyCreated": "API 密钥已创建",
     "keyCreatedHint": "请立即复制此密钥，它将不会再次显示。",
@@ -371,6 +381,7 @@
     "presetUserEmail": "用户邮箱",
     "lastHealthCheck": "最近健康检查",
     "toolsCount": "工具数",
+    "callsCount": "调用数",
     "discoverTools": "发现工具",
     "deleteConfirm": "确定要删除此 MCP 服务器吗？",
     "allServers": "所有 MCP 服务器",
@@ -381,7 +392,12 @@
     "registering": "注册中...",
     "transport": "传输",
     "editServer": "编辑 MCP 服务器",
-    "editDescription": "更新 MCP 服务器设置。"
+    "editDescription": "更新 MCP 服务器设置。",
+    "testFailedBlocking": "连接测试失败：{{msg}}。请修复后重试。",
+    "namespacePrefix": "命名空间前缀",
+    "namespacePrefixPlaceholder": "例如 github（留空自动生成）",
+    "namespacePrefixHint": "工具暴露为 <前缀>__<工具名>。仅支持小写字母、数字和下划线，最多 32 字符。",
+    "willBeStoredAs": "将保存为："
   },
   "mcpTools": {
     "title": "MCP 工具",
@@ -391,7 +407,9 @@
     "noTools": "尚未发现任何工具。",
     "noToolsHint": "在服务器上使用「发现工具」来填充此列表。",
     "inputSchema": "输入模式",
-    "noDescription": "无描述"
+    "noDescription": "无描述",
+    "searchPlaceholder": "按名称或描述搜索工具",
+    "toolsFound": "个工具"
   },
   "mcpLogs": {
     "title": "MCP 调用日志",
@@ -506,8 +524,10 @@
     "period_monthly": "每月",
     "surface_ai_gateway": "AI 网关",
     "surface_mcp_gateway": "MCP 网关",
+    "surface_console": "控制台",
     "surfaceShort_ai_gateway": "AI",
-    "surfaceShort_mcp_gateway": "MCP"
+    "surfaceShort_mcp_gateway": "MCP",
+    "surfaceShort_console": "控制台"
   },
   "users": {
     "title": "用户",
