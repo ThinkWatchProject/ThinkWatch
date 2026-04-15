@@ -136,7 +136,13 @@ impl Breaker {
         }
     }
 
-    async fn record_failure(&self) {
+    /// Returns `true` when this call flipped the breaker into the `Open`
+    /// state (either from Closed-past-threshold or from HalfOpen-probe-
+    /// failed). Callers use the signal to emit a one-shot
+    /// `provider.circuit_open` audit event — the breaker itself can't
+    /// do that because it has no audit handle and mcp-gateway mustn't
+    /// depend on the server crate.
+    async fn record_failure(&self) -> bool {
         let mut inner = self.inner.lock().await;
         inner.consecutive_failures += 1;
         match inner.state {
@@ -151,7 +157,9 @@ impl Breaker {
                         failures,
                         "MCP circuit breaker OPEN"
                     );
+                    return true;
                 }
+                false
             }
             CbState::HalfOpen => {
                 // Probe failed → go back to Open and restart the timer.
@@ -163,8 +171,9 @@ impl Breaker {
                     server = %self.server_name,
                     "MCP circuit breaker back to OPEN (probe failed)"
                 );
+                true
             }
-            CbState::Open => {}
+            CbState::Open => false,
         }
     }
 }
@@ -226,8 +235,10 @@ impl McpCircuitBreakers {
         self.breaker_for(server_name).await.record_success().await;
     }
 
-    pub async fn record_failure(&self, server_name: &str) {
-        self.breaker_for(server_name).await.record_failure().await;
+    /// Returns `true` when the call flipped the breaker to Open. See
+    /// `Breaker::record_failure` for the full semantics.
+    pub async fn record_failure(&self, server_name: &str) -> bool {
+        self.breaker_for(server_name).await.record_failure().await
     }
 
     /// Pre-register a server so it shows up in the dashboard CB snapshot

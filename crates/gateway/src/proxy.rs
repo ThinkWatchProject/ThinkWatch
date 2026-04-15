@@ -173,6 +173,7 @@ async fn post_flight_account(
     completion_tokens: u32,
     request_rules: Vec<limits::RateLimitRule>,
     budget_subjects: Vec<(BudgetSubject, Uuid)>,
+    audit: think_watch_common::audit::AuditLogger,
 ) {
     let mult = weight_cache.get(&db, &model).await;
     let weighted = weight::weighted_tokens(prompt_tokens as i64, completion_tokens as i64, mult);
@@ -198,11 +199,30 @@ async fn post_flight_account(
         Ok(caps) if !caps.is_empty() => {
             match limits::budget::add_weighted_tokens(&redis, &caps, weighted).await {
                 Ok((_statuses, crossings)) if !crossings.is_empty() => {
-                    // Fire budget alert webhook in the background so
-                    // the response stream isn't delayed. Uses a
-                    // one-shot reqwest::Client — we don't keep a long
-                    // lived client because alerts are rare.
+                    // 1) Emit one `budget.threshold_crossed` audit entry
+                    //    per crossing so any forwarder subscribed to
+                    //    `audit` log_type picks them up alongside key /
+                    //    role events. Event payload matches the legacy
+                    //    ad-hoc webhook body so existing receivers keep
+                    //    working if they switch channels.
+                    for crossing in &crossings {
+                        audit.log(
+                            think_watch_common::audit::AuditEntry::new("budget.threshold_crossed")
+                                .resource(format!("budget_cap:{}", crossing.cap_id))
+                                .detail(
+                                    serde_json::to_value(crossing)
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
+                        );
+                    }
+                    // 2) Legacy direct webhook — kept for backward
+                    //    compatibility until the `security.budget_
+                    //    alert_webhook_url` setting is migrated to a
+                    //    forwarder subscription on `budget.threshold_
+                    //    crossed`. Runs in the background so the
+                    //    response stream isn't delayed.
                     let dc = dynamic_config.clone();
+                    let crossings_for_webhook = crossings.clone();
                     tokio::spawn(async move {
                         let url = dc.get_string("security.budget_alert_webhook_url").await;
                         let url = url.as_deref().unwrap_or("").trim();
@@ -213,7 +233,7 @@ async fn post_flight_account(
                             .timeout(std::time::Duration::from_secs(10))
                             .build()
                             .unwrap_or_default();
-                        for crossing in &crossings {
+                        for crossing in &crossings_for_webhook {
                             if let Err(e) = client.post(url).json(crossing).send().await {
                                 tracing::warn!("budget alert webhook failed: {e}");
                             }
@@ -765,6 +785,7 @@ pub async fn proxy_chat_completion(
                     u.completion_tokens,
                     request_rules_for_done,
                     budget_subjects,
+                    audit_for_done,
                 )
                 .await;
             })
@@ -810,6 +831,7 @@ pub async fn proxy_chat_completion(
                 usage.completion_tokens,
                 request_rules.clone(),
                 resolve_budget_subjects(&identity),
+                state.audit.clone(),
             )
             .await;
         }
@@ -1073,6 +1095,7 @@ pub async fn proxy_anthropic_messages(
                     u.completion_tokens,
                     request_rules_for_done,
                     budget_subjects,
+                    audit_for_done,
                 )
                 .await;
             })
@@ -1115,6 +1138,7 @@ pub async fn proxy_anthropic_messages(
                 usage.completion_tokens,
                 request_rules.clone(),
                 resolve_budget_subjects(&identity),
+                state.audit.clone(),
             )
             .await;
         }
@@ -1385,6 +1409,7 @@ pub async fn proxy_responses(
                     u.completion_tokens,
                     request_rules_for_done,
                     budget_subjects,
+                    audit_for_done,
                 )
                 .await;
             })
@@ -1420,6 +1445,7 @@ pub async fn proxy_responses(
                 usage.completion_tokens,
                 request_rules.clone(),
                 resolve_budget_subjects(&identity),
+                state.audit.clone(),
             )
             .await;
         }

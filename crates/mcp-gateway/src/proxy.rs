@@ -130,6 +130,22 @@ pub struct McpProxy {
 }
 
 impl McpProxy {
+    /// Emit a `provider.circuit_open` audit event. Fired at most once
+    /// per breaker transition — duplicate calls on the same Open state
+    /// are already suppressed by `Breaker::record_failure` returning
+    /// false when the state was already Open.
+    fn emit_circuit_open(&self, server_id: Uuid, server_name: &str) {
+        self.audit.log(
+            think_watch_common::audit::AuditEntry::new("provider.circuit_open")
+                .resource(format!("mcp_server:{server_id}"))
+                .detail(serde_json::json!({
+                    "server_id": server_id.to_string(),
+                    "server_name": server_name,
+                    "kind": "mcp",
+                })),
+        );
+    }
+
     pub fn new(
         registry: Registry,
         pool: ConnectionPool,
@@ -393,14 +409,20 @@ impl McpProxy {
                 // breaker reflects upstream tool errors, not just transport
                 // errors. We treat any `error` field as a failure.
                 if resp.error.is_some() {
-                    self.circuit_breakers.record_failure(&server_name).await;
+                    let flipped_open = self.circuit_breakers.record_failure(&server_name).await;
+                    if flipped_open {
+                        self.emit_circuit_open(server_id, &server_name);
+                    }
                 } else {
                     self.circuit_breakers.record_success(&server_name).await;
                 }
                 resp
             }
             Err(e) => {
-                self.circuit_breakers.record_failure(&server_name).await;
+                let flipped_open = self.circuit_breakers.record_failure(&server_name).await;
+                if flipped_open {
+                    self.emit_circuit_open(server_id, &server_name);
+                }
                 tracing::error!(
                     server_id = %server_id,
                     error = %e,

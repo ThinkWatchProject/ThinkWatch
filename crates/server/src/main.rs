@@ -356,6 +356,7 @@ async fn main() -> anyhow::Result<()> {
     tasks::api_key_lifecycle::spawn_api_key_lifecycle_task(
         state.db.clone(),
         state.dynamic_config.clone(),
+        state.audit.clone(),
     );
     tasks::data_retention::spawn_data_retention_task(
         state.db.clone(),
