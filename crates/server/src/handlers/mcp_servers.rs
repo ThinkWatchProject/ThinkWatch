@@ -286,15 +286,14 @@ pub async fn list_servers(
             server_id: String,
             calls: u64,
         }
-        // Bound to last 90 days — TTL already drops older parts but the
-        // WHERE clause lets ClickHouse prune monthly partitions up-front
-        // instead of scanning every retained part.
+        // Read from the pre-aggregated mcp_server_call_counts table —
+        // SummingMergeTree, fed by the mcp_server_call_counts_mv MV on
+        // mcp_logs. This is O(number_of_servers) merged rows instead of
+        // scanning the full mcp_logs retention window per request.
         let rows = ch
             .query(
-                "SELECT server_id, count() AS calls
-                 FROM mcp_logs
-                 WHERE server_id IS NOT NULL
-                   AND created_at >= now() - INTERVAL 90 DAY
+                "SELECT server_id, toUInt64(sum(calls)) AS calls
+                 FROM mcp_server_call_counts
                  GROUP BY server_id",
             )
             .fetch_all::<CallRow>()

@@ -1052,6 +1052,54 @@ pub async fn ensure_clickhouse_tables(
             return Err(e);
         }
     }
+
+    // One-shot backfill of aggregate tables. The MVs attached to
+    // mcp_logs / gateway_logs only capture rows inserted *after* the
+    // MV is created, so on first boot (or when schema is upgraded to
+    // include these MVs) we seed the aggregate tables with a snapshot
+    // of whatever history is still retained. Gated on emptiness so it
+    // runs exactly once per aggregate — cheap to check, safe to skip.
+    backfill_if_empty(
+        client,
+        "mcp_server_call_counts",
+        "INSERT INTO mcp_server_call_counts \
+         SELECT server_id, toUInt64(count()) AS calls \
+         FROM mcp_logs WHERE server_id IS NOT NULL GROUP BY server_id",
+    )
+    .await;
+    backfill_if_empty(
+        client,
+        "provider_health_5m",
+        "INSERT INTO provider_health_5m \
+         SELECT toStartOfFiveMinutes(created_at) AS bucket_5m, \
+                provider, \
+                toUInt64(count()) AS total_requests, \
+                toUInt64(countIf(status_code >= 400)) AS error_requests, \
+                sum(ifNull(latency_ms, 0)) AS sum_latency_ms, \
+                toUInt64(countIf(latency_ms IS NOT NULL)) AS requests_latency \
+         FROM gateway_logs WHERE provider IS NOT NULL \
+         GROUP BY bucket_5m, provider",
+    )
+    .await;
+
     tracing::info!("ClickHouse tables initialized");
     Ok(())
+}
+
+/// Run `insert_sql` against `client` iff `table` is currently empty.
+/// Failures are logged but not propagated — a missing backfill yields
+/// a temporarily-low metric, never a failed boot.
+async fn backfill_if_empty(client: &clickhouse::Client, table: &str, insert_sql: &str) {
+    let count_sql = format!("SELECT count() FROM {table}");
+    match client.query(&count_sql).fetch_one::<u64>().await {
+        Ok(0) => {
+            if let Err(e) = client.query(insert_sql).execute().await {
+                tracing::warn!("ClickHouse backfill of {table} failed: {e}");
+            } else {
+                tracing::info!("ClickHouse aggregate {table} backfilled from source log table");
+            }
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!("ClickHouse count({table}) failed: {e}"),
+    }
 }

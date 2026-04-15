@@ -500,14 +500,24 @@ async fn build_live_snapshot(
 
     let providers_q: ChFut<ProviderHealthRow> = match user_filter {
         None => Box::pin(
+            // Read from the 5-minute rollup maintained by
+            // provider_health_5m_mv. Scanning pre-aggregated buckets
+            // instead of raw gateway_logs drops the per-request row
+            // count by roughly (traffic_per_5min × providers), which
+            // on a busy deployment is 4-5 orders of magnitude. The
+            // user-scoped arm below still hits the raw table because
+            // the rollup aggregates user_id out.
             ch.query(
                 "SELECT \
-                    ifNull(provider, 'unknown') AS provider, \
-                    count() AS requests, \
-                    avg(ifNull(latency_ms, 0)) AS avg_latency_ms, \
-                    (countIf(status_code < 400) / count()) * 100 AS success_rate \
-                 FROM gateway_logs \
-                 WHERE created_at >= now() - INTERVAL 15 MINUTE \
+                    provider, \
+                    toUInt64(sum(total_requests)) AS requests, \
+                    if(sum(requests_latency) > 0, \
+                       sum(sum_latency_ms) / sum(requests_latency), 0) AS avg_latency_ms, \
+                    if(sum(total_requests) > 0, \
+                       (sum(total_requests) - sum(error_requests)) / sum(total_requests) * 100, \
+                       100) AS success_rate \
+                 FROM provider_health_5m \
+                 WHERE bucket_5m >= now() - INTERVAL 15 MINUTE \
                  GROUP BY provider \
                  ORDER BY requests DESC \
                  LIMIT 8",
