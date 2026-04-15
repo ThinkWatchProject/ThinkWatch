@@ -169,6 +169,13 @@ pub async fn create_key(
     State(state): State<AppState>,
     Json(req): Json<CreateApiKeyRequest>,
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
+    // Self-serve key creation: any user whose role grants api_keys:create
+    // can mint a key bound to themselves. The team-scope check below
+    // separately enforces "you can only target a team you belong to"
+    // unless the caller also has team:write (full admin). This plugs a
+    // prior gap where the handler had no explicit permission gate at all.
+    auth_user.require_permission("api_keys:create")?;
+
     let surfaces = normalize_surfaces(&req.surfaces)?;
 
     // Validate team membership if team_id is specified

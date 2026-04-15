@@ -33,7 +33,7 @@ import {
 } from '@/components/ui/select';
 import { Plus, Copy, Check, Ban, RotateCw, Pencil, KeyRound, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -481,12 +481,14 @@ export function ApiKeysPage() {
           <p className="text-muted-foreground">{t('apiKeys.subtitle')}</p>
         </div>
         <Dialog open={dialogOpen} onOpenChange={handleDialogChange}>
-          <DialogTrigger asChild>
-            <Button>
-              <Plus className="h-4 w-4" />
-              {t('apiKeys.createKey')}
-            </Button>
-          </DialogTrigger>
+          {hasPermission('api_keys:create') && (
+            <DialogTrigger asChild>
+              <Button>
+                <Plus className="h-4 w-4" />
+                {t('apiKeys.createKey')}
+              </Button>
+            </DialogTrigger>
+          )}
           <DialogContent className="sm:max-w-md">
             <DialogHeader>
               <DialogTitle>{createdKey ? t('apiKeys.keyCreated') : t('apiKeys.createKey')}</DialogTitle>
