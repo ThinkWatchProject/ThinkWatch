@@ -405,6 +405,7 @@
     "editServer": "Edit MCP Server",
     "editDescription": "Update MCP server settings.",
     "testFailedBlocking": "Connection test failed: {{msg}}. Fix the issue and try again.",
+    "mustTestFirst": "Run Test Connection first and confirm the server responds with a tool list.",
     "namespacePrefix": "Namespace Prefix",
     "namespacePrefixPlaceholder": "e.g. github (auto-derived if empty)",
     "namespacePrefixHint": "Tools are exposed as <prefix>__<tool_name>. Lowercase letters, digits, underscores only. Max 32 chars.",

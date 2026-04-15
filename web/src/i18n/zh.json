@@ -405,6 +405,7 @@
     "editServer": "编辑 MCP 服务器",
     "editDescription": "更新 MCP 服务器设置。",
     "testFailedBlocking": "连接测试失败：{{msg}}。请修复后重试。",
+    "mustTestFirst": "请先点击\"测试连接\"并确认服务器返回工具列表。",
     "namespacePrefix": "命名空间前缀",
     "namespacePrefixPlaceholder": "例如 github（留空自动生成）",
     "namespacePrefixHint": "工具暴露为 <前缀>__<工具名>。仅支持小写字母、数字和下划线，最多 32 字符。",

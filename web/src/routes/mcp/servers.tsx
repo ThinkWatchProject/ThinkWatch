@@ -421,7 +421,15 @@ export function McpServersPage() {
                   {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
                   {testing ? t('providers.testing') : t('providers.testConnection')}
                 </Button>
-                <Button type="submit" disabled={submitting}>
+                {/* Submit is gated on a successful test-connection so the
+                    admin always sees the tool list before a server is
+                    persisted — avoids the "registered then discovered
+                    it's broken" footgun we hit in the earlier session. */}
+                <Button
+                  type="submit"
+                  disabled={submitting || !testResult?.success}
+                  title={!testResult?.success ? t('mcpServers.mustTestFirst') : undefined}
+                >
                   {submitting ? t('mcpServers.registering') : t('mcpServers.registerServer')}
                 </Button>
               </DialogFooter>
