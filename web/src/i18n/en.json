@@ -71,6 +71,7 @@
     "platformLogs": "Platform Logs",
     "configGuide": "Configuration Guide",
     "apiDocs": "API Docs",
+    "usageLicense": "Usage & License",
     "contentSecurity": "Content Security",
     "mcpStore": "Store"
   },
@@ -1201,5 +1202,26 @@
     "appDesc": "Server runtime tracing — level, target, message",
     "results": "Results",
     "noLogs": "No logs found."
+  },
+  "usageLicense": {
+    "title": "Usage & License",
+    "subtitle": "Month-to-date Billable Tokens and MCP Tool Calls against your licensing tier.",
+    "currentTier": "Current tier",
+    "tierHint": "Highest tier reached by either Billable Tokens or MCP Tool Calls this UTC month.",
+    "billableTokens": "Billable Tokens (MTD)",
+    "mcpCalls": "MCP Tool Calls (MTD)",
+    "ofCeiling": "{{pct}}% of {{ceiling}} ceiling",
+    "unboundedTier": "No upper bound — custom agreement",
+    "nextTierAt": "Next: {{tier}}",
+    "tokensDaily": "Daily Billable Tokens",
+    "callsDaily": "Daily MCP Tool Calls",
+    "localOnly": "These figures are computed locally and never transmitted. Used for operator visibility only; activation and billing are out of scope.",
+    "tier": {
+      "starter": "Starter",
+      "growth": "Growth",
+      "scale": "Scale",
+      "enterprise": "Enterprise",
+      "custom": "Custom"
+    }
   }
 }

@@ -497,6 +497,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
     // Admin routes (admin/super_admin role required)
     let admin_routes = Router::new()
         .route(
+            "/api/admin/usage-license",
+            get(handlers::usage_license::get_usage_license),
+        )
+        .route(
             "/api/admin/providers",
             get(handlers::providers::list_providers).post(handlers::providers::create_provider),
         )

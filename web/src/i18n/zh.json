@@ -71,6 +71,7 @@
     "platformLogs": "平台日志",
     "configGuide": "配置指南",
     "apiDocs": "API 文档",
+    "usageLicense": "用量与许可",
     "contentSecurity": "内容安全",
     "mcpStore": "商店"
   },
@@ -1201,5 +1202,26 @@
     "appDesc": "服务运行时追踪——级别、模块、消息",
     "results": "查询结果",
     "noLogs": "未找到日志。"
+  },
+  "usageLicense": {
+    "title": "用量与许可",
+    "subtitle": "本月(UTC)累计的 Billable Tokens 与 MCP Tool Calls,对照许可阶梯展示。",
+    "currentTier": "当前阶梯",
+    "tierHint": "UTC 本月内,Billable Tokens 与 MCP Tool Calls 取二者较高的阶梯。",
+    "billableTokens": "Billable Tokens(本月累计)",
+    "mcpCalls": "MCP Tool Calls(本月累计)",
+    "ofCeiling": "已用 {{pct}}% / 上限 {{ceiling}}",
+    "unboundedTier": "无上限 — 定制协议",
+    "nextTierAt": "下一阶梯:{{tier}}",
+    "tokensDaily": "每日 Billable Tokens",
+    "callsDaily": "每日 MCP Tool Calls",
+    "localOnly": "数据纯本地计算,不会外传。仅用于运营可视化;激活与计费不在本页范围。",
+    "tier": {
+      "starter": "Starter",
+      "growth": "Growth",
+      "scale": "Scale",
+      "enterprise": "Enterprise",
+      "custom": "Custom"
+    }
   }
 }

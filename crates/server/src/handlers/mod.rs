@@ -25,3 +25,4 @@ pub mod sso;
 pub mod teams;
 pub mod test_rate_limit;
 pub mod time_range;
+pub mod usage_license;

@@ -42,6 +42,7 @@ import {
   LogOut,
   User,
   FileCode2,
+  Gauge,
   Filter,
   Store,
 } from 'lucide-react';
@@ -112,6 +113,7 @@ const navGroups: NavGroup[] = [
       { titleKey: 'nav.roles', icon: Shield, href: '/admin/roles', permission: 'roles:read' },
       { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings', permission: 'settings:read' },
       { titleKey: 'nav.apiDocs', icon: FileCode2, href: '/admin/api-docs', permission: 'settings:read' },
+      { titleKey: 'nav.usageLicense', icon: Gauge, href: '/admin/usage-license', permission: 'analytics:read_all' },
     ],
   },
 ];
