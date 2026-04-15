@@ -1789,3 +1789,88 @@ impl IntoResponse for GatewayErrorResponse {
         (status, Json(body)).into_response()
     }
 }
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+    use axum::http::HeaderMap;
+
+    /// `gateway_error_status` must agree with the HTTP status that
+    /// `GatewayErrorResponse::into_response` returns — drift between
+    /// them would make the gateway_logs `status_code` field disagree
+    /// with the actual response code, and trace UI users would chase
+    /// phantom 502s for what was actually a 429.
+    #[test]
+    fn gateway_error_status_matches_response_status() {
+        for (err, expected) in [
+            (GatewayError::ProviderError("x".into()), 502),
+            (GatewayError::TransformError("x".into()), 400),
+            (GatewayError::NetworkError("x".into()), 502),
+            (GatewayError::UpstreamRateLimited, 429),
+            (GatewayError::LocalRateLimited("rule".into()), 429),
+            (GatewayError::UpstreamAuthError, 401),
+        ] {
+            assert_eq!(
+                gateway_error_status(&err),
+                expected,
+                "status mismatch for {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_trace_id_accepts_caller_supplied_value() {
+        let mut h = HeaderMap::new();
+        h.insert("x-trace-id", "abc-12345".parse().unwrap());
+        assert_eq!(resolve_trace_id(&h), "abc-12345");
+    }
+
+    #[test]
+    fn resolve_trace_id_trims_whitespace() {
+        let mut h = HeaderMap::new();
+        h.insert("x-trace-id", "  spaced  ".parse().unwrap());
+        assert_eq!(resolve_trace_id(&h), "spaced");
+    }
+
+    #[test]
+    fn resolve_trace_id_mints_uuid_when_missing() {
+        let h = HeaderMap::new();
+        let id = resolve_trace_id(&h);
+        // UUID v4 is 36 chars with 4 hyphens.
+        assert_eq!(id.len(), 36, "expected v4 UUID, got {id}");
+        assert_eq!(id.matches('-').count(), 4);
+    }
+
+    #[test]
+    fn resolve_trace_id_rejects_too_long_header() {
+        let mut h = HeaderMap::new();
+        let long = "x".repeat(129);
+        h.insert("x-trace-id", long.parse().unwrap());
+        // Falls back to UUID when the header fails validation.
+        let id = resolve_trace_id(&h);
+        assert_ne!(id.len(), 129, "did not reject long header");
+        assert_eq!(id.len(), 36);
+    }
+
+    #[test]
+    fn resolve_trace_id_rejects_empty_header() {
+        let mut h = HeaderMap::new();
+        h.insert("x-trace-id", "   ".parse().unwrap());
+        let id = resolve_trace_id(&h);
+        assert_eq!(id.len(), 36, "blank header should fall back to UUID");
+    }
+
+    /// 128-char boundary: exactly 128 should pass, 129 should reject.
+    #[test]
+    fn resolve_trace_id_boundary() {
+        let mut h128 = HeaderMap::new();
+        let s128 = "a".repeat(128);
+        h128.insert("x-trace-id", s128.parse().unwrap());
+        assert_eq!(resolve_trace_id(&h128).len(), 128);
+
+        let mut h129 = HeaderMap::new();
+        let s129 = "a".repeat(129);
+        h129.insert("x-trace-id", s129.parse().unwrap());
+        assert_eq!(resolve_trace_id(&h129).len(), 36, "129 must fall back");
+    }
+}

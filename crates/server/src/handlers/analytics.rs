@@ -757,3 +757,58 @@ fn csv_escape(s: &str) -> String {
     let escaped = s.replace('"', "\"\"");
     format!("\"{escaped}\"")
 }
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn cost_group_by_parses_known_aliases() {
+        assert_eq!(CostGroupBy::parse(None), CostGroupBy::Model);
+        assert_eq!(CostGroupBy::parse(Some("model")), CostGroupBy::Model);
+        assert_eq!(CostGroupBy::parse(Some("user")), CostGroupBy::User);
+        assert_eq!(CostGroupBy::parse(Some("team")), CostGroupBy::Team);
+        assert_eq!(
+            CostGroupBy::parse(Some("cost_center")),
+            CostGroupBy::CostCenter
+        );
+        assert_eq!(
+            CostGroupBy::parse(Some("costcenter")),
+            CostGroupBy::CostCenter
+        );
+        assert_eq!(CostGroupBy::parse(Some("USER")), CostGroupBy::User);
+    }
+
+    #[test]
+    fn cost_group_by_unknown_falls_back_to_model() {
+        // Default to the historical behaviour so a stale client param
+        // doesn't 400 the export. Defensive — never trust query strings.
+        assert_eq!(CostGroupBy::parse(Some("garbage")), CostGroupBy::Model);
+        assert_eq!(CostGroupBy::parse(Some("")), CostGroupBy::Model);
+    }
+
+    #[test]
+    fn csv_escape_wraps_simple_fields_in_quotes() {
+        assert_eq!(csv_escape("hello"), "\"hello\"");
+        assert_eq!(csv_escape(""), "\"\"");
+    }
+
+    #[test]
+    fn csv_escape_doubles_embedded_quotes() {
+        // RFC 4180: a literal `"` inside a quoted field becomes `""`.
+        assert_eq!(csv_escape(r#"a"b"#), r#""a""b""#);
+        // Input is 8 chars: " q u o t e d "
+        // Each " becomes "" → ""quoted""
+        // Then wrap in "..." → """quoted"""  (3 quotes per side)
+        assert_eq!(csv_escape("\"quoted\""), "\"\"\"quoted\"\"\"");
+    }
+
+    #[test]
+    fn csv_escape_keeps_commas_and_newlines_safe() {
+        // The whole field is wrapped in quotes already, so commas and
+        // newlines pass through verbatim. Just verify they don't break
+        // the wrapping.
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+        assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
+    }
+}

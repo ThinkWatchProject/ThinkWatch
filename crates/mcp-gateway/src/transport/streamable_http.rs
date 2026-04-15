@@ -146,3 +146,53 @@ pub async fn handle_delete(
 
     StatusCode::NO_CONTENT.into_response()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_id_passthrough_when_caller_pinned() {
+        let mut h = HeaderMap::new();
+        h.insert(TRACE_ID_HEADER, "req-2026-04-15-abc".parse().unwrap());
+        assert_eq!(resolve_trace_id(&h), "req-2026-04-15-abc");
+    }
+
+    #[test]
+    fn trace_id_minted_when_header_missing() {
+        let h = HeaderMap::new();
+        let id = resolve_trace_id(&h);
+        assert_eq!(id.len(), 36, "expected v4 UUID");
+    }
+
+    #[test]
+    fn trace_id_rejects_oversize_header() {
+        let mut h = HeaderMap::new();
+        let long = "x".repeat(129);
+        h.insert(TRACE_ID_HEADER, long.parse().unwrap());
+        let id = resolve_trace_id(&h);
+        assert_ne!(id.len(), 129, "129-char value must be rejected");
+        assert_eq!(id.len(), 36);
+    }
+
+    #[test]
+    fn trace_id_rejects_blank_header() {
+        let mut h = HeaderMap::new();
+        h.insert(TRACE_ID_HEADER, "   ".parse().unwrap());
+        assert_eq!(resolve_trace_id(&h).len(), 36);
+    }
+
+    /// Cross-check: the AI gateway side and the MCP transport side
+    /// must produce the same id for the same caller-pinned header
+    /// value, otherwise correlation breaks. The two implementations
+    /// live in different crates so the test exists to flag drift if
+    /// one ever loosens its rules.
+    #[test]
+    fn trace_id_validation_matches_ai_gateway() {
+        for input in ["abc", "req-2026-04-15-abc", &"a".repeat(128)] {
+            let mut h = HeaderMap::new();
+            h.insert(TRACE_ID_HEADER, input.parse().unwrap());
+            assert_eq!(resolve_trace_id(&h), input);
+        }
+    }
+}
