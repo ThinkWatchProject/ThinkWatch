@@ -5,6 +5,7 @@
     "delete": "Delete",
     "create": "Create",
     "search": "Search",
+    "refresh": "Refresh",
     "loading": "Loading...",
     "noData": "No data",
     "confirm": "Confirm",
@@ -73,6 +74,7 @@
     "apiDocs": "API Docs",
     "usageLicense": "Usage & License",
     "trace": "Request Trace",
+    "webhookOutbox": "Webhook Outbox",
     "contentSecurity": "Content Security",
     "mcpStore": "Store"
   },
@@ -1221,6 +1223,25 @@
     "appDesc": "Server runtime tracing — level, target, message",
     "results": "Results",
     "noLogs": "No logs found."
+  },
+  "webhookOutbox": {
+    "title": "Webhook Outbox",
+    "subtitle": "Pending webhook deliveries waiting for the durable retry worker.",
+    "pending": "Pending deliveries",
+    "totalRows": "{{count}} row(s)",
+    "totalRowsTruncated": "Showing {{shown}} of {{total}} — backlog is large; investigate the drain worker",
+    "empty": "Outbox is empty — every webhook delivery succeeded inline.",
+    "created": "Queued",
+    "nextAttempt": "Next attempt",
+    "due": "now",
+    "attemptsHint": "Attempt count out of the 24-attempt cap. Rows that hit 24 are dropped automatically.",
+    "deletedForwarder": "(forwarder deleted)",
+    "retry": "Retry now",
+    "retryQueued": "Scheduled for the next drain tick",
+    "delete": "Delete row",
+    "deleteConfirm": "Drop this pending delivery permanently?",
+    "deleted": "Row deleted",
+    "workerHint": "The drain worker runs every 10 seconds. Failed deliveries back off exponentially up to 1 hour between attempts and are dropped after 24 total attempts."
   },
   "trace": {
     "title": "Request Trace",

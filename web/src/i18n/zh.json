@@ -5,6 +5,7 @@
     "delete": "删除",
     "create": "创建",
     "search": "搜索",
+    "refresh": "刷新",
     "loading": "加载中...",
     "noData": "暂无数据",
     "confirm": "确认",
@@ -73,6 +74,7 @@
     "apiDocs": "API 文档",
     "usageLicense": "用量与许可",
     "trace": "请求追踪",
+    "webhookOutbox": "Webhook 出箱",
     "contentSecurity": "内容安全",
     "mcpStore": "商店"
   },
@@ -1221,6 +1223,25 @@
     "appDesc": "服务运行时追踪——级别、模块、消息",
     "results": "查询结果",
     "noLogs": "未找到日志。"
+  },
+  "webhookOutbox": {
+    "title": "Webhook 出箱",
+    "subtitle": "等待持久化重试 worker 的 webhook 投递队列。",
+    "pending": "待发投递",
+    "totalRows": "共 {{count}} 条",
+    "totalRowsTruncated": "显示 {{shown}} / {{total}} 条 —— 积压较多,请检查 drain worker",
+    "empty": "出箱为空 —— 所有 webhook 都在内联重试中成功送达。",
+    "created": "入队",
+    "nextAttempt": "下次尝试",
+    "due": "立即",
+    "attemptsHint": "已尝试次数 / 24 上限。达到 24 次的行会被自动丢弃。",
+    "deletedForwarder": "(forwarder 已删除)",
+    "retry": "立即重试",
+    "retryQueued": "已安排下一轮 drain 时投递",
+    "delete": "删除该行",
+    "deleteConfirm": "永久删除该待投递事件?",
+    "deleted": "已删除",
+    "workerHint": "Drain worker 每 10 秒运行一次。失败投递按指数退避(最长 1 小时)重试,累计 24 次后弃单。"
   },
   "trace": {
     "title": "请求追踪",
