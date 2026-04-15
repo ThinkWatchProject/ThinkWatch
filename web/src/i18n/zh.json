@@ -72,6 +72,7 @@
     "configGuide": "配置指南",
     "apiDocs": "API 文档",
     "usageLicense": "用量与许可",
+    "trace": "请求追踪",
     "contentSecurity": "内容安全",
     "mcpStore": "商店"
   },
@@ -1202,6 +1203,15 @@
     "appDesc": "服务运行时追踪——级别、模块、消息",
     "results": "查询结果",
     "noLogs": "未找到日志。"
+  },
+  "trace": {
+    "title": "请求追踪",
+    "subtitle": "按 trace_id 查看同一请求涉及的所有日志事件。",
+    "inputPlaceholder": "粘贴 trace_id(如 API 响应头 x-trace-id)",
+    "lookup": "查询",
+    "eventCount": "共 {{count}} 条事件",
+    "noEvents": "该 trace_id 未找到任何事件。",
+    "howToFind": "把任意 API 响应头 x-trace-id 的值粘贴过来。"
   },
   "usageLicense": {
     "title": "用量与许可",

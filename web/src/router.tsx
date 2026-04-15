@@ -43,6 +43,7 @@ const UsageLicensePage = lazyRouteComponent(
   () => import('@/routes/admin/usage-license'),
   'UsageLicensePage',
 );
+const TracePage = lazyRouteComponent(() => import('@/routes/admin/trace'), 'TracePage');
 const ProfilePage = lazyRouteComponent(() => import('@/routes/profile'), 'ProfilePage');
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? '';
@@ -312,6 +313,18 @@ const usageLicenseRoute = createRoute({
   component: UsageLicensePage,
 });
 
+const traceIndexRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/admin/trace',
+  component: TracePage,
+});
+
+const traceDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/admin/trace/$traceId',
+  component: TracePage,
+});
+
 const profileRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/profile',
@@ -361,6 +374,8 @@ const routeTree = rootRoute.addChildren([
   logForwardersRoute,
   apiDocsRoute,
   usageLicenseRoute,
+  traceIndexRoute,
+  traceDetailRoute,
   profileRoute,
   registerRoute,
   setupRoute,

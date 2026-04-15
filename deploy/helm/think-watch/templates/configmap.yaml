@@ -195,12 +195,14 @@ data:
         detail           Nullable(String) CODEC(ZSTD(3)),
         ip_address       Nullable(String),
         user_agent       Nullable(String) CODEC(ZSTD(3)),
+        trace_id         Nullable(String),
         created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
         INDEX idx_user_id   user_id   TYPE bloom_filter GRANULARITY 4,
         INDEX idx_api_key   api_key_id TYPE bloom_filter GRANULARITY 4,
         INDEX idx_action    action     TYPE set(100)     GRANULARITY 2,
         INDEX idx_resource  resource   TYPE set(100)     GRANULARITY 2,
         INDEX idx_ip        ip_address TYPE bloom_filter GRANULARITY 4,
+        INDEX idx_trace     trace_id   TYPE bloom_filter GRANULARITY 4,
         INDEX idx_search    id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
     ) ENGINE = MergeTree()
     PARTITION BY toYYYYMM(created_at)
@@ -222,12 +224,14 @@ data:
         ip_address       Nullable(String),
         user_agent       Nullable(String) CODEC(ZSTD(3)),
         detail           Nullable(String) CODEC(ZSTD(3)),
+        trace_id         Nullable(String),
         created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
         INDEX idx_user_id    user_id    TYPE bloom_filter GRANULARITY 4,
         INDEX idx_api_key    api_key_id TYPE bloom_filter GRANULARITY 4,
         INDEX idx_model      model_id   TYPE set(200)     GRANULARITY 2,
         INDEX idx_provider   provider   TYPE set(50)      GRANULARITY 2,
         INDEX idx_status     status_code TYPE set(50)     GRANULARITY 2,
+        INDEX idx_trace      trace_id   TYPE bloom_filter GRANULARITY 4,
         INDEX idx_search     id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
     ) ENGINE = MergeTree()
     PARTITION BY toYYYYMM(created_at)
@@ -253,11 +257,13 @@ data:
         error_message    Nullable(String) CODEC(ZSTD(3)),
         ip_address       Nullable(String),
         detail           Nullable(String) CODEC(ZSTD(3)),
+        trace_id         Nullable(String),
         created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
         INDEX idx_user_id    user_id    TYPE bloom_filter GRANULARITY 4,
         INDEX idx_server_id  server_id  TYPE bloom_filter GRANULARITY 4,
         INDEX idx_tool       tool_name  TYPE set(200)     GRANULARITY 2,
         INDEX idx_status     status     TYPE set(20)      GRANULARITY 2,
+        INDEX idx_trace      trace_id   TYPE bloom_filter GRANULARITY 4,
         INDEX idx_search     id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
     ) ENGINE = MergeTree()
     PARTITION BY toYYYYMM(created_at)
@@ -290,4 +296,12 @@ data:
     ORDER BY (created_at, id)
     TTL toDateTime(created_at) + INTERVAL 90 DAY
     SETTINGS index_granularity = 8192, ttl_only_drop_parts = 1;
+
+    -- trace_id backfill for existing installs (M2-8). Idempotent.
+    ALTER TABLE audit_logs    ADD COLUMN IF NOT EXISTS trace_id Nullable(String);
+    ALTER TABLE gateway_logs  ADD COLUMN IF NOT EXISTS trace_id Nullable(String);
+    ALTER TABLE mcp_logs      ADD COLUMN IF NOT EXISTS trace_id Nullable(String);
+    ALTER TABLE audit_logs    ADD INDEX  IF NOT EXISTS idx_trace trace_id TYPE bloom_filter GRANULARITY 4;
+    ALTER TABLE gateway_logs  ADD INDEX  IF NOT EXISTS idx_trace trace_id TYPE bloom_filter GRANULARITY 4;
+    ALTER TABLE mcp_logs      ADD INDEX  IF NOT EXISTS idx_trace trace_id TYPE bloom_filter GRANULARITY 4;
 {{- end }}

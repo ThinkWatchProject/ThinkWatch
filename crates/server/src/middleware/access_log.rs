@@ -21,6 +21,20 @@ use think_watch_common::dynamic_config::DynamicConfig;
 #[derive(Clone, Default)]
 pub struct AccessLogUserSlot(pub Arc<OnceLock<Uuid>>);
 
+/// Per-request correlation id inserted into request extensions so any
+/// downstream audit emission can tag itself with it. Mirrors what the
+/// gateway puts in `metadata.request_id` for AI traffic — setting this
+/// from the access_log layer means management endpoints get a trace id
+/// too, and a single `GET /api/admin/trace/{id}` query returns every
+/// row from audit_logs, gateway_logs, or mcp_logs that shares it.
+///
+/// Clients can pin the id by sending the `x-trace-id` header; otherwise
+/// a fresh UUID is minted. We echo the chosen id back on the response
+/// as `x-trace-id` so operators can copy it out of a cURL trace.
+#[derive(Clone, Debug)]
+#[allow(dead_code)] // read by handlers that tag audit entries with .trace_id()
+pub struct RequestTraceId(pub String);
+
 /// Layer that logs HTTP requests to ClickHouse.
 #[derive(Clone)]
 pub struct AccessLogLayer {
@@ -76,6 +90,21 @@ where
     fn call(&mut self, mut request: Request) -> Self::Future {
         let method = request.method().to_string();
         let path = request.uri().path().to_string();
+
+        // Resolve or mint the trace id for this request. Headers are
+        // validated to be sensible ASCII (<= 128 chars, no control
+        // characters) — anything else we ignore and generate fresh.
+        let incoming_trace = request
+            .headers()
+            .get("x-trace-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| !c.is_control()));
+        let trace_id = incoming_trace.unwrap_or_else(|| Uuid::new_v4().to_string());
+        request
+            .extensions_mut()
+            .insert(RequestTraceId(trace_id.clone()));
+
         // Slot for auth_guard to publish the resolved user_id into.
         let user_slot = AccessLogUserSlot::default();
         request.extensions_mut().insert(user_slot.clone());
@@ -94,10 +123,20 @@ where
         let port = self.port;
         let headers = request.headers().clone();
         let start = std::time::Instant::now();
+        let trace_for_response = trace_id.clone();
         let future = self.inner.call(request);
 
         Box::pin(async move {
-            let response = future.await?;
+            let mut response = future.await?;
+            // Echo the trace id back to the client unless the downstream
+            // handler already set one (which would be odd but we let it
+            // win). Parsing failure (never happens for a UUID) silently
+            // skips the header — the event is still tagged in CH.
+            if !response.headers().contains_key("x-trace-id")
+                && let Ok(v) = trace_for_response.parse()
+            {
+                response.headers_mut().insert("x-trace-id", v);
+            }
             let latency_ms = start.elapsed().as_millis() as i64;
             let status_code = response.status().as_u16();
 

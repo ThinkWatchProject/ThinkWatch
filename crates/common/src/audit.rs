@@ -71,6 +71,11 @@ pub struct AuditEntry {
     pub detail: Option<serde_json::Value>,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
+    /// Correlates this event with other gateway/mcp/audit rows that
+    /// belong to the same incoming request. Typically set to the
+    /// gateway's `metadata.request_id`; `None` for standalone admin
+    /// actions where there is no request to correlate against.
+    pub trace_id: Option<String>,
     pub created_at: String,
 }
 
@@ -91,6 +96,10 @@ struct ChAuditRow {
     detail: Option<String>,
     ip_address: Option<String>,
     user_agent: Option<String>,
+    // Order matches CREATE TABLE in deploy/clickhouse/init.sql; trace_id
+    // must sit here (between user_agent and created_at) so CH's columnar
+    // insert lines up. If you move one, move both.
+    trace_id: Option<String>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
     created_at: chrono::DateTime<Utc>,
 }
@@ -127,6 +136,7 @@ struct ChGatewayRow {
     ip_address: Option<String>,
     user_agent: Option<String>,
     detail: Option<String>,
+    trace_id: Option<String>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
     created_at: chrono::DateTime<Utc>,
 }
@@ -144,6 +154,7 @@ struct ChMcpRow {
     error_message: Option<String>,
     ip_address: Option<String>,
     detail: Option<String>,
+    trace_id: Option<String>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
     created_at: chrono::DateTime<Utc>,
 }
@@ -213,6 +224,7 @@ impl AuditEntry {
             detail: None,
             ip_address: None,
             user_agent: None,
+            trace_id: None,
             created_at: Utc::now().to_rfc3339(),
         }
     }
@@ -280,6 +292,14 @@ impl AuditEntry {
 
     pub fn user_agent(mut self, ua: impl Into<String>) -> Self {
         self.user_agent = Some(ua.into());
+        self
+    }
+
+    /// Correlate this row with other events for the same request.
+    /// Typically the gateway's `metadata.request_id`. Omit for admin
+    /// actions that aren't tied to a gateway call.
+    pub fn trace_id(mut self, id: impl Into<String>) -> Self {
+        self.trace_id = Some(id.into());
         self
     }
 }
@@ -934,6 +954,7 @@ async fn flush_audit(
                 detail: detail_str(&mut entry.detail),
                 ip_address: entry.ip_address,
                 user_agent: entry.user_agent,
+                trace_id: entry.trace_id,
                 created_at: ts,
             })
             .await?;
@@ -989,6 +1010,7 @@ async fn flush_gateway(
             ip_address: entry.ip_address,
             user_agent: entry.user_agent,
             detail: detail_str(&mut entry.detail),
+            trace_id: entry.trace_id,
             created_at: ts,
         };
         insert.write(&row).await?;
@@ -1015,6 +1037,7 @@ async fn flush_mcp(
             error_message: detail_field(&entry.detail, "error_message"),
             ip_address: entry.ip_address,
             detail: detail_str(&mut entry.detail),
+            trace_id: entry.trace_id,
             created_at: ts,
         };
         insert.write(&row).await?;

@@ -83,6 +83,10 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     detail           Nullable(String) CODEC(ZSTD(3)),
     ip_address       Nullable(String),
     user_agent       Nullable(String) CODEC(ZSTD(3)),
+    -- trace_id correlates this event with the AI gateway / MCP request
+    -- that produced it. Set by the originating handler's middleware;
+    -- NULL for standalone admin actions.
+    trace_id         Nullable(String),
     created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
 
     -- Skip indices: exact-match filters
@@ -91,6 +95,7 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     INDEX idx_action    action     TYPE set(100)     GRANULARITY 2,
     INDEX idx_resource  resource   TYPE set(100)     GRANULARITY 2,
     INDEX idx_ip        ip_address TYPE bloom_filter GRANULARITY 4,
+    INDEX idx_trace     trace_id   TYPE bloom_filter GRANULARITY 4,
 
     -- Skip index: substring search on id column (String type, not LowCardinality)
     INDEX idx_search id TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
@@ -118,6 +123,8 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     ip_address       Nullable(String),
     user_agent       Nullable(String) CODEC(ZSTD(3)),
     detail           Nullable(String) CODEC(ZSTD(3)),
+    -- trace_id: shared ID across gateway / mcp / audit rows for one request.
+    trace_id         Nullable(String),
     created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
 
     -- Skip indices
@@ -126,6 +133,7 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     INDEX idx_model      model_id   TYPE set(200)     GRANULARITY 2,
     INDEX idx_provider   provider   TYPE set(50)      GRANULARITY 2,
     INDEX idx_status     status_code TYPE set(50)     GRANULARITY 2,
+    INDEX idx_trace      trace_id   TYPE bloom_filter GRANULARITY 4,
     INDEX idx_search     id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(created_at)
@@ -158,6 +166,7 @@ CREATE TABLE IF NOT EXISTS mcp_logs (
     error_message    Nullable(String) CODEC(ZSTD(3)),
     ip_address       Nullable(String),
     detail           Nullable(String) CODEC(ZSTD(3)),
+    trace_id         Nullable(String),
     created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
 
     -- Skip indices
@@ -165,6 +174,7 @@ CREATE TABLE IF NOT EXISTS mcp_logs (
     INDEX idx_server_id  server_id  TYPE bloom_filter GRANULARITY 4,
     INDEX idx_tool       tool_name  TYPE set(200)     GRANULARITY 2,
     INDEX idx_status     status     TYPE set(20)      GRANULARITY 2,
+    INDEX idx_trace      trace_id   TYPE bloom_filter GRANULARITY 4,
     INDEX idx_search     id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(created_at)
@@ -195,6 +205,18 @@ ALTER TABLE mcp_logs ADD INDEX IF NOT EXISTS idx_error_msg error_message TYPE to
 ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_detail detail TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4;
 -- platform_logs: user_email for the role-history / team-change audit UI.
 ALTER TABLE platform_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloom_filter GRANULARITY 4;
+
+-- ---- trace_id column backfill for existing installs (M2-8) ------------
+-- Correlates a single request's events across gateway_logs / mcp_logs /
+-- audit_logs. `GET /api/admin/trace/{trace_id}` reads from all three.
+-- Fresh installs get the column from CREATE TABLE above; these idempotent
+-- ALTERs make the migration a no-op on upgrade.
+ALTER TABLE audit_logs    ADD COLUMN IF NOT EXISTS trace_id Nullable(String);
+ALTER TABLE gateway_logs  ADD COLUMN IF NOT EXISTS trace_id Nullable(String);
+ALTER TABLE mcp_logs      ADD COLUMN IF NOT EXISTS trace_id Nullable(String);
+ALTER TABLE audit_logs    ADD INDEX  IF NOT EXISTS idx_trace trace_id TYPE bloom_filter GRANULARITY 4;
+ALTER TABLE gateway_logs  ADD INDEX  IF NOT EXISTS idx_trace trace_id TYPE bloom_filter GRANULARITY 4;
+ALTER TABLE mcp_logs      ADD INDEX  IF NOT EXISTS idx_trace trace_id TYPE bloom_filter GRANULARITY 4;
 
 -- ================================================================
 --  mcp_server_call_counts  (P2-10)

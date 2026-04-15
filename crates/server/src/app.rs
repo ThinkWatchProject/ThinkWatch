@@ -501,6 +501,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             get(handlers::usage_license::get_usage_license),
         )
         .route(
+            "/api/admin/trace/{trace_id}",
+            get(handlers::trace::get_trace),
+        )
+        .route(
             "/api/admin/providers",
             get(handlers::providers::list_providers).post(handlers::providers::create_provider),
         )
