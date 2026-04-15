@@ -18,8 +18,6 @@ pub struct Timeouts {
     pub mcp_pool_secs: u64,
     /// Console-side request timeout layer (TimeoutLayer in app.rs).
     pub console_request_secs: u64,
-    /// Background MCP health-check interval.
-    pub mcp_health_interval_secs: u64,
     /// Per-frame WebSocket send/recv ceiling on the dashboard WS loop.
     pub dashboard_ws_io_secs: u64,
     /// Dashboard WS push cadence (snapshot every N seconds).
@@ -34,7 +32,6 @@ impl Default for Timeouts {
             http_client_secs: 15,
             mcp_pool_secs: 30,
             console_request_secs: 30,
-            mcp_health_interval_secs: 60,
             dashboard_ws_io_secs: 5,
             dashboard_ws_tick_secs: 4,
             dashboard_ws_max_per_user: 4,
@@ -51,10 +48,6 @@ impl Timeouts {
             console_request_secs: env_u64(
                 "THINKWATCH_CONSOLE_REQUEST_SECS",
                 d.console_request_secs,
-            ),
-            mcp_health_interval_secs: env_u64(
-                "THINKWATCH_MCP_HEALTH_INTERVAL_SECS",
-                d.mcp_health_interval_secs,
             ),
             dashboard_ws_io_secs: env_u64(
                 "THINKWATCH_DASHBOARD_WS_IO_SECS",

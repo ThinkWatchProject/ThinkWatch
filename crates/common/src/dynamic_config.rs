@@ -263,6 +263,14 @@ impl DynamicConfig {
         self.get_i64("data.retention_days_app").await.unwrap_or(30)
     }
 
+    /// Background MCP health-check cadence. Read on every loop iteration
+    /// so changes via the settings UI take effect within one tick. Min
+    /// clamped at 5s server-side to keep a typo from DOSing upstreams.
+    pub async fn mcp_health_interval_secs(&self) -> u64 {
+        let raw = self.get_i64("mcp.health_interval_secs").await.unwrap_or(300);
+        raw.max(5) as u64
+    }
+
     pub async fn client_ip_source(&self) -> String {
         self.get_string("security.client_ip_source")
             .await

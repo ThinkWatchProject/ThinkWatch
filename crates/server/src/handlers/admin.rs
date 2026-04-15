@@ -1625,6 +1625,21 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
+        // MCP background health-check cadence. Lower bound (5s) prevents
+        // a typo from DOSing every registered upstream; upper bound is
+        // a day, anything beyond that is effectively "never" — admin
+        // should disable the loop entirely if they want that.
+        "mcp.health_interval_secs" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            if !(5..=86400).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "mcp.health_interval_secs must be between 5 and 86400".into(),
+                ));
+            }
+        }
+
         // Integer settings that can be 0 (0 = disabled)
         "api_keys.default_expiry_days"
         | "api_keys.inactivity_timeout_days"

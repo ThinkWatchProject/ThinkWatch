@@ -212,7 +212,6 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
         state.clone(),
         registry.clone(),
         pool.clone(),
-        state.config.timeouts.mcp_health_interval_secs,
     );
 
     let mut mcp_proxy = McpProxy::new(

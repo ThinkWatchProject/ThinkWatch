@@ -388,17 +388,19 @@ pub fn spawn_mcp_health_loop(
     state: AppState,
     registry: think_watch_mcp_gateway::registry::Registry,
     pool: think_watch_mcp_gateway::pool::ConnectionPool,
-    interval_secs: u64,
 ) {
     let checker = think_watch_mcp_gateway::health::HealthChecker::new(pool);
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
-        // First tick fires immediately; skip it so we don't probe the
-        // moment the server starts (avoids piling on top of the startup
-        // discovery burst).
-        tick.tick().await;
+        // Skip the immediate-fire first tick so we don't pile probes on
+        // top of the startup discovery burst. Cadence is read from
+        // DynamicConfig (`mcp.health_interval_secs`) before each sleep,
+        // so changes via the settings UI take effect within one tick
+        // — no restart needed.
+        tokio::time::sleep(std::time::Duration::from_secs(
+            state.dynamic_config.mcp_health_interval_secs().await,
+        ))
+        .await;
         loop {
-            tick.tick().await;
             let servers = registry.list().await;
             for server in &servers {
                 let health = checker.check_server(server).await;
@@ -432,6 +434,10 @@ pub fn spawn_mcp_health_loop(
                     );
                 }
             }
+            // Re-read cadence each iteration so settings UI changes
+            // take effect immediately on the next probe round.
+            let secs = state.dynamic_config.mcp_health_interval_secs().await;
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
         }
     });
 }

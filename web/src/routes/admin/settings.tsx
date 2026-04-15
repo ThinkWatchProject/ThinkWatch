@@ -70,6 +70,7 @@ export function SettingsPage() {
   const [availableRoles, setAvailableRoles] = useState<{ id: string; name: string }[]>([]);
   // MCP Store
   const [registryUrl, setRegistryUrl] = useState('');
+  const [mcpHealthInterval, setMcpHealthInterval] = useState(300);
   // Gateway
   const [cacheTtl, setCacheTtl] = useState(0);
   const [requestTimeout, setRequestTimeout] = useState(30);
@@ -116,6 +117,7 @@ export function SettingsPage() {
     setAllowRegistration(getSettingValue(data, 'auth', 'allow_registration') === true);
     setDefaultRole(str(getSettingValue(data, 'auth', 'default_role'), ''));
     setRegistryUrl(str(getSettingValue(data, 'mcp_store', 'registry_url'), ''));
+    setMcpHealthInterval(num(getSettingValue(data, 'mcp', 'health_interval_secs'), 300));
     setCacheTtl(num(getSettingValue(data, 'gateway', 'cache_ttl_secs'), 3600));
     setRequestTimeout(num(getSettingValue(data, 'gateway', 'request_timeout_secs'), 120));
     setBodyLimit(num(getSettingValue(data, 'gateway', 'body_limit_bytes'), 10485760));
@@ -189,6 +191,7 @@ export function SettingsPage() {
           'auth.allow_registration': allowRegistration,
           'auth.default_role': defaultRole,
           'mcp_store.registry_url': registryUrl,
+          'mcp.health_interval_secs': mcpHealthInterval,
           'gateway.cache_ttl_secs': cacheTtl,
           'gateway.request_timeout_secs': requestTimeout,
           'gateway.body_limit_bytes': bodyLimit,
@@ -584,6 +587,30 @@ export function SettingsPage() {
                 <Label className="text-sm">{t('settings.registryUrl')}</Label>
                 <p className="text-xs text-muted-foreground">{t('settings.registryUrlHint')}</p>
                 <Input value={registryUrl} onChange={(e) => setRegistryUrl(e.target.value)} placeholder="https://thinkwatch.dev/registry/mcp-templates.json" />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Background health-check cadence — read on every loop tick
+              so changes here propagate to the next probe round without
+              a server restart. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t('settings.mcpRuntimeTitle')}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-2 max-w-md">
+                <Label className="text-sm">{t('settings.mcpHealthIntervalLabel')}</Label>
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.mcpHealthIntervalHint')}
+                </p>
+                <Input
+                  type="number"
+                  min={5}
+                  step={5}
+                  value={mcpHealthInterval}
+                  onChange={(e) => setMcpHealthInterval(Number(e.target.value) || 0)}
+                />
               </div>
             </CardContent>
           </Card>
