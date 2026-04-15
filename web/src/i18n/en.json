@@ -1248,6 +1248,7 @@
     "subtitle": "Look up every log event tagged with a single trace_id.",
     "inputPlaceholder": "Paste a trace_id (e.g. x-trace-id response header)",
     "lookup": "Look up",
+    "autoRefresh": "Auto-refresh (5s)",
     "eventCount": "{{count}} event(s) recorded",
     "noEvents": "No events found for this trace_id.",
     "howToFind": "Paste the value of the x-trace-id header returned on any API response."

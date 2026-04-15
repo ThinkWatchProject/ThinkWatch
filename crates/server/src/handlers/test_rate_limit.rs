@@ -21,7 +21,21 @@ pub async fn check_test_rate_limit(
     user_id: Uuid,
     endpoint_tag: &str,
 ) -> Result<(), AppError> {
-    let key = format!("rl:test:{endpoint_tag}:{user_id}");
+    check_admin_rate_limit(redis, user_id, endpoint_tag, MAX_CALLS_PER_MIN).await
+}
+
+/// Same fixed-window mechanism as `check_test_rate_limit` but with a
+/// caller-chosen cap. Used by admin endpoints that want a more
+/// permissive ceiling than the 5/min default — e.g. trace lookups,
+/// which are read-only but still hit ClickHouse and shouldn't
+/// support 100/sec abuse from a stolen admin token.
+pub async fn check_admin_rate_limit(
+    redis: &fred::clients::Client,
+    user_id: Uuid,
+    endpoint_tag: &str,
+    limit_per_min: u32,
+) -> Result<(), AppError> {
+    let key = format!("rl:admin:{endpoint_tag}:{user_id}");
     let count: u32 = match redis.incr::<u32, _>(&key).await {
         Ok(n) => n,
         Err(_) => return Ok(()),
@@ -31,7 +45,7 @@ pub async fn check_test_rate_limit(
         // the key stays slightly longer, which tightens the limit.
         let _: Result<bool, _> = redis.expire(&key, 60, None).await;
     }
-    if count > MAX_CALLS_PER_MIN {
+    if count > limit_per_min {
         return Err(AppError::RateLimited);
     }
     Ok(())

@@ -65,6 +65,19 @@ pub async fn get_trace(
         .assert_scope_global(&state.db, "analytics:read_all")
         .await?;
 
+    // Per-admin rate limit: 60 lookups/min. Generous enough that the
+    // page can poll every couple seconds, tight enough that a stolen
+    // admin token can't run a CH-hammering script. Best-effort against
+    // a Redis outage so the admin can still investigate during partial
+    // failures.
+    super::test_rate_limit::check_admin_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        "trace_lookup",
+        60,
+    )
+    .await?;
+
     // Basic sanity: trace_ids are UUIDs in practice but we accept any
     // short token to avoid coupling to a particular format. Length cap
     // keeps a path-segment abuse from fanning out into CH unbounded.
@@ -177,6 +190,54 @@ pub async fn get_trace(
                 status: String::new(),
                 duration_ms: 0,
                 user_id: r.user_id,
+            });
+        }
+
+        // Best-effort app_logs correlation. The proxy emits tracing
+        // events like `tracing::info!(request_id = %trace_id, …)` so
+        // the trace id lands in the structured `fields` JSON column.
+        // We do a substring match against `fields` and `span` bounded
+        // to the last 1h — a full-period scan would hammer CH.
+        // Operators investigating older requests should use the
+        // dedicated /logs explorer.
+        //
+        // When a future schema adds first-class `app_logs.trace_id`,
+        // swap the LIKE for an indexed equality predicate.
+        #[derive(clickhouse::Row, serde::Deserialize)]
+        struct AppLogRow {
+            id: String,
+            created_at: String,
+            level: String,
+            message: String,
+        }
+        let pattern = format!("%{trace_id}%");
+        let app_rows: Vec<AppLogRow> = ch
+            .query(
+                "SELECT id, \
+                        formatDateTime(created_at, '%Y-%m-%dT%H:%M:%S.%fZ', 'UTC') AS created_at, \
+                        level, message \
+                   FROM app_logs \
+                  WHERE created_at >= now() - INTERVAL 1 HOUR \
+                    AND (fields LIKE ? OR span LIKE ?) \
+                  LIMIT 200",
+            )
+            .bind(&pattern)
+            .bind(&pattern)
+            .fetch_all::<AppLogRow>()
+            .await
+            .unwrap_or_default();
+        for r in app_rows {
+            events.push(TraceEvent {
+                kind: "app".into(),
+                id: r.id,
+                created_at: r.created_at,
+                // Truncate the message so a stack-trace-style log
+                // doesn't blow up the timeline cell. Full text is in
+                // /logs explorer if the operator needs it.
+                subject: r.message.chars().take(120).collect::<String>(),
+                status: r.level,
+                duration_ms: 0,
+                user_id: None,
             });
         }
     }

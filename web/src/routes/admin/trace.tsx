@@ -10,7 +10,7 @@ import { AlertCircle, Search } from 'lucide-react';
 import { api } from '@/lib/api';
 
 interface TraceEvent {
-  kind: 'gateway' | 'mcp' | 'audit';
+  kind: 'gateway' | 'mcp' | 'audit' | 'app';
   id: string;
   created_at: string;
   subject: string;
@@ -37,19 +37,42 @@ export function TracePage() {
   const [data, setData] = useState<TraceResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  // Auto-poll keeps the timeline fresh while a long-running request
+  // is still emitting events. Defaults on so the operator doesn't
+  // have to manually refresh; backend has a 60/min admin rate limit
+  // so a 5s cadence is well within budget.
+  const [autoRefresh, setAutoRefresh] = useState(true);
+
+  // Single source of truth for the fetch — both the param-change
+  // effect and the polling interval call this. Loading flag only
+  // flips on the *first* load so polling refreshes don't blank the
+  // timeline.
+  const fetchTrace = (traceId: string, isInitial: boolean) => {
+    if (isInitial) setLoading(true);
+    setError('');
+    api<TraceResponse>(`/api/admin/trace/${encodeURIComponent(traceId)}`)
+      .then(setData)
+      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load trace'))
+      .finally(() => {
+        if (isInitial) setLoading(false);
+      });
+  };
 
   useEffect(() => {
     if (!params.traceId) {
       setData(null);
       return;
     }
-    setLoading(true);
-    setError('');
-    api<TraceResponse>(`/api/admin/trace/${encodeURIComponent(params.traceId)}`)
-      .then(setData)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load trace'))
-      .finally(() => setLoading(false));
+    fetchTrace(params.traceId, true);
   }, [params.traceId]);
+
+  useEffect(() => {
+    if (!params.traceId || !autoRefresh) return;
+    const id = window.setInterval(() => {
+      fetchTrace(params.traceId!, false);
+    }, 5_000);
+    return () => window.clearInterval(id);
+  }, [params.traceId, autoRefresh]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -86,6 +109,17 @@ export function TracePage() {
           <Search className="mr-1.5 h-4 w-4" />
           {t('trace.lookup')}
         </Button>
+        {params.traceId && (
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+              className="h-3.5 w-3.5"
+            />
+            {t('trace.autoRefresh')}
+          </label>
+        )}
       </form>
 
       {error && (
@@ -198,6 +232,13 @@ function Waterfall({
         return 'var(--chart-2)';
       case 'audit':
         return 'var(--chart-3)';
+      case 'app':
+        // App-log entries (best-effort substring match against
+        // tracing event fields for the last 1h) — use a muted tone
+        // so they don't compete with first-class kinds.
+        return evt.status === 'ERROR' || evt.status === 'WARN'
+          ? 'var(--destructive)'
+          : 'var(--muted-foreground)';
       default:
         return 'var(--muted-foreground)';
     }
@@ -335,6 +376,14 @@ function Waterfall({
             aria-hidden
           />
           audit
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span
+            className="inline-block h-2 w-3 rounded-sm"
+            style={{ background: 'var(--muted-foreground)' }}
+            aria-hidden
+          />
+          app
         </span>
         <span className="flex items-center gap-1.5">
           <span

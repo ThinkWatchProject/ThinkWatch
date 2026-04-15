@@ -1248,6 +1248,7 @@
     "subtitle": "按 trace_id 查看同一请求涉及的所有日志事件。",
     "inputPlaceholder": "粘贴 trace_id(如 API 响应头 x-trace-id)",
     "lookup": "查询",
+    "autoRefresh": "自动刷新(5 秒)",
     "eventCount": "共 {{count}} 条事件",
     "noEvents": "该 trace_id 未找到任何事件。",
     "howToFind": "把任意 API 响应头 x-trace-id 的值粘贴过来。"
