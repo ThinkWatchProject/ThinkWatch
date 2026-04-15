@@ -9,7 +9,8 @@ use crate::handlers::{
     app_logs::{AppLogEntryResponse, AppLogsResponse},
     auth::{ChangePasswordRequest, TotpSetupResponse, TotpVerifyRequest},
     dashboard::{
-        DashboardLive, DashboardStats, LiveLogRow, ProviderHealth, RpmBucket, WsTicketResponse,
+        DashboardLayout, DashboardLive, DashboardStats, LiveLogRow, ProviderHealth, RpmBucket,
+        WsTicketResponse,
     },
     gateway_logs::{GatewayLogEntry, GatewayLogsResponse},
     limits::{
@@ -139,6 +140,8 @@ use crate::handlers::{
         crate::handlers::dashboard::get_dashboard_stats,
         crate::handlers::dashboard::get_dashboard_live,
         crate::handlers::dashboard::create_dashboard_ws_ticket,
+        crate::handlers::dashboard::get_dashboard_layout,
+        crate::handlers::dashboard::put_dashboard_layout,
         // Audit & Logs
         crate::handlers::audit::list_audit_logs,
         crate::handlers::gateway_logs::list_gateway_logs,
@@ -187,6 +190,7 @@ use crate::handlers::{
             UsageStats, UsageRow, CostStats, CostRow,
             // Dashboard
             DashboardStats, ProviderHealth, RpmBucket, LiveLogRow, DashboardLive, WsTicketResponse,
+            DashboardLayout,
             // Logs
             GatewayLogEntry, GatewayLogsResponse,
             McpLogEntry, McpLogsResponse,

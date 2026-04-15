@@ -27,7 +27,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from '@/components/ui/chart';
-import { api } from '@/lib/api';
+import { api, apiPut } from '@/lib/api';
 import { StatusIndicator } from '@/components/ui/status-indicator';
 import { ServiceLogo } from '@/components/ui/service-logo';
 import { DashboardLiveSchema, WsTicketSchema } from '@/lib/schemas';
@@ -270,27 +270,67 @@ function useLiveDashboard() {
 
 const STAT_ORDER_KEY = 'dashboard.stat-order.v1';
 
+interface LayoutPayload {
+  stat_order?: string[];
+}
+
 /// Reorderable 4-up grid. `cards` is keyed by a stable id — the grid
 /// renders children in the persisted order (falling back to the object
 /// key order) and lets the user drag a card's handle to rearrange.
-/// Order is stored in localStorage so it survives reloads.
+///
+/// Order syncs server-side via `/api/dashboard/layout` so it carries
+/// across browsers and devices. We still write through to localStorage
+/// to avoid a first-paint flash back to default order while the API call
+/// is in flight; the API result wins if it differs.
 function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
-  const defaultOrder = Object.keys(cards);
+  const defaultOrder = useMemo(() => Object.keys(cards), [cards]);
+
+  const mergeOrder = (saved: unknown): string[] => {
+    if (!Array.isArray(saved) || !saved.every((k) => typeof k === 'string')) {
+      return defaultOrder;
+    }
+    // Drop ids that no longer exist (card removed); append new ones at end.
+    const known = saved.filter((k) => k in cards);
+    for (const k of defaultOrder) if (!known.includes(k)) known.push(k);
+    return known;
+  };
+
   const [order, setOrder] = useState<string[]>(() => {
     try {
-      const saved = JSON.parse(localStorage.getItem(STAT_ORDER_KEY) || 'null') as unknown;
-      if (Array.isArray(saved) && saved.every((k) => typeof k === 'string')) {
-        // Merge with defaults: drop ids no longer present, append new ones.
-        const known = saved.filter((k) => k in cards);
-        for (const k of defaultOrder) if (!known.includes(k)) known.push(k);
-        return known;
-      }
+      const cached = JSON.parse(localStorage.getItem(STAT_ORDER_KEY) || 'null') as unknown;
+      return mergeOrder(cached);
     } catch {
-      // fallthrough
+      return defaultOrder;
     }
-    return defaultOrder;
   });
   const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  // On mount, reconcile with the server-side layout. If the user changed
+  // order on another device, this overwrites the local cache. We ignore
+  // failures (auth churn, network) — the cached order keeps working.
+  useEffect(() => {
+    let cancelled = false;
+    api<{ name: string; layout_json: LayoutPayload | null }>('/api/dashboard/layout')
+      .then((res) => {
+        if (cancelled) return;
+        const next = mergeOrder(res.layout_json?.stat_order);
+        setOrder(next);
+        try {
+          localStorage.setItem(STAT_ORDER_KEY, JSON.stringify(next));
+        } catch {
+          // ignore
+        }
+      })
+      .catch(() => {
+        /* keep localStorage-backed order */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally only reconcile once per mount — subsequent drags
+    // write through to the server, so there's no race to rehydrate.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const persist = (next: string[]) => {
     setOrder(next);
@@ -299,6 +339,15 @@ function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
     } catch {
       // quota / privacy mode — reorder still works for this session.
     }
+    // Fire-and-forget PUT; intentionally no debounce because drag events
+    // are user-paced and each settled drop is a discrete intent worth
+    // persisting immediately. Toast on failure so silent loss is visible.
+    apiPut<unknown>('/api/dashboard/layout', {
+      name: 'default',
+      layout_json: { stat_order: next } satisfies LayoutPayload,
+    }).catch((err: unknown) => {
+      toast.error(err instanceof Error ? err.message : 'Failed to save layout');
+    });
   };
 
   const reorder = (from: string, to: string) => {

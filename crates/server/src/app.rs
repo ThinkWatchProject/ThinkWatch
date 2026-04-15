@@ -453,6 +453,11 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             "/api/dashboard/ws-ticket",
             post(handlers::dashboard::create_dashboard_ws_ticket),
         )
+        .route(
+            "/api/dashboard/layout",
+            get(handlers::dashboard::get_dashboard_layout)
+                .put(handlers::dashboard::put_dashboard_layout),
+        )
         .route("/api/mcp/tools", get(handlers::mcp_tools::list_tools))
         .route("/api/mcp/store", get(handlers::mcp_store::list_templates))
         .route(
