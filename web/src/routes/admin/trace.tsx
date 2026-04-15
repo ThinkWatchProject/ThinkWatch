@@ -143,7 +143,7 @@ export function TracePage() {
             {data.events.length === 0 ? (
               <p className="py-8 text-center text-muted-foreground">{t('trace.noEvents')}</p>
             ) : (
-              <Waterfall events={data.events} fmtTime={fmtTime} />
+              <Waterfall events={data.events} fmtTime={fmtTime} traceId={data.trace_id} />
             )}
           </CardContent>
         </Card>
@@ -168,9 +168,11 @@ export function TracePage() {
 function Waterfall({
   events,
   fmtTime,
+  traceId,
 }: {
   events: TraceEvent[];
   fmtTime: (iso: string) => string;
+  traceId: string;
 }) {
   // Compute the time domain: trace start = earliest event,
   // trace end   = latest (event start + duration).
@@ -307,8 +309,16 @@ function Waterfall({
             (evt.status ? ` · ${evt.status}` : '') +
             (evt.duration_ms > 0 ? ` · ${evt.duration_ms}ms` : '') +
             ` · ${fmtTime(evt.created_at)}`;
-          return (
-            <g key={`${evt.kind}-${evt.id}-${i}`}>
+          // App events get a deep-link to /logs filtered by trace_id
+          // so the operator can read the full message (the waterfall
+          // truncates at 120 chars for layout). SVG `<a>` renders as
+          // a normal anchor that pointer events bubble through to.
+          const appLogsHref =
+            evt.kind === 'app'
+              ? `/logs?category=app&q=${encodeURIComponent(traceId)}`
+              : null;
+          const rowContent = (
+            <>
               <title>{tooltip}</title>
               {/* Left label: kind + subject (truncated). Use SVG text +
                   manual ellipsis-by-truncate; CSS overflow wouldn't
@@ -320,6 +330,7 @@ function Waterfall({
                 fontSize="10"
                 fill="currentColor"
                 fillOpacity={0.75}
+                style={appLogsHref ? { textDecoration: 'underline' } : undefined}
               >
                 {`${evt.kind}: ${labelText}`.slice(0, 28)}
                 {`${evt.kind}: ${labelText}`.length > 28 ? '…' : ''}
@@ -332,6 +343,7 @@ function Waterfall({
                 rx={3}
                 fill={colorFor(evt)}
                 fillOpacity={0.85}
+                style={appLogsHref ? { cursor: 'pointer' } : undefined}
               />
               {/* Duration label to the right of the bar when there's
                   room; suppressed for sub-ms point events. */}
@@ -346,7 +358,19 @@ function Waterfall({
                   {evt.duration_ms}ms
                 </text>
               )}
-            </g>
+            </>
+          );
+          return appLogsHref ? (
+            <a
+              key={`${evt.kind}-${evt.id}-${i}`}
+              href={appLogsHref}
+              target="_blank"
+              rel="noreferrer"
+            >
+              {rowContent}
+            </a>
+          ) : (
+            <g key={`${evt.kind}-${evt.id}-${i}`}>{rowContent}</g>
           );
         })}
       </svg>

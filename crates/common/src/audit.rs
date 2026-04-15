@@ -831,6 +831,15 @@ async fn drain_once(
     registry: &ForwarderRegistry,
     http: &reqwest::Client,
 ) -> Result<(), sqlx::Error> {
+    // Surface the backlog depth every tick so operators can alert on
+    // "outbox > N rows for M minutes". Published before the drain so
+    // the gauge reflects the pre-drain snapshot the tick operated on.
+    let depth: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM webhook_outbox")
+        .fetch_one(db)
+        .await
+        .unwrap_or(0);
+    metrics::gauge!("webhook_outbox_depth").set(depth as f64);
+
     #[derive(sqlx::FromRow)]
     struct OutboxRow {
         id: Uuid,

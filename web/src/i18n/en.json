@@ -1227,6 +1227,7 @@
   "webhookOutbox": {
     "title": "Webhook Outbox",
     "subtitle": "Pending webhook deliveries waiting for the durable retry worker.",
+    "autoRefresh": "Auto-refresh (10s)",
     "pending": "Pending deliveries",
     "totalRows": "{{count}} row(s)",
     "totalRowsTruncated": "Showing {{shown}} of {{total}} — backlog is large; investigate the drain worker",

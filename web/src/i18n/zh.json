@@ -1227,6 +1227,7 @@
   "webhookOutbox": {
     "title": "Webhook 出箱",
     "subtitle": "等待持久化重试 worker 的 webhook 投递队列。",
+    "autoRefresh": "自动刷新(10 秒)",
     "pending": "待发投递",
     "totalRows": "共 {{count}} 条",
     "totalRowsTruncated": "显示 {{shown}} / {{total}} 条 —— 积压较多,请检查 drain worker",

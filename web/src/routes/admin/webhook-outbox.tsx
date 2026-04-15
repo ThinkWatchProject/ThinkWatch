@@ -13,6 +13,7 @@ interface OutboxRow {
   id: string;
   forwarder_id: string;
   forwarder_name: string | null;
+  forwarder_url: string | null;
   attempts: number;
   next_attempt_at: string;
   last_error: string | null;
@@ -35,9 +36,14 @@ export function WebhookOutboxPage() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
+  // Auto-refresh keeps the queue view current while the drain worker
+  // chews through the backlog. 10s matches the worker cadence — a
+  // faster poll just wastes CH / PG round-trips. Default on so the
+  // operator watching a drain-down doesn't have to hand-refresh.
+  const [autoRefresh, setAutoRefresh] = useState(true);
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (isInitial: boolean) => {
+    if (isInitial) setLoading(true);
     setError('');
     try {
       const res = await api<OutboxResponse>('/api/admin/webhook-outbox');
@@ -45,20 +51,28 @@ export function WebhookOutboxPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load');
     } finally {
-      setLoading(false);
+      if (isInitial) setLoading(false);
     }
   };
 
   useEffect(() => {
-    void load();
+    void load(true);
   }, []);
+
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const id = window.setInterval(() => {
+      void load(false);
+    }, 10_000);
+    return () => window.clearInterval(id);
+  }, [autoRefresh]);
 
   const handleRetry = async (id: string) => {
     setBusyId(id);
     try {
       await apiPost(`/api/admin/webhook-outbox/${id}/retry`, {});
       toast.success(t('webhookOutbox.retryQueued'));
-      await load();
+      await load(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Retry failed');
     } finally {
@@ -72,7 +86,7 @@ export function WebhookOutboxPage() {
     try {
       await apiDelete(`/api/admin/webhook-outbox/${id}`);
       toast.success(t('webhookOutbox.deleted'));
-      await load();
+      await load(false);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Delete failed');
     } finally {
@@ -105,10 +119,21 @@ export function WebhookOutboxPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('webhookOutbox.title')}</h1>
           <p className="text-muted-foreground">{t('webhookOutbox.subtitle')}</p>
         </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-          <RefreshCw className={`mr-1 h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
-          {t('common.refresh')}
-        </Button>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={autoRefresh}
+              onChange={(e) => setAutoRefresh(e.target.checked)}
+              className="h-3.5 w-3.5"
+            />
+            {t('webhookOutbox.autoRefresh')}
+          </label>
+          <Button variant="outline" size="sm" onClick={() => load(false)} disabled={loading}>
+            <RefreshCw className={`mr-1 h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
+            {t('common.refresh')}
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -151,6 +176,14 @@ export function WebhookOutboxPage() {
                     <div className="font-mono text-xs">
                       {r.forwarder_name ?? <span className="italic text-muted-foreground">{t('webhookOutbox.deletedForwarder')}</span>}
                     </div>
+                    {r.forwarder_url && (
+                      <div
+                        className="truncate font-mono text-[10px] text-muted-foreground"
+                        title={r.forwarder_url}
+                      >
+                        {r.forwarder_url}
+                      </div>
+                    )}
                     {r.last_error && (
                       <div
                         className="truncate font-mono text-[10px] text-destructive"

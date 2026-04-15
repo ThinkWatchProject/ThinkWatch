@@ -29,6 +29,12 @@ pub struct WebhookOutboxRow {
     /// the FK CASCADE should normally clean those up but a row could
     /// linger if the worker is mid-iteration.
     pub forwarder_name: Option<String>,
+    /// URL the delivery is targeting, extracted from the forwarder
+    /// config. Lets the operator debug a stuck row without jumping
+    /// to the forwarder-admin page to cross-reference. `None` when
+    /// the forwarder was deleted or the config is somehow missing
+    /// the `url` field (defensive).
+    pub forwarder_url: Option<String>,
     pub attempts: i32,
     pub next_attempt_at: DateTime<Utc>,
     pub last_error: Option<String>,
@@ -66,8 +72,13 @@ pub async fn list_outbox(
         .assert_scope_global(&state.db, "log_forwarders:write")
         .await?;
 
+    // Pull the URL out of the forwarder's JSONB config at query time.
+    // `->>` returns TEXT and casts NULL on a missing key — safer than
+    // a second materialised column that'd drift from the forwarder's
+    // canonical config.
     let items: Vec<WebhookOutboxRow> = sqlx::query_as(
         "SELECT o.id, o.forwarder_id, f.name AS forwarder_name, \
+                (f.config->>'url')::text AS forwarder_url, \
                 o.attempts, o.next_attempt_at, o.last_error, o.created_at \
            FROM webhook_outbox o \
            LEFT JOIN log_forwarders f ON f.id = o.forwarder_id \

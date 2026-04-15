@@ -843,14 +843,19 @@ pub async fn proxy_chat_completion(
 
     if is_stream {
         // Select route (with affinity) for streaming — no retry after
-        // first chunk, so pick the best candidate up front.
+        // first chunk, so pick the best candidate up front. Route-
+        // lookup failures on the streaming branch deserve a
+        // gateway_logs row just like the non-streaming bubble above
+        // — operators debugging "my SSE stream never started" would
+        // otherwise find zero trace events to correlate against.
         let entry = select_route_for_stream(
             routes,
             &state.redis,
             identity.user_id.as_deref(),
             &original_model,
         )
-        .await?;
+        .await
+        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
 
         // Replace model with upstream_model if configured
         if let Some(ref upstream) = entry.upstream_model {
@@ -1205,7 +1210,8 @@ pub async fn proxy_anthropic_messages(
             identity.user_id.as_deref(),
             &mapped_model,
         )
-        .await?;
+        .await
+        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
 
         let mut stream_request = request.clone();
         if let Some(ref upstream) = entry.upstream_model {
@@ -1564,7 +1570,8 @@ pub async fn proxy_responses(
             identity.user_id.as_deref(),
             &mapped_model,
         )
-        .await?;
+        .await
+        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
 
         let mut stream_request = request.clone();
         if let Some(ref upstream) = entry.upstream_model {
