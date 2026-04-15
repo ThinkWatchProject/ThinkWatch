@@ -75,6 +75,8 @@ use crate::handlers::{
         crate::handlers::api_keys::list_cost_centers,
         crate::handlers::usage_license::get_usage_license,
         crate::handlers::trace::get_trace,
+        crate::handlers::roles_yaml::export_role,
+        crate::handlers::roles_yaml::import_role,
         // Setup
         crate::handlers::setup::setup_status,
         crate::handlers::setup::setup_initialize,

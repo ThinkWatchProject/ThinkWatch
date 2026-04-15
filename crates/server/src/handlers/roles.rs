@@ -146,7 +146,7 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     d("system:configure_oidc", "system", "configure_oidc"),
 ];
 
-fn is_known_permission(key: &str) -> bool {
+pub(super) fn is_known_permission(key: &str) -> bool {
     PERMISSIONS.iter().any(|p| p.key == key)
 }
 

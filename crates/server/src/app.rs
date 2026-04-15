@@ -702,6 +702,14 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             post(handlers::roles::reset_role),
         )
         .route(
+            "/api/admin/roles/{id}/export",
+            get(handlers::roles_yaml::export_role),
+        )
+        .route(
+            "/api/admin/roles/import",
+            post(handlers::roles_yaml::import_role),
+        )
+        .route(
             "/api/admin/permissions",
             get(handlers::roles::list_permissions),
         )
