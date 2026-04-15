@@ -176,6 +176,28 @@ pub async fn install_template(
     };
 
     super::providers::validate_url(&endpoint_url)?;
+    if let Some(ref headers) = req.custom_headers {
+        super::providers::validate_custom_headers(headers)?;
+    }
+
+    // Verify the endpoint actually responds to JSON-RPC tools/list before
+    // we persist anything. Keeps broken installs from cluttering the
+    // server list and replaces the old manual "test connection" step in
+    // the install dialog.
+    let probe = super::mcp_servers::probe_mcp_endpoint(
+        &state.http_client,
+        &endpoint_url,
+        template.auth_type.as_deref(),
+        req.auth_secret.as_deref(),
+        req.custom_headers.as_ref(),
+    )
+    .await;
+    if !probe.success {
+        return Err(AppError::BadRequest(format!(
+            "Connection test failed: {}",
+            probe.message
+        )));
+    }
 
     // Auto-detect transport type for hosted endpoints
     let transport_type = {
