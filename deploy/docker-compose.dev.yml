@@ -81,7 +81,7 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
       - ./data/clickhouse:/var/lib/clickhouse
-      - ./clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./clickhouse/initdb.d/:/docker-entrypoint-initdb.d/:ro
       - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
       - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
     healthcheck:
