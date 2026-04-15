@@ -27,3 +27,7 @@ Thumbs.db
 /.claude
 deploy/clickhouse/users.d/default-user.xml
 deploy/data/
+
+# Internal planning / progress docs — local only, never push
+/docs/q2-2026-plan.md
+/docs/*-plan.md
