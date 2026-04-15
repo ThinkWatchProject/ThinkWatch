@@ -1,5 +1,7 @@
 import {
   memo,
+  Suspense,
+  use,
   useEffect,
   useMemo,
   useRef,
@@ -7,6 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react';
+import { ErrorBoundary } from '@/components/error-boundary';
 import { useTranslation } from 'react-i18next';
 import { Inbox } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ReferenceLine, YAxis } from 'recharts';
@@ -337,6 +340,124 @@ function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
 }
 
 // ----------------------------------------------------------------------------
+// Suspense-bound card wrappers
+//
+// Each overview endpoint (usage / cost / stats) is fetched as a single
+// stable promise at the page level and consumed here via React 19's
+// use(). The component suspends on first render, unblocking a sibling
+// card's render as soon as its own promise resolves — no more
+// page-wide "all three done" gate. ErrorBoundary catches a rejected
+// fetch and falls back to a terminal card variant.
+// ----------------------------------------------------------------------------
+
+function SuspendedCard({
+  children,
+  fallbackLabel,
+  chartIndex,
+}: {
+  children: ReactNode;
+  fallbackLabel: string;
+  chartIndex: 1 | 2 | 3 | 4 | 5;
+}) {
+  return (
+    <ErrorBoundary
+      fallback={
+        <StatCard
+          label={fallbackLabel}
+          value={0}
+          format={() => '—'}
+          spark={Array(24).fill(0)}
+          loading={false}
+          chartIndex={chartIndex}
+        />
+      }
+    >
+      <Suspense
+        fallback={
+          <StatCard
+            label={fallbackLabel}
+            value={0}
+            format={() => '…'}
+            spark={Array(24).fill(0)}
+            loading
+            chartIndex={chartIndex}
+          />
+        }
+      >
+        {children}
+      </Suspense>
+    </ErrorBoundary>
+  );
+}
+
+function TokensCard({
+  promise,
+  locale,
+  label,
+}: {
+  promise: Promise<UsageStats>;
+  locale: string;
+  label: string;
+}) {
+  const usage = use(promise);
+  return (
+    <StatCard
+      label={label}
+      value={usage.total_tokens_today}
+      format={(v) => fmtCompact(v, locale)}
+      spark={usage.tokens_buckets}
+      loading={false}
+      chartIndex={1}
+    />
+  );
+}
+
+function CostCard({
+  promise,
+  locale,
+  label,
+}: {
+  promise: Promise<CostStats>;
+  locale: string;
+  label: string;
+}) {
+  const cost = use(promise);
+  return (
+    <StatCard
+      label={label}
+      value={cost.total_cost_mtd}
+      format={(v) => fmtUsd(v, locale)}
+      delta={cost.budget_usage_pct != null ? `${cost.budget_usage_pct.toFixed(1)}%` : undefined}
+      spark={cost.cost_buckets}
+      loading={false}
+      chartIndex={2}
+    />
+  );
+}
+
+function KeysCard({
+  promise,
+  locale,
+  label,
+}: {
+  promise: Promise<DashboardStats>;
+  locale: string;
+  label: string;
+}) {
+  const stats = use(promise);
+  return (
+    <StatCard
+      label={label}
+      value={stats.active_api_keys}
+      format={(v) => fmtInt(Math.round(v), locale)}
+      spark={stats.active_keys_buckets}
+      loading={false}
+      chartIndex={3}
+    />
+  );
+}
+
+// ----------------------------------------------------------------------------
 // Stat card with embedded shadcn AreaChart sparkline
 // ----------------------------------------------------------------------------
 
@@ -444,38 +565,39 @@ export function DashboardPage() {
   const { t, i18n } = useTranslation();
   // Map i18next language code → BCP 47 locale for Intl.NumberFormat.
   const locale = i18n.language === 'zh' ? 'zh-CN' : 'en-US';
-  const [stats, setStats] = useState<DashboardStats | null>(null);
-  const [usage, setUsage] = useState<UsageStats | null>(null);
-  const [cost, setCost] = useState<CostStats | null>(null);
   const { live, connected } = useLiveDashboard();
 
+  // Each of the three overview endpoints becomes its own stable promise,
+  // consumed by a dedicated <Suspense>-wrapped child via React 19's
+  // use(). A card renders as soon as *its* endpoint resolves — the slow
+  // one no longer blocks the other two. useState(() => ...) makes the
+  // promise identity stable across re-renders so suspense doesn't
+  // thrash on every render.
+  const [statsPromise] = useState(() => api<DashboardStats>('/api/dashboard/stats'));
+  const [usagePromise] = useState(() => api<UsageStats>('/api/analytics/usage/stats'));
+  const [costPromise] = useState(() => api<CostStats>('/api/analytics/costs/stats'));
+
+  // Toast-on-rejection is still useful — keep the "something failed"
+  // signal but out-of-band from the render path (ErrorBoundaries below
+  // catch the actual throw and render an error affordance).
   useEffect(() => {
-    // Any of the three stats endpoints failing used to leave cards stuck
-    // on "…" with zero feedback. Surface a single toast if *anything*
-    // fails so the user knows the numbers are stale, while still letting
-    // the partial successes render.
-    const fetches: Array<[string, Promise<unknown>]> = [
-      ['stats', api<DashboardStats>('/api/dashboard/stats').then(setStats)],
-      ['usage', api<UsageStats>('/api/analytics/usage/stats').then(setUsage)],
-      ['cost', api<CostStats>('/api/analytics/costs/stats').then(setCost)],
+    const pairs: Array<[string, Promise<unknown>]> = [
+      ['stats', statsPromise],
+      ['usage', usagePromise],
+      ['cost', costPromise],
     ];
-    Promise.allSettled(fetches.map(([, p]) => p)).then((results) => {
+    Promise.allSettled(pairs.map(([, p]) => p)).then((results) => {
       const failed = results
-        .map((r, i) => (r.status === 'rejected' ? fetches[i][0] : null))
+        .map((r, i) => (r.status === 'rejected' ? pairs[i][0] : null))
         .filter((x): x is string => !!x);
       if (failed.length > 0) {
         toast.error(t('dashboard.loadFailed', { what: failed.join(', ') }));
       }
     });
-  }, [t]);
+  }, [t, statsPromise, usagePromise, costPromise]);
 
-  const tokensSpark = useMemo(() => usage?.tokens_buckets ?? Array(24).fill(0), [usage]);
-  const costSpark = useMemo(() => cost?.cost_buckets ?? Array(24).fill(0), [cost]);
-  const keysSpark = useMemo(() => stats?.active_keys_buckets ?? Array(24).fill(0), [stats]);
   const rpmSpark = useMemo(() => live?.rpm_buckets ?? Array(24).fill(0), [live]);
-
   const currentRpm = live?.rpm_buckets?.[live.rpm_buckets.length - 1] ?? 0;
-  const loading = !stats || !usage || !cost;
 
   // Upstream-health filter (all / ai / mcp). Counts come from the live
   // snapshot so the tab pills always show the current per-kind totals.
@@ -524,48 +646,43 @@ export function DashboardPage() {
         <StatCardGrid
           cards={{
             tokens: (
-              <StatCard
-                label={t('dashboard.tokensUsedToday')}
-                value={usage?.total_tokens_today ?? 0}
-                format={(v) => fmtCompact(v, locale)}
-                spark={tokensSpark}
-                loading={loading}
-                chartIndex={1}
-              />
+              <SuspendedCard fallbackLabel={t('dashboard.tokensUsedToday')} chartIndex={1}>
+                <TokensCard
+                  promise={usagePromise}
+                  locale={locale}
+                  label={t('dashboard.tokensUsedToday')}
+                />
+              </SuspendedCard>
             ),
             cost: (
-              <StatCard
-                label={t('dashboard.costMtd')}
-                value={cost?.total_cost_mtd ?? 0}
-                format={(v) => fmtUsd(v, locale)}
-                delta={
-                  cost?.budget_usage_pct != null
-                    ? `${cost.budget_usage_pct.toFixed(1)}%`
-                    : undefined
-                }
-                spark={costSpark}
-                loading={loading}
-                chartIndex={2}
-              />
+              <SuspendedCard fallbackLabel={t('dashboard.costMtd')} chartIndex={2}>
+                <CostCard
+                  promise={costPromise}
+                  locale={locale}
+                  label={t('dashboard.costMtd')}
+                />
+              </SuspendedCard>
             ),
             keys: (
-              <StatCard
-                label={t('dashboard.activeApiKeys')}
-                value={stats?.active_api_keys ?? 0}
-                format={(v) => fmtInt(Math.round(v), locale)}
-                spark={keysSpark}
-                loading={loading}
-                chartIndex={3}
-              />
+              <SuspendedCard fallbackLabel={t('dashboard.activeApiKeys')} chartIndex={3}>
+                <KeysCard
+                  promise={statsPromise}
+                  locale={locale}
+                  label={t('dashboard.activeApiKeys')}
+                />
+              </SuspendedCard>
             ),
             rpm: (
+              // RPM is already streaming over the WS channel — no
+              // Suspense needed, but it reads `live?.rpm_buckets` which
+              // stays null-safe until the first frame arrives.
               <StatCard
                 label={t('dashboard.requestsPerMin')}
                 value={currentRpm}
                 format={(v) => fmtInt(Math.round(v), locale)}
                 delta={t('dashboard.live')}
                 spark={rpmSpark}
-                loading={loading}
+                loading={!live}
                 chartIndex={4}
               />
             ),
