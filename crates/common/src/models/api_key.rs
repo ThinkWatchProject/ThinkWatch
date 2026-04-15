@@ -32,4 +32,7 @@ pub struct ApiKey {
     pub inactivity_timeout_days: Option<i32>,
     pub disabled_reason: Option<String>,
     pub last_rotation_at: Option<DateTime<Utc>>,
+    /// Optional cost-center / project tag for per-subject analytics
+    /// group-by. Free-form up to 64 chars, or NULL when untagged.
+    pub cost_center: Option<String>,
 }

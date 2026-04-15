@@ -148,6 +148,10 @@ pub struct CreateApiKeyRequest {
     pub surfaces: Vec<String>,
     pub allowed_models: Option<Vec<String>>,
     pub expires_in_days: Option<i32>,
+    /// Optional cost-center / project tag for analytics attribution.
+    /// Free-form up to 64 chars; the admin UI autocompletes from the
+    /// distinct values already in use.
+    pub cost_center: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

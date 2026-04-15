@@ -287,6 +287,9 @@
     "expiresInHint": "从现在起的过期天数。留空则保持当前设置。",
     "rotationPeriod": "轮换周期（天）",
     "inactivityTimeout": "不活跃超时（天）",
+    "costCenter": "成本中心",
+    "costCenterPlaceholder": "如 team-alpha、project-x",
+    "costCenterHint": "可选标签,用于 Costs 页面的成本归因。自由文本,最长 64 字符。",
     "expiringSoon": "即将过期",
     "expired": "已过期",
     "rotated": "已轮换",
@@ -499,7 +502,16 @@
     "inputTokens": "输入令牌",
     "outputTokens": "输出令牌",
     "totalCost": "总成本",
-    "noCosts": "暂无成本数据。"
+    "noCosts": "暂无成本数据。",
+    "groupBy": "分组方式",
+    "group": {
+      "model": "模型",
+      "user": "用户",
+      "team": "团队",
+      "cost_center": "成本中心"
+    },
+    "export": "导出 CSV",
+    "exportFailed": "导出失败:{{msg}}"
   },
   "audit": {
     "title": "审计日志",

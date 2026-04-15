@@ -473,7 +473,11 @@ pub async fn get_cost_stats(
 
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct CostRow {
-    pub model_id: String,
+    /// Opaque group key; content depends on `group_by` in the request.
+    /// For `group_by=model` it's a model_id; for `user` / `team` it's
+    /// the UUID as a string; for `cost_center` it's the tag (or the
+    /// literal string "(untagged)" for NULL).
+    pub group_key: String,
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -481,13 +485,46 @@ pub struct CostRow {
     pub total_cost: rust_decimal::Decimal,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CostGroupBy {
+    Model,
+    User,
+    Team,
+    CostCenter,
+}
+
+impl CostGroupBy {
+    fn parse(s: Option<&str>) -> Self {
+        match s.unwrap_or("").to_ascii_lowercase().as_str() {
+            "user" => Self::User,
+            "team" => Self::Team,
+            "cost_center" | "costcenter" => Self::CostCenter,
+            _ => Self::Model,
+        }
+    }
+}
+
+#[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
+pub struct CostsQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+    /// `model` (default) | `user` | `team` | `cost_center`.
+    pub group_by: Option<String>,
+    /// `json` (default) | `csv` — when `csv`, response is a text/csv
+    /// download instead of JSON.
+    pub format: Option<String>,
+    /// Optional range filter: `24h` | `7d` | `30d` | `mtd` (default).
+    /// MTD is what the Costs page has always shown.
+    pub range: Option<String>,
+}
+
 #[utoipa::path(
     get,
     path = "/api/analytics/costs",
     tag = "Analytics",
-    params(AnalyticsQuery),
+    params(CostsQuery),
     responses(
-        (status = 200, description = "Cost breakdown by model for the current month", body = Vec<CostRow>),
+        (status = 200, description = "Cost breakdown grouped by the requested dimension", body = Vec<CostRow>),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Forbidden"),
     ),
@@ -496,62 +533,126 @@ pub struct CostRow {
 pub async fn get_costs(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    axum::extract::Query(params): axum::extract::Query<AnalyticsQuery>,
-) -> Result<Json<Vec<CostRow>>, AppError> {
+    axum::extract::Query(params): axum::extract::Query<CostsQuery>,
+) -> Result<axum::response::Response, AppError> {
+    use axum::response::IntoResponse;
     let (limit, offset) =
         super::clickhouse_util::clamp_pagination(params.limit, params.offset, 200);
-    let month_start = chrono::Utc::now()
-        .date_naive()
-        .with_day(1)
-        .unwrap_or(chrono::Utc::now().date_naive());
+    // Range: default = month-to-date (the page's original semantics).
+    // Explicit 24h/7d/30d narrow the window.
+    let now = chrono::Utc::now();
+    let window_start = match params.range.as_deref().unwrap_or("mtd") {
+        "24h" => TimeRange::Day.window_start(now),
+        "7d" => TimeRange::Week.window_start(now),
+        "30d" => TimeRange::Month.window_start(now),
+        _ => now
+            .date_naive()
+            .with_day(1)
+            .unwrap_or(now.date_naive())
+            .and_hms_opt(0, 0, 0)
+            .expect("valid hms")
+            .and_utc(),
+    };
+    let group_by = CostGroupBy::parse(params.group_by.as_deref());
     let team_filter = analytics_team_filter(&auth_user, &state.db).await?;
     let caller_id = auth_user.claims.sub;
 
-    let rows = match team_filter {
+    // Pick the SQL grouping expression based on group_by. No user input
+    // is interpolated — the enum picks one of a fixed set of expressions,
+    // so there's no injection surface.
+    let (group_expr, from_expr) = match group_by {
+        CostGroupBy::Model => ("u.model_id", "usage_records u"),
+        CostGroupBy::User => ("COALESCE(u.user_id::text, '(none)')", "usage_records u"),
+        CostGroupBy::Team => ("COALESCE(u.team_id::text, '(none)')", "usage_records u"),
+        CostGroupBy::CostCenter => (
+            "COALESCE(k.cost_center, '(untagged)')",
+            "usage_records u LEFT JOIN api_keys k ON k.id = u.api_key_id",
+        ),
+    };
+
+    let rows: Vec<CostRow> = match team_filter {
         None => {
-            sqlx::query_as::<_, CostRow>(
-                r#"SELECT
-                    model_id,
-                    COUNT(*) as request_count,
-                    COALESCE(SUM(input_tokens::bigint), 0)::bigint as input_tokens,
-                    COALESCE(SUM(output_tokens::bigint), 0)::bigint as output_tokens,
-                    COALESCE(SUM(cost_usd), 0) as total_cost
-               FROM usage_records
-               WHERE created_at::date >= $1
-               GROUP BY model_id
-               ORDER BY total_cost DESC
-               LIMIT $2 OFFSET $3"#,
-            )
-            .bind(month_start)
-            .bind(limit)
-            .bind(offset)
-            .fetch_all(&state.db)
-            .await?
+            let sql = format!(
+                "SELECT {group_expr} AS group_key, \
+                        COUNT(*) AS request_count, \
+                        COALESCE(SUM(u.input_tokens::bigint), 0)::bigint AS input_tokens, \
+                        COALESCE(SUM(u.output_tokens::bigint), 0)::bigint AS output_tokens, \
+                        COALESCE(SUM(u.cost_usd), 0) AS total_cost \
+                   FROM {from_expr} \
+                  WHERE u.created_at >= $1 \
+                  GROUP BY group_key \
+                  ORDER BY total_cost DESC \
+                  LIMIT $2 OFFSET $3"
+            );
+            sqlx::query_as::<_, CostRow>(&sql)
+                .bind(window_start)
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&state.db)
+                .await?
         }
         Some(team_ids) => {
-            sqlx::query_as::<_, CostRow>(
-                r#"SELECT
-                    model_id,
-                    COUNT(*) as request_count,
-                    COALESCE(SUM(input_tokens::bigint), 0)::bigint as input_tokens,
-                    COALESCE(SUM(output_tokens::bigint), 0)::bigint as output_tokens,
-                    COALESCE(SUM(cost_usd), 0) as total_cost
-               FROM usage_records
-               WHERE created_at::date >= $1
-                 AND (team_id = ANY($4) OR user_id = $5)
-               GROUP BY model_id
-               ORDER BY total_cost DESC
-               LIMIT $2 OFFSET $3"#,
-            )
-            .bind(month_start)
-            .bind(limit)
-            .bind(offset)
-            .bind(&team_ids)
-            .bind(caller_id)
-            .fetch_all(&state.db)
-            .await?
+            let sql = format!(
+                "SELECT {group_expr} AS group_key, \
+                        COUNT(*) AS request_count, \
+                        COALESCE(SUM(u.input_tokens::bigint), 0)::bigint AS input_tokens, \
+                        COALESCE(SUM(u.output_tokens::bigint), 0)::bigint AS output_tokens, \
+                        COALESCE(SUM(u.cost_usd), 0) AS total_cost \
+                   FROM {from_expr} \
+                  WHERE u.created_at >= $1 \
+                    AND (u.team_id = ANY($4) OR u.user_id = $5) \
+                  GROUP BY group_key \
+                  ORDER BY total_cost DESC \
+                  LIMIT $2 OFFSET $3"
+            );
+            sqlx::query_as::<_, CostRow>(&sql)
+                .bind(window_start)
+                .bind(limit)
+                .bind(offset)
+                .bind(&team_ids)
+                .bind(caller_id)
+                .fetch_all(&state.db)
+                .await?
         }
     };
 
-    Ok(Json(rows))
+    // CSV export for spreadsheet / finance handoff.
+    if params.format.as_deref() == Some("csv") {
+        let mut body =
+            String::from("group_key,request_count,input_tokens,output_tokens,total_cost\n");
+        for r in &rows {
+            use std::fmt::Write;
+            let _ = writeln!(
+                &mut body,
+                "{},{},{},{},{}",
+                csv_escape(&r.group_key),
+                r.request_count,
+                r.input_tokens,
+                r.output_tokens,
+                r.total_cost,
+            );
+        }
+        let filename = format!("costs-{}.csv", now.format("%Y%m%d"));
+        return Ok((
+            axum::http::StatusCode::OK,
+            [
+                (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    &format!("attachment; filename=\"{filename}\""),
+                ),
+            ],
+            body,
+        )
+            .into_response());
+    }
+
+    Ok(Json(rows).into_response())
+}
+
+/// Quote-and-escape a field for RFC4180-ish CSV output. We wrap every
+/// field in quotes to avoid ambiguity with commas / newlines inside tags.
+fn csv_escape(s: &str) -> String {
+    let escaped = s.replace('"', "\"\"");
+    format!("\"{escaped}\"")
 }

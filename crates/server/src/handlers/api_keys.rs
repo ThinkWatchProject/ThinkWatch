@@ -199,9 +199,11 @@ pub async fn create_key(
         .expires_in_days
         .map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
 
+    let cost_center = validate_cost_center(req.cost_center.as_deref())?;
+
     let row = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, surfaces, allowed_models, expires_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
+        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, surfaces, allowed_models, expires_at, cost_center)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *"#,
     )
     .bind(&generated.prefix)
     .bind(&generated.hash)
@@ -211,6 +213,7 @@ pub async fn create_key(
     .bind(&surfaces)
     .bind(&req.allowed_models)
     .bind(expires_at)
+    .bind(cost_center.as_deref())
     .fetch_one(&state.db)
     .await?;
 
@@ -312,6 +315,9 @@ pub struct UpdateKeyRequest {
     pub expires_in_days: Option<i32>,
     pub rotation_period_days: Option<i32>,
     pub inactivity_timeout_days: Option<i32>,
+    /// Free-form cost-center / project tag. `Some("")` clears the tag;
+    /// `None` leaves it untouched.
+    pub cost_center: Option<String>,
 }
 
 /// PATCH /api/keys/{id} — update key settings.
@@ -364,20 +370,33 @@ pub async fn update_key(
         })
         .unwrap_or(key.expires_at.map(Some).unwrap_or(None));
 
+    // cost_center semantics:
+    //  * None              → leave unchanged
+    //  * Some("")          → clear (NULL)
+    //  * Some("anything")  → set after validation
+    let (cost_center_set, cost_center_value) = match req.cost_center.as_deref() {
+        None => (false, None),
+        Some("") => (true, None),
+        Some(s) => (true, validate_cost_center(Some(s))?),
+    };
+
     let updated = sqlx::query_as::<_, ApiKey>(
         r#"UPDATE api_keys SET
             allowed_models = COALESCE($1, allowed_models),
             surfaces = COALESCE($2, surfaces),
             expires_at = $3,
             rotation_period_days = COALESCE($4, rotation_period_days),
-            inactivity_timeout_days = COALESCE($5, inactivity_timeout_days)
-           WHERE id = $6 RETURNING *"#,
+            inactivity_timeout_days = COALESCE($5, inactivity_timeout_days),
+            cost_center = CASE WHEN $7 THEN $6 ELSE cost_center END
+           WHERE id = $8 RETURNING *"#,
     )
     .bind(&req.allowed_models)
     .bind(normalized_surfaces.as_ref())
     .bind(expires_at)
     .bind(req.rotation_period_days)
     .bind(req.inactivity_timeout_days)
+    .bind(cost_center_value.as_deref())
+    .bind(cost_center_set)
     .bind(id)
     .fetch_one(&state.db)
     .await?;
@@ -625,4 +644,87 @@ pub async fn list_expiring_keys(
     };
 
     Ok(Json(keys))
+}
+
+/// Validate a cost_center value: trim whitespace, reject if > 64 chars,
+/// convert empty string to None. Shared by create_key and update_key so
+/// both paths apply the same normalisation.
+fn validate_cost_center(input: Option<&str>) -> Result<Option<String>, AppError> {
+    let Some(raw) = input else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if trimmed.chars().count() > 64 {
+        return Err(AppError::BadRequest(
+            "cost_center must be 64 characters or fewer".into(),
+        ));
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+/// GET /api/keys/cost-centers — distinct non-null tags currently in use,
+/// sorted alphabetically. Used by the admin UI to autocomplete the
+/// cost-center field on the api-key create / edit forms.
+#[utoipa::path(
+    get,
+    path = "/api/keys/cost-centers",
+    tag = "API Keys",
+    responses(
+        (status = 200, description = "Distinct cost-center tags in use", body = Vec<String>),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_token" = []))
+)]
+pub async fn list_cost_centers(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<String>>, AppError> {
+    auth_user.require_permission("api_keys:read")?;
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT DISTINCT cost_center FROM api_keys \
+          WHERE cost_center IS NOT NULL AND deleted_at IS NULL \
+          ORDER BY cost_center ASC",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(rows.into_iter().map(|(s,)| s).collect()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_cost_center_accepts_valid_input() {
+        assert_eq!(validate_cost_center(None).unwrap(), None);
+        assert_eq!(validate_cost_center(Some("")).unwrap(), None);
+        assert_eq!(validate_cost_center(Some("   ")).unwrap(), None);
+        assert_eq!(
+            validate_cost_center(Some(" team-alpha "))
+                .unwrap()
+                .as_deref(),
+            Some("team-alpha"),
+        );
+    }
+
+    #[test]
+    fn validate_cost_center_rejects_too_long() {
+        let too_long = "x".repeat(65);
+        assert!(validate_cost_center(Some(&too_long)).is_err());
+        // Exactly 64 is fine.
+        let ok = "x".repeat(64);
+        assert!(validate_cost_center(Some(&ok)).is_ok());
+    }
+
+    #[test]
+    fn validate_cost_center_counts_chars_not_bytes() {
+        // 64 4-byte CJK chars should pass (unicode length, not byte length).
+        let cjk = "部".repeat(64);
+        assert!(validate_cost_center(Some(&cjk)).is_ok());
+        let cjk65 = "部".repeat(65);
+        assert!(validate_cost_center(Some(&cjk65)).is_err());
+    }
 }

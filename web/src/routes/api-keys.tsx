@@ -70,6 +70,7 @@ interface ApiKey {
   inactivity_timeout_days: number | null;
   disabled_reason: string | null;
   last_rotation_at: string | null;
+  cost_center: string | null;
 }
 
 interface PaginatedResponse<T> {
@@ -215,6 +216,8 @@ export function ApiKeysPage() {
   ]);
   const [expiresInDays, setExpiresInDays] = useState('');
   const [createTeamId, setCreateTeamId] = useState<string>('');
+  const [createCostCenter, setCreateCostCenter] = useState('');
+  const [costCenterOptions, setCostCenterOptions] = useState<string[]>([]);
   const { teams } = useTeams();
 
   // Edit dialog
@@ -225,6 +228,7 @@ export function ApiKeysPage() {
   const [editExpiresInDays, setEditExpiresInDays] = useState('');
   const [editRotationPeriod, setEditRotationPeriod] = useState('');
   const [editInactivityTimeout, setEditInactivityTimeout] = useState('');
+  const [editCostCenter, setEditCostCenter] = useState('');
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError] = useState('');
 
@@ -254,6 +258,11 @@ export function ApiKeysPage() {
 
   useEffect(() => {
     fetchKeys();
+    // Populate the cost-center autocomplete from existing tags. Failure
+    // is non-fatal — the field is free-form anyway.
+    api<string[]>('/api/keys/cost-centers')
+      .then(setCostCenterOptions)
+      .catch(() => setCostCenterOptions([]));
   }, []);
 
   // ---------------------------------------------------------------------------
@@ -279,6 +288,7 @@ export function ApiKeysPage() {
     setCreateSurfaces(['ai_gateway', 'mcp_gateway']);
     setExpiresInDays('');
     setCreateTeamId('');
+    setCreateCostCenter('');
     setFormError('');
     setCreatedKey(null);
     setCopied(false);
@@ -311,7 +321,13 @@ export function ApiKeysPage() {
         allowed_models: models.length > 0 ? models : undefined,
         expires_in_days: expiresInDays ? parseInt(expiresInDays, 10) : undefined,
         team_id: createTeamId && createTeamId !== '__none__' ? createTeamId : undefined,
+        cost_center: createCostCenter.trim() ? createCostCenter.trim() : undefined,
       });
+      // Refresh autocomplete pool — if the user entered a brand-new
+      // tag, offer it to future forms in the same session.
+      if (createCostCenter.trim() && !costCenterOptions.includes(createCostCenter.trim())) {
+        setCostCenterOptions((prev) => [...prev, createCostCenter.trim()].sort());
+      }
       setCreatedKey(res.api_key);
       await fetchKeys();
     } catch (err) {
@@ -375,6 +391,7 @@ export function ApiKeysPage() {
     setEditExpiresInDays('');
     setEditRotationPeriod(k.rotation_period_days?.toString() ?? '');
     setEditInactivityTimeout(k.inactivity_timeout_days?.toString() ?? '');
+    setEditCostCenter(k.cost_center ?? '');
     setEditError('');
     setEditDialogOpen(true);
   };
@@ -399,7 +416,15 @@ export function ApiKeysPage() {
         expires_in_days: editExpiresInDays ? parseInt(editExpiresInDays, 10) : undefined,
         rotation_period_days: editRotationPeriod ? parseInt(editRotationPeriod, 10) : null,
         inactivity_timeout_days: editInactivityTimeout ? parseInt(editInactivityTimeout, 10) : null,
+        // Always send the field so the server can distinguish "unset"
+        // (not sent) from "clear" (empty string). "Unset" isn't reachable
+        // from this form — once you're editing you're always explicitly
+        // choosing some value or blanking it.
+        cost_center: editCostCenter.trim(),
       });
+      if (editCostCenter.trim() && !costCenterOptions.includes(editCostCenter.trim())) {
+        setCostCenterOptions((prev) => [...prev, editCostCenter.trim()].sort());
+      }
       setEditDialogOpen(false);
       await fetchKeys();
     } catch (err) {
@@ -538,6 +563,23 @@ export function ApiKeysPage() {
                   <Label htmlFor="key-expires">{t('apiKeys.expiresInDays')}</Label>
                   <Input id="key-expires" type="number" value={expiresInDays} onChange={(e) => setExpiresInDays(e.target.value)} placeholder="90" />
                 </div>
+                <div className="space-y-2">
+                  <Label htmlFor="key-cost-center">{t('apiKeys.costCenter')}</Label>
+                  <Input
+                    id="key-cost-center"
+                    list="cost-center-options"
+                    value={createCostCenter}
+                    onChange={(e) => setCreateCostCenter(e.target.value)}
+                    placeholder={t('apiKeys.costCenterPlaceholder')}
+                    maxLength={64}
+                  />
+                  <datalist id="cost-center-options">
+                    {costCenterOptions.map((opt) => (
+                      <option key={opt} value={opt} />
+                    ))}
+                  </datalist>
+                  <p className="text-xs text-muted-foreground">{t('apiKeys.costCenterHint')}</p>
+                </div>
                 <DialogFooter>
                   <Button type="submit" disabled={submitting}>
                     {submitting ? t('apiKeys.creating') : t('apiKeys.createKeyBtn')}
@@ -604,6 +646,18 @@ export function ApiKeysPage() {
             <div className="space-y-2">
               <Label>{t('apiKeys.inactivityTimeout')}</Label>
               <Input type="number" value={editInactivityTimeout} onChange={(e) => setEditInactivityTimeout(e.target.value)} placeholder="0" min={0} />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="edit-cost-center">{t('apiKeys.costCenter')}</Label>
+              <Input
+                id="edit-cost-center"
+                list="cost-center-options"
+                value={editCostCenter}
+                onChange={(e) => setEditCostCenter(e.target.value)}
+                placeholder={t('apiKeys.costCenterPlaceholder')}
+                maxLength={64}
+              />
+              <p className="text-xs text-muted-foreground">{t('apiKeys.costCenterHint')}</p>
             </div>
             <DialogFooter>
               <Button type="submit" disabled={editSubmitting}>

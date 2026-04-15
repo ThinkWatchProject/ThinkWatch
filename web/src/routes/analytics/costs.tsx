@@ -9,9 +9,11 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { DollarSign, TrendingUp, AlertCircle } from 'lucide-react';
+import { DollarSign, TrendingUp, AlertCircle, Download } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
+import { toast } from 'sonner';
 import { useTeams } from '@/hooks/use-teams';
 import { TeamFilter } from '@/components/filters/team-filter';
 import { SimpleBarChart } from '@/components/ui/simple-chart';
@@ -19,12 +21,15 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
 
 interface CostRow {
-  model_id: string;
+  group_key: string;
   request_count: number;
   input_tokens: number;
   output_tokens: number;
   total_cost: string;
 }
+
+type CostGroupBy = 'model' | 'user' | 'team' | 'cost_center';
+const GROUP_BY_OPTIONS: readonly CostGroupBy[] = ['model', 'user', 'team', 'cost_center'] as const;
 
 interface CostStats {
   total_cost_mtd: number;
@@ -41,13 +46,26 @@ export function CostsPage() {
   // Team filter
   const { teams } = useTeams();
   const [selectedTeam, setSelectedTeam] = useState<string>('');
+  const [groupBy, setGroupBy] = useState<CostGroupBy>('model');
+  const [exporting, setExporting] = useState(false);
 
-  const fetchData = useCallback((teamId: string) => {
+  const queryString = useCallback(
+    (extra?: Record<string, string>): string => {
+      const params = new URLSearchParams();
+      if (selectedTeam) params.set('team_id', selectedTeam);
+      params.set('group_by', groupBy);
+      if (extra) for (const [k, v] of Object.entries(extra)) params.set(k, v);
+      const qs = params.toString();
+      return qs ? `?${qs}` : '';
+    },
+    [selectedTeam, groupBy],
+  );
+
+  const fetchData = useCallback(() => {
     setLoading(true);
-    const teamSuffix = teamId ? `?team_id=${teamId}` : '';
     Promise.all([
-      api<CostRow[]>(`/api/analytics/costs${teamSuffix}`),
-      api<CostStats>(`/api/analytics/costs/stats${teamSuffix}`),
+      api<CostRow[]>(`/api/analytics/costs${queryString()}`),
+      api<CostStats>(`/api/analytics/costs/stats${selectedTeam ? `?team_id=${selectedTeam}` : ''}`),
     ])
       .then(([costData, statsData]) => {
         setRows(costData);
@@ -55,18 +73,44 @@ export function CostsPage() {
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load cost data'))
       .finally(() => setLoading(false));
-  }, []);
+  }, [queryString, selectedTeam]);
 
   useEffect(() => {
-    fetchData(selectedTeam);
-  }, [selectedTeam, fetchData]);
+    fetchData();
+  }, [fetchData]);
 
-  // Chart: cost by model
+  const handleExport = useCallback(async () => {
+    setExporting(true);
+    try {
+      // Use fetch directly — the /costs endpoint returns text/csv with
+      // `format=csv`, which the typed api() helper would try to JSON-parse.
+      const res = await fetch(`/api/analytics/costs${queryString({ format: 'csv', limit: '1000' })}`, {
+        credentials: 'include',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `costs-${groupBy}-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      toast.error(t('analyticsCosts.exportFailed', { msg: err instanceof Error ? err.message : 'unknown' }));
+    } finally {
+      setExporting(false);
+    }
+  }, [queryString, groupBy, t]);
+
+  // Chart: top N rows by cost for the selected grouping.
   const chartData = useMemo(() => {
     return rows
+      .slice()
       .sort((a, b) => parseFloat(b.total_cost) - parseFloat(a.total_cost))
       .map((row) => ({
-        label: row.model_id.length > 16 ? row.model_id.slice(0, 14) + '..' : row.model_id,
+        label: row.group_key.length > 18 ? row.group_key.slice(0, 16) + '..' : row.group_key,
         value: parseFloat(row.total_cost),
       }));
   }, [rows]);
@@ -81,7 +125,35 @@ export function CostsPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('analyticsCosts.title')}</h1>
           <p className="text-muted-foreground">{t('analyticsCosts.subtitle')}</p>
         </div>
-        <TeamFilter teams={teams} value={selectedTeam} onChange={setSelectedTeam} />
+        <div className="flex items-center gap-2">
+          <div
+            role="radiogroup"
+            aria-label={t('analyticsCosts.groupBy')}
+            className="inline-flex items-center gap-0.5 rounded-md border bg-muted/30 p-0.5 text-xs"
+          >
+            {GROUP_BY_OPTIONS.map((g) => (
+              <button
+                key={g}
+                type="button"
+                role="radio"
+                aria-checked={groupBy === g}
+                onClick={() => setGroupBy(g)}
+                className={`rounded px-2 py-1 font-medium transition-colors ${
+                  groupBy === g
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {t(`analyticsCosts.group.${g}`)}
+              </button>
+            ))}
+          </div>
+          <Button variant="outline" size="sm" disabled={exporting || rows.length === 0} onClick={handleExport}>
+            <Download className="mr-1.5 h-3.5 w-3.5" />
+            {t('analyticsCosts.export')}
+          </Button>
+          <TeamFilter teams={teams} value={selectedTeam} onChange={setSelectedTeam} />
+        </div>
       </div>
 
       <div className="grid gap-4 md:grid-cols-2">
@@ -160,7 +232,7 @@ export function CostsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>{t('analyticsCosts.model')}</TableHead>
+                  <TableHead>{t(`analyticsCosts.group.${groupBy}`)}</TableHead>
                   <TableHead className="text-right">{t('analyticsCosts.requests')}</TableHead>
                   <TableHead className="text-right">{t('analyticsCosts.inputTokens')}</TableHead>
                   <TableHead className="text-right">{t('analyticsCosts.outputTokens')}</TableHead>
@@ -173,8 +245,8 @@ export function CostsPage() {
                   const cost = parseFloat(row.total_cost);
                   const pct = totalCost > 0 ? (cost / totalCost) * 100 : 0;
                   return (
-                    <TableRow key={row.model_id}>
-                      <TableCell className="font-mono text-xs">{row.model_id}</TableCell>
+                    <TableRow key={row.group_key}>
+                      <TableCell className="font-mono text-xs">{row.group_key}</TableCell>
                       <TableCell className="text-right">{row.request_count.toLocaleString()}</TableCell>
                       <TableCell className="text-right">{row.input_tokens.toLocaleString()}</TableCell>
                       <TableCell className="text-right">{row.output_tokens.toLocaleString()}</TableCell>

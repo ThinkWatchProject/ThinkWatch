@@ -432,6 +432,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             get(handlers::api_keys::list_expiring_keys),
         )
         .route(
+            "/api/keys/cost-centers",
+            get(handlers::api_keys::list_cost_centers),
+        )
+        .route(
             "/api/keys/{id}",
             get(handlers::api_keys::get_key)
                 .patch(handlers::api_keys::update_key)

@@ -72,6 +72,7 @@ use crate::handlers::{
         crate::handlers::api_keys::revoke_key,
         crate::handlers::api_keys::rotate_key,
         crate::handlers::api_keys::list_expiring_keys,
+        crate::handlers::api_keys::list_cost_centers,
         // Setup
         crate::handlers::setup::setup_status,
         crate::handlers::setup::setup_initialize,

@@ -287,6 +287,9 @@
     "expiresInHint": "New expiry from now (days). Leave empty to keep current.",
     "rotationPeriod": "Rotation Period (days)",
     "inactivityTimeout": "Inactivity Timeout (days)",
+    "costCenter": "Cost center",
+    "costCenterPlaceholder": "e.g. team-alpha, project-x",
+    "costCenterHint": "Optional tag for cost attribution on the Costs page. Free-form, up to 64 chars.",
     "expiringSoon": "Expiring Soon",
     "expired": "Expired",
     "rotated": "Rotated",
@@ -499,7 +502,16 @@
     "inputTokens": "Input Tokens",
     "outputTokens": "Output Tokens",
     "totalCost": "Total Cost",
-    "noCosts": "No cost data available yet."
+    "noCosts": "No cost data available yet.",
+    "groupBy": "Group by",
+    "group": {
+      "model": "Model",
+      "user": "User",
+      "team": "Team",
+      "cost_center": "Cost center"
+    },
+    "export": "Export CSV",
+    "exportFailed": "Export failed: {{msg}}"
   },
   "audit": {
     "title": "Audit Logs",
