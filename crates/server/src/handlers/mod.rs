@@ -20,7 +20,6 @@ pub mod models;
 pub mod platform_logs;
 pub mod providers;
 pub mod roles;
-pub mod roles_yaml;
 pub mod setup;
 pub mod sso;
 pub mod teams;

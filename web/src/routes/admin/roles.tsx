@@ -80,8 +80,6 @@ import {
   Lock,
   Download,
   Upload,
-  FileCode2,
-  FileUp,
 } from 'lucide-react';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -193,21 +191,6 @@ export function RolesPage() {
     skipped: number;
     failed: { name: string; reason: string }[];
   } | null>(null);
-
-  // YAML Policy-as-Code import flow: paste a single-role document, run
-  // dry_run first to see the diff, then Apply. Separate from the JSON
-  // bulk-export above because the use cases are different — this one
-  // is for GitOps review / copy-paste from a PR comment.
-  const [yamlImportOpen, setYamlImportOpen] = useState(false);
-  const [yamlImportText, setYamlImportText] = useState('');
-  const [yamlImporting, setYamlImporting] = useState(false);
-  const [yamlDryRun, setYamlDryRun] = useState<{
-    role_name: string;
-    outcome: string;
-    diff_fields: string[];
-    role_id: string | null;
-  } | null>(null);
-  const [yamlError, setYamlError] = useState('');
 
   // ------------------------------------------------------------------
   // Data fetch
@@ -555,100 +538,6 @@ export function RolesPage() {
     roles: ExportedRole[];
   };
 
-  /// Single-role YAML export — hits the server endpoint so the file
-  /// matches what the import path will accept (apiVersion / kind
-  /// envelope). Prefer this over the JSON bulk export when the target
-  /// is a GitOps repo expecting a Kubernetes-style manifest.
-  const exportRoleYaml = async (role: RoleResponse) => {
-    try {
-      const res = await fetch(`/api/admin/roles/${role.id}/export`, {
-        credentials: 'include',
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `role-${role.name.replace(/[^a-zA-Z0-9._-]/g, '_')}.yaml`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Export failed');
-    }
-  };
-
-  /// Run the YAML import in dry-run mode so the operator sees the diff
-  /// before committing. Server responds with outcome=dry_run_{create|
-  /// update|unchanged} and, for updates, the list of fields that would
-  /// change.
-  const yamlDryRunImport = async () => {
-    setYamlImporting(true);
-    setYamlError('');
-    setYamlDryRun(null);
-    try {
-      const res = await fetch('/api/admin/roles/import?dry_run=true', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/yaml' },
-        body: yamlImportText,
-      });
-      const body = (await res.json()) as {
-        role_name?: string;
-        outcome?: string;
-        diff_fields?: string[];
-        role_id?: string | null;
-        error?: { message?: string };
-      };
-      if (!res.ok) {
-        throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
-      }
-      setYamlDryRun({
-        role_name: body.role_name ?? '',
-        outcome: body.outcome ?? '',
-        diff_fields: body.diff_fields ?? [],
-        role_id: body.role_id ?? null,
-      });
-    } catch (err) {
-      setYamlError(err instanceof Error ? err.message : 'Dry-run failed');
-    } finally {
-      setYamlImporting(false);
-    }
-  };
-
-  /// Actually apply the import. Only enabled once the dry-run succeeded,
-  /// to enforce "look before you leap" on policy changes.
-  const yamlApplyImport = async () => {
-    setYamlImporting(true);
-    setYamlError('');
-    try {
-      const res = await fetch('/api/admin/roles/import', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/yaml' },
-        body: yamlImportText,
-      });
-      const body = (await res.json()) as {
-        role_name?: string;
-        outcome?: string;
-        error?: { message?: string };
-      };
-      if (!res.ok) {
-        throw new Error(body?.error?.message ?? `HTTP ${res.status}`);
-      }
-      toast.success(t('roles.yamlApplied', { name: body.role_name, outcome: body.outcome }));
-      setYamlImportOpen(false);
-      setYamlImportText('');
-      setYamlDryRun(null);
-      await fetchData();
-    } catch (err) {
-      setYamlError(err instanceof Error ? err.message : 'Import failed');
-    } finally {
-      setYamlImporting(false);
-    }
-  };
-
   const exportRoles = (allRoles: RoleResponse[]) => {
     const envelope: ExportEnvelope = {
       version: 1,
@@ -910,18 +799,6 @@ export function RolesPage() {
             <Upload className="mr-1 h-3.5 w-3.5" />
             {importing ? t('common.loading') : t('roles.importRoles')}
           </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => {
-              setYamlImportOpen(true);
-              setYamlDryRun(null);
-              setYamlError('');
-            }}
-          >
-            <FileUp className="mr-1 h-3.5 w-3.5" />
-            {t('roles.importYaml')}
-          </Button>
         <Dialog
           open={createOpen}
           onOpenChange={(o) => {
@@ -1162,16 +1039,6 @@ export function RolesPage() {
                           <Pencil className="h-3.5 w-3.5" />
                         </Button>
                       )}
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7"
-                        onClick={() => exportRoleYaml(role)}
-                        aria-label={t('roles.exportYaml')}
-                        title={t('roles.exportYaml')}
-                      >
-                        <FileCode2 className="h-3.5 w-3.5" />
-                      </Button>
                       {!role.is_system && (
                         <Button
                           variant="ghost"
@@ -1632,80 +1499,6 @@ export function RolesPage() {
         </DialogContent>
       </Dialog>
 
-      {/* YAML Policy-as-Code import dialog — dry-run → apply flow. */}
-      <Dialog
-        open={yamlImportOpen}
-        onOpenChange={(o) => {
-          setYamlImportOpen(o);
-          if (!o) {
-            setYamlImportText('');
-            setYamlDryRun(null);
-            setYamlError('');
-          }
-        }}
-      >
-        <DialogContent className="max-w-2xl">
-          <DialogHeader>
-            <DialogTitle>{t('roles.importYaml')}</DialogTitle>
-            <DialogDescription>{t('roles.importYamlHint')}</DialogDescription>
-          </DialogHeader>
-          <div className="space-y-3">
-            <textarea
-              className="h-64 w-full rounded-md border bg-background p-3 font-mono text-xs"
-              placeholder={'apiVersion: thinkwatch.dev/v1\nkind: Role\nmetadata:\n  name: ...\nspec:\n  permissions: [...]'}
-              value={yamlImportText}
-              onChange={(e) => {
-                setYamlImportText(e.target.value);
-                // Any edit invalidates the prior dry-run so Apply
-                // can't run against stale diff.
-                setYamlDryRun(null);
-              }}
-              spellCheck={false}
-            />
-            {yamlError && (
-              <div className="rounded-md border border-destructive/30 bg-destructive/10 p-2 text-xs text-destructive">
-                {yamlError}
-              </div>
-            )}
-            {yamlDryRun && (
-              <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs">
-                <div className="font-medium text-emerald-700 dark:text-emerald-400">
-                  {t(`roles.yamlOutcome.${yamlDryRun.outcome}`, {
-                    defaultValue: yamlDryRun.outcome,
-                    name: yamlDryRun.role_name,
-                  })}
-                </div>
-                {yamlDryRun.diff_fields.length > 0 && (
-                  <div className="mt-2">
-                    <div className="text-muted-foreground">{t('roles.yamlDiffFields')}:</div>
-                    <ul className="ml-4 list-disc font-mono">
-                      {yamlDryRun.diff_fields.map((f) => (
-                        <li key={f}>{f}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={yamlDryRunImport}
-              disabled={yamlImporting || !yamlImportText.trim()}
-            >
-              {yamlImporting ? t('common.loading') : t('roles.yamlDryRun')}
-            </Button>
-            <Button
-              onClick={yamlApplyImport}
-              disabled={yamlImporting || !yamlDryRun || yamlDryRun.outcome === 'dry_run_unchanged'}
-              title={!yamlDryRun ? t('roles.yamlDryRunFirst') : undefined}
-            >
-              {yamlImporting ? t('common.loading') : t('roles.yamlApply')}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

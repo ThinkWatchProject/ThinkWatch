@@ -78,8 +78,6 @@ use crate::handlers::{
         crate::handlers::webhook_outbox::list_outbox,
         crate::handlers::webhook_outbox::delete_outbox_row,
         crate::handlers::webhook_outbox::retry_outbox_row,
-        crate::handlers::roles_yaml::export_role,
-        crate::handlers::roles_yaml::import_role,
         // Setup
         crate::handlers::setup::setup_status,
         crate::handlers::setup::setup_initialize,
