@@ -358,6 +358,33 @@ mod tests {
         let entry = AuditEntry::mcp("tool.invoke");
         assert_eq!(entry.log_type, LogType::Mcp);
     }
+
+    #[test]
+    fn trace_id_builder_sets_field() {
+        let entry = AuditEntry::new("some.action").trace_id("abc-123");
+        assert_eq!(entry.trace_id.as_deref(), Some("abc-123"));
+    }
+
+    #[test]
+    fn hmac_sha256_hex_matches_rfc4231_vector() {
+        // RFC 4231 Test Case 1: key = 20 bytes of 0x0b, data = "Hi There".
+        // Expected HMAC-SHA256: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+        let key = [0x0b; 20];
+        let got = hmac_sha256_hex(&key, b"Hi There");
+        assert_eq!(
+            got,
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+    }
+
+    #[test]
+    fn hmac_sha256_hex_is_deterministic_and_secret_dependent() {
+        let a = hmac_sha256_hex(b"secret-a", b"payload");
+        let b = hmac_sha256_hex(b"secret-a", b"payload");
+        let c = hmac_sha256_hex(b"secret-b", b"payload");
+        assert_eq!(a, b, "same secret + payload must be stable");
+        assert_ne!(a, c, "different secret must change the digest");
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -786,42 +813,93 @@ async fn send_webhook(
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' in webhook config")?;
 
-    let mut req = client
-        .post(url)
-        .header("Content-Type", "application/json")
-        .json(entry);
+    // Serialize the body once so the HMAC signs exactly what goes over
+    // the wire — avoids any field-ordering or whitespace divergence
+    // between the signature input and the posted body.
+    let body = serde_json::to_vec(entry).map_err(|e| format!("JSON serialise: {e}"))?;
 
-    // Custom headers (new format: JSON object stored as string)
-    if let Some(headers_val) = config.config.get("custom_headers") {
-        let headers_str = headers_val.as_str().unwrap_or("");
-        if let Ok(headers) =
-            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(headers_str)
-        {
-            for (k, v) in headers {
-                if let Some(v_str) = v.as_str() {
-                    req = req.header(k.as_str(), v_str);
+    // Optional HMAC-SHA256 signature. When `signing_secret` is set on
+    // the forwarder row, every delivery gets an `x-signature` header
+    // with `sha256=<hex>` over the body bytes. Receivers can verify by
+    // recomputing with the same secret; a mismatch means the payload
+    // was tampered with in transit (or arrived via a different sender).
+    let signing_secret = config
+        .config
+        .get("signing_secret")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let signature = signing_secret.map(|secret| hmac_sha256_hex(secret.as_bytes(), &body));
+
+    // Retry policy: 3 attempts, exponential backoff (200ms, 400ms,
+    // 800ms). A 2xx or explicit 4xx terminates — 4xx is a config
+    // problem at the receiver, retrying would just amplify noise.
+    // Network errors and 5xx retry up to the attempt cap.
+    let mut last_err = String::new();
+    for attempt in 0..3u32 {
+        if attempt > 0 {
+            let delay_ms = 200u64 * (1u64 << (attempt - 1)); // 200, 400, 800
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+
+        let mut req = client
+            .post(url)
+            .header("Content-Type", "application/json")
+            .body(body.clone());
+
+        // Custom headers (new format: JSON object stored as string)
+        if let Some(headers_val) = config.config.get("custom_headers") {
+            let headers_str = headers_val.as_str().unwrap_or("");
+            if let Ok(headers) =
+                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(headers_str)
+            {
+                for (k, v) in headers {
+                    if let Some(v_str) = v.as_str() {
+                        req = req.header(k.as_str(), v_str);
+                    }
                 }
             }
         }
-    }
 
-    // Legacy: single auth_header field
-    if let Some(token) = config.config.get("auth_header").and_then(|v| v.as_str()) {
-        req = req.header("Authorization", token);
-    }
+        // Legacy: single auth_header field
+        if let Some(token) = config.config.get("auth_header").and_then(|v| v.as_str()) {
+            req = req.header("Authorization", token);
+        }
 
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("Webhook request failed: {e}"))?;
+        if let Some(ref sig) = signature {
+            req = req.header("x-signature", format!("sha256={sig}"));
+        }
 
-    if resp.status().is_success() {
-        Ok(())
-    } else {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        Err(format!("Webhook returned {status}: {body}"))
+        match req.send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(()),
+            Ok(resp) => {
+                let status = resp.status();
+                let rtext = resp.text().await.unwrap_or_default();
+                last_err = format!("Webhook returned {status}: {rtext}");
+                if status.is_client_error() {
+                    // 4xx — no point retrying, the receiver rejected
+                    // the payload shape itself.
+                    return Err(last_err);
+                }
+            }
+            Err(e) => {
+                last_err = format!("Webhook request failed: {e}");
+            }
+        }
     }
+    Err(last_err)
+}
+
+/// Hex-encoded HMAC-SHA256. Kept local to this module so the forwarder
+/// doesn't pull in a hmac-crate dependency on the shared `common` crate.
+/// Implemented via the existing `hmac` workspace dep, re-exported from
+/// the auth crate is undesirable (common should not depend on auth).
+fn hmac_sha256_hex(secret: &[u8], msg: &[u8]) -> String {
+    use hmac::{Hmac, Mac, digest::KeyInit};
+    type HmacSha256 = Hmac<sha2::Sha256>;
+    let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
+    mac.update(msg);
+    let tag = mac.finalize().into_bytes();
+    tag.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 // ---------------------------------------------------------------------------

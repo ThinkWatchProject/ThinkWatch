@@ -1008,7 +1008,10 @@
     "editForwarder": "Edit Forwarder",
     "editDescription": "Update forwarder name and configuration.",
     "logTypes": "Log Types",
-    "transportProtocol": "Transport Protocol"
+    "transportProtocol": "Transport Protocol",
+    "signingSecret": "HMAC Signing Secret",
+    "signingSecretPlaceholder": "Leave blank to disable signing",
+    "signingSecretHint": "When set, each webhook payload is signed with HMAC-SHA256 and delivered with an 'x-signature: sha256=<hex>' header. Deliveries also retry up to 3 times with exponential backoff on network errors and 5xx responses."
   },
   "guide": {
     "title": "Configuration Guide",

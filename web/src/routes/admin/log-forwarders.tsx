@@ -103,6 +103,7 @@ export function LogForwardersPage() {
   const [formTopic, setFormTopic] = useState('');
   const [formWebhookUrl, setFormWebhookUrl] = useState('');
   const [formHeaders, setFormHeaders] = useState<{ key: string; value: string }[]>([]);
+  const [formSigningSecret, setFormSigningSecret] = useState('');
   const [formLogTypes, setFormLogTypes] = useState<Set<string>>(new Set(['access', 'app', 'audit', 'gateway', 'mcp', 'platform']));
   const [creating, setCreating] = useState(false);
 
@@ -116,6 +117,7 @@ export function LogForwardersPage() {
   const [editTopic, setEditTopic] = useState('');
   const [editWebhookUrl, setEditWebhookUrl] = useState('');
   const [editHeaders, setEditHeaders] = useState<{ key: string; value: string }[]>([]);
+  const [editSigningSecret, setEditSigningSecret] = useState('');
   const [editLogTypes, setEditLogTypes] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
 
@@ -149,6 +151,7 @@ export function LogForwardersPage() {
     setFormTopic('');
     setFormWebhookUrl('');
     setFormHeaders([]);
+    setFormSigningSecret('');
     setFormLogTypes(new Set(['access', 'app', 'audit', 'gateway', 'mcp', 'platform']));
   };
 
@@ -165,6 +168,7 @@ export function LogForwardersPage() {
           if (h.key.trim() && h.value.trim()) hdrs[h.key.trim()] = h.value.trim();
         }
         if (Object.keys(hdrs).length > 0) cfg.custom_headers = JSON.stringify(hdrs);
+        if (formSigningSecret.trim()) cfg.signing_secret = formSigningSecret.trim();
         return cfg;
       }
       default:
@@ -255,6 +259,10 @@ export function LogForwardersPage() {
     } else {
       setEditHeaders([]);
     }
+    // Signing secret is returned by the API as-is (same privilege
+    // bar as config read elsewhere). Showing it masked in a password
+    // field lets the operator replace without losing the existing one.
+    setEditSigningSecret(f.config.signing_secret || '');
     setEditLogTypes(new Set(f.log_types || ['audit']));
     setEditDialogOpen(true);
   };
@@ -274,6 +282,7 @@ export function LogForwardersPage() {
           if (h.key.trim() && h.value.trim()) hdrs[h.key.trim()] = h.value.trim();
         }
         if (Object.keys(hdrs).length > 0) cfg.custom_headers = JSON.stringify(hdrs);
+        if (editSigningSecret.trim()) cfg.signing_secret = editSigningSecret.trim();
         return cfg;
       }
       default:
@@ -393,6 +402,19 @@ export function LogForwardersPage() {
                     <Button type="button" variant="outline" size="sm" onClick={() => setFormHeaders([...formHeaders, { key: '', value: '' }])}>
                       <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
                     </Button>
+                  </div>
+                  <div>
+                    <Label>{t('logForwarders.signingSecret')}</Label>
+                    <Input
+                      type="password"
+                      value={formSigningSecret}
+                      onChange={(e) => setFormSigningSecret(e.target.value)}
+                      placeholder={t('logForwarders.signingSecretPlaceholder')}
+                      autoComplete="new-password"
+                    />
+                    <p className="text-xs text-muted-foreground mt-1">
+                      {t('logForwarders.signingSecretHint')}
+                    </p>
                   </div>
                 </>
               )}
@@ -638,6 +660,19 @@ export function LogForwardersPage() {
                   <Button type="button" variant="outline" size="sm" onClick={() => setEditHeaders([...editHeaders, { key: '', value: '' }])}>
                     <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
                   </Button>
+                </div>
+                <div>
+                  <Label>{t('logForwarders.signingSecret')}</Label>
+                  <Input
+                    type="password"
+                    value={editSigningSecret}
+                    onChange={(e) => setEditSigningSecret(e.target.value)}
+                    placeholder={t('logForwarders.signingSecretPlaceholder')}
+                    autoComplete="new-password"
+                  />
+                  <p className="text-xs text-muted-foreground mt-1">
+                    {t('logForwarders.signingSecretHint')}
+                  </p>
                 </div>
               </>
             )}

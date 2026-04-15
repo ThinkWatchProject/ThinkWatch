@@ -1008,7 +1008,10 @@
     "editForwarder": "编辑转发器",
     "editDescription": "更新转发器名称和配置。",
     "logTypes": "日志类型",
-    "transportProtocol": "传输协议"
+    "transportProtocol": "传输协议",
+    "signingSecret": "HMAC 签名密钥",
+    "signingSecretPlaceholder": "留空关闭签名",
+    "signingSecretHint": "设置后,每条 webhook 载荷会用 HMAC-SHA256 签名,随 'x-signature: sha256=<hex>' 头一起投递。网络错误或 5xx 响应时指数退避重试,最多 3 次。"
   },
   "guide": {
     "title": "配置指南",
