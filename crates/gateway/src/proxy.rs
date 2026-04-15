@@ -14,12 +14,12 @@ use crate::content_filter::{Action, ContentFilter};
 use crate::cost_tracker::CostTracker;
 use crate::metadata::RequestMetadata;
 use crate::model_mapping::ModelMapper;
-use crate::pii_redactor::PiiRedactor;
+use crate::pii_redactor::{PiiRedactor, PiiStreamRestorer};
 use crate::providers::traits::{ChatCompletionRequest, GatewayError};
 use crate::quota::QuotaManager;
 use crate::rate_limiter::RateLimiter;
 use crate::router::{ModelRouter, RouteEntry};
-use crate::streaming::stream_to_sse;
+use crate::streaming::{stream_to_sse, stream_to_sse_with_restorer};
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::{
     self, BudgetSubject, RateLimitSubject, RateMetric, sliding, weight,
@@ -684,7 +684,8 @@ pub async fn proxy_chat_completion(
                 .await;
             })
         };
-        Ok(stream_to_sse(stream, on_done).into_response())
+        let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
+        Ok(stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response())
     } else {
         // Non-streaming: full failover with retry across priority groups
         let (_entry, mut response) = select_route_with_failover(
@@ -934,7 +935,8 @@ pub async fn proxy_anthropic_messages(
                 .await;
             })
         };
-        Ok(stream_to_sse(stream, on_done).into_response())
+        let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
+        Ok(stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response())
     } else {
         let (_entry, mut response) = select_route_with_failover(
             routes,

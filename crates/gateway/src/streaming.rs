@@ -1,3 +1,4 @@
+use crate::pii_redactor::PiiStreamRestorer;
 use crate::providers::traits::{ChatCompletionChunk, GatewayError, Usage};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use futures::Stream;
@@ -30,6 +31,26 @@ use std::sync::{Arc, Mutex};
 pub fn stream_to_sse<F>(
     stream: Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>,
     on_done: F,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
+where
+    F: FnOnce(Option<Usage>) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+        + Send
+        + 'static,
+{
+    stream_to_sse_with_restorer(stream, on_done, None)
+}
+
+/// Same as `stream_to_sse`, but runs each chunk's `delta.content` through
+/// a `PiiStreamRestorer` first. The restorer holds back any trailing
+/// content that might still be growing into a placeholder; on completion,
+/// a final synthetic chunk flushes whatever is left in the buffer.
+///
+/// When `restorer` is `None` this is an exact no-op delegation — no
+/// extra allocations, no latency penalty for the feature-off path.
+pub fn stream_to_sse_with_restorer<F>(
+    stream: Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>,
+    on_done: F,
+    restorer: Option<PiiStreamRestorer>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
 where
     F: FnOnce(Option<Usage>) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>>
@@ -71,6 +92,13 @@ where
         on_done(usage).await;
     });
 
+    // Strip out the no-op case so the hot loop can skip the restorer
+    // branch without re-checking every chunk.
+    let mut restorer = restorer.filter(|r| !r.is_noop());
+    // The very last chunk model+id+object we saw — needed if we have
+    // to synthesise a final flush chunk for the restorer tail.
+    let last_chunk_template: Arc<Mutex<Option<ChatCompletionChunk>>> = Arc::new(Mutex::new(None));
+
     let body = async_stream::stream! {
         let mut source = stream;
         let mut done_tx = Some(done_tx);
@@ -80,7 +108,7 @@ where
         use futures::stream::StreamExt;
         while let Some(result) = source.next().await {
             match result {
-                Ok(chunk) => {
+                Ok(mut chunk) => {
                     // Capture usage off any chunk that carries it.
                     // OpenAI streaming with `stream_options.include_usage = true`
                     // emits one chunk near the end whose `usage` is set;
@@ -92,6 +120,31 @@ where
                     {
                         *g = chunk.usage.clone();
                     }
+
+                    // PII restoration: feed each choice.delta.content through
+                    // the restorer. If the restorer holds the tail back, the
+                    // emitted content may be shorter than received; that's
+                    // the whole point — the next chunk completes the
+                    // placeholder.
+                    if let Some(r) = restorer.as_mut() {
+                        for choice in chunk.choices.iter_mut() {
+                            if let Some(s) = choice.delta
+                                .get("content")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                            {
+                                let restored = r.process(&s);
+                                choice.delta["content"] =
+                                    serde_json::Value::String(restored);
+                            }
+                        }
+                        // Remember the latest chunk shape so we can
+                        // mint a compatible flush chunk at the end.
+                        if let Ok(mut g) = last_chunk_template.lock() {
+                            *g = Some(chunk.clone());
+                        }
+                    }
+
                     let json = serde_json::to_string(&chunk).unwrap_or_default();
                     yield Ok::<Event, Infallible>(Event::default().data(json));
                 }
@@ -107,6 +160,29 @@ where
                         Event::default().data(error_json.to_string()),
                     );
                 }
+            }
+        }
+
+        // Restorer flush — release any tail that got held back
+        // waiting for a `}}` that never came. We reuse the last chunk
+        // as a template so routing / model fields stay consistent.
+        if let Some(r) = restorer.as_mut() {
+            let tail = r.flush();
+            if !tail.is_empty()
+                && let Some(mut flush_chunk) = last_chunk_template
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.clone())
+            {
+                // Clear any upstream content + finish_reason + usage
+                // so this synthetic chunk only carries the flushed tail.
+                flush_chunk.usage = None;
+                for choice in flush_chunk.choices.iter_mut() {
+                    choice.delta = serde_json::json!({"content": tail});
+                    choice.finish_reason = None;
+                }
+                let json = serde_json::to_string(&flush_chunk).unwrap_or_default();
+                yield Ok::<Event, Infallible>(Event::default().data(json));
             }
         }
 

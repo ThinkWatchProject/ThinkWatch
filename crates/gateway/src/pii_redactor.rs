@@ -219,6 +219,128 @@ impl PiiRedactor {
     }
 }
 
+/// Stateful restorer for streaming responses. Placeholders have the
+/// shape `{{TYPE_SALT_N}}` which a token stream may fragment across
+/// arbitrary chunks — `{{` in one chunk and `EMAIL_abc_1}}` in the next.
+///
+/// The restorer buffers the tail of unflushed content whenever it sees
+/// an unclosed `{{` (or a lone trailing `{` that might be the start of
+/// one) and releases it as soon as the closing `}}` arrives. All
+/// complete placeholders are replaced with their original values before
+/// emission; anything that *looks* like a placeholder but doesn't match
+/// any known key passes through verbatim.
+///
+/// Emit ordering is preserved: the concatenation of `process()` outputs
+/// plus the final `flush()` equals what `restore_response` would return
+/// for the same content seen as a single string.
+pub struct PiiStreamRestorer {
+    /// Placeholder → original lookup. Cloned out of a RedactionContext
+    /// because we need ownership once and it's cheap (typically < 10 entries).
+    replacements: HashMap<String, String>,
+    /// Unflushed tail that might still grow into a complete placeholder.
+    buffer: String,
+}
+
+impl PiiStreamRestorer {
+    pub fn new(ctx: &RedactionContext) -> Self {
+        Self {
+            replacements: ctx.replacements.clone(),
+            buffer: String::new(),
+        }
+    }
+
+    /// Returns true when the restorer has no work to do — callers can
+    /// short-circuit and pass the chunk through untouched.
+    pub fn is_noop(&self) -> bool {
+        self.replacements.is_empty()
+    }
+
+    /// Feed the next piece of decoded content. Returns whatever is safe
+    /// to emit now (placeholders already restored). The unreleased tail
+    /// stays in the buffer for the next call.
+    pub fn process(&mut self, next: &str) -> String {
+        if self.is_noop() {
+            // Nothing to restore; never buffer — avoid introducing
+            // latency when the feature isn't even active.
+            return next.to_string();
+        }
+        self.buffer.push_str(next);
+        let cut = Self::safe_emit_boundary(&self.buffer);
+        if cut == 0 {
+            return String::new();
+        }
+        // Emit [0..cut) with replacements; keep [cut..) in the buffer.
+        let emit_slice = self.buffer[..cut].to_string();
+        let restored = self.restore_complete(&emit_slice);
+        self.buffer.drain(..cut);
+        restored
+    }
+
+    /// Final drain — called once when the source stream ends. Any
+    /// residual buffer is emitted verbatim (an unterminated `{{...` at
+    /// the very end of a stream never becomes a placeholder, so the
+    /// safest thing is to let the client see what the upstream actually
+    /// said).
+    pub fn flush(&mut self) -> String {
+        if self.buffer.is_empty() {
+            return String::new();
+        }
+        let out = self.restore_complete(&self.buffer);
+        self.buffer.clear();
+        out
+    }
+
+    /// Replace every known placeholder in `s` with its original value.
+    /// Linear in `s.len() × replacements.len()`; the replacements map
+    /// is expected to be small (single-digit entries) so the nested
+    /// loop is fine in practice.
+    fn restore_complete(&self, s: &str) -> String {
+        let mut out = s.to_string();
+        for (placeholder, original) in &self.replacements {
+            if out.contains(placeholder) {
+                out = out.replace(placeholder, original);
+            }
+        }
+        out
+    }
+
+    /// Given a buffer, return the byte index up to which it is safe to
+    /// emit now. Everything from the returned index onwards must stay
+    /// buffered because it might still grow into a `{{...}}` placeholder.
+    ///
+    /// Rules:
+    ///  1. Find the rightmost `{{`. If there is no matching `}}` after
+    ///     it, cut there — that `{{` is still open.
+    ///  2. Otherwise, if the buffer ends with a single `{`, cut one
+    ///     byte back so the next chunk's leading `{` can join it.
+    ///  3. Otherwise, the whole buffer is releasable.
+    fn safe_emit_boundary(buf: &str) -> usize {
+        let bytes = buf.as_bytes();
+        if let Some(open_pos) = buf.rfind("{{") {
+            // Is there a `}}` strictly after the `{{`? Start looking
+            // two bytes past the `{{` so a literal `{{}}` doesn't
+            // match itself (nonsense but cheap to guard).
+            let after_open = open_pos + 2;
+            if after_open >= bytes.len() {
+                // `{{` at the very end → definitely still open.
+                return open_pos;
+            }
+            if buf[after_open..].contains("}}") {
+                // Complete placeholder — fall through to the trailing-
+                // `{` check so we don't release a lone brace.
+            } else {
+                return open_pos;
+            }
+        }
+        // No unclosed `{{`. But a single trailing `{` could be the
+        // first half of a future `{{` — hold it back by one byte.
+        if bytes.last() == Some(&b'{') {
+            return bytes.len() - 1;
+        }
+        bytes.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +614,117 @@ mod tests {
         let content = redacted[0].content.as_str().unwrap();
         assert!(content.contains("EMAIL"), "got: {content}");
         assert!(!content.contains("alice@test.org"));
+    }
+
+    // ---------------------------------------------------------------
+    // PiiStreamRestorer — rebuilds restored text across arbitrary chunk
+    // boundaries. The invariant we're testing:
+    //   concat(restorer.process(chunk_i) for i in 0..N) + restorer.flush()
+    //   == restore_complete(concat(chunk_i))
+    // ---------------------------------------------------------------
+
+    fn sample_ctx() -> RedactionContext {
+        let mut r = HashMap::new();
+        r.insert("{{EMAIL_abc123_1}}".into(), "alice@example.com".into());
+        r.insert("{{PHONE_def456_1}}".into(), "13812345678".into());
+        RedactionContext { replacements: r }
+    }
+
+    fn restore_whole(chunks: &[&str]) -> String {
+        let ctx = sample_ctx();
+        let mut r = PiiStreamRestorer::new(&ctx);
+        let mut out = String::new();
+        for c in chunks {
+            out.push_str(&r.process(c));
+        }
+        out.push_str(&r.flush());
+        out
+    }
+
+    #[test]
+    fn stream_restore_handles_whole_placeholder_in_one_chunk() {
+        let out = restore_whole(&["Hi {{EMAIL_abc123_1}}!"]);
+        assert_eq!(out, "Hi alice@example.com!");
+    }
+
+    #[test]
+    fn stream_restore_reassembles_placeholder_split_across_chunks() {
+        // Split right after the opening `{{`.
+        let out = restore_whole(&["Hi {{", "EMAIL_abc123_1}}!"]);
+        assert_eq!(out, "Hi alice@example.com!");
+    }
+
+    #[test]
+    fn stream_restore_reassembles_single_byte_split() {
+        // Every boundary case at once — one byte per chunk.
+        let input = "{{EMAIL_abc123_1}}";
+        let chunks: Vec<String> = input.chars().map(|c| c.to_string()).collect();
+        let refs: Vec<&str> = chunks.iter().map(|s| s.as_str()).collect();
+        let out = restore_whole(&refs);
+        assert_eq!(out, "alice@example.com");
+    }
+
+    #[test]
+    fn stream_restore_handles_trailing_lone_brace() {
+        // The first chunk ends with a single `{` — it might be the
+        // start of a placeholder. Must hold it back.
+        let out = restore_whole(&["prefix {", "{EMAIL_abc123_1}} tail"]);
+        assert_eq!(out, "prefix alice@example.com tail");
+    }
+
+    #[test]
+    fn stream_restore_passes_unknown_placeholder_like_tokens_through() {
+        // The model echoed something that *looks* like a placeholder
+        // but isn't in the replacements map. Must flow through as-is
+        // after the closing `}}`, not stay buffered forever.
+        let out = restore_whole(&["see {{NOT_", "A_REAL_KEY}} done"]);
+        assert_eq!(out, "see {{NOT_A_REAL_KEY}} done");
+    }
+
+    #[test]
+    fn stream_restore_flush_emits_unterminated_tail_verbatim() {
+        // Upstream ended mid-placeholder. We don't silently drop the
+        // tail — emit it so the client at least sees something.
+        let out = restore_whole(&["oops {{EMAIL_incompl"]);
+        assert_eq!(out, "oops {{EMAIL_incompl");
+    }
+
+    #[test]
+    fn stream_restore_noop_when_context_is_empty() {
+        let ctx = RedactionContext {
+            replacements: HashMap::new(),
+        };
+        let mut r = PiiStreamRestorer::new(&ctx);
+        assert!(r.is_noop());
+        // Even with a `{{` in the input, no buffering happens — we
+        // want zero latency overhead when the feature isn't active.
+        let out1 = r.process("partial {{foo");
+        assert_eq!(out1, "partial {{foo");
+        let out2 = r.process(" bar}}");
+        assert_eq!(out2, " bar}}");
+        assert_eq!(r.flush(), "");
+    }
+
+    #[test]
+    fn stream_restore_anthropic_style_fragmented_deltas() {
+        // Mimics Anthropic `content_block_delta` events that each carry
+        // one or two tokens. Placeholders can land on any boundary.
+        let out = restore_whole(&[
+            "Hello ",
+            "{{",
+            "EMAIL_",
+            "abc123_1",
+            "}}",
+            " and ",
+            "{{PHONE_def456_1}}",
+            ".",
+        ]);
+        assert_eq!(out, "Hello alice@example.com and 13812345678.");
+    }
+
+    #[test]
+    fn stream_restore_multiple_placeholders_same_chunk() {
+        let out = restore_whole(&["a {{EMAIL_abc123_1}} b {{PHONE_def456_1}} c"]);
+        assert_eq!(out, "a alice@example.com b 13812345678 c");
     }
 }
