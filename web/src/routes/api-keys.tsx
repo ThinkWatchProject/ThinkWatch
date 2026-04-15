@@ -43,7 +43,12 @@ import { toast } from 'sonner';
 /// closed enum on the backend (`api_keys.surfaces` CHECK constraint
 /// + `require_api_key("...")` middleware). Adding a new gateway
 /// means updating both this list and the server-side allowlist.
-const ALL_SURFACES = ['ai_gateway', 'mcp_gateway'] as const;
+// Must match ALLOWED_SURFACES in crates/server/src/handlers/api_keys.rs.
+// `console` grants the key access to the admin API on port 3001 — same
+// endpoints the Web UI uses — so service accounts can drive it without
+// a password flow. Default for new keys stays ai+mcp because the
+// console surface is a privileged choice that should be opt-in.
+const ALL_SURFACES = ['ai_gateway', 'mcp_gateway', 'console'] as const;
 type Surface = (typeof ALL_SURFACES)[number];
 
 // ---------------------------------------------------------------------------

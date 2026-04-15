@@ -264,7 +264,7 @@
     "allowedModels": "Allowed Models",
     "allowedModelsHint": "Comma-separated model names (leave empty for all)",
     "surfaces": "Gateway access",
-    "surfacesHint": "Pick at least one gateway this key may call. The same `tw-` token works for both surfaces — this controls which one(s) are allowed.",
+    "surfacesHint": "Pick at least one surface this key may call. The same `tw-` token works across all three (AI gateway, MCP gateway, Console admin API) — this list controls which one(s) are allowed.",
     "surfacesRequired": "Pick at least one gateway",
     "surface_ai_gateway": "AI gateway (/v1/...)",
     "surface_mcp_gateway": "MCP gateway (/mcp)",

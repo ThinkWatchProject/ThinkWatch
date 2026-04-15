@@ -264,7 +264,7 @@
     "allowedModels": "允许的模型",
     "allowedModelsHint": "逗号分隔的模型名称（留空表示全部）",
     "surfaces": "网关访问",
-    "surfacesHint": "至少选择一个网关。同一个 `tw-` 密钥可用于两种网关，这里控制此密钥具体可访问哪一种或哪几种。",
+    "surfacesHint": "至少选择一个表面。同一个 `tw-` 密钥可用于全部三个表面(AI 网关、MCP 网关、控制台管理 API),这里控制此密钥具体可访问哪一个或哪几个。",
     "surfacesRequired": "至少选择一个网关",
     "surface_ai_gateway": "AI 网关 (/v1/...)",
     "surface_mcp_gateway": "MCP 网关 (/mcp)",
