@@ -122,6 +122,11 @@ pub struct McpProxy {
     pub db: PgPool,
     pub redis: fred::clients::Client,
     pub dynamic_config: std::sync::Arc<think_watch_common::dynamic_config::DynamicConfig>,
+    /// Audit sink — populated by the server when it constructs the
+    /// proxy. One `mcp_logs` row per tools/call completion, tagged
+    /// with trace_id so the /api/admin/trace view can correlate it
+    /// with the AI-gateway row that triggered the call.
+    pub audit: think_watch_common::audit::AuditLogger,
 }
 
 impl McpProxy {
@@ -131,6 +136,7 @@ impl McpProxy {
         db: PgPool,
         redis: fred::clients::Client,
         dynamic_config: std::sync::Arc<think_watch_common::dynamic_config::DynamicConfig>,
+        audit: think_watch_common::audit::AuditLogger,
     ) -> Self {
         Self {
             registry,
@@ -139,6 +145,7 @@ impl McpProxy {
             db,
             redis,
             dynamic_config,
+            audit,
         }
     }
 
@@ -330,7 +337,7 @@ impl McpProxy {
         if let Some(obj) = upstream_params.as_object_mut() {
             obj.insert(
                 "name".to_owned(),
-                serde_json::Value::String(original_tool_name),
+                serde_json::Value::String(original_tool_name.clone()),
             );
         }
 
@@ -365,7 +372,18 @@ impl McpProxy {
             user_id: user_id.to_string(),
             user_email: user_email.to_string(),
         };
-        match self
+
+        // Fresh trace_id per MCP invocation. When the upstream AI gateway
+        // invokes tools via this path we'll eventually accept a caller-
+        // supplied trace_id header; until then each tools/call lights
+        // up as its own timeline entry, which is still useful.
+        let call_trace_id = uuid::Uuid::new_v4().to_string();
+        let started = std::time::Instant::now();
+        let server_id = server.id;
+        let server_name = server.name.clone();
+        let tool_name = original_tool_name.to_string();
+
+        let response = match self
             .pool
             .send_request(&conn, &upstream_request, Some(&caller))
             .await
@@ -375,25 +393,49 @@ impl McpProxy {
                 // breaker reflects upstream tool errors, not just transport
                 // errors. We treat any `error` field as a failure.
                 if resp.error.is_some() {
-                    self.circuit_breakers.record_failure(&server.name).await;
+                    self.circuit_breakers.record_failure(&server_name).await;
                 } else {
-                    self.circuit_breakers.record_success(&server.name).await;
+                    self.circuit_breakers.record_success(&server_name).await;
                 }
                 resp
             }
             Err(e) => {
-                self.circuit_breakers.record_failure(&server.name).await;
+                self.circuit_breakers.record_failure(&server_name).await;
                 tracing::error!(
-                    server_id = %server.id,
+                    server_id = %server_id,
                     error = %e,
                     "upstream tools/call failed"
                 );
                 err_response(
-                    request.id,
+                    request.id.clone(),
                     INTERNAL_ERROR,
                     format!("Upstream server error: {e}"),
                 )
             }
-        }
+        };
+
+        // Emit mcp_logs row so /api/admin/trace lights up this call.
+        // Tool discovery (`tools/list`) is deliberately excluded here —
+        // we're inside `handle_tools_call` already, so `tool_name` is
+        // always an actual invocation.
+        let (status, error_message) = if let Some(ref err) = response.error {
+            ("error".to_string(), Some(err.message.clone()))
+        } else {
+            ("ok".to_string(), None)
+        };
+        let mut entry = think_watch_common::audit::AuditEntry::mcp("tools.call")
+            .trace_id(call_trace_id)
+            .detail(serde_json::json!({
+                "server_id": server_id.to_string(),
+                "server_name": server_name,
+                "tool_name": tool_name,
+                "duration_ms": started.elapsed().as_millis() as i64,
+                "status": status,
+                "error_message": error_message,
+            }));
+        entry = entry.user_id(user_id);
+        self.audit.log(entry);
+
+        response
     }
 }

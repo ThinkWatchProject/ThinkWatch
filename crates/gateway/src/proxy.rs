@@ -55,6 +55,10 @@ pub struct GatewayState {
     /// without restarting the gateway. The cache is in-process so
     /// the lookup is a `RwLock::read` + `HashMap::get`.
     pub dynamic_config: Arc<DynamicConfig>,
+    /// Audit sink — used to emit one `gateway_logs` row per completed
+    /// request (trace_id, tokens, latency, status). Wired up from the
+    /// server so the gateway crate doesn't have to build its own.
+    pub audit: think_watch_common::audit::AuditLogger,
 }
 
 /// Identity information extracted from the auth middleware.
@@ -110,6 +114,54 @@ fn resolve_budget_subjects(identity: &GatewayRequestIdentity) -> Vec<(BudgetSubj
 /// All errors are logged and swallowed — by the time we get here
 /// the caller has already received their response, so refusing to
 /// account isn't an option.
+///
+/// Emit a `gateway_logs` row into ClickHouse via the shared audit
+/// pipeline. Called exactly once per completed AI request (streaming
+/// and non-streaming) so operators can run `GET /api/admin/trace/{id}`
+/// and see the gateway leg of the fan-out.
+///
+/// `status_code` is the HTTP status we're about to return. For
+/// streaming responses where the connection could still break after
+/// this point we still write 200 — partial completions carry their
+/// own `outcome=cancelled` counter in the streaming layer.
+#[allow(clippy::too_many_arguments)]
+fn emit_gateway_log(
+    audit: &think_watch_common::audit::AuditLogger,
+    trace_id: &str,
+    user_id: Option<&str>,
+    api_key_id: Option<&str>,
+    model_id: &str,
+    provider: Option<&str>,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    cost_usd: f64,
+    latency_ms: i64,
+    status_code: i64,
+) {
+    let mut entry = think_watch_common::audit::AuditEntry::gateway("chat.completion")
+        .trace_id(trace_id.to_string())
+        .detail(serde_json::json!({
+            "model_id": model_id,
+            "provider": provider,
+            "input_tokens": prompt_tokens as i64,
+            "output_tokens": completion_tokens as i64,
+            "cost_usd": cost_usd,
+            "latency_ms": latency_ms,
+            "status_code": status_code,
+        }));
+    if let Some(uid) = user_id
+        && let Ok(u) = uuid::Uuid::parse_str(uid)
+    {
+        entry = entry.user_id(u);
+    }
+    if let Some(kid) = api_key_id
+        && let Ok(u) = uuid::Uuid::parse_str(kid)
+    {
+        entry = entry.api_key_id(u);
+    }
+    audit.log(entry);
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn post_flight_account(
     db: sqlx::PgPool,
@@ -550,6 +602,7 @@ pub async fn proxy_chat_completion(
 
     // 4. Extract per-request metadata from headers and body
     let metadata = RequestMetadata::extract(&headers, &request);
+    let request_started_at = std::time::Instant::now();
     tracing::info!(
         request_id = %metadata.request_id,
         model = %metadata.model,
@@ -663,10 +716,42 @@ pub async fn proxy_chat_completion(
         let model = original_model.clone();
         let request_rules_for_done = request_rules.clone();
         let budget_subjects = resolve_budget_subjects(&identity);
+        // Extra captures for emit_gateway_log — cloning small strings
+        // here is cheaper than retaining &state through the 'static bound.
+        let audit_for_done = state.audit.clone();
+        let cost_tracker = state.cost_tracker.clone();
+        let trace_id_for_done = metadata.request_id.clone();
+        let user_id_for_done = identity.user_id.clone();
+        let api_key_id_for_done = identity.api_key_id.clone();
+        let model_for_log = original_model.clone();
+        let started = request_started_at;
         let stream = entry.provider.stream_chat_completion(request);
         let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
+                // Emit the gateway_logs row regardless of whether the
+                // upstream surfaced usage — a zero-token completion
+                // still represents a real request that operators may
+                // need to correlate via trace_id.
+                let (pt, ct) = usage
+                    .as_ref()
+                    .map(|u| (u.prompt_tokens, u.completion_tokens))
+                    .unwrap_or((0, 0));
+                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct);
+                emit_gateway_log(
+                    &audit_for_done,
+                    &trace_id_for_done,
+                    user_id_for_done.as_deref(),
+                    api_key_id_for_done.as_deref(),
+                    &model_for_log,
+                    None,
+                    pt,
+                    ct,
+                    cost,
+                    started.elapsed().as_millis() as i64,
+                    200,
+                );
+
                 let Some(u) = usage else {
                     return;
                 };
@@ -739,6 +824,32 @@ pub async fn proxy_chat_completion(
             "Audit log: request completed"
         );
 
+        // 8f. Emit gateway_logs row so `GET /api/admin/trace/{id}` can
+        // find this request. Cost is computed from provider pricing if
+        // we know it, otherwise 0.0 (analytics treats NULL == 0).
+        let (prompt_tokens, completion_tokens) = response
+            .usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens, u.completion_tokens))
+            .unwrap_or((0, 0));
+        let cost_usd =
+            state
+                .cost_tracker
+                .calculate_cost(&original_model, prompt_tokens, completion_tokens);
+        emit_gateway_log(
+            &state.audit,
+            &metadata.request_id,
+            identity.user_id.as_deref(),
+            identity.api_key_id.as_deref(),
+            &original_model,
+            None,
+            prompt_tokens,
+            completion_tokens,
+            cost_usd,
+            request_started_at.elapsed().as_millis() as i64,
+            200,
+        );
+
         let mut http_response = Json(&response).into_response();
         http_response
             .headers_mut()
@@ -790,6 +901,12 @@ pub async fn proxy_anthropic_messages(
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
+    // One trace_id per request — propagates into the gateway_logs row
+    // and the post-flight streaming callback below. Generated locally
+    // because this handler doesn't extract a RequestMetadata the way
+    // proxy_chat_completion does.
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    let request_started_at = std::time::Instant::now();
     let model = body
         .get("model")
         .and_then(|v| v.as_str())
@@ -914,10 +1031,35 @@ pub async fn proxy_anthropic_messages(
         let model_for_done = mapped_model.clone();
         let request_rules_for_done = request_rules.clone();
         let budget_subjects = resolve_budget_subjects(&identity);
+        let audit_for_done = state.audit.clone();
+        let cost_tracker = state.cost_tracker.clone();
+        let trace_id_for_done = trace_id.clone();
+        let user_id_for_done = identity.user_id.clone();
+        let api_key_id_for_done = identity.api_key_id.clone();
+        let model_for_log = mapped_model.clone();
+        let started = request_started_at;
         let stream = entry.provider.stream_chat_completion(stream_request);
         let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
+                let (pt, ct) = usage
+                    .as_ref()
+                    .map(|u| (u.prompt_tokens, u.completion_tokens))
+                    .unwrap_or((0, 0));
+                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct);
+                emit_gateway_log(
+                    &audit_for_done,
+                    &trace_id_for_done,
+                    user_id_for_done.as_deref(),
+                    api_key_id_for_done.as_deref(),
+                    &model_for_log,
+                    None,
+                    pt,
+                    ct,
+                    cost,
+                    started.elapsed().as_millis() as i64,
+                    200,
+                );
                 let Some(u) = usage else {
                     return;
                 };
@@ -936,7 +1078,12 @@ pub async fn proxy_anthropic_messages(
             })
         };
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
-        Ok(stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response())
+        let mut http_response =
+            stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response();
+        if let Ok(v) = trace_id.parse() {
+            http_response.headers_mut().insert("x-trace-id", v);
+        }
+        Ok(http_response)
     } else {
         let (_entry, mut response) = select_route_with_failover(
             routes,
@@ -972,9 +1119,34 @@ pub async fn proxy_anthropic_messages(
             .await;
         }
 
+        // Emit gateway_logs for the trace timeline.
+        let (pt, ct) = response
+            .usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens, u.completion_tokens))
+            .unwrap_or((0, 0));
+        let cost = state.cost_tracker.calculate_cost(&mapped_model, pt, ct);
+        emit_gateway_log(
+            &state.audit,
+            &trace_id,
+            identity.user_id.as_deref(),
+            identity.api_key_id.as_deref(),
+            &mapped_model,
+            None,
+            pt,
+            ct,
+            cost,
+            request_started_at.elapsed().as_millis() as i64,
+            200,
+        );
+
         // Convert OpenAI response back to Anthropic format
         let anthropic_response = convert_to_anthropic_response(&response);
-        Ok(Json(anthropic_response).into_response())
+        let mut http_response = Json(anthropic_response).into_response();
+        if let Ok(v) = trace_id.parse() {
+            http_response.headers_mut().insert("x-trace-id", v);
+        }
+        Ok(http_response)
     }
 }
 
@@ -1041,6 +1213,8 @@ pub async fn proxy_responses(
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
+    let trace_id = uuid::Uuid::new_v4().to_string();
+    let request_started_at = std::time::Instant::now();
     let model = body
         .get("model")
         .and_then(|v| v.as_str())
@@ -1169,10 +1343,35 @@ pub async fn proxy_responses(
         let model_for_done = mapped_model.clone();
         let request_rules_for_done = request_rules.clone();
         let budget_subjects = resolve_budget_subjects(&identity);
+        let audit_for_done = state.audit.clone();
+        let cost_tracker = state.cost_tracker.clone();
+        let trace_id_for_done = trace_id.clone();
+        let user_id_for_done = identity.user_id.clone();
+        let api_key_id_for_done = identity.api_key_id.clone();
+        let model_for_log = mapped_model.clone();
+        let started = request_started_at;
         let stream = entry.provider.stream_chat_completion(stream_request);
         let on_done = move |usage: Option<crate::providers::traits::Usage>|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
+                let (pt, ct) = usage
+                    .as_ref()
+                    .map(|u| (u.prompt_tokens, u.completion_tokens))
+                    .unwrap_or((0, 0));
+                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct);
+                emit_gateway_log(
+                    &audit_for_done,
+                    &trace_id_for_done,
+                    user_id_for_done.as_deref(),
+                    api_key_id_for_done.as_deref(),
+                    &model_for_log,
+                    None,
+                    pt,
+                    ct,
+                    cost,
+                    started.elapsed().as_millis() as i64,
+                    200,
+                );
                 let Some(u) = usage else {
                     return;
                 };
@@ -1190,7 +1389,11 @@ pub async fn proxy_responses(
                 .await;
             })
         };
-        Ok(stream_to_sse(stream, on_done).into_response())
+        let mut http_response = stream_to_sse(stream, on_done).into_response();
+        if let Ok(v) = trace_id.parse() {
+            http_response.headers_mut().insert("x-trace-id", v);
+        }
+        Ok(http_response)
     } else {
         let (_entry, mut response) = select_route_with_failover(
             routes,
@@ -1221,8 +1424,32 @@ pub async fn proxy_responses(
             .await;
         }
 
+        let (pt, ct) = response
+            .usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens, u.completion_tokens))
+            .unwrap_or((0, 0));
+        let cost = state.cost_tracker.calculate_cost(&mapped_model, pt, ct);
+        emit_gateway_log(
+            &state.audit,
+            &trace_id,
+            identity.user_id.as_deref(),
+            identity.api_key_id.as_deref(),
+            &mapped_model,
+            None,
+            pt,
+            ct,
+            cost,
+            request_started_at.elapsed().as_millis() as i64,
+            200,
+        );
+
         let responses_format = convert_to_responses_format(&response);
-        Ok(Json(responses_format).into_response())
+        let mut http_response = Json(responses_format).into_response();
+        if let Ok(v) = trace_id.parse() {
+            http_response.headers_mut().insert("x-trace-id", v);
+        }
+        Ok(http_response)
     }
 }
 
