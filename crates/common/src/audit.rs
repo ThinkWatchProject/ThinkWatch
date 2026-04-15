@@ -1,5 +1,5 @@
 use chrono::Utc;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::net::UdpSocket;
@@ -56,11 +56,23 @@ impl LogType {
     }
 }
 
+/// `log_type` deserialisation default used when an outbox row was
+/// produced before the field was added — the webhook payload omits
+/// it via `serde(skip)` either way, so any drained row needs a fresh
+/// default to keep the engine routing decisions sane.
+fn default_log_type() -> LogType {
+    LogType::Audit
+}
+
 /// Audit log entry sent to ClickHouse and dynamically configured forwarders.
-#[derive(Debug, Clone, Serialize)]
+///
+/// Deserialize is required because the durable webhook outbox round-
+/// trips entries through Postgres JSONB; the drain worker pulls them
+/// back out and feeds them into `send_webhook` again.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEntry {
     pub id: String,
-    #[serde(skip)]
+    #[serde(skip, default = "default_log_type")]
     pub log_type: LogType,
     pub user_id: Option<String>,
     pub user_email: Option<String>,
@@ -476,10 +488,20 @@ impl AuditLogger {
 
         // Spawn periodic forwarder reload (every 10s)
         if let Some(pool) = &db {
-            let pool = pool.clone();
-            let reg = registry.clone();
+            let reload_pool = pool.clone();
+            let reload_reg = registry.clone();
             tokio::spawn(async move {
-                reload_forwarders_loop(pool, reg).await;
+                reload_forwarders_loop(reload_pool, reload_reg).await;
+            });
+
+            // Durable webhook redelivery — drains rows the inline
+            // retry couldn't deliver. Same registry handle so it
+            // sees forwarder config edits the operator makes via
+            // the admin UI without a restart.
+            let drain_pool = pool.clone();
+            let drain_reg = registry.clone();
+            tokio::spawn(async move {
+                webhook_outbox_drain_loop(drain_pool, drain_reg).await;
             });
         }
 
@@ -659,10 +681,172 @@ async fn forward_to_all(
                     .bind(err_msg)
                     .execute(pool)
                     .await;
+                    // Webhook deliveries get a durable second chance —
+                    // park the entry in `webhook_outbox` so the
+                    // background drain worker can keep trying after the
+                    // inline 3x retry exhausted. Other transports
+                    // (syslog/kafka) don't have this safety net yet;
+                    // they're typically point-to-point and a transport
+                    // failure means the upstream is genuinely down.
+                    if runtime.config.forwarder_type == "webhook"
+                        && let Ok(payload_json) = serde_json::to_value(entry)
+                    {
+                        let _ = sqlx::query(
+                            "INSERT INTO webhook_outbox (forwarder_id, payload, last_error) \
+                             VALUES ($1, $2, $3)",
+                        )
+                        .bind(id)
+                        .bind(&payload_json)
+                        .bind(err_msg)
+                        .execute(pool)
+                        .await;
+                    }
                 }
             }
         }
     }
+}
+
+/// Background drain for `webhook_outbox`. Polls every 10s, picks up
+/// to 100 due rows, attempts redelivery, deletes on success, bumps
+/// attempt count + reschedules on failure. Caps backoff at one hour
+/// and gives up after 24 attempts (~1 day worth of redelivery).
+async fn webhook_outbox_drain_loop(db: PgPool, registry: ForwarderRegistry) {
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        interval.tick().await;
+        if let Err(e) = drain_once(&db, &registry, &http).await {
+            tracing::warn!("webhook_outbox drain failed: {e}");
+        }
+    }
+}
+
+const MAX_OUTBOX_ATTEMPTS: i32 = 24;
+
+async fn drain_once(
+    db: &PgPool,
+    registry: &ForwarderRegistry,
+    http: &reqwest::Client,
+) -> Result<(), sqlx::Error> {
+    #[derive(sqlx::FromRow)]
+    struct OutboxRow {
+        id: Uuid,
+        forwarder_id: Uuid,
+        payload: serde_json::Value,
+        attempts: i32,
+    }
+
+    let due: Vec<OutboxRow> = sqlx::query_as(
+        "SELECT id, forwarder_id, payload, attempts \
+           FROM webhook_outbox \
+          WHERE next_attempt_at <= now() \
+          ORDER BY next_attempt_at ASC \
+          LIMIT 100",
+    )
+    .fetch_all(db)
+    .await?;
+
+    if due.is_empty() {
+        return Ok(());
+    }
+
+    let registry_guard = registry.read().await;
+    for row in due {
+        // Forwarder may have been deleted (cascade should have removed
+        // the row, but races happen) or disabled — skip and let the
+        // next tick reconsider. Disabled forwarders also stop draining.
+        let runtime = match registry_guard.get(&row.forwarder_id) {
+            Some(rt) if rt.config.enabled => rt,
+            _ => {
+                continue;
+            }
+        };
+
+        // Re-deserialise the entry. A schema drift between insert and
+        // drain (extremely unlikely) would surface here as a parse
+        // error; in that case we drop the row to avoid a poison pill.
+        let entry: AuditEntry = match serde_json::from_value(row.payload.clone()) {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::warn!(
+                    outbox_id = %row.id,
+                    error = %e,
+                    "outbox payload no longer parses; dropping"
+                );
+                let _ = sqlx::query("DELETE FROM webhook_outbox WHERE id = $1")
+                    .bind(row.id)
+                    .execute(db)
+                    .await;
+                continue;
+            }
+        };
+
+        match send_webhook(http, &runtime.config, &entry).await {
+            Ok(()) => {
+                let _ = sqlx::query("DELETE FROM webhook_outbox WHERE id = $1")
+                    .bind(row.id)
+                    .execute(db)
+                    .await;
+                let _ = sqlx::query(
+                    "UPDATE log_forwarders SET sent_count = sent_count + 1, \
+                                                last_sent_at = now(), \
+                                                updated_at = now() \
+                     WHERE id = $1",
+                )
+                .bind(row.forwarder_id)
+                .execute(db)
+                .await;
+            }
+            Err(err_msg) => {
+                let next_attempts = row.attempts + 1;
+                if next_attempts >= MAX_OUTBOX_ATTEMPTS {
+                    // Give up — drop the row and surface a metric so
+                    // the operator can investigate without an
+                    // ever-growing table.
+                    metrics::counter!("audit_log_dropped_total", "kind" => "webhook_outbox_exhausted")
+                        .increment(1);
+                    let _ = sqlx::query("DELETE FROM webhook_outbox WHERE id = $1")
+                        .bind(row.id)
+                        .execute(db)
+                        .await;
+                    tracing::error!(
+                        forwarder_id = %row.forwarder_id,
+                        attempts = next_attempts,
+                        error = %err_msg,
+                        "webhook outbox row exhausted; dropping"
+                    );
+                } else {
+                    // Exponential backoff capped at 1h:
+                    //   attempt 1 → 30s
+                    //   attempt 2 → 60s
+                    //   attempt 3 → 120s
+                    //   ...
+                    //   attempt 8+ → 3600s
+                    let delay_secs =
+                        (30u64.saturating_mul(1u64 << (next_attempts as u32 - 1).min(7))).min(3600);
+                    let _ = sqlx::query(
+                        "UPDATE webhook_outbox \
+                            SET attempts = $2, \
+                                last_error = $3, \
+                                next_attempt_at = now() + ($4 || ' seconds')::interval \
+                          WHERE id = $1",
+                    )
+                    .bind(row.id)
+                    .bind(next_attempts)
+                    .bind(&err_msg)
+                    .bind(delay_secs.to_string())
+                    .execute(db)
+                    .await;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
