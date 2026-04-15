@@ -387,6 +387,18 @@ pub async fn update_key(
         Some(s) => (true, validate_cost_center(Some(s))?),
     };
 
+    // Detect an actual extension of expires_at (later than the current
+    // value, or removed entirely). When that happens the lifecycle
+    // task's `last_expiry_warning_days` dedupe column has to reset
+    // — otherwise a key warned at 7-day-remaining and then extended
+    // by 90 days would silently miss the next 7-day warning because
+    // `bucket < last_expiry_warning_days` would still be false.
+    let expiry_extended = match (key.expires_at, expires_at) {
+        (Some(prev), Some(new_val)) => new_val > prev,
+        (Some(_), None) => true, // expiry removed entirely
+        _ => false,
+    };
+
     let updated = sqlx::query_as::<_, ApiKey>(
         r#"UPDATE api_keys SET
             allowed_models = COALESCE($1, allowed_models),
@@ -394,7 +406,9 @@ pub async fn update_key(
             expires_at = $3,
             rotation_period_days = COALESCE($4, rotation_period_days),
             inactivity_timeout_days = COALESCE($5, inactivity_timeout_days),
-            cost_center = CASE WHEN $7 THEN $6 ELSE cost_center END
+            cost_center = CASE WHEN $7 THEN $6 ELSE cost_center END,
+            last_expiry_warning_days = CASE WHEN $9 THEN NULL
+                                            ELSE last_expiry_warning_days END
            WHERE id = $8 RETURNING *"#,
     )
     .bind(&req.allowed_models)
@@ -405,6 +419,7 @@ pub async fn update_key(
     .bind(cost_center_value.as_deref())
     .bind(cost_center_set)
     .bind(id)
+    .bind(expiry_extended)
     .fetch_one(&state.db)
     .await?;
 

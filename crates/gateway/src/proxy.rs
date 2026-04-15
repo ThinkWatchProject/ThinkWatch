@@ -218,6 +218,10 @@ fn emit_gateway_error_log(
         "error_type": format!("{err:?}").split('(').next().unwrap_or("Error"),
         "error_message": err.to_string(),
     });
+    // Same `chat.completion` action as the success path — flush_gateway
+    // drops the action when it writes ChGatewayRow, so the trace
+    // endpoint distinguishes errors via `status_code` (>= 400) instead.
+    // Detail carries error_type + error_message for the drill-down.
     let mut entry = think_watch_common::audit::AuditEntry::gateway("chat.completion")
         .trace_id(trace_id.to_string())
         .detail(detail);

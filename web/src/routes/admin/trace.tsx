@@ -171,9 +171,27 @@ function Waterfall({
 
   const xForOffset = (offsetMs: number) => LABEL_W + (offsetMs / span) * BAR_AREA_W;
 
-  // Color per kind — match the badge palette in the legend below.
-  const colorFor = (kind: string) => {
-    switch (kind) {
+  // Color per (kind, status). Errors override the kind palette so
+  // operators can spot a 502 / 5xx in a long timeline at a glance
+  // without reading every tooltip.
+  const isErrorEvent = (evt: TraceEvent): boolean => {
+    if (evt.kind === 'gateway' || evt.kind === 'mcp') {
+      const code = parseInt(evt.status, 10);
+      // gateway uses HTTP codes (>= 400 is error). mcp emits "ok" /
+      // "error" string statuses; both flow through here.
+      return (
+        (Number.isFinite(code) && code >= 400) ||
+        evt.status === 'error'
+      );
+    }
+    return false;
+  };
+
+  const colorFor = (evt: TraceEvent) => {
+    if (isErrorEvent(evt)) {
+      return 'var(--destructive)';
+    }
+    switch (evt.kind) {
       case 'gateway':
         return 'var(--chart-1)';
       case 'mcp':
@@ -271,7 +289,7 @@ function Waterfall({
                 width={widthPx}
                 height={barH}
                 rx={3}
-                fill={colorFor(evt.kind)}
+                fill={colorFor(evt)}
                 fillOpacity={0.85}
               />
               {/* Duration label to the right of the bar when there's
@@ -317,6 +335,14 @@ function Waterfall({
             aria-hidden
           />
           audit
+        </span>
+        <span className="flex items-center gap-1.5">
+          <span
+            className="inline-block h-2 w-3 rounded-sm"
+            style={{ background: 'var(--destructive)' }}
+            aria-hidden
+          />
+          error
         </span>
       </div>
     </div>
