@@ -12,7 +12,9 @@ use tokio::sync::RwLock;
 // Circuit-breaker state lives in `think-watch-common` so the MCP gateway
 // can write into the same registry. Re-exported here for backwards compat
 // with anything that already imported from this module.
-pub use think_watch_common::cb_registry::{CbState, record_cb, snapshot_cb_states};
+pub use think_watch_common::cb_registry::{
+    CbState, record_cb, record_cb_with_kind, snapshot_cb_states,
+};
 
 /// Load-balancing strategy for selecting a backend.
 #[derive(Debug, Clone, Copy)]
@@ -103,7 +105,7 @@ impl FailoverBackend {
                     *self.state.write().await = CircuitState::Open;
                     *self.last_failure.write().await = Some(Instant::now());
                     metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(2.0);
-                    record_cb(self.provider.name(), CbState::Open);
+                    record_cb_with_kind(self.provider.name(), CbState::Open, "ai");
                     tracing::warn!(
                         provider = self.provider.name(),
                         "Circuit breaker OPEN after {} consecutive failures",
@@ -117,7 +119,7 @@ impl FailoverBackend {
                 *self.last_failure.write().await = Some(Instant::now());
                 self.half_open_successes.store(0, Ordering::Relaxed);
                 metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(2.0);
-                record_cb(self.provider.name(), CbState::Open);
+                record_cb_with_kind(self.provider.name(), CbState::Open, "ai");
                 tracing::warn!(
                     provider = self.provider.name(),
                     "Circuit breaker back to OPEN (half-open probe failed)"

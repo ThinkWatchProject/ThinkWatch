@@ -124,6 +124,61 @@ fn resolve_budget_subjects(identity: &GatewayRequestIdentity) -> Vec<(BudgetSubj
 /// streaming responses where the connection could still break after
 /// this point we still write 200 — partial completions carry their
 /// own `outcome=cancelled` counter in the streaming layer.
+/// Map a `GatewayError` to the HTTP status we'll actually return so
+/// the error-path `gateway_logs` row carries the same status code the
+/// client saw. Keep in sync with `GatewayErrorResponse::into_response`
+/// below — drift there would make traces misleading.
+fn gateway_error_status(err: &GatewayError) -> i64 {
+    match err {
+        GatewayError::ProviderError(_) => 502,
+        GatewayError::TransformError(_) => 400,
+        GatewayError::NetworkError(_) => 502,
+        GatewayError::UpstreamRateLimited | GatewayError::LocalRateLimited(_) => 429,
+        GatewayError::UpstreamAuthError => 401,
+    }
+}
+
+/// Emit a single `gateway_logs` row for a failed request. The detail
+/// blob mirrors the success-path shape but also carries `error_type`
+/// and `error_message` so operators can drill down without joining
+/// against a separate error-log stream.
+#[allow(clippy::too_many_arguments)]
+fn emit_gateway_error_log(
+    audit: &think_watch_common::audit::AuditLogger,
+    trace_id: &str,
+    user_id: Option<&str>,
+    api_key_id: Option<&str>,
+    model_id: &str,
+    latency_ms: i64,
+    err: &GatewayError,
+) {
+    let status = gateway_error_status(err);
+    let detail = serde_json::json!({
+        "model_id": model_id,
+        "input_tokens": 0i64,
+        "output_tokens": 0i64,
+        "cost_usd": 0.0,
+        "latency_ms": latency_ms,
+        "status_code": status,
+        "error_type": format!("{err:?}").split('(').next().unwrap_or("Error"),
+        "error_message": err.to_string(),
+    });
+    let mut entry = think_watch_common::audit::AuditEntry::gateway("chat.completion")
+        .trace_id(trace_id.to_string())
+        .detail(detail);
+    if let Some(uid) = user_id
+        && let Ok(u) = uuid::Uuid::parse_str(uid)
+    {
+        entry = entry.user_id(u);
+    }
+    if let Some(kid) = api_key_id
+        && let Ok(u) = uuid::Uuid::parse_str(kid)
+    {
+        entry = entry.api_key_id(u);
+    }
+    audit.log(entry);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_gateway_log(
     audit: &think_watch_common::audit::AuditLogger,
@@ -803,7 +858,18 @@ pub async fn proxy_chat_completion(
             false,
         )
         .await
-        .map_err(GatewayErrorResponse::from)?;
+        .map_err(|e| {
+            emit_gateway_error_log(
+                &state.audit,
+                &metadata.request_id,
+                identity.user_id.as_deref(),
+                identity.api_key_id.as_deref(),
+                &original_model,
+                request_started_at.elapsed().as_millis() as i64,
+                &e,
+            );
+            GatewayErrorResponse::from(e)
+        })?;
 
         // Restore original model name in response (don't leak upstream_model)
         response.model = original_model.clone();
@@ -1117,7 +1183,18 @@ pub async fn proxy_anthropic_messages(
             false,
         )
         .await
-        .map_err(GatewayErrorResponse::from)?;
+        .map_err(|e| {
+            emit_gateway_error_log(
+                &state.audit,
+                &trace_id,
+                identity.user_id.as_deref(),
+                identity.api_key_id.as_deref(),
+                &mapped_model,
+                request_started_at.elapsed().as_millis() as i64,
+                &e,
+            );
+            GatewayErrorResponse::from(e)
+        })?;
 
         // Restore original model name
         response.model = mapped_model.clone();
@@ -1429,7 +1506,18 @@ pub async fn proxy_responses(
             false,
         )
         .await
-        .map_err(GatewayErrorResponse::from)?;
+        .map_err(|e| {
+            emit_gateway_error_log(
+                &state.audit,
+                &trace_id,
+                identity.user_id.as_deref(),
+                identity.api_key_id.as_deref(),
+                &mapped_model,
+                request_started_at.elapsed().as_millis() as i64,
+                &e,
+            );
+            GatewayErrorResponse::from(e)
+        })?;
 
         // Restore original model name
         response.model = mapped_model.clone();

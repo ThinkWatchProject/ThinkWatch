@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 
-use think_watch_common::cb_registry::{CbState, record_cb};
+use think_watch_common::cb_registry::{CbState, record_cb, record_cb_with_kind};
 
 /// Tunables for a single circuit breaker.
 #[derive(Debug, Clone, Copy)]
@@ -136,13 +136,12 @@ impl Breaker {
         }
     }
 
-    /// Returns `true` when this call flipped the breaker into the `Open`
-    /// state (either from Closed-past-threshold or from HalfOpen-probe-
-    /// failed). Callers use the signal to emit a one-shot
-    /// `provider.circuit_open` audit event — the breaker itself can't
-    /// do that because it has no audit handle and mcp-gateway mustn't
-    /// depend on the server crate.
-    async fn record_failure(&self) -> bool {
+    /// Record a failure. Transitions the breaker to Open on either
+    /// Closed-past-threshold or HalfOpen-probe-failed. The
+    /// `record_cb_with_kind` side-effect fires the global OPEN_LISTENER,
+    /// which is where the `provider.circuit_open` audit event gets
+    /// emitted — no return-value threading required.
+    async fn record_failure(&self) {
         let mut inner = self.inner.lock().await;
         inner.consecutive_failures += 1;
         match inner.state {
@@ -151,29 +150,26 @@ impl Breaker {
                     inner.state = CbState::Open;
                     inner.last_failure = Some(Instant::now());
                     let failures = inner.consecutive_failures;
-                    record_cb(&self.server_name, CbState::Open);
+                    record_cb_with_kind(&self.server_name, CbState::Open, "mcp");
                     tracing::warn!(
                         server = %self.server_name,
                         failures,
                         "MCP circuit breaker OPEN"
                     );
-                    return true;
                 }
-                false
             }
             CbState::HalfOpen => {
                 // Probe failed → go back to Open and restart the timer.
                 inner.state = CbState::Open;
                 inner.last_failure = Some(Instant::now());
                 inner.half_open_successes = 0;
-                record_cb(&self.server_name, CbState::Open);
+                record_cb_with_kind(&self.server_name, CbState::Open, "mcp");
                 tracing::warn!(
                     server = %self.server_name,
                     "MCP circuit breaker back to OPEN (probe failed)"
                 );
-                true
             }
-            CbState::Open => false,
+            CbState::Open => {}
         }
     }
 }
@@ -235,10 +231,8 @@ impl McpCircuitBreakers {
         self.breaker_for(server_name).await.record_success().await;
     }
 
-    /// Returns `true` when the call flipped the breaker to Open. See
-    /// `Breaker::record_failure` for the full semantics.
-    pub async fn record_failure(&self, server_name: &str) -> bool {
-        self.breaker_for(server_name).await.record_failure().await
+    pub async fn record_failure(&self, server_name: &str) {
+        self.breaker_for(server_name).await.record_failure().await;
     }
 
     /// Pre-register a server so it shows up in the dashboard CB snapshot

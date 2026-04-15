@@ -143,6 +143,26 @@ async fn main() -> anyhow::Result<()> {
         .modify(|layer| *layer = Some(tracing_ch::ClickHouseLayer::new(audit_logger.clone())));
     tracing::info!("ClickHouse tracing layer activated");
 
+    // Install the circuit-breaker OPEN listener. Both gateways
+    // (AI + MCP) write into the shared cb_registry; this listener
+    // emits a single `provider.circuit_open` audit event per
+    // Closed→Open / HalfOpen→Open transition, tagged with the
+    // caller's `kind` so downstream subscribers can distinguish AI
+    // provider outages from MCP server outages.
+    {
+        let audit_for_cb = audit_logger.clone();
+        think_watch_common::cb_registry::set_open_listener(move |key, kind| {
+            audit_for_cb.log(
+                audit::AuditEntry::new("provider.circuit_open")
+                    .resource(format!("{kind}_provider:{key}"))
+                    .detail(serde_json::json!({
+                        "kind": kind,
+                        "provider": key,
+                    })),
+            );
+        });
+    }
+
     // Initialize OIDC — prefer dynamic config (database), fall back to env vars.
     // If OIDC env vars are set but no DB config exists yet, seed the DB from env.
     let oidc_manager = {
