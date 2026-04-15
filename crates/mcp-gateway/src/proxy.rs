@@ -159,14 +159,22 @@ impl McpProxy {
         user_email: &str,
         role_ids: &[Uuid],
         allowed_mcp_tools: Option<&[String]>,
+        trace_id: &str,
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
         match request.method.as_str() {
             "initialize" => self.handle_initialize(request).await,
             "tools/list" => self.handle_tools_list(allowed_mcp_tools, request).await,
             "tools/call" => {
-                self.handle_tools_call(user_id, user_email, role_ids, allowed_mcp_tools, request)
-                    .await
+                self.handle_tools_call(
+                    user_id,
+                    user_email,
+                    role_ids,
+                    allowed_mcp_tools,
+                    trace_id,
+                    request,
+                )
+                .await
             }
             _ => err_response(
                 request.id,
@@ -233,6 +241,7 @@ impl McpProxy {
         user_email: &str,
         role_ids: &[Uuid],
         allowed_mcp_tools: Option<&[String]>,
+        trace_id: &str,
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
         // Resolve params + tool target up front so we know which MCP
@@ -373,11 +382,11 @@ impl McpProxy {
             user_email: user_email.to_string(),
         };
 
-        // Fresh trace_id per MCP invocation. When the upstream AI gateway
-        // invokes tools via this path we'll eventually accept a caller-
-        // supplied trace_id header; until then each tools/call lights
-        // up as its own timeline entry, which is still useful.
-        let call_trace_id = uuid::Uuid::new_v4().to_string();
+        // The trace id was resolved at the transport layer — either
+        // pinned by an upstream `x-trace-id` header so this call links
+        // to the AI request that triggered the tool-use, or freshly
+        // minted if the caller didn't supply one.
+        let call_trace_id = trace_id.to_string();
         let started = std::time::Instant::now();
         let server_id = server.id;
         let server_name = server.name.clone();

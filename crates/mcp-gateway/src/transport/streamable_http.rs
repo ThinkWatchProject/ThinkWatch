@@ -44,6 +44,24 @@ pub struct McpRequestIdentity {
 
 /// Header name used to carry the MCP session identifier.
 const MCP_SESSION_HEADER: &str = "mcp-session-id";
+/// Optional caller-supplied trace identifier. When present and sane,
+/// it propagates into every `mcp_logs` row this request produces so
+/// the upstream AI request that initiated the tool-use can be
+/// correlated with the resulting MCP calls in `/api/admin/trace`.
+const TRACE_ID_HEADER: &str = "x-trace-id";
+
+/// Validate and accept an inbound x-trace-id, falling back to a fresh
+/// UUID. Mirrors the same shape rules the access_log middleware uses
+/// (≤128 chars, ASCII, no control characters) so a single sanitiser
+/// is impossible to skip on either entry path.
+fn resolve_trace_id(headers: &HeaderMap) -> String {
+    headers
+        .get(TRACE_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| !c.is_control()))
+        .unwrap_or_else(|| Uuid::new_v4().to_string())
+}
 
 /// `POST /mcp` — main Streamable HTTP endpoint.
 ///
@@ -74,6 +92,11 @@ pub async fn handle_post(
         state.sessions.create_session(identity.user_id).await
     };
 
+    // --- Trace correlation -------------------------------------------------
+    // Either echo what the caller pinned (so a multi-call AI-driven
+    // session shows up under one trace) or mint a fresh id.
+    let trace_id = resolve_trace_id(&headers);
+
     // --- Dispatch ----------------------------------------------------------
     let response = state
         .proxy
@@ -82,14 +105,19 @@ pub async fn handle_post(
             &identity.user_email,
             &identity.role_ids,
             identity.allowed_mcp_tools.as_deref(),
+            &trace_id,
             request,
         )
         .await;
 
-    // Return the response with the session header.
+    // Return the response with the session header + trace id so the
+    // operator can copy it back out of the wire.
     let mut resp_headers = HeaderMap::new();
     if let Ok(val) = session_id.parse() {
         resp_headers.insert(MCP_SESSION_HEADER, val);
+    }
+    if let Ok(val) = trace_id.parse() {
+        resp_headers.insert(TRACE_ID_HEADER, val);
     }
 
     (StatusCode::OK, resp_headers, Json(response)).into_response()

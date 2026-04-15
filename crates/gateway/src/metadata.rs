@@ -73,7 +73,17 @@ impl RequestMetadata {
             }
         }
 
-        let request_id = uuid::Uuid::new_v4().to_string();
+        // Honor a caller-supplied `x-trace-id` so the request_id used
+        // for logging / metadata matches the trace_id the client pinned
+        // — letting one client correlate the AI call with its
+        // follow-on MCP tools/call under a single trace. Validation
+        // mirrors the access_log middleware and the MCP transport.
+        let request_id = headers
+            .get("x-trace-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| !c.is_control()))
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let timestamp = chrono::Utc::now().to_rfc3339();
 
         Self {

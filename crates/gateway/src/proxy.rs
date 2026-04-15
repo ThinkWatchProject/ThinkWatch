@@ -124,6 +124,22 @@ fn resolve_budget_subjects(identity: &GatewayRequestIdentity) -> Vec<(BudgetSubj
 /// streaming responses where the connection could still break after
 /// this point we still write 200 — partial completions carry their
 /// own `outcome=cancelled` counter in the streaming layer.
+/// Resolve the trace id for an AI request. Prefers a caller-supplied
+/// `x-trace-id` header (length-bounded ASCII, no control chars) so a
+/// client that wants its AI request linked with a follow-on MCP
+/// tools/call can pin both legs to one id. Falls back to a UUID.
+///
+/// Mirrors the same validation rules as the access_log middleware and
+/// the MCP transport layer — keep all three in sync if you change one.
+fn resolve_trace_id(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-trace-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| !c.is_control()))
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
 /// Map a `GatewayError` to the HTTP status we'll actually return so
 /// the error-path `gateway_logs` row carries the same status code the
 /// client saw. Keep in sync with `GatewayErrorResponse::into_response`
@@ -985,15 +1001,14 @@ pub async fn list_models_handler(State(state): State<GatewayState>) -> Json<serd
 /// logging, but does NOT do PII redaction or caching (complex content types).
 pub async fn proxy_anthropic_messages(
     State(state): State<GatewayState>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
-    // One trace_id per request — propagates into the gateway_logs row
-    // and the post-flight streaming callback below. Generated locally
-    // because this handler doesn't extract a RequestMetadata the way
-    // proxy_chat_completion does.
-    let trace_id = uuid::Uuid::new_v4().to_string();
+    // Honor x-trace-id when the caller pinned one — that's how a
+    // client correlates this AI call with the MCP tools/call it
+    // makes off the back of a tool-use response. Otherwise mint.
+    let trace_id = resolve_trace_id(&headers);
     let request_started_at = std::time::Instant::now();
     let model = body
         .get("model")
@@ -1310,11 +1325,11 @@ fn convert_to_anthropic_response(
 /// could be a direct passthrough in the future.
 pub async fn proxy_responses(
     State(state): State<GatewayState>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     axum::Extension(identity): axum::Extension<GatewayRequestIdentity>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
-    let trace_id = uuid::Uuid::new_v4().to_string();
+    let trace_id = resolve_trace_id(&headers);
     let request_started_at = std::time::Instant::now();
     let model = body
         .get("model")
