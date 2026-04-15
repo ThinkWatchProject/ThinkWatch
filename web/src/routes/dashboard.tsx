@@ -262,6 +262,81 @@ function useLiveDashboard() {
 }
 
 // ----------------------------------------------------------------------------
+// Stat-card grid — native HTML5 drag-reorder + localStorage persistence
+// ----------------------------------------------------------------------------
+
+const STAT_ORDER_KEY = 'dashboard.stat-order.v1';
+
+/// Reorderable 4-up grid. `cards` is keyed by a stable id — the grid
+/// renders children in the persisted order (falling back to the object
+/// key order) and lets the user drag a card's handle to rearrange.
+/// Order is stored in localStorage so it survives reloads.
+function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
+  const defaultOrder = Object.keys(cards);
+  const [order, setOrder] = useState<string[]>(() => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(STAT_ORDER_KEY) || 'null') as unknown;
+      if (Array.isArray(saved) && saved.every((k) => typeof k === 'string')) {
+        // Merge with defaults: drop ids no longer present, append new ones.
+        const known = saved.filter((k) => k in cards);
+        for (const k of defaultOrder) if (!known.includes(k)) known.push(k);
+        return known;
+      }
+    } catch {
+      // fallthrough
+    }
+    return defaultOrder;
+  });
+  const [draggingId, setDraggingId] = useState<string | null>(null);
+
+  const persist = (next: string[]) => {
+    setOrder(next);
+    try {
+      localStorage.setItem(STAT_ORDER_KEY, JSON.stringify(next));
+    } catch {
+      // quota / privacy mode — reorder still works for this session.
+    }
+  };
+
+  const reorder = (from: string, to: string) => {
+    if (from === to) return;
+    const next = order.filter((k) => k !== from);
+    const idx = next.indexOf(to);
+    next.splice(idx < 0 ? next.length : idx, 0, from);
+    persist(next);
+  };
+
+  return (
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {order.map((id) => (
+        <div
+          key={id}
+          draggable
+          onDragStart={(e) => {
+            setDraggingId(id);
+            e.dataTransfer.effectAllowed = 'move';
+            // Firefox needs any dataTransfer payload to start a drag.
+            e.dataTransfer.setData('text/plain', id);
+          }}
+          onDragEnd={() => setDraggingId(null)}
+          onDragOver={(e) => {
+            if (draggingId && draggingId !== id) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            e.preventDefault();
+            const from = e.dataTransfer.getData('text/plain');
+            if (from) reorder(from, id);
+          }}
+          className={`transition-opacity ${draggingId === id ? 'opacity-40' : ''} cursor-grab active:cursor-grabbing`}
+        >
+          {cards[id]}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
 // Stat card with embedded shadcn AreaChart sparkline
 // ----------------------------------------------------------------------------
 
@@ -446,44 +521,56 @@ export function DashboardPage() {
       </div>
 
       <Section eyebrow={t('dashboard.overviewEyebrow')} className="shrink-0">
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <StatCard
-            label={t('dashboard.tokensUsedToday')}
-            value={usage?.total_tokens_today ?? 0}
-            format={(v) => fmtCompact(v, locale)}
-            spark={tokensSpark}
-            loading={loading}
-            chartIndex={1}
-          />
-          <StatCard
-            label={t('dashboard.costMtd')}
-            value={cost?.total_cost_mtd ?? 0}
-            format={(v) => fmtUsd(v, locale)}
-            delta={
-              cost?.budget_usage_pct != null ? `${cost.budget_usage_pct.toFixed(1)}%` : undefined
-            }
-            spark={costSpark}
-            loading={loading}
-            chartIndex={2}
-          />
-          <StatCard
-            label={t('dashboard.activeApiKeys')}
-            value={stats?.active_api_keys ?? 0}
-            format={(v) => fmtInt(Math.round(v), locale)}
-            spark={keysSpark}
-            loading={loading}
-            chartIndex={3}
-          />
-          <StatCard
-            label={t('dashboard.requestsPerMin')}
-            value={currentRpm}
-            format={(v) => fmtInt(Math.round(v), locale)}
-            delta={t('dashboard.live')}
-            spark={rpmSpark}
-            loading={loading}
-            chartIndex={4}
-          />
-        </div>
+        <StatCardGrid
+          cards={{
+            tokens: (
+              <StatCard
+                label={t('dashboard.tokensUsedToday')}
+                value={usage?.total_tokens_today ?? 0}
+                format={(v) => fmtCompact(v, locale)}
+                spark={tokensSpark}
+                loading={loading}
+                chartIndex={1}
+              />
+            ),
+            cost: (
+              <StatCard
+                label={t('dashboard.costMtd')}
+                value={cost?.total_cost_mtd ?? 0}
+                format={(v) => fmtUsd(v, locale)}
+                delta={
+                  cost?.budget_usage_pct != null
+                    ? `${cost.budget_usage_pct.toFixed(1)}%`
+                    : undefined
+                }
+                spark={costSpark}
+                loading={loading}
+                chartIndex={2}
+              />
+            ),
+            keys: (
+              <StatCard
+                label={t('dashboard.activeApiKeys')}
+                value={stats?.active_api_keys ?? 0}
+                format={(v) => fmtInt(Math.round(v), locale)}
+                spark={keysSpark}
+                loading={loading}
+                chartIndex={3}
+              />
+            ),
+            rpm: (
+              <StatCard
+                label={t('dashboard.requestsPerMin')}
+                value={currentRpm}
+                format={(v) => fmtInt(Math.round(v), locale)}
+                delta={t('dashboard.live')}
+                spark={rpmSpark}
+                loading={loading}
+                chartIndex={4}
+              />
+            ),
+          }}
+        />
       </Section>
 
       {/* Bottom region — flex-1 fills the rest of the viewport. The inner
