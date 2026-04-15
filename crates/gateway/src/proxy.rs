@@ -124,6 +124,45 @@ fn resolve_budget_subjects(identity: &GatewayRequestIdentity) -> Vec<(BudgetSubj
 /// streaming responses where the connection could still break after
 /// this point we still write 200 — partial completions carry their
 /// own `outcome=cancelled` counter in the streaming layer.
+/// Per-handler error-logging context. Built once near the top of each
+/// AI proxy handler and consumed by `return Err(ctx.emit(...))` at
+/// early-return points so an error never leaves the gateway without a
+/// matching `gateway_logs` row. The success path uses
+/// `emit_gateway_log` directly because it has tokens / cost info that
+/// the error path doesn't.
+///
+/// Fields are owned (cheap clones at request entry) because the
+/// handler later mutates `request` and a borrow of `request.model`
+/// would block that with a partial-borrow error. The audit handle is
+/// borrowed because it's already an `Arc` internally.
+struct LogCtx<'a> {
+    audit: &'a think_watch_common::audit::AuditLogger,
+    trace_id: String,
+    user_id: Option<String>,
+    api_key_id: Option<String>,
+    /// May be "(unknown)" when the failure happens before the model
+    /// has been resolved (e.g. transform errors on malformed bodies).
+    model: String,
+    started: std::time::Instant,
+}
+
+impl LogCtx<'_> {
+    /// Emit the error row and return the error unchanged so call sites
+    /// stay one-line:  `return Err(ctx.emit(GatewayError::...));`
+    fn emit(&self, err: GatewayError) -> GatewayError {
+        emit_gateway_error_log(
+            self.audit,
+            &self.trace_id,
+            self.user_id.as_deref(),
+            self.api_key_id.as_deref(),
+            &self.model,
+            self.started.elapsed().as_millis() as i64,
+            &err,
+        );
+        err
+    }
+}
+
 /// Resolve the trace id for an AI request. Prefers a caller-supplied
 /// `x-trace-id` header (length-bounded ASCII, no control chars) so a
 /// client that wants its AI request linked with a follow-on MCP
@@ -669,6 +708,23 @@ pub async fn proxy_chat_completion(
     // 1. Apply model mapping
     request.model = state.model_mapper.map(&request.model);
 
+    // Resolve trace_id and start clock up front so every early-return
+    // path (allowed_models reject / preflight rate limit / content
+    // filter block / route lookup miss) can emit a gateway_logs row
+    // before bubbling. RequestMetadata::extract honors the same
+    // x-trace-id header further down, so metadata.request_id ends up
+    // matching trace_id.
+    let trace_id = resolve_trace_id(&headers);
+    let request_started_at = std::time::Instant::now();
+    let ctx = LogCtx {
+        audit: &state.audit,
+        trace_id: trace_id.clone(),
+        user_id: identity.user_id.clone(),
+        api_key_id: identity.api_key_id.clone(),
+        model: request.model.clone(),
+        started: request_started_at,
+    };
+
     // 2. Enforce allowed_models from API key
     if let Some(ref allowed) = identity.allowed_models
         && !allowed.is_empty()
@@ -676,11 +732,12 @@ pub async fn proxy_chat_completion(
             .iter()
             .any(|m| request.model == *m || request.model.starts_with(m))
     {
-        return Err(GatewayError::TransformError(format!(
-            "Model '{}' is not allowed for this API key",
-            request.model
-        ))
-        .into());
+        return Err(ctx
+            .emit(GatewayError::TransformError(format!(
+                "Model '{}' is not allowed for this API key",
+                request.model
+            )))
+            .into());
     }
 
     // 3. Rate limit pre-flight (requests metric). See
@@ -688,12 +745,12 @@ pub async fn proxy_chat_completion(
     // Messages and the Responses surface so all three obey the
     // same `(api_key, user, provider)` rule resolution and the
     // same `security.rate_limit_fail_closed` toggle.
-    let (_provider_id, request_rules) =
-        preflight_request_limits(&state, &identity, &request.model).await?;
+    let (_provider_id, request_rules) = preflight_request_limits(&state, &identity, &request.model)
+        .await
+        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e.0)))?;
 
     // 4. Extract per-request metadata from headers and body
     let metadata = RequestMetadata::extract(&headers, &request);
-    let request_started_at = std::time::Instant::now();
     tracing::info!(
         request_id = %metadata.request_id,
         model = %metadata.model,
@@ -707,10 +764,11 @@ pub async fn proxy_chat_completion(
         match m.action {
             Action::Block => {
                 tracing::warn!("Content filter blocked request: {m}");
-                return Err(GatewayError::TransformError(format!(
-                    "Request blocked by content filter: {m}"
-                ))
-                .into());
+                return Err(ctx
+                    .emit(GatewayError::TransformError(format!(
+                        "Request blocked by content filter: {m}"
+                    )))
+                    .into());
             }
             Action::Warn => {
                 tracing::warn!("Content filter warning (request allowed): {m}");
@@ -739,7 +797,9 @@ pub async fn proxy_chat_completion(
         .unwrap_or_else(|| request.model.clone());
     if let Err(e) = state.quota.check_quota(&quota_key).await {
         tracing::warn!("Quota exceeded for {quota_key}: {e}");
-        return Err(GatewayError::ProviderError(format!("Quota exceeded: {e}")).into());
+        return Err(ctx
+            .emit(GatewayError::ProviderError(format!("Quota exceeded: {e}")))
+            .into());
     }
 
     let is_stream = request.stream.unwrap_or(false);
@@ -771,7 +831,10 @@ pub async fn proxy_chat_completion(
     // Route to provider — multi-route failover
     let original_model = request.model.clone();
     let routes = state.router.route(&request.model).ok_or_else(|| {
-        GatewayError::ProviderError(format!("No provider found for model: {}", request.model))
+        ctx.emit(GatewayError::ProviderError(format!(
+            "No provider found for model: {}",
+            request.model
+        )))
     })?;
 
     if is_stream {
@@ -1010,10 +1073,24 @@ pub async fn proxy_anthropic_messages(
     // makes off the back of a tool-use response. Otherwise mint.
     let trace_id = resolve_trace_id(&headers);
     let request_started_at = std::time::Instant::now();
+
+    // Build LogCtx with model="(unknown)" up-front so a missing-model
+    // body still emits an error row. We rebuild it once we know the
+    // real model so subsequent emits attribute correctly.
+    let early_ctx = LogCtx {
+        audit: &state.audit,
+        trace_id: trace_id.clone(),
+        user_id: identity.user_id.clone(),
+        api_key_id: identity.api_key_id.clone(),
+        model: "(unknown)".into(),
+        started: request_started_at,
+    };
     let model = body
         .get("model")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| GatewayError::TransformError("Missing 'model' field".into()))?
+        .ok_or_else(|| {
+            early_ctx.emit(GatewayError::TransformError("Missing 'model' field".into()))
+        })?
         .to_string();
 
     let is_stream = body
@@ -1023,12 +1100,21 @@ pub async fn proxy_anthropic_messages(
 
     // Apply model mapping
     let mapped_model = state.model_mapper.map(&model);
+    let ctx = LogCtx {
+        audit: &state.audit,
+        trace_id: trace_id.clone(),
+        user_id: identity.user_id.clone(),
+        api_key_id: identity.api_key_id.clone(),
+        model: mapped_model.clone(),
+        started: request_started_at,
+    };
 
     // Rate limit pre-flight — same engine as the chat-completions
     // path so a developer key can't dodge their per-minute quota
     // by switching from `/v1/chat/completions` to `/v1/messages`.
-    let (_provider_id, request_rules) =
-        preflight_request_limits(&state, &identity, &mapped_model).await?;
+    let (_provider_id, request_rules) = preflight_request_limits(&state, &identity, &mapped_model)
+        .await
+        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e.0)))?;
 
     // Content filter — check user messages
     if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
@@ -1047,10 +1133,11 @@ pub async fn proxy_anthropic_messages(
             match m.action {
                 Action::Block => {
                     tracing::warn!("Content filter blocked request: {m}");
-                    return Err(GatewayError::TransformError(format!(
-                        "Request blocked by content filter: {m}"
-                    ))
-                    .into());
+                    return Err(ctx
+                        .emit(GatewayError::TransformError(format!(
+                            "Request blocked by content filter: {m}"
+                        )))
+                        .into());
                 }
                 Action::Warn => tracing::warn!("Content filter warning: {m}"),
                 Action::Log => tracing::info!("Content filter log: {m}"),
@@ -1060,7 +1147,9 @@ pub async fn proxy_anthropic_messages(
 
     // Route to provider — multi-route failover
     let routes = state.router.route(&mapped_model).ok_or_else(|| {
-        GatewayError::ProviderError(format!("No provider found for model: {mapped_model}"))
+        ctx.emit(GatewayError::ProviderError(format!(
+            "No provider found for model: {mapped_model}"
+        )))
     })?;
 
     // Convert to OpenAI format internally, let the provider handle the rest
@@ -1331,10 +1420,21 @@ pub async fn proxy_responses(
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     let trace_id = resolve_trace_id(&headers);
     let request_started_at = std::time::Instant::now();
+
+    let early_ctx = LogCtx {
+        audit: &state.audit,
+        trace_id: trace_id.clone(),
+        user_id: identity.user_id.clone(),
+        api_key_id: identity.api_key_id.clone(),
+        model: "(unknown)".into(),
+        started: request_started_at,
+    };
     let model = body
         .get("model")
         .and_then(|v| v.as_str())
-        .ok_or_else(|| GatewayError::TransformError("Missing 'model' field".into()))?
+        .ok_or_else(|| {
+            early_ctx.emit(GatewayError::TransformError("Missing 'model' field".into()))
+        })?
         .to_string();
 
     let is_stream = body
@@ -1343,11 +1443,20 @@ pub async fn proxy_responses(
         .unwrap_or(false);
 
     let mapped_model = state.model_mapper.map(&model);
+    let ctx = LogCtx {
+        audit: &state.audit,
+        trace_id: trace_id.clone(),
+        user_id: identity.user_id.clone(),
+        api_key_id: identity.api_key_id.clone(),
+        model: mapped_model.clone(),
+        started: request_started_at,
+    };
 
     // Rate limit pre-flight — same engine as the chat completions
     // path. Keeps the three AI surfaces symmetric.
-    let (_provider_id, request_rules) =
-        preflight_request_limits(&state, &identity, &mapped_model).await?;
+    let (_provider_id, request_rules) = preflight_request_limits(&state, &identity, &mapped_model)
+        .await
+        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e.0)))?;
 
     // Extract messages from the "input" field (Responses API format)
     // Input can be a string or an array of messages
@@ -1387,9 +1496,11 @@ pub async fn proxy_responses(
             }
         }
         _ => {
-            return Err(
-                GatewayError::TransformError("Missing or invalid 'input' field".into()).into(),
-            );
+            return Err(ctx
+                .emit(GatewayError::TransformError(
+                    "Missing or invalid 'input' field".into(),
+                ))
+                .into());
         }
     }
 
@@ -1399,10 +1510,11 @@ pub async fn proxy_responses(
         match m.action {
             Action::Block => {
                 tracing::warn!("Content filter blocked request: {m}");
-                return Err(GatewayError::TransformError(format!(
-                    "Request blocked by content filter: {m}"
-                ))
-                .into());
+                return Err(ctx
+                    .emit(GatewayError::TransformError(format!(
+                        "Request blocked by content filter: {m}"
+                    )))
+                    .into());
             }
             Action::Warn => tracing::warn!("Content filter warning: {m}"),
             Action::Log => tracing::info!("Content filter log: {m}"),
@@ -1427,7 +1539,9 @@ pub async fn proxy_responses(
 
     // Route to provider — multi-route failover
     let routes = state.router.route(&mapped_model).ok_or_else(|| {
-        GatewayError::ProviderError(format!("No provider found for model: {mapped_model}"))
+        ctx.emit(GatewayError::ProviderError(format!(
+            "No provider found for model: {mapped_model}"
+        )))
     })?;
 
     if is_stream {
