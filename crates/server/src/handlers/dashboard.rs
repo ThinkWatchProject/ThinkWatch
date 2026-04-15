@@ -15,19 +15,26 @@ use super::clickhouse_util::{ch_available, ch_client};
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct DashboardStats {
-    pub total_requests_today: i64,
+    /// Total AI + MCP requests in the selected window.
+    pub total_requests: i64,
     pub active_providers: i64,
-    /// Number of distinct API keys used in the last 24 hours.
+    /// Number of distinct API keys used in the selected window.
     pub active_api_keys: i64,
     pub connected_mcp_servers: i64,
-    /// Hourly distinct active key counts for the past 24 hours (oldest → newest, length 24).
+    /// Per-bucket distinct active key counts (oldest → newest).
+    /// Length matches the selected range (24 / 7 / 30).
     pub active_keys_buckets: Vec<u64>,
+    /// Echo of the range the server used, so the frontend can label axes.
+    pub range: String,
 }
 
 #[utoipa::path(
     get,
     path = "/api/dashboard/stats",
     tag = "Dashboard",
+    params(
+        ("range" = Option<String>, Query, description = "24h | 7d | 30d (default 24h)"),
+    ),
     responses(
         (status = 200, description = "High-level dashboard counters", body = DashboardStats),
         (status = 401, description = "Unauthorized"),
@@ -38,8 +45,12 @@ pub struct DashboardStats {
 pub async fn get_dashboard_stats(
     auth_user: AuthUser,
     State(state): State<AppState>,
+    Query(rq): Query<crate::handlers::time_range::RangeQuery>,
 ) -> Result<Json<DashboardStats>, AppError> {
-    let today = chrono::Utc::now().date_naive();
+    use crate::handlers::time_range::TimeRange;
+    let range = TimeRange::parse(rq.range.as_deref());
+    let now = chrono::Utc::now();
+    let window_start = range.window_start(now);
     let caller_id = auth_user.claims.sub;
 
     // Determine the team scope for usage / api_key counts. Provider
@@ -63,8 +74,8 @@ pub async fn get_dashboard_stats(
 
     let total_requests: Option<i64> = match &owned_teams_for_usage {
         None => {
-            sqlx::query_scalar("SELECT COUNT(*) FROM usage_records WHERE created_at::date = $1")
-                .bind(today)
+            sqlx::query_scalar("SELECT COUNT(*) FROM usage_records WHERE created_at >= $1")
+                .bind(window_start)
                 .fetch_one(&state.db)
                 .await?
         }
@@ -72,10 +83,10 @@ pub async fn get_dashboard_stats(
             let team_ids_vec: Vec<uuid::Uuid> = team_ids.iter().copied().collect();
             sqlx::query_scalar(
                 "SELECT COUNT(*) FROM usage_records \
-                  WHERE created_at::date = $1 \
+                  WHERE created_at >= $1 \
                     AND (team_id = ANY($2) OR user_id = $3)",
             )
-            .bind(today)
+            .bind(window_start)
             .bind(&team_ids_vec)
             .bind(caller_id)
             .fetch_one(&state.db)
@@ -98,8 +109,9 @@ pub async fn get_dashboard_stats(
             .fetch_one(&state.db)
             .await?;
 
-    // Active API keys — count distinct keys used in the last 24 hours
-    // from ClickHouse gateway_logs, plus hourly buckets for the sparkline.
+    // Active API keys — distinct keys used in the selected window from
+    // ClickHouse gateway_logs, plus per-bucket counts for the sparkline.
+    // Bucket granularity follows the range: hour for 24h, day for 7d/30d.
     let (active_api_keys, active_keys_buckets) = if ch_available(&state) {
         let ch = ch_client(&state)?;
 
@@ -109,7 +121,7 @@ pub async fn get_dashboard_stats(
         }
         #[derive(Debug, clickhouse::Row, Deserialize)]
         struct KeyBucket {
-            hour: String,
+            bucket: String,
             cnt: u64,
         }
 
@@ -135,96 +147,181 @@ pub async fn get_dashboard_stats(
             }
         };
 
+        // Map range → ClickHouse interval expression + bucket function.
+        // CH doesn't let us parameterise keywords, so we pick one of a fixed
+        // set of statements — no string interpolation of untrusted data.
+        let count_query = match range {
+            TimeRange::Day => {
+                "SELECT uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= now() - INTERVAL 24 HOUR \
+                   AND api_key_id IS NOT NULL AND api_key_id != ''"
+            }
+            TimeRange::Week => {
+                "SELECT uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= now() - INTERVAL 7 DAY \
+                   AND api_key_id IS NOT NULL AND api_key_id != ''"
+            }
+            TimeRange::Month => {
+                "SELECT uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= now() - INTERVAL 30 DAY \
+                   AND api_key_id IS NOT NULL AND api_key_id != ''"
+            }
+        };
+        let count_query_scoped = match range {
+            TimeRange::Day => {
+                "SELECT uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= now() - INTERVAL 24 HOUR \
+                   AND api_key_id IS NOT NULL AND api_key_id != '' \
+                   AND has(?, user_id)"
+            }
+            TimeRange::Week => {
+                "SELECT uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= now() - INTERVAL 7 DAY \
+                   AND api_key_id IS NOT NULL AND api_key_id != '' \
+                   AND has(?, user_id)"
+            }
+            TimeRange::Month => {
+                "SELECT uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= now() - INTERVAL 30 DAY \
+                   AND api_key_id IS NOT NULL AND api_key_id != '' \
+                   AND has(?, user_id)"
+            }
+        };
+
         let count_result: u64 = match &visible_user_ids {
             None => ch
-                .query(
-                    "SELECT uniqExact(api_key_id) AS cnt \
-                     FROM gateway_logs \
-                     WHERE created_at >= now() - INTERVAL 24 HOUR \
-                       AND api_key_id IS NOT NULL AND api_key_id != ''",
-                )
+                .query(count_query)
                 .fetch_one::<KeyCount>()
                 .await
                 .map(|r| r.cnt)
                 .unwrap_or(0),
             Some(ids) => ch
-                .query(
-                    "SELECT uniqExact(api_key_id) AS cnt \
-                     FROM gateway_logs \
-                     WHERE created_at >= now() - INTERVAL 24 HOUR \
-                       AND api_key_id IS NOT NULL AND api_key_id != '' \
-                       AND has(?, user_id)",
-                )
+                .query(count_query_scoped)
                 .bind(ids)
                 .fetch_one::<KeyCount>()
                 .await
                 .map(|r| r.cnt)
                 .unwrap_or(0),
+        };
+
+        let bucket_query = match range {
+            TimeRange::Day => {
+                "SELECT toString(toStartOfHour(created_at)) AS bucket, \
+                        uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= toStartOfHour(now()) - INTERVAL 23 HOUR \
+                   AND api_key_id IS NOT NULL AND api_key_id != '' \
+                 GROUP BY bucket ORDER BY bucket ASC"
+            }
+            TimeRange::Week => {
+                "SELECT toString(toStartOfDay(created_at)) AS bucket, \
+                        uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= toStartOfDay(now()) - INTERVAL 6 DAY \
+                   AND api_key_id IS NOT NULL AND api_key_id != '' \
+                 GROUP BY bucket ORDER BY bucket ASC"
+            }
+            TimeRange::Month => {
+                "SELECT toString(toStartOfDay(created_at)) AS bucket, \
+                        uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= toStartOfDay(now()) - INTERVAL 29 DAY \
+                   AND api_key_id IS NOT NULL AND api_key_id != '' \
+                 GROUP BY bucket ORDER BY bucket ASC"
+            }
+        };
+        let bucket_query_scoped = match range {
+            TimeRange::Day => {
+                "SELECT toString(toStartOfHour(created_at)) AS bucket, \
+                        uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= toStartOfHour(now()) - INTERVAL 23 HOUR \
+                   AND api_key_id IS NOT NULL AND api_key_id != '' \
+                   AND has(?, user_id) \
+                 GROUP BY bucket ORDER BY bucket ASC"
+            }
+            TimeRange::Week => {
+                "SELECT toString(toStartOfDay(created_at)) AS bucket, \
+                        uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= toStartOfDay(now()) - INTERVAL 6 DAY \
+                   AND api_key_id IS NOT NULL AND api_key_id != '' \
+                   AND has(?, user_id) \
+                 GROUP BY bucket ORDER BY bucket ASC"
+            }
+            TimeRange::Month => {
+                "SELECT toString(toStartOfDay(created_at)) AS bucket, \
+                        uniqExact(api_key_id) AS cnt \
+                 FROM gateway_logs \
+                 WHERE created_at >= toStartOfDay(now()) - INTERVAL 29 DAY \
+                   AND api_key_id IS NOT NULL AND api_key_id != '' \
+                   AND has(?, user_id) \
+                 GROUP BY bucket ORDER BY bucket ASC"
+            }
         };
 
         let bucket_rows: Vec<KeyBucket> = match &visible_user_ids {
             None => ch
-                .query(
-                    "SELECT \
-                        toString(toStartOfHour(created_at)) AS hour, \
-                        uniqExact(api_key_id) AS cnt \
-                     FROM gateway_logs \
-                     WHERE created_at >= toStartOfHour(now()) - INTERVAL 23 HOUR \
-                       AND api_key_id IS NOT NULL AND api_key_id != '' \
-                     GROUP BY hour \
-                     ORDER BY hour ASC",
-                )
+                .query(bucket_query)
                 .fetch_all::<KeyBucket>()
                 .await
                 .unwrap_or_default(),
             Some(ids) => ch
-                .query(
-                    "SELECT \
-                        toString(toStartOfHour(created_at)) AS hour, \
-                        uniqExact(api_key_id) AS cnt \
-                     FROM gateway_logs \
-                     WHERE created_at >= toStartOfHour(now()) - INTERVAL 23 HOUR \
-                       AND api_key_id IS NOT NULL AND api_key_id != '' \
-                       AND has(?, user_id) \
-                     GROUP BY hour \
-                     ORDER BY hour ASC",
-                )
+                .query(bucket_query_scoped)
                 .bind(ids)
                 .fetch_all::<KeyBucket>()
                 .await
                 .unwrap_or_default(),
         };
 
-        // Build a dense 24-slot array keyed by hour string.
-        let now = chrono::Utc::now();
-        let mut buckets = Vec::with_capacity(24);
-        let lookup: std::collections::HashMap<String, u64> =
-            bucket_rows.into_iter().map(|b| (b.hour, b.cnt)).collect();
-        for i in (0..24).rev() {
-            let hour = (now - chrono::Duration::hours(i))
-                .format("%Y-%m-%d %H:00:00")
-                .to_string();
-            buckets.push(*lookup.get(&hour).unwrap_or(&0));
-        }
+        // CH emits bucket strings in its default `%Y-%m-%d %H:%M:%S` format.
+        // Parse them to timestamps so we can align with range.bucket_starts.
+        use chrono::NaiveDateTime;
+        let lookup: std::collections::HashMap<i64, u64> = bucket_rows
+            .into_iter()
+            .filter_map(|b| {
+                NaiveDateTime::parse_from_str(&b.bucket, "%Y-%m-%d %H:%M:%S")
+                    .ok()
+                    .map(|ndt| (ndt.and_utc().timestamp(), b.cnt))
+            })
+            .collect();
+        let buckets: Vec<u64> = range
+            .bucket_starts(now)
+            .into_iter()
+            .map(|t| *lookup.get(&t.timestamp()).unwrap_or(&0))
+            .collect();
         (count_result as i64, buckets)
     } else {
-        // No ClickHouse — fall back to Postgres last_used_at in past 24h.
+        // No ClickHouse — fall back to Postgres last_used_at in the window.
         let count: Option<i64> = sqlx::query_scalar(
             "SELECT COUNT(DISTINCT id) FROM api_keys \
              WHERE is_active = true AND deleted_at IS NULL \
-               AND last_used_at >= now() - INTERVAL '24 hours'",
+               AND last_used_at >= $1",
         )
+        .bind(window_start)
         .fetch_one(&state.db)
         .await?;
-        (count.unwrap_or(0), vec![0; 24])
+        (count.unwrap_or(0), vec![0; range.bucket_count()])
     };
 
     Ok(Json(DashboardStats {
-        total_requests_today: total_requests.unwrap_or(0),
+        total_requests: total_requests.unwrap_or(0),
         active_providers: active_providers.unwrap_or(0),
         active_api_keys,
         connected_mcp_servers: connected_mcp_servers.unwrap_or(0),
         active_keys_buckets,
+        range: match range {
+            TimeRange::Day => "24h",
+            TimeRange::Week => "7d",
+            TimeRange::Month => "30d",
+        }
+        .into(),
     }))
 }
 

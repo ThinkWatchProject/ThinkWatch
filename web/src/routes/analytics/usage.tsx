@@ -27,14 +27,14 @@ interface UsageRow {
 }
 
 interface UsageStats {
-  total_tokens_today: number;
-  total_requests_today: number;
+  total_tokens: number;
+  total_requests: number;
 }
 
 export function UsagePage() {
   const { t } = useTranslation();
   const [rows, setRows] = useState<UsageRow[]>([]);
-  const [stats, setStats] = useState<UsageStats>({ total_tokens_today: 0, total_requests_today: 0 });
+  const [stats, setStats] = useState<UsageStats>({ total_tokens: 0, total_requests: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -90,7 +90,7 @@ export function UsagePage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {loading ? <Skeleton className="h-8 w-24" /> : stats.total_tokens_today.toLocaleString()}
+              {loading ? <Skeleton className="h-8 w-24" /> : stats.total_tokens.toLocaleString()}
             </div>
           </CardContent>
         </Card>
@@ -101,7 +101,7 @@ export function UsagePage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {loading ? <Skeleton className="h-8 w-24" /> : stats.total_requests_today.toLocaleString()}
+              {loading ? <Skeleton className="h-8 w-24" /> : stats.total_requests.toLocaleString()}
             </div>
           </CardContent>
         </Card>

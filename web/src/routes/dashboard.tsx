@@ -34,24 +34,31 @@ import { DashboardLiveSchema, WsTicketSchema } from '@/lib/schemas';
 import { toast } from 'sonner';
 
 interface DashboardStats {
-  total_requests_today: number;
+  total_requests: number;
   active_providers: number;
   active_api_keys: number;
   connected_mcp_servers: number;
   active_keys_buckets: number[];
+  range: string;
 }
 
 interface UsageStats {
-  total_tokens_today: number;
-  total_requests_today: number;
+  total_tokens: number;
+  total_requests: number;
   tokens_buckets: number[];
+  range: string;
 }
 
 interface CostStats {
-  total_cost_mtd: number;
+  total_cost: number;
   budget_usage_pct: number | null;
   cost_buckets: number[];
+  range: string;
+  total_cost_mtd: number;
 }
+
+type TimeRange = '24h' | '7d' | '30d';
+const TIME_RANGES: readonly TimeRange[] = ['24h', '7d', '30d'] as const;
 
 interface ProviderHealth {
   kind: 'ai' | 'mcp';
@@ -452,7 +459,7 @@ function TokensCard({
   return (
     <StatCard
       label={label}
-      value={usage.total_tokens_today}
+      value={usage.total_tokens}
       format={(v) => fmtCompact(v, locale)}
       spark={usage.tokens_buckets}
       loading={false}
@@ -474,7 +481,7 @@ function CostCard({
   return (
     <StatCard
       label={label}
-      value={cost.total_cost_mtd}
+      value={cost.total_cost}
       format={(v) => fmtUsd(v, locale)}
       delta={cost.budget_usage_pct != null ? `${cost.budget_usage_pct.toFixed(1)}%` : undefined}
       spark={cost.cost_buckets}
@@ -616,15 +623,39 @@ export function DashboardPage() {
   const locale = i18n.language === 'zh' ? 'zh-CN' : 'en-US';
   const { live, connected } = useLiveDashboard();
 
+  // Global time-range filter. Selecting a different range remounts the
+  // three Suspense cards (see `key={range}` below), which mints fresh
+  // promises for the new window.
+  const [range, setRange] = useState<TimeRange>(() => {
+    const cached = typeof window !== 'undefined' ? window.localStorage.getItem('dashboard.range.v1') : null;
+    return cached && (TIME_RANGES as readonly string[]).includes(cached) ? (cached as TimeRange) : '24h';
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('dashboard.range.v1', range);
+    } catch {
+      // ignore
+    }
+  }, [range]);
+
   // Each of the three overview endpoints becomes its own stable promise,
   // consumed by a dedicated <Suspense>-wrapped child via React 19's
   // use(). A card renders as soon as *its* endpoint resolves — the slow
-  // one no longer blocks the other two. useState(() => ...) makes the
-  // promise identity stable across re-renders so suspense doesn't
-  // thrash on every render.
-  const [statsPromise] = useState(() => api<DashboardStats>('/api/dashboard/stats'));
-  const [usagePromise] = useState(() => api<UsageStats>('/api/analytics/usage/stats'));
-  const [costPromise] = useState(() => api<CostStats>('/api/analytics/costs/stats'));
+  // one no longer blocks the other two. useMemo keyed on `range` makes
+  // the promise identity stable across re-renders but refreshes when the
+  // range changes.
+  const statsPromise = useMemo(
+    () => api<DashboardStats>(`/api/dashboard/stats?range=${range}`),
+    [range],
+  );
+  const usagePromise = useMemo(
+    () => api<UsageStats>(`/api/analytics/usage/stats?range=${range}`),
+    [range],
+  );
+  const costPromise = useMemo(
+    () => api<CostStats>(`/api/analytics/costs/stats?range=${range}`),
+    [range],
+  );
 
   // Toast-on-rejection is still useful — keep the "something failed"
   // signal but out-of-band from the render path (ErrorBoundaries below
@@ -677,17 +708,42 @@ export function DashboardPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('dashboard.title')}</h1>
           <p className="text-sm text-muted-foreground">{t('dashboard.subtitle')}</p>
         </div>
-        <div
-          className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground"
-          aria-live="polite"
-        >
-          <span
-            aria-hidden="true"
-            className={`h-1.5 w-1.5 rounded-full ${
-              connected ? 'animate-pulse bg-foreground' : 'bg-muted-foreground'
-            }`}
-          />
-          {connected ? t('dashboard.live') : t('dashboard.reconnecting')}
+        <div className="flex items-center gap-4">
+          {/* Global time-range filter — drives all three overview queries. */}
+          <div
+            role="radiogroup"
+            aria-label={t('dashboard.rangeLabel')}
+            className="inline-flex items-center gap-0.5 rounded-md border bg-muted/30 p-0.5 text-xs"
+          >
+            {TIME_RANGES.map((r) => (
+              <button
+                key={r}
+                type="button"
+                role="radio"
+                aria-checked={range === r}
+                onClick={() => setRange(r)}
+                className={`rounded px-2 py-1 font-medium transition-colors ${
+                  range === r
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                {t(`dashboard.range.${r}`)}
+              </button>
+            ))}
+          </div>
+          <div
+            className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground"
+            aria-live="polite"
+          >
+            <span
+              aria-hidden="true"
+              className={`h-1.5 w-1.5 rounded-full ${
+                connected ? 'animate-pulse bg-foreground' : 'bg-muted-foreground'
+              }`}
+            />
+            {connected ? t('dashboard.live') : t('dashboard.reconnecting')}
+          </div>
         </div>
       </div>
 
