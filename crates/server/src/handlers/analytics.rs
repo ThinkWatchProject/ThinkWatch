@@ -60,6 +60,13 @@ pub struct UsageStats {
     pub tokens_buckets: Vec<i64>,
     /// Echo of the range the server used, so the frontend can render labels.
     pub range: String,
+    /// Same totals over the immediately-preceding window of the same
+    /// length. Populated only when `?compare=true`. Frontend computes
+    /// `(current - prev) / prev` to render a percentage delta.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_total_tokens: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_total_requests: Option<i64>,
 }
 
 #[utoipa::path(
@@ -175,11 +182,68 @@ pub async fn get_usage_stats(
             .collect::<Vec<i64>>()
     };
 
+    // Compare-period totals — same query, [prev_start, prev_end) range.
+    let (prev_total_tokens, prev_total_requests) = if q.compare.unwrap_or(false) {
+        let (prev_start, prev_end) = range.prev_window(now);
+        let (pt, pr) = match &team_filter {
+            None => {
+                let pt: Option<i64> = sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint \
+                       FROM usage_records WHERE created_at >= $1 AND created_at < $2",
+                )
+                .bind(prev_start)
+                .bind(prev_end)
+                .fetch_one(&state.db)
+                .await?;
+                let pr: Option<i64> = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM usage_records \
+                      WHERE created_at >= $1 AND created_at < $2",
+                )
+                .bind(prev_start)
+                .bind(prev_end)
+                .fetch_one(&state.db)
+                .await?;
+                (pt, pr)
+            }
+            Some(team_ids) => {
+                let pt: Option<i64> = sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint \
+                       FROM usage_records \
+                      WHERE created_at >= $1 AND created_at < $2 \
+                        AND (team_id = ANY($3) OR user_id = $4)",
+                )
+                .bind(prev_start)
+                .bind(prev_end)
+                .bind(team_ids)
+                .bind(caller_id)
+                .fetch_one(&state.db)
+                .await?;
+                let pr: Option<i64> = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM usage_records \
+                      WHERE created_at >= $1 AND created_at < $2 \
+                        AND (team_id = ANY($3) OR user_id = $4)",
+                )
+                .bind(prev_start)
+                .bind(prev_end)
+                .bind(team_ids)
+                .bind(caller_id)
+                .fetch_one(&state.db)
+                .await?;
+                (pt, pr)
+            }
+        };
+        (Some(pt.unwrap_or(0)), Some(pr.unwrap_or(0)))
+    } else {
+        (None, None)
+    };
+
     Ok(Json(UsageStats {
         total_tokens: total_tokens.unwrap_or(0),
         total_requests: total_requests.unwrap_or(0),
         tokens_buckets,
         range: range_label(range).into(),
+        prev_total_tokens,
+        prev_total_requests,
     }))
 }
 
@@ -294,6 +358,10 @@ pub struct CostStats {
     /// "you've spent $X this month" figure needs to stay stable even when
     /// the user is inspecting a 24h window.
     pub total_cost_mtd: f64,
+    /// Total cost over the immediately-preceding window of the same
+    /// length. Populated only when `?compare=true`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_total_cost: Option<f64>,
 }
 
 #[utoipa::path(
@@ -462,12 +530,45 @@ pub async fn get_cost_stats(
             .collect::<Vec<f64>>()
     };
 
+    let prev_total_cost = if q.compare.unwrap_or(false) {
+        let (prev_start, prev_end) = range.prev_window(now);
+        let prev: Option<rust_decimal::Decimal> = match &team_filter {
+            None => {
+                sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records \
+                      WHERE created_at >= $1 AND created_at < $2",
+                )
+                .bind(prev_start)
+                .bind(prev_end)
+                .fetch_one(&state.db)
+                .await?
+            }
+            Some(team_ids) => {
+                sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records \
+                      WHERE created_at >= $1 AND created_at < $2 \
+                        AND (team_id = ANY($3) OR user_id = $4)",
+                )
+                .bind(prev_start)
+                .bind(prev_end)
+                .bind(team_ids)
+                .bind(caller_id)
+                .fetch_one(&state.db)
+                .await?
+            }
+        };
+        Some(prev.and_then(|d| d.to_f64()).unwrap_or(0.0))
+    } else {
+        None
+    };
+
     Ok(Json(CostStats {
         total_cost: total_f64,
         budget_usage_pct,
         cost_buckets,
         range: range_label(range).into(),
         total_cost_mtd: total_mtd_f64,
+        prev_total_cost,
     }))
 }
 

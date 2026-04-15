@@ -40,6 +40,8 @@ interface DashboardStats {
   connected_mcp_servers: number;
   active_keys_buckets: number[];
   range: string;
+  prev_total_requests?: number;
+  prev_active_api_keys?: number;
 }
 
 interface UsageStats {
@@ -47,6 +49,8 @@ interface UsageStats {
   total_requests: number;
   tokens_buckets: number[];
   range: string;
+  prev_total_tokens?: number;
+  prev_total_requests?: number;
 }
 
 interface CostStats {
@@ -55,6 +59,7 @@ interface CostStats {
   cost_buckets: number[];
   range: string;
   total_cost_mtd: number;
+  prev_total_cost?: number;
 }
 
 type TimeRange = '24h' | '7d' | '30d';
@@ -464,6 +469,7 @@ function TokensCard({
       spark={usage.tokens_buckets}
       loading={false}
       chartIndex={1}
+      prev={usage.prev_total_tokens}
     />
   );
 }
@@ -487,6 +493,7 @@ function CostCard({
       spark={cost.cost_buckets}
       loading={false}
       chartIndex={2}
+      prev={cost.prev_total_cost}
     />
   );
 }
@@ -509,6 +516,7 @@ function KeysCard({
       spark={stats.active_keys_buckets}
       loading={false}
       chartIndex={3}
+      prev={stats.prev_active_api_keys}
     />
   );
 }
@@ -525,14 +533,46 @@ interface StatCardProps {
   spark: number[];
   loading: boolean;
   chartIndex: 1 | 2 | 3 | 4 | 5;
+  /// Comparison value from the previous-period query (`?compare=true`).
+  /// When present, the card renders a small chip with ↑/↓ + percent
+  /// change. Distinct from `delta` (which is the budget-vs-spend
+  /// percentage on the cost card) so both can show simultaneously.
+  prev?: number;
 }
 
-function StatCard({ label, value, format, delta, spark, loading, chartIndex }: StatCardProps) {
+function StatCard({ label, value, format, delta, spark, loading, chartIndex, prev }: StatCardProps) {
   const animated = useCounter(value);
   const data = useMemo(() => spark.map((v, i) => ({ i, v })), [spark]);
   const config = {
     v: { label, color: `var(--chart-${chartIndex})` },
   } satisfies ChartConfig;
+
+  // Compute percent change vs previous period. Three edge cases:
+  //   prev undefined    → compare mode is off; render nothing
+  //   prev === 0 && value === 0 → no change; render flat
+  //   prev === 0 && value > 0   → infinite growth from zero; render
+  //                                "new" instead of a misleading 0%
+  let cmpChip: { text: string; tone: 'pos' | 'neg' | 'flat' | 'new' } | null = null;
+  if (prev !== undefined) {
+    if (prev === 0 && value === 0) {
+      cmpChip = { text: '0%', tone: 'flat' };
+    } else if (prev === 0) {
+      cmpChip = { text: 'new', tone: 'pos' };
+    } else {
+      const pct = ((value - prev) / prev) * 100;
+      const sign = pct > 0 ? '↑' : pct < 0 ? '↓' : '';
+      cmpChip = {
+        text: `${sign}${Math.abs(pct).toFixed(1)}%`,
+        tone: pct > 0 ? 'pos' : pct < 0 ? 'neg' : 'flat',
+      };
+    }
+  }
+  const cmpToneClass: Record<'pos' | 'neg' | 'flat' | 'new', string> = {
+    pos: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400',
+    neg: 'bg-destructive/15 text-destructive',
+    flat: 'bg-muted text-muted-foreground',
+    new: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400',
+  };
 
   return (
     <Card size="sm">
@@ -541,11 +581,23 @@ function StatCard({ label, value, format, delta, spark, loading, chartIndex }: S
         <CardTitle className="font-mono text-2xl tabular-nums tracking-tight">
           {loading ? '…' : format(animated)}
         </CardTitle>
-        {delta && (
+        {(delta || cmpChip) && (
           <CardAction>
-            <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">
-              {delta}
-            </span>
+            <div className="flex items-center gap-1">
+              {cmpChip && (
+                <span
+                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${cmpToneClass[cmpChip.tone]}`}
+                  title={prev !== undefined ? `prev: ${format(prev)}` : undefined}
+                >
+                  {cmpChip.text}
+                </span>
+              )}
+              {delta && (
+                <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">
+                  {delta}
+                </span>
+              )}
+            </div>
           </CardAction>
         )}
       </CardHeader>
@@ -638,23 +690,39 @@ export function DashboardPage() {
     }
   }, [range]);
 
+  // "Compare to previous" toggle. When on, the three stats endpoints
+  // are queried with `?compare=true` and each card renders a delta
+  // chip vs the immediately-preceding window of the same length.
+  const [compare, setCompare] = useState<boolean>(() => {
+    return typeof window !== 'undefined'
+      && window.localStorage.getItem('dashboard.compare.v1') === '1';
+  });
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('dashboard.compare.v1', compare ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  }, [compare]);
+
   // Each of the three overview endpoints becomes its own stable promise,
   // consumed by a dedicated <Suspense>-wrapped child via React 19's
   // use(). A card renders as soon as *its* endpoint resolves — the slow
-  // one no longer blocks the other two. useMemo keyed on `range` makes
-  // the promise identity stable across re-renders but refreshes when the
-  // range changes.
+  // one no longer blocks the other two. useMemo keyed on `range` +
+  // `compare` makes the promise identity stable across re-renders but
+  // refreshes whenever either control changes.
+  const compareQs = compare ? '&compare=true' : '';
   const statsPromise = useMemo(
-    () => api<DashboardStats>(`/api/dashboard/stats?range=${range}`),
-    [range],
+    () => api<DashboardStats>(`/api/dashboard/stats?range=${range}${compareQs}`),
+    [range, compareQs],
   );
   const usagePromise = useMemo(
-    () => api<UsageStats>(`/api/analytics/usage/stats?range=${range}`),
-    [range],
+    () => api<UsageStats>(`/api/analytics/usage/stats?range=${range}${compareQs}`),
+    [range, compareQs],
   );
   const costPromise = useMemo(
-    () => api<CostStats>(`/api/analytics/costs/stats?range=${range}`),
-    [range],
+    () => api<CostStats>(`/api/analytics/costs/stats?range=${range}${compareQs}`),
+    [range, compareQs],
   );
 
   // Toast-on-rejection is still useful — keep the "something failed"
@@ -732,6 +800,20 @@ export function DashboardPage() {
               </button>
             ))}
           </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={compare}
+            onClick={() => setCompare((v) => !v)}
+            className={`rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              compare
+                ? 'border-primary/60 bg-primary/10 text-primary'
+                : 'border-border bg-muted/30 text-muted-foreground hover:text-foreground'
+            }`}
+            title={t('dashboard.compareHint')}
+          >
+            {t('dashboard.compare')}
+          </button>
           <div
             className="flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-muted-foreground"
             aria-live="polite"

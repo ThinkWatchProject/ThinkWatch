@@ -175,6 +175,8 @@
     "overviewEyebrow": "总览",
     "logsEyebrow": "实时请求",
     "rangeLabel": "时间范围",
+    "compare": "对比",
+    "compareHint": "对比同等长度的上一时段差异",
     "range": {
       "24h": "24小时",
       "7d": "7天",

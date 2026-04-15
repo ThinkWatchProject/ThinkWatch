@@ -11,11 +11,17 @@ use serde::Deserialize;
 /// Shared query-string extractor for `/api/dashboard/stats`,
 /// `/api/analytics/usage/stats`, `/api/analytics/costs/stats`.
 ///
-/// Accepts `?range=24h|7d|30d`. Anything else silently falls back to the
-/// 24h default so an old client with a stale param doesn't 400.
+/// Accepts `?range=24h|7d|30d` and an optional `?compare=true` flag.
+/// When `compare` is set the handler computes totals over the
+/// immediately-preceding window of the same length and returns them
+/// alongside the current values so the dashboard can render a delta.
+/// Anything else silently falls back to the 24h default so an old
+/// client with a stale param doesn't 400.
 #[derive(Debug, Default, Deserialize)]
 pub struct RangeQuery {
     pub range: Option<String>,
+    #[serde(default)]
+    pub compare: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +73,24 @@ impl TimeRange {
     /// than this is excluded from the window.
     pub fn window_start(self, now: DateTime<Utc>) -> DateTime<Utc> {
         self.bucket_starts(now).first().copied().unwrap_or(now)
+    }
+
+    /// Previous-period window — the same-length window immediately
+    /// before the current one. Returns `(start, end)` half-open
+    /// `[start, end)` so SQL becomes `created_at >= start AND
+    /// created_at < end`.
+    ///
+    /// Used by the dashboard "compare to previous" toggle so
+    /// `(current - previous) / previous` gives the operator a
+    /// percentage delta per card.
+    pub fn prev_window(self, now: DateTime<Utc>) -> (DateTime<Utc>, DateTime<Utc>) {
+        let cur_start = self.window_start(now);
+        let n = self.bucket_count() as i64;
+        let prev_start = match self {
+            Self::Day => cur_start - Duration::hours(n),
+            Self::Week | Self::Month => cur_start - Duration::days(n),
+        };
+        (prev_start, cur_start)
     }
 
     /// Bucket start timestamps (oldest → newest), aligned to the trunc unit.
@@ -151,6 +175,29 @@ mod tests {
         let now = Utc::now();
         for r in [TimeRange::Day, TimeRange::Week, TimeRange::Month] {
             assert_eq!(r.window_start(now), r.bucket_starts(now)[0]);
+        }
+    }
+
+    #[test]
+    fn prev_window_is_same_length_and_immediately_before() {
+        let now = Utc::now();
+        for r in [TimeRange::Day, TimeRange::Week, TimeRange::Month] {
+            let cur_start = r.window_start(now);
+            let (prev_start, prev_end) = r.prev_window(now);
+            // Previous window's end == current window's start (no gap,
+            // no overlap).
+            assert_eq!(prev_end, cur_start, "{r:?}: gap between prev/cur windows");
+            // Previous window length == bucket_count × bucket_duration.
+            // The "current window" stretches from window_start to a
+            // few minutes past `now` (because alignment rounds down),
+            // so we compare against the canonical window length, not
+            // `now - cur_start`.
+            let canonical_len = r.bucket_duration() * (r.bucket_count() as i32);
+            let prev_len = prev_end - prev_start;
+            assert_eq!(
+                prev_len, canonical_len,
+                "{r:?}: prev window length {prev_len:?} != canonical {canonical_len:?}"
+            );
         }
     }
 }

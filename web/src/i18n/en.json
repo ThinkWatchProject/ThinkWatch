@@ -175,6 +175,8 @@
     "overviewEyebrow": "Overview",
     "logsEyebrow": "Live requests",
     "rangeLabel": "Time range",
+    "compare": "Compare",
+    "compareHint": "Show change vs the immediately-preceding window of the same length",
     "range": {
       "24h": "24h",
       "7d": "7d",

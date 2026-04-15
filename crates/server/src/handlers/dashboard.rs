@@ -26,6 +26,15 @@ pub struct DashboardStats {
     pub active_keys_buckets: Vec<u64>,
     /// Echo of the range the server used, so the frontend can label axes.
     pub range: String,
+    /// Same totals over the immediately-preceding window of the same
+    /// length. Populated only when `?compare=true`. Provider /
+    /// MCP-server counts are platform-wide instantaneous values so a
+    /// "previous" version doesn't make sense — we only carry the two
+    /// windowed counters that do.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_total_requests: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prev_active_api_keys: Option<i64>,
 }
 
 #[utoipa::path(
@@ -310,6 +319,80 @@ pub async fn get_dashboard_stats(
         (count.unwrap_or(0), vec![0; range.bucket_count()])
     };
 
+    // Compare-period totals: same query shape, [prev_start, prev_end).
+    // Active key count comes from CH when available, falls back to PG
+    // last_used_at — same logic as the current-window branch above.
+    let (prev_total_requests, prev_active_api_keys) = if rq.compare.unwrap_or(false) {
+        let (prev_start, prev_end) = range.prev_window(now);
+
+        let prev_reqs: Option<i64> = match &owned_teams_for_usage {
+            None => {
+                sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM usage_records \
+                      WHERE created_at >= $1 AND created_at < $2",
+                )
+                .bind(prev_start)
+                .bind(prev_end)
+                .fetch_one(&state.db)
+                .await?
+            }
+            Some(team_ids) => {
+                let team_ids_vec: Vec<uuid::Uuid> = team_ids.iter().copied().collect();
+                sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM usage_records \
+                      WHERE created_at >= $1 AND created_at < $2 \
+                        AND (team_id = ANY($3) OR user_id = $4)",
+                )
+                .bind(prev_start)
+                .bind(prev_end)
+                .bind(&team_ids_vec)
+                .bind(caller_id)
+                .fetch_one(&state.db)
+                .await?
+            }
+        };
+
+        let prev_keys: i64 = if ch_available(&state) {
+            #[derive(Debug, clickhouse::Row, Deserialize)]
+            struct KeyCount {
+                cnt: u64,
+            }
+            // Re-bound the CH query against the prev window using the
+            // same DateTime literals — avoids mirroring the Day/Week/
+            // Month switch above.
+            let prev_start_str = prev_start.format("%Y-%m-%d %H:%M:%S").to_string();
+            let prev_end_str = prev_end.format("%Y-%m-%d %H:%M:%S").to_string();
+            ch_client(&state)?
+                .query(
+                    "SELECT uniqExact(api_key_id) AS cnt \
+                     FROM gateway_logs \
+                     WHERE created_at >= parseDateTimeBestEffort(?) \
+                       AND created_at <  parseDateTimeBestEffort(?) \
+                       AND api_key_id IS NOT NULL AND api_key_id != ''",
+                )
+                .bind(&prev_start_str)
+                .bind(&prev_end_str)
+                .fetch_one::<KeyCount>()
+                .await
+                .map(|r| r.cnt as i64)
+                .unwrap_or(0)
+        } else {
+            sqlx::query_scalar::<_, Option<i64>>(
+                "SELECT COUNT(DISTINCT id) FROM api_keys \
+                 WHERE is_active = true AND deleted_at IS NULL \
+                   AND last_used_at >= $1 AND last_used_at < $2",
+            )
+            .bind(prev_start)
+            .bind(prev_end)
+            .fetch_one(&state.db)
+            .await?
+            .unwrap_or(0)
+        };
+        (Some(prev_reqs.unwrap_or(0)), Some(prev_keys))
+    } else {
+        (None, None)
+    };
+
     Ok(Json(DashboardStats {
         total_requests: total_requests.unwrap_or(0),
         active_providers: active_providers.unwrap_or(0),
@@ -322,6 +405,8 @@ pub async fn get_dashboard_stats(
             TimeRange::Month => "30d",
         }
         .into(),
+        prev_total_requests,
+        prev_active_api_keys,
     }))
 }
 
