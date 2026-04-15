@@ -19,7 +19,7 @@ use crate::providers::traits::{ChatCompletionRequest, GatewayError};
 use crate::quota::QuotaManager;
 use crate::rate_limiter::RateLimiter;
 use crate::router::{ModelRouter, RouteEntry};
-use crate::streaming::{stream_to_sse, stream_to_sse_with_restorer};
+use crate::streaming::stream_to_sse_with_restorer;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::{
     self, BudgetSubject, RateLimitSubject, RateMetric, sliding, weight,
@@ -1521,6 +1521,15 @@ pub async fn proxy_responses(
         }
     }
 
+    // PII redaction — same pipeline the chat-completions and Anthropic
+    // surfaces use, so /v1/responses doesn't leak emails / phones / IDs
+    // upstream just because it's the third-class endpoint. Streaming
+    // restoration runs through PiiStreamRestorer below; non-streaming
+    // restoration runs against the converted response right before we
+    // hand it back to the client.
+    let pii_redactor = state.pii_redactor.load();
+    let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&messages);
+
     let max_tokens = body
         .get("max_output_tokens")
         .and_then(|v| v.as_u64())
@@ -1528,7 +1537,7 @@ pub async fn proxy_responses(
 
     let request = crate::providers::traits::ChatCompletionRequest {
         model: mapped_model.clone(),
-        messages,
+        messages: redacted_messages,
         temperature: body.get("temperature").and_then(|v| v.as_f64()),
         max_tokens: Some(max_tokens),
         stream: Some(is_stream),
@@ -1620,7 +1629,12 @@ pub async fn proxy_responses(
                 .await;
             })
         };
-        let mut http_response = stream_to_sse(stream, on_done).into_response();
+        // Stitch placeholders back together as chunks stream through.
+        // Same restorer the chat-completions surface uses; no-op when
+        // redaction_ctx is empty so the feature-off path stays free.
+        let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
+        let mut http_response =
+            stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response();
         if let Ok(v) = trace_id.parse() {
             http_response.headers_mut().insert("x-trace-id", v);
         }
@@ -1650,6 +1664,10 @@ pub async fn proxy_responses(
 
         // Restore original model name
         response.model = mapped_model.clone();
+
+        // Restore PII placeholders so the converted response carries
+        // the original user data the model echoed back.
+        pii_redactor.restore_response(&mut response, &redaction_ctx);
 
         if let Some(ref usage) = response.usage {
             post_flight_account(
