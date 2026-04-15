@@ -87,3 +87,129 @@ pub fn record_cb(key: &str, state: CbState) {
 pub fn snapshot_cb_states() -> HashMap<String, CbState> {
     cb_registry().read().map(|m| m.clone()).unwrap_or_default()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    /// Tests share the global `OPEN_LISTENER` and `CB_REGISTRY` —
+    /// running them in parallel would crosstalk. A serial mutex
+    /// keeps them ordered without forcing the whole crate single-
+    /// threaded.
+    fn serial_lock() -> &'static Mutex<()> {
+        static M: OnceLock<Mutex<()>> = OnceLock::new();
+        M.get_or_init(|| Mutex::new(()))
+    }
+
+    /// Captures listener invocations into a static so a second test
+    /// run within the same process still sees calls made *after*
+    /// the first set_open_listener wins. (OnceLock semantics: only
+    /// the first set takes effect, so we install once at first use.)
+    fn captured() -> &'static Mutex<Vec<(String, String)>> {
+        static C: OnceLock<Mutex<Vec<(String, String)>>> = OnceLock::new();
+        let cell = C.get_or_init(|| Mutex::new(Vec::new()));
+        // Idempotent install — only the first call actually wires the
+        // listener, subsequent ones no-op (OnceLock::set returns Err).
+        let cap = cell;
+        set_open_listener(move |key, kind| {
+            if let Ok(mut g) = cap.lock() {
+                g.push((key.to_string(), kind.to_string()));
+            }
+        });
+        cell
+    }
+
+    fn drain_captured() -> Vec<(String, String)> {
+        let cap = captured();
+        cap.lock()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn open_listener_fires_once_per_transition_to_open() {
+        let _g = serial_lock().lock().unwrap();
+        let _ = drain_captured(); // discard residue from earlier tests
+
+        record_cb_with_kind("test-fires-once", CbState::Closed, "ai");
+        record_cb_with_kind("test-fires-once", CbState::Open, "ai");
+        record_cb_with_kind("test-fires-once", CbState::Open, "ai");
+        record_cb_with_kind("test-fires-once", CbState::Open, "ai");
+
+        let calls = drain_captured();
+        let calls_for_key: Vec<_> = calls
+            .iter()
+            .filter(|(k, _)| k == "test-fires-once")
+            .collect();
+        assert_eq!(
+            calls_for_key.len(),
+            1,
+            "expected exactly one Open transition, got {calls_for_key:?}"
+        );
+        assert_eq!(calls_for_key[0].1, "ai");
+    }
+
+    #[test]
+    fn open_listener_re_fires_after_close_then_open() {
+        let _g = serial_lock().lock().unwrap();
+        let _ = drain_captured();
+
+        record_cb_with_kind("test-re-fires", CbState::Open, "mcp");
+        record_cb_with_kind("test-re-fires", CbState::Closed, "mcp");
+        record_cb_with_kind("test-re-fires", CbState::Open, "mcp");
+
+        let calls = drain_captured();
+        let calls_for_key: Vec<_> = calls.iter().filter(|(k, _)| k == "test-re-fires").collect();
+        assert_eq!(
+            calls_for_key.len(),
+            2,
+            "Closed→Open should re-fire, got {calls_for_key:?}"
+        );
+        assert!(calls_for_key.iter().all(|(_, kind)| kind == "mcp"));
+    }
+
+    #[test]
+    fn open_listener_does_not_fire_on_half_open() {
+        let _g = serial_lock().lock().unwrap();
+        let _ = drain_captured();
+
+        record_cb_with_kind("test-no-half-open", CbState::Closed, "ai");
+        record_cb_with_kind("test-no-half-open", CbState::HalfOpen, "ai");
+
+        let calls = drain_captured();
+        assert!(
+            !calls.iter().any(|(k, _)| k == "test-no-half-open"),
+            "HalfOpen transition must not fire the Open listener"
+        );
+    }
+
+    #[test]
+    fn record_cb_legacy_uses_unknown_kind_tag() {
+        let _g = serial_lock().lock().unwrap();
+        let _ = drain_captured();
+
+        record_cb("test-legacy-shim", CbState::Open);
+
+        let calls = drain_captured();
+        let entry = calls
+            .iter()
+            .find(|(k, _)| k == "test-legacy-shim")
+            .expect("legacy shim should still fire the listener");
+        assert_eq!(entry.1, "unknown");
+    }
+
+    #[test]
+    fn snapshot_reflects_latest_state_for_each_key() {
+        let _g = serial_lock().lock().unwrap();
+
+        record_cb_with_kind("snapshot-test-1", CbState::Closed, "ai");
+        record_cb_with_kind("snapshot-test-2", CbState::Open, "mcp");
+        record_cb_with_kind("snapshot-test-1", CbState::HalfOpen, "ai");
+
+        let snap = snapshot_cb_states();
+        assert_eq!(snap.get("snapshot-test-1"), Some(&CbState::HalfOpen));
+        assert_eq!(snap.get("snapshot-test-2"), Some(&CbState::Open));
+    }
+}

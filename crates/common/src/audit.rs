@@ -397,6 +397,90 @@ mod tests {
         assert_eq!(a, b, "same secret + payload must be stable");
         assert_ne!(a, c, "different secret must change the digest");
     }
+
+    #[test]
+    fn outbox_backoff_doubles_then_caps_at_one_hour() {
+        // Sanity: monotonic non-decreasing and exactly the documented
+        // schedule for the first 8 attempts.
+        assert_eq!(outbox_backoff_secs(1), 30);
+        assert_eq!(outbox_backoff_secs(2), 60);
+        assert_eq!(outbox_backoff_secs(3), 120);
+        assert_eq!(outbox_backoff_secs(4), 240);
+        assert_eq!(outbox_backoff_secs(5), 480);
+        assert_eq!(outbox_backoff_secs(6), 960);
+        assert_eq!(outbox_backoff_secs(7), 1920);
+        // attempt 8 onwards: clamped at 1h.
+        assert_eq!(outbox_backoff_secs(8), 3600);
+        assert_eq!(outbox_backoff_secs(9), 3600);
+        assert_eq!(outbox_backoff_secs(MAX_OUTBOX_ATTEMPTS - 1), 3600);
+    }
+
+    #[test]
+    fn outbox_backoff_floors_attempt_number_at_one() {
+        // Defensive: caller passing 0 or negative shouldn't underflow
+        // the shift. Treat as attempt 1.
+        assert_eq!(outbox_backoff_secs(0), 30);
+        assert_eq!(outbox_backoff_secs(-5), 30);
+    }
+
+    #[test]
+    fn outbox_backoff_total_max_lifetime_is_under_one_day() {
+        // 24 attempts at the cap == ~24h — keeps the doc claim
+        // ("dropped after ~1 day") honest. Exact upper bound:
+        // 30 + 60 + 120 + 240 + 480 + 960 + 1920 + 16 × 3600.
+        let total: u64 = (1..=MAX_OUTBOX_ATTEMPTS).map(outbox_backoff_secs).sum();
+        // < 25 hours (86_400 s × 25 / 24 ≈ 90_000); roughly a day.
+        assert!(total < 90_000, "total backoff window {total}s exceeds ~25h");
+        assert!(
+            total > 60_000,
+            "total backoff window {total}s shorter than expected"
+        );
+    }
+
+    /// AuditEntry must round-trip through JSONB: the durable webhook
+    /// outbox stores entries serialized, and an old payload missing
+    /// the `log_type` field (which is `#[serde(skip)]`) must still
+    /// parse — that field gets re-defaulted by `default_log_type`.
+    #[test]
+    fn audit_entry_deserialise_is_backwards_compatible() {
+        // Minimal payload: id + action + created_at, everything else
+        // None / default. Older outbox rows produced before the model
+        // grew Option fields look like this.
+        let json = r#"{
+            "id": "abc",
+            "action": "test.event",
+            "user_id": null,
+            "user_email": null,
+            "api_key_id": null,
+            "resource": null,
+            "resource_id": null,
+            "detail": null,
+            "ip_address": null,
+            "user_agent": null,
+            "trace_id": null,
+            "created_at": "2026-04-15T00:00:00Z"
+        }"#;
+        let entry: AuditEntry = serde_json::from_str(json).expect("parse minimal payload");
+        assert_eq!(entry.id, "abc");
+        assert_eq!(entry.action, "test.event");
+        // log_type was missing from the wire → falls back to default.
+        assert_eq!(entry.log_type, LogType::Audit);
+    }
+
+    #[test]
+    fn audit_entry_round_trip_through_json() {
+        let original = AuditEntry::new("round.trip")
+            .resource("foo:1")
+            .trace_id("trace-xyz")
+            .detail(serde_json::json!({"k": "v"}));
+        let bytes = serde_json::to_vec(&original).expect("serialise");
+        let decoded: AuditEntry = serde_json::from_slice(&bytes).expect("deserialise");
+        assert_eq!(decoded.id, original.id);
+        assert_eq!(decoded.action, original.action);
+        assert_eq!(decoded.resource, original.resource);
+        assert_eq!(decoded.trace_id, original.trace_id);
+        assert_eq!(decoded.detail, original.detail);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -728,6 +812,20 @@ async fn webhook_outbox_drain_loop(db: PgPool, registry: ForwarderRegistry) {
 
 const MAX_OUTBOX_ATTEMPTS: i32 = 24;
 
+/// Compute the next-attempt backoff (in seconds) for a webhook outbox
+/// row that just failed `attempt_number` times (1-indexed: first
+/// retry is attempt 1). Doubles every attempt, capped at 1 hour so
+/// a long-broken receiver doesn't rot in the table for days between
+/// attempts. Extracted so the schedule is unit-testable without
+/// standing up a Postgres fixture.
+pub(crate) fn outbox_backoff_secs(attempt_number: i32) -> u64 {
+    let n = attempt_number.max(1) as u32;
+    // Saturating shift caps the doubling at attempt 8 → 30 × 128 = 3840s,
+    // then clamped to 3600. Anything past attempt 8 stays at 1h.
+    let exp = (n - 1).min(7);
+    (30u64.saturating_mul(1u64 << exp)).min(3600)
+}
+
 async fn drain_once(
     db: &PgPool,
     registry: &ForwarderRegistry,
@@ -821,14 +919,8 @@ async fn drain_once(
                         "webhook outbox row exhausted; dropping"
                     );
                 } else {
-                    // Exponential backoff capped at 1h:
-                    //   attempt 1 → 30s
-                    //   attempt 2 → 60s
-                    //   attempt 3 → 120s
-                    //   ...
-                    //   attempt 8+ → 3600s
-                    let delay_secs =
-                        (30u64.saturating_mul(1u64 << (next_attempts as u32 - 1).min(7))).min(3600);
+                    // Exponential backoff capped at 1h — see `outbox_backoff_secs`.
+                    let delay_secs = outbox_backoff_secs(next_attempts);
                     let _ = sqlx::query(
                         "UPDATE webhook_outbox \
                             SET attempts = $2, \
