@@ -267,7 +267,10 @@ impl DynamicConfig {
     /// so changes via the settings UI take effect within one tick. Min
     /// clamped at 5s server-side to keep a typo from DOSing upstreams.
     pub async fn mcp_health_interval_secs(&self) -> u64 {
-        let raw = self.get_i64("mcp.health_interval_secs").await.unwrap_or(300);
+        let raw = self
+            .get_i64("mcp.health_interval_secs")
+            .await
+            .unwrap_or(300);
         raw.max(5) as u64
     }
 

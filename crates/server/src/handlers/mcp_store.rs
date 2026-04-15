@@ -549,3 +549,40 @@ async fn resolve_server_collisions(
             .into(),
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn flatten_i18n_passes_through_plain_strings() {
+        assert_eq!(flatten_i18n(&json!("hello")).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn flatten_i18n_joins_bilingual_objects() {
+        let v = json!({"en": "GitHub", "zh": "代码托管"});
+        assert_eq!(flatten_i18n(&v).as_deref(), Some("GitHub\n---\n代码托管"));
+    }
+
+    #[test]
+    fn flatten_i18n_handles_missing_language() {
+        // Only en provided — zh side empty
+        let v = json!({"en": "only english"});
+        assert_eq!(flatten_i18n(&v).as_deref(), Some("only english\n---\n"));
+    }
+
+    #[test]
+    fn flatten_i18n_returns_none_for_empty_object() {
+        let v = json!({"en": "", "zh": ""});
+        assert_eq!(flatten_i18n(&v), None);
+    }
+
+    #[test]
+    fn flatten_i18n_returns_none_for_non_string_non_object() {
+        assert_eq!(flatten_i18n(&json!(42)), None);
+        assert_eq!(flatten_i18n(&json!(null)), None);
+        assert_eq!(flatten_i18n(&json!([1, 2, 3])), None);
+    }
+}

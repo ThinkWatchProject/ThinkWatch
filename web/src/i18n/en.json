@@ -103,6 +103,13 @@
     "syncSuccess": "Synced {{count}} templates from registry",
     "authRequired": "Auth Required",
     "noAuth": "No Auth",
+    "testConnection": "Test Connection",
+    "testing": "Testing...",
+    "testPassed": "Connected — found {{count}} tool(s) in {{ms}}ms",
+    "testFailed": "Connection failed: {{msg}}",
+    "testRequired": "Run a successful connection test first",
+    "toolsPreview": "Tools preview",
+    "moreTools": "… and {{count}} more",
     "category": {
       "developer": "Developer",
       "database": "Database",

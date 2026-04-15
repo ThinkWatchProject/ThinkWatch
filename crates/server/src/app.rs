@@ -208,11 +208,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
     // Background health check loop — keeps the in-memory registry status
     // fresh AND mirrors the result back to `mcp_servers.status` so the
     // admin UI sees real liveness without a manual probe.
-    crate::mcp_runtime::spawn_mcp_health_loop(
-        state.clone(),
-        registry.clone(),
-        pool.clone(),
-    );
+    crate::mcp_runtime::spawn_mcp_health_loop(state.clone(), registry.clone(), pool.clone());
 
     let mut mcp_proxy = McpProxy::new(
         registry,

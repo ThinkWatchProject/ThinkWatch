@@ -103,6 +103,13 @@
     "syncSuccess": "已从仓库同步 {{count}} 个模板",
     "authRequired": "需要认证",
     "noAuth": "无需认证",
+    "testConnection": "测试连接",
+    "testing": "测试中...",
+    "testPassed": "连接成功 — 发现 {{count}} 个工具,耗时 {{ms}}ms",
+    "testFailed": "连接失败:{{msg}}",
+    "testRequired": "请先通过一次连接测试",
+    "toolsPreview": "工具预览",
+    "moreTools": "… 还有 {{count}} 个",
     "category": {
       "developer": "开发工具",
       "database": "数据库",

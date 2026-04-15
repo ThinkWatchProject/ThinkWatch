@@ -15,7 +15,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import { Search, Download, CheckCircle2, Plus, Trash2, Loader2, Star, RefreshCw } from 'lucide-react';
+import { Search, Download, CheckCircle2, Plus, Trash2, Loader2, Star, RefreshCw, PlugZap, XCircle } from 'lucide-react';
 import { api, apiPost, hasPermission } from '@/lib/api';
 import { slugifyPrefix, resolveCollision, sanitizePrefixInput } from '@/lib/prefix-utils';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -82,6 +82,16 @@ export function McpStorePage() {
   const [existingServers, setExistingServers] = useState<{ name: string; namespace_prefix: string }[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [installing, setInstalling] = useState(false);
+  // Test-connection state — gates the install submit button and renders a
+  // tools preview when successful. Mirrors the servers.tsx registration flow.
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    success: boolean;
+    message: string;
+    latency_ms?: number;
+    tools_count?: number;
+    tools?: { name: string; description?: string }[];
+  } | null>(null);
 
   const fetchTemplates = async () => {
     try {
@@ -132,6 +142,45 @@ export function McpStorePage() {
     setServerName(tmpl.name);
     setServerPrefix(tmpl.slug.replace(/-/g, '_'));
     setPrefixManuallyEdited(false);
+    setTestResult(null);
+  };
+
+  // Invalidate test result when connection inputs change — previous test
+  // said nothing about the new URL/secret/headers combo.
+  useEffect(() => {
+    setTestResult(null);
+  }, [endpointUrl, authSecret, customHeaders]);
+
+  const handleTestConnection = async () => {
+    if (!installTemplate) return;
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const headers =
+        customHeaders.length > 0
+          ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
+          : null;
+      const res = await apiPost<{
+        success: boolean;
+        message: string;
+        latency_ms?: number;
+        tools_count?: number;
+        tools?: { name: string; description?: string }[];
+      }>('/api/mcp/servers/test', {
+        endpoint_url: endpointUrl,
+        auth_type: installTemplate.auth_type,
+        auth_secret: authSecret || undefined,
+        custom_headers: headers,
+      });
+      setTestResult(res);
+    } catch (err) {
+      setTestResult({
+        success: false,
+        message: err instanceof Error ? err.message : 'Connection failed',
+      });
+    } finally {
+      setTesting(false);
+    }
   };
 
   // Live preview: what will `name` and `namespace_prefix` actually look like
@@ -154,6 +203,12 @@ export function McpStorePage() {
   const handleInstall = async (e: FormEvent) => {
     e.preventDefault();
     if (!installTemplate) return;
+    // Refuse install unless the user just verified the connection works.
+    // Prevents "installed but broken" servers from piling up in the list.
+    if (!testResult?.success) {
+      toast.error(t('mcpStore.testRequired'));
+      return;
+    }
     setInstalling(true);
     try {
       await apiPost(`/api/mcp/store/${installTemplate.slug}/install`, {
@@ -462,8 +517,74 @@ export function McpStorePage() {
               ))}
             </div>
 
+            {/* Test connection + tools preview */}
+            {needsEndpoint && endpointUrl && (
+              <div className="space-y-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={testing || !endpointUrl}
+                  onClick={handleTestConnection}
+                >
+                  {testing ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      {t('mcpStore.testing')}
+                    </>
+                  ) : (
+                    <>
+                      <PlugZap className="mr-2 h-4 w-4" />
+                      {t('mcpStore.testConnection')}
+                    </>
+                  )}
+                </Button>
+                {testResult && testResult.success && (
+                  <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs">
+                    <div className="flex items-center gap-2 font-medium text-emerald-700 dark:text-emerald-400">
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                      {t('mcpStore.testPassed', {
+                        count: testResult.tools_count ?? 0,
+                        ms: testResult.latency_ms ?? 0,
+                      })}
+                    </div>
+                    {testResult.tools && testResult.tools.length > 0 && (
+                      <div className="mt-2 space-y-1">
+                        <p className="text-muted-foreground">{t('mcpStore.toolsPreview')}:</p>
+                        <ul className="space-y-0.5">
+                          {testResult.tools.slice(0, 5).map((tool) => (
+                            <li key={tool.name} className="font-mono text-[11px]">
+                              <span className="text-foreground">{tool.name}</span>
+                              {tool.description && (
+                                <span className="ml-2 text-muted-foreground">— {tool.description}</span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                        {testResult.tools.length > 5 && (
+                          <p className="text-muted-foreground">
+                            {t('mcpStore.moreTools', { count: testResult.tools.length - 5 })}
+                          </p>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {testResult && !testResult.success && (
+                  <div className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
+                    <XCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    <span>{t('mcpStore.testFailed', { msg: testResult.message })}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
             <DialogFooter>
-              <Button type="submit" disabled={installing}>
+              <Button
+                type="submit"
+                disabled={installing || testing || !testResult?.success}
+                title={!testResult?.success ? t('mcpStore.testRequired') : undefined}
+              >
                 {installing ? (
                   <>
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
