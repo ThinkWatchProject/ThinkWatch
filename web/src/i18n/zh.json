@@ -512,10 +512,17 @@
       "model": "模型",
       "user": "用户",
       "team": "团队",
-      "cost_center": "成本中心"
+      "cost_center": "成本中心",
+      "provider": "提供商"
     },
     "export": "导出 CSV",
-    "exportFailed": "导出失败:{{msg}}"
+    "exportFailed": "导出失败:{{msg}}",
+    "rangeLabel": "时间范围",
+    "range_24h": "24小时",
+    "range_7d": "7天",
+    "range_30d": "30天",
+    "range_mtd": "本月至今",
+    "pivotTotal": "合计"
   },
   "audit": {
     "title": "审计日志",

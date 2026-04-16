@@ -512,10 +512,17 @@
       "model": "Model",
       "user": "User",
       "team": "Team",
-      "cost_center": "Cost center"
+      "cost_center": "Cost center",
+      "provider": "Provider"
     },
     "export": "Export CSV",
-    "exportFailed": "Export failed: {{msg}}"
+    "exportFailed": "Export failed: {{msg}}",
+    "rangeLabel": "Time range",
+    "range_24h": "24h",
+    "range_7d": "7d",
+    "range_30d": "30d",
+    "range_mtd": "MTD",
+    "pivotTotal": "Total"
   },
   "audit": {
     "title": "Audit Logs",

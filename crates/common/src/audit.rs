@@ -1435,6 +1435,7 @@ pub async fn ensure_clickhouse_tables(
         include_str!("../../../deploy/clickhouse/initdb.d/02_index_backfills.sql"),
         include_str!("../../../deploy/clickhouse/initdb.d/03_trace_id_backfill.sql"),
         include_str!("../../../deploy/clickhouse/initdb.d/04_materialized_views.sql"),
+        include_str!("../../../deploy/clickhouse/initdb.d/05_cost_rollup.sql"),
     ];
 
     for init_sql in init_files {

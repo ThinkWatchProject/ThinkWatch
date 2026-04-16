@@ -4,7 +4,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::handlers::{
     access_logs::{AccessLogEntry, AccessLogsResponse},
     admin::UpdateSettingsRequest,
-    analytics::{CostRow, CostStats, UsageRow, UsageStats},
+    analytics::{CostBreakdown, CostItem, CostStats, CostTotals, UsageRow, UsageStats},
     api_keys::UpdateKeyRequest,
     app_logs::{AppLogEntryResponse, AppLogsResponse},
     auth::{ChangePasswordRequest, TotpSetupResponse, TotpVerifyRequest},
@@ -193,7 +193,7 @@ use crate::handlers::{
             RuleRow, RuleListResponse, UpsertRuleRequest, RuleUsage,
             CapRow, CapListResponse, UpsertCapRequest, CapUsage, UsageResponse,
             // Analytics
-            UsageStats, UsageRow, CostStats, CostRow,
+            UsageStats, UsageRow, CostStats, CostBreakdown, CostItem, CostTotals,
             // Dashboard
             DashboardStats, ProviderHealth, RpmBucket, LiveLogRow, DashboardLive, WsTicketResponse,
             DashboardLayout,

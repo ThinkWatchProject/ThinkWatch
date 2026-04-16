@@ -584,37 +584,140 @@ pub async fn get_cost_stats(
     }))
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
-pub struct CostRow {
-    /// Opaque group key; content depends on `group_by` in the request.
-    /// For `group_by=model` it's a model_id; for `user` it's the UUID
-    /// as a string; for `cost_center` it's the tag (or the literal
-    /// string "(untagged)" for NULL).
+/// A single row in the multi-dimension cost breakdown response.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CostItem {
+    /// Dimension name → display value for each requested `group_by` dimension.
+    pub dimensions: std::collections::HashMap<String, String>,
+    /// Backward-compat: equals the first dimension's value so existing
+    /// frontends that read `group_key` keep working during migration.
     pub group_key: String,
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
     #[schema(value_type = f64)]
-    pub total_cost: rust_decimal::Decimal,
+    pub total_cost: f64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Aggregate totals across all groups.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CostTotals {
+    pub request_count: i64,
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub total_cost: f64,
+}
+
+/// Top-level cost breakdown response.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct CostBreakdown {
+    pub items: Vec<CostItem>,
+    pub total: CostTotals,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CostGroupBy {
     Model,
     User,
     CostCenter,
+    Provider,
 }
 
 impl CostGroupBy {
-    fn parse(s: Option<&str>) -> Self {
-        // `"team"` was previously a valid value. `usage_records.team_id`
-        // has been dropped; a caller asking for the team breakdown now
-        // gets the model-level grouping so the page still renders.
-        match s.unwrap_or("").to_ascii_lowercase().as_str() {
-            "user" => Self::User,
-            "cost_center" | "costcenter" => Self::CostCenter,
-            _ => Self::Model,
+    fn parse_single(s: &str) -> Option<Self> {
+        match s.to_ascii_lowercase().as_str() {
+            "model" => Some(Self::Model),
+            "user" => Some(Self::User),
+            "cost_center" | "costcenter" => Some(Self::CostCenter),
+            "provider" => Some(Self::Provider),
+            _ => None,
         }
+    }
+
+    /// Parse a comma-separated list of dimensions.
+    ///
+    /// Returns `Err` with a message for invalid dimension names or if
+    /// more than 3 dimensions are requested. An empty / missing value
+    /// defaults to `[Model]`.
+    fn parse_multi(s: Option<&str>) -> Result<Vec<Self>, String> {
+        let raw = s.unwrap_or("").trim();
+        if raw.is_empty() {
+            return Ok(vec![Self::Model]);
+        }
+        let mut dims = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for part in raw.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            // Legacy "team" silently maps to model (column was dropped).
+            if part.eq_ignore_ascii_case("team") {
+                if seen.insert(Self::Model) {
+                    dims.push(Self::Model);
+                }
+                continue;
+            }
+            match Self::parse_single(part) {
+                Some(dim) => {
+                    if seen.insert(dim) {
+                        dims.push(dim);
+                    }
+                }
+                None => {
+                    return Err(format!(
+                        "unknown group_by dimension: `{part}`. \
+                         Valid values: model, user, cost_center, provider"
+                    ));
+                }
+            }
+        }
+        if dims.is_empty() {
+            return Ok(vec![Self::Model]);
+        }
+        if dims.len() > 3 {
+            return Err("at most 3 group_by dimensions are allowed".into());
+        }
+        Ok(dims)
+    }
+
+    /// The SQL expression that produces this dimension's value.
+    fn sql_expr(self) -> &'static str {
+        match self {
+            Self::Model => "u.model_id",
+            Self::User => "COALESCE(u.user_id::text, '(none)')",
+            Self::CostCenter => "COALESCE(k.cost_center, '(untagged)')",
+            Self::Provider => "COALESCE(p.display_name, '(none)')",
+        }
+    }
+
+    /// The column alias used in SELECT / GROUP BY for this dimension.
+    fn alias(self) -> &'static str {
+        match self {
+            Self::Model => "dim_model",
+            Self::User => "dim_user",
+            Self::CostCenter => "dim_cost_center",
+            Self::Provider => "dim_provider",
+        }
+    }
+
+    /// Human-readable dimension key used in the `dimensions` map.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::User => "user",
+            Self::CostCenter => "cost_center",
+            Self::Provider => "provider",
+        }
+    }
+
+    /// Whether this dimension requires an extra JOIN.
+    fn needs_api_keys_join(self) -> bool {
+        matches!(self, Self::CostCenter)
+    }
+
+    fn needs_providers_join(self) -> bool {
+        matches!(self, Self::Provider)
     }
 }
 
@@ -622,7 +725,9 @@ impl CostGroupBy {
 pub struct CostsQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
-    /// `model` (default) | `user` | `cost_center`.
+    /// Comma-separated dimensions: `model` (default), `user`,
+    /// `cost_center`, `provider`. Up to 3.
+    /// Example: `group_by=model,provider`.
     pub group_by: Option<String>,
     /// `json` (default) | `csv` — when `csv`, response is a text/csv
     /// download instead of JSON.
@@ -638,7 +743,8 @@ pub struct CostsQuery {
     tag = "Analytics",
     params(CostsQuery),
     responses(
-        (status = 200, description = "Cost breakdown grouped by the requested dimension", body = Vec<CostRow>),
+        (status = 200, description = "Cost breakdown grouped by the requested dimensions", body = CostBreakdown),
+        (status = 400, description = "Invalid group_by dimension"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Forbidden"),
     ),
@@ -652,8 +758,11 @@ pub async fn get_costs(
     use axum::response::IntoResponse;
     let (limit, offset) =
         super::clickhouse_util::clamp_pagination(params.limit, params.offset, 200);
+
+    let dims =
+        CostGroupBy::parse_multi(params.group_by.as_deref()).map_err(AppError::BadRequest)?;
+
     // Range: default = month-to-date (the page's original semantics).
-    // Explicit 24h/7d/30d narrow the window.
     let now = chrono::Utc::now();
     let window_start = match params.range.as_deref().unwrap_or("mtd") {
         "24h" => TimeRange::Day.window_start(now),
@@ -667,37 +776,60 @@ pub async fn get_costs(
             .expect("valid hms")
             .and_utc(),
     };
-    let group_by = CostGroupBy::parse(params.group_by.as_deref());
     let team_filter = analytics_team_filter(&auth_user, &state.db).await?;
     let caller_id = auth_user.claims.sub;
 
-    // Pick the SQL grouping expression based on group_by. No user input
-    // is interpolated — the enum picks one of a fixed set of expressions,
-    // so there's no injection surface.
-    let (group_expr, from_expr) = match group_by {
-        CostGroupBy::Model => ("u.model_id", "usage_records u"),
-        CostGroupBy::User => ("COALESCE(u.user_id::text, '(none)')", "usage_records u"),
-        CostGroupBy::CostCenter => (
-            "COALESCE(k.cost_center, '(untagged)')",
-            "usage_records u LEFT JOIN api_keys k ON k.id = u.api_key_id",
-        ),
-    };
+    // Build dynamic SQL fragments from the validated dimension list.
+    // No user input is interpolated — each enum variant maps to a fixed
+    // SQL expression, so there is no injection surface.
+    let need_api_keys = dims.iter().any(|d| d.needs_api_keys_join());
+    let need_providers = dims.iter().any(|d| d.needs_providers_join());
 
-    let rows: Vec<CostRow> = match team_filter {
+    let mut from = String::from("usage_records u");
+    if need_api_keys {
+        from.push_str(" LEFT JOIN api_keys k ON k.id = u.api_key_id");
+    }
+    if need_providers {
+        from.push_str(" LEFT JOIN providers p ON p.id = u.provider_id");
+    }
+
+    // SELECT columns: one per dimension alias.
+    let select_dims: String = dims
+        .iter()
+        .map(|d| format!("{} AS {}", d.sql_expr(), d.alias()))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // GROUP BY list — use aliases.
+    let group_by_clause: String = dims
+        .iter()
+        .map(|d| d.alias().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // Fetch raw rows via sqlx::Row (dynamic column count).
+    let base_select = format!(
+        "SELECT {select_dims}, \
+                COUNT(*) AS request_count, \
+                COALESCE(SUM(u.input_tokens::bigint), 0)::bigint AS input_tokens, \
+                COALESCE(SUM(u.output_tokens::bigint), 0)::bigint AS output_tokens, \
+                COALESCE(SUM(u.cost_usd), 0) AS total_cost \
+           FROM {from}"
+    );
+
+    use rust_decimal::prelude::ToPrimitive;
+    use sqlx::Row;
+
+    let raw_rows: Vec<sqlx::postgres::PgRow> = match &team_filter {
         None => {
             let sql = format!(
-                "SELECT {group_expr} AS group_key, \
-                        COUNT(*) AS request_count, \
-                        COALESCE(SUM(u.input_tokens::bigint), 0)::bigint AS input_tokens, \
-                        COALESCE(SUM(u.output_tokens::bigint), 0)::bigint AS output_tokens, \
-                        COALESCE(SUM(u.cost_usd), 0) AS total_cost \
-                   FROM {from_expr} \
+                "{base_select} \
                   WHERE u.created_at >= $1 \
-                  GROUP BY group_key \
+                  GROUP BY {group_by_clause} \
                   ORDER BY total_cost DESC \
                   LIMIT $2 OFFSET $3"
             );
-            sqlx::query_as::<_, CostRow>(&sql)
+            sqlx::query(&sql)
                 .bind(window_start)
                 .bind(limit)
                 .bind(offset)
@@ -706,43 +838,101 @@ pub async fn get_costs(
         }
         Some(team_ids) => {
             let sql = format!(
-                "SELECT {group_expr} AS group_key, \
-                        COUNT(*) AS request_count, \
-                        COALESCE(SUM(u.input_tokens::bigint), 0)::bigint AS input_tokens, \
-                        COALESCE(SUM(u.output_tokens::bigint), 0)::bigint AS output_tokens, \
-                        COALESCE(SUM(u.cost_usd), 0) AS total_cost \
-                   FROM {from_expr} \
+                "{base_select} \
                   WHERE u.created_at >= $1 \
-                    AND (u.user_id = $5 OR u.user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($4))) \
-                  GROUP BY group_key \
+                    AND (u.user_id = $5 OR u.user_id IN (\
+                         SELECT user_id FROM team_members WHERE team_id = ANY($4))) \
+                  GROUP BY {group_by_clause} \
                   ORDER BY total_cost DESC \
                   LIMIT $2 OFFSET $3"
             );
-            sqlx::query_as::<_, CostRow>(&sql)
+            sqlx::query(&sql)
                 .bind(window_start)
                 .bind(limit)
                 .bind(offset)
-                .bind(&team_ids)
+                .bind(team_ids)
                 .bind(caller_id)
                 .fetch_all(&state.db)
                 .await?
         }
     };
 
+    // Map raw rows into CostItem structs.
+    let mut total_req: i64 = 0;
+    let mut total_in: i64 = 0;
+    let mut total_out: i64 = 0;
+    let mut total_cost_sum: f64 = 0.0;
+
+    let items: Vec<CostItem> = raw_rows
+        .iter()
+        .map(|row| {
+            let mut dimensions = std::collections::HashMap::new();
+            for d in &dims {
+                let val: String = row.get(d.alias());
+                dimensions.insert(d.key().to_string(), val);
+            }
+            let request_count: i64 = row.get("request_count");
+            let input_tokens: i64 = row.get("input_tokens");
+            let output_tokens: i64 = row.get("output_tokens");
+            let cost_dec: rust_decimal::Decimal = row.get("total_cost");
+            let total_cost = cost_dec.to_f64().unwrap_or(0.0);
+
+            total_req += request_count;
+            total_in += input_tokens;
+            total_out += output_tokens;
+            total_cost_sum += total_cost;
+
+            // group_key = first dimension's value for backward compat.
+            let group_key = dimensions.get(dims[0].key()).cloned().unwrap_or_default();
+
+            CostItem {
+                dimensions,
+                group_key,
+                request_count,
+                input_tokens,
+                output_tokens,
+                total_cost,
+            }
+        })
+        .collect();
+
+    let breakdown = CostBreakdown {
+        items,
+        total: CostTotals {
+            request_count: total_req,
+            input_tokens: total_in,
+            output_tokens: total_out,
+            total_cost: total_cost_sum,
+        },
+    };
+
     // CSV export for spreadsheet / finance handoff.
     if params.format.as_deref() == Some("csv") {
+        let dim_headers: String = dims.iter().map(|d| d.key()).collect::<Vec<_>>().join(",");
         let mut body =
-            String::from("group_key,request_count,input_tokens,output_tokens,total_cost\n");
-        for r in &rows {
+            format!("{dim_headers},request_count,input_tokens,output_tokens,total_cost\n");
+        for item in &breakdown.items {
             use std::fmt::Write;
+            let dim_vals: String = dims
+                .iter()
+                .map(|d| {
+                    csv_escape(
+                        item.dimensions
+                            .get(d.key())
+                            .map(|s| s.as_str())
+                            .unwrap_or(""),
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
             let _ = writeln!(
                 &mut body,
                 "{},{},{},{},{}",
-                csv_escape(&r.group_key),
-                r.request_count,
-                r.input_tokens,
-                r.output_tokens,
-                r.total_cost,
+                dim_vals,
+                item.request_count,
+                item.input_tokens,
+                item.output_tokens,
+                item.total_cost,
             );
         }
         let filename = format!("costs-{}.csv", now.format("%Y%m%d"));
@@ -760,7 +950,7 @@ pub async fn get_costs(
             .into_response());
     }
 
-    Ok(Json(rows).into_response())
+    Ok(Json(breakdown).into_response())
 }
 
 /// Quote-and-escape a field for RFC4180-ish CSV output. We wrap every
@@ -775,30 +965,82 @@ mod helper_tests {
     use super::*;
 
     #[test]
-    fn cost_group_by_parses_known_aliases() {
-        assert_eq!(CostGroupBy::parse(None), CostGroupBy::Model);
-        assert_eq!(CostGroupBy::parse(Some("model")), CostGroupBy::Model);
-        assert_eq!(CostGroupBy::parse(Some("user")), CostGroupBy::User);
-        // "team" used to be its own variant; the team column on
-        // usage_records is gone, so it now falls through to Model.
-        assert_eq!(CostGroupBy::parse(Some("team")), CostGroupBy::Model);
+    fn cost_group_by_parses_single_known() {
+        let dims = CostGroupBy::parse_multi(None).unwrap();
+        assert_eq!(dims, vec![CostGroupBy::Model]);
         assert_eq!(
-            CostGroupBy::parse(Some("cost_center")),
-            CostGroupBy::CostCenter
+            CostGroupBy::parse_multi(Some("model")).unwrap(),
+            vec![CostGroupBy::Model]
         );
         assert_eq!(
-            CostGroupBy::parse(Some("costcenter")),
-            CostGroupBy::CostCenter
+            CostGroupBy::parse_multi(Some("user")).unwrap(),
+            vec![CostGroupBy::User]
         );
-        assert_eq!(CostGroupBy::parse(Some("USER")), CostGroupBy::User);
+        assert_eq!(
+            CostGroupBy::parse_multi(Some("provider")).unwrap(),
+            vec![CostGroupBy::Provider]
+        );
+        assert_eq!(
+            CostGroupBy::parse_multi(Some("cost_center")).unwrap(),
+            vec![CostGroupBy::CostCenter]
+        );
+        assert_eq!(
+            CostGroupBy::parse_multi(Some("costcenter")).unwrap(),
+            vec![CostGroupBy::CostCenter]
+        );
+        assert_eq!(
+            CostGroupBy::parse_multi(Some("USER")).unwrap(),
+            vec![CostGroupBy::User]
+        );
     }
 
     #[test]
-    fn cost_group_by_unknown_falls_back_to_model() {
-        // Default to the historical behaviour so a stale client param
-        // doesn't 400 the export. Defensive — never trust query strings.
-        assert_eq!(CostGroupBy::parse(Some("garbage")), CostGroupBy::Model);
-        assert_eq!(CostGroupBy::parse(Some("")), CostGroupBy::Model);
+    fn cost_group_by_multi_dimensions() {
+        let dims = CostGroupBy::parse_multi(Some("model,provider")).unwrap();
+        assert_eq!(dims, vec![CostGroupBy::Model, CostGroupBy::Provider]);
+
+        let dims = CostGroupBy::parse_multi(Some("user, cost_center, model")).unwrap();
+        assert_eq!(
+            dims,
+            vec![
+                CostGroupBy::User,
+                CostGroupBy::CostCenter,
+                CostGroupBy::Model
+            ]
+        );
+    }
+
+    #[test]
+    fn cost_group_by_deduplicates() {
+        let dims = CostGroupBy::parse_multi(Some("model,model,provider")).unwrap();
+        assert_eq!(dims, vec![CostGroupBy::Model, CostGroupBy::Provider]);
+    }
+
+    #[test]
+    fn cost_group_by_team_legacy_maps_to_model() {
+        // "team" used to be its own variant; maps to Model now.
+        let dims = CostGroupBy::parse_multi(Some("team")).unwrap();
+        assert_eq!(dims, vec![CostGroupBy::Model]);
+    }
+
+    #[test]
+    fn cost_group_by_rejects_unknown() {
+        let err = CostGroupBy::parse_multi(Some("garbage")).unwrap_err();
+        assert!(err.contains("unknown group_by dimension"));
+    }
+
+    #[test]
+    fn cost_group_by_rejects_more_than_3() {
+        let err = CostGroupBy::parse_multi(Some("model,user,provider,cost_center")).unwrap_err();
+        assert!(err.contains("at most 3"));
+    }
+
+    #[test]
+    fn cost_group_by_empty_defaults_to_model() {
+        assert_eq!(
+            CostGroupBy::parse_multi(Some("")).unwrap(),
+            vec![CostGroupBy::Model]
+        );
     }
 
     #[test]
@@ -811,17 +1053,11 @@ mod helper_tests {
     fn csv_escape_doubles_embedded_quotes() {
         // RFC 4180: a literal `"` inside a quoted field becomes `""`.
         assert_eq!(csv_escape(r#"a"b"#), r#""a""b""#);
-        // Input is 8 chars: " q u o t e d "
-        // Each " becomes "" → ""quoted""
-        // Then wrap in "..." → """quoted"""  (3 quotes per side)
         assert_eq!(csv_escape("\"quoted\""), "\"\"\"quoted\"\"\"");
     }
 
     #[test]
     fn csv_escape_keeps_commas_and_newlines_safe() {
-        // The whole field is wrapped in quotes already, so commas and
-        // newlines pass through verbatim. Just verify they don't break
-        // the wrapping.
         assert_eq!(csv_escape("a,b"), "\"a,b\"");
         assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
     }
