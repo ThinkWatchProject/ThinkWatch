@@ -310,6 +310,66 @@ impl DynamicConfig {
         raw.clamp(60, 86400)
     }
 
+    /// Seed default settings that should be visible in Admin > Settings.
+    /// Uses `ON CONFLICT DO NOTHING` so existing values are never overwritten.
+    pub async fn seed_defaults(&self) -> anyhow::Result<()> {
+        let defaults: &[(&str, serde_json::Value, &str, &str)] = &[
+            (
+                "perf.http_client_secs",
+                serde_json::json!(15),
+                "perf",
+                "Outbound HTTP client timeout (seconds)",
+            ),
+            (
+                "perf.mcp_pool_secs",
+                serde_json::json!(30),
+                "perf",
+                "MCP connection pool per-request timeout (seconds)",
+            ),
+            (
+                "perf.console_request_secs",
+                serde_json::json!(30),
+                "perf",
+                "Console-side request timeout (seconds)",
+            ),
+            (
+                "perf.dashboard_ws_io_secs",
+                serde_json::json!(5),
+                "perf",
+                "Dashboard WebSocket per-frame read/write timeout (seconds)",
+            ),
+            (
+                "perf.dashboard_ws_tick_secs",
+                serde_json::json!(4),
+                "perf",
+                "Dashboard WebSocket push interval (seconds)",
+            ),
+            (
+                "perf.dashboard_ws_max_per_user",
+                serde_json::json!(4),
+                "perf",
+                "Max concurrent dashboard WebSocket connections per user",
+            ),
+        ];
+
+        for (key, value, category, description) in defaults {
+            sqlx::query(
+                r#"INSERT INTO system_settings (key, value, category, description, updated_at)
+                   VALUES ($1, $2, $3, $4, now())
+                   ON CONFLICT (key) DO NOTHING"#,
+            )
+            .bind(key)
+            .bind(value)
+            .bind(category)
+            .bind(description)
+            .execute(&self.db)
+            .await?;
+        }
+
+        self.reload().await?;
+        Ok(())
+    }
+
     /// Insert or update a setting, creating the row if it doesn't exist.
     pub async fn upsert(
         &self,
