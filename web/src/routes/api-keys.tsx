@@ -24,17 +24,9 @@ import {
 } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Checkbox } from '@/components/ui/checkbox';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
 import { Plus, Copy, Check, Ban, RotateCw, Pencil, KeyRound, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
-import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
@@ -59,9 +51,7 @@ interface ApiKey {
   id: string;
   name: string;
   key_prefix: string;
-  team_name: string | null;
   user_id: string | null;
-  team_id: string | null;
   surfaces: Surface[];
   allowed_models: string[] | null;
   expires_at: string | null;
@@ -76,6 +66,19 @@ interface ApiKey {
   disabled_reason: string | null;
   last_rotation_at: string | null;
   cost_center: string | null;
+}
+
+// Reused from the roles admin page's model picker — same endpoint
+// (`GET /api/admin/models`), same row shape. Duplicating a type alias
+// here rather than importing from roles/ keeps that namespace's file
+// ownership clean.
+interface ModelRow {
+  id: string;
+  provider_id: string;
+  provider_name: string;
+  model_id: string;
+  display_name: string;
+  is_active: boolean;
 }
 
 interface PaginatedResponse<T> {
@@ -196,6 +199,106 @@ function ExpiryCell({ apiKey }: { apiKey: ApiKey }) {
 }
 
 // ---------------------------------------------------------------------------
+// AllowedModelsEditor — "all / specific" radio with a grouped multiselect
+// ---------------------------------------------------------------------------
+
+interface AllowedModelsEditorProps {
+  mode: 'all' | 'specific';
+  onModeChange: (m: 'all' | 'specific') => void;
+  selected: string[];
+  onSelectedChange: (ids: string[]) => void;
+  available: ModelRow[];
+}
+
+function AllowedModelsEditor({
+  mode,
+  onModeChange,
+  selected,
+  onSelectedChange,
+  available,
+}: AllowedModelsEditorProps) {
+  const { t } = useTranslation();
+  const groups = new Map<string, ModelRow[]>();
+  for (const m of available) {
+    if (!m.is_active) continue;
+    const list = groups.get(m.provider_name) ?? [];
+    list.push(m);
+    groups.set(m.provider_name, list);
+  }
+  const toggleModel = (modelId: string) => {
+    if (selected.includes(modelId)) {
+      onSelectedChange(selected.filter((id) => id !== modelId));
+    } else {
+      onSelectedChange([...selected, modelId]);
+    }
+  };
+  return (
+    <div className="space-y-2">
+      <Label>{t('apiKeys.allowedModels')}</Label>
+      <div
+        role="radiogroup"
+        aria-label={t('apiKeys.allowedModels')}
+        className="flex gap-4 text-sm"
+      >
+        <label className="flex cursor-pointer items-center gap-2">
+          <input
+            type="radio"
+            name="allowed-models-mode"
+            checked={mode === 'all'}
+            onChange={() => onModeChange('all')}
+          />
+          {t('apiKeys.allowedModels_allModels')}
+        </label>
+        <label className="flex cursor-pointer items-center gap-2">
+          <input
+            type="radio"
+            name="allowed-models-mode"
+            checked={mode === 'specific'}
+            onChange={() => onModeChange('specific')}
+          />
+          {t('apiKeys.allowedModels_specificModels')}
+        </label>
+      </div>
+      {mode === 'specific' && (
+        <div className="space-y-2 rounded-md border p-3 text-sm">
+          <p className="text-xs text-muted-foreground">
+            {t('apiKeys.allowedModels_pickModelsHint')}
+          </p>
+          {available.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              {t('apiKeys.allowedModels_noModels')}
+            </p>
+          ) : (
+            Array.from(groups.entries())
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([provider, rows]) => (
+                <div key={provider} className="space-y-1">
+                  <div className="text-xs font-medium text-muted-foreground">{provider}</div>
+                  <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
+                    {rows.map((m) => (
+                      <label
+                        key={m.id}
+                        className="flex cursor-pointer items-center gap-2"
+                      >
+                        <Checkbox
+                          checked={selected.includes(m.model_id)}
+                          onCheckedChange={() => toggleModel(m.model_id)}
+                        />
+                        <span>{m.display_name}</span>
+                        <code className="text-[10px] text-muted-foreground">{m.model_id}</code>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+              ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
@@ -214,21 +317,26 @@ export function ApiKeysPage() {
   const [copied, setCopied] = useState(false);
 
   const [name, setName] = useState('');
-  const [allowedModels, setAllowedModels] = useState('');
+  // `allowedModelsMode` drives the allow-list radio when the AI gateway
+  // surface is enabled. 'all' → send null; 'specific' → send `selectedModels`.
+  const [allowedModelsMode, setAllowedModelsMode] = useState<'all' | 'specific'>('all');
+  const [selectedModels, setSelectedModels] = useState<string[]>([]);
   const [createSurfaces, setCreateSurfaces] = useState<Surface[]>([
     'ai_gateway',
     'mcp_gateway',
   ]);
   const [expiresInDays, setExpiresInDays] = useState('');
-  const [createTeamId, setCreateTeamId] = useState<string>('');
   const [createCostCenter, setCreateCostCenter] = useState('');
   const [costCenterOptions, setCostCenterOptions] = useState<string[]>([]);
-  const { teams } = useTeams();
+  // Model catalogue for the "specific models" multiselect — shared with
+  // the roles admin page and fetched from the same endpoint.
+  const [availableModels, setAvailableModels] = useState<ModelRow[]>([]);
 
   // Edit dialog
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editingKey, setEditingKey] = useState<ApiKey | null>(null);
-  const [editAllowedModels, setEditAllowedModels] = useState('');
+  const [editAllowedModelsMode, setEditAllowedModelsMode] = useState<'all' | 'specific'>('all');
+  const [editSelectedModels, setEditSelectedModels] = useState<string[]>([]);
   const [editSurfaces, setEditSurfaces] = useState<Surface[]>([]);
   const [editExpiresInDays, setEditExpiresInDays] = useState('');
   const [editRotationPeriod, setEditRotationPeriod] = useState('');
@@ -268,6 +376,12 @@ export function ApiKeysPage() {
     api<string[]>('/api/keys/cost-centers')
       .then(setCostCenterOptions)
       .catch(() => setCostCenterOptions([]));
+    // Model catalogue for the allowed-models picker. Same endpoint the
+    // roles admin page uses. Failure is non-fatal — the user can still
+    // pick "All models" which sends null.
+    api<ModelRow[]>('/api/admin/models')
+      .then(setAvailableModels)
+      .catch(() => setAvailableModels([]));
   }, []);
 
   // ---------------------------------------------------------------------------
@@ -289,10 +403,10 @@ export function ApiKeysPage() {
 
   const resetForm = () => {
     setName('');
-    setAllowedModels('');
+    setAllowedModelsMode('all');
+    setSelectedModels([]);
     setCreateSurfaces(['ai_gateway', 'mcp_gateway']);
     setExpiresInDays('');
-    setCreateTeamId('');
     setCreateCostCenter('');
     setFormError('');
     setCreatedKey(null);
@@ -316,16 +430,19 @@ export function ApiKeysPage() {
     setCopied(false);
     setSubmitting(true);
     try {
-      const models = allowedModels
-        .split(',')
-        .map((m) => m.trim())
-        .filter(Boolean);
+      // Only meaningful when ai_gateway is in the surfaces set. For keys
+      // without AI gateway access, allowed_models is irrelevant and we
+      // always send null (= "all", the permissive default).
+      const aiEnabled = createSurfaces.includes('ai_gateway');
+      const allowedModels =
+        aiEnabled && allowedModelsMode === 'specific' && selectedModels.length > 0
+          ? selectedModels
+          : null;
       const res = await apiPost<CreateKeyResponse>('/api/keys', {
         name,
         surfaces: createSurfaces,
-        allowed_models: models.length > 0 ? models : undefined,
+        allowed_models: allowedModels,
         expires_in_days: expiresInDays ? parseInt(expiresInDays, 10) : undefined,
-        team_id: createTeamId && createTeamId !== '__none__' ? createTeamId : undefined,
         cost_center: createCostCenter.trim() ? createCostCenter.trim() : undefined,
       });
       // Refresh autocomplete pool — if the user entered a brand-new
@@ -391,7 +508,13 @@ export function ApiKeysPage() {
 
   const openEditDialog = (k: ApiKey) => {
     setEditingKey(k);
-    setEditAllowedModels(k.allowed_models?.join(', ') ?? '');
+    if (k.allowed_models && k.allowed_models.length > 0) {
+      setEditAllowedModelsMode('specific');
+      setEditSelectedModels(k.allowed_models);
+    } else {
+      setEditAllowedModelsMode('all');
+      setEditSelectedModels([]);
+    }
     setEditSurfaces(k.surfaces ?? []);
     setEditExpiresInDays('');
     setEditRotationPeriod(k.rotation_period_days?.toString() ?? '');
@@ -411,12 +534,13 @@ export function ApiKeysPage() {
     setEditSubmitting(true);
     setEditError('');
     try {
-      const models = editAllowedModels
-        .split(',')
-        .map((m) => m.trim())
-        .filter(Boolean);
+      const aiEnabled = editSurfaces.includes('ai_gateway');
+      const allowedModels =
+        aiEnabled && editAllowedModelsMode === 'specific' && editSelectedModels.length > 0
+          ? editSelectedModels
+          : null;
       await apiPatch(`/api/keys/${editingKey.id}`, {
-        allowed_models: models.length > 0 ? models : null,
+        allowed_models: allowedModels,
         surfaces: editSurfaces,
         expires_in_days: editExpiresInDays ? parseInt(editExpiresInDays, 10) : undefined,
         rotation_period_days: editRotationPeriod ? parseInt(editRotationPeriod, 10) : null,
@@ -546,26 +670,15 @@ export function ApiKeysPage() {
                     ))}
                   </div>
                 </div>
-                <div className="space-y-2">
-                  <Label>{t('apiKeys.team')}</Label>
-                  <Select value={createTeamId} onValueChange={setCreateTeamId}>
-                    <SelectTrigger>
-                      <SelectValue placeholder={t('apiKeys.teamNone')} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="__none__">{t('apiKeys.teamNone')}</SelectItem>
-                      {teams.map((team) => (
-                        <SelectItem key={team.id} value={team.id}>
-                          {team.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="key-models">{t('apiKeys.allowedModels')}</Label>
-                  <Input id="key-models" value={allowedModels} onChange={(e) => setAllowedModels(e.target.value)} placeholder="gpt-4o, claude-sonnet-4 (comma-separated)" />
-                </div>
+                {createSurfaces.includes('ai_gateway') && (
+                  <AllowedModelsEditor
+                    mode={allowedModelsMode}
+                    onModeChange={setAllowedModelsMode}
+                    selected={selectedModels}
+                    onSelectedChange={setSelectedModels}
+                    available={availableModels}
+                  />
+                )}
                 <div className="space-y-2">
                   <Label htmlFor="key-expires">{t('apiKeys.expiresInDays')}</Label>
                   <Input id="key-expires" type="number" value={expiresInDays} onChange={(e) => setExpiresInDays(e.target.value)} placeholder="90" />
@@ -636,11 +749,15 @@ export function ApiKeysPage() {
                 ))}
               </div>
             </div>
-            <div className="space-y-2">
-              <Label>{t('apiKeys.allowedModels')}</Label>
-              <Input value={editAllowedModels} onChange={(e) => setEditAllowedModels(e.target.value)} placeholder="gpt-4o, claude-sonnet-4" />
-              <p className="text-xs text-muted-foreground">{t('apiKeys.allowedModelsHint')}</p>
-            </div>
+            {editSurfaces.includes('ai_gateway') && (
+              <AllowedModelsEditor
+                mode={editAllowedModelsMode}
+                onModeChange={setEditAllowedModelsMode}
+                selected={editSelectedModels}
+                onSelectedChange={setEditSelectedModels}
+                available={availableModels}
+              />
+            )}
             <div className="space-y-2">
               <Label>{t('apiKeys.expiresIn')}</Label>
               <Input type="number" value={editExpiresInDays} onChange={(e) => setEditExpiresInDays(e.target.value)} placeholder="90" min={1} />
@@ -765,7 +882,6 @@ export function ApiKeysPage() {
                 <TableRow>
                   <TableHead>{t('common.name')}</TableHead>
                   <TableHead>{t('apiKeys.keyPrefix')}</TableHead>
-                  <TableHead>{t('apiKeys.team')}</TableHead>
                   <TableHead>{t('apiKeys.surfaces')}</TableHead>
                   <TableHead>{t('apiKeys.expires')}</TableHead>
                   <TableHead>{t('common.status')}</TableHead>
@@ -780,7 +896,6 @@ export function ApiKeysPage() {
                     <TableCell>
                       <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{k.key_prefix}</code>
                     </TableCell>
-                    <TableCell className="text-sm">{k.team_name ?? '—'}</TableCell>
                     <TableCell>
                       <div className="flex flex-wrap gap-1">
                         {(k.surfaces ?? []).map((s) => (

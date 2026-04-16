@@ -9,7 +9,6 @@ pub struct UsageRecord {
     pub id: Uuid,
     pub api_key_id: Option<Uuid>,
     pub user_id: Option<Uuid>,
-    pub team_id: Option<Uuid>,
     pub provider_id: Option<Uuid>,
     pub model_id: String,
     pub request_type: String,

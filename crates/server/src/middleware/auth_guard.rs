@@ -247,25 +247,6 @@ impl AuthUser {
         }
     }
 
-    /// Assert the caller has `perm` covering the api_key whose id
-    /// is `target_api_key_id`. Resolves the api_key's owner and
-    /// delegates to `assert_scope_for_user`.
-    pub async fn assert_scope_for_api_key(
-        &self,
-        pool: &sqlx::PgPool,
-        perm: &str,
-        target_api_key_id: uuid::Uuid,
-    ) -> Result<(), AppError> {
-        let owner: Option<uuid::Uuid> =
-            sqlx::query_scalar("SELECT user_id FROM api_keys WHERE id = $1")
-                .bind(target_api_key_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("api_key lookup failed: {e}")))?;
-        let owner = owner.ok_or_else(|| AppError::NotFound("API key not found".into()))?;
-        self.assert_scope_for_user(pool, perm, owner).await
-    }
-
     /// Polymorphic scope check for the limits engine. The limits
     /// CRUD endpoints are keyed on `(subject_kind, subject_id)`
     /// where `subject_kind ∈ {user, api_key, team, provider, mcp_server}`.

@@ -11,7 +11,6 @@ pub struct ApiKey {
     pub key_hash: String,
     pub name: String,
     pub user_id: Option<Uuid>,
-    pub team_id: Option<Uuid>,
     /// Which gateway surfaces this key may call. Always non-empty
     /// (DB CHECK enforces it). Each entry is one of `ai_gateway` /
     /// `mcp_gateway`.

@@ -28,8 +28,8 @@ interface CostRow {
   total_cost: string;
 }
 
-type CostGroupBy = 'model' | 'user' | 'team' | 'cost_center';
-const GROUP_BY_OPTIONS: readonly CostGroupBy[] = ['model', 'user', 'team', 'cost_center'] as const;
+type CostGroupBy = 'model' | 'user' | 'cost_center';
+const GROUP_BY_OPTIONS: readonly CostGroupBy[] = ['model', 'user', 'cost_center'] as const;
 
 interface CostStats {
   total_cost_mtd: number;

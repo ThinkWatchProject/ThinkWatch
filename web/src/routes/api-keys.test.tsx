@@ -18,12 +18,8 @@ const makeKey = (overrides: Record<string, unknown> = {}) => ({
   id: 'key-1',
   name: 'test-key',
   key_prefix: 'tw_test_',
-  team_name: 'team-a',
   user_id: 'user-1',
-  team_id: 'team-1',
   allowed_models: null,
-  rate_limit_rpm: 60,
-  rate_limit_tpm: null,
   expires_at: null,
   is_active: true,
   last_used_at: null,
@@ -55,8 +51,6 @@ describe('ApiKeysPage', () => {
     // Verify table headers exist
     expect(screen.getByText('Name')).toBeInTheDocument()
     expect(screen.getByText('Key Prefix')).toBeInTheDocument()
-    expect(screen.getByText('Team')).toBeInTheDocument()
-    expect(screen.getByText('Rate Limit')).toBeInTheDocument()
     expect(screen.getByText('Expires')).toBeInTheDocument()
     expect(screen.getByText('Status')).toBeInTheDocument()
   })

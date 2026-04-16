@@ -141,7 +141,6 @@ pub struct UserResponse {
 #[derive(Debug, Deserialize)]
 pub struct CreateApiKeyRequest {
     pub name: String,
-    pub team_id: Option<Uuid>,
     /// Which gateways this key can call. Must be non-empty;
     /// each entry must be `ai_gateway` or `mcp_gateway`. The
     /// handler validates and normalizes the list.

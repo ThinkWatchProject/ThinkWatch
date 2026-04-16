@@ -15,12 +15,59 @@ use think_watch_common::models::ApiKey;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
+/// Resolve whether the caller sees only their own keys or the whole
+/// table. API keys are user-owned, so scope collapses to two cases:
+/// the caller has `perm` at GLOBAL scope (sees everything) or they
+/// only see their own rows. Team-scoped grants no longer widen the
+/// visible set because api_keys don't belong to teams.
+async fn caller_has_global(
+    auth_user: &AuthUser,
+    pool: &sqlx::PgPool,
+    perm: &str,
+) -> Result<bool, AppError> {
+    Ok(auth_user
+        .owned_team_scope_for_perm(pool, perm)
+        .await?
+        .is_none())
+}
+
+/// Reject the request when the caller neither owns the target key
+/// nor has the supplied permission at global scope. Used by the
+/// single-key endpoints (GET/PATCH/DELETE/rotate) which previously
+/// walked through team membership.
+async fn assert_owner_or_global(
+    auth_user: &AuthUser,
+    pool: &sqlx::PgPool,
+    perm: &str,
+    key_id: Uuid,
+) -> Result<(), AppError> {
+    let owner: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM api_keys WHERE id = $1")
+        .bind(key_id)
+        .fetch_optional(pool)
+        .await?;
+    let owner = owner.ok_or_else(|| AppError::NotFound("API key not found".into()))?;
+    let has_perm = !auth_user.denied_permissions.iter().any(|p| p == perm)
+        && auth_user.permissions.iter().any(|p| p == perm);
+    if !has_perm {
+        return Err(AppError::Forbidden(format!(
+            "Missing required permission: {perm}"
+        )));
+    }
+    if auth_user.claims.sub == owner {
+        return Ok(());
+    }
+    if caller_has_global(auth_user, pool, perm).await? {
+        return Ok(());
+    }
+    Err(AppError::Forbidden(format!(
+        "{perm} not granted for this API key"
+    )))
+}
+
 /// GET /api/keys
 ///
 /// Result set is the union of:
-///   - the caller's own keys (always)
-///   - keys belonging to users in any team the caller has
-///     `api_keys:read` scoped to (team_manager case)
+///   - the caller's own keys (always, when they hold `api_keys:read`)
 ///   - everyone's keys, when the caller has `api_keys:read` at
 ///     global scope (super_admin / admin case)
 #[utoipa::path(
@@ -41,75 +88,43 @@ pub async fn list_keys(
     State(state): State<AppState>,
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<PaginatedResponse<ApiKey>>, AppError> {
+    auth_user.require_permission("api_keys:read")?;
     let per_page = pagination.per_page();
     let offset = pagination.offset();
     let caller_id = auth_user.claims.sub;
+    let global = caller_has_global(&auth_user, &state.db, "api_keys:read").await?;
 
-    // Resolve the visible-key filter once. None = global, Some(set)
-    // = caller can only see keys belonging to users in those teams
-    // (plus their own).
-    let owned_teams = auth_user
-        .owned_team_scope_for_perm(&state.db, "api_keys:read")
+    let (total, keys): (i64, Vec<ApiKey>) = if global {
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE deleted_at IS NULL")
+                .fetch_one(&state.db)
+                .await?;
+        let keys = sqlx::query_as::<_, ApiKey>(
+            "SELECT * FROM api_keys WHERE deleted_at IS NULL \
+             ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+        )
+        .bind(per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&state.db)
         .await?;
-
-    let (total, keys): (i64, Vec<ApiKey>) = match owned_teams {
-        None => {
-            // Global scope — no filter at all.
-            let total: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE deleted_at IS NULL")
-                    .fetch_one(&state.db)
-                    .await?;
-            let keys = sqlx::query_as::<_, ApiKey>(
-                "SELECT * FROM api_keys WHERE deleted_at IS NULL \
-                 ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-            )
-            .bind(per_page as i64)
-            .bind(offset as i64)
-            .fetch_all(&state.db)
-            .await?;
-            (total, keys)
-        }
-        Some(team_ids) => {
-            // Caller can see their own keys plus any key whose owner
-            // is in one of the team_ids set.
-            let team_ids_vec: Vec<Uuid> = team_ids.into_iter().collect();
-            let total: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM api_keys k \
-                  WHERE k.deleted_at IS NULL \
-                    AND ( \
-                        k.user_id = $1 \
-                        OR EXISTS ( \
-                            SELECT 1 FROM team_members tm \
-                             WHERE tm.user_id = k.user_id \
-                               AND tm.team_id = ANY($2) \
-                        ) \
-                    )",
-            )
-            .bind(caller_id)
-            .bind(&team_ids_vec)
-            .fetch_one(&state.db)
-            .await?;
-            let keys = sqlx::query_as::<_, ApiKey>(
-                "SELECT k.* FROM api_keys k \
-                  WHERE k.deleted_at IS NULL \
-                    AND ( \
-                        k.user_id = $1 \
-                        OR EXISTS ( \
-                            SELECT 1 FROM team_members tm \
-                             WHERE tm.user_id = k.user_id \
-                               AND tm.team_id = ANY($2) \
-                        ) \
-                    ) \
-                  ORDER BY k.created_at DESC LIMIT $3 OFFSET $4",
-            )
-            .bind(caller_id)
-            .bind(&team_ids_vec)
-            .bind(per_page as i64)
-            .bind(offset as i64)
-            .fetch_all(&state.db)
-            .await?;
-            (total, keys)
-        }
+        (total, keys)
+    } else {
+        let total: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM api_keys WHERE deleted_at IS NULL AND user_id = $1",
+        )
+        .bind(caller_id)
+        .fetch_one(&state.db)
+        .await?;
+        let keys = sqlx::query_as::<_, ApiKey>(
+            "SELECT * FROM api_keys WHERE deleted_at IS NULL AND user_id = $1 \
+             ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(caller_id)
+        .bind(per_page as i64)
+        .bind(offset as i64)
+        .fetch_all(&state.db)
+        .await?;
+        (total, keys)
     };
 
     Ok(Json(PaginatedResponse {
@@ -155,13 +170,13 @@ fn normalize_surfaces(input: &[String]) -> Result<Vec<String>, AppError> {
     tag = "API Keys",
     request_body(
         content_type = "application/json",
-        description = "Key name, surfaces, optional team_id, models, and expiry",
+        description = "Key name, surfaces, optional allowed_models, expiry, and cost_center",
     ),
     responses(
         (status = 200, description = "API key created — plaintext key shown only once"),
-        (status = 400, description = "Invalid surfaces or team membership"),
+        (status = 400, description = "Invalid surfaces"),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Cannot create keys for other teams without team:write"),
+        (status = 403, description = "Missing api_keys:create permission"),
     ),
 )]
 pub async fn create_key(
@@ -169,36 +184,13 @@ pub async fn create_key(
     State(state): State<AppState>,
     Json(req): Json<CreateApiKeyRequest>,
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
-    // Self-serve key creation: any user whose role grants api_keys:create
-    // can mint a key bound to themselves. The team-scope check below
-    // separately enforces "you can only target a team you belong to"
-    // unless the caller also has team:write (full admin). This plugs a
-    // prior gap where the handler had no explicit permission gate at all.
+    // Self-serve creation: any role granting `api_keys:create` lets the
+    // caller mint a key bound to themselves. Keys no longer have a team
+    // concept, so no cross-tenant gate is needed — the key inherits
+    // permissions from the owner's roles only.
     auth_user.require_permission("api_keys:create")?;
 
     let surfaces = normalize_surfaces(&req.surfaces)?;
-
-    // Validate team membership if team_id is specified
-    if let Some(team_id) = req.team_id {
-        let is_member = sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM team_members WHERE user_id = $1 AND team_id = $2)",
-        )
-        .bind(auth_user.claims.sub)
-        .bind(team_id)
-        .fetch_one(&state.db)
-        .await?;
-
-        if !is_member {
-            // Allow users with cross-team API key management to create
-            // keys for any team. The `api_keys:create` permission alone
-            // only grants access to the caller's own team; creating for
-            // another team requires full API-key administration rights,
-            // which we express as `team:write`.
-            auth_user
-                .require_permission("team:write")
-                .map_err(|_| AppError::Forbidden("Cannot create keys for other teams".into()))?;
-        }
-    }
 
     let generated = api_key::generate_api_key();
 
@@ -209,14 +201,13 @@ pub async fn create_key(
     let cost_center = validate_cost_center(req.cost_center.as_deref())?;
 
     let row = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, surfaces, allowed_models, expires_at, cost_center)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *"#,
+        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces, allowed_models, expires_at, cost_center)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
     )
     .bind(&generated.prefix)
     .bind(&generated.hash)
     .bind(&req.name)
     .bind(auth_user.claims.sub)
-    .bind(req.team_id)
     .bind(&surfaces)
     .bind(&req.allowed_models)
     .bind(expires_at)
@@ -242,7 +233,7 @@ pub async fn create_key(
     responses(
         (status = 200, description = "API key details"),
         (status = 401, description = "Unauthorized"),
-        (status = 403, description = "Forbidden — key is outside the caller's team scope"),
+        (status = 403, description = "Forbidden — caller is not the owner and lacks global scope"),
         (status = 404, description = "API key not found"),
     ),
 )]
@@ -251,12 +242,7 @@ pub async fn get_key(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiKey>, AppError> {
-    // Scope check first — bounces requests for keys outside the
-    // caller's owned team set with a 403 instead of leaking the
-    // key's existence via a "not found" probe.
-    auth_user
-        .assert_scope_for_api_key(&state.db, "api_keys:read", id)
-        .await?;
+    assert_owner_or_global(&auth_user, &state.db, "api_keys:read", id).await?;
     let key =
         sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
@@ -286,9 +272,7 @@ pub async fn revoke_key(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user
-        .assert_scope_for_api_key(&state.db, "api_keys:delete", id)
-        .await?;
+    assert_owner_or_global(&auth_user, &state.db, "api_keys:delete", id).await?;
 
     let result = sqlx::query(
         "UPDATE api_keys SET is_active = false, disabled_reason = 'revoked' \
@@ -315,6 +299,9 @@ pub async fn revoke_key(
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateKeyRequest {
+    /// When `Some(None-inside)` field omitted → leave unchanged. A JSON
+    /// `null` for allowed_models means "all models"; a non-empty array
+    /// means restrict to that list.
     pub allowed_models: Option<Vec<String>>,
     /// When `Some`, replaces the entire surfaces list. Must still
     /// be non-empty. Omit the field to leave surfaces untouched.
@@ -350,9 +337,7 @@ pub async fn update_key(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateKeyRequest>,
 ) -> Result<Json<ApiKey>, AppError> {
-    auth_user
-        .assert_scope_for_api_key(&state.db, "api_keys:update", id)
-        .await?;
+    assert_owner_or_global(&auth_user, &state.db, "api_keys:update", id).await?;
     let key =
         sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
@@ -507,9 +492,7 @@ pub async fn rotate_key(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
-    auth_user
-        .assert_scope_for_api_key(&state.db, "api_keys:rotate", id)
-        .await?;
+    assert_owner_or_global(&auth_user, &state.db, "api_keys:rotate", id).await?;
     let old_key =
         sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
@@ -541,17 +524,16 @@ pub async fn rotate_key(
     let mut tx = state.db.begin().await?;
 
     let new_key = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, team_id, surfaces, allowed_models,
+        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces, allowed_models,
             expires_at, rotation_period_days, inactivity_timeout_days,
             rotated_from_id, last_rotation_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
            RETURNING *"#,
     )
     .bind(&generated.prefix)
     .bind(&generated.hash)
     .bind(format!("{} (rotated)", old_key.name))
     .bind(old_key.user_id)
-    .bind(old_key.team_id)
     .bind(&old_key.surfaces)
     .bind(&old_key.allowed_models)
     .bind(old_key.expires_at)
@@ -596,10 +578,8 @@ pub struct ExpiringKeysQuery {
 
 /// GET /api/keys/expiring — list keys expiring within N days.
 ///
-/// Always includes the caller's own expiring keys, plus any keys
-/// belonging to users in teams the caller has `api_keys:read` for
-/// (so a team manager sees the whole team's expiring set, not just
-/// their own). Soft-deleted keys are filtered out.
+/// Caller sees their own expiring keys; admins with `api_keys:read` at
+/// global scope see everyone's. Soft-deleted keys are filtered out.
 #[utoipa::path(
     get,
     path = "/api/keys/expiring",
@@ -617,52 +597,39 @@ pub async fn list_expiring_keys(
     State(state): State<AppState>,
     Query(query): Query<ExpiringKeysQuery>,
 ) -> Result<Json<Vec<ApiKey>>, AppError> {
+    auth_user.require_permission("api_keys:read")?;
     let days = query.days.unwrap_or(7);
     let threshold = chrono::Utc::now() + chrono::Duration::days(days as i64);
     let caller_id = auth_user.claims.sub;
 
-    let owned_teams = auth_user
-        .owned_team_scope_for_perm(&state.db, "api_keys:read")
-        .await?;
+    let global = caller_has_global(&auth_user, &state.db, "api_keys:read").await?;
 
-    let keys = match owned_teams {
-        None => {
-            sqlx::query_as::<_, ApiKey>(
-                r#"SELECT * FROM api_keys
-                   WHERE is_active = true
-                     AND deleted_at IS NULL
-                     AND expires_at IS NOT NULL
-                     AND expires_at <= $1
-                   ORDER BY expires_at ASC"#,
-            )
-            .bind(threshold)
-            .fetch_all(&state.db)
-            .await?
-        }
-        Some(team_ids) => {
-            let team_ids_vec: Vec<Uuid> = team_ids.into_iter().collect();
-            sqlx::query_as::<_, ApiKey>(
-                r#"SELECT k.* FROM api_keys k
-                   WHERE k.is_active = true
-                     AND k.deleted_at IS NULL
-                     AND k.expires_at IS NOT NULL
-                     AND k.expires_at <= $1
-                     AND (
-                         k.user_id = $2
-                         OR EXISTS (
-                             SELECT 1 FROM team_members tm
-                              WHERE tm.user_id = k.user_id
-                                AND tm.team_id = ANY($3)
-                         )
-                     )
-                   ORDER BY k.expires_at ASC"#,
-            )
-            .bind(threshold)
-            .bind(caller_id)
-            .bind(&team_ids_vec)
-            .fetch_all(&state.db)
-            .await?
-        }
+    let keys = if global {
+        sqlx::query_as::<_, ApiKey>(
+            r#"SELECT * FROM api_keys
+               WHERE is_active = true
+                 AND deleted_at IS NULL
+                 AND expires_at IS NOT NULL
+                 AND expires_at <= $1
+               ORDER BY expires_at ASC"#,
+        )
+        .bind(threshold)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<_, ApiKey>(
+            r#"SELECT * FROM api_keys
+               WHERE is_active = true
+                 AND deleted_at IS NULL
+                 AND expires_at IS NOT NULL
+                 AND expires_at <= $1
+                 AND user_id = $2
+               ORDER BY expires_at ASC"#,
+        )
+        .bind(threshold)
+        .bind(caller_id)
+        .fetch_all(&state.db)
+        .await?
     };
 
     Ok(Json(keys))
