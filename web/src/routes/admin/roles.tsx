@@ -5,6 +5,7 @@ import {
   useState,
   useCallback,
   type FormEvent,
+  type ReactNode,
 } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card } from '@/components/ui/card';
@@ -34,7 +35,11 @@ interface PickableUser {
     scope: string;
   }>;
 }
-import { LimitsDraftEditor, persistDrafts } from '@/components/roles/LimitsDraftEditor';
+import {
+  LimitsDraftEditor,
+  draftsToSurfaceConstraints,
+  type SurfaceConstraints,
+} from '@/components/roles/LimitsDraftEditor';
 import { lazy, Suspense } from 'react';
 // Lazy — pulls in codemirror + @codemirror/lang-json (~418 KB). Only
 // users who toggle "Policy JSON" mode on a role ever pay the download.
@@ -101,8 +106,17 @@ import {
   permsToPolicy,
   policyToPerms,
   type RoleMember,
-  type RoleResponse,
+  type RoleResponse as BaseRoleResponse,
 } from './roles/types';
+
+// Track A1 adds `surface_constraints` to the GET /roles/{id} and list
+// responses — rate limits and budgets now live inline on the role
+// row (JSONB column) instead of in side tables keyed by subject.
+// Typed here rather than in shared types.ts to keep the two tracks
+// from stomping on each other; promote upstream once both land.
+type RoleResponse = BaseRoleResponse & {
+  surface_constraints?: SurfaceConstraints;
+};
 
 // (Types, POLICY_TEMPLATES, SIMPLE_TEMPLATES, and the simple↔policy
 // conversion helpers all live in `./roles/types.ts` — see the
@@ -146,6 +160,10 @@ export function RolesPage() {
   const [createLimitDrafts, setCreateLimitDrafts] = useState<Set<string>>(new Set());
   const [editOpen, setEditOpen] = useState(false);
   const [editRole, setEditRole] = useState<RoleResponse | null>(null);
+  // Edit-side limits buffer. Seeded from the role's inline
+  // `surface_constraints` JSONB on openEdit and posted back verbatim
+  // as part of the role PATCH body.
+  const [editConstraints, setEditConstraints] = useState<SurfaceConstraints>({});
   const [saving, setSaving] = useState(false);
 
   // Detail (read-only inspector for system roles)
@@ -426,21 +444,8 @@ export function RolesPage() {
           name: createForm.name,
           description: createForm.description || null,
           ...buildRolePayload(createForm, permissions),
+          surface_constraints: draftsToSurfaceConstraints(createLimitDrafts),
         });
-        // Persist any preset rate-limit / budget drafts the admin
-        // checked. Best-effort: if a single draft fails we toast but
-        // still close the dialog (the role itself is saved).
-        if (createLimitDrafts.size > 0) {
-          try {
-            await persistDrafts(created.id, createLimitDrafts, apiPost);
-          } catch (err) {
-            toast.error(
-              `${t('roles.draftPersistFailed')}: ${
-                err instanceof Error ? err.message : 'unknown'
-              }`,
-            );
-          }
-        }
         setCreateOpen(false);
         resetCreateForm();
         setCreateLimitDrafts(new Set());
@@ -468,6 +473,7 @@ export function RolesPage() {
   const openEdit = (r: RoleResponse) => {
     setEditRole(r);
     editForm.reset(fromRoleResponse(r));
+    setEditConstraints(r.surface_constraints ?? {});
     setEditOpen(true);
   };
 
@@ -490,6 +496,7 @@ export function RolesPage() {
           name: editForm.name,
           description: editForm.description || null,
           ...buildRolePayload(editForm, permissions),
+          surface_constraints: editConstraints,
         });
         setEditOpen(false);
         setEditRole(null);
@@ -881,6 +888,20 @@ export function RolesPage() {
                             mcpTools={createForm.mcpTools}
                             onMcpToolsChange={createForm.setMcpTools}
                             mcpToolsByServer={mcpToolsByServer}
+                            renderGroupExtra={(group) => {
+                              const surface = surfaceFor(group);
+                              if (!surface) return null;
+                              const enabled = createForm.perms.has(`${surface}:use`);
+                              return (
+                                <SurfaceLimitsSlot enabled={enabled}>
+                                  <LimitsDraftEditor
+                                    surface={surface}
+                                    selected={createLimitDrafts}
+                                    onChange={setCreateLimitDrafts}
+                                  />
+                                </SurfaceLimitsSlot>
+                              );
+                            }}
                           />
                         </TabsContent>
                         <TabsContent value="policy" className="mt-3">
@@ -900,17 +921,6 @@ export function RolesPage() {
                         <DangerPermissionWarning />
                       )}
                     </div>
-                  ),
-                },
-                {
-                  id: 'limits',
-                  label: t('roles.stepLimits'),
-                  hint: t('roles.stepLimitsHint'),
-                  content: (
-                    <LimitsDraftEditor
-                      selected={createLimitDrafts}
-                      onChange={setCreateLimitDrafts}
-                    />
                   ),
                 },
                 {
@@ -1077,7 +1087,7 @@ export function RolesPage() {
 
       {/* Edit dialog */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>
-        <DialogContent className="max-w-5xl max-h-[90vh] overflow-y-auto flex flex-col">
+        <DialogContent className="w-[min(95vw,80rem)] max-w-none max-h-[90vh] overflow-y-auto flex flex-col sm:max-w-none">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               {t('roles.editRole')}
@@ -1166,6 +1176,22 @@ export function RolesPage() {
                           mcpTools={editForm.mcpTools}
                           onMcpToolsChange={editForm.setMcpTools}
                           mcpToolsByServer={mcpToolsByServer}
+                          renderGroupExtra={(group) => {
+                            const surface = surfaceFor(group);
+                            if (!surface) return null;
+                            const enabled = editForm.perms.has(`${surface}:use`);
+                            return (
+                              <SurfaceLimitsSlot enabled={enabled}>
+                                <LimitsPanel
+                                  surfaces={[surface]}
+                                  allowBudgets={surface === 'ai_gateway'}
+                                  compact
+                                  value={editConstraints}
+                                  onChange={setEditConstraints}
+                                />
+                              </SurfaceLimitsSlot>
+                            );
+                          }}
                         />
                       </TabsContent>
                       <TabsContent value="policy" className="mt-3">
@@ -1186,19 +1212,6 @@ export function RolesPage() {
                     )}
                   </div>
                 ),
-              },
-              {
-                id: 'limits',
-                label: t('roles.stepLimits'),
-                hint: t('roles.stepLimitsHint'),
-                content: editRole ? (
-                  <LimitsPanel
-                    subjectKind="role"
-                    subjectId={editRole.id}
-                    surfaces={['ai_gateway', 'mcp_gateway']}
-                    allowBudgets={true}
-                  />
-                ) : null,
               },
               {
                 id: 'members',
@@ -1564,6 +1577,48 @@ function RoleKindTabs({
 function hasDangerous(selected: Set<string>, dangerous: Set<string>): boolean {
   for (const key of selected) if (dangerous.has(key)) return true;
   return false;
+}
+
+/// Map a permission-tree resource group to the gateway surface whose
+/// rate limits / budgets are meaningful there. Returns `null` for
+/// resource groups that don't carry surface-scoped constraints.
+function surfaceFor(group: string): 'ai_gateway' | 'mcp_gateway' | null {
+  if (group === 'ai_gateway') return 'ai_gateway';
+  if (group === 'mcp_gateway') return 'mcp_gateway';
+  return null;
+}
+
+/// Wraps the inline limits editor with a header, a "requires the
+/// `<surface>:use` permission" tooltip, and the visual-disabled state
+/// when the permission is off. Keeping the gate here means the
+/// preset-chip / table component itself stays permission-agnostic.
+function SurfaceLimitsSlot({
+  enabled,
+  children,
+}: {
+  enabled: boolean;
+  children: ReactNode;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className="mt-3 space-y-2 border-t pt-3">
+      <div className="flex items-baseline justify-between gap-2">
+        <div>
+          <div className="text-xs font-medium">{t('roles.surfaceLimitsHeader')}</div>
+          <div className="text-[11px] text-muted-foreground">
+            {t('roles.surfaceLimitsHint')}
+          </div>
+        </div>
+      </div>
+      <div
+        className={enabled ? '' : 'pointer-events-none opacity-50'}
+        title={enabled ? undefined : t('roles.surfaceLimitsRequiresPerm')}
+        aria-disabled={!enabled}
+      >
+        {children}
+      </div>
+    </div>
+  );
 }
 
 function DangerPermissionWarning() {

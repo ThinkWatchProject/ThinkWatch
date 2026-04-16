@@ -37,6 +37,11 @@ interface PermissionTreeProps {
   mcpTools: Set<string> | null;
   onMcpToolsChange: (next: Set<string> | null) => void;
   mcpToolsByServer: McpToolsByServer;
+  /** Slot rendered inside each resource group's body after the perm
+   *  checkbox list and the scope dropdown. Used to inline surface-level
+   *  constraints (rate limits, budgets) directly under the `ai_gateway`
+   *  and `mcp_gateway` groups. */
+  renderGroupExtra?: (groupKey: string) => React.ReactNode;
 }
 
 /**
@@ -58,6 +63,7 @@ export function PermissionTree({
   mcpTools,
   onMcpToolsChange,
   mcpToolsByServer,
+  renderGroupExtra,
 }: PermissionTreeProps) {
   const { t } = useTranslation();
   const groups = Array.from(grouped.entries());
@@ -143,6 +149,9 @@ export function PermissionTree({
                     onChange={onMcpToolsChange}
                     mcpToolsByServer={mcpToolsByServer}
                   />
+                )}
+                {renderGroupExtra && (
+                  <div className="mt-2 pl-6">{renderGroupExtra(resource)}</div>
                 )}
               </div>
             );

@@ -46,6 +46,12 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { api, apiPost, apiDelete } from '@/lib/api';
+import type {
+  SurfaceConstraints,
+  SurfaceBlock,
+  SurfaceRule,
+  SurfaceBudget,
+} from '@/components/roles/LimitsDraftEditor';
 
 // ----------------------------------------------------------------------------
 // Types
@@ -126,20 +132,22 @@ const PERIOD_OPTIONS: { value: Period; labelKey: string }[] = [
 // ----------------------------------------------------------------------------
 
 interface LimitsPanelProps {
-  subjectKind: SubjectKind;
-  subjectId: string;
+  subjectKind?: SubjectKind;
+  subjectId?: string;
   /// Which gateway surfaces are valid for this subject. The rules
   /// table only shows / lets the admin add rules for these surfaces.
-  ///
-  ///   - user, api_key with both surfaces → ['ai_gateway', 'mcp_gateway']
-  ///   - api_key restricted to AI       → ['ai_gateway']
-  ///   - provider                       → ['ai_gateway']
-  ///   - mcp_server                     → ['mcp_gateway']
   surfaces: Surface[];
-  /// Whether to render the budget caps section. mcp_server has no
-  /// budget side (the backend `BudgetSubject` enum doesn't include
-  /// it) so the caller passes false there.
+  /// Whether to render the budget caps section.
   allowBudgets: boolean;
+  /// Controlled mode: when supplied the panel stops making API calls
+  /// and edits the in-memory SurfaceConstraints object instead.
+  /// The parent role form collects the result and sends it as part
+  /// of the role PATCH body — limits live inline on the role row now.
+  value?: SurfaceConstraints;
+  onChange?: (next: SurfaceConstraints) => void;
+  /// Strip the collapsible border/header so the panel embeds inline
+  /// under a permission group without a nested-card visual.
+  compact?: boolean;
 }
 
 export function LimitsPanel({
@@ -147,7 +155,48 @@ export function LimitsPanel({
   subjectId,
   surfaces,
   allowBudgets,
+  value,
+  onChange,
+  compact,
 }: LimitsPanelProps) {
+  if (value !== undefined && onChange) {
+    return (
+      <ControlledLimits
+        surfaces={surfaces}
+        allowBudgets={allowBudgets}
+        value={value}
+        onChange={onChange}
+        compact={compact}
+      />
+    );
+  }
+  if (!subjectKind || !subjectId) {
+    throw new Error('LimitsPanel requires either (subjectKind, subjectId) or (value, onChange)');
+  }
+  return (
+    <UncontrolledLimits
+      subjectKind={subjectKind}
+      subjectId={subjectId}
+      surfaces={surfaces}
+      allowBudgets={allowBudgets}
+      compact={compact}
+    />
+  );
+}
+
+function UncontrolledLimits({
+  subjectKind,
+  subjectId,
+  surfaces,
+  allowBudgets,
+  compact,
+}: {
+  subjectKind: SubjectKind;
+  subjectId: string;
+  surfaces: Surface[];
+  allowBudgets: boolean;
+  compact?: boolean;
+}) {
   const { t } = useTranslation();
   const [rules, setRules] = useState<RuleRow[]>([]);
   const [caps, setCaps] = useState<CapRow[]>([]);
@@ -185,23 +234,30 @@ export function LimitsPanel({
   }, [reload]);
 
   return (
-    <Collapsible className="rounded-md border bg-muted/20 px-3 py-2">
-      <CollapsibleTrigger asChild>
-        <button
-          type="button"
-          className="group flex w-full cursor-pointer items-center gap-2 text-sm"
-        >
-          <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
-          <Label className="cursor-pointer font-medium">{t('limits.title')}</Label>
-          <span className="ml-auto text-[11px] text-muted-foreground">
-            {t('limits.summary', {
-              rules: rules.length,
-              caps: allowBudgets ? caps.length : 0,
-            })}
-          </span>
-        </button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="mt-3 space-y-4">
+    <Collapsible
+      defaultOpen={compact}
+      className={
+        compact ? 'space-y-2' : 'rounded-md border bg-muted/20 px-3 py-2'
+      }
+    >
+      {!compact && (
+        <CollapsibleTrigger asChild>
+          <button
+            type="button"
+            className="group flex w-full cursor-pointer items-center gap-2 text-sm"
+          >
+            <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=open]:rotate-90" />
+            <Label className="cursor-pointer font-medium">{t('limits.title')}</Label>
+            <span className="ml-auto text-[11px] text-muted-foreground">
+              {t('limits.summary', {
+                rules: rules.length,
+                caps: allowBudgets ? caps.length : 0,
+              })}
+            </span>
+          </button>
+        </CollapsibleTrigger>
+      )}
+      <CollapsibleContent className={compact ? 'space-y-3' : 'mt-3 space-y-4'}>
         {error && <p className="text-xs text-destructive">{error}</p>}
         {loading && rules.length === 0 && caps.length === 0 ? (
           <p className="text-xs italic text-muted-foreground">{t('common.loading')}</p>
@@ -697,6 +753,396 @@ function AddCapRow({
         />
       </div>
       <Button type="button" size="sm" className="h-7" onClick={submit} disabled={busy || !limitTokens}>
+        <Plus className="mr-1 h-3 w-3" />
+        {t('limits.add')}
+      </Button>
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------------------
+// Controlled panel — inline editor for role surface_constraints
+// ----------------------------------------------------------------------------
+
+// Roles carry their rules / budgets inline on the row (JSONB column)
+// rather than in the `rate_limit_rules` / `budget_caps` side tables,
+// so the role-edit flow edits a plain in-memory object and ships it
+// back as part of the role PATCH body. No `base` URL, no reload, no
+// usage counters (those only exist for subjects with live traffic).
+function ControlledLimits({
+  surfaces,
+  allowBudgets,
+  value,
+  onChange,
+  compact,
+}: {
+  surfaces: Surface[];
+  allowBudgets: boolean;
+  value: SurfaceConstraints;
+  onChange: (next: SurfaceConstraints) => void;
+  compact?: boolean;
+}) {
+  const { t } = useTranslation();
+  // Single-surface inline use is the common case — when the caller
+  // restricts to one surface we can omit the per-row "surface" column
+  // and badge to keep the table dense.
+  const singleSurface: Surface | null = surfaces.length === 1 ? surfaces[0] : null;
+
+  const updateBlock = (s: Surface, next: SurfaceBlock) => {
+    const cleared = next.rules.length === 0 && next.budgets.length === 0;
+    const out: SurfaceConstraints = { ...value };
+    if (cleared) delete out[s];
+    else out[s] = next;
+    onChange(out);
+  };
+
+  const getBlock = (s: Surface): SurfaceBlock =>
+    value[s] ?? { rules: [], budgets: [] };
+
+  const addRule = (s: Surface, rule: SurfaceRule) => {
+    const block = getBlock(s);
+    updateBlock(s, { ...block, rules: [...block.rules, rule] });
+  };
+  const removeRule = (s: Surface, idx: number) => {
+    const block = getBlock(s);
+    updateBlock(s, { ...block, rules: block.rules.filter((_, i) => i !== idx) });
+  };
+  const toggleRule = (s: Surface, idx: number) => {
+    const block = getBlock(s);
+    updateBlock(s, {
+      ...block,
+      rules: block.rules.map((r, i) => (i === idx ? { ...r, enabled: !r.enabled } : r)),
+    });
+  };
+  const addBudget = (s: Surface, budget: SurfaceBudget) => {
+    const block = getBlock(s);
+    // Dedupe-by-period: re-adding the same period overwrites so the
+    // admin can tweak a quota without deleting first. Matches the
+    // backend UNIQUE (subject, period) semantics on budget_caps.
+    updateBlock(s, {
+      ...block,
+      budgets: [...block.budgets.filter((b) => b.period !== budget.period), budget],
+    });
+  };
+  const removeBudget = (s: Surface, idx: number) => {
+    const block = getBlock(s);
+    updateBlock(s, { ...block, budgets: block.budgets.filter((_, i) => i !== idx) });
+  };
+  const toggleBudget = (s: Surface, idx: number) => {
+    const block = getBlock(s);
+    updateBlock(s, {
+      ...block,
+      budgets: block.budgets.map((b, i) => (i === idx ? { ...b, enabled: !b.enabled } : b)),
+    });
+  };
+
+  const allRules: { surface: Surface; rule: SurfaceRule; idx: number }[] = [];
+  for (const s of surfaces) {
+    getBlock(s).rules.forEach((rule, idx) => allRules.push({ surface: s, rule, idx }));
+  }
+  const allBudgets: { surface: Surface; budget: SurfaceBudget; idx: number }[] = [];
+  for (const s of surfaces) {
+    getBlock(s).budgets.forEach((budget, idx) => allBudgets.push({ surface: s, budget, idx }));
+  }
+
+  return (
+    <div className={compact ? 'space-y-3' : 'rounded-md border bg-muted/20 px-3 py-2 space-y-4'}>
+      <div className="space-y-2">
+        <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+          {t('limits.rulesTitle')}
+        </Label>
+        <p className="text-[11px] text-muted-foreground">{t('limits.rulesHint')}</p>
+        {allRules.length === 0 ? (
+          <p className="text-xs italic text-muted-foreground">{t('limits.noRules')}</p>
+        ) : (
+          <div className="rounded-md border">
+            <table className="w-full text-xs">
+              <thead className="border-b bg-muted/40">
+                <tr className="text-left text-muted-foreground">
+                  {!singleSurface && (
+                    <th className="px-2 py-1.5 font-medium">{t('limits.surface')}</th>
+                  )}
+                  <th className="px-2 py-1.5 font-medium">{t('limits.metric')}</th>
+                  <th className="px-2 py-1.5 font-medium">{t('limits.window')}</th>
+                  <th className="px-2 py-1.5 font-medium">{t('limits.maxCount')}</th>
+                  <th className="px-2 py-1.5 font-medium">{t('limits.enabled')}</th>
+                  <th className="w-8" />
+                </tr>
+              </thead>
+              <tbody className="divide-y">
+                {allRules.map(({ surface: s, rule, idx }) => (
+                  <tr key={`${s}-${idx}`}>
+                    {!singleSurface && (
+                      <td className="px-2 py-1.5">
+                        <Badge variant="outline" className="text-[10px]">
+                          {t(`limits.surfaceShort_${s}` as const)}
+                        </Badge>
+                      </td>
+                    )}
+                    <td className="px-2 py-1.5 font-mono text-[10px]">{rule.metric}</td>
+                    <td className="px-2 py-1.5 font-mono text-[10px]">
+                      {windowLabel(rule.window_secs, t)}
+                    </td>
+                    <td className="px-2 py-1.5 font-mono tabular-nums">{rule.max_count}</td>
+                    <td className="px-2 py-1.5">
+                      <Switch
+                        checked={rule.enabled}
+                        onCheckedChange={() => toggleRule(s, idx)}
+                      />
+                    </td>
+                    <td className="px-2 py-1.5 text-right">
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon"
+                        className="h-6 w-6"
+                        onClick={() => removeRule(s, idx)}
+                        aria-label={t('common.delete')}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        <AddRuleInline surfaces={surfaces} onAdd={addRule} />
+      </div>
+
+      {allowBudgets && (
+        <div className="space-y-2">
+          <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            {t('limits.budgetsTitle')}
+          </Label>
+          <p className="text-[11px] text-muted-foreground">{t('limits.budgetsHint')}</p>
+          {allBudgets.length === 0 ? (
+            <p className="text-xs italic text-muted-foreground">{t('limits.noCaps')}</p>
+          ) : (
+            <div className="rounded-md border">
+              <table className="w-full text-xs">
+                <thead className="border-b bg-muted/40">
+                  <tr className="text-left text-muted-foreground">
+                    {!singleSurface && (
+                      <th className="px-2 py-1.5 font-medium">{t('limits.surface')}</th>
+                    )}
+                    <th className="px-2 py-1.5 font-medium">{t('limits.period')}</th>
+                    <th className="px-2 py-1.5 font-medium">{t('limits.limitTokens')}</th>
+                    <th className="px-2 py-1.5 font-medium">{t('limits.enabled')}</th>
+                    <th className="w-8" />
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {allBudgets.map(({ surface: s, budget, idx }) => (
+                    <tr key={`${s}-${idx}`}>
+                      {!singleSurface && (
+                        <td className="px-2 py-1.5">
+                          <Badge variant="outline" className="text-[10px]">
+                            {t(`limits.surfaceShort_${s}` as const)}
+                          </Badge>
+                        </td>
+                      )}
+                      <td className="px-2 py-1.5 font-mono text-[10px]">
+                        {t(`limits.period_${budget.period}` as const)}
+                      </td>
+                      <td className="px-2 py-1.5 font-mono tabular-nums">{budget.limit_tokens}</td>
+                      <td className="px-2 py-1.5">
+                        <Switch
+                          checked={budget.enabled}
+                          onCheckedChange={() => toggleBudget(s, idx)}
+                        />
+                      </td>
+                      <td className="px-2 py-1.5 text-right">
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon"
+                          className="h-6 w-6"
+                          onClick={() => removeBudget(s, idx)}
+                          aria-label={t('common.delete')}
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <AddBudgetInline surfaces={surfaces} onAdd={addBudget} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AddRuleInline({
+  surfaces,
+  onAdd,
+}: {
+  surfaces: Surface[];
+  onAdd: (s: Surface, rule: SurfaceRule) => void;
+}) {
+  const { t } = useTranslation();
+  const [surface, setSurface] = useState<Surface>(surfaces[0] ?? 'ai_gateway');
+  const [metric, setMetric] = useState<Metric>('requests');
+  const [windowSecs, setWindowSecs] = useState<number>(3600);
+  const [maxCount, setMaxCount] = useState('');
+
+  const setSurfaceWithMetric = (s: Surface) => {
+    setSurface(s);
+    if (s === 'mcp_gateway' && metric === 'tokens') setMetric('requests');
+  };
+
+  const submit = () => {
+    const n = parseInt(maxCount, 10);
+    if (!Number.isFinite(n) || n <= 0) {
+      window.alert(t('limits.maxCountInvalid'));
+      return;
+    }
+    onAdd(surface, { metric, window_secs: windowSecs, max_count: n, enabled: true });
+    setMaxCount('');
+  };
+
+  return (
+    <div className="flex flex-wrap items-end gap-2 rounded-md border bg-muted/10 p-2">
+      {surfaces.length > 1 && (
+        <div className="space-y-1">
+          <Label className="text-[10px] text-muted-foreground">{t('limits.surface')}</Label>
+          <Select value={surface} onValueChange={(v) => setSurfaceWithMetric(v as Surface)}>
+            <SelectTrigger className="h-7 w-32 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {surfaces.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {t(`limits.surface_${s}` as const)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      <div className="space-y-1">
+        <Label className="text-[10px] text-muted-foreground">{t('limits.metric')}</Label>
+        <Select
+          value={metric}
+          onValueChange={(v) => setMetric(v as Metric)}
+          disabled={surface === 'mcp_gateway'}
+        >
+          <SelectTrigger className="h-7 w-28 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="requests">{t('limits.metric_requests')}</SelectItem>
+            <SelectItem value="tokens">{t('limits.metric_tokens')}</SelectItem>
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-[10px] text-muted-foreground">{t('limits.window')}</Label>
+        <Select value={String(windowSecs)} onValueChange={(v) => setWindowSecs(Number(v))}>
+          <SelectTrigger className="h-7 w-24 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {WINDOW_OPTIONS.map((w) => (
+              <SelectItem key={w.secs} value={String(w.secs)}>
+                {t(w.labelKey as 'limits.window_60')}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-[10px] text-muted-foreground">{t('limits.maxCount')}</Label>
+        <Input
+          type="number"
+          min={1}
+          value={maxCount}
+          onChange={(e) => setMaxCount(e.target.value)}
+          placeholder={metric === 'tokens' ? '100000' : '60'}
+          className="h-7 w-28 text-xs"
+        />
+      </div>
+      <Button type="button" size="sm" className="h-7" onClick={submit} disabled={!maxCount}>
+        <Plus className="mr-1 h-3 w-3" />
+        {t('limits.add')}
+      </Button>
+    </div>
+  );
+}
+
+function AddBudgetInline({
+  surfaces,
+  onAdd,
+}: {
+  surfaces: Surface[];
+  onAdd: (s: Surface, budget: SurfaceBudget) => void;
+}) {
+  const { t } = useTranslation();
+  const [surface, setSurface] = useState<Surface>(surfaces[0] ?? 'ai_gateway');
+  const [period, setPeriod] = useState<Period>('monthly');
+  const [limitTokens, setLimitTokens] = useState('');
+
+  const submit = () => {
+    const n = parseInt(limitTokens, 10);
+    if (!Number.isFinite(n) || n <= 0) {
+      window.alert(t('limits.limitTokensInvalid'));
+      return;
+    }
+    onAdd(surface, { period, limit_tokens: n, enabled: true });
+    setLimitTokens('');
+  };
+
+  return (
+    <div className="flex flex-wrap items-end gap-2 rounded-md border bg-muted/10 p-2">
+      {surfaces.length > 1 && (
+        <div className="space-y-1">
+          <Label className="text-[10px] text-muted-foreground">{t('limits.surface')}</Label>
+          <Select value={surface} onValueChange={(v) => setSurface(v as Surface)}>
+            <SelectTrigger className="h-7 w-32 text-xs">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {surfaces.map((s) => (
+                <SelectItem key={s} value={s}>
+                  {t(`limits.surface_${s}` as const)}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      )}
+      <div className="space-y-1">
+        <Label className="text-[10px] text-muted-foreground">{t('limits.period')}</Label>
+        <Select value={period} onValueChange={(v) => setPeriod(v as Period)}>
+          <SelectTrigger className="h-7 w-28 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {PERIOD_OPTIONS.map((p) => (
+              <SelectItem key={p.value} value={p.value}>
+                {t(p.labelKey as 'limits.period_daily')}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-[10px] text-muted-foreground">{t('limits.limitTokens')}</Label>
+        <Input
+          type="number"
+          min={1}
+          value={limitTokens}
+          onChange={(e) => setLimitTokens(e.target.value)}
+          placeholder="1000000"
+          className="h-7 w-32 text-xs"
+        />
+      </div>
+      <Button type="button" size="sm" className="h-7" onClick={submit} disabled={!limitTokens}>
         <Plus className="mr-1 h-3 w-3" />
         {t('limits.add')}
       </Button>
