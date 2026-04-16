@@ -221,6 +221,43 @@ pub async fn compute_user_resource_limits(
     })
 }
 
+/// Aggregate `rbac_roles.surface_constraints` across every role assigned to
+/// `user_id` (direct + team-inherited) using "most restrictive wins":
+/// per `(surface, metric, window_secs)` take the MIN `max_count`;
+/// per `(surface, period)` take the MIN `limit_tokens`. Disabled or
+/// non-positive entries are ignored. A role that doesn't carry a
+/// particular (surface, ...) entry does not widen the aggregate.
+///
+/// Shared by the AI gateway and MCP gateway request paths — they both
+/// call this once per request and feed the result into the rate-limit
+/// + budget engines.
+pub async fn compute_user_surface_constraints(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<think_watch_common::limits::SurfaceConstraints, sqlx::Error> {
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT r.surface_constraints FROM ( \
+           SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
+           UNION \
+           SELECT tra.role_id \
+             FROM team_members tm \
+             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
+            WHERE tm.user_id = $1 \
+         ) roles \
+         JOIN rbac_roles r ON r.id = roles.role_id",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    let per_role: Vec<think_watch_common::limits::SurfaceConstraints> = rows
+        .into_iter()
+        .filter_map(|(v,)| serde_json::from_value(v).ok())
+        .collect();
+    Ok(think_watch_common::limits::merge_most_restrictive(
+        &per_role,
+    ))
+}
+
 /// Check if a namespaced MCP tool name matches any of the allowed patterns.
 /// Patterns: `"*"` matches all, `"mysql__*"` matches prefix, exact otherwise.
 pub fn is_mcp_tool_allowed(patterns: Option<&[String]>, namespaced_name: &str) -> bool {

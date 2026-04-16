@@ -15,8 +15,10 @@ use crate::middleware::auth_guard::AuthUser;
 /// global scope — they see every row in `usage_records`. Otherwise
 /// returns `Ok(Some(team_ids))` containing every team the caller is
 /// allowed to read; the SQL filter then becomes
-/// `WHERE (team_id = ANY($team_ids) OR user_id = $caller)` — caller
-/// always sees their own usage even if they're not in any team.
+/// `WHERE (user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($team_ids))
+///     OR user_id = $caller)` — caller always sees their own usage even
+/// if they're not in any team. Team scoping flows through the team's
+/// members now that `usage_records.team_id` is gone.
 ///
 /// Falls back to `analytics:read_own` (Some(empty set)) for users
 /// who only have own-scoped analytics — they see only their own
@@ -115,7 +117,7 @@ pub async fn get_usage_stats(
                 "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint \
                    FROM usage_records \
                   WHERE created_at >= $1 \
-                    AND (team_id = ANY($2) OR user_id = $3)",
+                    AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
             )
             .bind(window_start)
             .bind(team_ids)
@@ -125,7 +127,7 @@ pub async fn get_usage_stats(
             let reqs: Option<i64> = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM usage_records \
                   WHERE created_at >= $1 \
-                    AND (team_id = ANY($2) OR user_id = $3)",
+                    AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
             )
             .bind(window_start)
             .bind(team_ids)
@@ -160,7 +162,7 @@ pub async fn get_usage_stats(
             }
             Some(team_ids) => {
                 let sql = format!(
-                    "{sql_common} AND (team_id = ANY($2) OR user_id = $3) \
+                    "{sql_common} AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2))) \
                      GROUP BY bucket ORDER BY bucket"
                 );
                 sqlx::query_as::<_, Bucket>(&sql)
@@ -210,7 +212,7 @@ pub async fn get_usage_stats(
                     "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint \
                        FROM usage_records \
                       WHERE created_at >= $1 AND created_at < $2 \
-                        AND (team_id = ANY($3) OR user_id = $4)",
+                        AND (user_id = $4 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($3)))",
                 )
                 .bind(prev_start)
                 .bind(prev_end)
@@ -221,7 +223,7 @@ pub async fn get_usage_stats(
                 let pr: Option<i64> = sqlx::query_scalar(
                     "SELECT COUNT(*) FROM usage_records \
                       WHERE created_at >= $1 AND created_at < $2 \
-                        AND (team_id = ANY($3) OR user_id = $4)",
+                        AND (user_id = $4 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($3)))",
                 )
                 .bind(prev_start)
                 .bind(prev_end)
@@ -324,7 +326,7 @@ pub async fn get_usage(
                     COALESCE(SUM(output_tokens::bigint), 0)::bigint as output_tokens,
                     COALESCE(SUM(cost_usd), 0) as total_cost
                FROM usage_records
-              WHERE team_id = ANY($3) OR user_id = $4
+              WHERE user_id = $4 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($3))
                GROUP BY created_at::date, model_id
                ORDER BY date DESC
                LIMIT $1 OFFSET $2"#,
@@ -410,7 +412,7 @@ pub async fn get_cost_stats(
             sqlx::query_scalar(
                 "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records \
           WHERE created_at >= $1 \
-            AND (team_id = ANY($2) OR user_id = $3)",
+            AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
             )
             .bind(window_start)
             .bind(team_ids)
@@ -434,7 +436,7 @@ pub async fn get_cost_stats(
             sqlx::query_scalar(
                 "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records \
           WHERE created_at >= $1 \
-            AND (team_id = ANY($2) OR user_id = $3)",
+            AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
             )
             .bind(month_start)
             .bind(team_ids)
@@ -448,25 +450,35 @@ pub async fn get_cost_stats(
     let total_f64 = total.and_then(|d| d.to_f64()).unwrap_or(0.0);
     let total_mtd_f64 = total_mtd.and_then(|d| d.to_f64()).unwrap_or(0.0);
 
-    // Budget usage percentage: sum of current spend / sum of limits
-    // across all enabled monthly budget caps visible to the caller.
+    // Budget usage percentage: ratio of current spend to the monthly
+    // limit the caller's role-inline AI gateway constraints impose.
+    // After the limits refactor, budgets live on `rbac_roles.surface_
+    // constraints` (merged most-restrictive across roles) and the
+    // Redis counters are keyed per-user.
     let budget_usage_pct: Option<f64> = {
-        use think_watch_common::limits::{self, BudgetSubject, budget};
-        // Budget caps live on roles. Load the caller's role IDs and
-        // fetch all enabled monthly caps across those roles.
-        let role_ids = think_watch_auth::rbac::load_user_role_ids(&state.db, caller_id)
-            .await
+        use think_watch_common::limits::{BudgetCap, BudgetPeriod, BudgetSubject, Surface, budget};
+        let constraints =
+            think_watch_auth::rbac::compute_user_surface_constraints(&state.db, caller_id)
+                .await
+                .unwrap_or_default();
+        let caps: Vec<BudgetCap> = constraints
+            .block(Surface::AiGateway)
+            .map(|block| {
+                block
+                    .budgets
+                    .iter()
+                    .filter(|b| b.enabled && b.period == BudgetPeriod::Monthly)
+                    .map(|b| BudgetCap {
+                        id: uuid::Uuid::nil(),
+                        subject_kind: BudgetSubject::User,
+                        subject_id: caller_id,
+                        period: b.period,
+                        limit_tokens: b.limit_tokens,
+                        enabled: true,
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
-        let mut caps: Vec<limits::BudgetCap> = Vec::new();
-        for rid in &role_ids {
-            if let Ok(role_caps) = limits::list_caps(&state.db, BudgetSubject::Role, *rid).await {
-                caps.extend(
-                    role_caps
-                        .into_iter()
-                        .filter(|c| c.period == limits::BudgetPeriod::Monthly && c.enabled),
-                );
-            }
-        }
         if caps.is_empty() {
             None
         } else {
@@ -507,7 +519,7 @@ pub async fn get_cost_stats(
             }
             Some(team_ids) => {
                 let sql = format!(
-                    "{sql_common} AND (team_id = ANY($2) OR user_id = $3) \
+                    "{sql_common} AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2))) \
                      GROUP BY bucket ORDER BY bucket"
                 );
                 sqlx::query_as::<_, Bucket>(&sql)
@@ -547,7 +559,7 @@ pub async fn get_cost_stats(
                 sqlx::query_scalar(
                     "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records \
                       WHERE created_at >= $1 AND created_at < $2 \
-                        AND (team_id = ANY($3) OR user_id = $4)",
+                        AND (user_id = $4 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($3)))",
                 )
                 .bind(prev_start)
                 .bind(prev_end)
@@ -575,9 +587,9 @@ pub async fn get_cost_stats(
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct CostRow {
     /// Opaque group key; content depends on `group_by` in the request.
-    /// For `group_by=model` it's a model_id; for `user` / `team` it's
-    /// the UUID as a string; for `cost_center` it's the tag (or the
-    /// literal string "(untagged)" for NULL).
+    /// For `group_by=model` it's a model_id; for `user` it's the UUID
+    /// as a string; for `cost_center` it's the tag (or the literal
+    /// string "(untagged)" for NULL).
     pub group_key: String,
     pub request_count: i64,
     pub input_tokens: i64,
@@ -590,15 +602,16 @@ pub struct CostRow {
 enum CostGroupBy {
     Model,
     User,
-    Team,
     CostCenter,
 }
 
 impl CostGroupBy {
     fn parse(s: Option<&str>) -> Self {
+        // `"team"` was previously a valid value. `usage_records.team_id`
+        // has been dropped; a caller asking for the team breakdown now
+        // gets the model-level grouping so the page still renders.
         match s.unwrap_or("").to_ascii_lowercase().as_str() {
             "user" => Self::User,
-            "team" => Self::Team,
             "cost_center" | "costcenter" => Self::CostCenter,
             _ => Self::Model,
         }
@@ -609,7 +622,7 @@ impl CostGroupBy {
 pub struct CostsQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
-    /// `model` (default) | `user` | `team` | `cost_center`.
+    /// `model` (default) | `user` | `cost_center`.
     pub group_by: Option<String>,
     /// `json` (default) | `csv` — when `csv`, response is a text/csv
     /// download instead of JSON.
@@ -664,7 +677,6 @@ pub async fn get_costs(
     let (group_expr, from_expr) = match group_by {
         CostGroupBy::Model => ("u.model_id", "usage_records u"),
         CostGroupBy::User => ("COALESCE(u.user_id::text, '(none)')", "usage_records u"),
-        CostGroupBy::Team => ("COALESCE(u.team_id::text, '(none)')", "usage_records u"),
         CostGroupBy::CostCenter => (
             "COALESCE(k.cost_center, '(untagged)')",
             "usage_records u LEFT JOIN api_keys k ON k.id = u.api_key_id",
@@ -701,7 +713,7 @@ pub async fn get_costs(
                         COALESCE(SUM(u.cost_usd), 0) AS total_cost \
                    FROM {from_expr} \
                   WHERE u.created_at >= $1 \
-                    AND (u.team_id = ANY($4) OR u.user_id = $5) \
+                    AND (u.user_id = $5 OR u.user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($4))) \
                   GROUP BY group_key \
                   ORDER BY total_cost DESC \
                   LIMIT $2 OFFSET $3"
@@ -767,7 +779,9 @@ mod helper_tests {
         assert_eq!(CostGroupBy::parse(None), CostGroupBy::Model);
         assert_eq!(CostGroupBy::parse(Some("model")), CostGroupBy::Model);
         assert_eq!(CostGroupBy::parse(Some("user")), CostGroupBy::User);
-        assert_eq!(CostGroupBy::parse(Some("team")), CostGroupBy::Team);
+        // "team" used to be its own variant; the team column on
+        // usage_records is gone, so it now falls through to Model.
+        assert_eq!(CostGroupBy::parse(Some("team")), CostGroupBy::Model);
         assert_eq!(
             CostGroupBy::parse(Some("cost_center")),
             CostGroupBy::CostCenter

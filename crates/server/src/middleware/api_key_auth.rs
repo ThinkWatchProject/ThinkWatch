@@ -46,7 +46,6 @@ fn intersect_allowlists(
 pub struct GatewayIdentity {
     pub api_key_id: uuid::Uuid,
     pub user_id: Option<uuid::Uuid>,
-    pub team_id: Option<uuid::Uuid>,
     pub allowed_models: Option<Vec<String>>,
     /// Role NAMES the underlying user holds. Used by the MCP gateway's
     /// access controller, which gates per-tool access on role names.
@@ -153,31 +152,34 @@ pub fn require_api_key(
             // per request — fast enough at our scale.
             //
             // We also pull the role NAMES so the MCP access controller
-            // can gate per-tool access without re-querying the DB.
-            let (role_limits, user_roles, role_ids) = if let Some(uid) = row.user_id {
+            // can gate per-tool access without re-querying the DB, and
+            // the aggregated `surface_constraints` JSON so the gateway
+            // hot path has rate limits + budgets without further lookups.
+            let (role_limits, user_roles, surface_constraints) = if let Some(uid) = row.user_id {
                 let limits = rbac::compute_user_resource_limits(&state.db, uid)
                     .await
                     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
                 let names = rbac::load_user_role_names(&state.db, uid)
                     .await
                     .unwrap_or_default();
-                let ids = rbac::load_user_role_ids(&state.db, uid)
+                let constraints = rbac::compute_user_surface_constraints(&state.db, uid)
                     .await
                     .unwrap_or_default();
-                (limits, names, ids)
+                (limits, names, constraints)
             } else {
                 // Service-account API keys (no user_id) inherit only
                 // the per-key constraints, since there's no user to
                 // resolve roles against. They get an empty role list,
                 // which means the MCP access controller will deny
-                // anything that requires a role match.
+                // anything that requires a role match, and an empty
+                // constraint set so no role-inline limits fire.
                 (
                     rbac::UserResourceLimits {
                         allowed_models: None,
                         allowed_mcp_tools: None,
                     },
                     Vec::new(),
-                    Vec::new(),
+                    think_watch_common::limits::SurfaceConstraints::default(),
                 )
             };
             let merged_models =
@@ -200,13 +202,12 @@ pub fn require_api_key(
                 user_email,
                 api_key_id: Some(row.id.to_string()),
                 allowed_models: merged_models.clone(),
-                role_ids: role_ids.iter().map(|id| id.to_string()).collect(),
+                surface_constraints: surface_constraints.clone(),
             };
 
             let identity = GatewayIdentity {
                 api_key_id: row.id,
                 user_id: row.user_id,
-                team_id: row.team_id,
                 allowed_models: merged_models,
                 user_roles,
             };
@@ -234,7 +235,7 @@ pub fn require_api_key(
                     user_id: uid,
                     user_email,
                     user_roles: identity.user_roles.clone(),
-                    role_ids: role_ids.clone(),
+                    surface_constraints: surface_constraints.clone(),
                     allowed_mcp_tools: role_limits.allowed_mcp_tools.clone(),
                 };
                 request.extensions_mut().insert(mcp_identity);

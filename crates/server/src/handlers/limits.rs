@@ -47,21 +47,35 @@ use crate::middleware::auth_guard::AuthUser;
 // Path parameter parsing
 // ----------------------------------------------------------------------------
 
+// Role-scoped limits now live inline on `rbac_roles.surface_constraints`.
+// The side-table endpoints explicitly refuse `role` so a stale client
+// can't silently half-update one side.
+const ROLE_INLINE_MSG: &str = "Role limits are inline on the role; use the role endpoint";
+
+fn reject_role_kind(kind: &str) -> Result<(), AppError> {
+    if kind == "role" {
+        return Err(AppError::BadRequest(ROLE_INLINE_MSG.into()));
+    }
+    Ok(())
+}
+
 /// Parse a `subject_kind` path segment for rate-limit rules. Rejects
 /// any value not in the closed enum so callers get a 400 instead of
 /// the engine silently returning an empty list.
 fn parse_rate_subject(kind: &str) -> Result<RateLimitSubject, AppError> {
+    reject_role_kind(kind)?;
     RateLimitSubject::parse(kind).ok_or_else(|| {
         AppError::BadRequest(format!(
-            "Unknown rate-limit subject kind '{kind}' (allowed: role)"
+            "Unknown rate-limit subject kind '{kind}' (allowed: user, api_key)"
         ))
     })
 }
 
 fn parse_budget_subject(kind: &str) -> Result<BudgetSubject, AppError> {
+    reject_role_kind(kind)?;
     BudgetSubject::parse(kind).ok_or_else(|| {
         AppError::BadRequest(format!(
-            "Unknown budget subject kind '{kind}' (allowed: role)"
+            "Unknown budget subject kind '{kind}' (allowed: user, api_key)"
         ))
     })
 }
@@ -570,12 +584,12 @@ pub async fn get_usage(
     }))
 }
 
-/// Translate a rate-limit subject into the matching budget subject
-/// when one exists. mcp_server doesn't have a budget side, so
-/// callers fall back to "no caps".
+/// Translate a rate-limit subject into the matching budget subject.
+/// The kinds overlap 1:1 today (both sides accept user / api_key).
 fn budget_kind_for(subject: RateLimitSubject) -> Option<BudgetSubject> {
     match subject {
-        RateLimitSubject::Role => Some(BudgetSubject::Role),
+        RateLimitSubject::User => Some(BudgetSubject::User),
+        RateLimitSubject::ApiKey => Some(BudgetSubject::ApiKey),
     }
 }
 
@@ -591,5 +605,36 @@ fn map_validation_error(e: sqlx::Error) -> AppError {
     match &e {
         sqlx::Error::Protocol(msg) => AppError::BadRequest(msg.clone()),
         _ => AppError::from(e),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_rate_subject_rejects_role() {
+        let err = parse_rate_subject("role").unwrap_err();
+        match err {
+            AppError::BadRequest(msg) => assert_eq!(msg, ROLE_INLINE_MSG),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_budget_subject_rejects_role() {
+        let err = parse_budget_subject("role").unwrap_err();
+        match err {
+            AppError::BadRequest(msg) => assert_eq!(msg, ROLE_INLINE_MSG),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_subjects_accept_user_and_api_key() {
+        assert!(parse_rate_subject("user").is_ok());
+        assert!(parse_rate_subject("api_key").is_ok());
+        assert!(parse_budget_subject("user").is_ok());
+        assert!(parse_budget_subject("api_key").is_ok());
     }
 }

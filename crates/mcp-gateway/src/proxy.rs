@@ -2,7 +2,9 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use think_watch_common::limits::{self, RateLimitSubject, RateMetric, sliding};
+use think_watch_common::limits::{
+    self, RateLimitRule, RateLimitSubject, RateMetric, Surface, SurfaceConstraints, sliding,
+};
 
 use crate::access_control::is_tool_allowed;
 use crate::circuit_breaker::McpCircuitBreakers;
@@ -157,7 +159,7 @@ impl McpProxy {
         &self,
         user_id: Uuid,
         user_email: &str,
-        role_ids: &[Uuid],
+        surface_constraints: &SurfaceConstraints,
         allowed_mcp_tools: Option<&[String]>,
         trace_id: &str,
         request: JsonRpcRequest,
@@ -169,7 +171,7 @@ impl McpProxy {
                 self.handle_tools_call(
                     user_id,
                     user_email,
-                    role_ids,
+                    surface_constraints,
                     allowed_mcp_tools,
                     trace_id,
                     request,
@@ -239,7 +241,7 @@ impl McpProxy {
         &self,
         user_id: Uuid,
         user_email: &str,
-        role_ids: &[Uuid],
+        surface_constraints: &SurfaceConstraints,
         allowed_mcp_tools: Option<&[String]>,
         trace_id: &str,
         request: JsonRpcRequest,
@@ -280,17 +282,29 @@ impl McpProxy {
                 }
             };
 
-        // Rate limit pre-flight — only role-based subjects.
-        let subjects: Vec<(RateLimitSubject, Uuid)> = role_ids
-            .iter()
-            .map(|&rid| (RateLimitSubject::Role, rid))
-            .collect();
-        let rules = limits::list_enabled_rules_for_subjects(&self.db, &subjects)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!("MCP rate-limit DB load failed: {e}; allowing call");
-                Vec::new()
-            });
+        // Rate-limit pre-flight — materialize the user's merged MCP
+        // surface rules on the fly (the parent crate already did the
+        // most-restrictive aggregation across every role assignment).
+        let rules: Vec<RateLimitRule> = surface_constraints
+            .block(Surface::McpGateway)
+            .map(|block| {
+                block
+                    .rules
+                    .iter()
+                    .filter(|r| r.enabled)
+                    .map(|r| RateLimitRule {
+                        id: Uuid::nil(),
+                        subject_kind: RateLimitSubject::User,
+                        subject_id: user_id,
+                        surface: Surface::McpGateway,
+                        metric: r.metric,
+                        window_secs: r.window_secs,
+                        max_count: r.max_count,
+                        enabled: true,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         let resolved = sliding::resolve_rules(&rules, RateMetric::Requests);
         if !resolved.is_empty() {
             let fail_closed = self.dynamic_config.rate_limit_fail_closed().await;

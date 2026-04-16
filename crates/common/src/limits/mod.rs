@@ -42,26 +42,28 @@ pub mod weight;
 
 /// What kind of resource a rule or cap is attached to.
 ///
-/// Mapping to DB tables is implicit — `RateLimitSubject` covers the
-/// kinds allowed by `rate_limit_rules.subject_kind`, `BudgetSubject`
-/// covers `budget_caps.subject_kind`. They overlap on user / api_key /
-/// provider / team; only `mcp_server` is rate-only.
+/// Role-level constraints are stored inline on `rbac_roles.surface_constraints`
+/// (see `SurfaceConstraints` below), so `'role'` is intentionally absent
+/// here — the side tables are reserved for per-user / per-key overrides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitSubject {
-    Role,
+    User,
+    ApiKey,
 }
 
 impl RateLimitSubject {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Role => "role",
+            Self::User => "user",
+            Self::ApiKey => "api_key",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "role" => Self::Role,
+            "user" => Self::User,
+            "api_key" => Self::ApiKey,
             _ => return None,
         })
     }
@@ -70,19 +72,22 @@ impl RateLimitSubject {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BudgetSubject {
-    Role,
+    User,
+    ApiKey,
 }
 
 impl BudgetSubject {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Role => "role",
+            Self::User => "user",
+            Self::ApiKey => "api_key",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
-            "role" => Self::Role,
+            "user" => Self::User,
+            "api_key" => Self::ApiKey,
             _ => return None,
         })
     }
@@ -110,6 +115,197 @@ impl Surface {
             _ => return None,
         })
     }
+}
+
+// ----------------------------------------------------------------------------
+// Role-inline surface constraints
+//
+// Persisted on `rbac_roles.surface_constraints` as JSONB. Shape:
+//
+//   {
+//     "ai_gateway":  { "rules": [...], "budgets": [...] },
+//     "mcp_gateway": { "rules": [...], "budgets": [...] }
+//   }
+//
+// Absent surface key == empty block. The aggregator (see
+// `rbac::compute_user_surface_constraints`) merges across every role
+// the user holds using "most restrictive wins" semantics.
+// ----------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceConstraints {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_gateway: Option<SurfaceBlock>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_gateway: Option<SurfaceBlock>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceBlock {
+    #[serde(default)]
+    pub rules: Vec<SurfaceRule>,
+    #[serde(default)]
+    pub budgets: Vec<SurfaceBudget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceRule {
+    pub metric: RateMetric,
+    pub window_secs: i32,
+    pub max_count: i64,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SurfaceBudget {
+    pub period: BudgetPeriod,
+    pub limit_tokens: i64,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl SurfaceConstraints {
+    pub fn block(&self, surface: Surface) -> Option<&SurfaceBlock> {
+        match surface {
+            Surface::AiGateway => self.ai_gateway.as_ref(),
+            Surface::McpGateway => self.mcp_gateway.as_ref(),
+        }
+    }
+
+    pub fn block_mut(&mut self, surface: Surface) -> &mut Option<SurfaceBlock> {
+        match surface {
+            Surface::AiGateway => &mut self.ai_gateway,
+            Surface::McpGateway => &mut self.mcp_gateway,
+        }
+    }
+}
+
+/// Merge every role's constraints into a single effective set using
+/// "most restrictive wins":
+///   - per (surface, metric, window_secs): take the MIN enabled max_count
+///   - per (surface, period):              take the MIN enabled limit_tokens
+///
+/// Disabled entries are ignored. An entry absent from a role is treated
+/// as "no constraint from that role" — it does NOT tighten the min.
+pub fn merge_most_restrictive(inputs: &[SurfaceConstraints]) -> SurfaceConstraints {
+    use std::collections::HashMap;
+
+    let mut ai = SurfaceBlock::default();
+    let mut mcp = SurfaceBlock::default();
+
+    // (surface_key, metric, window_secs) -> min_max_count
+    let mut rule_min: HashMap<(&str, RateMetric, i32), i64> = HashMap::new();
+    let mut budget_min: HashMap<(&str, BudgetPeriod), i64> = HashMap::new();
+
+    for cons in inputs {
+        for (surface_key, block_opt) in [
+            (Surface::AiGateway.as_str(), cons.ai_gateway.as_ref()),
+            (Surface::McpGateway.as_str(), cons.mcp_gateway.as_ref()),
+        ] {
+            let Some(block) = block_opt else { continue };
+            for r in &block.rules {
+                if !r.enabled || r.max_count <= 0 {
+                    continue;
+                }
+                rule_min
+                    .entry((surface_key, r.metric, r.window_secs))
+                    .and_modify(|v| {
+                        if r.max_count < *v {
+                            *v = r.max_count;
+                        }
+                    })
+                    .or_insert(r.max_count);
+            }
+            for b in &block.budgets {
+                if !b.enabled || b.limit_tokens <= 0 {
+                    continue;
+                }
+                budget_min
+                    .entry((surface_key, b.period))
+                    .and_modify(|v| {
+                        if b.limit_tokens < *v {
+                            *v = b.limit_tokens;
+                        }
+                    })
+                    .or_insert(b.limit_tokens);
+            }
+        }
+    }
+
+    for ((surface_key, metric, window_secs), max_count) in rule_min {
+        let rule = SurfaceRule {
+            metric,
+            window_secs,
+            max_count,
+            enabled: true,
+        };
+        if surface_key == Surface::AiGateway.as_str() {
+            ai.rules.push(rule);
+        } else {
+            mcp.rules.push(rule);
+        }
+    }
+    for ((surface_key, period), limit_tokens) in budget_min {
+        let b = SurfaceBudget {
+            period,
+            limit_tokens,
+            enabled: true,
+        };
+        if surface_key == Surface::AiGateway.as_str() {
+            ai.budgets.push(b);
+        } else {
+            mcp.budgets.push(b);
+        }
+    }
+
+    SurfaceConstraints {
+        ai_gateway: (!ai.rules.is_empty() || !ai.budgets.is_empty()).then_some(ai),
+        mcp_gateway: (!mcp.rules.is_empty() || !mcp.budgets.is_empty()).then_some(mcp),
+    }
+}
+
+/// Schema validation for an incoming `surface_constraints` JSON payload
+/// on role create/update. Returns a user-friendly error message on
+/// failure. Accepts the same shape `SurfaceConstraints` deserializes
+/// from; additionally checks window/period/value ranges.
+pub fn validate_surface_constraints(
+    value: &serde_json::Value,
+) -> Result<SurfaceConstraints, String> {
+    if !value.is_object() {
+        return Err("surface_constraints must be an object".into());
+    }
+    let cons: SurfaceConstraints = serde_json::from_value(value.clone())
+        .map_err(|e| format!("Invalid surface_constraints JSON: {e}"))?;
+    for (surface_name, block) in [
+        ("ai_gateway", cons.ai_gateway.as_ref()),
+        ("mcp_gateway", cons.mcp_gateway.as_ref()),
+    ] {
+        let Some(block) = block else { continue };
+        for (i, r) in block.rules.iter().enumerate() {
+            if !is_allowed_window(r.window_secs) {
+                return Err(format!(
+                    "{surface_name}.rules[{i}]: window_secs {} not in allowed set",
+                    r.window_secs
+                ));
+            }
+            if r.max_count <= 0 {
+                return Err(format!("{surface_name}.rules[{i}]: max_count must be > 0"));
+            }
+        }
+        for (i, b) in block.budgets.iter().enumerate() {
+            if b.limit_tokens <= 0 {
+                return Err(format!(
+                    "{surface_name}.budgets[{i}]: limit_tokens must be > 0"
+                ));
+            }
+        }
+    }
+    Ok(cons)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -495,4 +691,176 @@ pub async fn validate_persisted(pool: &PgPool) -> anyhow::Result<()> {
 
     tracing::info!("limits validation passed");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn surface_constraints_roundtrip_json() {
+        let json = serde_json::json!({
+            "ai_gateway": {
+                "rules": [
+                    { "metric": "requests", "window_secs": 60, "max_count": 100, "enabled": true }
+                ],
+                "budgets": [
+                    { "period": "daily", "limit_tokens": 1_000_000, "enabled": true }
+                ]
+            }
+        });
+        let cons: SurfaceConstraints = serde_json::from_value(json.clone()).unwrap();
+        let ai = cons.ai_gateway.as_ref().unwrap();
+        assert_eq!(ai.rules.len(), 1);
+        assert_eq!(ai.rules[0].metric, RateMetric::Requests);
+        assert_eq!(ai.rules[0].window_secs, 60);
+        assert_eq!(ai.rules[0].max_count, 100);
+        assert_eq!(ai.budgets[0].period, BudgetPeriod::Daily);
+        assert!(cons.mcp_gateway.is_none());
+        // Round-trip back to JSON preserves shape.
+        let back = serde_json::to_value(&cons).unwrap();
+        assert_eq!(back, json);
+    }
+
+    #[test]
+    fn surface_constraints_absent_and_empty_blocks() {
+        let empty: SurfaceConstraints = serde_json::from_str("{}").unwrap();
+        assert!(empty.ai_gateway.is_none());
+        assert!(empty.mcp_gateway.is_none());
+
+        let empty_blocks: SurfaceConstraints =
+            serde_json::from_str(r#"{"ai_gateway":{"rules":[],"budgets":[]}}"#).unwrap();
+        let ai = empty_blocks.ai_gateway.as_ref().unwrap();
+        assert!(ai.rules.is_empty());
+        assert!(ai.budgets.is_empty());
+    }
+
+    #[test]
+    fn validate_surface_constraints_rejects_bad_window() {
+        let json = serde_json::json!({
+            "ai_gateway": {
+                "rules": [
+                    { "metric": "requests", "window_secs": 42, "max_count": 10, "enabled": true }
+                ]
+            }
+        });
+        assert!(validate_surface_constraints(&json).is_err());
+    }
+
+    #[test]
+    fn validate_surface_constraints_rejects_bad_max_count() {
+        let json = serde_json::json!({
+            "ai_gateway": {
+                "rules": [
+                    { "metric": "tokens", "window_secs": 60, "max_count": 0 }
+                ]
+            }
+        });
+        assert!(validate_surface_constraints(&json).is_err());
+    }
+
+    #[test]
+    fn merge_most_restrictive_multi_role() {
+        let a = serde_json::from_value::<SurfaceConstraints>(serde_json::json!({
+            "ai_gateway": {
+                "rules": [
+                    { "metric": "requests", "window_secs": 60, "max_count": 100 },
+                    { "metric": "tokens",   "window_secs": 60, "max_count": 10_000 }
+                ],
+                "budgets": [
+                    { "period": "daily", "limit_tokens": 5_000_000 }
+                ]
+            }
+        }))
+        .unwrap();
+        let b = serde_json::from_value::<SurfaceConstraints>(serde_json::json!({
+            "ai_gateway": {
+                "rules": [
+                    { "metric": "requests", "window_secs": 60, "max_count": 50 }
+                ],
+                "budgets": [
+                    { "period": "daily",   "limit_tokens": 10_000_000 },
+                    { "period": "monthly", "limit_tokens": 50_000_000 }
+                ]
+            },
+            "mcp_gateway": {
+                "rules": [
+                    { "metric": "requests", "window_secs": 300, "max_count": 20 }
+                ]
+            }
+        }))
+        .unwrap();
+
+        let merged = merge_most_restrictive(&[a, b]);
+        let ai = merged.ai_gateway.as_ref().unwrap();
+
+        // requests/60s: min(100, 50) = 50
+        let reqs = ai
+            .rules
+            .iter()
+            .find(|r| r.metric == RateMetric::Requests && r.window_secs == 60)
+            .unwrap();
+        assert_eq!(reqs.max_count, 50);
+        // tokens/60s: only in A
+        let toks = ai
+            .rules
+            .iter()
+            .find(|r| r.metric == RateMetric::Tokens && r.window_secs == 60)
+            .unwrap();
+        assert_eq!(toks.max_count, 10_000);
+        // daily budget: min(5M, 10M) = 5M
+        let daily = ai
+            .budgets
+            .iter()
+            .find(|b| b.period == BudgetPeriod::Daily)
+            .unwrap();
+        assert_eq!(daily.limit_tokens, 5_000_000);
+        // monthly: only in B
+        let monthly = ai
+            .budgets
+            .iter()
+            .find(|b| b.period == BudgetPeriod::Monthly)
+            .unwrap();
+        assert_eq!(monthly.limit_tokens, 50_000_000);
+
+        let mcp = merged.mcp_gateway.as_ref().unwrap();
+        assert_eq!(mcp.rules.len(), 1);
+        assert_eq!(mcp.rules[0].window_secs, 300);
+    }
+
+    #[test]
+    fn merge_ignores_disabled_and_nonpositive() {
+        let a = SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![SurfaceRule {
+                    metric: RateMetric::Requests,
+                    window_secs: 60,
+                    max_count: 10,
+                    enabled: false,
+                }],
+                budgets: vec![SurfaceBudget {
+                    period: BudgetPeriod::Daily,
+                    limit_tokens: 0,
+                    enabled: true,
+                }],
+            }),
+            mcp_gateway: None,
+        };
+        let b = SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![SurfaceRule {
+                    metric: RateMetric::Requests,
+                    window_secs: 60,
+                    max_count: 100,
+                    enabled: true,
+                }],
+                budgets: vec![],
+            }),
+            mcp_gateway: None,
+        };
+        let merged = merge_most_restrictive(&[a, b]);
+        let ai = merged.ai_gateway.as_ref().unwrap();
+        assert_eq!(ai.rules[0].max_count, 100);
+        assert!(ai.budgets.is_empty());
+    }
 }

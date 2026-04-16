@@ -36,8 +36,11 @@ pub struct McpRequestIdentity {
     /// keys (no associated user) — those will be denied any tool
     /// that requires a role match.
     pub user_roles: Vec<String>,
-    /// Role IDs for rate-limit subject resolution.
-    pub role_ids: Vec<Uuid>,
+    /// Effective (most-restrictive across roles) rate-limit rules and
+    /// budget caps for this user. Materialized by the parent crate
+    /// once per request so the MCP proxy can apply them without a DB
+    /// round-trip.
+    pub surface_constraints: think_watch_common::limits::SurfaceConstraints,
     /// MCP tool access patterns from role union. `None` = unrestricted.
     pub allowed_mcp_tools: Option<Vec<String>>,
 }
@@ -103,7 +106,7 @@ pub async fn handle_post(
         .handle_request(
             identity.user_id,
             &identity.user_email,
-            &identity.role_ids,
+            &identity.surface_constraints,
             identity.allowed_mcp_tools.as_deref(),
             &trace_id,
             request,

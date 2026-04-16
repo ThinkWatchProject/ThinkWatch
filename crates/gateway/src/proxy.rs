@@ -22,7 +22,8 @@ use crate::router::{ModelRouter, RouteEntry};
 use crate::streaming::stream_to_sse_with_restorer;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::{
-    self, BudgetSubject, RateLimitSubject, RateMetric, sliding, weight,
+    self, BudgetCap, BudgetSubject, RateLimitRule, RateLimitSubject, RateMetric, Surface,
+    SurfaceConstraints, sliding, weight,
 };
 
 /// Shared application state for the gateway proxy handlers.
@@ -73,32 +74,73 @@ pub struct GatewayRequestIdentity {
     pub user_email: Option<String>,
     pub api_key_id: Option<String>,
     pub allowed_models: Option<Vec<String>>,
-    /// Role IDs the user holds — used to apply role-level rate limits.
-    pub role_ids: Vec<String>,
+    /// Merged-across-roles inline limits (most restrictive per
+    /// surface+metric+window / surface+period). Computed once by the
+    /// auth middleware via `rbac::compute_user_surface_constraints`
+    /// and consumed directly here — no side-table lookups on the
+    /// hot path.
+    pub surface_constraints: SurfaceConstraints,
 }
 
-/// Resolve every (subject_kind, subject_id) tuple this request should
-/// be rate-limited against.
-///
-/// Order is significant only for diagnostics — the rate-limit engine
-/// treats every rule independently and rejects on the first failure.
-/// We add api_key first so the most specific quota fires first in
-/// the error message.
-fn resolve_rate_subjects(identity: &GatewayRequestIdentity) -> Vec<(RateLimitSubject, Uuid)> {
-    identity
-        .role_ids
+/// Materialize the merged surface constraints into `RateLimitRule`
+/// rows keyed by the authenticated user id. Redis counters now live
+/// at `ratelimit:<surface>:user:<user_id>:...` — one set per user
+/// regardless of how many roles they hold. Roles merged to empty
+/// (no user_id, or no rules) produce an empty list.
+fn rules_for_ai_gateway(identity: &GatewayRequestIdentity) -> Vec<RateLimitRule> {
+    let Some(user_id) = identity
+        .user_id
+        .as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok())
+    else {
+        return Vec::new();
+    };
+    let Some(block) = identity.surface_constraints.block(Surface::AiGateway) else {
+        return Vec::new();
+    };
+    block
+        .rules
         .iter()
-        .filter_map(|s| Uuid::parse_str(s).ok())
-        .map(|id| (RateLimitSubject::Role, id))
+        .filter(|r| r.enabled)
+        .map(|r| RateLimitRule {
+            // Synthetic id — stable across a single request so the
+            // exceeded_index in `CheckOutcome` maps back to the same
+            // rule without needing a persistence layer.
+            id: Uuid::nil(),
+            subject_kind: RateLimitSubject::User,
+            subject_id: user_id,
+            surface: Surface::AiGateway,
+            metric: r.metric,
+            window_secs: r.window_secs,
+            max_count: r.max_count,
+            enabled: true,
+        })
         .collect()
 }
 
-fn resolve_budget_subjects(identity: &GatewayRequestIdentity) -> Vec<(BudgetSubject, Uuid)> {
-    identity
-        .role_ids
+fn budgets_for_ai_gateway(identity: &GatewayRequestIdentity) -> Vec<BudgetCap> {
+    let Some(user_id) = identity
+        .user_id
+        .as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok())
+    else {
+        return Vec::new();
+    };
+    let Some(block) = identity.surface_constraints.block(Surface::AiGateway) else {
+        return Vec::new();
+    };
+    block
+        .budgets
         .iter()
-        .filter_map(|s| Uuid::parse_str(s).ok())
-        .map(|id| (BudgetSubject::Role, id))
+        .filter(|b| b.enabled)
+        .map(|b| BudgetCap {
+            id: Uuid::nil(),
+            subject_kind: BudgetSubject::User,
+            subject_id: user_id,
+            period: b.period,
+            limit_tokens: b.limit_tokens,
+            enabled: true,
+        })
         .collect()
 }
 
@@ -286,7 +328,7 @@ async fn post_flight_account(
     prompt_tokens: u32,
     completion_tokens: u32,
     request_rules: Vec<limits::RateLimitRule>,
-    budget_subjects: Vec<(BudgetSubject, Uuid)>,
+    budget_caps: Vec<BudgetCap>,
     audit: think_watch_common::audit::AuditLogger,
 ) {
     let mult = weight_cache.get(&db, &model).await;
@@ -308,9 +350,13 @@ async fn post_flight_account(
         tracing::warn!("token rate-limit accounting failed: {e}");
     }
 
-    // Natural-period budget caps for the matching subjects.
-    match limits::list_enabled_caps_for_subjects(&db, &budget_subjects).await {
-        Ok(caps) if !caps.is_empty() => {
+    // Natural-period budget caps derived from the user's merged
+    // role-inline constraints. `db` is unused here — kept on the
+    // signature so future per-user overrides can fold in cleanly.
+    let _ = db;
+    if !budget_caps.is_empty() {
+        let caps = budget_caps;
+        {
             match limits::budget::add_weighted_tokens(&redis, &caps, weighted).await {
                 Ok((_statuses, crossings)) if !crossings.is_empty() => {
                     // 1) Emit one `budget.threshold_crossed` audit entry
@@ -360,10 +406,6 @@ async fn post_flight_account(
                 }
             }
         }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!("budget caps DB load failed: {e}");
-        }
     }
 }
 
@@ -384,16 +426,10 @@ async fn preflight_request_limits(
     model: &str,
 ) -> Result<(Option<Uuid>, Vec<limits::RateLimitRule>), GatewayErrorResponse> {
     let _provider_id = state.router.provider_id_for(model);
-    let rate_subjects = resolve_rate_subjects(identity);
-    let request_rules =
-        match limits::list_enabled_rules_for_subjects(&state.db, &rate_subjects).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("rate-limit DB load failed: {e}; allowing request");
-                metrics::counter!("gateway_rate_limit_db_error_total").increment(1);
-                Vec::new()
-            }
-        };
+    // Role-inline constraints came in with the identity (materialized
+    // once by the auth middleware). No DB fetch here — fail-closed is
+    // only relevant for the Redis call below.
+    let request_rules = rules_for_ai_gateway(identity);
     let resolved_request_rules = sliding::resolve_rules(&request_rules, RateMetric::Requests);
     if !resolved_request_rules.is_empty() {
         let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
@@ -878,7 +914,7 @@ pub async fn proxy_chat_completion(
         let weight_cache = state.weight_cache.clone();
         let model = original_model.clone();
         let request_rules_for_done = request_rules.clone();
-        let budget_subjects = resolve_budget_subjects(&identity);
+        let budget_caps = budgets_for_ai_gateway(&identity);
         // Extra captures for emit_gateway_log — cloning small strings
         // here is cheaper than retaining &state through the 'static bound.
         let audit_for_done = state.audit.clone();
@@ -927,7 +963,7 @@ pub async fn proxy_chat_completion(
                     u.prompt_tokens,
                     u.completion_tokens,
                     request_rules_for_done,
-                    budget_subjects,
+                    budget_caps.clone(),
                     audit_for_done,
                 )
                 .await;
@@ -984,7 +1020,7 @@ pub async fn proxy_chat_completion(
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 request_rules.clone(),
-                resolve_budget_subjects(&identity),
+                budgets_for_ai_gateway(&identity),
                 state.audit.clone(),
             )
             .await;
@@ -1232,7 +1268,7 @@ pub async fn proxy_anthropic_messages(
         let weight_cache = state.weight_cache.clone();
         let model_for_done = mapped_model.clone();
         let request_rules_for_done = request_rules.clone();
-        let budget_subjects = resolve_budget_subjects(&identity);
+        let budget_caps = budgets_for_ai_gateway(&identity);
         let audit_for_done = state.audit.clone();
         let cost_tracker = state.cost_tracker.clone();
         let trace_id_for_done = trace_id.clone();
@@ -1274,7 +1310,7 @@ pub async fn proxy_anthropic_messages(
                     u.prompt_tokens,
                     u.completion_tokens,
                     request_rules_for_done,
-                    budget_subjects,
+                    budget_caps.clone(),
                     audit_for_done,
                 )
                 .await;
@@ -1328,7 +1364,7 @@ pub async fn proxy_anthropic_messages(
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 request_rules.clone(),
-                resolve_budget_subjects(&identity),
+                budgets_for_ai_gateway(&identity),
                 state.audit.clone(),
             )
             .await;
@@ -1592,7 +1628,7 @@ pub async fn proxy_responses(
         let weight_cache = state.weight_cache.clone();
         let model_for_done = mapped_model.clone();
         let request_rules_for_done = request_rules.clone();
-        let budget_subjects = resolve_budget_subjects(&identity);
+        let budget_caps = budgets_for_ai_gateway(&identity);
         let audit_for_done = state.audit.clone();
         let cost_tracker = state.cost_tracker.clone();
         let trace_id_for_done = trace_id.clone();
@@ -1634,7 +1670,7 @@ pub async fn proxy_responses(
                     u.prompt_tokens,
                     u.completion_tokens,
                     request_rules_for_done,
-                    budget_subjects,
+                    budget_caps.clone(),
                     audit_for_done,
                 )
                 .await;
@@ -1690,7 +1726,7 @@ pub async fn proxy_responses(
                 usage.prompt_tokens,
                 usage.completion_tokens,
                 request_rules.clone(),
-                resolve_budget_subjects(&identity),
+                budgets_for_ai_gateway(&identity),
                 state.audit.clone(),
             )
             .await;

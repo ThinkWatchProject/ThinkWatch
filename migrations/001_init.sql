@@ -64,6 +64,9 @@ CREATE TABLE rbac_roles (
     permissions         TEXT[]   NOT NULL DEFAULT ARRAY[]::TEXT[],
     allowed_models      TEXT[],
     allowed_mcp_tools   TEXT[],
+    -- Per-surface rate-limit rules and budget caps, inline with the role.
+    -- Shape: { "ai_gateway": { "rules": [...], "budgets": [...] }, ... }
+    surface_constraints JSONB NOT NULL DEFAULT '{}'::jsonb,
     policy_document     JSONB,
     created_by          UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -223,7 +226,6 @@ CREATE TABLE api_keys (
     key_hash                VARCHAR(255) NOT NULL,
     name                    VARCHAR(255) NOT NULL,
     user_id                 UUID REFERENCES users(id) ON DELETE SET NULL,
-    team_id                 UUID REFERENCES teams(id) ON DELETE SET NULL,
     -- Which gateways this key can call. Subset of
     -- {'ai_gateway', 'mcp_gateway'}; the CHECK enforces non-empty
     -- so a key always has at least one surface. Both gateways
@@ -239,7 +241,9 @@ CREATE TABLE api_keys (
     -- `budget_caps` (subject_kind = 'api_key'). The previous fixed
     -- columns (rate_limit_rpm / rate_limit_tpm / monthly_budget)
     -- have been removed.
+    cost_center             VARCHAR(64),
     expires_at              TIMESTAMPTZ,
+    last_expiry_warning_days INTEGER,
     is_active               BOOLEAN NOT NULL DEFAULT TRUE,
     last_used_at            TIMESTAMPTZ,
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -267,7 +271,8 @@ CREATE INDEX idx_api_keys_key_prefix  ON api_keys(key_prefix);
 CREATE INDEX idx_api_keys_user_id     ON api_keys(user_id);
 CREATE INDEX idx_api_keys_is_active   ON api_keys(is_active)  WHERE is_active = true;
 CREATE INDEX idx_api_keys_expires_at  ON api_keys(expires_at) WHERE expires_at IS NOT NULL;
-CREATE INDEX idx_api_keys_not_deleted ON api_keys(created_at) WHERE deleted_at IS NULL;
+CREATE INDEX idx_api_keys_not_deleted   ON api_keys(created_at) WHERE deleted_at IS NULL;
+CREATE INDEX idx_api_keys_cost_center  ON api_keys(cost_center) WHERE cost_center IS NOT NULL;
 
 -- --------------------------------------------------------------------------
 -- Providers & Models
@@ -366,7 +371,6 @@ CREATE TABLE usage_records (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     api_key_id      UUID REFERENCES api_keys(id) ON DELETE SET NULL,
     user_id         UUID REFERENCES users(id) ON DELETE SET NULL,
-    team_id         UUID REFERENCES teams(id) ON DELETE SET NULL,
     provider_id     UUID REFERENCES providers(id) ON DELETE SET NULL,
     model_id        VARCHAR(255) NOT NULL,
     request_type    VARCHAR(50)  NOT NULL,
@@ -381,7 +385,6 @@ CREATE TABLE usage_records (
 
 CREATE INDEX idx_usage_records_created_at  ON usage_records(created_at);
 CREATE INDEX idx_usage_records_user_id     ON usage_records(user_id, created_at);
-CREATE INDEX idx_usage_records_team_id     ON usage_records(team_id, created_at);
 CREATE INDEX idx_usage_records_api_key_id  ON usage_records(api_key_id, created_at);
 CREATE INDEX idx_usage_records_model_id    ON usage_records(model_id, created_at);
 
@@ -395,19 +398,18 @@ CREATE INDEX idx_usage_records_model_id    ON usage_records(model_id, created_at
 -- Rate limit rules + budget caps
 --
 -- Generic rule storage for sliding-window rate limits and natural-period
--- budget caps. Both tables are subject-polymorphic — the same engine
--- enforces limits on users, API keys, providers, and MCP servers via
--- the (subject_kind, subject_id) tuple. See plan.md for the full design.
+-- budget caps. Role-level constraints are inline on rbac_roles
+-- (surface_constraints JSONB); these tables are for user / api_key
+-- subjects only.
 -- --------------------------------------------------------------------------
 
 CREATE TABLE rate_limit_rules (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- Who the rule applies to.
     subject_kind VARCHAR(20) NOT NULL
-        CHECK (subject_kind IN ('role')),
+        CHECK (subject_kind IN ('user', 'api_key')),
     subject_id   UUID NOT NULL,
-    -- Which gateway this rule guards. A user can have separate rules
-    -- for the AI gateway and the MCP gateway.
+    -- Which gateway this rule guards.
     surface      VARCHAR(20) NOT NULL
         CHECK (surface IN ('ai_gateway', 'mcp_gateway')),
     -- What we count: requests (1 per call) or weighted tokens (computed
@@ -434,7 +436,7 @@ CREATE INDEX idx_rlr_enabled  ON rate_limit_rules(enabled) WHERE enabled = TRUE;
 CREATE TABLE budget_caps (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     subject_kind VARCHAR(20) NOT NULL
-        CHECK (subject_kind IN ('role')),
+        CHECK (subject_kind IN ('user', 'api_key')),
     subject_id   UUID NOT NULL,
     -- Natural calendar period — counters reset on the period boundary
     -- (system TZ). NOT a sliding window; that's what rate_limit_rules
@@ -594,6 +596,39 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 ('general.public_protocol', '""', 'general', 'Public gateway protocol: "http", "https", or empty for auto-detect from browser'),
 ('general.public_host',     '""', 'general', 'Public gateway host (empty = auto-detect from browser)'),
 ('general.public_port',     '0',  'general', 'Public gateway port (0 = use the gateway listening port)');
+
+-- MCP
+INSERT INTO system_settings (key, value, category, description) VALUES
+('mcp.health_interval_secs', '300', 'mcp',
+ 'How often (in seconds) to background-probe each registered MCP server. Default 300 = every 5 minutes.');
+
+-- --------------------------------------------------------------------------
+-- Dashboard layouts — per-user stat-card ordering (server-side persistence)
+-- --------------------------------------------------------------------------
+
+CREATE TABLE user_dashboard_layouts (
+    user_id     UUID PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL DEFAULT 'default',
+    layout_json JSONB NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- --------------------------------------------------------------------------
+-- Webhook outbox — durable retry queue for webhook deliveries
+-- --------------------------------------------------------------------------
+
+CREATE TABLE webhook_outbox (
+    id              UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
+    forwarder_id    UUID         NOT NULL
+                                 REFERENCES log_forwarders(id) ON DELETE CASCADE,
+    payload         JSONB        NOT NULL,
+    attempts        INTEGER      NOT NULL DEFAULT 0,
+    next_attempt_at TIMESTAMPTZ  NOT NULL DEFAULT now(),
+    last_error      TEXT,
+    created_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
+);
+
+CREATE INDEX idx_webhook_outbox_next_attempt ON webhook_outbox(next_attempt_at);
 
 -- --------------------------------------------------------------------------
 -- MCP Store — template marketplace for one-click MCP server installation

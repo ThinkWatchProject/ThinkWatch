@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 use think_watch_auth::rbac;
 use think_watch_common::errors::AppError;
+use think_watch_common::limits as commons_limits;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::{AuthUser, invalidate_role_perms};
@@ -405,6 +406,9 @@ pub struct RoleResponse {
     /// against action/resource patterns). When `null`, the flat
     /// `permissions` array is the sole source of truth.
     pub policy_document: Option<serde_json::Value>,
+    /// Per-surface rate-limit rules and budget caps. Empty object
+    /// when the role imposes no constraints.
+    pub surface_constraints: serde_json::Value,
     /// Number of users currently assigned to this role.
     pub user_count: i64,
     /// Email of the user who created this role. `None` for system
@@ -431,6 +435,7 @@ type RoleRow = (
     Option<Vec<String>>,
     Option<Vec<String>>,
     Option<serde_json::Value>,
+    serde_json::Value,
     Option<String>,
     chrono::DateTime<chrono::Utc>,
     chrono::DateTime<chrono::Utc>,
@@ -438,6 +443,7 @@ type RoleRow = (
 
 const ROLE_SELECT: &str = "SELECT r.id, r.name, r.description, r.is_system, r.permissions, \
                                   r.allowed_models, r.allowed_mcp_tools, r.policy_document, \
+                                  r.surface_constraints, \
                                   u.email AS created_by_email, \
                                   r.created_at, r.updated_at \
                            FROM rbac_roles r \
@@ -453,10 +459,11 @@ fn row_to_response(row: RoleRow, user_count: i64) -> RoleResponse {
         allowed_models: row.5,
         allowed_mcp_tools: row.6,
         policy_document: row.7,
+        surface_constraints: row.8,
         user_count,
-        created_by_email: row.8,
-        created_at: row.9.to_rfc3339(),
-        updated_at: row.10.to_rfc3339(),
+        created_by_email: row.9,
+        created_at: row.10.to_rfc3339(),
+        updated_at: row.11.to_rfc3339(),
     }
 }
 
@@ -524,6 +531,10 @@ pub struct CreateRoleRequest {
     pub allowed_models: Option<Vec<String>>,
     pub allowed_mcp_tools: Option<Vec<String>>,
     pub policy_document: Option<serde_json::Value>,
+    /// Inline rate-limit + budget constraints. Validated server-side;
+    /// missing or `{}` means "no constraints".
+    #[serde(default)]
+    pub surface_constraints: Option<serde_json::Value>,
 }
 
 #[utoipa::path(
@@ -556,6 +567,13 @@ pub async fn create_role(
     if let Some(ref doc) = payload.policy_document {
         rbac::validate_policy_document(doc).map_err(AppError::BadRequest)?;
     }
+    let surface_constraints = match payload.surface_constraints.as_ref() {
+        Some(v) => {
+            commons_limits::validate_surface_constraints(v).map_err(AppError::BadRequest)?;
+            v.clone()
+        }
+        None => serde_json::json!({}),
+    };
     for perm in &payload.permissions {
         if !is_known_permission(perm) {
             return Err(AppError::BadRequest(format!("Invalid permission: {perm}")));
@@ -565,12 +583,14 @@ pub async fn create_role(
     let row: RoleRow = sqlx::query_as(
         "WITH inserted AS ( \
             INSERT INTO rbac_roles (name, description, is_system, permissions, \
-                                    allowed_models, allowed_mcp_tools, policy_document, created_by) \
-            VALUES ($1, $2, FALSE, $3, $4, $5, $6, $7) \
+                                    allowed_models, allowed_mcp_tools, policy_document, \
+                                    surface_constraints, created_by) \
+            VALUES ($1, $2, FALSE, $3, $4, $5, $6, $7, $8) \
             RETURNING * \
          ) \
          SELECT i.id, i.name, i.description, i.is_system, i.permissions, \
                 i.allowed_models, i.allowed_mcp_tools, i.policy_document, \
+                i.surface_constraints, \
                 u.email AS created_by_email, \
                 i.created_at, i.updated_at \
          FROM inserted i \
@@ -582,6 +602,7 @@ pub async fn create_role(
     .bind(&payload.allowed_models)
     .bind(&payload.allowed_mcp_tools)
     .bind(&payload.policy_document)
+    .bind(&surface_constraints)
     .bind(auth_user.claims.sub)
     .fetch_one(&state.db)
     .await
@@ -615,6 +636,8 @@ pub struct UpdateRoleRequest {
     pub allowed_models: Option<Vec<String>>,
     pub allowed_mcp_tools: Option<Vec<String>>,
     pub policy_document: Option<serde_json::Value>,
+    #[serde(default)]
+    pub surface_constraints: Option<serde_json::Value>,
 }
 
 #[utoipa::path(
@@ -679,20 +702,25 @@ pub async fn update_role(
             }
         }
     }
+    if let Some(ref sc) = payload.surface_constraints {
+        commons_limits::validate_surface_constraints(sc).map_err(AppError::BadRequest)?;
+    }
 
     // Build a single UPDATE with COALESCE so we only touch fields the
     // caller actually sent. Permissions / models / servers / policy are
     // nullable so an explicit `Some(None)` clears them. We pass them
     // through directly and let the COALESCE branches resolve.
+    // `surface_constraints` is NOT NULL so we COALESCE on omission.
     sqlx::query(
         "UPDATE rbac_roles SET \
-            name              = COALESCE($2, name), \
-            description       = COALESCE($3, description), \
-            permissions       = COALESCE($4, permissions), \
-            allowed_models    = $5, \
-            allowed_mcp_tools = $6, \
-            policy_document   = $7, \
-            updated_at        = now() \
+            name                = COALESCE($2, name), \
+            description         = COALESCE($3, description), \
+            permissions         = COALESCE($4, permissions), \
+            allowed_models      = $5, \
+            allowed_mcp_tools   = $6, \
+            policy_document     = $7, \
+            surface_constraints = COALESCE($8, surface_constraints), \
+            updated_at          = now() \
          WHERE id = $1",
     )
     .bind(id)
@@ -702,6 +730,7 @@ pub async fn update_role(
     .bind(payload.allowed_models.as_ref())
     .bind(payload.allowed_mcp_tools.as_ref())
     .bind(payload.policy_document.as_ref())
+    .bind(payload.surface_constraints.as_ref())
     .execute(&state.db)
     .await?;
 
@@ -788,8 +817,9 @@ pub async fn reset_role(
         "UPDATE rbac_roles SET \
             permissions         = $2, \
             allowed_models      = NULL, \
-            allowed_mcp_tools = NULL, \
+            allowed_mcp_tools   = NULL, \
             policy_document     = NULL, \
+            surface_constraints = '{}'::jsonb, \
             updated_at          = now() \
          WHERE id = $1",
     )

@@ -93,7 +93,8 @@ pub async fn get_dashboard_stats(
             sqlx::query_scalar(
                 "SELECT COUNT(*) FROM usage_records \
                   WHERE created_at >= $1 \
-                    AND (team_id = ANY($2) OR user_id = $3)",
+                    AND (user_id = $3 \
+                         OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
             )
             .bind(window_start)
             .bind(&team_ids_vec)
@@ -341,7 +342,8 @@ pub async fn get_dashboard_stats(
                 sqlx::query_scalar(
                     "SELECT COUNT(*) FROM usage_records \
                       WHERE created_at >= $1 AND created_at < $2 \
-                        AND (team_id = ANY($3) OR user_id = $4)",
+                        AND (user_id = $4 \
+                             OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($3)))",
                 )
                 .bind(prev_start)
                 .bind(prev_end)
