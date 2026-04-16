@@ -221,8 +221,8 @@ export function ModelsPage() {
     let totalCount = 0;
     try {
       for (const p of providers) {
-        const res = await apiPost<{ count: number }>(`/api/admin/providers/${p.id}/sync-models`, {});
-        totalCount += res.count;
+        const res = await apiPost<{ synced: number }>(`/api/admin/providers/${p.id}/sync-models`, {});
+        totalCount += res.synced;
       }
       toast.success(t('models.syncSuccess', { count: totalCount }));
       await fetchModels();
