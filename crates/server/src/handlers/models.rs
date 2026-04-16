@@ -539,13 +539,12 @@ pub async fn create_model_route(
     let priority = req.priority.unwrap_or(0);
 
     // Check for existing route to give a friendly error instead of 500
-    let existing: Option<Uuid> = sqlx::query_scalar(
-        "SELECT id FROM model_routes WHERE model_id = $1 AND provider_id = $2",
-    )
-    .bind(&model_id)
-    .bind(req.provider_id)
-    .fetch_optional(&state.db)
-    .await?;
+    let existing: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM model_routes WHERE model_id = $1 AND provider_id = $2")
+            .bind(&model_id)
+            .bind(req.provider_id)
+            .fetch_optional(&state.db)
+            .await?;
     if existing.is_some() {
         return Err(AppError::BadRequest(
             "A route for this model+provider already exists".into(),
@@ -659,4 +658,212 @@ pub async fn delete_model_route(
     );
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
+}
+
+// ---------------------------------------------------------------------------
+// Flat route listing (all routes, paginated)
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct RouteListQuery {
+    pub q: Option<String>,
+    pub provider_id: Option<Uuid>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RouteListResponse {
+    pub items: Vec<ModelRouteRow>,
+    pub total: i64,
+}
+
+/// GET /api/admin/model-routes — paginated flat list of all routes.
+pub async fn list_all_routes(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Query(q): Query<RouteListQuery>,
+) -> Result<Json<RouteListResponse>, AppError> {
+    auth_user.require_permission("models:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:read")
+        .await?;
+
+    let page_size = q.page_size.unwrap_or(50).clamp(1, 200);
+    let page = q.page.unwrap_or(1).max(1);
+    let offset = (page - 1) * page_size;
+    let search = q.q.as_deref().unwrap_or("").trim();
+    let search_pattern = format!("%{search}%");
+
+    let (rows, total) = if search.is_empty() && q.provider_id.is_none() {
+        let total: Option<i64> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM model_routes mr JOIN providers p ON p.id = mr.provider_id WHERE p.deleted_at IS NULL",
+        )
+        .fetch_one(&state.db)
+        .await?;
+        let rows = sqlx::query_as::<_, ModelRouteRow>(
+            r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
+                      mr.upstream_model, mr.weight, mr.priority, mr.enabled
+               FROM model_routes mr
+               JOIN providers p ON p.id = mr.provider_id
+               WHERE p.deleted_at IS NULL
+               ORDER BY mr.model_id, mr.priority, mr.weight DESC
+               LIMIT $1 OFFSET $2"#,
+        )
+        .bind(page_size)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
+        (rows, total.unwrap_or(0))
+    } else {
+        let total: Option<i64> = sqlx::query_scalar(
+            r#"SELECT COUNT(*) FROM model_routes mr
+               JOIN providers p ON p.id = mr.provider_id
+               WHERE p.deleted_at IS NULL
+                 AND ($1 = '' OR mr.model_id ILIKE $2 OR p.name ILIKE $2)
+                 AND ($3::UUID IS NULL OR mr.provider_id = $3)"#,
+        )
+        .bind(search)
+        .bind(&search_pattern)
+        .bind(q.provider_id)
+        .fetch_one(&state.db)
+        .await?;
+        let rows = sqlx::query_as::<_, ModelRouteRow>(
+            r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
+                      mr.upstream_model, mr.weight, mr.priority, mr.enabled
+               FROM model_routes mr
+               JOIN providers p ON p.id = mr.provider_id
+               WHERE p.deleted_at IS NULL
+                 AND ($1 = '' OR mr.model_id ILIKE $2 OR p.name ILIKE $2)
+                 AND ($3::UUID IS NULL OR mr.provider_id = $3)
+               ORDER BY mr.model_id, mr.priority, mr.weight DESC
+               LIMIT $4 OFFSET $5"#,
+        )
+        .bind(search)
+        .bind(&search_pattern)
+        .bind(q.provider_id)
+        .bind(page_size)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
+        (rows, total.unwrap_or(0))
+    };
+
+    Ok(Json(RouteListResponse { items: rows, total }))
+}
+
+// ---------------------------------------------------------------------------
+// Batch create routes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BatchCreateRoutesRequest {
+    pub provider_id: Uuid,
+    pub model_ids: Vec<String>,
+}
+
+/// POST /api/admin/model-routes/batch — batch create routes.
+/// Auto-creates models that don't exist yet.
+pub async fn batch_create_routes(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<BatchCreateRoutesRequest>,
+) -> Result<Json<Value>, AppError> {
+    auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
+
+    if req.model_ids.is_empty() {
+        return Err(AppError::BadRequest("model_ids is empty".into()));
+    }
+
+    let provider_exists: Option<Uuid> =
+        sqlx::query_scalar("SELECT id FROM providers WHERE id = $1 AND deleted_at IS NULL")
+            .bind(req.provider_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if provider_exists.is_none() {
+        return Err(AppError::BadRequest("Provider not found".into()));
+    }
+
+    let model_slice: &[String] = &req.model_ids;
+
+    // Auto-create models that don't exist
+    sqlx::query(
+        r#"INSERT INTO models (model_id, display_name, is_active)
+           SELECT m, m, true FROM UNNEST($1::TEXT[]) AS t(m)
+           ON CONFLICT (model_id) DO NOTHING"#,
+    )
+    .bind(model_slice)
+    .execute(&state.db)
+    .await?;
+
+    // Create routes (skip duplicates)
+    let result = sqlx::query(
+        r#"INSERT INTO model_routes (model_id, provider_id, weight, priority)
+           SELECT m, $2, 100, 0 FROM UNNEST($1::TEXT[]) AS t(m)
+           ON CONFLICT (model_id, provider_id) DO NOTHING"#,
+    )
+    .bind(model_slice)
+    .bind(req.provider_id)
+    .execute(&state.db)
+    .await?;
+
+    let created = result.rows_affected() as i64;
+
+    state.audit.log(
+        auth_user
+            .audit("model_routes.batch_created")
+            .resource("model_routes")
+            .detail(serde_json::json!({
+                "provider_id": req.provider_id,
+                "requested": req.model_ids.len(),
+                "created": created,
+            })),
+    );
+
+    Ok(Json(serde_json::json!({ "created": created })))
+}
+
+// ---------------------------------------------------------------------------
+// Fetch remote models from a provider (for the add dialog)
+// ---------------------------------------------------------------------------
+
+/// GET /api/admin/providers/{id}/remote-models
+pub async fn list_remote_models(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(provider_id): Path<Uuid>,
+) -> Result<Json<Vec<String>>, AppError> {
+    auth_user.require_permission("models:read")?;
+
+    let provider = sqlx::query_as::<_, think_watch_common::models::Provider>(
+        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(provider_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound("Provider not found".into()))?;
+
+    let headers: Vec<ProviderHeader> = provider
+        .config_json
+        .get("headers")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let test_req = super::providers::TestProviderRequest {
+        provider_type: provider.provider_type.clone(),
+        base_url: provider.base_url.clone(),
+        headers,
+    };
+
+    let Json(resp) = super::providers::run_provider_test(test_req).await?;
+    if !resp.success {
+        return Err(AppError::BadRequest(format!(
+            "Provider unreachable: {}",
+            resp.message
+        )));
+    }
+
+    Ok(Json(resp.models.unwrap_or_default()))
 }

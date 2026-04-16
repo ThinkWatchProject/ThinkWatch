@@ -546,9 +546,21 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             get(handlers::models::list_model_routes).post(handlers::models::create_model_route),
         )
         .route(
+            "/api/admin/model-routes",
+            get(handlers::models::list_all_routes),
+        )
+        .route(
+            "/api/admin/model-routes/batch",
+            post(handlers::models::batch_create_routes),
+        )
+        .route(
             "/api/admin/model-routes/{route_id}",
             patch(handlers::models::update_model_route)
                 .delete(handlers::models::delete_model_route),
+        )
+        .route(
+            "/api/admin/providers/{provider_id}/remote-models",
+            get(handlers::models::list_remote_models),
         )
         .route(
             "/api/admin/teams",
