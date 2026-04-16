@@ -130,7 +130,7 @@ export function ModelsPage() {
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize, setPageSize] = useState(50);
 
   // Routes: cached per model_id
   const [expandedModel, setExpandedModel] = useState<string | null>(null);
@@ -414,9 +414,9 @@ export function ModelsPage() {
   /* ---------- render ---------- */
 
   return (
-    <div className="space-y-6">
+    <div className="flex flex-col h-[calc(100vh-4rem)]">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">{t('models.title')}</h1>
           <p className="text-muted-foreground">{t('models.subtitle')}</p>
@@ -436,32 +436,27 @@ export function ModelsPage() {
       </div>
 
       {error && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" className="mb-4">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
       {providers.length === 0 && !loading && (
-        <Alert>
+        <Alert className="mb-4">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{t('models.noProvidersHint')}</AlertDescription>
         </Alert>
       )}
 
       {/* Search */}
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 mb-4">
         <Input
           placeholder={t('models.searchPlaceholder')}
           value={search}
           onChange={(e) => { setSearch(e.target.value); setPage(1); }}
           className="max-w-sm"
         />
-        {totalModels > 0 && (
-          <span className="text-sm text-muted-foreground">
-            {totalModels} {t('models.totalCount')}
-          </span>
-        )}
       </div>
 
       {/* Models table */}
@@ -480,8 +475,8 @@ export function ModelsPage() {
           </CardContent>
         </Card>
       ) : (
-        <Card>
-          <CardContent className="p-0 overflow-x-auto">
+        <Card className="flex flex-col min-h-0 flex-1">
+          <CardContent className="p-0 overflow-auto flex-1">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -665,17 +660,17 @@ export function ModelsPage() {
               </TableBody>
             </Table>
           </CardContent>
+          <div className="border-t">
+            <DataTablePagination
+              total={totalModels}
+              page={page}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              onPageSizeChange={setPageSize}
+            />
+          </div>
         </Card>
       )}
-
-      {/* Pagination */}
-      <DataTablePagination
-        total={totalModels}
-        page={page}
-        pageSize={pageSize}
-        onPageChange={setPage}
-        onPageSizeChange={setPageSize}
-      />
 
       {/* Edit Model Dialog */}
       <Dialog open={modelDialogOpen} onOpenChange={setModelDialogOpen}>
