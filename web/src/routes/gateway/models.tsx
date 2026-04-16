@@ -458,7 +458,7 @@ export function ModelsPage() {
         </Card>
       ) : (
         <Card>
-          <CardContent className="p-0">
+          <CardContent className="p-0 overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -492,8 +492,8 @@ export function ModelsPage() {
                             <ChevronRight className="h-4 w-4" />
                           )}
                         </TableCell>
-                        <TableCell className="font-mono text-xs">{m.model_id}</TableCell>
-                        <TableCell>{m.display_name}</TableCell>
+                        <TableCell className="font-mono text-xs max-w-[220px] truncate" title={m.model_id}>{m.model_id}</TableCell>
+                        <TableCell className="max-w-[200px] truncate" title={m.display_name}>{m.display_name}</TableCell>
                         <TableCell className="text-right font-mono text-xs">
                           {m.input_price ?? '\u2014'}
                         </TableCell>
