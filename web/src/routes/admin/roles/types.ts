@@ -22,10 +22,7 @@ export interface RoleResponse {
   name: string;
   description: string | null;
   is_system: boolean;
-  permissions: string[];
-  allowed_models: string[] | null;
-  allowed_mcp_tools: string[] | null;
-  policy_document: PolicyDocument | null;
+  policy_document: PolicyDocument;
   user_count: number;
   /** Email of the user who created this role. `null` for seeded
    *  system roles or roles whose creator was deleted. */
@@ -60,12 +57,17 @@ export interface PolicyDocument {
   Statement: PolicyStatement[];
 }
 
+export interface PolicyConstraints {
+  RateLimits?: { Metric: string; Window: string; MaxCount: number }[];
+  Budgets?: { Period: string; MaxTokens: number }[];
+}
+
 export interface PolicyStatement {
   Sid?: string;
   Effect: 'Allow' | 'Deny';
   Action: string | string[];
   Resource: string | string[];
-  Condition?: Record<string, unknown>;
+  Constraints?: PolicyConstraints;
 }
 
 export interface McpServer {
@@ -292,63 +294,158 @@ export function groupByResource(perms: PermissionDef[]): Map<string, PermissionD
 }
 
 // ----------------------------------------------------------------------------
-// Simple ↔ Policy mode conversion
-//
-// `permsToPolicy` produces a single Allow statement listing every selected
-// permission key — round-trips losslessly back through `policyToPerms`.
-//
-// `policyToPerms` walks every Statement and harvests Action keys from any
-// Allow rule whose Resource matches `*` (or `["*"]`). Anything fancier
-// (Deny rules, Resource scoping like `model:gpt-*`, conditions) cannot be
-// represented in simple mode and is reported as lossy so the UI can warn
-// the admin before they overwrite the JSON.
+// Parsed constraints — camelCase TS representation of the PascalCase JSON
+// Constraints blocks attached to individual Statements.
 // ----------------------------------------------------------------------------
 
-/// Encode the simple-mode form into a policy document. Permissions become
-/// a wildcard-Resource Allow; model/MCP-tool scope become additional Allow
-/// statements with `model:` / `mcp_tool:` prefixed Resources. `null` scope
-/// (= unrestricted) is omitted entirely so the JSON only carries explicit
-/// constraints.
+export interface ParsedRateLimit {
+  metric: 'requests' | 'tokens';
+  window: string;
+  maxCount: number;
+  enabled: boolean;
+}
+
+export interface ParsedBudget {
+  period: 'daily' | 'weekly' | 'monthly';
+  maxTokens: number;
+  enabled: boolean;
+}
+
+export interface ParsedSurfaceConstraints {
+  rateLimits: ParsedRateLimit[];
+  budgets: ParsedBudget[];
+}
+
+export interface ParsedConstraints {
+  ai_gateway?: ParsedSurfaceConstraints;
+  mcp_gateway?: ParsedSurfaceConstraints;
+}
+
+// ----------------------------------------------------------------------------
+// Simple ↔ Policy mode conversion
+//
+// `permsToPolicy` groups permissions by surface (ai_gateway, mcp_gateway,
+// rest) and builds one Statement per group. Constraints (rate limits,
+// budgets) are attached to the relevant Statement rather than as a
+// top-level key.
+//
+// `policyToPerms` walks every Statement and harvests Action keys, model/tool
+// scope from Resource, and constraints from each Statement's Constraints.
+// ----------------------------------------------------------------------------
+
+function constraintsToJson(c: ParsedSurfaceConstraints): PolicyConstraints | undefined {
+  const out: PolicyConstraints = {};
+  // Only serialize enabled rules/budgets into the policy document
+  const enabledRules = c.rateLimits.filter((r) => r.enabled);
+  const enabledBudgets = c.budgets.filter((b) => b.enabled);
+  if (enabledRules.length > 0) {
+    out.RateLimits = enabledRules.map((r) => ({
+      Metric: r.metric,
+      Window: r.window,
+      MaxCount: r.maxCount,
+    }));
+  }
+  if (enabledBudgets.length > 0) {
+    out.Budgets = enabledBudgets.map((b) => ({
+      Period: b.period,
+      MaxTokens: b.maxTokens,
+    }));
+  }
+  return out.RateLimits || out.Budgets ? out : undefined;
+}
+
+function constraintsFromJson(c: PolicyConstraints | undefined): ParsedSurfaceConstraints {
+  return {
+    rateLimits: (c?.RateLimits ?? []).map((r) => ({
+      metric: r.Metric as 'requests' | 'tokens',
+      window: r.Window,
+      maxCount: r.MaxCount,
+      enabled: true,
+    })),
+    budgets: (c?.Budgets ?? []).map((b) => ({
+      period: b.Period as 'daily' | 'weekly' | 'monthly',
+      maxTokens: b.MaxTokens,
+      enabled: true,
+    })),
+  };
+}
+
+function isEmptySurfaceConstraints(c: ParsedSurfaceConstraints): boolean {
+  return c.rateLimits.length === 0 && c.budgets.length === 0;
+}
+
+/// Encode the simple-mode form into a policy document. Permissions are
+/// grouped by surface: ai_gateway perms get their own Statement with
+/// model scope as Resource and AI constraints; mcp_gateway perms get
+/// their own Statement with tool scope and MCP constraints; remaining
+/// perms go into a catch-all Statement.
 export function permsToPolicy(
   perms: Set<string>,
   models?: Set<string> | null,
   mcpTools?: Set<string> | null,
+  constraints?: ParsedConstraints | null,
 ): PolicyDocument {
   const statements: PolicyStatement[] = [];
-  if (perms.size > 0) {
-    statements.push({
-      Sid: 'AllowPermissions',
-      Effect: 'Allow',
-      Action: Array.from(perms).sort(),
-      Resource: '*',
-    });
-  }
-  if (models != null) {
-    statements.push({
-      Sid: 'ModelScope',
-      Effect: 'Allow',
-      Action: 'ai_gateway:use',
-      Resource:
-        models.size === 0
+
+  const aiPerms = [...perms].filter((p) => p.startsWith('ai_gateway:')).sort();
+  const mcpPerms = [...perms].filter((p) => p.startsWith('mcp_gateway:')).sort();
+  const restPerms = [...perms]
+    .filter((p) => !p.startsWith('ai_gateway:') && !p.startsWith('mcp_gateway:'))
+    .sort();
+
+  if (aiPerms.length > 0 || models != null) {
+    const resource: string | string[] =
+      models == null
+        ? '*'
+        : models.size === 0
           ? []
           : Array.from(models)
               .sort()
-              .map((m) => `model:${m}`),
-    });
-  }
-  if (mcpTools != null) {
-    statements.push({
-      Sid: 'McpToolScope',
+              .map((m) => `model:${m}`);
+    const aiConstraints = constraints?.ai_gateway;
+    const stmt: PolicyStatement = {
+      Sid: 'AIGateway',
       Effect: 'Allow',
-      Action: 'mcp_gateway:use',
-      Resource:
-        mcpTools.size === 0
+      Action: aiPerms.length > 0 ? aiPerms : 'ai_gateway:use',
+      Resource: resource,
+    };
+    if (aiConstraints && !isEmptySurfaceConstraints(aiConstraints)) {
+      stmt.Constraints = constraintsToJson(aiConstraints);
+    }
+    statements.push(stmt);
+  }
+
+  if (mcpPerms.length > 0 || mcpTools != null) {
+    const resource: string | string[] =
+      mcpTools == null
+        ? '*'
+        : mcpTools.size === 0
           ? []
           : Array.from(mcpTools)
               .sort()
-              .map((t) => `mcp_tool:${t}`),
+              .map((t) => `mcp_tool:${t}`);
+    const mcpConstraints = constraints?.mcp_gateway;
+    const stmt: PolicyStatement = {
+      Sid: 'MCPGateway',
+      Effect: 'Allow',
+      Action: mcpPerms.length > 0 ? mcpPerms : 'mcp_gateway:use',
+      Resource: resource,
+    };
+    if (mcpConstraints && !isEmptySurfaceConstraints(mcpConstraints)) {
+      stmt.Constraints = constraintsToJson(mcpConstraints);
+    }
+    statements.push(stmt);
+  }
+
+  if (restPerms.length > 0) {
+    statements.push({
+      Sid: 'ConsoleAccess',
+      Effect: 'Allow',
+      Action: restPerms,
+      Resource: '*',
     });
   }
+
   return { Version: '2024-01-01', Statement: statements };
 }
 
@@ -360,10 +457,12 @@ export function isWildcardResource(r: PolicyStatement['Resource']): boolean {
 
 export interface PolicyParseResult {
   perms: Set<string>;
-  /** `null` = unrestricted (no ModelScope statement seen); Set = restrict. */
+  /** `null` = unrestricted (no model-scoped Resource seen); Set = restrict. */
   models: Set<string> | null;
   /** Same shape, for MCP tools scope. */
   mcpTools: Set<string> | null;
+  /** Constraints extracted from per-Statement Constraints blocks, grouped by surface. */
+  constraints: ParsedConstraints;
   /** True if any statement couldn't be expressed in simple mode. */
   lossy: boolean;
   parseError: boolean;
@@ -374,6 +473,7 @@ export function policyToPerms(json: string, available: PermissionDef[]): PolicyP
     perms: new Set(),
     models: null,
     mcpTools: null,
+    constraints: {},
     lossy: false,
     parseError: false,
   };
@@ -391,9 +491,6 @@ export function policyToPerms(json: string, available: PermissionDef[]): PolicyP
       out.lossy = true;
       continue;
     }
-    // Detect scope statements by their Resource shape — any non-wildcard
-    // Resource with `model:` / `mcp_tool:` prefixes is treated as a scope
-    // restriction rather than a regular permission grant.
     const resources = Array.isArray(st.Resource) ? st.Resource : [st.Resource];
     const modelResources = resources.filter(
       (r): r is string => typeof r === 'string' && r.startsWith('model:'),
@@ -401,30 +498,60 @@ export function policyToPerms(json: string, available: PermissionDef[]): PolicyP
     const toolResources = resources.filter(
       (r): r is string => typeof r === 'string' && r.startsWith('mcp_tool:'),
     );
-    if (modelResources.length > 0 || st.Sid === 'ModelScope') {
-      out.models = new Set(modelResources.map((r) => r.slice('model:'.length)));
-      continue;
-    }
-    if (toolResources.length > 0 || st.Sid === 'McpToolScope') {
-      out.mcpTools = new Set(toolResources.map((r) => r.slice('mcp_tool:'.length)));
-      continue;
-    }
-    if (!isWildcardResource(st.Resource)) {
-      out.lossy = true;
-      continue;
-    }
     const actions = Array.isArray(st.Action) ? st.Action : [st.Action];
-    for (const a of actions) {
-      if (a === '*') {
-        for (const p of available) out.perms.add(p.key);
-      } else if (a.endsWith(':*')) {
-        const prefix = a.slice(0, -1); // includes the colon
-        for (const p of available) if (p.key.startsWith(prefix)) out.perms.add(p.key);
-      } else if (valid.has(a)) {
-        out.perms.add(a);
-      } else {
-        out.lossy = true;
+    const hasAiAction = actions.some((a) => a.startsWith('ai_gateway:'));
+    const hasMcpAction = actions.some((a) => a.startsWith('mcp_gateway:'));
+
+    // Extract model scope from Resource
+    if (modelResources.length > 0) {
+      out.models = new Set(modelResources.map((r) => r.slice('model:'.length)));
+    } else if (
+      hasAiAction &&
+      !isWildcardResource(st.Resource) &&
+      resources.length === 0
+    ) {
+      // Empty resource array = explicit "no models allowed"
+      out.models = new Set();
+    }
+
+    // Extract tool scope from Resource
+    if (toolResources.length > 0) {
+      out.mcpTools = new Set(toolResources.map((r) => r.slice('mcp_tool:'.length)));
+    } else if (
+      hasMcpAction &&
+      !isWildcardResource(st.Resource) &&
+      resources.length === 0
+    ) {
+      out.mcpTools = new Set();
+    }
+
+    // Extract constraints by surface
+    if (st.Constraints) {
+      const parsed = constraintsFromJson(st.Constraints);
+      if (hasAiAction) {
+        out.constraints.ai_gateway = parsed;
+      } else if (hasMcpAction) {
+        out.constraints.mcp_gateway = parsed;
       }
+    }
+
+    // Collect Action keys as permissions
+    if (isWildcardResource(st.Resource) || modelResources.length > 0 || toolResources.length > 0) {
+      for (const a of actions) {
+        if (a === '*') {
+          for (const p of available) out.perms.add(p.key);
+        } else if (a.endsWith(':*')) {
+          const prefix = a.slice(0, -1);
+          for (const p of available) if (p.key.startsWith(prefix)) out.perms.add(p.key);
+        } else if (valid.has(a)) {
+          out.perms.add(a);
+        } else {
+          out.lossy = true;
+        }
+      }
+    } else if (!isWildcardResource(st.Resource) && modelResources.length === 0 && toolResources.length === 0) {
+      // Non-wildcard Resource without model:/mcp_tool: prefix
+      out.lossy = true;
     }
   }
   return out;

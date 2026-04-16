@@ -5,10 +5,30 @@ use uuid::Uuid;
 
 use think_watch_auth::rbac;
 use think_watch_common::errors::AppError;
-use think_watch_common::limits as commons_limits;
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::{AuthUser, invalidate_role_perms};
+
+/// Validate any Constraints blocks inside a policy_document's statements.
+fn validate_policy_constraints_in_doc(doc: &serde_json::Value) -> Result<(), AppError> {
+    let statements = match doc.get("Statement").and_then(|s| s.as_array()) {
+        Some(arr) => arr,
+        None => return Ok(()),
+    };
+    for (i, stmt) in statements.iter().enumerate() {
+        if let Some(c) = stmt.get("Constraints")
+            && !c.is_null()
+        {
+            let constraints: think_watch_common::limits::PolicyConstraints =
+                serde_json::from_value(c.clone()).map_err(|e| {
+                    AppError::BadRequest(format!("Statement[{i}].Constraints: {e}"))
+                })?;
+            think_watch_common::limits::validate_policy_constraints(&constraints)
+                .map_err(|e| AppError::BadRequest(format!("Statement[{i}].{e}")))?;
+        }
+    }
+    Ok(())
+}
 
 /// One permission entry in the structured catalog.
 ///
@@ -151,202 +171,49 @@ pub(super) fn is_known_permission(key: &str) -> bool {
     PERMISSIONS.iter().any(|p| p.key == key)
 }
 
-/// Default permission set for each seeded system role.
+/// Default policy document for each seeded system role.
 ///
 /// This is the **single source of truth** for "what should this
 /// system role grant out of the box". The migration uses these to
-/// seed `rbac_roles.permissions` on a fresh database, and the
+/// seed `rbac_roles.policy_document` on a fresh database, and the
 /// "Reset to defaults" UI in the system-role editor uses them to
 /// roll back any in-place edits.
 ///
 /// Kept in lockstep with the seed in `migrations/001_init.sql`
 /// — `validate_seeded_roles` runs at startup so a drift between
 /// the two would fail-fast.
-pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &[&str])] = &[
+pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &str)] = &[
     (
         "super_admin",
-        &[
-            "ai_gateway:use",
-            "mcp_gateway:use",
-            "api_keys:read",
-            "api_keys:create",
-            "api_keys:update",
-            "api_keys:rotate",
-            "api_keys:delete",
-            "providers:read",
-            "providers:create",
-            "providers:update",
-            "providers:delete",
-            "providers:rotate_key",
-            "models:read",
-            "models:write",
-            "mcp_servers:read",
-            "mcp_servers:create",
-            "mcp_servers:update",
-            "mcp_servers:delete",
-            "users:read",
-            "users:create",
-            "users:update",
-            "users:delete",
-            "teams:read",
-            "teams:create",
-            "teams:update",
-            "teams:delete",
-            "team_members:write",
-            "team:read",
-            "team:write",
-            "sessions:revoke",
-            "roles:read",
-            "roles:create",
-            "roles:update",
-            "roles:delete",
-            "roles:edit_system",
-            "analytics:read_own",
-            "analytics:read_team",
-            "analytics:read_all",
-            "audit_logs:read_own",
-            "audit_logs:read_team",
-            "audit_logs:read_all",
-            "logs:read_own",
-            "logs:read_team",
-            "logs:read_all",
-            "log_forwarders:read",
-            "log_forwarders:write",
-            "webhooks:read",
-            "webhooks:write",
-            "content_filter:read",
-            "content_filter:write",
-            "pii_redactor:read",
-            "pii_redactor:write",
-            "rate_limits:read",
-            "rate_limits:write",
-            "settings:read",
-            "settings:write",
-            "system:configure_oidc",
-        ],
+        r#"{"Version":"2024-01-01","Statement":[{"Sid":"FullAccess","Effect":"Allow","Action":"*","Resource":"*"}]}"#,
     ),
     (
         "admin",
-        &[
-            "ai_gateway:use",
-            "mcp_gateway:use",
-            "api_keys:read",
-            "api_keys:create",
-            "api_keys:update",
-            "api_keys:rotate",
-            "api_keys:delete",
-            "providers:read",
-            "providers:create",
-            "providers:update",
-            "providers:delete",
-            "providers:rotate_key",
-            "models:read",
-            "models:write",
-            "mcp_servers:read",
-            "mcp_servers:create",
-            "mcp_servers:update",
-            "mcp_servers:delete",
-            "users:read",
-            "users:create",
-            "users:update",
-            "teams:read",
-            "teams:create",
-            "teams:update",
-            "teams:delete",
-            "team_members:write",
-            "team:read",
-            "team:write",
-            "sessions:revoke",
-            "roles:read",
-            "roles:create",
-            "roles:update",
-            "roles:delete",
-            "analytics:read_all",
-            "audit_logs:read_all",
-            "logs:read_all",
-            "log_forwarders:read",
-            "log_forwarders:write",
-            "webhooks:read",
-            "webhooks:write",
-            "content_filter:read",
-            "content_filter:write",
-            "pii_redactor:read",
-            "pii_redactor:write",
-            "rate_limits:read",
-            "rate_limits:write",
-            "settings:read",
-            "settings:write",
-        ],
+        r#"{"Version":"2024-01-01","Statement":[{"Sid":"AdminAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","api_keys:delete","providers:read","providers:create","providers:update","providers:delete","providers:rotate_key","models:read","models:write","mcp_servers:read","mcp_servers:create","mcp_servers:update","mcp_servers:delete","users:read","users:create","users:update","teams:read","teams:create","teams:update","teams:delete","team_members:write","team:read","team:write","sessions:revoke","roles:read","roles:create","roles:update","roles:delete","analytics:read_all","audit_logs:read_all","logs:read_all","log_forwarders:read","log_forwarders:write","webhooks:read","webhooks:write","content_filter:read","content_filter:write","pii_redactor:read","pii_redactor:write","rate_limits:read","rate_limits:write","settings:read","settings:write"],"Resource":"*"}]}"#,
     ),
     (
         "team_manager",
-        // The team_manager role is meant to be assigned with
-        // `scope_kind = team` so its perms only fire on the team
-        // it's bound to. The handler-level scope checks
-        // (assert_scope_for_*) enforce that — the catalog just
-        // declares which perms the role HAS; the assignment
-        // declares WHERE.
-        &[
-            "ai_gateway:use",
-            "mcp_gateway:use",
-            "api_keys:read",
-            "api_keys:create",
-            "api_keys:update",
-            "api_keys:rotate",
-            "providers:read",
-            "models:read",
-            "mcp_servers:read",
-            "users:read",
-            "users:update",
-            "team_members:write",
-            "team:read",
-            "team:write",
-            "analytics:read_team",
-            "audit_logs:read_team",
-            "logs:read_team",
-            "rate_limits:read",
-            "rate_limits:write",
-        ],
+        r#"{"Version":"2024-01-01","Statement":[{"Sid":"TeamManagement","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","providers:read","models:read","mcp_servers:read","users:read","users:update","team_members:write","team:read","team:write","analytics:read_team","audit_logs:read_team","logs:read_team","rate_limits:read","rate_limits:write"],"Resource":"*"}]}"#,
     ),
     (
         "developer",
-        &[
-            "ai_gateway:use",
-            "mcp_gateway:use",
-            "api_keys:read",
-            "api_keys:create",
-            "api_keys:update",
-            "providers:read",
-            "models:read",
-            "mcp_servers:read",
-            "analytics:read_own",
-            "audit_logs:read_own",
-            "logs:read_own",
-        ],
+        r#"{"Version":"2024-01-01","Statement":[{"Sid":"DeveloperAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","providers:read","models:read","mcp_servers:read","analytics:read_own","audit_logs:read_own","logs:read_own"],"Resource":"*"}]}"#,
     ),
     (
         "viewer",
-        &[
-            "api_keys:read",
-            "providers:read",
-            "models:read",
-            "mcp_servers:read",
-            "analytics:read_own",
-            "audit_logs:read_own",
-            "logs:read_own",
-        ],
+        r#"{"Version":"2024-01-01","Statement":[{"Sid":"ViewerAccess","Effect":"Allow","Action":["api_keys:read","providers:read","models:read","mcp_servers:read","analytics:read_own","audit_logs:read_own","logs:read_own"],"Resource":"*"}]}"#,
     ),
 ];
 
-fn system_role_default_permissions(name: &str) -> Option<Vec<String>> {
+fn system_role_default_policy(name: &str) -> Option<serde_json::Value> {
     SYSTEM_ROLE_DEFAULTS
         .iter()
         .find(|(n, _)| *n == name)
-        .map(|(_, perms)| perms.iter().map(|p| (*p).to_string()).collect())
+        .and_then(|(_, json)| serde_json::from_str(json).ok())
 }
 
-/// Startup-time validation: every permission string stored on a role in
-/// `rbac_roles.permissions` must appear in the static `PERMISSIONS` catalog.
+/// Startup-time validation: every permission derived from a role's
+/// `policy_document` must appear in the static `PERMISSIONS` catalog.
 ///
 /// If this check fails the server refuses to start. Rationale: a seeded
 /// role that grants a permission the catalog doesn't know about means
@@ -355,13 +222,15 @@ fn system_role_default_permissions(name: &str) -> Option<Vec<String>> {
 /// are footguns that silently break authorization, so we want a loud
 /// fail-fast.
 pub async fn validate_seeded_roles(pool: &sqlx::PgPool) -> anyhow::Result<()> {
-    let rows: Vec<(String, Vec<String>)> =
-        sqlx::query_as("SELECT name, permissions FROM rbac_roles")
+    let rows: Vec<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT name, policy_document FROM rbac_roles")
             .fetch_all(pool)
             .await?;
+    let all_perm_keys: Vec<&str> = PERMISSIONS.iter().map(|p| p.key).collect();
     let mut unknown: Vec<String> = Vec::new();
-    for (role_name, perms) in &rows {
-        for perm in perms {
+    for (role_name, doc) in &rows {
+        let perms = think_watch_common::limits::extract_permissions(doc, &all_perm_keys);
+        for perm in &perms {
             if !is_known_permission(perm) {
                 unknown.push(format!("{role_name}: {perm}"));
             }
@@ -383,6 +252,12 @@ pub async fn validate_seeded_roles(pool: &sqlx::PgPool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// All permission keys as a static slice, used when passing the catalog
+/// to `compute_user_permissions` in the auth crate.
+pub fn all_permission_keys() -> Vec<&'static str> {
+    PERMISSIONS.iter().map(|p| p.key).collect()
+}
+
 // ============================================================================
 // Role + role-assignment handlers.
 //
@@ -397,18 +272,9 @@ pub struct RoleResponse {
     pub name: String,
     pub description: Option<String>,
     pub is_system: bool,
-    pub permissions: Vec<String>,
-    /// Allowed model IDs. `null` = unrestricted (all models).
-    pub allowed_models: Option<Vec<String>>,
-    /// Allowed MCP tool patterns. `null` = unrestricted (all tools).
-    pub allowed_mcp_tools: Option<Vec<String>>,
-    /// Optional structured policy document (Allow/Deny statements
-    /// against action/resource patterns). When `null`, the flat
-    /// `permissions` array is the sole source of truth.
-    pub policy_document: Option<serde_json::Value>,
-    /// Per-surface rate-limit rules and budget caps. Empty object
-    /// when the role imposes no constraints.
-    pub surface_constraints: serde_json::Value,
+    /// The unified policy document containing permissions, resource
+    /// scopes, rate limits, and budgets.
+    pub policy_document: serde_json::Value,
     /// Number of users currently assigned to this role.
     pub user_count: i64,
     /// Email of the user who created this role. `None` for system
@@ -431,19 +297,14 @@ type RoleRow = (
     String,
     Option<String>,
     bool,
-    Vec<String>,
-    Option<Vec<String>>,
-    Option<Vec<String>>,
-    Option<serde_json::Value>,
     serde_json::Value,
     Option<String>,
     chrono::DateTime<chrono::Utc>,
     chrono::DateTime<chrono::Utc>,
 );
 
-const ROLE_SELECT: &str = "SELECT r.id, r.name, r.description, r.is_system, r.permissions, \
-                                  r.allowed_models, r.allowed_mcp_tools, r.policy_document, \
-                                  r.surface_constraints, \
+const ROLE_SELECT: &str = "SELECT r.id, r.name, r.description, r.is_system, \
+                                  r.policy_document, \
                                   u.email AS created_by_email, \
                                   r.created_at, r.updated_at \
                            FROM rbac_roles r \
@@ -455,15 +316,11 @@ fn row_to_response(row: RoleRow, user_count: i64) -> RoleResponse {
         name: row.1,
         description: row.2,
         is_system: row.3,
-        permissions: row.4,
-        allowed_models: row.5,
-        allowed_mcp_tools: row.6,
-        policy_document: row.7,
-        surface_constraints: row.8,
+        policy_document: row.4,
         user_count,
-        created_by_email: row.9,
-        created_at: row.10.to_rfc3339(),
-        updated_at: row.11.to_rfc3339(),
+        created_by_email: row.5,
+        created_at: row.6.to_rfc3339(),
+        updated_at: row.7.to_rfc3339(),
     }
 }
 
@@ -527,14 +384,7 @@ pub async fn list_roles(
 pub struct CreateRoleRequest {
     pub name: String,
     pub description: Option<String>,
-    pub permissions: Vec<String>,
-    pub allowed_models: Option<Vec<String>>,
-    pub allowed_mcp_tools: Option<Vec<String>>,
-    pub policy_document: Option<serde_json::Value>,
-    /// Inline rate-limit + budget constraints. Validated server-side;
-    /// missing or `{}` means "no constraints".
-    #[serde(default)]
-    pub surface_constraints: Option<serde_json::Value>,
+    pub policy_document: serde_json::Value,
 }
 
 #[utoipa::path(
@@ -564,33 +414,16 @@ pub async fn create_role(
             "Role name must be 1-100 characters".into(),
         ));
     }
-    if let Some(ref doc) = payload.policy_document {
-        rbac::validate_policy_document(doc).map_err(AppError::BadRequest)?;
-    }
-    let surface_constraints = match payload.surface_constraints.as_ref() {
-        Some(v) => {
-            commons_limits::validate_surface_constraints(v).map_err(AppError::BadRequest)?;
-            v.clone()
-        }
-        None => serde_json::json!({}),
-    };
-    for perm in &payload.permissions {
-        if !is_known_permission(perm) {
-            return Err(AppError::BadRequest(format!("Invalid permission: {perm}")));
-        }
-    }
+    rbac::validate_policy_document(&payload.policy_document).map_err(AppError::BadRequest)?;
+    validate_policy_constraints_in_doc(&payload.policy_document)?;
 
     let row: RoleRow = sqlx::query_as(
         "WITH inserted AS ( \
-            INSERT INTO rbac_roles (name, description, is_system, permissions, \
-                                    allowed_models, allowed_mcp_tools, policy_document, \
-                                    surface_constraints, created_by) \
-            VALUES ($1, $2, FALSE, $3, $4, $5, $6, $7, $8) \
+            INSERT INTO rbac_roles (name, description, is_system, policy_document, created_by) \
+            VALUES ($1, $2, FALSE, $3, $4) \
             RETURNING * \
          ) \
-         SELECT i.id, i.name, i.description, i.is_system, i.permissions, \
-                i.allowed_models, i.allowed_mcp_tools, i.policy_document, \
-                i.surface_constraints, \
+         SELECT i.id, i.name, i.description, i.is_system, i.policy_document, \
                 u.email AS created_by_email, \
                 i.created_at, i.updated_at \
          FROM inserted i \
@@ -598,11 +431,7 @@ pub async fn create_role(
     )
     .bind(name)
     .bind(&payload.description)
-    .bind(&payload.permissions)
-    .bind(&payload.allowed_models)
-    .bind(&payload.allowed_mcp_tools)
     .bind(&payload.policy_document)
-    .bind(&surface_constraints)
     .bind(auth_user.claims.sub)
     .fetch_one(&state.db)
     .await
@@ -632,12 +461,7 @@ pub async fn create_role(
 pub struct UpdateRoleRequest {
     pub name: Option<String>,
     pub description: Option<String>,
-    pub permissions: Option<Vec<String>>,
-    pub allowed_models: Option<Vec<String>>,
-    pub allowed_mcp_tools: Option<Vec<String>>,
     pub policy_document: Option<serde_json::Value>,
-    #[serde(default)]
-    pub surface_constraints: Option<serde_json::Value>,
 }
 
 #[utoipa::path(
@@ -675,9 +499,9 @@ pub async fn update_role(
     let is_system = existing.0;
 
     // System role gating:
-    //   - Editing the permissions / models / servers / policy / description
-    //     of a system role requires the additional `roles:edit_system`
-    //     permission, which is strictly more dangerous than `roles:update`.
+    //   - Editing the policy_document or description of a system role
+    //     requires the additional `roles:edit_system` permission, which
+    //     is strictly more dangerous than `roles:update`.
     //   - The `name` and `is_system` columns are immovable on system rows
     //     because the rest of the app key off the literal string
     //     ("super_admin", "developer", ...). The UI hides the name field
@@ -694,43 +518,21 @@ pub async fn update_role(
 
     if let Some(ref doc) = payload.policy_document {
         rbac::validate_policy_document(doc).map_err(AppError::BadRequest)?;
-    }
-    if let Some(ref perms) = payload.permissions {
-        for perm in perms {
-            if !is_known_permission(perm) {
-                return Err(AppError::BadRequest(format!("Invalid permission: {perm}")));
-            }
-        }
-    }
-    if let Some(ref sc) = payload.surface_constraints {
-        commons_limits::validate_surface_constraints(sc).map_err(AppError::BadRequest)?;
+        validate_policy_constraints_in_doc(doc)?;
     }
 
-    // Build a single UPDATE with COALESCE so we only touch fields the
-    // caller actually sent. Permissions / models / servers / policy are
-    // nullable so an explicit `Some(None)` clears them. We pass them
-    // through directly and let the COALESCE branches resolve.
-    // `surface_constraints` is NOT NULL so we COALESCE on omission.
     sqlx::query(
         "UPDATE rbac_roles SET \
-            name                = COALESCE($2, name), \
-            description         = COALESCE($3, description), \
-            permissions         = COALESCE($4, permissions), \
-            allowed_models      = $5, \
-            allowed_mcp_tools   = $6, \
-            policy_document     = $7, \
-            surface_constraints = COALESCE($8, surface_constraints), \
-            updated_at          = now() \
+            name             = COALESCE($2, name), \
+            description      = COALESCE($3, description), \
+            policy_document  = COALESCE($4, policy_document), \
+            updated_at       = now() \
          WHERE id = $1",
     )
     .bind(id)
     .bind(payload.name.as_deref().map(str::trim))
     .bind(payload.description.as_deref())
-    .bind(payload.permissions.as_ref())
-    .bind(payload.allowed_models.as_ref())
-    .bind(payload.allowed_mcp_tools.as_ref())
     .bind(payload.policy_document.as_ref())
-    .bind(payload.surface_constraints.as_ref())
     .execute(&state.db)
     .await?;
 
@@ -806,7 +608,7 @@ pub async fn reset_role(
         ));
     }
 
-    let defaults = system_role_default_permissions(&existing.1).ok_or_else(|| {
+    let default_doc = system_role_default_policy(&existing.1).ok_or_else(|| {
         AppError::BadRequest(format!(
             "No defaults registered for system role '{}'",
             existing.1
@@ -815,16 +617,12 @@ pub async fn reset_role(
 
     sqlx::query(
         "UPDATE rbac_roles SET \
-            permissions         = $2, \
-            allowed_models      = NULL, \
-            allowed_mcp_tools   = NULL, \
-            policy_document     = NULL, \
-            surface_constraints = '{}'::jsonb, \
-            updated_at          = now() \
+            policy_document  = $2, \
+            updated_at       = now() \
          WHERE id = $1",
     )
     .bind(id)
-    .bind(&defaults)
+    .bind(&default_doc)
     .execute(&state.db)
     .await?;
 

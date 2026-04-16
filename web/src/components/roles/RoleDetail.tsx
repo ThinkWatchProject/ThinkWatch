@@ -15,12 +15,15 @@ import type {
   PermissionDef,
   RoleResponse,
 } from '@/routes/admin/roles/types';
+import { policyToPerms } from '@/routes/admin/roles/types';
 
 interface RoleDetailProps {
   role: RoleResponse;
   /** Permission catalog grouped by resource — used to render only the
    *  resources the role actually grants something in. */
   grouped: Map<string, PermissionDef[]>;
+  /** Flat permission catalog for policy parsing. */
+  catalog: PermissionDef[];
   dangerousKeys: Set<string>;
   availableServers: McpServer[];
   teamsById: Map<string, { id: string; name: string }>;
@@ -37,13 +40,15 @@ interface RoleDetailProps {
 export function RoleDetail({
   role,
   grouped,
+  catalog,
   dangerousKeys,
   availableServers,
   teamsById,
   onMembersChanged,
 }: RoleDetailProps) {
   const { t } = useTranslation();
-  const selected = new Set(role.permissions);
+  const parsed = policyToPerms(JSON.stringify(role.policy_document), catalog);
+  const selected = parsed.perms;
   const [detailTab, setDetailTab] = useState<'overview' | 'history'>('overview');
 
   return (
@@ -79,69 +84,66 @@ export function RoleDetail({
             </div>
             <div className="font-mono text-2xl tabular-nums">{role.user_count}</div>
           </div>
-          {role.policy_document ? (
-            <div>
-              <div className="mb-2 flex items-center gap-1.5 text-xs uppercase tracking-wider text-muted-foreground">
-                <FileJson className="h-3.5 w-3.5" />
-                {t('roles.policyDocument')}
-              </div>
-              <pre className="max-h-72 overflow-auto rounded-md border bg-muted/30 p-3 font-mono text-[10px]">
-                {JSON.stringify(role.policy_document, null, 2)}
-              </pre>
+          <div>
+            <div className="mb-2 flex items-center gap-1.5 text-xs uppercase tracking-wider text-muted-foreground">
+              <FileJson className="h-3.5 w-3.5" />
+              {t('roles.policyDocument')}
             </div>
-          ) : (
-            <div>
-              <div className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
-                {t('roles.permissions')}
-              </div>
-              <div className="space-y-2 rounded-md border p-3">
-                {Array.from(grouped.entries()).map(([resource, perms]) => {
-                  const granted = perms.filter((p) => selected.has(p.key));
-                  if (granted.length === 0) return null;
-                  return (
-                    <div key={resource}>
-                      <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
-                        {t(`permissions.resource.${resource}` as const, {
-                          defaultValue: resource,
-                        })}
-                      </div>
-                      <div className="mt-1 flex flex-wrap gap-1">
-                        {granted.map((p) => (
-                          <Badge
-                            key={p.key}
-                            variant={dangerousKeys.has(p.key) ? 'destructive' : 'outline'}
-                            className="text-[10px]"
-                          >
-                            {t(`permissions.action.${p.action}` as const, {
-                              defaultValue: p.action,
-                            })}
-                          </Badge>
-                        ))}
-                      </div>
+            <pre className="max-h-72 overflow-auto rounded-md border bg-muted/30 p-3 font-mono text-[10px]">
+              {JSON.stringify(role.policy_document, null, 2)}
+            </pre>
+          </div>
+          <div>
+            <div className="mb-2 text-xs uppercase tracking-wider text-muted-foreground">
+              {t('roles.permissions')}
+            </div>
+            <div className="space-y-2 rounded-md border p-3">
+              {Array.from(grouped.entries()).map(([resource, perms]) => {
+                const granted = perms.filter((p) => selected.has(p.key));
+                if (granted.length === 0) return null;
+                return (
+                  <div key={resource}>
+                    <div className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                      {t(`permissions.resource.${resource}` as const, {
+                        defaultValue: resource,
+                      })}
                     </div>
-                  );
-                })}
-                {role.permissions.length === 0 && (
-                  <span className="text-xs text-muted-foreground italic">
-                    {t('common.none')}
-                  </span>
-                )}
-              </div>
+                    <div className="mt-1 flex flex-wrap gap-1">
+                      {granted.map((p) => (
+                        <Badge
+                          key={p.key}
+                          variant={dangerousKeys.has(p.key) ? 'destructive' : 'outline'}
+                          className="text-[10px]"
+                        >
+                          {t(`permissions.action.${p.action}` as const, {
+                            defaultValue: p.action,
+                          })}
+                        </Badge>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+              {selected.size === 0 && (
+                <span className="text-xs text-muted-foreground italic">
+                  {t('common.none')}
+                </span>
+              )}
             </div>
-          )}
-          {(role.allowed_models !== null || role.allowed_mcp_tools !== null) && (
+          </div>
+          {(parsed.models !== null || parsed.mcpTools !== null) && (
             <div className="space-y-2">
-              {role.allowed_models !== null && (
+              {parsed.models !== null && (
                 <ConstraintRow
                   label={t('roles.allowedModels')}
-                  items={role.allowed_models}
+                  items={[...parsed.models]}
                   resolveLabel={(s) => s}
                 />
               )}
-              {role.allowed_mcp_tools !== null && (
+              {parsed.mcpTools !== null && (
                 <ConstraintRow
                   label={t('roles.allowedMcpTools')}
-                  items={role.allowed_mcp_tools}
+                  items={[...parsed.mcpTools]}
                   resolveLabel={(id) =>
                     availableServers.find((s) => s.id === id)?.name ?? id.slice(0, 8)
                   }

@@ -42,9 +42,9 @@ pub mod weight;
 
 /// What kind of resource a rule or cap is attached to.
 ///
-/// Role-level constraints are stored inline on `rbac_roles.surface_constraints`
-/// (see `SurfaceConstraints` below), so `'role'` is intentionally absent
-/// here — the side tables are reserved for per-user / per-key overrides.
+/// Role-level constraints are derived from `rbac_roles.policy_document`
+/// Constraints blocks, so `'role'` is intentionally absent here — the
+/// side tables are reserved for per-user / per-key overrides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitSubject {
@@ -120,16 +120,10 @@ impl Surface {
 // ----------------------------------------------------------------------------
 // Role-inline surface constraints
 //
-// Persisted on `rbac_roles.surface_constraints` as JSONB. Shape:
-//
-//   {
-//     "ai_gateway":  { "rules": [...], "budgets": [...] },
-//     "mcp_gateway": { "rules": [...], "budgets": [...] }
-//   }
-//
-// Absent surface key == empty block. The aggregator (see
-// `rbac::compute_user_surface_constraints`) merges across every role
-// the user holds using "most restrictive wins" semantics.
+// Derived from `rbac_roles.policy_document` Constraints on statements
+// that target `ai_gateway:use` or `mcp_gateway:use`. The runtime
+// representation below is identical to the old `surface_constraints`
+// JSONB shape so the merge + enforcement code stays unchanged.
 // ----------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -181,6 +175,316 @@ impl SurfaceConstraints {
         match surface {
             Surface::AiGateway => &mut self.ai_gateway,
             Surface::McpGateway => &mut self.mcp_gateway,
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------
+// PolicyDocument → derived data extraction
+//
+// Pure functions that parse a policy_document JSONB value (already
+// deserialized into `rbac::PolicyDocument`) into the runtime types the
+// gateway and RBAC layers consume. No DB calls.
+// ----------------------------------------------------------------------------
+
+/// Human-readable window string ↔ seconds conversion.
+/// Supported values: "1m", "5m", "1h", "5h", "1d", "1w".
+pub fn window_to_secs(s: &str) -> Option<i32> {
+    Some(match s {
+        "1m" => 60,
+        "5m" => 300,
+        "1h" => 3_600,
+        "5h" => 18_000,
+        "1d" => 86_400,
+        "1w" => 604_800,
+        _ => return None,
+    })
+}
+
+pub fn secs_to_window(secs: i32) -> Option<&'static str> {
+    Some(match secs {
+        60 => "1m",
+        300 => "5m",
+        3_600 => "1h",
+        18_000 => "5h",
+        86_400 => "1d",
+        604_800 => "1w",
+        _ => return None,
+    })
+}
+
+/// PascalCase constraint types matching the policy_document JSON shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PolicyConstraints {
+    #[serde(default)]
+    pub rate_limits: Vec<PolicyRateLimit>,
+    #[serde(default)]
+    pub budgets: Vec<PolicyBudget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PolicyRateLimit {
+    pub metric: String,
+    pub window: String,
+    pub max_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+pub struct PolicyBudget {
+    pub period: String,
+    pub max_tokens: i64,
+}
+
+/// Validate a policy_document's Constraints blocks. Called during role
+/// create/update to reject invalid window strings or non-positive counts.
+pub fn validate_policy_constraints(constraints: &PolicyConstraints) -> Result<(), String> {
+    for (i, rl) in constraints.rate_limits.iter().enumerate() {
+        let secs = window_to_secs(&rl.window).ok_or_else(|| {
+            format!(
+                "RateLimits[{i}]: Window '{}' not in allowed set (1m/5m/1h/5h/1d/1w)",
+                rl.window
+            )
+        })?;
+        if !is_allowed_window(secs) {
+            return Err(format!(
+                "RateLimits[{i}]: Window '{}' not allowed",
+                rl.window
+            ));
+        }
+        if rl.max_count <= 0 {
+            return Err(format!("RateLimits[{i}]: MaxCount must be > 0"));
+        }
+        if RateMetric::parse(&rl.metric).is_none() {
+            return Err(format!(
+                "RateLimits[{i}]: Metric '{}' unknown (expected requests/tokens)",
+                rl.metric
+            ));
+        }
+    }
+    for (i, b) in constraints.budgets.iter().enumerate() {
+        if b.max_tokens <= 0 {
+            return Err(format!("Budgets[{i}]: MaxTokens must be > 0"));
+        }
+        if BudgetPeriod::parse(&b.period).is_none() {
+            return Err(format!(
+                "Budgets[{i}]: Period '{}' unknown (expected daily/weekly/monthly)",
+                b.period
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Extract SurfaceConstraints from a parsed PolicyDocument by examining
+/// statements whose Action includes `ai_gateway:use` or `mcp_gateway:use`
+/// and pulling their Constraints blocks. Uses `think_watch_auth::rbac`
+/// types via the `serde_json::Value` representation so this crate
+/// does not depend on the auth crate.
+pub fn extract_surface_constraints(doc: &serde_json::Value) -> SurfaceConstraints {
+    let statements = match doc.get("Statement").and_then(|s| s.as_array()) {
+        Some(arr) => arr,
+        None => return SurfaceConstraints::default(),
+    };
+
+    let mut ai_block = SurfaceBlock::default();
+    let mut mcp_block = SurfaceBlock::default();
+
+    for stmt in statements {
+        let effect = stmt.get("Effect").and_then(|e| e.as_str()).unwrap_or("");
+        if effect != "Allow" {
+            continue;
+        }
+
+        let constraints_val = match stmt.get("Constraints") {
+            Some(c) if !c.is_null() => c,
+            _ => continue,
+        };
+        let constraints: PolicyConstraints = match serde_json::from_value(constraints_val.clone()) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let actions = stmt_actions(stmt);
+        let targets_ai = action_matches_any(&actions, "ai_gateway:use");
+        let targets_mcp = action_matches_any(&actions, "mcp_gateway:use");
+
+        if targets_ai {
+            append_constraints(&mut ai_block, &constraints);
+        }
+        if targets_mcp {
+            append_constraints(&mut mcp_block, &constraints);
+        }
+    }
+
+    SurfaceConstraints {
+        ai_gateway: if ai_block.rules.is_empty() && ai_block.budgets.is_empty() {
+            None
+        } else {
+            Some(ai_block)
+        },
+        mcp_gateway: if mcp_block.rules.is_empty() && mcp_block.budgets.is_empty() {
+            None
+        } else {
+            Some(mcp_block)
+        },
+    }
+}
+
+/// Extract the effective model scope from a parsed PolicyDocument.
+/// Looks at Allow statements whose Action matches `ai_gateway:use` and
+/// collects Resource entries that start with `model:`. Returns `None`
+/// when any matching statement has Resource `"*"` (unrestricted).
+pub fn extract_allowed_models(doc: &serde_json::Value) -> Option<Vec<String>> {
+    let statements = doc.get("Statement").and_then(|s| s.as_array())?;
+    let mut models: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut found_any = false;
+
+    for stmt in statements {
+        let effect = stmt.get("Effect").and_then(|e| e.as_str()).unwrap_or("");
+        if effect != "Allow" {
+            continue;
+        }
+        let actions = stmt_actions(stmt);
+        if !action_matches_any(&actions, "ai_gateway:use") {
+            continue;
+        }
+        found_any = true;
+        let resources = stmt_resources(stmt);
+        for r in &resources {
+            if r == "*" {
+                return None;
+            }
+            if let Some(model) = r.strip_prefix("model:") {
+                models.insert(model.to_string());
+            }
+        }
+    }
+    if !found_any {
+        return None;
+    }
+    Some(models.into_iter().collect())
+}
+
+/// Extract the effective MCP tool scope from a parsed PolicyDocument.
+/// Same logic as `extract_allowed_models` but for `mcp_gateway:use`
+/// statements and `mcp_tool:` resource prefixes.
+pub fn extract_allowed_mcp_tools(doc: &serde_json::Value) -> Option<Vec<String>> {
+    let statements = doc.get("Statement").and_then(|s| s.as_array())?;
+    let mut tools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut found_any = false;
+
+    for stmt in statements {
+        let effect = stmt.get("Effect").and_then(|e| e.as_str()).unwrap_or("");
+        if effect != "Allow" {
+            continue;
+        }
+        let actions = stmt_actions(stmt);
+        if !action_matches_any(&actions, "mcp_gateway:use") {
+            continue;
+        }
+        found_any = true;
+        let resources = stmt_resources(stmt);
+        for r in &resources {
+            if r == "*" {
+                return None;
+            }
+            if let Some(tool) = r.strip_prefix("mcp_tool:") {
+                tools.insert(tool.to_string());
+            }
+        }
+    }
+    if !found_any {
+        return None;
+    }
+    Some(tools.into_iter().collect())
+}
+
+/// Extract the flat set of permission strings from a parsed
+/// PolicyDocument. Collects Action strings from all Allow statements,
+/// expanding `"*"` into the full permission catalog (caller supplies
+/// the known keys via the `all_perms` parameter).
+pub fn extract_permissions(doc: &serde_json::Value, all_perms: &[&str]) -> Vec<String> {
+    let statements = match doc.get("Statement").and_then(|s| s.as_array()) {
+        Some(arr) => arr,
+        None => return Vec::new(),
+    };
+    let mut perms: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for stmt in statements {
+        let effect = stmt.get("Effect").and_then(|e| e.as_str()).unwrap_or("");
+        if effect != "Allow" {
+            continue;
+        }
+        let actions = stmt_actions(stmt);
+        for action in &actions {
+            if action == "*" {
+                perms.extend(all_perms.iter().map(|s| s.to_string()));
+            } else if action.ends_with(":*") {
+                let prefix = &action[..action.len() - 1];
+                for p in all_perms {
+                    if p.starts_with(prefix) {
+                        perms.insert(p.to_string());
+                    }
+                }
+            } else {
+                perms.insert(action.to_string());
+            }
+        }
+    }
+    perms.into_iter().collect()
+}
+
+// Internal helpers for policy_document field extraction
+
+fn stmt_actions(stmt: &serde_json::Value) -> Vec<String> {
+    match stmt.get("Action") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn stmt_resources(stmt: &serde_json::Value) -> Vec<String> {
+    match stmt.get("Resource") {
+        Some(serde_json::Value::String(s)) => vec![s.clone()],
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn action_matches_any(actions: &[String], target: &str) -> bool {
+    actions.iter().any(|a| a == "*" || a == target)
+}
+
+fn append_constraints(block: &mut SurfaceBlock, constraints: &PolicyConstraints) {
+    for rl in &constraints.rate_limits {
+        if let (Some(metric), Some(secs)) =
+            (RateMetric::parse(&rl.metric), window_to_secs(&rl.window))
+        {
+            block.rules.push(SurfaceRule {
+                metric,
+                window_secs: secs,
+                max_count: rl.max_count,
+                enabled: true,
+            });
+        }
+    }
+    for b in &constraints.budgets {
+        if let Some(period) = BudgetPeriod::parse(&b.period) {
+            block.budgets.push(SurfaceBudget {
+                period,
+                limit_tokens: b.max_tokens,
+                enabled: true,
+            });
         }
     }
 }
@@ -269,10 +573,9 @@ pub fn merge_most_restrictive(inputs: &[SurfaceConstraints]) -> SurfaceConstrain
     }
 }
 
-/// Schema validation for an incoming `surface_constraints` JSON payload
-/// on role create/update. Returns a user-friendly error message on
-/// failure. Accepts the same shape `SurfaceConstraints` deserializes
-/// from; additionally checks window/period/value ranges.
+/// Schema validation for an incoming `surface_constraints` JSON payload.
+/// Kept for backward compatibility with the rate_limit_rules CRUD path.
+/// Returns a user-friendly error message on failure.
 pub fn validate_surface_constraints(
     value: &serde_json::Value,
 ) -> Result<SurfaceConstraints, String> {
@@ -862,5 +1165,108 @@ mod tests {
         let ai = merged.ai_gateway.as_ref().unwrap();
         assert_eq!(ai.rules[0].max_count, 100);
         assert!(ai.budgets.is_empty());
+    }
+
+    #[test]
+    fn window_to_secs_roundtrip() {
+        for (s, expected) in [
+            ("1m", 60),
+            ("5m", 300),
+            ("1h", 3_600),
+            ("5h", 18_000),
+            ("1d", 86_400),
+            ("1w", 604_800),
+        ] {
+            assert_eq!(window_to_secs(s), Some(expected), "parse failed for {s}");
+            assert_eq!(
+                secs_to_window(expected),
+                Some(s),
+                "format failed for {expected}"
+            );
+        }
+        assert_eq!(window_to_secs("bogus"), None);
+        assert_eq!(secs_to_window(42), None);
+    }
+
+    #[test]
+    fn extract_permissions_wildcard() {
+        let doc = serde_json::json!({
+            "Version": "2024-01-01",
+            "Statement": [{"Effect":"Allow","Action":"*","Resource":"*"}]
+        });
+        let all = &["ai_gateway:use", "providers:read", "roles:delete"];
+        let perms = extract_permissions(&doc, all);
+        assert_eq!(perms.len(), 3);
+        assert!(perms.contains(&"ai_gateway:use".to_string()));
+    }
+
+    #[test]
+    fn extract_permissions_prefix_wildcard() {
+        let doc = serde_json::json!({
+            "Version": "2024-01-01",
+            "Statement": [{"Effect":"Allow","Action":"providers:*","Resource":"*"}]
+        });
+        let all = &["providers:read", "providers:write", "models:read"];
+        let perms = extract_permissions(&doc, all);
+        assert_eq!(perms, vec!["providers:read", "providers:write"]);
+    }
+
+    #[test]
+    fn extract_allowed_models_unrestricted() {
+        let doc = serde_json::json!({
+            "Version": "2024-01-01",
+            "Statement": [{"Effect":"Allow","Action":"ai_gateway:use","Resource":"*"}]
+        });
+        assert_eq!(extract_allowed_models(&doc), None);
+    }
+
+    #[test]
+    fn extract_allowed_models_scoped() {
+        let doc = serde_json::json!({
+            "Version": "2024-01-01",
+            "Statement": [{
+                "Effect":"Allow",
+                "Action":"ai_gateway:use",
+                "Resource":["model:gpt-4o","model:claude-sonnet-4-20250514"]
+            }]
+        });
+        let models = extract_allowed_models(&doc).unwrap();
+        assert_eq!(models, vec!["claude-sonnet-4-20250514", "gpt-4o"]);
+    }
+
+    #[test]
+    fn extract_surface_constraints_from_policy() {
+        let doc = serde_json::json!({
+            "Version": "2024-01-01",
+            "Statement": [{
+                "Effect":"Allow",
+                "Action":"ai_gateway:use",
+                "Resource":"*",
+                "Constraints": {
+                    "RateLimits": [{"Metric":"requests","Window":"1h","MaxCount":100}],
+                    "Budgets": [{"Period":"daily","MaxTokens":1000000}]
+                }
+            }]
+        });
+        let sc = extract_surface_constraints(&doc);
+        let ai = sc.ai_gateway.unwrap();
+        assert_eq!(ai.rules.len(), 1);
+        assert_eq!(ai.rules[0].window_secs, 3600);
+        assert_eq!(ai.rules[0].max_count, 100);
+        assert_eq!(ai.budgets[0].limit_tokens, 1_000_000);
+        assert!(sc.mcp_gateway.is_none());
+    }
+
+    #[test]
+    fn validate_policy_constraints_rejects_bad_window() {
+        let c = PolicyConstraints {
+            rate_limits: vec![PolicyRateLimit {
+                metric: "requests".into(),
+                window: "2h".into(),
+                max_count: 10,
+            }],
+            budgets: vec![],
+        };
+        assert!(validate_policy_constraints(&c).is_err());
     }
 }

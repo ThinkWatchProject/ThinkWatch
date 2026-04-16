@@ -2,7 +2,7 @@ import { useTranslation } from 'react-i18next';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { SIMPLE_TEMPLATES } from '@/routes/admin/roles/types';
+import { SIMPLE_TEMPLATES, policyToPerms } from '@/routes/admin/roles/types';
 import type { PermissionDef, RoleResponse, SimpleTemplate } from '@/routes/admin/roles/types';
 
 export interface RoleScopeState {
@@ -59,12 +59,13 @@ export function StepBasics({
   const { t } = useTranslation();
 
   const handleCloneFrom = (roleId: string) => {
-    if (!scopeState || !roles) return;
+    if (!scopeState || !roles || !permissions) return;
     const src = roles.find((r) => r.id === roleId);
     if (!src) return;
-    scopeState.setPerms(new Set(src.permissions));
-    scopeState.setModels(src.allowed_models === null ? null : new Set(src.allowed_models));
-    scopeState.setMcpTools(src.allowed_mcp_tools === null ? null : new Set(src.allowed_mcp_tools));
+    const parsed = policyToPerms(JSON.stringify(src.policy_document), permissions);
+    scopeState.setPerms(parsed.perms);
+    scopeState.setModels(parsed.models);
+    scopeState.setMcpTools(parsed.mcpTools);
   };
 
   const handleApplyTemplate = (tplId: string) => {

@@ -39,6 +39,7 @@ import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import type { TeamSummary } from '@/lib/types';
 import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { policyToPerms, type PolicyDocument } from './roles/types';
 
 
 interface RoleAssignment {
@@ -67,12 +68,7 @@ interface AvailableRole {
   name: string;
   is_system: boolean;
   description: string | null;
-  /// Flat permission keys this role grants. Used by the editor's
-  /// "effective permissions" preview to compute the union across
-  /// every assignment in real time.
-  permissions: string[];
-  allowed_models: string[] | null;
-  allowed_mcp_tools: string[] | null;
+  policy_document: PolicyDocument;
 }
 
 export function UsersPage() {
@@ -938,11 +934,12 @@ function EffectivePermissionsPreview({
   for (const a of assignments) {
     const role = rolesById.get(a.role_id);
     if (!role) continue;
-    for (const p of role.permissions) perms.add(p);
-    if (role.allowed_models === null) modelsUnrestricted = true;
-    else for (const m of role.allowed_models) models.add(m);
-    if (role.allowed_mcp_tools === null) toolsUnrestricted = true;
-    else for (const t of role.allowed_mcp_tools) tools.add(t);
+    const parsed = policyToPerms(JSON.stringify(role.policy_document), []);
+    for (const p of parsed.perms) perms.add(p);
+    if (parsed.models === null) modelsUnrestricted = true;
+    else for (const m of parsed.models) models.add(m);
+    if (parsed.mcpTools === null) toolsUnrestricted = true;
+    else for (const t of parsed.mcpTools) tools.add(t);
   }
 
   // Group permissions by their resource prefix for a compact list.

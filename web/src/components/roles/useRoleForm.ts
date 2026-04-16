@@ -1,6 +1,6 @@
 import { useCallback, useReducer } from 'react';
-import type { PermissionDef, PolicyDocument, RoleResponse } from '@/routes/admin/roles/types';
-import { policyToPerms } from '@/routes/admin/roles/types';
+import type { PermissionDef, PolicyDocument, RoleResponse, ParsedConstraints } from '@/routes/admin/roles/types';
+import { policyToPerms, permsToPolicy } from '@/routes/admin/roles/types';
 
 /**
  * Shape of an in-flight role form. Kept flat rather than nested per-step
@@ -34,15 +34,30 @@ export function emptyRoleForm(): RoleFormState {
   };
 }
 
-export function fromRoleResponse(role: RoleResponse): RoleFormState {
+export function fromRoleResponse(role: RoleResponse, available?: PermissionDef[]): RoleFormState {
+  const doc = role.policy_document;
+  const json = JSON.stringify(doc, null, 2);
+  if (available) {
+    const parsed = policyToPerms(json, available);
+    return {
+      name: role.name,
+      description: role.description ?? '',
+      mode: 'policy',
+      perms: parsed.perms,
+      models: parsed.models,
+      mcpTools: parsed.mcpTools,
+      policyJson: json,
+      policyError: '',
+    };
+  }
   return {
     name: role.name,
     description: role.description ?? '',
-    mode: role.policy_document ? 'policy' : 'simple',
-    perms: new Set(role.permissions),
-    models: role.allowed_models === null ? null : new Set(role.allowed_models),
-    mcpTools: role.allowed_mcp_tools === null ? null : new Set(role.allowed_mcp_tools),
-    policyJson: role.policy_document ? JSON.stringify(role.policy_document, null, 2) : '',
+    mode: 'policy',
+    perms: new Set(),
+    models: null,
+    mcpTools: null,
+    policyJson: json,
     policyError: '',
   };
 }
@@ -125,42 +140,32 @@ export function useRoleForm(initial: RoleFormState = emptyRoleForm()) {
 
 export type RoleForm = ReturnType<typeof useRoleForm>;
 
-/// Derive the API payload from the current form state. In simple mode the
-/// fields come straight from the form; in policy mode we parse the JSON
-/// so the saved `allowed_models` / `allowed_mcp_tools` reflect any
-/// scope statements the admin added (or removed) directly in the JSON.
+/// Derive the API payload from the current form state. Both simple and
+/// policy mode produce only `{ policy_document }` — the five legacy
+/// fields are gone. In simple mode the document is synthesized from
+/// the form's perms/models/mcpTools/constraints; in policy mode the
+/// admin's raw JSON is used as-is.
 export function buildRolePayload(
   form: RoleForm,
-  permissions: PermissionDef[],
+  _permissions: PermissionDef[],
+  constraints?: ParsedConstraints | null,
 ): {
-  permissions: string[];
-  allowed_models: string[] | null;
-  allowed_mcp_tools: string[] | null;
-  policy_document: PolicyDocument | null;
+  policy_document: PolicyDocument;
 } {
   if (form.mode === 'simple') {
     return {
-      permissions: Array.from(form.perms),
-      allowed_models: form.models === null ? null : Array.from(form.models),
-      allowed_mcp_tools: form.mcpTools === null ? null : Array.from(form.mcpTools),
-      policy_document: null,
+      policy_document: permsToPolicy(form.perms, form.models, form.mcpTools, constraints),
     };
   }
-  // Policy mode: parse the JSON one more time so the scope side-fields
-  // mirror whatever Resource constraints the admin actually committed.
-  let parsed: PolicyDocument | null = null;
+  let parsed: PolicyDocument;
   if (form.policyJson.trim()) {
     try {
       parsed = JSON.parse(form.policyJson) as PolicyDocument;
     } catch {
-      parsed = null;
+      parsed = { Version: '2024-01-01', Statement: [] };
     }
+  } else {
+    parsed = { Version: '2024-01-01', Statement: [] };
   }
-  const fromJson = policyToPerms(form.policyJson, permissions);
-  return {
-    permissions: [],
-    allowed_models: fromJson.models === null ? null : Array.from(fromJson.models),
-    allowed_mcp_tools: fromJson.mcpTools === null ? null : Array.from(fromJson.mcpTools),
-    policy_document: parsed,
-  };
+  return { policy_document: parsed };
 }

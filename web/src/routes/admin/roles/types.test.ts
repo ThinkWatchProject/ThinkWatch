@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   type PermissionDef,
+  type ParsedConstraints,
   permsToPolicy,
   policyToPerms,
 } from './types';
@@ -22,48 +23,80 @@ const CATALOG: PermissionDef[] = [
 ];
 
 describe('permsToPolicy', () => {
-  it('encodes only an AllowPermissions statement when no scope is given', () => {
-    const perms = new Set(['api_keys:read', 'api_keys:create']);
+  it('groups permissions by surface into separate Statements', () => {
+    const perms = new Set(['ai_gateway:use', 'mcp_gateway:use', 'api_keys:read', 'api_keys:create']);
     const doc = permsToPolicy(perms);
     expect(doc.Version).toBe('2024-01-01');
-    expect(doc.Statement).toHaveLength(1);
-    expect(doc.Statement[0]).toMatchObject({
-      Sid: 'AllowPermissions',
-      Effect: 'Allow',
-      Resource: '*',
-    });
-    // Sorted alphabetically for determinism.
-    expect(doc.Statement[0].Action).toEqual(['api_keys:create', 'api_keys:read']);
+    const sids = doc.Statement.map((s) => s.Sid);
+    expect(sids).toEqual(['AIGateway', 'MCPGateway', 'ConsoleAccess']);
+    expect(doc.Statement[0].Action).toEqual(['ai_gateway:use']);
+    expect(doc.Statement[1].Action).toEqual(['mcp_gateway:use']);
+    expect(doc.Statement[2].Action).toEqual(['api_keys:create', 'api_keys:read']);
   });
 
-  it('adds ModelScope / McpToolScope statements when a Set is supplied', () => {
+  it('attaches model scope as Resource on the AIGateway statement', () => {
     const doc = permsToPolicy(
       new Set(['ai_gateway:use']),
       new Set(['gpt-4o', 'claude-3-5-sonnet']),
+    );
+    expect(doc.Statement).toHaveLength(1);
+    expect(doc.Statement[0].Sid).toBe('AIGateway');
+    expect(doc.Statement[0].Resource).toEqual(['model:claude-3-5-sonnet', 'model:gpt-4o']);
+  });
+
+  it('attaches MCP tool scope as Resource on the MCPGateway statement', () => {
+    const doc = permsToPolicy(
+      new Set(['mcp_gateway:use']),
+      null,
       new Set(['github__list_issues']),
     );
-    const sids = doc.Statement.map((s) => s.Sid);
-    expect(sids).toEqual(['AllowPermissions', 'ModelScope', 'McpToolScope']);
-    const modelStmt = doc.Statement[1];
-    expect(modelStmt.Resource).toEqual(['model:claude-3-5-sonnet', 'model:gpt-4o']);
-    const toolStmt = doc.Statement[2];
-    expect(toolStmt.Resource).toEqual(['mcp_tool:github__list_issues']);
+    expect(doc.Statement).toHaveLength(1);
+    expect(doc.Statement[0].Sid).toBe('MCPGateway');
+    expect(doc.Statement[0].Resource).toEqual(['mcp_tool:github__list_issues']);
   });
 
   it('emits an empty Resource array when a scope Set is empty (explicit "none allowed")', () => {
-    const doc = permsToPolicy(new Set(), new Set(), new Set());
-    // Perms is empty so no AllowPermissions; both scope statements present
-    // with Resource=[] to mean "scope is set but nothing matches".
-    const sids = doc.Statement.map((s) => s.Sid);
-    expect(sids).toEqual(['ModelScope', 'McpToolScope']);
-    expect(doc.Statement[0].Resource).toEqual([]);
-    expect(doc.Statement[1].Resource).toEqual([]);
+    const doc = permsToPolicy(new Set(['ai_gateway:use']), new Set(), new Set(['mcp_gateway:use']));
+    const aiStmt = doc.Statement.find((s) => s.Sid === 'AIGateway');
+    expect(aiStmt?.Resource).toEqual([]);
   });
 
-  it('omits scope statements entirely when models/mcpTools are null', () => {
+  it('omits scope when models/mcpTools are null (unrestricted)', () => {
     const doc = permsToPolicy(new Set(['ai_gateway:use']), null, null);
     expect(doc.Statement).toHaveLength(1);
-    expect(doc.Statement[0].Sid).toBe('AllowPermissions');
+    expect(doc.Statement[0].Resource).toBe('*');
+  });
+
+  it('attaches Constraints to the AIGateway statement', () => {
+    const constraints: ParsedConstraints = {
+      ai_gateway: {
+        rateLimits: [{ metric: 'requests', window: '1h', maxCount: 100, enabled: true }],
+        budgets: [{ period: 'daily', maxTokens: 1000000, enabled: true }],
+      },
+    };
+    const doc = permsToPolicy(new Set(['ai_gateway:use']), null, null, constraints);
+    expect(doc.Statement[0].Constraints).toEqual({
+      RateLimits: [{ Metric: 'requests', Window: '1h', MaxCount: 100 }],
+      Budgets: [{ Period: 'daily', MaxTokens: 1000000 }],
+    });
+  });
+
+  it('skips disabled constraints during serialization', () => {
+    const constraints: ParsedConstraints = {
+      ai_gateway: {
+        rateLimits: [{ metric: 'requests', window: '1h', maxCount: 100, enabled: false }],
+        budgets: [],
+      },
+    };
+    const doc = permsToPolicy(new Set(['ai_gateway:use']), null, null, constraints);
+    expect(doc.Statement[0].Constraints).toBeUndefined();
+  });
+
+  it('produces only a ConsoleAccess statement for non-gateway perms', () => {
+    const doc = permsToPolicy(new Set(['api_keys:read', 'api_keys:create']));
+    expect(doc.Statement).toHaveLength(1);
+    expect(doc.Statement[0].Sid).toBe('ConsoleAccess');
+    expect(doc.Statement[0].Resource).toBe('*');
   });
 });
 
@@ -130,19 +163,18 @@ describe('policyToPerms', () => {
     expect(r.lossy).toBe(true);
   });
 
-  it('extracts ModelScope and McpToolScope into separate Sets', () => {
+  it('extracts model and tool scope from Resource prefixes', () => {
     const doc = JSON.stringify({
       Version: '2024-01-01',
       Statement: [
-        { Sid: 'AllowPermissions', Effect: 'Allow', Action: 'ai_gateway:use', Resource: '*' },
         {
-          Sid: 'ModelScope',
+          Sid: 'AIGateway',
           Effect: 'Allow',
           Action: 'ai_gateway:use',
           Resource: ['model:gpt-4o', 'model:claude-3-5-sonnet'],
         },
         {
-          Sid: 'McpToolScope',
+          Sid: 'MCPGateway',
           Effect: 'Allow',
           Action: 'mcp_gateway:use',
           Resource: ['mcp_tool:github__list_issues'],
@@ -151,10 +183,53 @@ describe('policyToPerms', () => {
     });
     const r = policyToPerms(doc, CATALOG);
     expect(r.perms.has('ai_gateway:use')).toBe(true);
+    expect(r.perms.has('mcp_gateway:use')).toBe(true);
     expect(r.models).not.toBeNull();
     expect([...(r.models ?? [])].sort()).toEqual(['claude-3-5-sonnet', 'gpt-4o']);
     expect([...(r.mcpTools ?? [])]).toEqual(['github__list_issues']);
     expect(r.lossy).toBe(false);
+  });
+
+  it('extracts Constraints from Statements', () => {
+    const doc = JSON.stringify({
+      Version: '2024-01-01',
+      Statement: [
+        {
+          Sid: 'AIGateway',
+          Effect: 'Allow',
+          Action: 'ai_gateway:use',
+          Resource: '*',
+          Constraints: {
+            RateLimits: [{ Metric: 'requests', Window: '1h', MaxCount: 100 }],
+            Budgets: [{ Period: 'daily', MaxTokens: 1000000 }],
+          },
+        },
+        {
+          Sid: 'MCPGateway',
+          Effect: 'Allow',
+          Action: 'mcp_gateway:use',
+          Resource: '*',
+          Constraints: {
+            RateLimits: [{ Metric: 'requests', Window: '1m', MaxCount: 60 }],
+          },
+        },
+      ],
+    });
+    const r = policyToPerms(doc, CATALOG);
+    expect(r.constraints.ai_gateway).toBeDefined();
+    expect(r.constraints.ai_gateway!.rateLimits).toHaveLength(1);
+    expect(r.constraints.ai_gateway!.rateLimits[0]).toMatchObject({
+      metric: 'requests',
+      window: '1h',
+      maxCount: 100,
+    });
+    expect(r.constraints.ai_gateway!.budgets).toHaveLength(1);
+    expect(r.constraints.ai_gateway!.budgets[0]).toMatchObject({
+      period: 'daily',
+      maxTokens: 1000000,
+    });
+    expect(r.constraints.mcp_gateway).toBeDefined();
+    expect(r.constraints.mcp_gateway!.rateLimits).toHaveLength(1);
   });
 
   it('treats non-wildcard Resource statements (without scope prefix) as lossy', () => {
@@ -170,7 +245,7 @@ describe('policyToPerms', () => {
   });
 });
 
-describe('round-trip permsToPolicy → policyToPerms', () => {
+describe('round-trip permsToPolicy -> policyToPerms', () => {
   it('preserves a permissions-only role exactly', () => {
     const original = new Set(['ai_gateway:use', 'api_keys:read', 'api_keys:create']);
     const doc = permsToPolicy(original, null, null);
@@ -193,14 +268,27 @@ describe('round-trip permsToPolicy → policyToPerms', () => {
     expect(back.lossy).toBe(false);
   });
 
-  it('preserves an empty-Set scope as "explicit none"', () => {
-    const doc = permsToPolicy(new Set(['ai_gateway:use']), new Set(), new Set());
+  it('preserves constraints through round-trip', () => {
+    const constraints: ParsedConstraints = {
+      ai_gateway: {
+        rateLimits: [{ metric: 'requests', window: '1h', maxCount: 100, enabled: true }],
+        budgets: [{ period: 'daily', maxTokens: 1000000, enabled: true }],
+      },
+      mcp_gateway: {
+        rateLimits: [{ metric: 'requests', window: '1m', maxCount: 60, enabled: true }],
+        budgets: [],
+      },
+    };
+    const doc = permsToPolicy(
+      new Set(['ai_gateway:use', 'mcp_gateway:use']),
+      null,
+      null,
+      constraints,
+    );
     const back = policyToPerms(JSON.stringify(doc), CATALOG);
-    // Empty allowlist must round-trip as empty Set, NOT null (null means
-    // unrestricted, which is a very different grant).
-    expect(back.models).not.toBeNull();
-    expect(back.models?.size).toBe(0);
-    expect(back.mcpTools).not.toBeNull();
-    expect(back.mcpTools?.size).toBe(0);
+    expect(back.constraints.ai_gateway?.rateLimits).toHaveLength(1);
+    expect(back.constraints.ai_gateway?.rateLimits[0].maxCount).toBe(100);
+    expect(back.constraints.ai_gateway?.budgets).toHaveLength(1);
+    expect(back.constraints.mcp_gateway?.rateLimits).toHaveLength(1);
   });
 });

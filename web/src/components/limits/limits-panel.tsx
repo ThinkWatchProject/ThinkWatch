@@ -46,12 +46,24 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { api, apiPost, apiDelete } from '@/lib/api';
+// ----------------------------------------------------------------------------
+// Re-export the canonical constraint types from the roles module so
+// consumers can import from either location.
+// ----------------------------------------------------------------------------
+
+export type {
+  ParsedConstraints as SurfaceConstraints,
+  ParsedSurfaceConstraints as SurfaceBlock,
+  ParsedRateLimit as SurfaceRule,
+  ParsedBudget as SurfaceBudget,
+} from '@/routes/admin/roles/types';
+
 import type {
-  SurfaceConstraints,
-  SurfaceBlock,
-  SurfaceRule,
-  SurfaceBudget,
-} from '@/components/roles/LimitsDraftEditor';
+  ParsedConstraints,
+  ParsedSurfaceConstraints,
+  ParsedRateLimit,
+  ParsedBudget,
+} from '@/routes/admin/roles/types';
 
 // ----------------------------------------------------------------------------
 // Types
@@ -112,14 +124,19 @@ interface ListResponse<T> {
 // the migration CHECK constraint.
 // ----------------------------------------------------------------------------
 
-const WINDOW_OPTIONS: { secs: number; labelKey: string }[] = [
-  { secs: 60, labelKey: 'limits.window_60' },
-  { secs: 300, labelKey: 'limits.window_300' },
-  { secs: 3600, labelKey: 'limits.window_3600' },
-  { secs: 18000, labelKey: 'limits.window_18000' },
-  { secs: 86400, labelKey: 'limits.window_86400' },
-  { secs: 604800, labelKey: 'limits.window_604800' },
+const WINDOW_OPTIONS: { secs: number; key: string; labelKey: string }[] = [
+  { secs: 60, key: '1m', labelKey: 'limits.window_60' },
+  { secs: 300, key: '5m', labelKey: 'limits.window_300' },
+  { secs: 3600, key: '1h', labelKey: 'limits.window_3600' },
+  { secs: 18000, key: '5h', labelKey: 'limits.window_18000' },
+  { secs: 86400, key: '1d', labelKey: 'limits.window_86400' },
+  { secs: 604800, key: '1w', labelKey: 'limits.window_604800' },
 ];
+
+function windowKeyToLabel(key: string, t: TFn): string {
+  const opt = WINDOW_OPTIONS.find((w) => w.key === key);
+  return opt ? t(opt.labelKey) : key;
+}
 
 const PERIOD_OPTIONS: { value: Period; labelKey: string }[] = [
   { value: 'daily', labelKey: 'limits.period_daily' },
@@ -140,11 +157,11 @@ interface LimitsPanelProps {
   /// Whether to render the budget caps section.
   allowBudgets: boolean;
   /// Controlled mode: when supplied the panel stops making API calls
-  /// and edits the in-memory SurfaceConstraints object instead.
+  /// and edits the in-memory ParsedConstraints object instead.
   /// The parent role form collects the result and sends it as part
-  /// of the role PATCH body — limits live inline on the role row now.
-  value?: SurfaceConstraints;
-  onChange?: (next: SurfaceConstraints) => void;
+  /// of the role PATCH body — constraints live inline on each Statement.
+  value?: ParsedConstraints;
+  onChange?: (next: ParsedConstraints) => void;
   /// Strip the collapsible border/header so the panel embeds inline
   /// under a permission group without a nested-card visual.
   compact?: boolean;
@@ -778,47 +795,41 @@ function ControlledLimits({
 }: {
   surfaces: Surface[];
   allowBudgets: boolean;
-  value: SurfaceConstraints;
-  onChange: (next: SurfaceConstraints) => void;
+  value: ParsedConstraints;
+  onChange: (next: ParsedConstraints) => void;
   compact?: boolean;
 }) {
   const { t } = useTranslation();
-  // Single-surface inline use is the common case — when the caller
-  // restricts to one surface we can omit the per-row "surface" column
-  // and badge to keep the table dense.
   const singleSurface: Surface | null = surfaces.length === 1 ? surfaces[0] : null;
 
-  const updateBlock = (s: Surface, next: SurfaceBlock) => {
-    const cleared = next.rules.length === 0 && next.budgets.length === 0;
-    const out: SurfaceConstraints = { ...value };
+  const updateBlock = (s: Surface, next: ParsedSurfaceConstraints) => {
+    const cleared = next.rateLimits.length === 0 && next.budgets.length === 0;
+    const out: ParsedConstraints = { ...value };
     if (cleared) delete out[s];
     else out[s] = next;
     onChange(out);
   };
 
-  const getBlock = (s: Surface): SurfaceBlock =>
-    value[s] ?? { rules: [], budgets: [] };
+  const getBlock = (s: Surface): ParsedSurfaceConstraints =>
+    value[s] ?? { rateLimits: [], budgets: [] };
 
-  const addRule = (s: Surface, rule: SurfaceRule) => {
+  const addRule = (s: Surface, rule: ParsedRateLimit) => {
     const block = getBlock(s);
-    updateBlock(s, { ...block, rules: [...block.rules, rule] });
+    updateBlock(s, { ...block, rateLimits: [...block.rateLimits, rule] });
   };
   const removeRule = (s: Surface, idx: number) => {
     const block = getBlock(s);
-    updateBlock(s, { ...block, rules: block.rules.filter((_, i) => i !== idx) });
+    updateBlock(s, { ...block, rateLimits: block.rateLimits.filter((_, i) => i !== idx) });
   };
   const toggleRule = (s: Surface, idx: number) => {
     const block = getBlock(s);
     updateBlock(s, {
       ...block,
-      rules: block.rules.map((r, i) => (i === idx ? { ...r, enabled: !r.enabled } : r)),
+      rateLimits: block.rateLimits.map((r, i) => (i === idx ? { ...r, enabled: !r.enabled } : r)),
     });
   };
-  const addBudget = (s: Surface, budget: SurfaceBudget) => {
+  const addBudget = (s: Surface, budget: ParsedBudget) => {
     const block = getBlock(s);
-    // Dedupe-by-period: re-adding the same period overwrites so the
-    // admin can tweak a quota without deleting first. Matches the
-    // backend UNIQUE (subject, period) semantics on budget_caps.
     updateBlock(s, {
       ...block,
       budgets: [...block.budgets.filter((b) => b.period !== budget.period), budget],
@@ -836,11 +847,11 @@ function ControlledLimits({
     });
   };
 
-  const allRules: { surface: Surface; rule: SurfaceRule; idx: number }[] = [];
+  const allRules: { surface: Surface; rule: ParsedRateLimit; idx: number }[] = [];
   for (const s of surfaces) {
-    getBlock(s).rules.forEach((rule, idx) => allRules.push({ surface: s, rule, idx }));
+    getBlock(s).rateLimits.forEach((rule, idx) => allRules.push({ surface: s, rule, idx }));
   }
-  const allBudgets: { surface: Surface; budget: SurfaceBudget; idx: number }[] = [];
+  const allBudgets: { surface: Surface; budget: ParsedBudget; idx: number }[] = [];
   for (const s of surfaces) {
     getBlock(s).budgets.forEach((budget, idx) => allBudgets.push({ surface: s, budget, idx }));
   }
@@ -881,9 +892,9 @@ function ControlledLimits({
                     )}
                     <td className="px-2 py-1.5 font-mono text-[10px]">{rule.metric}</td>
                     <td className="px-2 py-1.5 font-mono text-[10px]">
-                      {windowLabel(rule.window_secs, t)}
+                      {windowKeyToLabel(rule.window, t)}
                     </td>
-                    <td className="px-2 py-1.5 font-mono tabular-nums">{rule.max_count}</td>
+                    <td className="px-2 py-1.5 font-mono tabular-nums">{rule.maxCount}</td>
                     <td className="px-2 py-1.5">
                       <Switch
                         checked={rule.enabled}
@@ -946,7 +957,7 @@ function ControlledLimits({
                       <td className="px-2 py-1.5 font-mono text-[10px]">
                         {t(`limits.period_${budget.period}` as const)}
                       </td>
-                      <td className="px-2 py-1.5 font-mono tabular-nums">{budget.limit_tokens}</td>
+                      <td className="px-2 py-1.5 font-mono tabular-nums">{budget.maxTokens}</td>
                       <td className="px-2 py-1.5">
                         <Switch
                           checked={budget.enabled}
@@ -983,12 +994,12 @@ function AddRuleInline({
   onAdd,
 }: {
   surfaces: Surface[];
-  onAdd: (s: Surface, rule: SurfaceRule) => void;
+  onAdd: (s: Surface, rule: ParsedRateLimit) => void;
 }) {
   const { t } = useTranslation();
   const [surface, setSurface] = useState<Surface>(surfaces[0] ?? 'ai_gateway');
   const [metric, setMetric] = useState<Metric>('requests');
-  const [windowSecs, setWindowSecs] = useState<number>(3600);
+  const [windowKey, setWindowKey] = useState<string>('1h');
   const [maxCount, setMaxCount] = useState('');
 
   const setSurfaceWithMetric = (s: Surface) => {
@@ -1002,7 +1013,7 @@ function AddRuleInline({
       window.alert(t('limits.maxCountInvalid'));
       return;
     }
-    onAdd(surface, { metric, window_secs: windowSecs, max_count: n, enabled: true });
+    onAdd(surface, { metric, window: windowKey, maxCount: n, enabled: true });
     setMaxCount('');
   };
 
@@ -1043,13 +1054,13 @@ function AddRuleInline({
       </div>
       <div className="space-y-1">
         <Label className="text-[10px] text-muted-foreground">{t('limits.window')}</Label>
-        <Select value={String(windowSecs)} onValueChange={(v) => setWindowSecs(Number(v))}>
+        <Select value={windowKey} onValueChange={setWindowKey}>
           <SelectTrigger className="h-7 w-24 text-xs">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
             {WINDOW_OPTIONS.map((w) => (
-              <SelectItem key={w.secs} value={String(w.secs)}>
+              <SelectItem key={w.key} value={w.key}>
                 {t(w.labelKey as 'limits.window_60')}
               </SelectItem>
             ))}
@@ -1080,7 +1091,7 @@ function AddBudgetInline({
   onAdd,
 }: {
   surfaces: Surface[];
-  onAdd: (s: Surface, budget: SurfaceBudget) => void;
+  onAdd: (s: Surface, budget: ParsedBudget) => void;
 }) {
   const { t } = useTranslation();
   const [surface, setSurface] = useState<Surface>(surfaces[0] ?? 'ai_gateway');
@@ -1093,7 +1104,7 @@ function AddBudgetInline({
       window.alert(t('limits.limitTokensInvalid'));
       return;
     }
-    onAdd(surface, { period, limit_tokens: n, enabled: true });
+    onAdd(surface, { period, maxTokens: n, enabled: true });
     setLimitTokens('');
   };
 

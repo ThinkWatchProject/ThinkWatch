@@ -3,25 +3,20 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 // ============================================================================
-// Multi-role merging semantics: UNION.
+// Multi-role merging semantics.
 //
-// A user with multiple role assignments gets the UNION of every role's
-// `permissions` field. If ANY role grants a permission, the user has it.
+// Every role has a single `policy_document` JSONB that encodes
+// permissions, model/tool scopes, rate limits, and budgets.
 //
-// The same rule holds for `allowed_models` and `allowed_mcp_tools`:
-// - If ANY role has `allowed_* = NULL` (unrestricted), the user is
-//   unrestricted for that resource type.
-// - Otherwise the effective allow-list is the union of every role's
-//   allow-list.
+// Permissions (Allow actions): UNION across roles — most permissive.
+// Model scope: UNION; if any role has Resource:"*" → unrestricted.
+// Rate limits: per (metric, window) take MIN MaxCount — most restrictive.
+// Budgets: per Period take MIN MaxTokens — most restrictive.
+// Deny statements: win over Allow across all roles.
 //
-// Rationale: RBAC is additive. Assigning a role should never *reduce*
-// a user's access. "Least privilege" is expressed by not assigning the
-// role in the first place, not by intersecting.
-//
-// `compute_user_permissions` below is the single source of truth for
-// this rule. It is called at JWT creation time; the resulting union
-// is embedded in `claims.permissions` and used by every runtime
-// authorization check.
+// `compute_user_permissions` is the single source of truth for the
+// permission union. It is called at JWT creation time; the resulting
+// set is used by every runtime authorization check.
 // ============================================================================
 
 /// Load the union of permissions for every role assigned to `user_id`.
@@ -29,34 +24,49 @@ use uuid::Uuid;
 /// Returns a deduplicated, sorted list. Empty Vec if the user has no
 /// roles (which is valid — they'll have no granular permissions and
 /// every handler's `require_permission` call will reject them).
+///
+/// Permissions are extracted from each role's `policy_document` by
+/// expanding Action patterns in Allow statements against the supplied
+/// permission catalog. The caller (server crate) passes its static
+/// `PERMISSIONS` keys so this crate stays catalog-agnostic.
 pub async fn compute_user_permissions(
     pool: &PgPool,
     user_id: Uuid,
+    all_perm_keys: &[&str],
 ) -> Result<Vec<String>, sqlx::Error> {
-    // Flatten the TEXT[] `permissions` field of every role the user
-    // holds into a single set — both directly-assigned roles AND
-    // roles inherited through team membership.
-    let rows: Vec<(String,)> = sqlx::query_as(
-        "SELECT DISTINCT perm FROM ( \
-           SELECT perm \
-             FROM rbac_role_assignments ra \
-             JOIN rbac_roles r ON r.id = ra.role_id \
-             CROSS JOIN LATERAL UNNEST(r.permissions) AS perm \
-            WHERE ra.user_id = $1 \
-           UNION ALL \
-           SELECT perm \
+    let docs = load_user_policy_documents(pool, user_id).await?;
+    let mut perms: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for doc in &docs {
+        perms.extend(think_watch_common::limits::extract_permissions(
+            doc,
+            all_perm_keys,
+        ));
+    }
+    Ok(perms.into_iter().collect())
+}
+
+/// Load all `policy_document` JSONB values from roles assigned to
+/// `user_id` (direct + team-inherited). Shared helper for permission
+/// extraction, resource limit computation, and constraint aggregation.
+async fn load_user_policy_documents(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<Vec<serde_json::Value>, sqlx::Error> {
+    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
+        "SELECT DISTINCT r.policy_document FROM ( \
+           SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
+           UNION \
+           SELECT tra.role_id \
              FROM team_members tm \
              JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
-             JOIN rbac_roles r ON r.id = tra.role_id \
-             CROSS JOIN LATERAL UNNEST(r.permissions) AS perm \
             WHERE tm.user_id = $1 \
-         ) combined \
-         ORDER BY perm",
+         ) roles \
+         JOIN rbac_roles r ON r.id = roles.role_id",
     )
     .bind(user_id)
     .fetch_all(pool)
     .await?;
-    Ok(rows.into_iter().map(|(p,)| p).collect())
+    Ok(rows.into_iter().map(|(v,)| v).collect())
 }
 
 /// Load the list of role NAMES (system + custom) assigned to `user_id`,
@@ -148,20 +158,18 @@ pub async fn compute_user_role_assignments(
 }
 
 /// Effective resource constraints for a user, derived by union'ing
-/// every role's `allowed_models` and `allowed_mcp_tools`. Mirrors
-/// the same union semantics documented at the top of this file:
+/// every role's model and MCP tool scopes from their policy_documents.
 ///
-///   - If ANY role has `allowed_* = NULL` (unrestricted), the field
-///     in the result is also `None` and the gateway should treat the
-///     user as unrestricted for that resource.
-///   - Otherwise the result is the union of every restricted role's
-///     allow-list, deduplicated.
+///   - If ANY role has `Resource: "*"` on the relevant gateway
+///     statement, the field in the result is `None` (unrestricted).
+///   - Otherwise the result is the union of every role's scoped
+///     resources, deduplicated.
 ///
 /// This is what the gateway middleware merges with the per-API-key
 /// allow-list (if any) before calling into the proxy.
 pub struct UserResourceLimits {
     pub allowed_models: Option<Vec<String>>,
-    /// MCP tool patterns: `NULL` = unrestricted, `["mysql__*"]` = server
+    /// MCP tool patterns: `None` = unrestricted, `["mysql__*"]` = server
     /// wildcard, `["mysql__query"]` = exact tool.
     pub allowed_mcp_tools: Option<Vec<String>>,
 }
@@ -170,23 +178,8 @@ pub async fn compute_user_resource_limits(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<UserResourceLimits, sqlx::Error> {
-    type Row = (Option<Vec<String>>, Option<Vec<String>>);
-    let rows: Vec<Row> = sqlx::query_as(
-        "SELECT r.allowed_models, r.allowed_mcp_tools FROM ( \
-           SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
-           UNION \
-           SELECT tra.role_id \
-             FROM team_members tm \
-             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
-            WHERE tm.user_id = $1 \
-         ) roles \
-         JOIN rbac_roles r ON r.id = roles.role_id",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
-
-    if rows.is_empty() {
+    let docs = load_user_policy_documents(pool, user_id).await?;
+    if docs.is_empty() {
         return Ok(UserResourceLimits {
             allowed_models: None,
             allowed_mcp_tools: None,
@@ -197,16 +190,18 @@ pub async fn compute_user_resource_limits(
     let mut tools_unrestricted = false;
     let mut models: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut tools: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    for (m, t) in rows {
-        match m {
+
+    for doc in &docs {
+        match think_watch_common::limits::extract_allowed_models(doc) {
             None => models_unrestricted = true,
             Some(list) => models.extend(list),
         }
-        match t {
+        match think_watch_common::limits::extract_allowed_mcp_tools(doc) {
             None => tools_unrestricted = true,
             Some(list) => tools.extend(list),
         }
     }
+
     Ok(UserResourceLimits {
         allowed_models: if models_unrestricted {
             None
@@ -221,12 +216,11 @@ pub async fn compute_user_resource_limits(
     })
 }
 
-/// Aggregate `rbac_roles.surface_constraints` across every role assigned to
-/// `user_id` (direct + team-inherited) using "most restrictive wins":
-/// per `(surface, metric, window_secs)` take the MIN `max_count`;
-/// per `(surface, period)` take the MIN `limit_tokens`. Disabled or
-/// non-positive entries are ignored. A role that doesn't carry a
-/// particular (surface, ...) entry does not widen the aggregate.
+/// Aggregate surface constraints from policy_documents across every
+/// role assigned to `user_id` (direct + team-inherited) using "most
+/// restrictive wins": per `(surface, metric, window_secs)` take the
+/// MIN `max_count`; per `(surface, period)` take the MIN
+/// `limit_tokens`. Disabled or non-positive entries are ignored.
 ///
 /// Shared by the AI gateway and MCP gateway request paths — they both
 /// call this once per request and feed the result into the rate-limit
@@ -235,23 +229,10 @@ pub async fn compute_user_surface_constraints(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<think_watch_common::limits::SurfaceConstraints, sqlx::Error> {
-    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
-        "SELECT r.surface_constraints FROM ( \
-           SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
-           UNION \
-           SELECT tra.role_id \
-             FROM team_members tm \
-             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
-            WHERE tm.user_id = $1 \
-         ) roles \
-         JOIN rbac_roles r ON r.id = roles.role_id",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
-    let per_role: Vec<think_watch_common::limits::SurfaceConstraints> = rows
-        .into_iter()
-        .filter_map(|(v,)| serde_json::from_value(v).ok())
+    let docs = load_user_policy_documents(pool, user_id).await?;
+    let per_role: Vec<think_watch_common::limits::SurfaceConstraints> = docs
+        .iter()
+        .map(think_watch_common::limits::extract_surface_constraints)
         .collect();
     Ok(think_watch_common::limits::merge_most_restrictive(
         &per_role,
@@ -283,42 +264,23 @@ pub async fn compute_denied_permissions(
     user_id: Uuid,
     allowed: &[String],
 ) -> Result<Vec<String>, sqlx::Error> {
-    // Load all non-null policy_document values from the user's roles.
-    let rows: Vec<(serde_json::Value,)> = sqlx::query_as(
-        "SELECT DISTINCT r.policy_document FROM ( \
-           SELECT ra.role_id FROM rbac_role_assignments ra WHERE ra.user_id = $1 \
-           UNION \
-           SELECT tra.role_id \
-             FROM team_members tm \
-             JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
-            WHERE tm.user_id = $1 \
-         ) roles \
-         JOIN rbac_roles r ON r.id = roles.role_id \
-        WHERE r.policy_document IS NOT NULL",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
-
-    if rows.is_empty() {
+    let docs = load_user_policy_documents(pool, user_id).await?;
+    if docs.is_empty() {
         return Ok(Vec::new());
     }
 
-    let policies: Vec<PolicyDocument> = rows
+    let policies: Vec<PolicyDocument> = docs
         .into_iter()
-        .filter_map(|(v,)| serde_json::from_value(v).ok())
+        .filter_map(|v| serde_json::from_value(v).ok())
         .collect();
 
     if policies.is_empty() {
         return Ok(Vec::new());
     }
 
-    // For each allowed permission, check if any policy denies it.
     let denied: Vec<String> = allowed
         .iter()
         .filter(|perm| {
-            // Split "resource:action" into action=perm, resource="*"
-            // (our permission model uses flat strings, not resource-level)
             policies
                 .iter()
                 .any(|doc| evaluate_policy(doc, perm, "*") == PolicyResult::Deny)

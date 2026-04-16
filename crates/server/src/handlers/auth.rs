@@ -93,7 +93,10 @@ pub(crate) async fn issue_auth_session(
     // Load roles/permissions for the login response body (frontend needs them),
     // but they are NOT embedded in the JWT anymore.
     let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user_id).await?;
-    let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user_id).await?;
+    let all_perm_keys = crate::handlers::roles::all_permission_keys();
+    let permissions =
+        think_watch_auth::rbac::compute_user_permissions(&state.db, user_id, &all_perm_keys)
+            .await?;
     let denied_permissions =
         think_watch_auth::rbac::compute_denied_permissions(&state.db, user_id, &permissions)
             .await?;
@@ -807,9 +810,11 @@ pub async fn me(
     // way the frontend learns "what can this user actually do
     // RIGHT NOW", so we want it to reflect post-login role edits
     // without needing a refresh.
-    let permissions = think_watch_auth::rbac::compute_user_permissions(&state.db, user.id)
-        .await
-        .unwrap_or_default();
+    let all_perm_keys = crate::handlers::roles::all_permission_keys();
+    let permissions =
+        think_watch_auth::rbac::compute_user_permissions(&state.db, user.id, &all_perm_keys)
+            .await
+            .unwrap_or_default();
     let denied_permissions =
         think_watch_auth::rbac::compute_denied_permissions(&state.db, user.id, &permissions)
             .await

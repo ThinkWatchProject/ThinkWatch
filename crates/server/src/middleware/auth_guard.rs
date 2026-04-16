@@ -124,13 +124,25 @@ impl AuthUser {
                    JOIN rbac_roles r ON r.id = ra.role_id
                   WHERE ra.user_id = $1
                     AND ra.scope_kind = 'global'
-                    AND $2 = ANY(r.permissions)
+                    AND EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                        WHERE stmt->>'Effect' = 'Allow'
+                          AND (stmt->>'Action' = '*'
+                               OR stmt->>'Action' = $2
+                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                    )
                  UNION ALL
                  SELECT 1 FROM team_members tm
                    JOIN team_role_assignments tra ON tra.team_id = tm.team_id
                    JOIN rbac_roles r ON r.id = tra.role_id
                   WHERE tm.user_id = $1
-                    AND $2 = ANY(r.permissions)
+                    AND EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                        WHERE stmt->>'Effect' = 'Allow'
+                          AND (stmt->>'Action' = '*'
+                               OR stmt->>'Action' = $2
+                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                    )
              )",
         )
         .bind(self.claims.sub)
@@ -158,11 +170,6 @@ impl AuthUser {
         perm: &str,
         target_user_id: uuid::Uuid,
     ) -> Result<(), AppError> {
-        // Self-edit is always allowed: a user can manage their own
-        // resources without needing a `*:write` perm on themselves.
-        // Handlers that DON'T want this (e.g. preventing
-        // self-permission-grants) can `require_permission` first and
-        // skip the scope check.
         if self.claims.sub == target_user_id {
             return Ok(());
         }
@@ -171,7 +178,12 @@ impl AuthUser {
                  SELECT 1 FROM rbac_role_assignments ra
                    JOIN rbac_roles r ON r.id = ra.role_id
                   WHERE ra.user_id = $1
-                    AND $2 = ANY(r.permissions)
+                    AND EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                        WHERE stmt->>'Effect' = 'Allow'
+                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
+                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                    )
                     AND (
                         ra.scope_kind = 'global'
                         OR (ra.scope_kind = 'team'
@@ -184,7 +196,12 @@ impl AuthUser {
                    JOIN team_role_assignments tra ON tra.team_id = tm.team_id
                    JOIN rbac_roles r ON r.id = tra.role_id
                   WHERE tm.user_id = $1
-                    AND $2 = ANY(r.permissions)
+                    AND EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                        WHERE stmt->>'Effect' = 'Allow'
+                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
+                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                    )
              )",
         )
         .bind(self.claims.sub)
@@ -219,7 +236,12 @@ impl AuthUser {
                  SELECT 1 FROM rbac_role_assignments ra
                    JOIN rbac_roles r ON r.id = ra.role_id
                   WHERE ra.user_id = $1
-                    AND $2 = ANY(r.permissions)
+                    AND EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                        WHERE stmt->>'Effect' = 'Allow'
+                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
+                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                    )
                     AND (
                         ra.scope_kind = 'global'
                         OR (ra.scope_kind = 'team' AND ra.scope_id = $3)
@@ -229,7 +251,12 @@ impl AuthUser {
                    JOIN team_role_assignments tra ON tra.team_id = tm.team_id
                    JOIN rbac_roles r ON r.id = tra.role_id
                   WHERE tm.user_id = $1
-                    AND $2 = ANY(r.permissions)
+                    AND EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                        WHERE stmt->>'Effect' = 'Allow'
+                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
+                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                    )
              )",
         )
         .bind(self.claims.sub)
@@ -292,13 +319,23 @@ impl AuthUser {
                    JOIN rbac_roles r ON r.id = ra.role_id
                   WHERE ra.user_id = $1
                     AND ra.scope_kind = 'global'
-                    AND $2 = ANY(r.permissions)
+                    AND EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                        WHERE stmt->>'Effect' = 'Allow'
+                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
+                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                    )
                  UNION ALL
                  SELECT 1 FROM team_members tm
                    JOIN team_role_assignments tra ON tra.team_id = tm.team_id
                    JOIN rbac_roles r ON r.id = tra.role_id
                   WHERE tm.user_id = $1
-                    AND $2 = ANY(r.permissions)
+                    AND EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                        WHERE stmt->>'Effect' = 'Allow'
+                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
+                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                    )
              )",
         )
         .bind(self.claims.sub)
@@ -316,7 +353,12 @@ impl AuthUser {
               WHERE ra.user_id = $1
                 AND ra.scope_kind = 'team'
                 AND ra.scope_id IS NOT NULL
-                AND $2 = ANY(r.permissions)",
+                AND EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                    WHERE stmt->>'Effect' = 'Allow'
+                      AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
+                           OR (stmt->'Action' @> to_jsonb($2::text)))
+                )",
         )
         .bind(self.claims.sub)
         .bind(perm)
@@ -439,7 +481,8 @@ async fn load_user_permissions_cached(
     }
 
     // Cache miss — compute from DB
-    let perms = rbac::compute_user_permissions(&state.db, user_id).await?;
+    let all_perm_keys = crate::handlers::roles::all_permission_keys();
+    let perms = rbac::compute_user_permissions(&state.db, user_id, &all_perm_keys).await?;
     let denied = rbac::compute_denied_permissions(&state.db, user_id, &perms).await?;
 
     // Best-effort cache write (60s TTL)
@@ -626,7 +669,8 @@ async fn auth_via_api_key(
 
     // Load current permissions from DB (not a snapshot like JWT claims).
     // This means permission changes take effect immediately for API key users.
-    let permissions = rbac::compute_user_permissions(&state.db, user_id)
+    let all_perm_keys = crate::handlers::roles::all_permission_keys();
+    let permissions = rbac::compute_user_permissions(&state.db, user_id, &all_perm_keys)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let denied_permissions = rbac::compute_denied_permissions(&state.db, user_id, &permissions)

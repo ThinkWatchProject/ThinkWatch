@@ -61,13 +61,7 @@ CREATE TABLE rbac_roles (
     name                VARCHAR(100) NOT NULL UNIQUE,
     description         TEXT,
     is_system           BOOLEAN NOT NULL DEFAULT FALSE,
-    permissions         TEXT[]   NOT NULL DEFAULT ARRAY[]::TEXT[],
-    allowed_models      TEXT[],
-    allowed_mcp_tools   TEXT[],
-    -- Per-surface rate-limit rules and budget caps, inline with the role.
-    -- Shape: { "ai_gateway": { "rules": [...], "budgets": [...] }, ... }
-    surface_constraints JSONB NOT NULL DEFAULT '{}'::jsonb,
-    policy_document     JSONB,
+    policy_document     JSONB NOT NULL DEFAULT '{"Version":"2024-01-01","Statement":[]}',
     created_by          UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -121,100 +115,36 @@ CREATE TABLE team_role_assignments (
 
 CREATE INDEX idx_team_role_assignments_role ON team_role_assignments(role_id);
 
--- Seed system roles. Permission catalog must stay in lockstep with the
--- backend `PERMISSION_CATALOG` (crates/server/src/handlers/roles.rs).
-INSERT INTO rbac_roles (name, description, is_system, permissions) VALUES
+-- Seed system roles. The policy_document is the single source of truth
+-- for permissions, model scope, tool scope, and constraints. Permission
+-- catalog must stay in lockstep with the backend PERMISSION_CATALOG
+-- (crates/server/src/handlers/roles.rs).
+INSERT INTO rbac_roles (name, description, is_system, policy_document) VALUES
 ('super_admin',
  'Full system access. Can manage every resource and inspect every log.',
  TRUE,
- ARRAY[
-    'ai_gateway:use', 'mcp_gateway:use',
-    'api_keys:read', 'api_keys:create', 'api_keys:update', 'api_keys:rotate', 'api_keys:delete',
-    'providers:read', 'providers:create', 'providers:update', 'providers:delete', 'providers:rotate_key',
-    'models:read', 'models:write',
-    'mcp_servers:read', 'mcp_servers:create', 'mcp_servers:update', 'mcp_servers:delete',
-    'users:read', 'users:create', 'users:update', 'users:delete',
-    'teams:read', 'teams:create', 'teams:update', 'teams:delete', 'team_members:write',
-    'team:read', 'team:write',
-    'sessions:revoke',
-    'roles:read', 'roles:create', 'roles:update', 'roles:delete', 'roles:edit_system',
-    'analytics:read_own', 'analytics:read_team', 'analytics:read_all',
-    'audit_logs:read_own', 'audit_logs:read_team', 'audit_logs:read_all',
-    'logs:read_own', 'logs:read_team', 'logs:read_all',
-    'log_forwarders:read', 'log_forwarders:write',
-    'webhooks:read', 'webhooks:write',
-    'content_filter:read', 'content_filter:write',
-    'pii_redactor:read', 'pii_redactor:write',
-    'rate_limits:read', 'rate_limits:write',
-    'settings:read', 'settings:write',
-    'system:configure_oidc'
- ]),
+ '{"Version":"2024-01-01","Statement":[{"Sid":"FullAccess","Effect":"Allow","Action":"*","Resource":"*"}]}'
+),
 ('admin',
  'Administrative access. Manages providers, MCP servers, API keys, and users.',
  TRUE,
- ARRAY[
-    'ai_gateway:use', 'mcp_gateway:use',
-    'api_keys:read', 'api_keys:create', 'api_keys:update', 'api_keys:rotate', 'api_keys:delete',
-    'providers:read', 'providers:create', 'providers:update', 'providers:delete', 'providers:rotate_key',
-    'models:read', 'models:write',
-    'mcp_servers:read', 'mcp_servers:create', 'mcp_servers:update', 'mcp_servers:delete',
-    'users:read', 'users:create', 'users:update',
-    'teams:read', 'teams:create', 'teams:update', 'teams:delete', 'team_members:write',
-    'team:read', 'team:write',
-    'sessions:revoke',
-    'roles:read', 'roles:create', 'roles:update', 'roles:delete',
-    'analytics:read_all',
-    'audit_logs:read_all',
-    'logs:read_all',
-    'log_forwarders:read', 'log_forwarders:write',
-    'webhooks:read', 'webhooks:write',
-    'content_filter:read', 'content_filter:write',
-    'pii_redactor:read', 'pii_redactor:write',
-    'rate_limits:read', 'rate_limits:write',
-    'settings:read', 'settings:write'
- ]),
+ '{"Version":"2024-01-01","Statement":[{"Sid":"AdminAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","api_keys:delete","providers:read","providers:create","providers:update","providers:delete","providers:rotate_key","models:read","models:write","mcp_servers:read","mcp_servers:create","mcp_servers:update","mcp_servers:delete","users:read","users:create","users:update","teams:read","teams:create","teams:update","teams:delete","team_members:write","team:read","team:write","sessions:revoke","roles:read","roles:create","roles:update","roles:delete","analytics:read_all","audit_logs:read_all","logs:read_all","log_forwarders:read","log_forwarders:write","webhooks:read","webhooks:write","content_filter:read","content_filter:write","pii_redactor:read","pii_redactor:write","rate_limits:read","rate_limits:write","settings:read","settings:write"],"Resource":"*"}]}'
+),
 ('team_manager',
  'Team-level management. Manages members, API keys, and rate limits for the team it''s assigned to. Intended to be granted with scope_kind = team.',
  TRUE,
- ARRAY[
-    'ai_gateway:use', 'mcp_gateway:use',
-    'api_keys:read', 'api_keys:create', 'api_keys:update', 'api_keys:rotate',
-    'providers:read',
-    'models:read',
-    'mcp_servers:read',
-    'users:read', 'users:update',
-    'team_members:write',
-    'team:read', 'team:write',
-    'analytics:read_team',
-    'audit_logs:read_team',
-    'logs:read_team',
-    'rate_limits:read', 'rate_limits:write'
- ]),
+ '{"Version":"2024-01-01","Statement":[{"Sid":"TeamManagement","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","providers:read","models:read","mcp_servers:read","users:read","users:update","team_members:write","team:read","team:write","analytics:read_team","audit_logs:read_team","logs:read_team","rate_limits:read","rate_limits:write"],"Resource":"*"}]}'
+),
 ('developer',
  'Standard developer. Uses the gateway, manages own API keys, sees own usage.',
  TRUE,
- ARRAY[
-    'ai_gateway:use', 'mcp_gateway:use',
-    'api_keys:read', 'api_keys:create', 'api_keys:update',
-    'providers:read',
-    'models:read',
-    'mcp_servers:read',
-    'analytics:read_own',
-    'audit_logs:read_own',
-    'logs:read_own'
- ]),
+ '{"Version":"2024-01-01","Statement":[{"Sid":"DeveloperAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","providers:read","models:read","mcp_servers:read","analytics:read_own","audit_logs:read_own","logs:read_own"],"Resource":"*"}]}'
+),
 ('viewer',
  'Read-only access. Can browse providers and analytics but not modify anything.',
  TRUE,
- ARRAY[
-    'api_keys:read',
-    'providers:read',
-    'models:read',
-    'mcp_servers:read',
-    'analytics:read_own',
-    'audit_logs:read_own',
-    'logs:read_own'
- ]);
+ '{"Version":"2024-01-01","Statement":[{"Sid":"ViewerAccess","Effect":"Allow","Action":["api_keys:read","providers:read","models:read","mcp_servers:read","analytics:read_own","audit_logs:read_own","logs:read_own"],"Resource":"*"}]}'
+);
 
 -- --------------------------------------------------------------------------
 -- API Keys
@@ -398,9 +328,9 @@ CREATE INDEX idx_usage_records_model_id    ON usage_records(model_id, created_at
 -- Rate limit rules + budget caps
 --
 -- Generic rule storage for sliding-window rate limits and natural-period
--- budget caps. Role-level constraints are inline on rbac_roles
--- (surface_constraints JSONB); these tables are for user / api_key
--- subjects only.
+-- budget caps. Role-level constraints are inline in
+-- rbac_roles.policy_document (Constraints field); these tables are for
+-- user / api_key subjects only.
 -- --------------------------------------------------------------------------
 
 CREATE TABLE rate_limit_rules (

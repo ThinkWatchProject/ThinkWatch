@@ -35,11 +35,7 @@ interface PickableUser {
     scope: string;
   }>;
 }
-import {
-  LimitsDraftEditor,
-  draftsToSurfaceConstraints,
-  type SurfaceConstraints,
-} from '@/components/roles/LimitsDraftEditor';
+import type { ParsedConstraints } from './roles/types';
 import { lazy, Suspense } from 'react';
 // Lazy — pulls in codemirror + @codemirror/lang-json (~418 KB). Only
 // users who toggle "Policy JSON" mode on a role ever pay the download.
@@ -109,14 +105,7 @@ import {
   type RoleResponse as BaseRoleResponse,
 } from './roles/types';
 
-// Track A1 adds `surface_constraints` to the GET /roles/{id} and list
-// responses — rate limits and budgets now live inline on the role
-// row (JSONB column) instead of in side tables keyed by subject.
-// Typed here rather than in shared types.ts to keep the two tracks
-// from stomping on each other; promote upstream once both land.
-type RoleResponse = BaseRoleResponse & {
-  surface_constraints?: SurfaceConstraints;
-};
+type RoleResponse = BaseRoleResponse;
 
 // (Types, POLICY_TEMPLATES, SIMPLE_TEMPLATES, and the simple↔policy
 // conversion helpers all live in `./roles/types.ts` — see the
@@ -154,16 +143,13 @@ export function RolesPage() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [creating, setCreating] = useState(false);
-  // Preset rate-limit / budget ids the admin checked in the create
-  // wizard. Persisted right after the role row is created so a fresh
-  // role lands with sensible guard-rails on day one.
-  const [createLimitDrafts, setCreateLimitDrafts] = useState<Set<string>>(new Set());
+  const [createConstraints, setCreateConstraints] = useState<ParsedConstraints>({});
   const [editOpen, setEditOpen] = useState(false);
   const [editRole, setEditRole] = useState<RoleResponse | null>(null);
   // Edit-side limits buffer. Seeded from the role's inline
   // `surface_constraints` JSONB on openEdit and posted back verbatim
   // as part of the role PATCH body.
-  const [editConstraints, setEditConstraints] = useState<SurfaceConstraints>({});
+  const [editConstraints, setEditConstraints] = useState<ParsedConstraints>({});
   const [saving, setSaving] = useState(false);
 
   // Detail (read-only inspector for system roles)
@@ -350,7 +336,7 @@ export function RolesPage() {
       if (!q) return true;
       if (r.name.toLowerCase().includes(q)) return true;
       if ((r.description ?? '').toLowerCase().includes(q)) return true;
-      const allPerms = [...r.permissions, ...extractPolicyActions(r.policy_document)];
+      const allPerms = extractPolicyActions(r.policy_document);
       if (allPerms.some((p) => matchPermission(p.toLowerCase(), q))) return true;
       return false;
     });
@@ -393,13 +379,17 @@ export function RolesPage() {
     next: 'simple' | 'policy',
     current: 'simple' | 'policy',
     form: ReturnType<typeof useRoleForm>,
+    constraints: ParsedConstraints,
+    setConstraints: (c: ParsedConstraints) => void,
   ) => {
     if (next === current) return;
     if (next === 'policy') {
-      // Encode perms + model/tool scope into one JSON document so the
-      // admin sees their full configuration round-trip into policy mode.
       form.setPolicyJson(
-        JSON.stringify(permsToPolicy(form.perms, form.models, form.mcpTools), null, 2),
+        JSON.stringify(
+          permsToPolicy(form.perms, form.models, form.mcpTools, constraints),
+          null,
+          2,
+        ),
       );
       form.setPolicyError('');
       form.setMode('policy');
@@ -409,11 +399,12 @@ export function RolesPage() {
     const result = policyToPerms(form.policyJson, permissions);
     if (result.parseError) {
       form.setPolicyError(t('roles.invalidJson'));
-      return; // refuse the switch — invalid JSON would silently nuke perms
+      return;
     }
     form.setPerms(result.perms);
     form.setModels(result.models);
     form.setMcpTools(result.mcpTools);
+    setConstraints(result.constraints);
     form.setPolicyError(result.lossy ? t('roles.policySyncLossy') : '');
     form.setMode('simple');
   };
@@ -443,12 +434,11 @@ export function RolesPage() {
         const created = await apiPost<RoleResponse>('/api/admin/roles', {
           name: createForm.name,
           description: createForm.description || null,
-          ...buildRolePayload(createForm, permissions),
-          surface_constraints: draftsToSurfaceConstraints(createLimitDrafts),
+          ...buildRolePayload(createForm, permissions, createConstraints),
         });
         setCreateOpen(false);
         resetCreateForm();
-        setCreateLimitDrafts(new Set());
+        setCreateConstraints({});
         await fetchData();
         toast.success(t('roles.createdSuccessfully', { name: created.name }));
         return;
@@ -472,8 +462,9 @@ export function RolesPage() {
 
   const openEdit = (r: RoleResponse) => {
     setEditRole(r);
-    editForm.reset(fromRoleResponse(r));
-    setEditConstraints(r.surface_constraints ?? {});
+    editForm.reset(fromRoleResponse(r, permissions));
+    const parsed = policyToPerms(JSON.stringify(r.policy_document), permissions);
+    setEditConstraints(parsed.constraints);
     setEditOpen(true);
   };
 
@@ -495,8 +486,7 @@ export function RolesPage() {
         await apiPatch(`/api/admin/roles/${editRole.id}`, {
           name: editForm.name,
           description: editForm.description || null,
-          ...buildRolePayload(editForm, permissions),
-          surface_constraints: editConstraints,
+          ...buildRolePayload(editForm, permissions, editConstraints),
         });
         setEditOpen(false);
         setEditRole(null);
@@ -511,7 +501,8 @@ export function RolesPage() {
     // Only gate when the EDIT introduces dangerous perms that weren't
     // already on the role. Re-saving an existing dangerous role with
     // no new dangerous perms shouldn't pester the admin.
-    const oldDanger = new Set((editRole.permissions ?? []).filter((k) => dangerousKeys.has(k)));
+    const oldParsed = policyToPerms(JSON.stringify(editRole.policy_document), permissions);
+    const oldDanger = new Set([...oldParsed.perms].filter((k) => dangerousKeys.has(k)));
     const newDanger =
       editForm.mode === 'simple' ? dangerKeysIn(editForm.perms).filter((k) => !oldDanger.has(k)) : [];
     if (newDanger.length > 0) {
@@ -533,10 +524,7 @@ export function RolesPage() {
   type ExportedRole = {
     name: string;
     description: string | null;
-    permissions: string[];
-    allowed_models: string[] | null;
-    allowed_mcp_tools: string[] | null;
-    policy_document: PolicyDocument | null;
+    policy_document: PolicyDocument;
   };
 
   type ExportEnvelope = {
@@ -557,9 +545,6 @@ export function RolesPage() {
         .map((r) => ({
           name: r.name,
           description: r.description,
-          permissions: r.permissions,
-          allowed_models: r.allowed_models,
-          allowed_mcp_tools: r.allowed_mcp_tools,
           policy_document: r.policy_document,
         })),
     };
@@ -623,10 +608,7 @@ export function RolesPage() {
           await apiPost('/api/admin/roles', {
             name: r.name,
             description: r.description ?? null,
-            permissions: Array.isArray(r.permissions) ? r.permissions : [],
-            allowed_models: r.allowed_models ?? null,
-            allowed_mcp_tools: r.allowed_mcp_tools ?? null,
-            policy_document: r.policy_document ?? null,
+            policy_document: r.policy_document ?? { Version: '2024-01-01', Statement: [] },
           });
           created += 1;
         } catch (e) {
@@ -863,7 +845,7 @@ export function RolesPage() {
                       <Tabs
                         value={createForm.mode}
                         onValueChange={(v) =>
-                          switchMode(v as 'simple' | 'policy', createForm.mode, createForm)
+                          switchMode(v as 'simple' | 'policy', createForm.mode, createForm, createConstraints, setCreateConstraints)
                         }
                       >
                         <TabsList className="grid w-full grid-cols-2">
@@ -891,13 +873,15 @@ export function RolesPage() {
                             renderGroupExtra={(group) => {
                               const surface = surfaceFor(group);
                               if (!surface) return null;
-                              const enabled = createForm.perms.has(`${surface}:use`);
+                              if (!createForm.perms.has(`${surface}:use`)) return null;
                               return (
-                                <SurfaceLimitsSlot enabled={enabled}>
-                                  <LimitsDraftEditor
-                                    surface={surface}
-                                    selected={createLimitDrafts}
-                                    onChange={setCreateLimitDrafts}
+                                <SurfaceLimitsSlot>
+                                  <LimitsPanel
+                                    surfaces={[surface]}
+                                    allowBudgets={surface === 'ai_gateway'}
+                                    compact
+                                    value={createConstraints}
+                                    onChange={setCreateConstraints}
                                   />
                                 </SurfaceLimitsSlot>
                               );
@@ -1016,16 +1000,10 @@ export function RolesPage() {
                     <span className="line-clamp-1">{role.description || '—'}</span>
                   </TableCell>
                   <TableCell>
-                    {role.policy_document ? (
-                      <PolicyPermSummary
-                        doc={role.policy_document}
-                        catalog={permissions}
-                      />
-                    ) : (
-                      <span className="font-mono text-xs tabular-nums">
-                        {role.permissions.length}
-                      </span>
-                    )}
+                    <PolicyPermSummary
+                      doc={role.policy_document}
+                      catalog={permissions}
+                    />
                   </TableCell>
                   <TableCell className="text-right font-mono text-xs tabular-nums">
                     {role.user_count}
@@ -1076,6 +1054,7 @@ export function RolesPage() {
             <RoleDetail
               role={detailRole}
               grouped={grouped}
+              catalog={permissions}
               dangerousKeys={dangerousKeys}
               availableServers={availableServers}
               teamsById={teamsById}
@@ -1153,7 +1132,7 @@ export function RolesPage() {
                     <Tabs
                       value={editForm.mode}
                       onValueChange={(v) =>
-                        switchMode(v as 'simple' | 'policy', editForm.mode, editForm)
+                        switchMode(v as 'simple' | 'policy', editForm.mode, editForm, editConstraints, setEditConstraints)
                       }
                     >
                       <TabsList className="grid w-full grid-cols-2">
@@ -1179,9 +1158,9 @@ export function RolesPage() {
                           renderGroupExtra={(group) => {
                             const surface = surfaceFor(group);
                             if (!surface) return null;
-                            const enabled = editForm.perms.has(`${surface}:use`);
+                            if (!editForm.perms.has(`${surface}:use`)) return null;
                             return (
-                              <SurfaceLimitsSlot enabled={enabled}>
+                              <SurfaceLimitsSlot>
                                 <LimitsPanel
                                   surfaces={[surface]}
                                   allowBudgets={surface === 'ai_gateway'}
@@ -1588,35 +1567,12 @@ function surfaceFor(group: string): 'ai_gateway' | 'mcp_gateway' | null {
   return null;
 }
 
-/// Wraps the inline limits editor with a header, a "requires the
-/// `<surface>:use` permission" tooltip, and the visual-disabled state
-/// when the permission is off. Keeping the gate here means the
-/// preset-chip / table component itself stays permission-agnostic.
-function SurfaceLimitsSlot({
-  enabled,
-  children,
-}: {
-  enabled: boolean;
-  children: ReactNode;
-}) {
+function SurfaceLimitsSlot({ children }: { children: ReactNode }) {
   const { t } = useTranslation();
   return (
     <div className="mt-3 space-y-2 border-t pt-3">
-      <div className="flex items-baseline justify-between gap-2">
-        <div>
-          <div className="text-xs font-medium">{t('roles.surfaceLimitsHeader')}</div>
-          <div className="text-[11px] text-muted-foreground">
-            {t('roles.surfaceLimitsHint')}
-          </div>
-        </div>
-      </div>
-      <div
-        className={enabled ? '' : 'pointer-events-none opacity-50'}
-        title={enabled ? undefined : t('roles.surfaceLimitsRequiresPerm')}
-        aria-disabled={!enabled}
-      >
-        {children}
-      </div>
+      <div className="text-xs font-medium">{t('roles.surfaceLimitsHeader')}</div>
+      {children}
     </div>
   );
 }

@@ -507,7 +507,12 @@ async fn resolve_dashboard_user_filter(
                JOIN rbac_roles r ON r.id = ra.role_id
               WHERE ra.user_id = $1
                 AND ra.scope_kind = 'global'
-                AND 'analytics:read_all' = ANY(r.permissions)
+                AND EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                    WHERE stmt->>'Effect' = 'Allow'
+                      AND (stmt->>'Action' = '*' OR stmt->>'Action' = 'analytics:read_all'
+                           OR (stmt->'Action' @> '\"analytics:read_all\"'::jsonb))
+                )
          )",
     )
     .bind(caller_id)
@@ -532,8 +537,15 @@ async fn resolve_dashboard_user_filter(
                    JOIN rbac_roles r ON r.id = ra.role_id
                   WHERE tm.user_id = u.id
                     AND ra.user_id = $1
-                    AND ('analytics:read_team' = ANY(r.permissions)
-                         OR 'analytics:read_all' = ANY(r.permissions))
+                    AND EXISTS (
+                        SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
+                        WHERE stmt->>'Effect' = 'Allow'
+                          AND (stmt->>'Action' = '*'
+                               OR stmt->>'Action' = 'analytics:read_team'
+                               OR stmt->>'Action' = 'analytics:read_all'
+                               OR (stmt->'Action' @> '\"analytics:read_team\"'::jsonb)
+                               OR (stmt->'Action' @> '\"analytics:read_all\"'::jsonb))
+                    )
              )",
     )
     .bind(caller_id)
