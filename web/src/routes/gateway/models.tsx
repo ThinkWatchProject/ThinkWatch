@@ -194,7 +194,7 @@ export function ModelsPage() {
   const fetchRoutes = useCallback(async (modelId: string) => {
     setRoutesLoading(true);
     try {
-      const routes = await api<ModelRoute[]>(`/api/admin/models/${modelId}/routes`);
+      const routes = await api<ModelRoute[]>(`/api/admin/models/${encodeURIComponent(modelId)}/routes`);
       setModelRoutes((prev) => ({ ...prev, [modelId]: routes }));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to load routes');
@@ -327,7 +327,7 @@ export function ModelsPage() {
     }
     setRouteSaving(true);
     try {
-      await apiPost(`/api/admin/models/${addRouteModelId}/routes`, body);
+      await apiPost(`/api/admin/models/${encodeURIComponent(addRouteModelId)}/routes`, body);
       toast.success(t('models.routeAdded'));
       setAddRouteDialogOpen(false);
       await fetchRoutes(addRouteModelId);
