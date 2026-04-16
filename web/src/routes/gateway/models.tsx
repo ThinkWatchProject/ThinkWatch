@@ -129,7 +129,7 @@ export function ModelsPage() {
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
-  const PAGE_SIZE = 50;
+  const PAGE_SIZE = 20;
 
   // Routes: cached per model_id
   const [expandedModel, setExpandedModel] = useState<string | null>(null);
