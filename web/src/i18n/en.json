@@ -799,7 +799,20 @@
     "logForwarding": "Log Forwarding",
     "logForwardingHint": "Syslog, Kafka, Webhook destinations are configured via the Log Forwarding page.",
     "manage": "Manage",
-    "connected": "Connected"
+    "connected": "Connected",
+    "perfHint": "Changes take effect immediately without restart.",
+    "perfHttpClient": "HTTP Client Timeout (s)",
+    "perfHttpClientHint": "Outbound HTTP timeout for MCP discovery, OIDC, etc.",
+    "perfMcpPool": "MCP Pool Timeout (s)",
+    "perfMcpPoolHint": "MCP connection pool per-request timeout.",
+    "perfConsoleRequest": "Console Request Timeout (s)",
+    "perfConsoleRequestHint": "Console-side API request timeout.",
+    "perfWsIo": "Dashboard WS I/O Timeout (s)",
+    "perfWsIoHint": "Per-frame WebSocket read/write timeout.",
+    "perfWsTick": "Dashboard WS Push Interval (s)",
+    "perfWsTickHint": "How often to push dashboard snapshots.",
+    "perfWsMax": "Max WS Per User",
+    "perfWsMaxHint": "Maximum concurrent dashboard WebSocket connections per user."
   },
   "settings": {
     "oidc": {
@@ -817,6 +830,7 @@
     "budget": "Budget Alerts",
     "apiKeysConfig": "API Key Policies",
     "auditConfig": "Audit",
+    "perf": "Performance",
     "saved": "Settings saved successfully",
     "saveError": "Failed to save settings",
     "requiresRestart": "Requires restart to take effect",

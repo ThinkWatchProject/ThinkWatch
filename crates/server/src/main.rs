@@ -119,7 +119,6 @@ async fn main() -> anyhow::Result<()> {
 
     // Load dynamic configuration from database
     let dynamic_config = Arc::new(DynamicConfig::load(pool.clone()).await?);
-    dynamic_config.seed_defaults().await?;
     tracing::info!("Dynamic configuration loaded");
 
     // Subscribe to config changes for multi-instance sync

@@ -532,6 +532,15 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 ('mcp.health_interval_secs', '300', 'mcp',
  'How often (in seconds) to background-probe each registered MCP server. Default 300 = every 5 minutes.');
 
+-- Performance tuning — all live-adjustable from Admin > Settings.
+INSERT INTO system_settings (key, value, category, description) VALUES
+('perf.http_client_secs',        '15', 'perf', 'Outbound HTTP client timeout in seconds (MCP discovery, OIDC, etc.)'),
+('perf.mcp_pool_secs',           '30', 'perf', 'MCP connection pool per-request timeout in seconds'),
+('perf.console_request_secs',    '30', 'perf', 'Console-side request timeout in seconds'),
+('perf.dashboard_ws_io_secs',    '5',  'perf', 'Dashboard WebSocket per-frame read/write timeout in seconds'),
+('perf.dashboard_ws_tick_secs',  '4',  'perf', 'Dashboard WebSocket push interval in seconds'),
+('perf.dashboard_ws_max_per_user', '4', 'perf', 'Max concurrent dashboard WebSocket connections per user');
+
 -- --------------------------------------------------------------------------
 -- Dashboard layouts — per-user stat-card ordering (server-side persistence)
 -- --------------------------------------------------------------------------

@@ -799,7 +799,20 @@
     "logForwarding": "日志转发",
     "logForwardingHint": "Syslog、Kafka、Webhook 目标通过日志转发页面配置。",
     "manage": "管理",
-    "connected": "已连接"
+    "connected": "已连接",
+    "perfHint": "修改后立即生效，无需重启。",
+    "perfHttpClient": "HTTP 客户端超时 (秒)",
+    "perfHttpClientHint": "出站 HTTP 超时，用于 MCP 发现、OIDC 等。",
+    "perfMcpPool": "MCP 连接池超时 (秒)",
+    "perfMcpPoolHint": "MCP 连接池单请求超时。",
+    "perfConsoleRequest": "控制台请求超时 (秒)",
+    "perfConsoleRequestHint": "管理控制台 API 请求超时。",
+    "perfWsIo": "Dashboard WS 读写超时 (秒)",
+    "perfWsIoHint": "WebSocket 单帧读写超时。",
+    "perfWsTick": "Dashboard WS 推送间隔 (秒)",
+    "perfWsTickHint": "Dashboard 数据推送频率。",
+    "perfWsMax": "每用户最大 WS 连接数",
+    "perfWsMaxHint": "每用户最大并发 Dashboard WebSocket 连接数。"
   },
   "settings": {
     "oidc": {
@@ -817,6 +830,7 @@
     "budget": "预算告警",
     "apiKeysConfig": "API Key 策略",
     "auditConfig": "审计配置",
+    "perf": "性能调优",
     "saved": "设置保存成功",
     "saveError": "保存设置失败",
     "requiresRestart": "需要重启生效",

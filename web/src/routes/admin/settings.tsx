@@ -95,6 +95,13 @@ export function SettingsPage() {
   const [platformRetention, setPlatformRetention] = useState(90);
   const [accessRetention, setAccessRetention] = useState(30);
   const [appRetention, setAppRetention] = useState(30);
+  // Performance tuning
+  const [perfHttpClientSecs, setPerfHttpClientSecs] = useState(15);
+  const [perfMcpPoolSecs, setPerfMcpPoolSecs] = useState(30);
+  const [perfConsoleRequestSecs, setPerfConsoleRequestSecs] = useState(30);
+  const [perfDashboardWsIoSecs, setPerfDashboardWsIoSecs] = useState(5);
+  const [perfDashboardWsTickSecs, setPerfDashboardWsTickSecs] = useState(4);
+  const [perfDashboardWsMaxPerUser, setPerfDashboardWsMaxPerUser] = useState(4);
   // OIDC
   const [oidcEnabled, setOidcEnabled] = useState(false);
   const [oidcIssuerUrl, setOidcIssuerUrl] = useState('');
@@ -143,6 +150,13 @@ export function SettingsPage() {
     setPlatformRetention(num(getSettingValue(data, 'data', 'retention_days_platform'), 90));
     setAccessRetention(num(getSettingValue(data, 'data', 'retention_days_access'), 30));
     setAppRetention(num(getSettingValue(data, 'data', 'retention_days_app'), 30));
+
+    setPerfHttpClientSecs(num(getSettingValue(data, 'perf', 'http_client_secs'), 15));
+    setPerfMcpPoolSecs(num(getSettingValue(data, 'perf', 'mcp_pool_secs'), 30));
+    setPerfConsoleRequestSecs(num(getSettingValue(data, 'perf', 'console_request_secs'), 30));
+    setPerfDashboardWsIoSecs(num(getSettingValue(data, 'perf', 'dashboard_ws_io_secs'), 5));
+    setPerfDashboardWsTickSecs(num(getSettingValue(data, 'perf', 'dashboard_ws_tick_secs'), 4));
+    setPerfDashboardWsMaxPerUser(num(getSettingValue(data, 'perf', 'dashboard_ws_max_per_user'), 4));
   }, []);
 
   useEffect(() => {
@@ -216,6 +230,12 @@ export function SettingsPage() {
           'data.retention_days_platform': platformRetention,
           'data.retention_days_access': accessRetention,
           'data.retention_days_app': appRetention,
+          'perf.http_client_secs': perfHttpClientSecs,
+          'perf.mcp_pool_secs': perfMcpPoolSecs,
+          'perf.console_request_secs': perfConsoleRequestSecs,
+          'perf.dashboard_ws_io_secs': perfDashboardWsIoSecs,
+          'perf.dashboard_ws_tick_secs': perfDashboardWsTickSecs,
+          'perf.dashboard_ws_max_per_user': perfDashboardWsMaxPerUser,
         },
       });
 
@@ -296,6 +316,10 @@ export function SettingsPage() {
           <TabsTrigger value="audit">
             <Database className="h-4 w-4" />
             {t('settings.auditConfig')}
+          </TabsTrigger>
+          <TabsTrigger value="perf">
+            <Settings className="h-4 w-4" />
+            {t('settings.perf')}
           </TabsTrigger>
         </TabsList>
 
@@ -869,6 +893,62 @@ export function SettingsPage() {
                       min={1}
                       max={3650}
                     />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        </TabsContent>
+
+        {/* ---------------------------------------------------------------- */}
+        {/* Performance Tuning Tab                                           */}
+        {/* ---------------------------------------------------------------- */}
+        <TabsContent value="perf">
+          <div className="space-y-6">
+            <Card>
+              <CardHeader>
+                <CardTitle className="text-base">{t('settings.perf')}</CardTitle>
+                <p className="text-xs text-muted-foreground mt-1">
+                  {t('settingsPage.perfHint')}
+                </p>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                  <div>
+                    <Label htmlFor="perf-http">{t('settingsPage.perfHttpClient')}</Label>
+                    <Input id="perf-http" type="number" min={1} value={perfHttpClientSecs}
+                      onChange={(e) => setPerfHttpClientSecs(Number(e.target.value))} />
+                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfHttpClientHint')}</p>
+                  </div>
+                  <div>
+                    <Label htmlFor="perf-mcp-pool">{t('settingsPage.perfMcpPool')}</Label>
+                    <Input id="perf-mcp-pool" type="number" min={1} value={perfMcpPoolSecs}
+                      onChange={(e) => setPerfMcpPoolSecs(Number(e.target.value))} />
+                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfMcpPoolHint')}</p>
+                  </div>
+                  <div>
+                    <Label htmlFor="perf-console">{t('settingsPage.perfConsoleRequest')}</Label>
+                    <Input id="perf-console" type="number" min={1} value={perfConsoleRequestSecs}
+                      onChange={(e) => setPerfConsoleRequestSecs(Number(e.target.value))} />
+                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfConsoleRequestHint')}</p>
+                  </div>
+                  <div>
+                    <Label htmlFor="perf-ws-io">{t('settingsPage.perfWsIo')}</Label>
+                    <Input id="perf-ws-io" type="number" min={1} value={perfDashboardWsIoSecs}
+                      onChange={(e) => setPerfDashboardWsIoSecs(Number(e.target.value))} />
+                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfWsIoHint')}</p>
+                  </div>
+                  <div>
+                    <Label htmlFor="perf-ws-tick">{t('settingsPage.perfWsTick')}</Label>
+                    <Input id="perf-ws-tick" type="number" min={1} value={perfDashboardWsTickSecs}
+                      onChange={(e) => setPerfDashboardWsTickSecs(Number(e.target.value))} />
+                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfWsTickHint')}</p>
+                  </div>
+                  <div>
+                    <Label htmlFor="perf-ws-max">{t('settingsPage.perfWsMax')}</Label>
+                    <Input id="perf-ws-max" type="number" min={1} value={perfDashboardWsMaxPerUser}
+                      onChange={(e) => setPerfDashboardWsMaxPerUser(Number(e.target.value))} />
+                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfWsMaxHint')}</p>
                   </div>
                 </div>
               </CardContent>
