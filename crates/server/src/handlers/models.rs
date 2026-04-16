@@ -538,6 +538,20 @@ pub async fn create_model_route(
     let weight = req.weight.unwrap_or(100);
     let priority = req.priority.unwrap_or(0);
 
+    // Check for existing route to give a friendly error instead of 500
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM model_routes WHERE model_id = $1 AND provider_id = $2",
+    )
+    .bind(&model_id)
+    .bind(req.provider_id)
+    .fetch_optional(&state.db)
+    .await?;
+    if existing.is_some() {
+        return Err(AppError::BadRequest(
+            "A route for this model+provider already exists".into(),
+        ));
+    }
+
     let row = sqlx::query_as::<_, ModelRouteRow>(
         r#"INSERT INTO model_routes (model_id, provider_id, upstream_model, weight, priority)
            VALUES ($1, $2, $3, $4, $5)
