@@ -336,6 +336,8 @@
     "syncing": "同步中...",
     "syncAll": "同步全部供应商",
     "syncSuccess": "已同步 {{count}} 个模型",
+    "searchPlaceholder": "搜索模型...",
+    "totalCount": "个模型",
     "routes": "路由",
     "addRoute": "添加路由",
     "weight": "权重",

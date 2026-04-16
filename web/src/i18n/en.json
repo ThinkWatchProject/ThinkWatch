@@ -336,6 +336,8 @@
     "syncing": "Syncing...",
     "syncAll": "Sync All Providers",
     "syncSuccess": "Synced {{count}} models",
+    "searchPlaceholder": "Search models...",
+    "totalCount": "models",
     "routes": "Routes",
     "addRoute": "Add Route",
     "weight": "Weight",

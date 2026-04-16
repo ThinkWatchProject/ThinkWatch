@@ -10,7 +10,7 @@
 // ============================================================================
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -40,36 +40,88 @@ pub struct ModelRow {
     pub is_active: bool,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ModelListQuery {
+    pub q: Option<String>,
+    pub page: Option<i64>,
+    pub page_size: Option<i64>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct ModelListResponse {
+    pub items: Vec<ModelRow>,
+    pub total: i64,
+}
+
 #[utoipa::path(
     get,
     path = "/api/admin/models",
     tag = "Models",
+    params(
+        ("q" = Option<String>, Query, description = "Search model_id or display_name"),
+        ("page" = Option<i64>, Query, description = "Page number (1-based)"),
+        ("page_size" = Option<i64>, Query, description = "Items per page (default 50)"),
+    ),
     security(("bearer_token" = [])),
     responses(
-        (status = 200, description = "List of models", body = Vec<ModelRow>),
+        (status = 200, description = "Paginated list of models", body = ModelListResponse),
         (status = 403, description = "Forbidden"),
     )
 )]
 pub async fn list_models(
     auth_user: AuthUser,
     State(state): State<AppState>,
-) -> Result<Json<Vec<ModelRow>>, AppError> {
+    Query(query): Query<ModelListQuery>,
+) -> Result<Json<ModelListResponse>, AppError> {
     auth_user.require_permission("models:read")?;
     auth_user
         .assert_scope_global(&state.db, "models:read")
         .await?;
-    let rows = sqlx::query_as::<_, ModelRow>(
-        r#"SELECT
-              m.id, m.model_id, m.display_name,
-              m.input_price, m.output_price,
-              m.input_multiplier, m.output_multiplier,
-              m.is_active
-           FROM models m
-           ORDER BY m.model_id"#,
-    )
-    .fetch_all(&state.db)
-    .await?;
-    Ok(Json(rows))
+
+    let page_size = query.page_size.unwrap_or(50).clamp(1, 200);
+    let page = query.page.unwrap_or(1).max(1);
+    let offset = (page - 1) * page_size;
+    let search = query.q.as_deref().unwrap_or("").trim();
+
+    let (rows, total): (Vec<ModelRow>, i64) = if search.is_empty() {
+        let total: Option<i64> = sqlx::query_scalar("SELECT COUNT(*) FROM models")
+            .fetch_one(&state.db)
+            .await?;
+        let rows = sqlx::query_as::<_, ModelRow>(
+            r#"SELECT id, model_id, display_name, input_price, output_price,
+                      input_multiplier, output_multiplier, is_active
+               FROM models ORDER BY is_active DESC, model_id
+               LIMIT $1 OFFSET $2"#,
+        )
+        .bind(page_size)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
+        (rows, total.unwrap_or(0))
+    } else {
+        let pattern = format!("%{search}%");
+        let total: Option<i64> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM models WHERE model_id ILIKE $1 OR display_name ILIKE $1",
+        )
+        .bind(&pattern)
+        .fetch_one(&state.db)
+        .await?;
+        let rows = sqlx::query_as::<_, ModelRow>(
+            r#"SELECT id, model_id, display_name, input_price, output_price,
+                      input_multiplier, output_multiplier, is_active
+               FROM models WHERE model_id ILIKE $1 OR display_name ILIKE $1
+               ORDER BY is_active DESC, model_id
+               LIMIT $2 OFFSET $3"#,
+        )
+        .bind(&pattern)
+        .bind(page_size)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
+        (rows, total.unwrap_or(0))
+    };
+
+    Ok(Json(ModelListResponse { items: rows, total }))
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -345,8 +397,8 @@ pub async fn sync_models(
     // OpenRouter). Now it's 2 total round-trips regardless of catalog size.
     let model_slice: &[String] = &remote_models;
     let model_result = sqlx::query(
-        r#"INSERT INTO models (model_id, display_name)
-           SELECT m, m FROM UNNEST($1::TEXT[]) AS t(m)
+        r#"INSERT INTO models (model_id, display_name, is_active)
+           SELECT m, m, false FROM UNNEST($1::TEXT[]) AS t(m)
            ON CONFLICT (model_id) DO NOTHING"#,
     )
     .bind(model_slice)

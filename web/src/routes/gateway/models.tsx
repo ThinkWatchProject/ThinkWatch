@@ -123,9 +123,13 @@ interface RouteEditFormState {
 export function ModelsPage() {
   const { t } = useTranslation();
   const [models, setModels] = useState<ModelRow[]>([]);
+  const [totalModels, setTotalModels] = useState(0);
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [search, setSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 50;
 
   // Routes: cached per model_id
   const [expandedModel, setExpandedModel] = useState<string | null>(null);
@@ -170,22 +174,25 @@ export function ModelsPage() {
 
   /* ---------- data fetching ---------- */
 
-  const fetchModels = useCallback(async () => {
+  const fetchModels = useCallback(async (p = page, q = search) => {
     setLoading(true);
     try {
-      const [res, p] = await Promise.all([
-        api<ModelRow[]>('/api/admin/models'),
+      const params = new URLSearchParams({ page: String(p), page_size: String(PAGE_SIZE) });
+      if (q) params.set('q', q);
+      const [res, provs] = await Promise.all([
+        api<{ items: ModelRow[]; total: number }>(`/api/admin/models?${params}`),
         api<Provider[]>('/api/admin/providers'),
       ]);
-      setModels(res);
-      setProviders(p);
+      setModels(res.items);
+      setTotalModels(res.total);
+      setProviders(provs);
       setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load models');
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page, search]);
 
   useEffect(() => {
     void fetchModels();
@@ -441,6 +448,21 @@ export function ModelsPage() {
         </Alert>
       )}
 
+      {/* Search */}
+      <div className="flex items-center gap-2">
+        <Input
+          placeholder={t('models.searchPlaceholder')}
+          value={search}
+          onChange={(e) => { setSearch(e.target.value); setPage(1); }}
+          className="max-w-sm"
+        />
+        {totalModels > 0 && (
+          <span className="text-sm text-muted-foreground">
+            {totalModels} {t('models.totalCount')}
+          </span>
+        )}
+      </div>
+
       {/* Models table */}
       {loading ? (
         <div className="space-y-4">
@@ -643,6 +665,23 @@ export function ModelsPage() {
             </Table>
           </CardContent>
         </Card>
+      )}
+
+      {/* Pagination */}
+      {totalModels > PAGE_SIZE && (
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-muted-foreground">
+            {page} / {Math.ceil(totalModels / PAGE_SIZE)}
+          </span>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
+              {t('common.previous')}
+            </Button>
+            <Button variant="outline" size="sm" disabled={page >= Math.ceil(totalModels / PAGE_SIZE)} onClick={() => setPage(page + 1)}>
+              {t('common.next')}
+            </Button>
+          </div>
+        </div>
       )}
 
       {/* Edit Model Dialog */}
