@@ -912,44 +912,14 @@ export function SettingsPage() {
                   {t('settingsPage.perfHint')}
                 </p>
               </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <Label htmlFor="perf-http">{t('settingsPage.perfHttpClient')}</Label>
-                    <Input id="perf-http" type="number" min={1} value={perfHttpClientSecs}
-                      onChange={(e) => setPerfHttpClientSecs(Number(e.target.value))} />
-                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfHttpClientHint')}</p>
-                  </div>
-                  <div>
-                    <Label htmlFor="perf-mcp-pool">{t('settingsPage.perfMcpPool')}</Label>
-                    <Input id="perf-mcp-pool" type="number" min={1} value={perfMcpPoolSecs}
-                      onChange={(e) => setPerfMcpPoolSecs(Number(e.target.value))} />
-                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfMcpPoolHint')}</p>
-                  </div>
-                  <div>
-                    <Label htmlFor="perf-console">{t('settingsPage.perfConsoleRequest')}</Label>
-                    <Input id="perf-console" type="number" min={1} value={perfConsoleRequestSecs}
-                      onChange={(e) => setPerfConsoleRequestSecs(Number(e.target.value))} />
-                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfConsoleRequestHint')}</p>
-                  </div>
-                  <div>
-                    <Label htmlFor="perf-ws-io">{t('settingsPage.perfWsIo')}</Label>
-                    <Input id="perf-ws-io" type="number" min={1} value={perfDashboardWsIoSecs}
-                      onChange={(e) => setPerfDashboardWsIoSecs(Number(e.target.value))} />
-                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfWsIoHint')}</p>
-                  </div>
-                  <div>
-                    <Label htmlFor="perf-ws-tick">{t('settingsPage.perfWsTick')}</Label>
-                    <Input id="perf-ws-tick" type="number" min={1} value={perfDashboardWsTickSecs}
-                      onChange={(e) => setPerfDashboardWsTickSecs(Number(e.target.value))} />
-                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfWsTickHint')}</p>
-                  </div>
-                  <div>
-                    <Label htmlFor="perf-ws-max">{t('settingsPage.perfWsMax')}</Label>
-                    <Input id="perf-ws-max" type="number" min={1} value={perfDashboardWsMaxPerUser}
-                      onChange={(e) => setPerfDashboardWsMaxPerUser(Number(e.target.value))} />
-                    <p className="text-xs text-muted-foreground mt-1">{t('settingsPage.perfWsMaxHint')}</p>
-                  </div>
+              <CardContent>
+                <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
+                  <NumberField label={t('settingsPage.perfHttpClient')} value={perfHttpClientSecs} onChange={setPerfHttpClientSecs} min={1} max={300} hint={t('settingsPage.perfHttpClientHint')} />
+                  <NumberField label={t('settingsPage.perfMcpPool')} value={perfMcpPoolSecs} onChange={setPerfMcpPoolSecs} min={1} max={300} hint={t('settingsPage.perfMcpPoolHint')} />
+                  <NumberField label={t('settingsPage.perfConsoleRequest')} value={perfConsoleRequestSecs} onChange={setPerfConsoleRequestSecs} min={1} max={300} hint={t('settingsPage.perfConsoleRequestHint')} />
+                  <NumberField label={t('settingsPage.perfWsIo')} value={perfDashboardWsIoSecs} onChange={setPerfDashboardWsIoSecs} min={1} max={60} hint={t('settingsPage.perfWsIoHint')} />
+                  <NumberField label={t('settingsPage.perfWsTick')} value={perfDashboardWsTickSecs} onChange={setPerfDashboardWsTickSecs} min={1} max={60} hint={t('settingsPage.perfWsTickHint')} />
+                  <NumberField label={t('settingsPage.perfWsMax')} value={perfDashboardWsMaxPerUser} onChange={setPerfDashboardWsMaxPerUser} min={1} max={50} hint={t('settingsPage.perfWsMaxHint')} />
                 </div>
               </CardContent>
             </Card>
