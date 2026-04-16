@@ -43,6 +43,7 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { DataTablePagination } from '@/components/data-table-pagination';
 import { api, apiDelete, apiPatch, apiPost } from '@/lib/api';
 import { toast } from 'sonner';
 
@@ -129,7 +130,7 @@ export function ModelsPage() {
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [page, setPage] = useState(1);
-  const PAGE_SIZE = 20;
+  const [pageSize, setPageSize] = useState(20);
 
   // Routes: cached per model_id
   const [expandedModel, setExpandedModel] = useState<string | null>(null);
@@ -174,10 +175,10 @@ export function ModelsPage() {
 
   /* ---------- data fetching ---------- */
 
-  const fetchModels = useCallback(async (p = page, q = search) => {
+  const fetchModels = useCallback(async (p = page, q = search, ps = pageSize) => {
     setLoading(true);
     try {
-      const params = new URLSearchParams({ page: String(p), page_size: String(PAGE_SIZE) });
+      const params = new URLSearchParams({ page: String(p), page_size: String(ps) });
       if (q) params.set('q', q);
       const [res, provs] = await Promise.all([
         api<{ items: ModelRow[]; total: number }>(`/api/admin/models?${params}`),
@@ -192,7 +193,7 @@ export function ModelsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, search]);
+  }, [page, search, pageSize]);
 
   useEffect(() => {
     void fetchModels();
@@ -668,21 +669,13 @@ export function ModelsPage() {
       )}
 
       {/* Pagination */}
-      {totalModels > PAGE_SIZE && (
-        <div className="flex items-center justify-between">
-          <span className="text-sm text-muted-foreground">
-            {page} / {Math.ceil(totalModels / PAGE_SIZE)}
-          </span>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>
-              {t('common.previous')}
-            </Button>
-            <Button variant="outline" size="sm" disabled={page >= Math.ceil(totalModels / PAGE_SIZE)} onClick={() => setPage(page + 1)}>
-              {t('common.next')}
-            </Button>
-          </div>
-        </div>
-      )}
+      <DataTablePagination
+        total={totalModels}
+        page={page}
+        pageSize={pageSize}
+        onPageChange={setPage}
+        onPageSizeChange={setPageSize}
+      />
 
       {/* Edit Model Dialog */}
       <Dialog open={modelDialogOpen} onOpenChange={setModelDialogOpen}>
