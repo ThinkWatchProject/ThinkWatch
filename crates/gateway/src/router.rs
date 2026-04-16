@@ -88,7 +88,7 @@ impl ModelRouter {
     }
 
     /// Look up the first provider DB id for a given model name.
-    /// Used for backward compatibility with rate limiting.
+    /// Used to scope rate-limit counters by provider.
     pub fn provider_id_for(&self, model: &str) -> Option<Uuid> {
         self.route(model)
             .and_then(|entries| entries.first())

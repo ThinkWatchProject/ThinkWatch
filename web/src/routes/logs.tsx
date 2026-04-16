@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { Fragment, useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { subHours, format } from 'date-fns';
@@ -199,6 +199,7 @@ function getColumns(cat: LogCategory): ColDef[] {
 }
 
 function getTimeKey(_cat: LogCategory): string {
+  // All log categories use `created_at` as the timestamp field.
   return 'created_at';
 }
 
@@ -262,8 +263,6 @@ function formatBackendTimestamp(raw: string): string {
   return Number.isNaN(d.getTime()) ? raw : d.toLocaleString();
 }
 
-// Backend returns DateTime64 strings without a timezone suffix, e.g.
-// "2026-04-06 09:21:00.000". They are UTC. Without an explicit suffix the
 // ---------------------------------------------------------------------------
 // LogDetail — per-row expansion content
 //
@@ -380,9 +379,8 @@ export function UnifiedLogsPage() {
 
   // Mirror the active query into a ref so we can sync the input *only*
   // when the URL truly changes from somewhere else (browser back/forward,
-  // external navigation), not on every re-render. The previous version
-  // ran setSearchInput on every change of activeQuery — when the URL
-  // updated from our own handleSearch the local state was overwritten,
+  // external navigation), not on every re-render. Without this, URL
+  // updates from our own handleSearch would overwrite local state,
   // racing the user's next keystroke.
   const lastSyncedQueryRef = useRef(activeQuery);
   useEffect(() => {
@@ -468,30 +466,33 @@ export function UnifiedLogsPage() {
    * of stacking duplicates. Negative tokens with the same key+value are
    * also de-duplicated.
    */
-  const updateFilter = (key: string, rawValue: unknown, negate: boolean) => {
-    if (rawValue === null || rawValue === undefined || rawValue === '') return;
-    let value = String(rawValue);
-    if (/\s/.test(value)) value = `"${value.replace(/"/g, '\\"')}"`;
-    const token = `${negate ? '-' : ''}${key}:${value}`;
+  const updateFilter = useCallback(
+    (key: string, rawValue: unknown, negate: boolean) => {
+      if (rawValue === null || rawValue === undefined || rawValue === '') return;
+      let value = String(rawValue);
+      if (/\s/.test(value)) value = `"${value.replace(/"/g, '\\"')}"`;
+      const token = `${negate ? '-' : ''}${key}:${value}`;
 
-    // Strip any existing positive `key:...` token (only one allowed at a time).
-    let stripped = activeQuery.replace(
-      new RegExp(`(?<![-\\w])${key}:(?:"[^"]*"|\\S+)\\s*`, 'g'),
-      '',
-    );
-    // Also strip a duplicate of the exact token we are about to add (for
-    // negatives, so clicking "−" twice on the same row is a no-op).
-    stripped = stripped
-      .replace(
-        new RegExp(`\\B${escapeRegex(token)}(?:\\s|$)`, 'g'),
+      // Strip any existing positive `key:...` token (only one allowed at a time).
+      let stripped = activeQuery.replace(
+        new RegExp(`(?<![-\\w])${key}:(?:"[^"]*"|\\S+)\\s*`, 'g'),
         '',
-      )
-      .trim();
+      );
+      // Also strip a duplicate of the exact token we are about to add (for
+      // negatives, so clicking "−" twice on the same row is a no-op).
+      stripped = stripped
+        .replace(
+          new RegExp(`\\B${escapeRegex(token)}(?:\\s|$)`, 'g'),
+          '',
+        )
+        .trim();
 
-    const next = stripped ? `${stripped} ${token}` : token;
-    setSearchInput(next);
-    updateSearch({ q: next, page: 0 });
-  };
+      const next = stripped ? `${stripped} ${token}` : token;
+      setSearchInput(next);
+      updateSearch({ q: next, page: 0 });
+    },
+    [activeQuery, updateSearch],
+  );
 
   // Stable references so memoized children (LogRow) don't re-render every
   // time the parent's state changes unrelated to filters.
@@ -620,8 +621,8 @@ export function UnifiedLogsPage() {
                   {logs.map((log) => {
                     const rowTime = String(log[timeKey] ?? log.created_at ?? '');
                     return (
-                      <>
-                        <TableRow key={log.id}>
+                      <Fragment key={log.id}>
+                        <TableRow>
                           <TableCell>
                             <Button variant="ghost" size="icon-xs" aria-label="Expand"
                               onClick={() => setExpandedRow(expandedRow === log.id ? null : log.id)}>
@@ -690,13 +691,13 @@ export function UnifiedLogsPage() {
                           })}
                         </TableRow>
                         {expandedRow === log.id && (
-                          <TableRow key={`${log.id}-detail`}>
+                          <TableRow>
                             <TableCell colSpan={columns.length + 1} className="bg-muted/30">
                               <LogDetail log={log} category={category} timeKey={timeKey} />
                             </TableCell>
                           </TableRow>
                         )}
-                      </>
+                      </Fragment>
                     );
                   })}
                 </TableBody>

@@ -4,7 +4,8 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use std::net::UdpSocket;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{Mutex, RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::models::LogForwarder;
@@ -442,10 +443,9 @@ mod tests {
     /// the `log_type` field (which is `#[serde(skip)]`) must still
     /// parse — that field gets re-defaulted by `default_log_type`.
     #[test]
-    fn audit_entry_deserialise_is_backwards_compatible() {
+    fn audit_entry_deserialise_minimal_payload() {
         // Minimal payload: id + action + created_at, everything else
-        // None / default. Older outbox rows produced before the model
-        // grew Option fields look like this.
+        // None / default.
         let json = r#"{
             "id": "abc",
             "action": "test.event",
@@ -513,6 +513,7 @@ impl Default for AuditConfig {
 struct ForwarderRuntime {
     config: LogForwarder,
     udp_socket: Option<UdpSocket>,
+    tcp_stream: Arc<Mutex<Option<tokio::net::TcpStream>>>,
 }
 
 /// Shared forwarder registry, reloaded periodically from the database.
@@ -530,11 +531,9 @@ pub struct AuditLogger {
 /// Bounded audit channel capacity.
 ///
 /// At ~80 bytes per entry that's about 8 MB of in-memory backlog,
-/// which is fine for any reasonable host. The previous 10k bound
-/// was too tight: a few seconds of ClickHouse stalling at 10k req/s
-/// silently dropped audit data. Bump to 100k so a 30-second outage
-/// at 3k req/s still survives, and surface drops via a metric
-/// instead of just logging.
+/// which is fine for any reasonable host. 100k entries means a
+/// 30-second ClickHouse outage at 3k req/s still survives; drops
+/// are surfaced via a metric.
 const AUDIT_CHANNEL_CAPACITY: usize = 100_000;
 
 /// Throttle window for the structured "audit drop" log line. The
@@ -668,6 +667,7 @@ async fn reload_forwarders(db: &PgPool, registry: &ForwarderRegistry) {
             ForwarderRuntime {
                 config: row,
                 udp_socket,
+                tcp_stream: Arc::new(Mutex::new(None)),
             },
         );
     }
@@ -737,7 +737,7 @@ async fn forward_to_all(
         }
         let result = match runtime.config.forwarder_type.as_str() {
             "udp_syslog" => send_udp_syslog(runtime, entry),
-            "tcp_syslog" => send_tcp_syslog(&runtime.config, entry).await,
+            "tcp_syslog" => send_tcp_syslog(runtime, entry).await,
             "kafka" => send_kafka(http_client, &runtime.config, entry).await,
             "webhook" => send_webhook(http_client, &runtime.config, entry).await,
             other => {
@@ -954,6 +954,42 @@ async fn drain_once(
 // Forwarder implementations
 // ---------------------------------------------------------------------------
 
+/// Build an RFC 5424 syslog message from a forwarder config and audit entry.
+/// Shared between UDP and TCP transports to avoid duplicating the message
+/// construction logic.
+fn build_syslog_message(facility: u8, entry: &AuditEntry, newline: bool) -> String {
+    let severity = 6u8; // informational
+    let priority = facility * 8 + severity;
+
+    let structured_data = format!(
+        "[audit@0 user_id=\"{}\" action=\"{}\" resource=\"{}\" ip=\"{}\"]",
+        entry.user_id.as_deref().unwrap_or("-"),
+        entry.action,
+        entry.resource.as_deref().unwrap_or("-"),
+        entry.ip_address.as_deref().unwrap_or("-"),
+    );
+    let resource = entry.resource.as_deref().unwrap_or("-");
+
+    let mut message = format!(
+        "<{priority}>1 {ts} think-watch audit - {action} {sd} {action} on {resource}",
+        ts = &entry.created_at,
+        action = entry.action,
+        sd = structured_data,
+    );
+    if newline {
+        message.push('\n');
+    }
+    message
+}
+
+fn parse_syslog_facility(config: &serde_json::Value) -> u8 {
+    config
+        .get("facility")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u8::try_from(v).ok())
+        .unwrap_or(16) // default: local0
+}
+
 fn send_udp_syslog(runtime: &ForwarderRuntime, entry: &AuditEntry) -> Result<(), String> {
     let addr = runtime
         .config
@@ -961,44 +997,12 @@ fn send_udp_syslog(runtime: &ForwarderRuntime, entry: &AuditEntry) -> Result<(),
         .get("address")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'address' in udp_syslog config")?;
-    let facility: u8 = runtime
-        .config
-        .config
-        .get("facility")
-        .and_then(|v| v.as_u64())
-        .and_then(|v| u8::try_from(v).ok())
-        .unwrap_or(16); // default: local0
-
+    let facility = parse_syslog_facility(&runtime.config.config);
     let socket = runtime
         .udp_socket
         .as_ref()
         .ok_or("UDP socket not initialized")?;
-
-    let severity = 6u8; // informational
-    let priority = facility * 8 + severity;
-    let hostname = "think-watch";
-    let app_name = "audit";
-    let msg_id = &entry.action;
-
-    let structured_data = format!(
-        "[audit@0 user_id=\"{}\" action=\"{}\" resource=\"{}\" ip=\"{}\"]",
-        entry.user_id.as_deref().unwrap_or("-"),
-        entry.action,
-        entry.resource.as_deref().unwrap_or("-"),
-        entry.ip_address.as_deref().unwrap_or("-"),
-    );
-
-    let message = format!(
-        "<{priority}>1 {timestamp} {hostname} {app_name} - {msg_id} {structured_data} {action} on {resource}",
-        priority = priority,
-        timestamp = &entry.created_at,
-        hostname = hostname,
-        app_name = app_name,
-        msg_id = msg_id,
-        structured_data = structured_data,
-        action = entry.action,
-        resource = entry.resource.as_deref().unwrap_or("-"),
-    );
+    let message = build_syslog_message(facility, entry, false);
 
     socket
         .send_to(message.as_bytes(), addr)
@@ -1006,45 +1010,39 @@ fn send_udp_syslog(runtime: &ForwarderRuntime, entry: &AuditEntry) -> Result<(),
         .map_err(|e| format!("Syslog UDP send failed: {e}"))
 }
 
-async fn send_tcp_syslog(config: &LogForwarder, entry: &AuditEntry) -> Result<(), String> {
-    let addr = config
+async fn send_tcp_syslog(runtime: &ForwarderRuntime, entry: &AuditEntry) -> Result<(), String> {
+    let addr = runtime
+        .config
         .config
         .get("address")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'address' in tcp_syslog config")?;
-    let facility: u8 = config
-        .config
-        .get("facility")
-        .and_then(|v| v.as_u64())
-        .and_then(|v| u8::try_from(v).ok())
-        .unwrap_or(16);
+    let facility = parse_syslog_facility(&runtime.config.config);
+    let message = build_syslog_message(facility, entry, true);
 
-    let severity = 6u8;
-    let priority = facility * 8 + severity;
+    let mut guard = runtime.tcp_stream.lock().await;
 
-    let structured_data = format!(
-        "[audit@0 user_id=\"{}\" action=\"{}\" resource=\"{}\" ip=\"{}\"]",
-        entry.user_id.as_deref().unwrap_or("-"),
-        entry.action,
-        entry.resource.as_deref().unwrap_or("-"),
-        entry.ip_address.as_deref().unwrap_or("-"),
-    );
+    // Try writing to existing stream first
+    if let Some(stream) = guard.as_mut() {
+        match stream.write_all(message.as_bytes()).await {
+            Ok(()) => return Ok(()),
+            Err(_) => {
+                // Connection is stale, drop it and reconnect below
+                *guard = None;
+            }
+        }
+    }
 
-    let message = format!(
-        "<{priority}>1 {ts} think-watch audit - {action} {sd} {action} on {resource}\n",
-        priority = priority,
-        ts = &entry.created_at,
-        action = entry.action,
-        sd = structured_data,
-        resource = entry.resource.as_deref().unwrap_or("-"),
-    );
-
+    // Connect (or reconnect after a failed write)
     let mut stream = tokio::net::TcpStream::connect(addr)
         .await
         .map_err(|e| format!("TCP syslog connect failed: {e}"))?;
-    tokio::io::AsyncWriteExt::write_all(&mut stream, message.as_bytes())
+    stream
+        .write_all(message.as_bytes())
         .await
-        .map_err(|e| format!("TCP syslog write failed: {e}"))
+        .map_err(|e| format!("TCP syslog write failed: {e}"))?;
+    *guard = Some(stream);
+    Ok(())
 }
 
 async fn send_kafka(
@@ -1101,7 +1099,11 @@ async fn send_webhook(
     // Serialize the body once so the HMAC signs exactly what goes over
     // the wire — avoids any field-ordering or whitespace divergence
     // between the signature input and the posted body.
-    let body = serde_json::to_vec(entry).map_err(|e| format!("JSON serialise: {e}"))?;
+    // `Bytes` is cheaply cloneable (ref-counted) so the retry loop
+    // doesn't deep-copy the payload on each attempt.
+    let body: bytes::Bytes = serde_json::to_vec(entry)
+        .map_err(|e| format!("JSON serialise: {e}"))?
+        .into();
 
     // Optional HMAC-SHA256 signature. When `signing_secret` is set on
     // the forwarder row, every delivery gets an `x-signature` header
@@ -1145,11 +1147,6 @@ async fn send_webhook(
             }
         }
 
-        // Legacy: single auth_header field
-        if let Some(token) = config.config.get("auth_header").and_then(|v| v.as_str()) {
-            req = req.header("Authorization", token);
-        }
-
         if let Some(ref sig) = signature {
             req = req.header("x-signature", format!("sha256={sig}"));
         }
@@ -1184,7 +1181,7 @@ fn hmac_sha256_hex(secret: &[u8], msg: &[u8]) -> String {
     let mut mac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key length");
     mac.update(msg);
     let tag = mac.finalize().into_bytes();
-    tag.iter().map(|b| format!("{b:02x}")).collect()
+    hex::encode(tag)
 }
 
 // ---------------------------------------------------------------------------

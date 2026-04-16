@@ -522,7 +522,10 @@
     "range_7d": "7天",
     "range_30d": "30天",
     "range_mtd": "本月至今",
-    "pivotTotal": "合计"
+    "pivotTotal": "合计",
+    "dimRow": "行",
+    "dimCol": "列",
+    "dimHint": "最多选择 2 个维度"
   },
   "audit": {
     "title": "审计日志",

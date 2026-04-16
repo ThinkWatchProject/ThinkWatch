@@ -9,7 +9,6 @@ think-watch-auth = { workspace = true }
 think-watch-gateway = { workspace = true }
 think-watch-mcp-gateway = { workspace = true }
 axum = { workspace = true }
-axum-extra = { workspace = true }
 tower = { workspace = true }
 tower-http = { workspace = true }
 tokio = { workspace = true }
@@ -25,12 +24,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 dotenvy = { workspace = true }
 utoipa = { workspace = true }
-utoipa-axum = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
 openidconnect = { workspace = true }
 rust_decimal = { workspace = true }
 reqwest = { workspace = true }
-urlencoding = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 p256 = { workspace = true }

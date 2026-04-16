@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 
-use think_watch_common::cb_registry::{CbState, record_cb, record_cb_with_kind};
+use think_watch_common::cb_registry::{CbState, record_cb_with_kind};
 
 /// Tunables for a single circuit breaker.
 #[derive(Debug, Clone, Copy)]
@@ -66,7 +66,7 @@ struct Breaker {
 
 impl Breaker {
     fn new(server_name: String, config: CircuitConfig) -> Self {
-        record_cb(&server_name, CbState::Closed);
+        record_cb_with_kind(&server_name, CbState::Closed, "mcp");
         Self {
             server_name,
             config,
@@ -97,7 +97,7 @@ impl Breaker {
                     inner.state = CbState::HalfOpen;
                     inner.half_open_successes = 0;
                     inner.consecutive_failures = 0;
-                    record_cb(&self.server_name, CbState::HalfOpen);
+                    record_cb_with_kind(&self.server_name, CbState::HalfOpen, "mcp");
                     tracing::info!(
                         server = %self.server_name,
                         "MCP circuit breaker HALF-OPEN (probing recovery)"
@@ -119,7 +119,7 @@ impl Breaker {
                 if inner.half_open_successes >= self.config.half_open_max {
                     inner.state = CbState::Closed;
                     inner.half_open_successes = 0;
-                    record_cb(&self.server_name, CbState::Closed);
+                    record_cb_with_kind(&self.server_name, CbState::Closed, "mcp");
                     tracing::info!(
                         server = %self.server_name,
                         "MCP circuit breaker CLOSED (recovered)"
@@ -130,7 +130,7 @@ impl Breaker {
                 // Shouldn't happen — `check` would have rejected — but if
                 // a stale request lands, recover gracefully.
                 inner.state = CbState::Closed;
-                record_cb(&self.server_name, CbState::Closed);
+                record_cb_with_kind(&self.server_name, CbState::Closed, "mcp");
             }
             CbState::Closed => {}
         }
@@ -302,9 +302,7 @@ mod tests {
     }
 
     /// Concurrent failures must not bump the breaker past Open multiple
-    /// times. With the old per-field locking, two parallel record_failure
-    /// calls could both observe `Closed`, both increment the counter, and
-    /// both write `last_failure`. Now everything happens under one mutex.
+    /// times — everything happens under one mutex.
     #[tokio::test]
     async fn concurrent_failures_serialize() {
         let cb = McpCircuitBreakers::with_config(cfg());

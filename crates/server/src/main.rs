@@ -9,7 +9,6 @@ use think_watch_common::dynamic_config::{self, DynamicConfig};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod app;
-mod error;
 mod handlers;
 mod mcp_runtime;
 mod middleware;
@@ -86,16 +85,10 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Initialize ClickHouse tables — block startup with bounded
-    // retry. The previous version was a fire-and-forget tokio::spawn
-    // that silently swallowed errors; if ClickHouse was unreachable
-    // at boot, the schema was never created and every audit insert
-    // for the entire process lifetime failed silently. Now we retry
-    // up to 5 times with exponential backoff (~1.5s + 3s + 6s + 12s
-    // = ~22s total) before giving up. If ClickHouse is configured
-    // (`ch_client.is_some()`) and all retries fail, we still log
-    // an error and continue rather than refuse to start — operators
-    // who tolerate degraded audit might prefer that — but bump
-    // `audit_clickhouse_init_failed_total` so dashboards see it.
+    // retry (up to 5 attempts with exponential backoff, ~22s total).
+    // If all retries fail we log an error and continue rather than
+    // refuse to start, but bump `audit_clickhouse_init_failed_total`
+    // so dashboards see it.
     if ch_client.is_some() {
         let mut attempt = 0u32;
         loop {
@@ -163,62 +156,13 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Initialize OIDC — prefer dynamic config (database), fall back to env vars.
-    // If OIDC env vars are set but no DB config exists yet, seed the DB from env.
+    // Initialize OIDC from dynamic config (database).
     let oidc_manager = {
         let dc = &dynamic_config;
         let encryption_key =
             think_watch_common::crypto::parse_encryption_key(&config.encryption_key)?;
 
-        // Check if OIDC is already configured in dynamic config (database)
-        let db_issuer = dc.oidc_issuer_url().await;
-
-        if db_issuer.is_none() && config.oidc_enabled() {
-            // Seed database from env vars (first-time migration)
-            tracing::info!("Seeding OIDC config from environment variables into database");
-            let secret_plain = config.oidc_client_secret.as_deref().unwrap_or("");
-            let secret_encrypted = hex::encode(think_watch_common::crypto::encrypt(
-                secret_plain.as_bytes(),
-                &encryption_key,
-            )?);
-            let default_redirect = format!(
-                "http://{}:{}/api/auth/sso/callback",
-                config.server_host, config.console_port
-            );
-
-            for (k, v, desc) in [
-                ("oidc.enabled", serde_json::json!(true), "SSO enabled"),
-                (
-                    "oidc.issuer_url",
-                    serde_json::json!(config.oidc_issuer_url.as_deref().unwrap_or("")),
-                    "OIDC issuer URL",
-                ),
-                (
-                    "oidc.client_id",
-                    serde_json::json!(config.oidc_client_id.as_deref().unwrap_or("")),
-                    "OIDC client ID",
-                ),
-                (
-                    "oidc.client_secret_encrypted",
-                    serde_json::json!(secret_encrypted),
-                    "OIDC client secret (encrypted)",
-                ),
-                (
-                    "oidc.redirect_url",
-                    serde_json::json!(
-                        config
-                            .oidc_redirect_url
-                            .as_deref()
-                            .unwrap_or(&default_redirect)
-                    ),
-                    "OIDC redirect URL",
-                ),
-            ] {
-                dc.upsert(k, &v, "oidc", Some(desc), None).await.ok();
-            }
-        }
-
-        // Now load OIDC from dynamic config
+        // Load OIDC from dynamic config
         if dc.oidc_enabled().await {
             let issuer = dc.oidc_issuer_url().await.unwrap_or_default();
             let client_id = dc.oidc_client_id().await.unwrap_or_default();
@@ -298,6 +242,10 @@ async fn main() -> anyhow::Result<()> {
     let content_filter = Arc::new(arc_swap::ArcSwap::from_pointee(initial_content_filter));
     let pii_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(initial_pii_redactor));
 
+    // Read perf tunables from DynamicConfig before moving it into AppState.
+    let init_http_secs = dynamic_config.perf_http_client_secs().await as u64;
+    let init_mcp_pool_secs = dynamic_config.perf_mcp_pool_secs().await as u64;
+
     let state = app::AppState {
         db: pool,
         redis,
@@ -315,18 +263,15 @@ async fn main() -> anyhow::Result<()> {
         // gateway proxy see the same view.
         mcp_registry: think_watch_mcp_gateway::registry::Registry::new(),
         mcp_circuit_breakers: think_watch_mcp_gateway::circuit_breaker::McpCircuitBreakers::new(),
-        mcp_pool: think_watch_mcp_gateway::pool::ConnectionPool::with_timeout(
-            config.timeouts.mcp_pool_secs,
-        ),
-        // Single shared HTTP client for outbound calls (tool discovery,
-        // SSO, etc). Timeout from `AppConfig.timeouts.http_client_secs`,
-        // overridable via `THINKWATCH_HTTP_CLIENT_SECS`.
-        http_client: reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(
-                config.timeouts.http_client_secs,
-            ))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new()),
+        mcp_pool: Arc::new(arc_swap::ArcSwap::from_pointee(
+            think_watch_mcp_gateway::pool::ConnectionPool::with_timeout(init_mcp_pool_secs),
+        )),
+        http_client: Arc::new(arc_swap::ArcSwap::from_pointee(
+            reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(init_http_secs))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+        )),
     };
 
     // --- Hot reload of content filter / PII redactor on config change ---
@@ -340,6 +285,8 @@ async fn main() -> anyhow::Result<()> {
         let dc_clone = state.dynamic_config.clone();
         let cf_clone = state.content_filter.clone();
         let pii_clone = state.pii_redactor.clone();
+        let http_clone = state.http_client.clone();
+        let pool_clone = state.mcp_pool.clone();
         tokio::spawn(async move {
             use fred::interfaces::{EventInterface, PubsubInterface};
             let mut rx = sub_redis_filters.message_rx();
@@ -349,24 +296,29 @@ async fn main() -> anyhow::Result<()> {
             }
             while let Ok(msg) = rx.recv().await {
                 if msg.channel == "config:changed" {
-                    // Force a fresh reload of DynamicConfig before
-                    // recomputing the filter / redactor. The previous
-                    // implementation slept 50ms and hoped the parallel
-                    // DynamicConfig subscriber had fired first — a
-                    // race that would silently install stale rules
-                    // under any subscriber latency. Now we drive the
-                    // reload explicitly: by the time `load_content_filter`
-                    // reads from `dc_clone`, the in-memory cache has
-                    // already been refreshed from Postgres.
                     if let Err(e) = dc_clone.reload().await {
-                        tracing::warn!("Failed to reload dynamic config before filter swap: {e}");
+                        tracing::warn!("Failed to reload dynamic config: {e}");
                         continue;
                     }
                     let new_filter = app::load_content_filter(&dc_clone).await;
                     cf_clone.store(Arc::new(new_filter));
                     let new_pii = app::load_pii_redactor(&dc_clone).await;
                     pii_clone.store(Arc::new(new_pii));
-                    tracing::info!("Content filter and PII redactor reloaded");
+
+                    // Rebuild HTTP client / MCP pool if their timeouts changed.
+                    let http_secs = dc_clone.perf_http_client_secs().await as u64;
+                    let new_http = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(http_secs))
+                        .build()
+                        .unwrap_or_else(|_| reqwest::Client::new());
+                    http_clone.store(Arc::new(new_http));
+
+                    let pool_secs = dc_clone.perf_mcp_pool_secs().await as u64;
+                    let new_pool =
+                        think_watch_mcp_gateway::pool::ConnectionPool::with_timeout(pool_secs);
+                    pool_clone.store(Arc::new(new_pool));
+
+                    tracing::info!("Hot-reloaded filters, HTTP client, and MCP pool");
                 }
             }
         });

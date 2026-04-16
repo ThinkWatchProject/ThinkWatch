@@ -522,7 +522,10 @@
     "range_7d": "7d",
     "range_30d": "30d",
     "range_mtd": "MTD",
-    "pivotTotal": "Total"
+    "pivotTotal": "Total",
+    "dimRow": "Row",
+    "dimCol": "Col",
+    "dimHint": "Select up to 2 dimensions"
   },
   "audit": {
     "title": "Audit Logs",

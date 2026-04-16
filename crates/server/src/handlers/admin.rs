@@ -1791,8 +1791,7 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
-        // Content filter rules — accept both new (action/match_type/name)
-        // and legacy (severity/category) field names for backward compatibility.
+        // Content filter rules: each rule requires pattern, match_type, action, and name.
         "security.content_filter_patterns" => {
             let arr = value
                 .as_array()

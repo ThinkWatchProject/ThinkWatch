@@ -130,10 +130,8 @@ pub struct RequestContext<'a> {
 ///
 /// Holds the same `db` / `redis` handles the AI gateway uses so the
 /// shared `limits` engine can be queried per request without bouncing
-/// out to a separate service. The previous in-process per-user rate
-/// limiter (hardcoded 60 calls/min) has been replaced — quotas now
-/// live in `rate_limit_rules` and are configurable per user / per
-/// MCP server.
+/// out to a separate service. Quotas live in `rate_limit_rules` and
+/// are configurable per user / per MCP server.
 #[derive(Clone)]
 pub struct McpProxy {
     pub registry: Registry,

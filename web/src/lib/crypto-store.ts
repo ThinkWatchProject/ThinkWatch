@@ -5,8 +5,7 @@
  * crypto.subtle.exportKey() on it. The public key JWK is exportable
  * so it can be sent to the server via POST /api/auth/register-key.
  *
- * Replaces the previous HMAC symmetric signing key approach: no secret
- * needs to travel from server to client.
+ * Asymmetric: no secret needs to travel from server to client.
  */
 
 const DB_NAME = 'thinkwatch-keys';

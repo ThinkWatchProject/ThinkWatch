@@ -15,6 +15,9 @@ interface ApiOptions<T = unknown> {
   /// probes (e.g. /api/auth/me on mount) where 401 just means "not logged
   /// in yet" rather than "session expired mid-use".
   no401Redirect?: boolean;
+  /// Optional AbortSignal for cancelling in-flight requests (e.g. from
+  /// useEffect cleanup). Passed through to the underlying fetch call.
+  signal?: AbortSignal;
 }
 
 // --- Auth model ---
@@ -207,6 +210,7 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
       ...options.headers,
     },
     body: bodyStr,
+    signal: options.signal,
   });
 
   if (res.status === 401) {
@@ -225,6 +229,7 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
           ...options.headers,
         },
         body: bodyStr,
+        signal: options.signal,
       });
       if (retryRes.ok) return validate(path, await retryRes.json(), options.schema);
     }

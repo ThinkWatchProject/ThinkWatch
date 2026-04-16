@@ -46,6 +46,16 @@ import {
   normalizeContentRule,
 } from '../admin/settings/types';
 
+type ContentFilterRuleWithId = ContentFilterRule & { _clientId: string };
+
+function withClientId(rule: ContentFilterRule): ContentFilterRuleWithId {
+  return { ...rule, _clientId: crypto.randomUUID() };
+}
+
+function stripClientId({ _clientId: _, ...rest }: ContentFilterRuleWithId): ContentFilterRule {
+  return rest;
+}
+
 export function GatewaySecurityPage() {
   const { t } = useTranslation();
 
@@ -53,7 +63,7 @@ export function GatewaySecurityPage() {
   const [saving, setSaving] = useState(false);
   const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
-  const [contentFilters, setContentFilters] = useState<ContentFilterRule[]>([]);
+  const [contentFilters, setContentFilters] = useState<ContentFilterRuleWithId[]>([]);
   const [piiPatterns, setPiiPatterns] = useState<PiiPattern[]>([]);
 
   // Unified sandbox state
@@ -73,7 +83,7 @@ export function GatewaySecurityPage() {
     api<Record<string, SettingEntry[]>>('/api/admin/settings')
       .then((data) => {
         const cf = getSettingValue(data, 'security', 'content_filter_patterns');
-        setContentFilters(Array.isArray(cf) ? cf.map(normalizeContentRule) : []);
+        setContentFilters(Array.isArray(cf) ? cf.map((r: unknown) => withClientId(normalizeContentRule(r))) : []);
         const pp = getSettingValue(data, 'security', 'pii_redactor_patterns');
         setPiiPatterns(Array.isArray(pp) ? pp : []);
       })
@@ -99,7 +109,7 @@ export function GatewaySecurityPage() {
       setPiiPatterns(dedupPii);
       await apiPatch('/api/admin/settings', {
         settings: {
-          'security.content_filter_patterns': dedupCf,
+          'security.content_filter_patterns': dedupCf.map(stripClientId),
           'security.pii_redactor_patterns': dedupPii,
         },
       });
@@ -121,7 +131,7 @@ export function GatewaySecurityPage() {
   const addContentFilter = () =>
     setContentFilters([
       ...contentFilters,
-      { name: '', pattern: '', match_type: 'contains', action: 'block' },
+      withClientId({ name: '', pattern: '', match_type: 'contains', action: 'block' }),
     ]);
 
   const removeContentFilter = (i: number) =>
@@ -129,7 +139,7 @@ export function GatewaySecurityPage() {
 
   const updateContentFilter = (i: number, field: keyof ContentFilterRule, value: string) =>
     setContentFilters(
-      contentFilters.map((p, idx) => (idx === i ? { ...p, [field]: value } : p)),
+      contentFilters.map((cf, idx) => (idx === i ? { ...cf, [field]: value } : cf)),
     );
 
   const openCfPresets = async () => {
@@ -151,7 +161,7 @@ export function GatewaySecurityPage() {
     const additions = preset.rules.filter(
       (r) => !existing.has(`${r.pattern}|${r.match_type}|${r.action}`),
     );
-    setContentFilters([...contentFilters, ...additions.map(normalizeContentRule)]);
+    setContentFilters([...contentFilters, ...additions.map((r) => withClientId(normalizeContentRule(r)))]);
     setCfPresetsOpen(false);
   };
 
@@ -189,7 +199,7 @@ export function GatewaySecurityPage() {
 
     const cfPromise = apiPost<{ matches: ContentFilterTestMatch[] }>(
       '/api/admin/settings/content-filter/test',
-      { text: sandboxText, rules: contentFilters },
+      { text: sandboxText, rules: contentFilters.map(stripClientId) },
     ).then(res => setCfSandboxResult(res.matches))
       .catch(() => setCfSandboxResult([]))
       .finally(() => setCfSandboxLoading(false));
@@ -285,7 +295,7 @@ export function GatewaySecurityPage() {
               </TableHeader>
               <TableBody>
                 {contentFilters.map((cf, i) => (
-                  <TableRow key={i}>
+                  <TableRow key={cf._clientId}>
                     <TableCell>
                       <Input
                         value={cf.name}

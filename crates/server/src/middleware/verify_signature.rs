@@ -232,10 +232,8 @@ pub async fn verify_signature(
     })?;
 
     // Session binding: validate that the request IP matches the IP the
-    // public key was registered from. Fail-closed: if a session was issued
-    // without a bound IP for some reason (legacy session, Redis flush
-    // mid-rollout), reject so we don't silently accept session-replay
-    // attacks.
+    // public key was registered from. Fail-closed: if a session has no
+    // bound IP, reject so we don't silently accept session-replay attacks.
     let ip_key = format!("signing_key_ip:{user_id}");
     let bound_ip: Option<String> = fred::interfaces::KeysInterface::get(&state.redis, &ip_key)
         .await

@@ -29,7 +29,6 @@ import {
 } from '@/components/ui/table';
 import {
   Plus,
-  X,
   Pause,
   Play,
   Trash2,
@@ -39,6 +38,7 @@ import {
   AlertCircle,
   Pencil,
 } from 'lucide-react';
+import { HeaderEditor } from '@/components/header-editor';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription, AlertAction } from '@/components/ui/alert';
@@ -102,7 +102,7 @@ export function LogForwardersPage() {
   const [formBrokerUrl, setFormBrokerUrl] = useState('');
   const [formTopic, setFormTopic] = useState('');
   const [formWebhookUrl, setFormWebhookUrl] = useState('');
-  const [formHeaders, setFormHeaders] = useState<{ key: string; value: string }[]>([]);
+  const [formHeaders, setFormHeaders] = useState<[string, string][]>([]);
   const [formSigningSecret, setFormSigningSecret] = useState('');
   const [formLogTypes, setFormLogTypes] = useState<Set<string>>(new Set(['access', 'app', 'audit', 'gateway', 'mcp', 'platform']));
   const [creating, setCreating] = useState(false);
@@ -116,7 +116,7 @@ export function LogForwardersPage() {
   const [editBrokerUrl, setEditBrokerUrl] = useState('');
   const [editTopic, setEditTopic] = useState('');
   const [editWebhookUrl, setEditWebhookUrl] = useState('');
-  const [editHeaders, setEditHeaders] = useState<{ key: string; value: string }[]>([]);
+  const [editHeaders, setEditHeaders] = useState<[string, string][]>([]);
   const [editSigningSecret, setEditSigningSecret] = useState('');
   const [editLogTypes, setEditLogTypes] = useState<Set<string>>(new Set());
   const [saving, setSaving] = useState(false);
@@ -164,8 +164,8 @@ export function LogForwardersPage() {
       case 'webhook': {
         const cfg: Record<string, string> = { url: formWebhookUrl };
         const hdrs: Record<string, string> = {};
-        for (const h of formHeaders) {
-          if (h.key.trim() && h.value.trim()) hdrs[h.key.trim()] = h.value.trim();
+        for (const [k, v] of formHeaders) {
+          if (k.trim() && v.trim()) hdrs[k.trim()] = v.trim();
         }
         if (Object.keys(hdrs).length > 0) cfg.custom_headers = JSON.stringify(hdrs);
         if (formSigningSecret.trim()) cfg.signing_secret = formSigningSecret.trim();
@@ -249,13 +249,13 @@ export function LogForwardersPage() {
     if (rawHeaders) {
       try {
         const parsed = typeof rawHeaders === 'string' ? JSON.parse(rawHeaders) : rawHeaders;
-        const entries = Object.entries(parsed as Record<string, string>).map(([key, value]) => ({ key, value }));
+        const entries = Object.entries(parsed as Record<string, string>).map(([k, v]) => [k, v] as [string, string]);
         setEditHeaders(entries);
       } catch {
-        setEditHeaders(f.config.auth_header ? [{ key: 'Authorization', value: f.config.auth_header }] : []);
+        setEditHeaders(f.config.auth_header ? [['Authorization', f.config.auth_header] as [string, string]] : []);
       }
     } else if (f.config.auth_header) {
-      setEditHeaders([{ key: 'Authorization', value: f.config.auth_header }]);
+      setEditHeaders([['Authorization', f.config.auth_header]]);
     } else {
       setEditHeaders([]);
     }
@@ -278,8 +278,8 @@ export function LogForwardersPage() {
       case 'webhook': {
         const cfg: Record<string, string> = { url: editWebhookUrl };
         const hdrs: Record<string, string> = {};
-        for (const h of editHeaders) {
-          if (h.key.trim() && h.value.trim()) hdrs[h.key.trim()] = h.value.trim();
+        for (const [k, v] of editHeaders) {
+          if (k.trim() && v.trim()) hdrs[k.trim()] = v.trim();
         }
         if (Object.keys(hdrs).length > 0) cfg.custom_headers = JSON.stringify(hdrs);
         if (editSigningSecret.trim()) cfg.signing_secret = editSigningSecret.trim();
@@ -390,18 +390,12 @@ export function LogForwardersPage() {
                   </div>
                   <div className="space-y-2">
                     <Label>{t('logForwarders.customHeaders')}</Label>
-                    {formHeaders.map((h, i) => (
-                      <div key={i} className="flex gap-2 items-center">
-                        <Input className="flex-1" value={h.key} onChange={(e) => { const next = [...formHeaders]; next[i] = { ...h, key: e.target.value }; setFormHeaders(next); }} placeholder={t('logForwarders.headerName')} />
-                        <Input className="flex-1" value={h.value} onChange={(e) => { const next = [...formHeaders]; next[i] = { ...h, value: e.target.value }; setFormHeaders(next); }} placeholder={t('logForwarders.headerValue')} />
-                        <Button type="button" variant="ghost" size="icon-sm" onClick={() => setFormHeaders(formHeaders.filter((_, j) => j !== i))}>
-                          <X className="h-3 w-3" />
-                        </Button>
-                      </div>
-                    ))}
-                    <Button type="button" variant="outline" size="sm" onClick={() => setFormHeaders([...formHeaders, { key: '', value: '' }])}>
-                      <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
-                    </Button>
+                    <HeaderEditor
+                      headers={formHeaders}
+                      onChange={setFormHeaders}
+                      keyPlaceholder={t('logForwarders.headerName')}
+                      valuePlaceholder={t('logForwarders.headerValue')}
+                    />
                   </div>
                   <div>
                     <Label>{t('logForwarders.signingSecret')}</Label>
@@ -648,18 +642,12 @@ export function LogForwardersPage() {
                 </div>
                 <div className="space-y-2">
                   <Label>{t('logForwarders.customHeaders')}</Label>
-                  {editHeaders.map((h, i) => (
-                    <div key={i} className="flex gap-2 items-center">
-                      <Input className="flex-1" value={h.key} onChange={(e) => { const next = [...editHeaders]; next[i] = { ...h, key: e.target.value }; setEditHeaders(next); }} placeholder={t('logForwarders.headerName')} />
-                      <Input className="flex-1" value={h.value} onChange={(e) => { const next = [...editHeaders]; next[i] = { ...h, value: e.target.value }; setEditHeaders(next); }} placeholder={t('logForwarders.headerValue')} />
-                      <Button type="button" variant="ghost" size="icon-sm" onClick={() => setEditHeaders(editHeaders.filter((_, j) => j !== i))}>
-                        <X className="h-3 w-3" />
-                      </Button>
-                    </div>
-                  ))}
-                  <Button type="button" variant="outline" size="sm" onClick={() => setEditHeaders([...editHeaders, { key: '', value: '' }])}>
-                    <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
-                  </Button>
+                  <HeaderEditor
+                    headers={editHeaders}
+                    onChange={setEditHeaders}
+                    keyPlaceholder={t('logForwarders.headerName')}
+                    valuePlaceholder={t('logForwarders.headerValue')}
+                  />
                 </div>
                 <div>
                   <Label>{t('logForwarders.signingSecret')}</Label>

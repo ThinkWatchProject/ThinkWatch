@@ -6,10 +6,14 @@ export function useTeams() {
   const [teams, setTeams] = useState<TeamSummary[]>([]);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
-    api<TeamSummary[]>('/api/admin/teams')
+    const controller = new AbortController();
+    api<TeamSummary[]>('/api/admin/teams', { signal: controller.signal })
       .then(setTeams)
-      .catch(() => {})
+      .catch((e) => {
+        if (!controller.signal.aborted) console.error(e);
+      })
       .finally(() => setLoading(false));
+    return () => controller.abort();
   }, []);
   return { teams, loading };
 }

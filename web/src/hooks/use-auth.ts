@@ -7,16 +7,9 @@ import {
   registerKeyPair,
   setCachedPermissions,
 } from '@/lib/api';
+import { UserResponseSchema, type UserResponse } from '@/lib/schemas';
 
-interface User {
-  id: string;
-  email: string;
-  display_name: string;
-  avatar_url: string | null;
-  is_active: boolean;
-  permissions?: string[];
-  denied_permissions?: string[];
-}
+type User = UserResponse;
 
 interface LoginResponse {
   token_type: string;
@@ -40,7 +33,7 @@ export function useAuth() {
     // missing or invalid, which the api client handles via the
     // 401 → refresh → logout flow.
     try {
-      const u = await api<User>('/api/auth/me', { no401Redirect: true });
+      const u = await api<User>('/api/auth/me', { no401Redirect: true, schema: UserResponseSchema });
       setUser(u);
       setCachedPermissions(u.permissions, u.denied_permissions);
     } catch {

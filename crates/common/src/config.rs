@@ -1,77 +1,5 @@
 use serde::Deserialize;
 
-/// Centralized timeouts and intervals. Each field has a sensible default
-/// but is overridable via the corresponding `THINKWATCH_*` environment
-/// variable so operators can tune them without recompiling.
-///
-/// The audit found these values scattered as magic constants across the
-/// codebase (`Duration::from_secs(15)`, `from_secs(30)`, `from_secs(60)`,
-/// etc), making it impossible to see "what's the discovery timeout?"
-/// without grepping. Now they're all in one place with units in the field
-/// names.
-#[derive(Debug, Clone, Deserialize)]
-pub struct Timeouts {
-    /// Outbound HTTP timeout for the shared `reqwest::Client`. Used by
-    /// MCP tool discovery, OIDC, etc.
-    pub http_client_secs: u64,
-    /// MCP connection-pool per-request timeout (one upstream call).
-    pub mcp_pool_secs: u64,
-    /// Console-side request timeout layer (TimeoutLayer in app.rs).
-    pub console_request_secs: u64,
-    /// Per-frame WebSocket send/recv ceiling on the dashboard WS loop.
-    pub dashboard_ws_io_secs: u64,
-    /// Dashboard WS push cadence (snapshot every N seconds).
-    pub dashboard_ws_tick_secs: u64,
-    /// Maximum concurrent dashboard WS connections per user.
-    pub dashboard_ws_max_per_user: usize,
-}
-
-impl Default for Timeouts {
-    fn default() -> Self {
-        Self {
-            http_client_secs: 15,
-            mcp_pool_secs: 30,
-            console_request_secs: 30,
-            dashboard_ws_io_secs: 5,
-            dashboard_ws_tick_secs: 4,
-            dashboard_ws_max_per_user: 4,
-        }
-    }
-}
-
-impl Timeouts {
-    pub fn from_env() -> Self {
-        let d = Self::default();
-        Self {
-            http_client_secs: env_u64("THINKWATCH_HTTP_CLIENT_SECS", d.http_client_secs),
-            mcp_pool_secs: env_u64("THINKWATCH_MCP_POOL_SECS", d.mcp_pool_secs),
-            console_request_secs: env_u64(
-                "THINKWATCH_CONSOLE_REQUEST_SECS",
-                d.console_request_secs,
-            ),
-            dashboard_ws_io_secs: env_u64(
-                "THINKWATCH_DASHBOARD_WS_IO_SECS",
-                d.dashboard_ws_io_secs,
-            ),
-            dashboard_ws_tick_secs: env_u64(
-                "THINKWATCH_DASHBOARD_WS_TICK_SECS",
-                d.dashboard_ws_tick_secs,
-            ),
-            dashboard_ws_max_per_user: env_u64(
-                "THINKWATCH_DASHBOARD_WS_MAX_PER_USER",
-                d.dashboard_ws_max_per_user as u64,
-            ) as usize,
-        }
-    }
-}
-
-fn env_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct AppConfig {
     pub database_url: String,
@@ -92,16 +20,6 @@ pub struct AppConfig {
     pub clickhouse_db: String,
     pub clickhouse_user: Option<String>,
     pub clickhouse_password: Option<String>,
-
-    // OIDC / SSO (e.g. Zitadel)
-    pub oidc_issuer_url: Option<String>,
-    pub oidc_client_id: Option<String>,
-    pub oidc_client_secret: Option<String>,
-    pub oidc_redirect_url: Option<String>,
-
-    /// Centralized timeouts and intervals — see `Timeouts`.
-    #[serde(default)]
-    pub timeouts: Timeouts,
 }
 
 impl AppConfig {
@@ -110,13 +28,13 @@ impl AppConfig {
 
         Ok(Self {
             database_url: std::env::var("DATABASE_URL")
-                .expect("DATABASE_URL environment variable is required"),
+                .map_err(|_| anyhow::anyhow!("DATABASE_URL environment variable is required"))?,
             redis_url: std::env::var("REDIS_URL")
-                .expect("REDIS_URL environment variable is required"),
+                .map_err(|_| anyhow::anyhow!("REDIS_URL environment variable is required"))?,
             jwt_secret: std::env::var("JWT_SECRET")
-                .expect("JWT_SECRET environment variable is required"),
+                .map_err(|_| anyhow::anyhow!("JWT_SECRET environment variable is required"))?,
             encryption_key: std::env::var("ENCRYPTION_KEY")
-                .expect("ENCRYPTION_KEY environment variable is required"),
+                .map_err(|_| anyhow::anyhow!("ENCRYPTION_KEY environment variable is required"))?,
             server_host: std::env::var("SERVER_HOST").unwrap_or_else(|_| "0.0.0.0".into()),
             gateway_port: std::env::var("GATEWAY_PORT")
                 .unwrap_or_else(|_| "3000".into())
@@ -135,14 +53,6 @@ impl AppConfig {
             clickhouse_db: std::env::var("CLICKHOUSE_DB").unwrap_or_else(|_| "think_watch".into()),
             clickhouse_user: std::env::var("CLICKHOUSE_USER").ok(),
             clickhouse_password: std::env::var("CLICKHOUSE_PASSWORD").ok(),
-
-            // OIDC
-            oidc_issuer_url: std::env::var("OIDC_ISSUER_URL").ok(),
-            oidc_client_id: std::env::var("OIDC_CLIENT_ID").ok(),
-            oidc_client_secret: std::env::var("OIDC_CLIENT_SECRET").ok(),
-            oidc_redirect_url: std::env::var("OIDC_REDIRECT_URL").ok(),
-
-            timeouts: Timeouts::from_env(),
         })
     }
 
@@ -228,11 +138,6 @@ impl AppConfig {
             clickhouse_db: "test".into(),
             clickhouse_user: None,
             clickhouse_password: None,
-            oidc_issuer_url: None,
-            oidc_client_id: None,
-            oidc_client_secret: None,
-            oidc_redirect_url: None,
-            timeouts: Timeouts::default(),
         }
     }
 
@@ -247,12 +152,6 @@ impl AppConfig {
             clickhouse_user: self.clickhouse_user.clone(),
             clickhouse_password: self.clickhouse_password.clone(),
         }
-    }
-
-    pub fn oidc_enabled(&self) -> bool {
-        self.oidc_issuer_url.is_some()
-            && self.oidc_client_id.is_some()
-            && self.oidc_client_secret.is_some()
     }
 }
 

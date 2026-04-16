@@ -7,14 +7,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::Mutex;
 
-// Circuit-breaker state lives in `think-watch-common` so the MCP gateway
-// can write into the same registry. Re-exported here for backwards compat
-// with anything that already imported from this module.
-pub use think_watch_common::cb_registry::{
-    CbState, record_cb, record_cb_with_kind, snapshot_cb_states,
-};
+use think_watch_common::cb_registry::{CbState, record_cb_with_kind};
 
 /// Load-balancing strategy for selecting a backend.
 #[derive(Debug, Clone, Copy)]
@@ -24,25 +19,26 @@ pub enum LoadBalanceStrategy {
     LeastFailures,
 }
 
-/// Circuit breaker state for a backend.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CircuitState {
-    /// Normal operation — requests flow through.
-    Closed,
-    /// Backend is failing — requests are rejected immediately.
-    Open,
-    /// Probing — allow limited requests to test recovery.
-    HalfOpen,
+/// Mutable inner state of a single breaker. Always accessed under the
+/// outer `Mutex`, never split across multiple locks. This mirrors the
+/// MCP gateway's `BreakerInner` design that fixes the race condition
+/// where concurrent failures could both observe `Closed`, both bump
+/// the counter, and both trip Open separately.
+struct BreakerInner {
+    state: CbState,
+    consecutive_failures: u32,
+    half_open_successes: u32,
+    last_failure: Option<Instant>,
 }
 
 /// A single backend in the failover pool with circuit breaker logic.
+///
+/// All breaker state lives behind a single `Mutex<BreakerInner>` so
+/// every state transition is atomic.
 struct FailoverBackend {
     provider: Arc<dyn DynAiProvider>,
-    state: RwLock<CircuitState>,
-    consecutive_failures: AtomicU32,
+    inner: Mutex<BreakerInner>,
     failure_threshold: u32,
-    last_failure: RwLock<Option<Instant>>,
-    half_open_successes: AtomicU32,
     half_open_max: u32,
 }
 
@@ -50,74 +46,81 @@ impl FailoverBackend {
     fn new(provider: Arc<dyn DynAiProvider>, failure_threshold: u32) -> Self {
         // Seed the global CB registry so new providers show up as `Closed`
         // before they have served their first request.
-        record_cb(provider.name(), CbState::Closed);
+        record_cb_with_kind(provider.name(), CbState::Closed, "ai");
         Self {
             provider,
-            state: RwLock::new(CircuitState::Closed),
-            consecutive_failures: AtomicU32::new(0),
+            inner: Mutex::new(BreakerInner {
+                state: CbState::Closed,
+                consecutive_failures: 0,
+                half_open_successes: 0,
+                last_failure: None,
+            }),
             failure_threshold,
-            last_failure: RwLock::new(None),
-            half_open_successes: AtomicU32::new(0),
             half_open_max: 3,
         }
     }
 
     fn is_healthy_fast(&self) -> bool {
-        // Quick non-async check: if consecutive failures < threshold, likely healthy
-        self.consecutive_failures.load(Ordering::Relaxed) < self.failure_threshold
+        // Quick non-blocking check via try_lock for the hot path.
+        // If the lock is contended, assume healthy and let the full
+        // check decide.
+        self.inner
+            .try_lock()
+            .map(|inner| inner.consecutive_failures < self.failure_threshold)
+            .unwrap_or(true)
     }
 
     async fn record_success(&self) {
-        let state = *self.state.read().await;
-        self.consecutive_failures.store(0, Ordering::Relaxed);
+        let mut inner = self.inner.lock().await;
+        inner.consecutive_failures = 0;
 
-        match state {
-            CircuitState::HalfOpen => {
-                let successes = self.half_open_successes.fetch_add(1, Ordering::Relaxed) + 1;
-                if successes >= self.half_open_max {
-                    *self.state.write().await = CircuitState::Closed;
-                    self.half_open_successes.store(0, Ordering::Relaxed);
+        match inner.state {
+            CbState::HalfOpen => {
+                inner.half_open_successes += 1;
+                if inner.half_open_successes >= self.half_open_max {
+                    inner.state = CbState::Closed;
+                    inner.half_open_successes = 0;
                     metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(0.0);
-                    record_cb(self.provider.name(), CbState::Closed);
+                    record_cb_with_kind(self.provider.name(), CbState::Closed, "ai");
                     tracing::info!(
                         provider = self.provider.name(),
                         "Circuit breaker closed (recovered)"
                     );
                 }
             }
-            CircuitState::Open => {
+            CbState::Open => {
                 // Should not happen, but handle gracefully
-                *self.state.write().await = CircuitState::Closed;
+                inner.state = CbState::Closed;
                 metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(0.0);
-                record_cb(self.provider.name(), CbState::Closed);
+                record_cb_with_kind(self.provider.name(), CbState::Closed, "ai");
             }
-            CircuitState::Closed => {}
+            CbState::Closed => {}
         }
     }
 
     async fn record_failure(&self) {
-        let prev = self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
-        let state = *self.state.read().await;
+        let mut inner = self.inner.lock().await;
+        inner.consecutive_failures += 1;
 
-        match state {
-            CircuitState::Closed => {
-                if prev + 1 >= self.failure_threshold {
-                    *self.state.write().await = CircuitState::Open;
-                    *self.last_failure.write().await = Some(Instant::now());
+        match inner.state {
+            CbState::Closed => {
+                if inner.consecutive_failures >= self.failure_threshold {
+                    inner.state = CbState::Open;
+                    inner.last_failure = Some(Instant::now());
+                    let failures = inner.consecutive_failures;
                     metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(2.0);
                     record_cb_with_kind(self.provider.name(), CbState::Open, "ai");
                     tracing::warn!(
                         provider = self.provider.name(),
-                        "Circuit breaker OPEN after {} consecutive failures",
-                        prev + 1
+                        "Circuit breaker OPEN after {failures} consecutive failures",
                     );
                 }
             }
-            CircuitState::HalfOpen => {
+            CbState::HalfOpen => {
                 // Probe failed — go back to Open
-                *self.state.write().await = CircuitState::Open;
-                *self.last_failure.write().await = Some(Instant::now());
-                self.half_open_successes.store(0, Ordering::Relaxed);
+                inner.state = CbState::Open;
+                inner.last_failure = Some(Instant::now());
+                inner.half_open_successes = 0;
                 metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(2.0);
                 record_cb_with_kind(self.provider.name(), CbState::Open, "ai");
                 tracing::warn!(
@@ -125,26 +128,26 @@ impl FailoverBackend {
                     "Circuit breaker back to OPEN (half-open probe failed)"
                 );
             }
-            CircuitState::Open => {}
+            CbState::Open => {}
         }
     }
 
     /// Check whether enough time has passed to try recovering (transition Open → HalfOpen).
     async fn maybe_recover(&self, recovery_secs: u64) {
-        let state = *self.state.read().await;
-        if state != CircuitState::Open {
+        let mut inner = self.inner.lock().await;
+        if inner.state != CbState::Open {
             return;
         }
-        let guard = self.last_failure.read().await;
-        if let Some(ts) = *guard
-            && ts.elapsed() >= Duration::from_secs(recovery_secs)
-        {
-            drop(guard);
-            *self.state.write().await = CircuitState::HalfOpen;
-            self.half_open_successes.store(0, Ordering::Relaxed);
-            self.consecutive_failures.store(0, Ordering::Relaxed);
+        let elapsed_ok = inner
+            .last_failure
+            .map(|t| t.elapsed() >= Duration::from_secs(recovery_secs))
+            .unwrap_or(false);
+        if elapsed_ok {
+            inner.state = CbState::HalfOpen;
+            inner.half_open_successes = 0;
+            inner.consecutive_failures = 0;
             metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(1.0);
-            record_cb(self.provider.name(), CbState::HalfOpen);
+            record_cb_with_kind(self.provider.name(), CbState::HalfOpen, "ai");
             tracing::info!(
                 provider = self.provider.name(),
                 "Circuit breaker HALF-OPEN (probing recovery)"
@@ -211,7 +214,11 @@ impl FailoverProvider {
                 let mut min_failures = u32::MAX;
                 let mut min_idx = 0;
                 for (i, b) in self.backends.iter().enumerate() {
-                    let f = b.consecutive_failures.load(Ordering::Relaxed);
+                    let f = b
+                        .inner
+                        .try_lock()
+                        .map(|inner| inner.consecutive_failures)
+                        .unwrap_or(0);
                     if f < min_failures {
                         min_failures = f;
                         min_idx = i;

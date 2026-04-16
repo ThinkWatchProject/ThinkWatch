@@ -184,8 +184,9 @@ pub async fn install_template(
     // we persist anything. Keeps broken installs from cluttering the
     // server list and replaces the old manual "test connection" step in
     // the install dialog.
+    let http = state.http_client.load();
     let probe = super::mcp_servers::probe_mcp_endpoint(
-        &state.http_client,
+        &http,
         &endpoint_url,
         template.auth_type.as_deref(),
         req.auth_secret.as_deref(),
@@ -206,8 +207,9 @@ pub async fn install_template(
             req.auth_secret.as_deref(),
         );
         let auth_ref = auth_hdr.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
+        let http_detect = state.http_client.load();
         match think_watch_mcp_gateway::detect::detect_transport(
-            &state.http_client,
+            &http_detect,
             &endpoint_url,
             auth_ref,
         )
@@ -308,7 +310,7 @@ pub async fn install_template(
     {
         let db = state.db.clone();
         let key = state.config.encryption_key.clone();
-        let http = state.http_client.clone();
+        let http = (**state.http_client.load()).clone();
         let registry = state.mcp_registry.clone();
         let server = server.clone();
         let server_id = server.id;
@@ -367,6 +369,7 @@ pub async fn install_template(
 
 #[derive(Debug, Deserialize)]
 struct RegistryResponse {
+    // Present in the registry JSON; serde requires the field for deserialization.
     #[allow(dead_code)]
     version: Option<i32>,
     templates: Vec<RegistryTemplate>,

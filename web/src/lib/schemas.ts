@@ -27,11 +27,11 @@ export type SetupStatus = z.infer<typeof SetupStatusSchema>;
 export const UserResponseSchema = z.object({
   id: z.string().uuid(),
   email: z.string(),
-  display_name: z.string().nullable().optional(),
-  avatar_url: z.string().nullable().optional(),
-  is_active: z.boolean().optional(),
-  roles: z.array(z.string()),
-  created_at: z.string().optional(),
+  display_name: z.string(),
+  avatar_url: z.string().nullable(),
+  is_active: z.boolean(),
+  permissions: z.array(z.string()).optional(),
+  denied_permissions: z.array(z.string()).optional(),
 });
 export type UserResponse = z.infer<typeof UserResponseSchema>;
 
@@ -63,6 +63,8 @@ export const DashboardLiveSchema = z.object({
   recent_logs: z.array(LiveLogRowSchema),
   max_rpm_limit: z.number().nullable(),
 });
+export type ProviderHealth = z.infer<typeof ProviderHealthSchema>;
+export type LiveLogRow = z.infer<typeof LiveLogRowSchema>;
 export type DashboardLive = z.infer<typeof DashboardLiveSchema>;
 
 // --- /api/dashboard/ws-ticket ----------------------------------------------

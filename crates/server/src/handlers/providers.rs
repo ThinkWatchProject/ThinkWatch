@@ -98,15 +98,9 @@ pub(crate) fn validate_url(url_str: &str) -> Result<(), AppError> {
 
     // For hostnames, do a single blocking DNS resolution. The function is
     // currently sync so the caller must run it from `spawn_blocking` if it
-    // can't tolerate the brief block. The previous double-resolve with
-    // std::thread::sleep was strictly worse: it blocked the *async*
-    // executor for 50ms on every successful validation.
-    //
-    // The double-resolve was meant to catch DNS rebinding, but rebinding
-    // is a TOFU attack against the actual TCP connection, not the
-    // validator — defending properly requires a custom DNS-pinning
-    // resolver in reqwest, which is out of scope here. We keep the
-    // single-shot resolve as a baseline guard.
+    // can't tolerate the brief block. This is a baseline SSRF guard;
+    // full DNS-rebinding defense would require a DNS-pinning resolver in
+    // reqwest, which is out of scope here.
     let resolved: Vec<std::net::IpAddr> = std::net::ToSocketAddrs::to_socket_addrs(&(host, 80))
         .map(|addrs| addrs.map(|a| a.ip()).collect())
         .unwrap_or_default();

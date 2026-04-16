@@ -2,6 +2,7 @@ use crate::providers::traits::{ChatCompletionResponse, ChatMessage};
 use rand::RngExt;
 use regex::Regex;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 /// Serializable PII pattern for storage in system_settings.
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
@@ -58,37 +59,52 @@ impl PiiRedactor {
     }
 
     pub fn new() -> Self {
+        // Static compiled regexes — compiled once, reused across all
+        // PiiRedactor instances and requests.
+        static RE_EMAIL: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap()
+        });
+        static RE_ID_CARD_CN: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\b\d{17}[\dXx]\b").unwrap());
+        static RE_CREDIT_CARD: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b").unwrap());
+        static RE_PHONE_CN: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"1[3-9]\d{9}").unwrap());
+        static RE_PHONE_US: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b").unwrap());
+        static RE_IPV4: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b").unwrap());
+
         // Order matters: longer/more specific patterns must come before shorter ones
         // to prevent partial matches (e.g. phone patterns matching inside credit cards).
         let patterns = vec![
             PiiPattern {
                 name: "email".into(),
-                regex: Regex::new(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}").unwrap(),
+                regex: RE_EMAIL.clone(),
                 placeholder_prefix: "EMAIL".into(),
             },
             PiiPattern {
                 name: "id_card_cn".into(),
-                regex: Regex::new(r"\b\d{17}[\dXx]\b").unwrap(),
+                regex: RE_ID_CARD_CN.clone(),
                 placeholder_prefix: "ID".into(),
             },
             PiiPattern {
                 name: "credit_card".into(),
-                regex: Regex::new(r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}[-\s]?\d{4}\b").unwrap(),
+                regex: RE_CREDIT_CARD.clone(),
                 placeholder_prefix: "CARD".into(),
             },
             PiiPattern {
                 name: "phone_cn".into(),
-                regex: Regex::new(r"1[3-9]\d{9}").unwrap(),
+                regex: RE_PHONE_CN.clone(),
                 placeholder_prefix: "PHONE".into(),
             },
             PiiPattern {
                 name: "phone_us".into(),
-                regex: Regex::new(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b").unwrap(),
+                regex: RE_PHONE_US.clone(),
                 placeholder_prefix: "PHONE".into(),
             },
             PiiPattern {
                 name: "ipv4".into(),
-                regex: Regex::new(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b").unwrap(),
+                regex: RE_IPV4.clone(),
                 placeholder_prefix: "IP".into(),
             },
         ];
@@ -115,10 +131,7 @@ impl PiiRedactor {
         // Per-request random salt to prevent placeholder prediction.
         // 64 bits gives 2^64 possible values — wide enough that an
         // attacker can't enumerate placeholder space across requests
-        // to correlate redacted PII. The previous u16 (only 65k
-        // possible values) was small enough that a determined
-        // observer could brute-force matches across a few thousand
-        // requests.
+        // to correlate redacted PII.
         let salt: u64 = rand::rng().random();
         let salt_hex = format!("{salt:016x}");
 

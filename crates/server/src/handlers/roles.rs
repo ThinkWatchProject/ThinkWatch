@@ -63,11 +63,8 @@ const fn d(key: &'static str, resource: &'static str, action: &'static str) -> P
     }
 }
 
-/// Canonical permission catalog. The previous catalog had 17 entries with
-/// coarse `*:write` / `*:manage` lumps that hid important distinctions
-/// (rotate API key vs delete provider, disable PII redaction vs change
-/// CORS origins). This is the audit-driven replacement: split by verb,
-/// flag the genuinely dangerous ones, group by resource for the UI.
+/// Canonical permission catalog: split by verb, flagging genuinely
+/// dangerous ones, grouped by resource for the UI.
 pub const PERMISSIONS: &[PermissionDef] = &[
     // --- AI gateway ---
     p("ai_gateway:use", "ai_gateway", "use"),

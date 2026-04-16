@@ -27,3 +27,4 @@ sha2 = { workspace = true }
 hmac = { workspace = true }
 metrics = { workspace = true }
 clickhouse = { workspace = true }
+bytes = { workspace = true }

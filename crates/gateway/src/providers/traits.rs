@@ -91,6 +91,48 @@ pub enum GatewayError {
     LocalRateLimited(String),
 }
 
+/// Shared base for all AI providers. Holds the HTTP client, base URL,
+/// and custom header templates. Previously each provider duplicated
+/// these three fields and the identical `new()`, `with_custom_headers()`,
+/// and `resolve_headers()` methods.
+pub struct ProviderBase {
+    pub base_url: String,
+    pub client: reqwest::Client,
+    pub custom_headers: Vec<(String, String)>,
+}
+
+impl ProviderBase {
+    pub fn new(base_url: String) -> Self {
+        Self {
+            base_url,
+            client: reqwest::Client::new(),
+            custom_headers: Vec::new(),
+        }
+    }
+
+    pub fn with_custom_headers(mut self, headers: Vec<(String, String)>) -> Self {
+        self.custom_headers = headers;
+        self
+    }
+
+    /// Resolve template variables (`{{user_id}}`, `{{user_email}}`) in
+    /// custom header values using the caller identity from the request.
+    pub fn resolve_headers(&self, request: &ChatCompletionRequest) -> Vec<(String, String)> {
+        let uid = request.caller_user_id.as_deref().unwrap_or("");
+        let email = request.caller_user_email.as_deref().unwrap_or("");
+        self.custom_headers
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    v.replace("{{user_id}}", uid)
+                        .replace("{{user_email}}", email),
+                )
+            })
+            .collect()
+    }
+}
+
 pub trait AiProvider: Send + Sync {
     fn name(&self) -> &str;
 

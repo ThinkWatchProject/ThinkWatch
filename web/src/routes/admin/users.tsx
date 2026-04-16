@@ -108,11 +108,11 @@ export function UsersPage() {
   const [resetConfirmUser, setResetConfirmUser] = useState<User | null>(null);
   const [resetLoading, setResetLoading] = useState(false);
 
-  const fetchUsers = async () => {
+  const fetchUsers = async (signal?: AbortSignal) => {
     try {
       const [usersRes, rolesRes] = await Promise.all([
-        api<{ data: User[]; total: number }>('/api/admin/users'),
-        api<{ items: AvailableRole[] }>('/api/admin/roles').catch(() => ({ items: [] })),
+        api<{ data: User[]; total: number }>('/api/admin/users', { signal }),
+        api<{ items: AvailableRole[] }>('/api/admin/roles', { signal }).catch(() => ({ items: [] })),
       ]);
       setUsers(
         usersRes.data.map((u) => ({
@@ -123,13 +123,18 @@ export function UsersPage() {
       // Unified picker — system + custom roles all show up together.
       setAvailableRoles(rolesRes.items);
     } catch (err) {
+      if (signal?.aborted) return;
       setError(err instanceof Error ? err.message : 'Failed to load users');
     } finally {
       setLoading(false);
     }
   };
 
-  useEffect(() => { fetchUsers(); }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    fetchUsers(controller.signal);
+    return () => controller.abort();
+  }, []);
 
   // --- Create user ---
   const resetCreateForm = () => {

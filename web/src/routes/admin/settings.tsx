@@ -729,10 +729,6 @@ export function SettingsPage() {
         {/* ---------------------------------------------------------------- */}
         {/* Budget Tab                                                        */}
         {/* ---------------------------------------------------------------- */}
-        {/* The legacy "Budget alerts" tab is gone. Budget caps are
-            managed per-subject (user / API key / provider / team) on
-            their respective edit pages, not in global settings. */}
-
         {/* ---------------------------------------------------------------- */}
         {/* API Keys Config Tab                                               */}
         {/* ---------------------------------------------------------------- */}

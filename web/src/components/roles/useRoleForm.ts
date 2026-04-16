@@ -141,10 +141,9 @@ export function useRoleForm(initial: RoleFormState = emptyRoleForm()) {
 export type RoleForm = ReturnType<typeof useRoleForm>;
 
 /// Derive the API payload from the current form state. Both simple and
-/// policy mode produce only `{ policy_document }` — the five legacy
-/// fields are gone. In simple mode the document is synthesized from
-/// the form's perms/models/mcpTools/constraints; in policy mode the
-/// admin's raw JSON is used as-is.
+/// policy mode produce only `{ policy_document }`. In simple mode the
+/// document is synthesized from the form's perms/models/mcpTools/constraints;
+/// in policy mode the admin's raw JSON is used as-is.
 export function buildRolePayload(
   form: RoleForm,
   _permissions: PermissionDef[],

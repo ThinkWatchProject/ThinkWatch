@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { Fragment, useCallback, useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -479,10 +479,9 @@ export function ModelsPage() {
                   const routes = modelRoutes[m.model_id];
                   const tw = routes ? totalWeight(routes) : 0;
                   return (
-                    <>
+                    <Fragment key={m.id}>
                       {/* Model row */}
                       <TableRow
-                        key={m.id}
                         className="cursor-pointer"
                         onClick={() => toggleExpand(m.model_id)}
                       >
@@ -540,7 +539,7 @@ export function ModelsPage() {
 
                       {/* Expanded routes */}
                       {isExpanded && (
-                        <TableRow key={`${m.id}-routes`}>
+                        <TableRow>
                           <TableCell colSpan={9} className="bg-muted/30 p-4">
                             <div className="space-y-3">
                               <div className="flex items-center justify-between">
@@ -637,7 +636,7 @@ export function ModelsPage() {
                           </TableCell>
                         </TableRow>
                       )}
-                    </>
+                    </Fragment>
                   );
                 })}
               </TableBody>

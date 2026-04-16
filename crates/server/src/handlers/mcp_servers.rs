@@ -259,8 +259,9 @@ pub async fn test_mcp_server(
         None
     };
 
+    let http = state.http_client.load();
     let outcome = probe_mcp_endpoint(
-        &state.http_client,
+        &http,
         &req.endpoint_url,
         req.auth_type.as_deref(),
         resolved_secret.as_deref(),
@@ -406,8 +407,9 @@ pub async fn create_server(
         let auth_hdr =
             build_auth_probe_header(req.auth_type.as_deref(), req.auth_secret.as_deref());
         let auth_ref = auth_hdr.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
+        let http_detect = state.http_client.load();
         match think_watch_mcp_gateway::detect::detect_transport(
-            &state.http_client,
+            &http_detect,
             &req.endpoint_url,
             auth_ref,
         )
@@ -464,7 +466,7 @@ pub async fn create_server(
     {
         let db = state.db.clone();
         let key = state.config.encryption_key.clone();
-        let http = state.http_client.clone();
+        let http = (**state.http_client.load()).clone();
         let registry = state.mcp_registry.clone();
         let server = server.clone();
         // R4.2: capture the latest discovery error onto mcp_servers.last_error
@@ -593,8 +595,9 @@ pub async fn update_server(
     let transport_type = if req.endpoint_url.is_some() {
         let auth_hdr = build_auth_probe_header(auth_type, req.auth_secret.as_deref());
         let auth_ref = auth_hdr.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
+        let http_detect = state.http_client.load();
         match think_watch_mcp_gateway::detect::detect_transport(
-            &state.http_client,
+            &http_detect,
             endpoint_url,
             auth_ref,
         )
@@ -655,8 +658,8 @@ pub async fn update_server(
     .map_err(map_mcp_server_unique_violation)?;
 
     // Evict any cached connection first — the pool keys by id, so a
-    // changed endpoint URL would otherwise keep using the old one.
-    state.mcp_pool.remove(id).await;
+    // changed endpoint URL needs a fresh connection.
+    state.mcp_pool.load().remove(id).await;
 
     // Re-register so the in-memory registry picks up the new endpoint /
     // name. `register` is an upsert keyed by id.
@@ -762,7 +765,7 @@ pub async fn delete_server(
     // gateway would keep a stale entry for a server that no longer exists
     // in the database.
     state.mcp_registry.unregister(id).await;
-    state.mcp_pool.remove(id).await;
+    state.mcp_pool.load().remove(id).await;
 
     state.audit.log(
         auth_user

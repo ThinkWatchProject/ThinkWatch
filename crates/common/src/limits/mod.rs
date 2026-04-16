@@ -121,9 +121,7 @@ impl Surface {
 // Role-inline surface constraints
 //
 // Derived from `rbac_roles.policy_document` Constraints on statements
-// that target `ai_gateway:use` or `mcp_gateway:use`. The runtime
-// representation below is identical to the old `surface_constraints`
-// JSONB shape so the merge + enforcement code stays unchanged.
+// that target `ai_gateway:use` or `mcp_gateway:use`.
 // ----------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -574,7 +572,6 @@ pub fn merge_most_restrictive(inputs: &[SurfaceConstraints]) -> SurfaceConstrain
 }
 
 /// Schema validation for an incoming `surface_constraints` JSON payload.
-/// Kept for backward compatibility with the rate_limit_rules CRUD path.
 /// Returns a user-friendly error message on failure.
 pub fn validate_surface_constraints(
     value: &serde_json::Value,

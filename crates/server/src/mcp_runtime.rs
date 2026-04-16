@@ -260,10 +260,8 @@ pub async fn discover_and_persist_tools(
     } else {
         resp.json().await?
     };
-    // Strict: require a `result` field. The previous fallback to the
-    // whole JSON body silently swallowed malformed responses (a server
-    // that returned `{"error": ...}` without `result` would still appear
-    // to "succeed" with garbage-shaped data).
+    // Strict: require a `result` field so malformed responses are
+    // caught instead of silently treated as success.
     let result = json
         .get("result")
         .ok_or_else(|| anyhow::anyhow!("MCP tools/list response missing `result` field"))?
@@ -359,7 +357,7 @@ pub async fn load_mcp_servers_into_registry(
     for server in servers {
         let db = state.db.clone();
         let key = encryption_key.clone();
-        let http = state.http_client.clone();
+        let http = (**state.http_client.load()).clone();
         let registry = registry.clone();
         tokio::spawn(async move {
             match discover_and_persist_tools(&db, &http, &server, &key).await {

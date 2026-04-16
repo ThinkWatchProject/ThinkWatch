@@ -591,7 +591,7 @@ async fn build_live_snapshot(
 
     // Snapshot the in-process CB registry once so we can decorate every
     // provider row with its real state below.
-    let cb_states = think_watch_gateway::failover::snapshot_cb_states();
+    let cb_states = think_watch_common::cb_registry::snapshot_cb_states();
 
     let seed_provider = |kind: &str, name: &str| ProviderHealth {
         kind: kind.to_string(),
@@ -985,14 +985,11 @@ pub async fn get_dashboard_live(
 // ============================================================================
 // WebSocket push channel for the dashboard
 //
-// Browsers can't send Authorization headers on a WS upgrade. The previous
-// design accepted the JWT in `?token=…`, but the URL ends up in:
-//   - server access logs (full URL)
-//   - reverse proxy logs
-//   - browser history
-//   - the Referer header on outbound links
+// Browsers can't send Authorization headers on a WS upgrade, and passing
+// the JWT in `?token=…` would leak it into access logs, reverse proxy
+// logs, browser history, and Referer headers.
 //
-// New flow:
+// Flow:
 //   1. Authenticated client POSTs `/api/dashboard/ws-ticket` to mint a
 //      single-use, 30-second ticket. The ticket is bound to the user_id
 //      and the access-token hash so we can still re-check JWT revocation
@@ -1168,7 +1165,7 @@ pub async fn dashboard_ws(
     // Per-user connection cap. A pathological client opening hundreds
     // of dashboard WS sockets would otherwise consume one tokio task +
     // ~4s of snapshot work each, exhausting executor / DB pool.
-    let max_per_user = state.config.timeouts.dashboard_ws_max_per_user;
+    let max_per_user = state.dynamic_config.perf_dashboard_ws_max_per_user().await as usize;
     if !try_acquire_ws_slot(user_id, max_per_user) {
         tracing::warn!(%user_id, "dashboard ws rejected: per-user connection cap reached");
         return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
@@ -1239,8 +1236,9 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
     // Per-frame I/O ceiling. Without this a slow / dead client can hang
     // the loop indefinitely on a buffered TCP write, blocking future
     // snapshot pushes for that connection.
-    let io_timeout = Duration::from_secs(state.config.timeouts.dashboard_ws_io_secs);
-    let tick_secs = state.config.timeouts.dashboard_ws_tick_secs;
+    let io_timeout =
+        Duration::from_secs(state.dynamic_config.perf_dashboard_ws_io_secs().await as u64);
+    let tick_secs = state.dynamic_config.perf_dashboard_ws_tick_secs().await as u64;
 
     // Resolve the team / user filter ONCE on connect. The filter is
     // determined by RBAC role assignments, which change rarely; we

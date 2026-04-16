@@ -1,4 +1,4 @@
-import { useState, useEffect, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -7,8 +7,8 @@ import { Label } from '@/components/ui/label';
 import { AlertCircle } from 'lucide-react';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+import { API_BASE } from '@/lib/api';
+import { useSsoStatus } from '@/hooks/use-sso-status';
 
 interface LoginPageProps {
   onLogin: (email: string, password: string, totpCode?: string) => Promise<{ totp_required?: boolean; password_change_required?: boolean }>;
@@ -20,21 +20,9 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const [ssoEnabled, setSsoEnabled] = useState(false);
-  const [registrationOpen, setRegistrationOpen] = useState(false);
+  const { ssoEnabled, allowRegistration: registrationOpen } = useSsoStatus();
   const [totpStep, setTotpStep] = useState(false);
   const [totpCode, setTotpCode] = useState('');
-
-  useEffect(() => {
-    // Use public endpoint (no auth required)
-    fetch(`${API_BASE}/api/auth/sso/status`)
-      .then((r) => r.json())
-      .then((d: { enabled: boolean; allow_registration?: boolean }) => {
-        setSsoEnabled(d.enabled);
-        setRegistrationOpen(d.allow_registration === true);
-      })
-      .catch(() => {});
-  }, []);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();

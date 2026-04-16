@@ -77,12 +77,6 @@ pub fn record_cb_with_kind(key: &str, state: CbState, kind: &str) {
     }
 }
 
-/// Backward-compatible shim for callers that don't specify a `kind`.
-/// New call sites should use `record_cb_with_kind`.
-pub fn record_cb(key: &str, state: CbState) {
-    record_cb_with_kind(key, state, "unknown");
-}
-
 /// Snapshot the current state of every key the registry has seen.
 pub fn snapshot_cb_states() -> HashMap<String, CbState> {
     cb_registry().read().map(|m| m.clone()).unwrap_or_default()
@@ -183,21 +177,6 @@ mod tests {
             !calls.iter().any(|(k, _)| k == "test-no-half-open"),
             "HalfOpen transition must not fire the Open listener"
         );
-    }
-
-    #[test]
-    fn record_cb_legacy_uses_unknown_kind_tag() {
-        let _g = serial_lock().lock().unwrap();
-        let _ = drain_captured();
-
-        record_cb("test-legacy-shim", CbState::Open);
-
-        let calls = drain_captured();
-        let entry = calls
-            .iter()
-            .find(|(k, _)| k == "test-legacy-shim")
-            .expect("legacy shim should still fire the listener");
-        assert_eq!(entry.1, "unknown");
     }
 
     #[test]

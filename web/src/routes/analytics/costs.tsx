@@ -9,7 +9,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { DollarSign, TrendingUp, AlertCircle, Download } from 'lucide-react';
+import { DollarSign, TrendingUp, AlertCircle, Download, ChevronDown } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
@@ -19,12 +19,18 @@ import { TeamFilter } from '@/components/filters/team-filter';
 import { SimpleBarChart } from '@/components/ui/simple-chart';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
+import { Badge } from '@/components/ui/badge';
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
 
 interface CostRow {
-  /** Legacy single-dimension key */
-  group_key?: string;
-  /** New multi-dimension response shape */
-  dimensions?: Record<string, string>;
+  dimensions: Record<string, string>;
   request_count: number;
   input_tokens: number;
   output_tokens: number;
@@ -43,11 +49,9 @@ interface CostStats {
   budget_usage_pct: number | null;
 }
 
-/** Extract the display value for a dimension from a CostRow, handling both old and new API shapes. */
+/** Extract the display value for a dimension from a CostRow. */
 function getDimensionValue(row: CostRow, dim: CostDimension): string {
-  if (row.dimensions && dim in row.dimensions) return row.dimensions[dim];
-  // Legacy: group_key is only usable for single-dimension queries
-  return row.group_key ?? '—';
+  return row.dimensions[dim] ?? '—';
 }
 
 export function CostsPage() {
@@ -97,11 +101,11 @@ export function CostsPage() {
   const fetchData = useCallback(() => {
     setLoading(true);
     Promise.all([
-      api<CostRow[]>(`/api/analytics/costs${queryString()}`),
+      api<{ items: CostRow[]; total: { request_count: number; input_tokens: number; output_tokens: number; total_cost: number } }>(`/api/analytics/costs${queryString()}`),
       api<CostStats>(`/api/analytics/costs/stats${selectedTeam ? `?team_id=${selectedTeam}` : ''}`),
     ])
       .then(([costData, statsData]) => {
-        setRows(costData);
+        setRows(costData.items);
         setStats(statsData);
       })
       .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load cost data'))
@@ -228,29 +232,43 @@ export function CostsPage() {
             ))}
           </div>
 
-          {/* Dimension toggles (multi-select, max 2) */}
-          <div
-            role="group"
-            aria-label={t('analyticsCosts.groupBy')}
-            className="inline-flex items-center gap-0.5 rounded-md border bg-muted/30 p-0.5 text-xs"
-          >
-            {DIMENSION_OPTIONS.map((g) => (
-              <button
-                key={g}
-                type="button"
-                role="checkbox"
-                aria-checked={selectedDimensions.includes(g)}
-                onClick={() => toggleDimension(g)}
-                className={`rounded px-2 py-1 font-medium transition-colors ${
-                  selectedDimensions.includes(g)
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {t(`analyticsCosts.group.${g}`)}
-              </button>
-            ))}
-          </div>
+          {/* Dimension picker — dropdown + badge chips */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button variant="outline" size="sm" className="gap-1.5">
+                {t('analyticsCosts.groupBy')}
+                <span className="inline-flex items-center gap-1">
+                  {selectedDimensions.map((dim, idx) => (
+                    <Badge key={dim} variant="secondary" className="gap-0.5 text-[10px] leading-none">
+                      {!isSingleDimension && (
+                        <span className="text-muted-foreground">
+                          {idx === 0 ? t('analyticsCosts.dimRow') : t('analyticsCosts.dimCol')}
+                        </span>
+                      )}
+                      {t(`analyticsCosts.group.${dim}`)}
+                    </Badge>
+                  ))}
+                </span>
+                <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-48">
+              <DropdownMenuLabel className="text-xs text-muted-foreground">
+                {t('analyticsCosts.dimHint')}
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              {DIMENSION_OPTIONS.map((g) => (
+                <DropdownMenuCheckboxItem
+                  key={g}
+                  checked={selectedDimensions.includes(g)}
+                  onCheckedChange={() => toggleDimension(g)}
+                  onSelect={(e) => e.preventDefault()}
+                >
+                  {t(`analyticsCosts.group.${g}`)}
+                </DropdownMenuCheckboxItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
           <Button variant="outline" size="sm" disabled={exporting || rows.length === 0} onClick={handleExport}>
             <Download className="mr-1.5 h-3.5 w-3.5" />
             {t('analyticsCosts.export')}

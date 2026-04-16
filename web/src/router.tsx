@@ -12,6 +12,9 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useAuth } from '@/hooks/use-auth';
 import { AppShell } from '@/components/layout/app-shell';
+import { API_BASE } from '@/lib/api';
+import { SetupStatusSchema, type SetupStatus } from '@/lib/schemas';
+import { useSsoStatus } from '@/hooks/use-sso-status';
 
 // Eagerly loaded — entry/auth screens that the user always hits first.
 import { LoginPage } from '@/routes/login';
@@ -50,9 +53,7 @@ const WebhookOutboxPage = lazyRouteComponent(
 );
 const ProfilePage = lazyRouteComponent(() => import('@/routes/profile'), 'ProfilePage');
 
-const API_BASE = import.meta.env.VITE_API_BASE ?? '';
-
-let cachedSetupStatus: { initialized: boolean; needs_setup: boolean } | null = null;
+let cachedSetupStatus: SetupStatus | null = null;
 
 /// Force the next mount to re-fetch /api/setup/status. Called by the
 /// setup wizard after a successful initialize so the user lands on the
@@ -66,7 +67,7 @@ function RootComponent() {
   const { user, loading, login, logout, handleSsoCallback } = useAuth();
   const [setupChecked, setSetupChecked] = useState(cachedSetupStatus !== null);
   const [needsSetup, setNeedsSetup] = useState(cachedSetupStatus?.needs_setup ?? false);
-  const [registrationOpen, setRegistrationOpen] = useState(false);
+  const { allowRegistration: registrationOpen } = useSsoStatus();
   const navigate = useNavigate();
   const pathname = useRouterState({ select: (s) => s.location.pathname });
 
@@ -78,7 +79,8 @@ function RootComponent() {
       if (cancelled) return;
       fetch(`${API_BASE}/api/setup/status`)
         .then((r) => r.json())
-        .then((data: { initialized: boolean; needs_setup: boolean }) => {
+        .then((raw) => {
+          const data = SetupStatusSchema.parse(raw);
           if (cancelled) return;
           cachedSetupStatus = data;
           setNeedsSetup(data.needs_setup);
@@ -104,16 +106,6 @@ function RootComponent() {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVis);
     };
-  }, []);
-
-  // Fetch whether self-registration is open (public endpoint, no auth).
-  useEffect(() => {
-    fetch(`${API_BASE}/api/auth/sso/status`)
-      .then((r) => r.json())
-      .then((d: { allow_registration?: boolean }) => {
-        setRegistrationOpen(d.allow_registration === true);
-      })
-      .catch(() => {});
   }, []);
 
   // Handle SSO callback. Auth cookies were set on the redirect

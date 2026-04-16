@@ -4,38 +4,19 @@ use serde::{Deserialize, Serialize};
 use std::pin::Pin;
 
 pub struct GoogleProvider {
-    pub base_url: String,
-    pub client: reqwest::Client,
-    pub custom_headers: Vec<(String, String)>,
+    pub base: ProviderBase,
 }
 
 impl GoogleProvider {
     pub fn new(base_url: String) -> Self {
         Self {
-            base_url,
-            client: reqwest::Client::new(),
-            custom_headers: Vec::new(),
+            base: ProviderBase::new(base_url),
         }
     }
 
     pub fn with_custom_headers(mut self, headers: Vec<(String, String)>) -> Self {
-        self.custom_headers = headers;
+        self.base = self.base.with_custom_headers(headers);
         self
-    }
-
-    fn resolve_headers(&self, request: &ChatCompletionRequest) -> Vec<(String, String)> {
-        let uid = request.caller_user_id.as_deref().unwrap_or("");
-        let email = request.caller_user_email.as_deref().unwrap_or("");
-        self.custom_headers
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.replace("{{user_id}}", uid)
-                        .replace("{{user_email}}", email),
-                )
-            })
-            .collect()
     }
 }
 
@@ -195,12 +176,15 @@ impl AiProvider for GoogleProvider {
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         let model = &request.model;
-        let headers = self.resolve_headers(&request);
+        let headers = self.base.resolve_headers(&request);
         let gemini_req = convert_request(&request);
 
-        let url = format!("{}/v1beta/models/{}:generateContent", self.base_url, model);
+        let url = format!(
+            "{}/v1beta/models/{}:generateContent",
+            self.base.base_url, model
+        );
 
-        let mut builder = self.client.post(&url);
+        let mut builder = self.base.client.post(&url);
         for (k, v) in &headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
@@ -233,10 +217,10 @@ impl AiProvider for GoogleProvider {
         &self,
         request: ChatCompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
-        let client = self.client.clone();
-        let base_url = self.base_url.clone();
+        let client = self.base.client.clone();
+        let base_url = self.base.base_url.clone();
         let model = request.model.clone();
-        let headers = self.resolve_headers(&request);
+        let headers = self.base.resolve_headers(&request);
 
         let gemini_req = convert_request(&request);
 

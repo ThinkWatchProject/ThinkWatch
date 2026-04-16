@@ -39,20 +39,6 @@ fn intersect_allowlists(
     }
 }
 
-/// Authenticated identity for gateway requests (via `tw-` API key).
-/// Inserted into request extensions for use by downstream middleware/handlers.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct GatewayIdentity {
-    pub api_key_id: uuid::Uuid,
-    pub user_id: Option<uuid::Uuid>,
-    pub allowed_models: Option<Vec<String>>,
-    /// Role NAMES the underlying user holds. Used by the MCP gateway's
-    /// access controller, which gates per-tool access on role names.
-    /// Empty for service-account keys (no associated user).
-    pub user_roles: Vec<String>,
-}
-
 /// Future returned by the middleware closure. Boxed because the
 /// generated impl trait isn't nameable; pulled out into a type
 /// alias to keep clippy::type_complexity happy.
@@ -205,13 +191,6 @@ pub fn require_api_key(
                 surface_constraints: surface_constraints.clone(),
             };
 
-            let identity = GatewayIdentity {
-                api_key_id: row.id,
-                user_id: row.user_id,
-                allowed_models: merged_models,
-                user_roles,
-            };
-
             // The MCP transport handlers expect their own typed
             // extension and require a user_id (sessions are keyed
             // by user). Service-account keys without a user_id
@@ -234,14 +213,13 @@ pub fn require_api_key(
                 let mcp_identity = McpRequestIdentity {
                     user_id: uid,
                     user_email,
-                    user_roles: identity.user_roles.clone(),
+                    user_roles,
                     surface_constraints: surface_constraints.clone(),
                     allowed_mcp_tools: role_limits.allowed_mcp_tools.clone(),
                 };
                 request.extensions_mut().insert(mcp_identity);
             }
 
-            request.extensions_mut().insert(identity);
             request.extensions_mut().insert(gateway_identity);
 
             Ok(next.run(request).await)

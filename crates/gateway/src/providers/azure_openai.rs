@@ -12,46 +12,29 @@ use std::pin::Pin;
 /// URL pattern: `{base_url}/openai/deployments/{model}/chat/completions?api-version={api_version}`
 /// Auth header: `api-key: {api_key}` (not `Authorization: Bearer`)
 pub struct AzureOpenAiProvider {
-    pub base_url: String,
+    pub base: ProviderBase,
     pub api_version: String,
-    pub client: reqwest::Client,
-    pub custom_headers: Vec<(String, String)>,
 }
 
 impl AzureOpenAiProvider {
     pub fn new(base_url: String, api_version: Option<String>) -> Self {
+        let mut base = ProviderBase::new(base_url);
+        base.base_url = base.base_url.trim_end_matches('/').to_string();
         Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
+            base,
             api_version: api_version.unwrap_or_else(|| "2024-12-01-preview".to_string()),
-            client: reqwest::Client::new(),
-            custom_headers: Vec::new(),
         }
     }
 
     pub fn with_custom_headers(mut self, headers: Vec<(String, String)>) -> Self {
-        self.custom_headers = headers;
+        self.base = self.base.with_custom_headers(headers);
         self
-    }
-
-    fn resolve_headers(&self, request: &ChatCompletionRequest) -> Vec<(String, String)> {
-        let uid = request.caller_user_id.as_deref().unwrap_or("");
-        let email = request.caller_user_email.as_deref().unwrap_or("");
-        self.custom_headers
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.replace("{{user_id}}", uid)
-                        .replace("{{user_email}}", email),
-                )
-            })
-            .collect()
     }
 
     fn completions_url(&self, deployment: &str) -> String {
         format!(
             "{}/openai/deployments/{}/chat/completions?api-version={}",
-            self.base_url, deployment, self.api_version
+            self.base.base_url, deployment, self.api_version
         )
     }
 }
@@ -67,9 +50,10 @@ impl AiProvider for AzureOpenAiProvider {
     ) -> Result<ChatCompletionResponse, GatewayError> {
         // In Azure, the "model" field is the deployment name
         let url = self.completions_url(&request.model);
-        let headers = self.resolve_headers(&request);
+        let headers = self.base.resolve_headers(&request);
 
         let mut builder = self
+            .base
             .client
             .post(&url)
             .header("content-type", "application/json");
@@ -108,9 +92,9 @@ impl AiProvider for AzureOpenAiProvider {
         &self,
         request: ChatCompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
-        let client = self.client.clone();
+        let client = self.base.client.clone();
         let url = self.completions_url(&request.model);
-        let headers = self.resolve_headers(&request);
+        let headers = self.base.resolve_headers(&request);
 
         let mut stream_request = request;
         stream_request.stream = Some(true);

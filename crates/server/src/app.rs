@@ -58,21 +58,19 @@ pub struct AppState {
     /// Per-MCP-server circuit breakers. Lives in AppState so the console
     /// CRUD handlers can pre-register newly added servers.
     pub mcp_circuit_breakers: think_watch_mcp_gateway::circuit_breaker::McpCircuitBreakers,
-    /// Connection pool for upstream MCP servers. Shared so the update/delete
-    /// CRUD handlers can evict stale connections when an endpoint changes —
-    /// the pool keys by server id, so a renamed endpoint would otherwise
-    /// keep using the old URL.
-    pub mcp_pool: think_watch_mcp_gateway::pool::ConnectionPool,
+    /// MCP connection pool. Wrapped in `ArcSwap` so the timeout can be
+    /// changed at runtime via `perf.mcp_pool_secs` without restart.
+    pub mcp_pool: Arc<arc_swap::ArcSwap<think_watch_mcp_gateway::pool::ConnectionPool>>,
     /// Shared HTTP client used by tool discovery and any future
-    /// outbound calls. Reusing one client preserves the connection pool
-    /// (TCP + TLS) instead of paying TCP/TLS handshake on every call.
-    pub http_client: reqwest::Client,
+    /// outbound calls. Wrapped in `ArcSwap` so the timeout can be
+    /// changed at runtime via `perf.http_client_secs` without restart.
+    pub http_client: Arc<arc_swap::ArcSwap<reqwest::Client>>,
 }
 
 /// Build a `ContentFilter` from the current `system_settings` value.
 pub async fn load_content_filter(dc: &DynamicConfig) -> ContentFilter {
     let configs: Vec<think_watch_gateway::content_filter::DenyRuleConfig> = dc
-        .get_json("security.content_filter_patterns")
+        .get("security.content_filter_patterns")
         .await
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
@@ -82,7 +80,7 @@ pub async fn load_content_filter(dc: &DynamicConfig) -> ContentFilter {
 /// Build a `PiiRedactor` from the current `system_settings` value.
 pub async fn load_pii_redactor(dc: &DynamicConfig) -> PiiRedactor {
     let configs: Vec<think_watch_gateway::pii_redactor::PiiPatternConfig> = dc
-        .get_json("security.pii_redactor_patterns")
+        .get("security.pii_redactor_patterns")
         .await
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
@@ -191,7 +189,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
     // console CRUD handlers can sync runtime state when admins add/remove
     // servers, and so the dashboard can reflect real CB state.
     let registry = state.mcp_registry.clone();
-    let pool = state.mcp_pool.clone();
+    let pool = (**state.mcp_pool.load()).clone();
 
     // Initial load: hydrate the in-memory registry from Postgres so the
     // gateway can actually proxy to configured upstream servers without a
@@ -784,7 +782,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1MB for console API
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(state.config.timeouts.console_request_secs),
+            std::time::Duration::from_secs(30), // default; runtime tuning via perf.console_request_secs
         ))
         .layer(cors)
         .layer(SetResponseHeaderLayer::overriding(

@@ -30,7 +30,13 @@ import {
 import { api, apiPut } from '@/lib/api';
 import { StatusIndicator } from '@/components/ui/status-indicator';
 import { ServiceLogo } from '@/components/ui/service-logo';
-import { DashboardLiveSchema, WsTicketSchema } from '@/lib/schemas';
+import {
+  DashboardLiveSchema,
+  WsTicketSchema,
+  type DashboardLive,
+  type LiveLogRow,
+  type ProviderHealth,
+} from '@/lib/schemas';
 import { toast } from 'sonner';
 
 interface DashboardStats {
@@ -65,35 +71,6 @@ interface CostStats {
 type TimeRange = '24h' | '7d' | '30d';
 const TIME_RANGES: readonly TimeRange[] = ['24h', '7d', '30d'] as const;
 
-interface ProviderHealth {
-  kind: 'ai' | 'mcp';
-  provider: string;
-  requests: number;
-  avg_latency_ms: number;
-  success_rate: number;
-  cb_state: string; // "Closed" | "HalfOpen" | "Open" | ""
-}
-
-interface LiveLogRow {
-  kind: 'api' | 'mcp';
-  id: string;
-  user_id: string;
-  /** model_id for "api", tool_name for "mcp" */
-  subject: string;
-  /** numeric HTTP status as a string for "api", or status string for "mcp" */
-  status: string;
-  latency_ms: number;
-  /** total tokens for "api", 0 for "mcp" */
-  tokens: number;
-  created_at: string;
-}
-
-interface DashboardLive {
-  providers: ProviderHealth[];
-  rpm_buckets: number[];
-  recent_logs: LiveLogRow[];
-  max_rpm_limit: number | null;
-}
 
 // Locale-aware formatters — react to i18next language changes by reading
 // the current language at format time. We don't cache the formatter
@@ -146,9 +123,7 @@ function useLiveDashboard() {
   const [live, setLive] = useState<DashboardLive | null>(null);
   const [connected, setConnected] = useState(false);
   // Ref mirror so the WS callbacks can read "have we ever received data?"
-  // without capturing a stale closure (the previous code captured `live`
-  // at effect-mount time and the fallback fetch in onclose never fired
-  // after the very first connect).
+  // without capturing a stale closure.
   const liveRef = useRef<DashboardLive | null>(null);
   liveRef.current = live;
 
@@ -207,8 +182,7 @@ function useLiveDashboard() {
           const payload = JSON.parse(ev.data) as DashboardLive;
           setLive(payload);
         } catch (err) {
-          // Surface parse failures so they're at least visible in
-          // devtools — the previous silent catch made WS bugs invisible.
+          // Surface parse failures so they're visible in devtools.
           console.error('dashboard ws parse failed', err, ev.data);
         }
       };

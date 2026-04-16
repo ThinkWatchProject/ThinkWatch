@@ -21,8 +21,7 @@ import {
 import { Check, Copy, Globe, ArrowRight, ArrowLeft, AlertTriangle, AlertCircle, Plus, X } from 'lucide-react';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-
-const API_BASE = import.meta.env.VITE_API_BASE ?? '';
+import { API_BASE } from '@/lib/api';
 
 const STEPS = ['welcome', 'admin', 'settings', 'provider', 'complete'] as const;
 type Step = (typeof STEPS)[number];

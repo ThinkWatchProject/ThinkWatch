@@ -64,23 +64,6 @@ impl AuthUser {
         }
     }
 
-    /// Same as `require_permission` but accepts multiple alternatives.
-    /// Access is granted if the user has ANY of the listed permissions.
-    #[allow(dead_code)]
-    pub fn require_any_permission(&self, perms: &[&str]) -> Result<(), AppError> {
-        if perms
-            .iter()
-            .any(|p| self.permissions.iter().any(|c| c == *p))
-        {
-            Ok(())
-        } else {
-            Err(AppError::Forbidden(format!(
-                "Missing any of required permissions: {}",
-                perms.join(", ")
-            )))
-        }
-    }
-
     // ------------------------------------------------------------------------
     // Scope-aware authorization
     //

@@ -112,11 +112,6 @@ impl DynamicConfig {
         self.cache.read().await.get(key).and_then(|v| v.as_bool())
     }
 
-    /// Get the raw JSON value (for complex structures like pattern arrays).
-    pub async fn get_json(&self, key: &str) -> Option<Value> {
-        self.cache.read().await.get(key).cloned()
-    }
-
     /// Get all settings grouped by category.
     pub async fn get_all_grouped(&self) -> HashMap<String, Vec<SettingEntry>> {
         let rows: Vec<SettingRow> = sqlx::query_as(
@@ -164,178 +159,115 @@ impl DynamicConfig {
     }
 
     // --- Convenience getters with defaults ---
+    //
+    // Simple getters follow one of three patterns: i64/bool with a
+    // default, String with a default, or Option<String>. The macros
+    // below generate the boilerplate so each setting is one line.
+}
 
-    pub async fn jwt_access_ttl_secs(&self) -> i64 {
-        self.get_i64("auth.jwt_access_ttl_secs")
-            .await
-            .unwrap_or(900)
-    }
+/// Generates `pub async fn $name(&self) -> $ret` methods that read a
+/// config key and return a default on miss. Keeps the `impl DynamicConfig`
+/// block tidy — each setting is one line instead of four.
+macro_rules! dc_getters_i64 {
+    ($( $fn_name:ident, $key:literal, $default:expr );* $(;)?) => {
+        impl DynamicConfig {
+            $(
+                pub async fn $fn_name(&self) -> i64 {
+                    self.get_i64($key).await.unwrap_or($default)
+                }
+            )*
+        }
+    };
+}
 
-    pub async fn jwt_refresh_ttl_days(&self) -> i64 {
-        self.get_i64("auth.jwt_refresh_ttl_days").await.unwrap_or(7)
-    }
+macro_rules! dc_getters_bool {
+    ($( $fn_name:ident, $key:literal, $default:expr );* $(;)?) => {
+        impl DynamicConfig {
+            $(
+                pub async fn $fn_name(&self) -> bool {
+                    self.get_bool($key).await.unwrap_or($default)
+                }
+            )*
+        }
+    };
+}
 
-    pub async fn cache_ttl_secs(&self) -> u64 {
-        self.get_i64("gateway.cache_ttl_secs").await.unwrap_or(3600) as u64
-    }
+macro_rules! dc_getters_string {
+    ($( $fn_name:ident, $key:literal, $default:expr );* $(;)?) => {
+        impl DynamicConfig {
+            $(
+                pub async fn $fn_name(&self) -> String {
+                    self.get_string($key).await.unwrap_or_else(|| $default.to_string())
+                }
+            )*
+        }
+    };
+}
 
-    pub async fn signature_drift_secs(&self) -> i64 {
-        self.get_i64("security.signature_drift_secs")
-            .await
-            .unwrap_or(300)
-    }
+macro_rules! dc_getters_u64_from_i64 {
+    ($( $fn_name:ident, $key:literal, $default:expr );* $(;)?) => {
+        impl DynamicConfig {
+            $(
+                pub async fn $fn_name(&self) -> u64 {
+                    self.get_i64($key).await.unwrap_or($default) as u64
+                }
+            )*
+        }
+    };
+}
 
-    pub async fn signature_nonce_ttl_secs(&self) -> i64 {
-        self.get_i64("security.signature_nonce_ttl_secs")
-            .await
-            .unwrap_or(600)
-    }
+dc_getters_i64! {
+    jwt_access_ttl_secs,              "auth.jwt_access_ttl_secs",              900;
+    jwt_refresh_ttl_days,             "auth.jwt_refresh_ttl_days",             7;
+    signature_drift_secs,             "security.signature_drift_secs",         300;
+    signature_nonce_ttl_secs,         "security.signature_nonce_ttl_secs",     600;
+    api_keys_default_expiry_days,     "api_keys.default_expiry_days",          90;
+    api_keys_inactivity_timeout_days, "api_keys.inactivity_timeout_days",      0;
+    api_keys_rotation_period_days,    "api_keys.rotation_period_days",         0;
+    api_keys_rotation_grace_period_hours, "api_keys.rotation_grace_period_hours", 24;
+    data_retention_days_usage,        "data.retention_days_usage",             90;
+    data_retention_days_audit,        "data.retention_days_audit",             90;
+    data_retention_days_gateway,      "data.retention_days_gateway",           90;
+    data_retention_days_mcp,          "data.retention_days_mcp",               90;
+    data_retention_days_platform,     "data.retention_days_platform",          90;
+    data_retention_days_access,       "data.retention_days_access",            30;
+    data_retention_days_app,          "data.retention_days_app",               30;
+    client_ip_xff_depth,              "security.client_ip_xff_depth",          1;
+}
 
-    pub async fn is_initialized(&self) -> bool {
-        self.get_bool("setup.initialized").await.unwrap_or(false)
-    }
+dc_getters_bool! {
+    is_initialized,          "setup.initialized",               false;
+    rate_limit_fail_closed,  "security.rate_limit_fail_closed", false;
+    allow_registration,      "auth.allow_registration",         false;
+    oidc_enabled,            "oidc.enabled",                    false;
+}
 
-    pub async fn site_name(&self) -> String {
-        self.get_string("setup.site_name")
-            .await
-            .unwrap_or_else(|| "ThinkWatch".to_string())
-    }
+dc_getters_string! {
+    site_name,               "setup.site_name",                   "ThinkWatch";
+    client_ip_source,        "security.client_ip_source",         "connection";
+    client_ip_xff_position,  "security.client_ip_xff_position",   "left";
+}
 
-    pub async fn api_keys_default_expiry_days(&self) -> i64 {
-        self.get_i64("api_keys.default_expiry_days")
-            .await
-            .unwrap_or(90)
-    }
+dc_getters_u64_from_i64! {
+    cache_ttl_secs,     "gateway.cache_ttl_secs",  3600;
+    mcp_cache_ttl_secs, "mcp.cache_ttl_secs",      0;
+}
 
-    pub async fn api_keys_inactivity_timeout_days(&self) -> i64 {
-        self.get_i64("api_keys.inactivity_timeout_days")
-            .await
-            .unwrap_or(0)
-    }
+// Performance tuning — dynamically adjustable via Admin > Settings.
+// Env vars are used as initial defaults at startup; once a value is
+// saved in `system_settings` it takes precedence on the next read.
+dc_getters_i64! {
+    perf_dashboard_ws_io_secs,        "perf.dashboard_ws_io_secs",        5;
+    perf_dashboard_ws_tick_secs,      "perf.dashboard_ws_tick_secs",      4;
+    perf_dashboard_ws_max_per_user,   "perf.dashboard_ws_max_per_user",   4;
+    perf_console_request_secs,        "perf.console_request_secs",        30;
+    perf_http_client_secs,            "perf.http_client_secs",            15;
+    perf_mcp_pool_secs,               "perf.mcp_pool_secs",               30;
+}
 
-    pub async fn api_keys_rotation_period_days(&self) -> i64 {
-        self.get_i64("api_keys.rotation_period_days")
-            .await
-            .unwrap_or(0)
-    }
-
-    pub async fn api_keys_rotation_grace_period_hours(&self) -> i64 {
-        self.get_i64("api_keys.rotation_grace_period_hours")
-            .await
-            .unwrap_or(24)
-    }
-
-    pub async fn data_retention_days_usage(&self) -> i64 {
-        self.get_i64("data.retention_days_usage")
-            .await
-            .unwrap_or(90)
-    }
-
-    pub async fn data_retention_days_audit(&self) -> i64 {
-        self.get_i64("data.retention_days_audit")
-            .await
-            .unwrap_or(90)
-    }
-
-    pub async fn data_retention_days_gateway(&self) -> i64 {
-        self.get_i64("data.retention_days_gateway")
-            .await
-            .unwrap_or(90)
-    }
-
-    pub async fn data_retention_days_mcp(&self) -> i64 {
-        self.get_i64("data.retention_days_mcp").await.unwrap_or(90)
-    }
-
-    pub async fn data_retention_days_platform(&self) -> i64 {
-        self.get_i64("data.retention_days_platform")
-            .await
-            .unwrap_or(90)
-    }
-
-    pub async fn data_retention_days_access(&self) -> i64 {
-        self.get_i64("data.retention_days_access")
-            .await
-            .unwrap_or(30)
-    }
-
-    pub async fn data_retention_days_app(&self) -> i64 {
-        self.get_i64("data.retention_days_app").await.unwrap_or(30)
-    }
-
-    /// Background MCP health-check cadence. Read on every loop iteration
-    /// so changes via the settings UI take effect within one tick. Min
-    /// clamped at 5s server-side to keep a typo from DOSing upstreams.
-    pub async fn mcp_health_interval_secs(&self) -> u64 {
-        let raw = self
-            .get_i64("mcp.health_interval_secs")
-            .await
-            .unwrap_or(300);
-        raw.max(5) as u64
-    }
-
-    /// TTL for client-facing MCP sessions (in seconds).  Each session
-    /// tracks per-user upstream `Mcp-Session-Id` values in Redis, so
-    /// this controls how long an idle session survives before the user
-    /// must re-initialize.  Clamped to [60, 86400].  Default 3600 (1h).
-    pub async fn mcp_session_ttl_secs(&self) -> i64 {
-        let raw = self.get_i64("mcp.session_ttl_secs").await.unwrap_or(3600);
-        raw.clamp(60, 86400)
-    }
-
-    /// Global default cache TTL for MCP tool-call responses (seconds).
-    /// Individual servers can override this via their `cache_ttl_secs`
-    /// config.  `0` disables caching globally.  Default 0 (off).
-    pub async fn mcp_cache_ttl_secs(&self) -> u64 {
-        self.get_i64("mcp.cache_ttl_secs").await.unwrap_or(0) as u64
-    }
-
-    pub async fn client_ip_source(&self) -> String {
-        self.get_string("security.client_ip_source")
-            .await
-            .unwrap_or_else(|| "connection".to_string())
-    }
-
-    pub async fn client_ip_xff_position(&self) -> String {
-        self.get_string("security.client_ip_xff_position")
-            .await
-            .unwrap_or_else(|| "left".to_string())
-    }
-
-    pub async fn client_ip_xff_depth(&self) -> i64 {
-        self.get_i64("security.client_ip_xff_depth")
-            .await
-            .unwrap_or(1)
-    }
-
-    /// When true the bucketed rate-limit engine returns an error
-    /// instead of fail-opening on Redis outages. Defaults to false
-    /// (fail open) for parity with previous releases.
-    pub async fn rate_limit_fail_closed(&self) -> bool {
-        self.get_bool("security.rate_limit_fail_closed")
-            .await
-            .unwrap_or(false)
-    }
-
-    pub async fn allow_registration(&self) -> bool {
-        self.get_bool("auth.allow_registration")
-            .await
-            .unwrap_or(false)
-    }
-
-    /// Role name to assign to newly registered / SSO users.
-    /// Empty or absent means no role (0 permissions).
-    pub async fn default_role(&self) -> Option<String> {
-        self.get_string("auth.default_role")
-            .await
-            .filter(|s| !s.is_empty())
-    }
-
-    // --- OIDC / SSO ---
-
-    pub async fn oidc_enabled(&self) -> bool {
-        self.get_bool("oidc.enabled").await.unwrap_or(false)
-    }
+/// Non-macro getters that need custom logic (clamping, filtering, etc.)
+impl DynamicConfig {
+    // --- OIDC / SSO (Option<String> — no default) ---
 
     pub async fn oidc_issuer_url(&self) -> Option<String> {
         self.get_string("oidc.issuer_url").await
@@ -352,6 +284,30 @@ impl DynamicConfig {
 
     pub async fn oidc_redirect_url(&self) -> Option<String> {
         self.get_string("oidc.redirect_url").await
+    }
+
+    /// Role name to assign to newly registered / SSO users.
+    /// Empty or absent means no role (0 permissions).
+    pub async fn default_role(&self) -> Option<String> {
+        self.get_string("auth.default_role")
+            .await
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Background MCP health-check cadence. Min clamped at 5s to
+    /// prevent a typo from DOSing upstreams.
+    pub async fn mcp_health_interval_secs(&self) -> u64 {
+        let raw = self
+            .get_i64("mcp.health_interval_secs")
+            .await
+            .unwrap_or(300);
+        raw.max(5) as u64
+    }
+
+    /// TTL for client-facing MCP sessions (in seconds). Clamped to [60, 86400].
+    pub async fn mcp_session_ttl_secs(&self) -> i64 {
+        let raw = self.get_i64("mcp.session_ttl_secs").await.unwrap_or(3600);
+        raw.clamp(60, 86400)
     }
 
     /// Insert or update a setting, creating the row if it doesn't exist.

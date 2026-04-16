@@ -589,9 +589,6 @@ pub async fn get_cost_stats(
 pub struct CostItem {
     /// Dimension name → display value for each requested `group_by` dimension.
     pub dimensions: std::collections::HashMap<String, String>,
-    /// Backward-compat: equals the first dimension's value so existing
-    /// frontends that read `group_key` keep working during migration.
-    pub group_key: String,
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
@@ -649,13 +646,6 @@ impl CostGroupBy {
         for part in raw.split(',') {
             let part = part.trim();
             if part.is_empty() {
-                continue;
-            }
-            // Legacy "team" silently maps to model (column was dropped).
-            if part.eq_ignore_ascii_case("team") {
-                if seen.insert(Self::Model) {
-                    dims.push(Self::Model);
-                }
                 continue;
             }
             match Self::parse_single(part) {
@@ -882,12 +872,8 @@ pub async fn get_costs(
             total_out += output_tokens;
             total_cost_sum += total_cost;
 
-            // group_key = first dimension's value for backward compat.
-            let group_key = dimensions.get(dims[0].key()).cloned().unwrap_or_default();
-
             CostItem {
                 dimensions,
-                group_key,
                 request_count,
                 input_tokens,
                 output_tokens,
@@ -1014,13 +1000,6 @@ mod helper_tests {
     fn cost_group_by_deduplicates() {
         let dims = CostGroupBy::parse_multi(Some("model,model,provider")).unwrap();
         assert_eq!(dims, vec![CostGroupBy::Model, CostGroupBy::Provider]);
-    }
-
-    #[test]
-    fn cost_group_by_team_legacy_maps_to_model() {
-        // "team" used to be its own variant; maps to Model now.
-        let dims = CostGroupBy::parse_multi(Some("team")).unwrap();
-        assert_eq!(dims, vec![CostGroupBy::Model]);
     }
 
     #[test]

@@ -5,38 +5,19 @@ use futures::stream::StreamExt;
 use std::pin::Pin;
 
 pub struct OpenAiProvider {
-    pub base_url: String,
-    pub client: reqwest::Client,
-    pub custom_headers: Vec<(String, String)>,
+    pub base: ProviderBase,
 }
 
 impl OpenAiProvider {
     pub fn new(base_url: String) -> Self {
         Self {
-            base_url,
-            client: reqwest::Client::new(),
-            custom_headers: Vec::new(),
+            base: ProviderBase::new(base_url),
         }
     }
 
     pub fn with_custom_headers(mut self, headers: Vec<(String, String)>) -> Self {
-        self.custom_headers = headers;
+        self.base = self.base.with_custom_headers(headers);
         self
-    }
-
-    fn resolve_headers(&self, request: &ChatCompletionRequest) -> Vec<(String, String)> {
-        let uid = request.caller_user_id.as_deref().unwrap_or("");
-        let email = request.caller_user_email.as_deref().unwrap_or("");
-        self.custom_headers
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.replace("{{user_id}}", uid)
-                        .replace("{{user_email}}", email),
-                )
-            })
-            .collect()
     }
 }
 
@@ -49,10 +30,11 @@ impl AiProvider for OpenAiProvider {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, GatewayError> {
-        let headers = self.resolve_headers(&request);
+        let headers = self.base.resolve_headers(&request);
         let mut builder = self
+            .base
             .client
-            .post(format!("{}/v1/chat/completions", self.base_url));
+            .post(format!("{}/v1/chat/completions", self.base.base_url));
         for (k, v) in &headers {
             builder = builder.header(k.as_str(), v.as_str());
         }
@@ -85,9 +67,9 @@ impl AiProvider for OpenAiProvider {
         &self,
         request: ChatCompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
-        let client = self.client.clone();
-        let url = format!("{}/v1/chat/completions", self.base_url);
-        let headers = self.resolve_headers(&request);
+        let client = self.base.client.clone();
+        let url = format!("{}/v1/chat/completions", self.base.base_url);
+        let headers = self.base.resolve_headers(&request);
 
         // Ensure stream is set to true in the outgoing request
         let mut request = request;

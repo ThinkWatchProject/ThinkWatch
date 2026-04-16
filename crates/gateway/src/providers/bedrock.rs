@@ -16,8 +16,7 @@ pub struct BedrockProvider {
     pub region: String,
     pub access_key_id: Option<String>,
     pub secret_access_key: Option<String>,
-    pub client: reqwest::Client,
-    pub custom_headers: Vec<(String, String)>,
+    pub base: ProviderBase,
 }
 
 impl BedrockProvider {
@@ -40,29 +39,13 @@ impl BedrockProvider {
             region,
             access_key_id,
             secret_access_key,
-            client: reqwest::Client::new(),
-            custom_headers: Vec::new(),
+            base: ProviderBase::new(String::new()),
         }
     }
 
     pub fn with_custom_headers(mut self, headers: Vec<(String, String)>) -> Self {
-        self.custom_headers = headers;
+        self.base = self.base.with_custom_headers(headers);
         self
-    }
-
-    fn resolve_headers(&self, request: &ChatCompletionRequest) -> Vec<(String, String)> {
-        let uid = request.caller_user_id.as_deref().unwrap_or("");
-        let email = request.caller_user_email.as_deref().unwrap_or("");
-        self.custom_headers
-            .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.replace("{{user_id}}", uid)
-                        .replace("{{user_email}}", email),
-                )
-            })
-            .collect()
     }
 
     fn endpoint_url(&self, model_id: &str) -> String {
@@ -86,7 +69,7 @@ impl BedrockProvider {
         use aws_credential_types::Credentials;
 
         let imds_base = "http://169.254.169.254";
-        let client = &self.client;
+        let client = &self.base.client;
 
         // Step 1: Get IMDSv2 token
         let token = client
@@ -267,6 +250,8 @@ struct BedrockOutput {
 
 #[derive(Debug, Deserialize)]
 struct BedrockOutputMessage {
+    // `role` is present in the Bedrock API response; serde requires the
+    // field for deserialization even though we don't read it.
     #[allow(dead_code)]
     role: String,
     content: Vec<BedrockOutputContent>,
@@ -373,7 +358,7 @@ impl AiProvider for BedrockProvider {
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         let url = self.endpoint_url(&request.model);
-        let custom_headers = self.resolve_headers(&request);
+        let custom_headers = self.base.resolve_headers(&request);
         let bedrock_req = convert_to_bedrock(&request);
         let body_bytes = serde_json::to_vec(&bedrock_req)
             .map_err(|e| GatewayError::TransformError(e.to_string()))?;
@@ -381,6 +366,7 @@ impl AiProvider for BedrockProvider {
         let signed_headers = self.sign_request(&url, &body_bytes).await?;
 
         let mut req_builder = self
+            .base
             .client
             .post(&url)
             .header("content-type", "application/json")
@@ -424,14 +410,14 @@ impl AiProvider for BedrockProvider {
         &self,
         request: ChatCompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
-        let client = self.client.clone();
+        let client = self.base.client.clone();
         let url = self.stream_endpoint_url(&request.model);
         let model = request.model.clone();
         let region = self.region.clone();
         let access_key_id = self.access_key_id.clone();
         let secret_access_key = self.secret_access_key.clone();
-        let provider_client = self.client.clone();
-        let custom_headers = self.resolve_headers(&request);
+        let provider_client = self.base.client.clone();
+        let custom_headers = self.base.resolve_headers(&request);
 
         let bedrock_req = convert_to_bedrock(&request);
 
@@ -447,8 +433,7 @@ impl AiProvider for BedrockProvider {
             // Sign the request
             let provider = BedrockProvider {
                 region, access_key_id, secret_access_key,
-                client: provider_client,
-                custom_headers: Vec::new(),
+                base: ProviderBase { base_url: String::new(), client: provider_client, custom_headers: Vec::new() },
             };
             let signed_headers = match provider.sign_request(&url, &body_bytes).await {
                 Ok(h) => h,

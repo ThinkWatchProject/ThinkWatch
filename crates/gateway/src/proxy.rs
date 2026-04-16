@@ -66,9 +66,7 @@ pub struct GatewayState {
 /// Identity information extracted from the auth middleware.
 ///
 /// Carries the resolved subject IDs the proxy needs in order to
-/// query the new `rate_limit_rules` / `budget_caps` engine. The old
-/// per-key fixed columns (rate_limit_rpm / tpm / monthly_budget)
-/// are gone — the engine reads everything from those tables.
+/// query the `rate_limit_rules` / `budget_caps` engine.
 #[derive(Debug, Clone, Default)]
 pub struct GatewayRequestIdentity {
     pub user_id: Option<String>,
@@ -323,7 +321,7 @@ fn emit_gateway_log(
 async fn post_flight_account(
     db: sqlx::PgPool,
     redis: fred::clients::Client,
-    dynamic_config: Arc<DynamicConfig>,
+    _dynamic_config: Arc<DynamicConfig>,
     weight_cache: weight::WeightCache,
     model: String,
     prompt_tokens: u32,
@@ -360,12 +358,10 @@ async fn post_flight_account(
         {
             match limits::budget::add_weighted_tokens(&redis, &caps, weighted).await {
                 Ok((_statuses, crossings)) if !crossings.is_empty() => {
-                    // 1) Emit one `budget.threshold_crossed` audit entry
-                    //    per crossing so any forwarder subscribed to
-                    //    `audit` log_type picks them up alongside key /
-                    //    role events. Event payload matches the legacy
-                    //    ad-hoc webhook body so existing receivers keep
-                    //    working if they switch channels.
+                    // Emit one `budget.threshold_crossed` audit entry
+                    // per crossing so any forwarder subscribed to
+                    // `audit` log_type picks them up alongside key /
+                    // role events.
                     for crossing in &crossings {
                         audit.log(
                             think_watch_common::audit::AuditEntry::new("budget.threshold_crossed")
@@ -376,30 +372,6 @@ async fn post_flight_account(
                                 ),
                         );
                     }
-                    // 2) Legacy direct webhook — kept for backward
-                    //    compatibility until the `security.budget_
-                    //    alert_webhook_url` setting is migrated to a
-                    //    forwarder subscription on `budget.threshold_
-                    //    crossed`. Runs in the background so the
-                    //    response stream isn't delayed.
-                    let dc = dynamic_config.clone();
-                    let crossings_for_webhook = crossings.clone();
-                    tokio::spawn(async move {
-                        let url = dc.get_string("security.budget_alert_webhook_url").await;
-                        let url = url.as_deref().unwrap_or("").trim();
-                        if url.is_empty() {
-                            return;
-                        }
-                        let client = reqwest::Client::builder()
-                            .timeout(std::time::Duration::from_secs(10))
-                            .build()
-                            .unwrap_or_default();
-                        for crossing in &crossings_for_webhook {
-                            if let Err(e) = client.post(url).json(crossing).send().await {
-                                tracing::warn!("budget alert webhook failed: {e}");
-                            }
-                        }
-                    });
                 }
                 Ok(_) => {}
                 Err(e) => {
@@ -867,7 +839,7 @@ pub async fn proxy_chat_completion(
             let mut response = axum::response::sse::Sse::new(body).into_response();
             response
                 .headers_mut()
-                .insert("X-Cache", "HIT".parse().unwrap());
+                .insert("X-Cache", axum::http::HeaderValue::from_static("HIT"));
             response.headers_mut().insert(
                 "X-Metadata-Request-Id",
                 metadata.request_id.parse().unwrap(),
@@ -877,7 +849,7 @@ pub async fn proxy_chat_completion(
         let mut response = Json(&cached).into_response();
         response
             .headers_mut()
-            .insert("X-Cache", "HIT".parse().unwrap());
+            .insert("X-Cache", axum::http::HeaderValue::from_static("HIT"));
         response.headers_mut().insert(
             "X-Metadata-Request-Id",
             metadata.request_id.parse().unwrap(),
@@ -1095,7 +1067,7 @@ pub async fn proxy_chat_completion(
         let mut http_response = Json(&response).into_response();
         http_response
             .headers_mut()
-            .insert("X-Cache", "MISS".parse().unwrap());
+            .insert("X-Cache", axum::http::HeaderValue::from_static("MISS"));
         http_response.headers_mut().insert(
             "X-Metadata-Request-Id",
             metadata.request_id.parse().unwrap(),

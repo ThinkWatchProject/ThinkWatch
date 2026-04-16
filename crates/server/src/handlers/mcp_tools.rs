@@ -88,9 +88,10 @@ pub async fn discover_tools(
     .await?
     .ok_or(AppError::NotFound("MCP Server not found".into()))?;
 
+    let http = state.http_client.load();
     let count = crate::mcp_runtime::discover_and_persist_tools(
         &state.db,
-        &state.http_client,
+        &http,
         &server,
         &state.config.encryption_key,
     )
