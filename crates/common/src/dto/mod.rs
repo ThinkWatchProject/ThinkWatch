@@ -199,6 +199,9 @@ pub struct CreateMcpServerRequest {
     /// Values may contain `{{user_id}}` and `{{user_email}}` template
     /// variables which are resolved per-request from the caller's identity.
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
+    /// Per-server response cache TTL in seconds. `None` = use global
+    /// `mcp.cache_ttl_secs` setting. `0` = disable caching for this server.
+    pub cache_ttl_secs: Option<u64>,
 }
 
 // --- Pagination ---

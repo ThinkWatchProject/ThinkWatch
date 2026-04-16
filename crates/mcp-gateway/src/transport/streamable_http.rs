@@ -7,8 +7,7 @@ use axum::response::IntoResponse;
 use uuid::Uuid;
 
 use crate::proxy::McpProxy;
-use crate::proxy::{INVALID_REQUEST, JsonRpcRequest, err_response};
-use crate::session::SessionManager;
+use crate::proxy::{INVALID_REQUEST, JsonRpcRequest, RequestContext, err_response};
 
 /// Shared application state for the MCP gateway Axum handlers.
 ///
@@ -16,10 +15,12 @@ use crate::session::SessionManager;
 /// parent server crate (the `require_api_key("mcp_gateway")` layer);
 /// the handlers below just read the `McpRequestIdentity` extension
 /// the middleware inserts.
+///
+/// Session management lives inside `McpProxy.sessions` — no separate
+/// handle needed here.
 #[derive(Clone)]
 pub struct McpGatewayState {
     pub proxy: McpProxy,
-    pub sessions: SessionManager,
 }
 
 /// Identity inserted by the parent crate's API-key middleware after
@@ -79,20 +80,21 @@ pub async fn handle_post(
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     // --- Session management ------------------------------------------------
+    let sessions = &state.proxy.sessions;
     let session_id = if let Some(sid) = headers
         .get(MCP_SESSION_HEADER)
         .and_then(|v| v.to_str().ok())
     {
         // Validate the existing session.
-        if state.sessions.get_session(sid).await.is_none() {
+        if sessions.get_session(sid).await.is_none() {
             let resp = err_response(request.id.clone(), INVALID_REQUEST, "Unknown session");
             return (StatusCode::BAD_REQUEST, Json(resp)).into_response();
         }
-        state.sessions.update_activity(sid).await;
+        sessions.update_activity(sid).await;
         sid.to_owned()
     } else {
         // First request — create a new session.
-        state.sessions.create_session(identity.user_id).await
+        sessions.create_session(identity.user_id).await
     };
 
     // --- Trace correlation -------------------------------------------------
@@ -101,17 +103,15 @@ pub async fn handle_post(
     let trace_id = resolve_trace_id(&headers);
 
     // --- Dispatch ----------------------------------------------------------
-    let response = state
-        .proxy
-        .handle_request(
-            identity.user_id,
-            &identity.user_email,
-            &identity.surface_constraints,
-            identity.allowed_mcp_tools.as_deref(),
-            &trace_id,
-            request,
-        )
-        .await;
+    let ctx = RequestContext {
+        user_id: identity.user_id,
+        user_email: &identity.user_email,
+        client_session_id: &session_id,
+        surface_constraints: &identity.surface_constraints,
+        allowed_mcp_tools: identity.allowed_mcp_tools.as_deref(),
+        trace_id: &trace_id,
+    };
+    let response = state.proxy.handle_request(&ctx, request).await;
 
     // Return the response with the session header + trace id so the
     // operator can copy it back out of the wire.
@@ -145,7 +145,7 @@ pub async fn handle_delete(
         None => return StatusCode::BAD_REQUEST.into_response(),
     };
 
-    state.sessions.remove_session(session_id).await;
+    state.proxy.sessions.remove_session(session_id).await;
 
     StatusCode::NO_CONTENT.into_response()
 }

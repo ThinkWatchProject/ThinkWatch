@@ -6,6 +6,23 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+/// Payload delivered to the `on_done` callback when a stream completes
+/// (naturally or via client cancellation).
+pub struct StreamResult {
+    /// The most recent `Usage` value any chunk reported (`None` when the
+    /// upstream never surfaced usage — common without
+    /// `stream_options.include_usage`).
+    pub usage: Option<Usage>,
+    /// Every chunk observed before the stream ended.  For a natural
+    /// completion this is the full sequence; for a cancellation it is a
+    /// partial prefix.  Empty when the stream errored on the very first
+    /// chunk.
+    pub chunks: Vec<ChatCompletionChunk>,
+    /// `true` when the upstream stream ran to its natural `[DONE]`
+    /// sentinel.  `false` on client disconnect or mid-stream error.
+    pub natural_completion: bool,
+}
+
 /// Converts a stream of `ChatCompletionChunk` results into an Axum SSE response.
 ///
 /// Each chunk is serialized as `data: {json}\n\n`. When the source stream ends,
@@ -14,10 +31,7 @@ use std::sync::{Arc, Mutex};
 ///
 /// `on_done` is **guaranteed to run exactly once** for every stream
 /// returned from this function — including the case where the client
-/// drops the connection mid-stream. The callback receives the most
-/// recent `Usage` value the proxy saw on any chunk (None if no chunk
-/// reported usage — common when the upstream doesn't include
-/// `stream_options.include_usage`).
+/// drops the connection mid-stream.
 ///
 /// **Why the channel dance:** the obvious implementation (call
 /// `on_done().await` at the bottom of an `async_stream::stream!`
@@ -27,13 +41,13 @@ use std::sync::{Arc, Mutex};
 /// running `on_done` in a detached `tokio::spawn` task that listens
 /// for either the stream's "I'm finished" signal or the dropped
 /// sender that signals "I was cancelled". Either way, the callback
-/// fires exactly once with whatever usage the stream had captured.
+/// fires exactly once with whatever state the stream had captured.
 pub fn stream_to_sse<F>(
     stream: Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>,
     on_done: F,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
 where
-    F: FnOnce(Option<Usage>) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    F: FnOnce(StreamResult) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
         + 'static,
 {
@@ -53,14 +67,17 @@ pub fn stream_to_sse_with_restorer<F>(
     restorer: Option<PiiStreamRestorer>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
 where
-    F: FnOnce(Option<Usage>) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    F: FnOnce(StreamResult) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         + Send
         + 'static,
 {
-    // Shared state — the stream loop writes the latest usage in,
-    // the post-flight task reads it on completion or drop.
+    // Shared state — the stream loop writes into these; the post-flight
+    // task reads them on completion or drop.
     let last_usage: Arc<Mutex<Option<Usage>>> = Arc::new(Mutex::new(None));
     let last_usage_for_done = last_usage.clone();
+    let collected_chunks: Arc<Mutex<Vec<ChatCompletionChunk>>> =
+        Arc::new(Mutex::new(Vec::with_capacity(64)));
+    let chunks_for_done = collected_chunks.clone();
 
     // `done_tx.send(natural)` runs from the stream loop on graceful
     // exit. If the loop is dropped before reaching that line, the
@@ -72,24 +89,28 @@ where
     tokio::spawn(async move {
         let outcome = done_rx.await;
         let usage = last_usage_for_done.lock().ok().and_then(|mut g| g.take());
+        let chunks = chunks_for_done
+            .lock()
+            .ok()
+            .map(|mut g| std::mem::take(&mut *g))
+            .unwrap_or_default();
+        let natural = matches!(outcome, Ok(true));
         match outcome {
             Ok(true) => {
-                // Natural completion — the stream ran to the [DONE]
-                // sentinel. Counters track real provider usage.
                 metrics::counter!("gateway_stream_completion_total", "outcome" => "natural")
                     .increment(1);
             }
             Ok(false) | Err(_) => {
-                // Either the stream errored mid-flight or the client
-                // disconnected before the [DONE] sentinel. We still
-                // run accounting so the partial usage we captured
-                // (if any) gets recorded — never let early disconnect
-                // be a free-quota loophole.
                 metrics::counter!("gateway_stream_completion_total", "outcome" => "cancelled")
                     .increment(1);
             }
         }
-        on_done(usage).await;
+        on_done(StreamResult {
+            usage,
+            chunks,
+            natural_completion: natural,
+        })
+        .await;
     });
 
     // Strip out the no-op case so the hot loop can skip the restorer
@@ -110,22 +131,18 @@ where
             match result {
                 Ok(mut chunk) => {
                     // Capture usage off any chunk that carries it.
-                    // OpenAI streaming with `stream_options.include_usage = true`
-                    // emits one chunk near the end whose `usage` is set;
-                    // Anthropic emits cumulative usage on the last
-                    // `message_delta` event. Either way we just take
-                    // the most recent non-None value.
                     if chunk.usage.is_some()
                         && let Ok(mut g) = last_usage.lock()
                     {
                         *g = chunk.usage.clone();
                     }
 
-                    // PII restoration: feed each choice.delta.content through
-                    // the restorer. If the restorer holds the tail back, the
-                    // emitted content may be shorter than received; that's
-                    // the whole point — the next chunk completes the
-                    // placeholder.
+                    // Collect a clone of each chunk for post-flight cache assembly.
+                    if let Ok(mut g) = collected_chunks.lock() {
+                        g.push(chunk.clone());
+                    }
+
+                    // PII restoration
                     if let Some(r) = restorer.as_mut() {
                         for choice in chunk.choices.iter_mut() {
                             if let Some(s) = choice.delta
@@ -138,8 +155,6 @@ where
                                     serde_json::Value::String(restored);
                             }
                         }
-                        // Remember the latest chunk shape so we can
-                        // mint a compatible flush chunk at the end.
                         if let Ok(mut g) = last_chunk_template.lock() {
                             *g = Some(chunk.clone());
                         }
@@ -164,8 +179,6 @@ where
         }
 
         // Restorer flush — release any tail that got held back
-        // waiting for a `}}` that never came. We reuse the last chunk
-        // as a template so routing / model fields stay consistent.
         if let Some(r) = restorer.as_mut() {
             let tail = r.flush();
             if !tail.is_empty()
@@ -174,8 +187,6 @@ where
                     .ok()
                     .and_then(|g| g.clone())
             {
-                // Clear any upstream content + finish_reason + usage
-                // so this synthetic chunk only carries the flushed tail.
                 flush_chunk.usage = None;
                 for choice in flush_chunk.choices.iter_mut() {
                     choice.delta = serde_json::json!({"content": tail});
@@ -186,10 +197,7 @@ where
             }
         }
 
-        // Source stream is fully drained. Tell the post-flight task
-        // it was a natural completion; if this fails (the spawned
-        // task already got cancelled or dropped) there's nothing to
-        // do — accounting will run from the Drop path instead.
+        // Source stream is fully drained — natural completion.
         if let Some(tx) = done_tx.take() {
             let _ = tx.send(true);
         }
@@ -198,6 +206,61 @@ where
     };
 
     Sse::new(body).keep_alive(KeepAlive::default())
+}
+
+/// Assemble a complete `ChatCompletionResponse` from a sequence of
+/// streaming chunks.  Returns `None` if the chunks list is empty.
+///
+/// The assembled response concatenates all `delta.content` fields
+/// into a single `message.content`, preserves `finish_reason` from
+/// the last chunk that carries one, and attaches the provided `usage`.
+pub fn assemble_response(
+    chunks: &[ChatCompletionChunk],
+    usage: Option<Usage>,
+) -> Option<crate::providers::traits::ChatCompletionResponse> {
+    let first = chunks.first()?;
+
+    // Accumulate per-choice content and finish_reason.
+    let mut choice_contents: std::collections::HashMap<u32, (String, Option<String>)> =
+        std::collections::HashMap::new();
+
+    for chunk in chunks {
+        for cc in &chunk.choices {
+            let entry = choice_contents
+                .entry(cc.index)
+                .or_insert_with(|| (String::new(), None));
+            if let Some(content) = cc.delta.get("content").and_then(|v| v.as_str()) {
+                entry.0.push_str(content);
+            }
+            if cc.finish_reason.is_some() {
+                entry.1 = cc.finish_reason.clone();
+            }
+        }
+    }
+
+    let mut choices: Vec<crate::providers::traits::Choice> = choice_contents
+        .into_iter()
+        .map(
+            |(idx, (content, finish_reason))| crate::providers::traits::Choice {
+                index: idx,
+                message: crate::providers::traits::ChatMessage {
+                    role: "assistant".to_string(),
+                    content: serde_json::Value::String(content),
+                },
+                finish_reason,
+            },
+        )
+        .collect();
+    choices.sort_by_key(|c| c.index);
+
+    Some(crate::providers::traits::ChatCompletionResponse {
+        id: first.id.clone(),
+        object: "chat.completion".to_string(),
+        created: first.created,
+        model: first.model.clone(),
+        choices,
+        usage,
+    })
 }
 
 #[cfg(test)]
@@ -223,9 +286,6 @@ mod tests {
 
     #[tokio::test]
     async fn on_done_runs_when_client_drops_stream_early() {
-        // Producer that yields ONE chunk with usage and then waits
-        // forever — simulates an upstream that's mid-stream when
-        // the client disconnects.
         let producer = async_stream::stream! {
             yield chunk(Some(Usage {
                 prompt_tokens: 10,
@@ -245,10 +305,10 @@ mod tests {
         let cap_c = captured_completion.clone();
 
         let on_done =
-            move |usage: Option<Usage>| -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+            move |result: StreamResult| -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
                 Box::pin(async move {
                     on_done_flag.store(true, Ordering::SeqCst);
-                    if let Some(u) = usage {
+                    if let Some(u) = result.usage {
                         cap_p.store(u.prompt_tokens, Ordering::SeqCst);
                         cap_c.store(u.completion_tokens, Ordering::SeqCst);
                     }
@@ -257,16 +317,10 @@ mod tests {
 
         let sse = stream_to_sse(Box::pin(producer), on_done);
 
-        // Pull the SSE body once to make sure the producer's first
-        // chunk gets observed (and last_usage gets populated). Then
-        // drop the entire SSE wrapper to simulate the client going
-        // away mid-stream.
         let mut body_stream = sse.into_response().into_body().into_data_stream();
         let _first: Option<Result<Bytes, _>> = body_stream.next().await;
         drop(body_stream);
 
-        // The post-flight task is detached. Give the runtime a few
-        // ticks to drive it before asserting.
         for _ in 0..20 {
             if on_done_called.load(Ordering::SeqCst) {
                 break;
@@ -284,7 +338,6 @@ mod tests {
 
     #[tokio::test]
     async fn on_done_runs_on_natural_completion() {
-        // Producer yields one chunk with usage, then ends.
         let producer = async_stream::stream! {
             yield chunk(Some(Usage {
                 prompt_tokens: 5,
@@ -301,10 +354,10 @@ mod tests {
         let cap_c = captured_completion.clone();
 
         let on_done =
-            move |usage: Option<Usage>| -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+            move |result: StreamResult| -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
                 Box::pin(async move {
                     on_done_flag.store(true, Ordering::SeqCst);
-                    if let Some(u) = usage {
+                    if let Some(u) = result.usage {
                         cap_p.store(u.prompt_tokens, Ordering::SeqCst);
                         cap_c.store(u.completion_tokens, Ordering::SeqCst);
                     }
@@ -313,7 +366,6 @@ mod tests {
 
         let sse = stream_to_sse(Box::pin(producer), on_done);
         let mut body_stream = sse.into_response().into_body().into_data_stream();
-        // Drain the entire body — natural completion.
         while let Some(item) = body_stream.next().await {
             let _: Result<Bytes, _> = item;
         }
@@ -343,10 +395,10 @@ mod tests {
         let received = received_some.clone();
 
         let on_done =
-            move |usage: Option<Usage>| -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+            move |result: StreamResult| -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
                 Box::pin(async move {
                     on_done_flag.store(true, Ordering::SeqCst);
-                    if usage.is_some() {
+                    if result.usage.is_some() {
                         received.store(true, Ordering::SeqCst);
                     }
                 })

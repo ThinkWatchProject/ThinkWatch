@@ -435,6 +435,9 @@ pub async fn create_server(
             super::providers::validate_custom_headers(headers)?;
             config["custom_headers"] = serde_json::to_value(headers).unwrap_or_default();
         }
+        if let Some(ttl) = req.cache_ttl_secs {
+            config["cache_ttl_secs"] = serde_json::json!(ttl);
+        }
         config
     })
     .fetch_one(&state.db)
@@ -526,6 +529,9 @@ pub struct UpdateMcpServerRequest {
     /// Custom HTTP headers forwarded when connecting to this MCP server.
     /// Values may contain `{{user_id}}` / `{{user_email}}` template variables.
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
+    /// Per-server response cache TTL in seconds. `None` = use global default.
+    /// `0` = disable caching for this server.
+    pub cache_ttl_secs: Option<u64>,
 }
 
 #[utoipa::path(
@@ -619,12 +625,15 @@ pub async fn update_server(
         existing.auth_secret_encrypted.clone()
     };
 
-    // Merge custom_headers + identity_headers into existing config_json
+    // Merge custom_headers + cache_ttl into existing config_json
     let mut config_json = existing.config_json.clone();
     if let Some(ref headers) = req.custom_headers {
         super::providers::validate_custom_headers(headers)?;
         config_json["custom_headers"] = serde_json::to_value(headers)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to serialize headers: {e}")))?;
+    }
+    if let Some(ttl) = req.cache_ttl_secs {
+        config_json["cache_ttl_secs"] = serde_json::json!(ttl);
     }
 
     let updated = sqlx::query_as::<_, McpServer>(

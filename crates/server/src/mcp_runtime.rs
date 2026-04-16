@@ -157,6 +157,18 @@ pub async fn build_registered_server(
         })
         .unwrap_or_default();
 
+    // Detect whether any custom header forwards per-user identity —
+    // if so, responses vary by caller and must not be cached.
+    let forwards_user_identity = custom_headers
+        .iter()
+        .any(|(_, v)| v.contains("{{user_id}}") || v.contains("{{user_email}}"));
+
+    // Per-server cache TTL override from config_json.cache_ttl_secs.
+    let cache_ttl_secs = server
+        .config_json
+        .get("cache_ttl_secs")
+        .and_then(|v| v.as_u64());
+
     Ok(RegisteredServer {
         id: server.id,
         name: server.name.clone(),
@@ -168,6 +180,8 @@ pub async fn build_registered_server(
         last_health_check: server.last_health_check,
         auth_header,
         custom_headers,
+        cache_ttl_secs,
+        forwards_user_identity,
     })
 }
 

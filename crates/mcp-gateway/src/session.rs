@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use think_watch_common::dynamic_config::DynamicConfig;
+
 /// Represents a single client-facing MCP session that may fan out to multiple
 /// upstream server sessions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,38 +30,53 @@ pub struct McpSession {
 ///
 /// Uses Redis as the backing store for multi-instance deployments.
 /// Falls back to in-memory storage if Redis is not provided.
+///
+/// The session TTL is read from [`DynamicConfig`] (`mcp.session_ttl_secs`)
+/// on every Redis write, so changes via the admin settings UI take effect
+/// immediately — no restart needed.
 #[derive(Clone)]
 pub struct SessionManager {
     /// In-memory fallback (used when Redis is not available, or for local caching)
     local: Arc<RwLock<HashMap<String, McpSession>>>,
     /// Optional Redis client for persistent session storage
     redis: Option<fred::clients::Client>,
-    /// Session TTL in seconds
-    ttl_secs: i64,
+    /// Dynamic config — read per-operation to pick up hot-reloaded TTL.
+    dynamic_config: Option<Arc<DynamicConfig>>,
 }
 
 const SESSION_PREFIX: &str = "mcp_session:";
+const DEFAULT_TTL_SECS: i64 = 3600;
 
 impl SessionManager {
+    /// In-memory-only manager (tests, single-instance without Redis).
     pub fn new() -> Self {
         Self {
             local: Arc::new(RwLock::new(HashMap::new())),
             redis: None,
-            ttl_secs: 3600, // 1 hour default
+            dynamic_config: None,
         }
     }
 
     /// Create a SessionManager backed by Redis for multi-instance persistence.
-    pub fn with_redis(redis: fred::clients::Client) -> Self {
+    pub fn with_redis(redis: fred::clients::Client, dynamic_config: Arc<DynamicConfig>) -> Self {
         Self {
             local: Arc::new(RwLock::new(HashMap::new())),
             redis: Some(redis),
-            ttl_secs: 3600,
+            dynamic_config: Some(dynamic_config),
         }
     }
 
     fn redis_key(id: &str) -> String {
         format!("{SESSION_PREFIX}{id}")
+    }
+
+    /// Resolve the current TTL from DynamicConfig, falling back to the
+    /// compile-time default when no config is wired in (tests).
+    async fn ttl_secs(&self) -> i64 {
+        match self.dynamic_config {
+            Some(ref dc) => dc.mcp_session_ttl_secs().await,
+            None => DEFAULT_TTL_SECS,
+        }
     }
 
     /// Create a new session for the given user, returning the session ID.
@@ -77,11 +94,12 @@ impl SessionManager {
         if let Some(ref redis) = self.redis
             && let Ok(json) = serde_json::to_string(&session)
         {
+            let ttl = self.ttl_secs().await;
             let _: Result<(), _> = fred::interfaces::KeysInterface::set(
                 redis,
                 Self::redis_key(&id),
                 json,
-                Some(fred::types::Expiration::EX(self.ttl_secs)),
+                Some(fred::types::Expiration::EX(ttl)),
                 None,
                 false,
             )
@@ -134,11 +152,12 @@ impl SessionManager {
             if let Some(ref redis) = self.redis
                 && let Ok(json) = serde_json::to_string(session)
             {
+                let ttl = self.ttl_secs().await;
                 let _: Result<(), _> = fred::interfaces::KeysInterface::set(
                     redis,
                     Self::redis_key(id),
                     json,
-                    Some(fred::types::Expiration::EX(self.ttl_secs)),
+                    Some(fred::types::Expiration::EX(ttl)),
                     None,
                     false,
                 )
@@ -164,11 +183,12 @@ impl SessionManager {
             if let Some(ref redis) = self.redis
                 && let Ok(json) = serde_json::to_string(session)
             {
+                let ttl = self.ttl_secs().await;
                 let _: Result<(), _> = fred::interfaces::KeysInterface::set(
                     redis,
                     Self::redis_key(session_id),
                     json,
-                    Some(fred::types::Expiration::EX(self.ttl_secs)),
+                    Some(fred::types::Expiration::EX(ttl)),
                     None,
                     false,
                 )
@@ -217,6 +237,8 @@ impl SessionManager {
     }
 
     /// Spawn a background task that periodically cleans up expired sessions.
+    /// The cleanup interval is fixed, but the TTL used by Redis writes is
+    /// always read from DynamicConfig at call time.
     pub fn start_cleanup_task(self, interval: Duration, max_age: Duration) {
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(interval);

@@ -7,9 +7,11 @@ use think_watch_common::limits::{
 };
 
 use crate::access_control::is_tool_allowed;
+use crate::cache::McpResponseCache;
 use crate::circuit_breaker::McpCircuitBreakers;
 use crate::pool::ConnectionPool;
 use crate::registry::Registry;
+use crate::session::SessionManager;
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -103,6 +105,22 @@ fn rate_label(rule: &limits::RateLimitRule) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Per-request caller context
+// ---------------------------------------------------------------------------
+
+/// Everything the proxy needs to know about the caller for a single
+/// request dispatch.  Bundled into a struct to keep method signatures
+/// under the clippy `too_many_arguments` threshold.
+pub struct RequestContext<'a> {
+    pub user_id: Uuid,
+    pub user_email: &'a str,
+    pub client_session_id: &'a str,
+    pub surface_constraints: &'a SurfaceConstraints,
+    pub allowed_mcp_tools: Option<&'a [String]>,
+    pub trace_id: &'a str,
+}
+
+// ---------------------------------------------------------------------------
 // McpProxy
 // ---------------------------------------------------------------------------
 
@@ -121,6 +139,14 @@ pub struct McpProxy {
     pub registry: Registry,
     pub pool: ConnectionPool,
     pub circuit_breakers: McpCircuitBreakers,
+    /// Per-user session manager — owns the mapping from client session
+    /// to per-server upstream `Mcp-Session-Id` values.  This is the
+    /// single source of truth for upstream sessions, replacing the
+    /// previous per-connection state that was shared across users.
+    pub sessions: SessionManager,
+    /// Redis-backed response cache for MCP tool calls.  Only used for
+    /// servers that don't forward per-user identity headers.
+    pub cache: McpResponseCache,
     pub db: PgPool,
     pub redis: fred::clients::Client,
     pub dynamic_config: std::sync::Arc<think_watch_common::dynamic_config::DynamicConfig>,
@@ -135,15 +161,19 @@ impl McpProxy {
     pub fn new(
         registry: Registry,
         pool: ConnectionPool,
+        sessions: SessionManager,
         db: PgPool,
         redis: fred::clients::Client,
         dynamic_config: std::sync::Arc<think_watch_common::dynamic_config::DynamicConfig>,
         audit: think_watch_common::audit::AuditLogger,
     ) -> Self {
+        let cache = McpResponseCache::new(redis.clone());
         Self {
             registry,
             pool,
             circuit_breakers: McpCircuitBreakers::new(),
+            sessions,
+            cache,
             db,
             redis,
             dynamic_config,
@@ -157,27 +187,13 @@ impl McpProxy {
     /// rejected even when an explicit per-tool policy permits them.
     pub async fn handle_request(
         &self,
-        user_id: Uuid,
-        user_email: &str,
-        surface_constraints: &SurfaceConstraints,
-        allowed_mcp_tools: Option<&[String]>,
-        trace_id: &str,
+        ctx: &RequestContext<'_>,
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
         match request.method.as_str() {
             "initialize" => self.handle_initialize(request).await,
-            "tools/list" => self.handle_tools_list(allowed_mcp_tools, request).await,
-            "tools/call" => {
-                self.handle_tools_call(
-                    user_id,
-                    user_email,
-                    surface_constraints,
-                    allowed_mcp_tools,
-                    trace_id,
-                    request,
-                )
-                .await
-            }
+            "tools/list" => self.handle_tools_list(ctx.allowed_mcp_tools, request).await,
+            "tools/call" => self.handle_tools_call(ctx, request).await,
             _ => err_response(
                 request.id,
                 METHOD_NOT_FOUND,
@@ -239,13 +255,15 @@ impl McpProxy {
 
     async fn handle_tools_call(
         &self,
-        user_id: Uuid,
-        user_email: &str,
-        surface_constraints: &SurfaceConstraints,
-        allowed_mcp_tools: Option<&[String]>,
-        trace_id: &str,
+        ctx: &RequestContext<'_>,
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
+        let user_id = ctx.user_id;
+        let user_email = ctx.user_email;
+        let client_session_id = ctx.client_session_id;
+        let surface_constraints = ctx.surface_constraints;
+        let allowed_mcp_tools = ctx.allowed_mcp_tools;
+        let trace_id = ctx.trace_id;
         // Resolve params + tool target up front so we know which MCP
         // server this call belongs to. The rate-limit subjects need
         // the server id, so the rate-limit gate runs AFTER the
@@ -371,6 +389,35 @@ impl McpProxy {
             params: Some(upstream_params),
         };
 
+        // --- Response cache ---------------------------------------------------
+        // Resolve the effective cache TTL:
+        //   per-server override (0 = explicitly disabled) → global fallback
+        let effective_cache_ttl = server
+            .cache_ttl_secs
+            .unwrap_or(self.dynamic_config.mcp_cache_ttl_secs().await);
+
+        // When the server forwards caller identity ({{user_id}} etc.),
+        // scope cache entries per-user so results are never leaked across
+        // users.  Shared servers get a user-agnostic cache lane.
+        let cache_user_id = if server.forwards_user_identity {
+            Some(&user_id)
+        } else {
+            None
+        };
+
+        if effective_cache_ttl > 0 {
+            if let Some(cached) = self
+                .cache
+                .get(&server.id, cache_user_id, &upstream_request)
+                .await
+            {
+                metrics::counter!("mcp_cache_hits_total").increment(1);
+                tracing::debug!(server = %server.name, "MCP cache hit");
+                return cached;
+            }
+            metrics::counter!("mcp_cache_misses_total").increment(1);
+        }
+
         // Circuit breaker — fail fast if the server's CB is currently Open.
         // The breaker is keyed by server name, which is what the dashboard
         // upstream-health panel reads from the shared cb_registry.
@@ -396,6 +443,13 @@ impl McpProxy {
             user_email: user_email.to_string(),
         };
 
+        // Retrieve the per-user upstream session ID for this server
+        // from the SessionManager (backed by Redis in production).
+        let upstream_sid = self
+            .sessions
+            .get_upstream_session(client_session_id, server.id)
+            .await;
+
         // The trace id was resolved at the transport layer — either
         // pinned by an upstream `x-trace-id` header so this call links
         // to the AI request that triggered the tool-use, or freshly
@@ -408,10 +462,23 @@ impl McpProxy {
 
         let response = match self
             .pool
-            .send_request(&conn, &upstream_request, Some(&caller))
+            .send_request(
+                &conn,
+                &upstream_request,
+                Some(&caller),
+                upstream_sid.as_deref(),
+            )
             .await
         {
-            Ok(resp) => {
+            Ok((resp, new_upstream_sid)) => {
+                // Persist any upstream session ID the server returned so
+                // subsequent calls from this user reuse the same session.
+                if let Some(sid) = new_upstream_sid {
+                    self.sessions
+                        .set_upstream_session(client_session_id, server_id, sid)
+                        .await;
+                }
+
                 // JSON-RPC error responses still count as failures so the
                 // breaker reflects upstream tool errors, not just transport
                 // errors. We treat any `error` field as a failure.
@@ -441,6 +508,19 @@ impl McpProxy {
                 )
             }
         };
+
+        // Write successful responses to cache when caching is enabled.
+        if effective_cache_ttl > 0 && response.error.is_none() {
+            self.cache
+                .set(
+                    &server_id,
+                    cache_user_id,
+                    &upstream_request,
+                    &response,
+                    effective_cache_ttl,
+                )
+                .await;
+        }
 
         // Emit mcp_logs row so /api/admin/trace lights up this call.
         // Tool discovery (`tools/list`) is deliberately excluded here —

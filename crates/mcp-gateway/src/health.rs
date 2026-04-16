@@ -46,17 +46,18 @@ impl HealthChecker {
 
         let conn = self.pool.get_or_create(server).await;
         let start = tokio::time::Instant::now();
-        let result = self.pool.send_request(&conn, &request, None).await;
+        // Health checks are system-level — no user session, no caller identity.
+        let result = self.pool.send_request(&conn, &request, None, None).await;
         let elapsed = start.elapsed();
 
         match result {
-            Ok(resp) if resp.error.is_none() => ServerHealth {
+            Ok((resp, _upstream_sid)) if resp.error.is_none() => ServerHealth {
                 status: "healthy".to_owned(),
                 latency_ms: Some(elapsed.as_millis() as u64),
                 last_check: Utc::now(),
                 error: None,
             },
-            Ok(resp) => {
+            Ok((resp, _)) => {
                 let msg = resp
                     .error
                     .map(|e| e.message)

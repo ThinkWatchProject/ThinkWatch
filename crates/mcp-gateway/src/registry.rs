@@ -56,6 +56,16 @@ pub struct RegisteredServer {
     /// which are resolved per-request from the caller's identity.
     #[serde(skip)]
     pub custom_headers: Vec<(String, String)>,
+    /// Per-server cache TTL override (seconds).  `None` means "use the
+    /// global `mcp.cache_ttl_secs` setting".  `Some(0)` disables caching
+    /// for this server explicitly.
+    #[serde(skip)]
+    pub cache_ttl_secs: Option<u64>,
+    /// `true` when any custom header value contains `{{user_id}}` or
+    /// `{{user_email}}` template variables, meaning the upstream request
+    /// varies by caller.  Responses from such servers must NOT be cached.
+    #[serde(skip)]
+    pub forwards_user_identity: bool,
 }
 
 /// The namespace separator used to prefix tool names with their server name.
@@ -206,6 +216,8 @@ mod tests {
             last_health_check: None,
             auth_header: None,
             custom_headers: Vec::new(),
+            cache_ttl_secs: None,
+            forwards_user_identity: false,
         }
     }
 

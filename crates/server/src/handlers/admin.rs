@@ -1640,6 +1640,32 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
+        // MCP client-session TTL.  Lower bound 60s keeps sessions from
+        // expiring mid-conversation; upper bound 86400 (1 day) limits
+        // stale upstream session accumulation.
+        "mcp.session_ttl_secs" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            if !(60..=86400).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "mcp.session_ttl_secs must be between 60 and 86400".into(),
+                ));
+            }
+        }
+
+        // MCP global response cache TTL. 0 = disabled, up to 86400 (1 day).
+        "mcp.cache_ttl_secs" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            if !(0..=86400).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "mcp.cache_ttl_secs must be between 0 and 86400".into(),
+                ));
+            }
+        }
+
         // Integer settings that can be 0 (0 = disabled)
         "api_keys.default_expiry_days"
         | "api_keys.inactivity_timeout_days"

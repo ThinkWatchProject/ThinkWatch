@@ -30,11 +30,14 @@ impl ResponseCache {
     }
 
     /// Whether this request is cacheable (deterministic).
+    ///
+    /// Both streaming and non-streaming requests are eligible — for
+    /// streaming the proxy assembles the complete response from chunks
+    /// after the stream ends and writes it to cache as a normal
+    /// `ChatCompletionResponse`.  On a subsequent cache hit with
+    /// `stream=true`, the assembled response is re-emitted as a
+    /// single-chunk SSE stream.
     pub fn is_cacheable(request: &ChatCompletionRequest) -> bool {
-        // Don't cache streaming requests
-        if request.stream.unwrap_or(false) {
-            return false;
-        }
         // Only cache when temperature is 0 or absent
         match request.temperature {
             Some(t) => t == 0.0,
@@ -207,10 +210,10 @@ mod tests {
     }
 
     #[test]
-    fn streaming_requests_are_not_cacheable() {
+    fn streaming_requests_are_cacheable() {
         let mut r = req("gpt-4o", "ping");
         r.stream = Some(true);
-        assert!(!ResponseCache::is_cacheable(&r));
+        assert!(ResponseCache::is_cacheable(&r));
     }
 
     #[test]

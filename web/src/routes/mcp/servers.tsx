@@ -45,7 +45,7 @@ interface McpServer {
   last_health_check: string | null;
   tools_count: number;
   call_count: number;
-  config_json?: { custom_headers?: Record<string, string> };
+  config_json?: { custom_headers?: Record<string, string>; cache_ttl_secs?: number };
   created_at: string;
 }
 
@@ -68,6 +68,7 @@ export function McpServersPage() {
   const [authType, setAuthType] = useState('none');
   const [authSecret, setAuthSecret] = useState('');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
+  const [cacheTtl, setCacheTtl] = useState('');
 
   // Edit state
   const [editDialogOpen, setEditDialogOpen] = useState(false);
@@ -79,6 +80,7 @@ export function McpServersPage() {
   const [editAuthType, setEditAuthType] = useState('none');
   const [editAuthSecret, setEditAuthSecret] = useState('');
   const [editCustomHeaders, setEditCustomHeaders] = useState<[string, string][]>([]);
+  const [editCacheTtl, setEditCacheTtl] = useState('');
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState('');
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -149,6 +151,7 @@ export function McpServersPage() {
     setAuthType('none');
     setAuthSecret('');
     setCustomHeaders([]);
+    setCacheTtl('');
     setFormError('');
     setTestResult(null);
   };
@@ -185,6 +188,7 @@ export function McpServersPage() {
         auth_type: authType,
         auth_secret: authSecret || undefined,
         custom_headers: headers,
+        cache_ttl_secs: cacheTtl ? Number(cacheTtl) : undefined,
       });
       setDialogOpen(false);
       resetForm();
@@ -233,6 +237,7 @@ export function McpServersPage() {
     setEditError('');
     const existing = s.config_json?.custom_headers ?? {};
     setEditCustomHeaders(Object.entries(existing));
+    setEditCacheTtl(s.config_json?.cache_ttl_secs != null ? String(s.config_json.cache_ttl_secs) : '');
     setEditDialogOpen(true);
   };
 
@@ -273,6 +278,7 @@ export function McpServersPage() {
         auth_type: editAuthType,
         auth_secret: editAuthSecret || undefined,
         custom_headers: headers,
+        cache_ttl_secs: editCacheTtl ? Number(editCacheTtl) : undefined,
       });
       setEditDialogOpen(false);
       setEditServer(null);
@@ -362,6 +368,11 @@ export function McpServersPage() {
                   <Input id="mcp-secret" type="password" value={authSecret} onChange={(e) => setAuthSecret(e.target.value)} placeholder="Secret or token" required />
                 </div>
               )}
+              <div className="space-y-2">
+                <Label>{t('mcpServers.cacheTtlLabel')}</Label>
+                <p className="text-xs text-muted-foreground">{t('mcpServers.cacheTtlHint')}</p>
+                <Input type="number" min={0} step={60} placeholder={t('mcpServers.cacheTtlPlaceholder')} value={cacheTtl} onChange={(e) => setCacheTtl(e.target.value)} />
+              </div>
               <div className="space-y-2">
                 <Label>{t('providers.customHeaders')}</Label>
                 <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
@@ -581,6 +592,11 @@ export function McpServersPage() {
                 <Input type="password" value={editAuthSecret} onChange={(e) => setEditAuthSecret(e.target.value)} placeholder="Leave empty to keep current" />
               </div>
             )}
+            <div className="space-y-2">
+              <Label>{t('mcpServers.cacheTtlLabel')}</Label>
+              <p className="text-xs text-muted-foreground">{t('mcpServers.cacheTtlHint')}</p>
+              <Input type="number" min={0} step={60} placeholder={t('mcpServers.cacheTtlPlaceholder')} value={editCacheTtl} onChange={(e) => setEditCacheTtl(e.target.value)} />
+            </div>
             <div className="space-y-2">
               <Label>{t('providers.customHeaders')}</Label>
               <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>

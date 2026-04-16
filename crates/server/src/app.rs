@@ -211,9 +211,12 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
     // admin UI sees real liveness without a manual probe.
     crate::mcp_runtime::spawn_mcp_health_loop(state.clone(), registry.clone(), pool.clone());
 
+    let session_manager =
+        SessionManager::with_redis(state.redis.clone(), state.dynamic_config.clone());
     let mut mcp_proxy = McpProxy::new(
         registry,
         pool,
+        session_manager,
         state.db.clone(),
         state.redis.clone(),
         state.dynamic_config.clone(),
@@ -222,11 +225,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
     // Wire the shared CB registry into the proxy so per-server breakers
     // are visible to the dashboard handler.
     mcp_proxy.circuit_breakers = state.mcp_circuit_breakers.clone();
-    let session_manager = SessionManager::with_redis(state.redis.clone());
-    let mcp_state = Arc::new(McpGatewayState {
-        proxy: mcp_proxy,
-        sessions: session_manager,
-    });
+    let mcp_state = Arc::new(McpGatewayState { proxy: mcp_proxy });
     let mcp_routes = Router::new()
         .route("/mcp", post(streamable_http::handle_post))
         .route("/mcp", delete(streamable_http::handle_delete))

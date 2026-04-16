@@ -274,6 +274,22 @@ impl DynamicConfig {
         raw.max(5) as u64
     }
 
+    /// TTL for client-facing MCP sessions (in seconds).  Each session
+    /// tracks per-user upstream `Mcp-Session-Id` values in Redis, so
+    /// this controls how long an idle session survives before the user
+    /// must re-initialize.  Clamped to [60, 86400].  Default 3600 (1h).
+    pub async fn mcp_session_ttl_secs(&self) -> i64 {
+        let raw = self.get_i64("mcp.session_ttl_secs").await.unwrap_or(3600);
+        raw.clamp(60, 86400)
+    }
+
+    /// Global default cache TTL for MCP tool-call responses (seconds).
+    /// Individual servers can override this via their `cache_ttl_secs`
+    /// config.  `0` disables caching globally.  Default 0 (off).
+    pub async fn mcp_cache_ttl_secs(&self) -> u64 {
+        self.get_i64("mcp.cache_ttl_secs").await.unwrap_or(0) as u64
+    }
+
     pub async fn client_ip_source(&self) -> String {
         self.get_string("security.client_ip_source")
             .await

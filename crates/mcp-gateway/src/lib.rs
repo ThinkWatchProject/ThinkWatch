@@ -1,4 +1,5 @@
 pub mod access_control;
+pub mod cache;
 pub mod circuit_breaker;
 pub mod detect;
 pub mod health;

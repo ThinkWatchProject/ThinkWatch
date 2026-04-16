@@ -5,6 +5,7 @@ use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use rand::RngExt;
 use sqlx::PgPool;
+use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -844,15 +845,35 @@ pub async fn proxy_chat_completion(
 
     let is_stream = request.stream.unwrap_or(false);
 
-    // Per-tenant cache scope. Prefer api_key id (the most specific
-    // tenant boundary the limits engine knows about); fall back to
-    // user id, then to a literal "anon" so a missing identity still
-    // gets its own private bucket rather than sharing the global key
-    // space. The README's "responses are cached when temperature=0"
-    // Cache lookup (non-streaming only) — semantic cache shared across all users
-    if !is_stream && let Some(cached) = state.cache.get(&request).await {
+    // Cache lookup — semantic cache shared across all users.
+    // Both streaming and non-streaming paths check cache; on a hit
+    // for a streaming request we re-emit the assembled response as
+    // a single-chunk SSE stream so the client gets the format it
+    // asked for.
+    if let Some(cached) = state.cache.get(&request).await {
         metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
-        tracing::debug!(model = %request.model, "Cache HIT");
+        tracing::debug!(model = %request.model, stream = is_stream, "Cache HIT");
+        if is_stream {
+            // Re-emit as SSE: one data chunk with the full response + [DONE]
+            let chunk_json = serde_json::to_string(&cached).unwrap_or_default();
+            let body = async_stream::stream! {
+                yield Ok::<axum::response::sse::Event, Infallible>(
+                    axum::response::sse::Event::default().data(chunk_json),
+                );
+                yield Ok::<axum::response::sse::Event, Infallible>(
+                    axum::response::sse::Event::default().data("[DONE]"),
+                );
+            };
+            let mut response = axum::response::sse::Sse::new(body).into_response();
+            response
+                .headers_mut()
+                .insert("X-Cache", "HIT".parse().unwrap());
+            response.headers_mut().insert(
+                "X-Metadata-Request-Id",
+                metadata.request_id.parse().unwrap(),
+            );
+            return Ok(response);
+        }
         let mut response = Json(&cached).into_response();
         response
             .headers_mut()
@@ -863,10 +884,7 @@ pub async fn proxy_chat_completion(
         );
         return Ok(response);
     }
-
-    if !is_stream {
-        metrics::counter!("gateway_cache_total", "result" => "miss").increment(1);
-    }
+    metrics::counter!("gateway_cache_total", "result" => "miss").increment(1);
 
     // Route to provider — multi-route failover
     let original_model = request.model.clone();
@@ -924,15 +942,15 @@ pub async fn proxy_chat_completion(
         let api_key_id_for_done = identity.api_key_id.clone();
         let model_for_log = original_model.clone();
         let started = request_started_at;
+        // Clone request for cache write — the original is moved into the provider.
+        let request_for_cache = request.clone();
+        let cache_for_done = state.cache.clone();
         let stream = entry.provider.stream_chat_completion(request);
-        let on_done = move |usage: Option<crate::providers::traits::Usage>|
+        let on_done = move |result: crate::streaming::StreamResult|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
-                // Emit the gateway_logs row regardless of whether the
-                // upstream surfaced usage — a zero-token completion
-                // still represents a real request that operators may
-                // need to correlate via trace_id.
-                let (pt, ct) = usage
+                let (pt, ct) = result
+                    .usage
                     .as_ref()
                     .map(|u| (u.prompt_tokens, u.completion_tokens))
                     .unwrap_or((0, 0));
@@ -951,7 +969,19 @@ pub async fn proxy_chat_completion(
                     200,
                 );
 
-                let Some(u) = usage else {
+                // Assemble and cache the complete response when the
+                // stream ran to natural completion (partial streams
+                // from client disconnects are NOT cached).
+                if result.natural_completion
+                    && let Some(assembled) =
+                        crate::streaming::assemble_response(&result.chunks, result.usage.clone())
+                {
+                    cache_for_done
+                        .set(&request_for_cache, &assembled, None)
+                        .await;
+                }
+
+                let Some(u) = result.usage else {
                     return;
                 };
                 post_flight_account(
@@ -1277,10 +1307,11 @@ pub async fn proxy_anthropic_messages(
         let model_for_log = mapped_model.clone();
         let started = request_started_at;
         let stream = entry.provider.stream_chat_completion(stream_request);
-        let on_done = move |usage: Option<crate::providers::traits::Usage>|
+        let on_done = move |result: crate::streaming::StreamResult|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
-                let (pt, ct) = usage
+                let (pt, ct) = result
+                    .usage
                     .as_ref()
                     .map(|u| (u.prompt_tokens, u.completion_tokens))
                     .unwrap_or((0, 0));
@@ -1298,7 +1329,7 @@ pub async fn proxy_anthropic_messages(
                     started.elapsed().as_millis() as i64,
                     200,
                 );
-                let Some(u) = usage else {
+                let Some(u) = result.usage else {
                     return;
                 };
                 post_flight_account(
@@ -1637,10 +1668,11 @@ pub async fn proxy_responses(
         let model_for_log = mapped_model.clone();
         let started = request_started_at;
         let stream = entry.provider.stream_chat_completion(stream_request);
-        let on_done = move |usage: Option<crate::providers::traits::Usage>|
+        let on_done = move |result: crate::streaming::StreamResult|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
-                let (pt, ct) = usage
+                let (pt, ct) = result
+                    .usage
                     .as_ref()
                     .map(|u| (u.prompt_tokens, u.completion_tokens))
                     .unwrap_or((0, 0));
@@ -1658,7 +1690,7 @@ pub async fn proxy_responses(
                     started.elapsed().as_millis() as i64,
                     200,
                 );
-                let Some(u) = usage else {
+                let Some(u) = result.usage else {
                     return;
                 };
                 post_flight_account(

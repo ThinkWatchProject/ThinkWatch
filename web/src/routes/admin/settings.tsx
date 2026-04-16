@@ -71,6 +71,8 @@ export function SettingsPage() {
   // MCP Store
   const [registryUrl, setRegistryUrl] = useState('');
   const [mcpHealthInterval, setMcpHealthInterval] = useState(300);
+  const [mcpSessionTtl, setMcpSessionTtl] = useState(3600);
+  const [mcpCacheTtl, setMcpCacheTtl] = useState(0);
   // Gateway
   const [cacheTtl, setCacheTtl] = useState(0);
   const [requestTimeout, setRequestTimeout] = useState(30);
@@ -118,6 +120,8 @@ export function SettingsPage() {
     setDefaultRole(str(getSettingValue(data, 'auth', 'default_role'), ''));
     setRegistryUrl(str(getSettingValue(data, 'mcp_store', 'registry_url'), ''));
     setMcpHealthInterval(num(getSettingValue(data, 'mcp', 'health_interval_secs'), 300));
+    setMcpSessionTtl(num(getSettingValue(data, 'mcp', 'session_ttl_secs'), 3600));
+    setMcpCacheTtl(num(getSettingValue(data, 'mcp', 'cache_ttl_secs'), 0));
     setCacheTtl(num(getSettingValue(data, 'gateway', 'cache_ttl_secs'), 3600));
     setRequestTimeout(num(getSettingValue(data, 'gateway', 'request_timeout_secs'), 120));
     setBodyLimit(num(getSettingValue(data, 'gateway', 'body_limit_bytes'), 10485760));
@@ -192,6 +196,8 @@ export function SettingsPage() {
           'auth.default_role': defaultRole,
           'mcp_store.registry_url': registryUrl,
           'mcp.health_interval_secs': mcpHealthInterval,
+          'mcp.session_ttl_secs': mcpSessionTtl,
+          'mcp.cache_ttl_secs': mcpCacheTtl,
           'gateway.cache_ttl_secs': cacheTtl,
           'gateway.request_timeout_secs': requestTimeout,
           'gateway.body_limit_bytes': bodyLimit,
@@ -610,6 +616,32 @@ export function SettingsPage() {
                   step={5}
                   value={mcpHealthInterval}
                   onChange={(e) => setMcpHealthInterval(Number(e.target.value) || 0)}
+                />
+              </div>
+              <div className="space-y-2 max-w-md mt-4">
+                <Label className="text-sm">{t('settings.mcpSessionTtlLabel')}</Label>
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.mcpSessionTtlHint')}
+                </p>
+                <Input
+                  type="number"
+                  min={60}
+                  step={60}
+                  value={mcpSessionTtl}
+                  onChange={(e) => setMcpSessionTtl(Number(e.target.value) || 0)}
+                />
+              </div>
+              <div className="space-y-2 max-w-md mt-4">
+                <Label className="text-sm">{t('settings.mcpCacheTtlLabel')}</Label>
+                <p className="text-xs text-muted-foreground">
+                  {t('settings.mcpCacheTtlHint')}
+                </p>
+                <Input
+                  type="number"
+                  min={0}
+                  step={60}
+                  value={mcpCacheTtl}
+                  onChange={(e) => setMcpCacheTtl(Number(e.target.value) || 0)}
                 />
               </div>
             </CardContent>
