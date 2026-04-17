@@ -36,10 +36,15 @@ const DYNAMIC_ENUMS = {
   'limits.period_${_}': ['daily', 'weekly', 'monthly'],
   'apiKeys.surface_${_}': ['ai_gateway', 'mcp_gateway', 'console'],
   'apiKeys.surfaceShort_${_}': ['ai_gateway', 'mcp_gateway', 'console'],
+  // Mirrors the resource names that the backend hands out in
+  // `crates/server/src/handlers/roles.rs`. Keep in sync — an entry that
+  // exists in the backend catalog but not here will silently fall
+  // through to the raw key (shown uppercased) in the permission tree.
   'permissions.resource.${_}': [
     'ai_gateway', 'mcp_gateway', 'api_keys', 'providers', 'mcp_servers',
-    'users', 'team', 'sessions', 'roles', 'analytics', 'audit_logs',
-    'logs', 'log_forwarders', 'webhooks', 'content_filter', 'pii_redactor',
+    'models', 'users', 'team', 'teams', 'team_members', 'sessions',
+    'roles', 'analytics', 'audit_logs', 'logs', 'log_forwarders',
+    'webhooks', 'content_filter', 'pii_redactor', 'rate_limits',
     'settings', 'system',
   ],
   'permissions.action.${_}': [

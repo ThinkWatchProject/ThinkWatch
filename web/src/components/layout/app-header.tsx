@@ -13,34 +13,61 @@ import {
 import { LanguageSwitcher } from './language-switcher';
 import { ThemeToggle } from './theme-toggle';
 
-const breadcrumbMap: Record<string, { sectionKey: string; pageKey: string }> = {
+interface CrumbEntry {
+  sectionKey: string;
+  pageKey: string;
+}
+
+/// Exact path → crumb. Kept separate from the prefix list below so
+/// dynamic routes (`/admin/teams/$id`, `/admin/trace/$traceId`) still
+/// pick up the right section even when the concrete id is part of the
+/// path.
+const exactBreadcrumbs: Record<string, CrumbEntry> = {
   '/': { sectionKey: 'nav.overview', pageKey: 'nav.dashboard' },
   '/guide': { sectionKey: 'nav.overview', pageKey: 'nav.configGuide' },
+  '/api-keys': { sectionKey: 'nav.overview', pageKey: 'nav.apiKeys' },
   '/gateway/providers': { sectionKey: 'nav.aiGateway', pageKey: 'nav.providers' },
   '/gateway/models': { sectionKey: 'nav.aiGateway', pageKey: 'nav.models' },
   '/gateway/security': { sectionKey: 'nav.aiGateway', pageKey: 'nav.contentSecurity' },
-  '/api-keys': { sectionKey: 'nav.overview', pageKey: 'nav.apiKeys' },
   '/mcp/servers': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.mcpServers' },
   '/mcp/tools': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.tools' },
+  '/mcp/store': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.mcpStore' },
   '/analytics/usage': { sectionKey: 'nav.analytics', pageKey: 'nav.usage' },
   '/analytics/costs': { sectionKey: 'nav.analytics', pageKey: 'nav.costs' },
-  '/logs/gateway': { sectionKey: 'nav.logs', pageKey: 'nav.requestLogs' },
-  '/logs/mcp': { sectionKey: 'nav.logs', pageKey: 'nav.mcpLogs' },
-  '/logs/audit': { sectionKey: 'nav.logs', pageKey: 'nav.auditLogs' },
-  '/logs/platform': { sectionKey: 'nav.logs', pageKey: 'nav.platformLogs' },
+  '/logs': { sectionKey: 'nav.logs', pageKey: 'nav.logExplorer' },
   '/logs/forwarders': { sectionKey: 'nav.logs', pageKey: 'nav.logForwarders' },
+  '/admin/webhook-outbox': { sectionKey: 'nav.logs', pageKey: 'nav.webhookOutbox' },
   '/admin/users': { sectionKey: 'nav.admin', pageKey: 'nav.users' },
   '/admin/teams': { sectionKey: 'nav.admin', pageKey: 'nav.teams' },
   '/admin/roles': { sectionKey: 'nav.admin', pageKey: 'nav.roles' },
   '/admin/settings': { sectionKey: 'nav.admin', pageKey: 'nav.settings' },
   '/admin/api-docs': { sectionKey: 'nav.admin', pageKey: 'nav.apiDocs' },
+  '/admin/usage-license': { sectionKey: 'nav.admin', pageKey: 'nav.usageLicense' },
+  '/admin/trace': { sectionKey: 'nav.admin', pageKey: 'nav.trace' },
   '/profile': { sectionKey: 'nav.admin', pageKey: 'auth.profile' },
 };
+
+/// Prefix → crumb, used for dynamic routes where the URL contains an
+/// id segment. Longest prefix wins, so `/admin/teams/$id` matches
+/// before `/admin/teams`.
+const prefixBreadcrumbs: { prefix: string; crumb: CrumbEntry }[] = [
+  { prefix: '/admin/teams/', crumb: { sectionKey: 'nav.admin', pageKey: 'nav.teams' } },
+  { prefix: '/admin/trace/', crumb: { sectionKey: 'nav.admin', pageKey: 'nav.trace' } },
+];
+
+function resolveCrumb(pathname: string): CrumbEntry | undefined {
+  const exact = exactBreadcrumbs[pathname];
+  if (exact) return exact;
+  for (const { prefix, crumb } of prefixBreadcrumbs) {
+    if (pathname.startsWith(prefix)) return crumb;
+  }
+  return undefined;
+}
 
 export function AppHeader() {
   const { t } = useTranslation();
   const location = useLocation();
-  const crumb = breadcrumbMap[location.pathname];
+  const crumb = resolveCrumb(location.pathname);
 
   return (
     <header className="flex h-16 shrink-0 items-center gap-2 transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-12">

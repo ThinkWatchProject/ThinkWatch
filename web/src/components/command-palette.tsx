@@ -14,12 +14,12 @@ interface CmdAction {
   labelKey: string;
   to: string;
   icon: typeof Server;
-  group: 'mcp' | 'gateway' | 'analytics' | 'admin' | 'other';
+  group: 'overview' | 'mcp' | 'gateway' | 'analytics' | 'admin' | 'other';
   keywords?: string;
 }
 
 const ACTIONS: CmdAction[] = [
-  { id: 'dashboard',       labelKey: 'nav.dashboard',       to: '/',                   icon: Activity,   group: 'other',     keywords: 'home index overview' },
+  { id: 'dashboard',       labelKey: 'nav.dashboard',       to: '/',                   icon: Activity,   group: 'overview',  keywords: 'home index overview' },
   { id: 'mcp.servers',     labelKey: 'nav.mcpServers',      to: '/mcp/servers',        icon: Server,     group: 'mcp',       keywords: 'mcp server endpoint' },
   { id: 'mcp.store',       labelKey: 'nav.mcpStore',        to: '/mcp/store',          icon: Store,      group: 'mcp',       keywords: 'market template install' },
   { id: 'mcp.tools',       labelKey: 'nav.tools',        to: '/mcp/tools',          icon: Wrench,     group: 'mcp' },

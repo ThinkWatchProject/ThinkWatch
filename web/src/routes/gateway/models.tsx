@@ -79,6 +79,9 @@ export function ModelsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  // `debouncedSearch` feeds the API so fast typing doesn't fan out
+  // one request per keystroke.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
   const [filterProviderId, setFilterProviderId] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
@@ -113,19 +116,17 @@ export function ModelsPage() {
   /* ---------- data fetching ---------- */
 
   const fetchRoutes = useCallback(
-    async (p = page, q = search, ps = pageSize, pid = filterProviderId) => {
+    async (p = page, q = debouncedSearch, ps = pageSize, pid = filterProviderId) => {
       setLoading(true);
       try {
         const params = new URLSearchParams({ page: String(p), page_size: String(ps) });
         if (q) params.set('q', q);
         if (pid) params.set('provider_id', pid);
-        const [res, provs] = await Promise.all([
-          api<{ items: RouteRow[]; total: number }>(`/api/admin/model-routes?${params}`),
-          api<Provider[]>('/api/admin/providers'),
-        ]);
+        const res = await api<{ items: RouteRow[]; total: number }>(
+          `/api/admin/model-routes?${params}`,
+        );
         setRoutes(res.items);
         setTotalRoutes(res.total);
-        setProviders(provs);
         setError('');
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load routes');
@@ -133,12 +134,39 @@ export function ModelsPage() {
         setLoading(false);
       }
     },
-    [page, search, pageSize, filterProviderId],
+    [page, debouncedSearch, pageSize, filterProviderId],
   );
+
+  // Providers list is small and only used by the filter dropdown +
+  // add-route picker — fetch once on mount, not on every keystroke.
+  const fetchProviders = useCallback(async () => {
+    try {
+      const provs = await api<Provider[]>('/api/admin/providers');
+      setProviders(provs);
+    } catch {
+      // Route fetch surfaces its own error; providers are non-critical here.
+    }
+  }, []);
+
+  useEffect(() => {
+    void fetchProviders();
+  }, [fetchProviders]);
 
   useEffect(() => {
     void fetchRoutes();
   }, [fetchRoutes]);
+
+  // Debounce search input. 250ms matches the users page.
+  useEffect(() => {
+    const h = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => clearTimeout(h);
+  }, [search]);
+
+  // Reset to page 1 when the search term actually changes (post-debounce),
+  // so you don't land on an empty page after filtering.
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
 
   /* ---------- edit route ---------- */
 
@@ -324,10 +352,7 @@ export function ModelsPage() {
         <Input
           placeholder={t('models.searchPlaceholder')}
           value={search}
-          onChange={(e) => {
-            setSearch(e.target.value);
-            setPage(1);
-          }}
+          onChange={(e) => setSearch(e.target.value)}
           className="max-w-sm"
         />
         <Select

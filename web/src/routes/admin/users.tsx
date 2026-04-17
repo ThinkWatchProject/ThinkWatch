@@ -40,7 +40,7 @@ import type { TeamSummary } from '@/lib/types';
 import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { DataTablePagination } from '@/components/data-table-pagination';
-import { policyToPerms, type PolicyDocument } from './roles/types';
+import { policyToPerms, type PermissionDef, type PolicyDocument } from './roles/types';
 
 
 interface RoleAssignment {
@@ -76,6 +76,7 @@ export function UsersPage() {
   const { t } = useTranslation();
   const [users, setUsers] = useState<User[]>([]);
   const [availableRoles, setAvailableRoles] = useState<AvailableRole[]>([]);
+  const [availablePermissions, setAvailablePermissions] = useState<PermissionDef[]>([]);
   const { teams: availableTeams } = useTeams();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -122,13 +123,19 @@ export function UsersPage() {
         per_page: String(pageSize),
       });
       if (debouncedSearch) params.set('search', debouncedSearch);
-      const [usersRes, rolesRes] = await Promise.all([
+      const [usersRes, rolesRes, permsRes] = await Promise.all([
         api<{ data: User[]; total: number }>(`/api/admin/users?${params.toString()}`, { signal }),
         // Roles list is small and only needed for the picker; fetch
         // once on mount, not on every page/search change.
         availableRoles.length === 0
           ? api<{ items: AvailableRole[] }>('/api/admin/roles', { signal }).catch(() => ({ items: [] }))
           : Promise.resolve({ items: availableRoles }),
+        // Permissions catalog is needed by policyToPerms to expand
+        // wildcards and validate action keys in the effective-permissions
+        // preview. Also fetch once.
+        availablePermissions.length === 0
+          ? api<PermissionDef[]>('/api/admin/permissions', { signal }).catch(() => [] as PermissionDef[])
+          : Promise.resolve(availablePermissions),
       ]);
       setUsers(
         usersRes.data.map((u) => ({
@@ -139,6 +146,7 @@ export function UsersPage() {
       setTotal(usersRes.total);
       // Unified picker — system + custom roles all show up together.
       if (availableRoles.length === 0) setAvailableRoles(rolesRes.items);
+      if (availablePermissions.length === 0) setAvailablePermissions(permsRes);
     } catch (err) {
       if (signal?.aborted) return;
       setError(err instanceof Error ? err.message : 'Failed to load users');
@@ -351,6 +359,7 @@ export function UsersPage() {
               <EffectivePermissionsPreview
                 assignments={createAssignments}
                 availableRoles={availableRoles}
+                availablePermissions={availablePermissions}
               />
               <DialogFooter>
                 <Button type="submit" disabled={submitting}>{submitting ? t('users.creating') : t('users.createUser')}</Button>
@@ -592,6 +601,7 @@ export function UsersPage() {
             <EffectivePermissionsPreview
               assignments={editAssignments}
               availableRoles={availableRoles}
+              availablePermissions={availablePermissions}
             />
             <DialogFooter>
               <Button type="submit" disabled={editLoading}>{editLoading ? t('users.saving') : t('common.save')}</Button>
@@ -946,9 +956,11 @@ function RoleAssignmentEditor({
 function EffectivePermissionsPreview({
   assignments,
   availableRoles,
+  availablePermissions,
 }: {
   assignments: RoleAssignment[];
   availableRoles: AvailableRole[];
+  availablePermissions: PermissionDef[];
 }) {
   const { t } = useTranslation();
 
@@ -964,7 +976,10 @@ function EffectivePermissionsPreview({
   for (const a of assignments) {
     const role = rolesById.get(a.role_id);
     if (!role) continue;
-    const parsed = policyToPerms(JSON.stringify(role.policy_document), []);
+    // policyToPerms needs the full catalog so it can validate literal
+    // action keys AND expand wildcards like `*` or `api_keys:*` — passing
+    // an empty array made every preview report zero permissions.
+    const parsed = policyToPerms(JSON.stringify(role.policy_document), availablePermissions);
     for (const p of parsed.perms) perms.add(p);
     if (parsed.models === null) modelsUnrestricted = true;
     else for (const m of parsed.models) models.add(m);
