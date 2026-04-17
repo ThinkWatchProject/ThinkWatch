@@ -248,6 +248,8 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
               <Label htmlFor="prov-apikey">{t('providers.apiKey')}</Label>
               <Input
                 id="prov-apikey"
+                type="password"
+                autoComplete="off"
                 value={unwrapAuthValue(providerType, headers.find(([k]) => k === authHeaderKey[providerType])?.[1] ?? '')}
                 onChange={(e) => {
                   const hk = authHeaderKey[providerType]!;
@@ -401,6 +403,8 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
             <div className="space-y-2">
               <Label>{t('providers.apiKey')}</Label>
               <Input
+                type="password"
+                autoComplete="off"
                 value={unwrapAuthValue(provider.provider_type, editHeaders.find(([k]) => k === authHeaderKey[provider.provider_type])?.[1] ?? '')}
                 onChange={(e) => {
                   const hk = authHeaderKey[provider.provider_type]!;

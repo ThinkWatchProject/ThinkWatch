@@ -55,7 +55,11 @@ export interface ModelRow {
 
 interface CreateKeyResponse {
   id: string;
-  api_key: string;
+  // Backend (POST /api/keys) returns this field as `key`, matching the
+  // rotate response. Using `api_key` here left createdKey undefined after
+  // a successful create, so the dialog stayed on the form and repeated
+  // submits created duplicate keys.
+  key: string;
 }
 
 interface RotateKeyResponse {
@@ -286,7 +290,7 @@ export function CreateApiKeyDialog({
       if (createCostCenter.trim()) {
         onCostCenterAdded(createCostCenter.trim());
       }
-      setCreatedKey(res.api_key);
+      setCreatedKey(res.key);
       onSuccess();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Failed to create key');
