@@ -8,6 +8,7 @@
     "refresh": "刷新",
     "loading": "加载中...",
     "noData": "暂无数据",
+    "noResults": "无匹配结果",
     "confirm": "确认",
     "actions": "操作",
     "status": "状态",
@@ -564,6 +565,7 @@
   "limits": {
     "title": "限速与配额",
     "summary": "{{rules}} 条规则 · {{caps}} 条配额",
+    "summaryRulesOnly": "{{rules}} 条规则",
     "rulesTitle": "滑动窗口限速",
     "rulesHint": "每条规则在所选时间窗口内累计指标超过上限后拒绝请求。多条规则可叠加 — 任一规则触发即拒绝。",
     "noRules": "尚未配置任何限速规则。",
@@ -761,7 +763,12 @@
     "allTools": "所有工具",
     "allModelsShort": "所有模型",
     "selected": "已选",
-    "allIncludingFuture": "全部（含未来新增）"
+    "allIncludingFuture": "全部（含未来新增）",
+    "modelPatternPlaceholder": "搜索或输入 openai/* 模式…",
+    "toolPatternPlaceholder": "搜索或输入 server__* 模式…",
+    "coveredBy": "已被模式覆盖",
+    "addPattern": "添加模式",
+    "addExact": "添加"
   },
   "permissions": {
     "resource": {

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useMemo, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -48,8 +48,6 @@ export interface ApiKey {
 
 export interface ModelRow {
   id: string;
-  provider_id: string;
-  provider_name: string;
   model_id: string;
   display_name: string;
   is_active: boolean;
@@ -87,13 +85,28 @@ function AllowedModelsEditor({
   available,
 }: AllowedModelsEditorProps) {
   const { t } = useTranslation();
-  const groups = new Map<string, ModelRow[]>();
-  for (const m of available) {
-    if (!m.is_active) continue;
-    const list = groups.get(m.provider_name) ?? [];
-    list.push(m);
-    groups.set(m.provider_name, list);
-  }
+  const [search, setSearch] = useState('');
+
+  // Active, search-filtered model list. Provider grouping was dropped
+  // with the route-centric redesign: a model can route to multiple
+  // providers, so `/api/admin/models` no longer carries a single
+  // `provider_name` field. We now render a flat scrollable list with
+  // a search box — grouping by a field that doesn't exist produced
+  // one giant "undefined" bucket.
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    return available
+      .filter((m) => m.is_active)
+      .filter((m) => {
+        if (!q) return true;
+        return (
+          m.model_id.toLowerCase().includes(q) ||
+          m.display_name.toLowerCase().includes(q)
+        );
+      })
+      .sort((a, b) => a.model_id.localeCompare(b.model_id));
+  }, [available, search]);
+
   const toggleModel = (modelId: string) => {
     if (selected.includes(modelId)) {
       onSelectedChange(selected.filter((id) => id !== modelId));
@@ -101,6 +114,7 @@ function AllowedModelsEditor({
       onSelectedChange([...selected, modelId]);
     }
   };
+
   return (
     <div className="space-y-2">
       <Label>{t('apiKeys.allowedModels')}</Label>
@@ -138,28 +152,39 @@ function AllowedModelsEditor({
               {t('apiKeys.allowedModels_noModels')}
             </p>
           ) : (
-            Array.from(groups.entries())
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([provider, rows]) => (
-                <div key={provider} className="space-y-1">
-                  <div className="text-xs font-medium text-muted-foreground">{provider}</div>
-                  <div className="grid grid-cols-1 gap-1 sm:grid-cols-2">
-                    {rows.map((m) => (
+            <>
+              <Input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={t('models.searchPlaceholder')}
+                className="h-8 text-xs"
+              />
+              <div className="max-h-64 overflow-y-auto rounded-md border bg-muted/20">
+                {filtered.length === 0 ? (
+                  <p className="p-3 text-xs text-muted-foreground">
+                    {t('apiKeys.allowedModels_noModels')}
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 gap-1 p-2 sm:grid-cols-2">
+                    {filtered.map((m) => (
                       <label
                         key={m.id}
-                        className="flex cursor-pointer items-center gap-2"
+                        className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-muted/50"
                       >
                         <Checkbox
                           checked={selected.includes(m.model_id)}
                           onCheckedChange={() => toggleModel(m.model_id)}
                         />
-                        <span>{m.display_name}</span>
-                        <code className="text-[10px] text-muted-foreground">{m.model_id}</code>
+                        <span className="truncate">{m.display_name}</span>
+                        <code className="ml-auto truncate text-[10px] text-muted-foreground">
+                          {m.model_id}
+                        </code>
                       </label>
                     ))}
                   </div>
-                </div>
-              ))
+                )}
+              </div>
+            </>
           )}
         </div>
       )}

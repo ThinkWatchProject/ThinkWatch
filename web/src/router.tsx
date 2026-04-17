@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ErrorBoundary } from '@/components/error-boundary';
+import { CommandPalette } from '@/components/command-palette';
 import {
   createRouter,
   createRootRoute,
@@ -161,6 +162,7 @@ function RootComponent() {
       <ErrorBoundary>
         <Outlet />
       </ErrorBoundary>
+      <CommandPalette />
     </AppShell>
   );
 }

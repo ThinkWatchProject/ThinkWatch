@@ -175,8 +175,10 @@ export function ApiKeysPage() {
     api<string[]>('/api/keys/cost-centers')
       .then(setCostCenterOptions)
       .catch(() => setCostCenterOptions([]));
-    api<ModelRow[]>('/api/admin/models')
-      .then(setAvailableModels)
+    // /api/admin/models returns `{ items, total }`, not a bare array.
+    // Request a wide page so the allowed-models picker sees every row.
+    api<{ items: ModelRow[]; total: number }>('/api/admin/models?page_size=200')
+      .then((res) => setAvailableModels(res.items))
       .catch(() => setAvailableModels([]));
   }, []);
 

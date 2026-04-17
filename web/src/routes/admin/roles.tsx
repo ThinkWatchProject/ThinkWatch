@@ -207,7 +207,12 @@ export function RolesPage() {
       const [rolesRes, perms, modelsRes, serversRes, teamsRes, toolsRes] = await Promise.all([
         api<{ items: RoleResponse[] }>('/api/admin/roles'),
         api<PermissionDef[]>('/api/admin/permissions'),
-        api<ModelRow[]>('/api/admin/models').catch(() => [] as ModelRow[]),
+        // /api/admin/models is paginated and returns `{ items, total }`,
+        // not a bare array. Ask for a single large page since the
+        // picker needs every model name for the role-scope dropdown.
+        api<{ items: ModelRow[]; total: number }>('/api/admin/models?page_size=200').catch(
+          () => ({ items: [] as ModelRow[], total: 0 }),
+        ),
         api<McpServer[]>('/api/mcp/servers').catch(() => [] as McpServer[]),
         // Teams power the scope badge on member rows. team_managers
         // can read this endpoint too — they just see fewer teams.
@@ -216,7 +221,7 @@ export function RolesPage() {
       ]);
       setRoles(rolesRes.items);
       setPermissions(perms);
-      setAvailableModelRows(modelsRes);
+      setAvailableModelRows(modelsRes.items);
       setAvailableServers(serversRes);
       setAvailableMcpTools(toolsRes);
       setTeamsById(new Map(teamsRes.map((t) => [t.id, t])));
@@ -279,17 +284,19 @@ export function RolesPage() {
     return out;
   }, [availableMcpTools, serverNameById, serverPrefixById]);
 
-  // Models grouped by provider name.
+  // After the route-centric redesign a model can route to multiple
+  // providers, so `/api/admin/models` no longer ships a single
+  // `provider_name` field. We keep the `Map<groupLabel, models[]>`
+  // shape PermissionTree expects but collapse everything into one
+  // unlabeled bucket — the dropdown now falls back to a flat list
+  // when the key is empty.
   const modelsByProvider = useMemo(() => {
     const out = new Map<string, { modelId: string; displayName: string }[]>();
+    const all: { modelId: string; displayName: string }[] = [];
     for (const m of availableModelRows) {
-      let group = out.get(m.provider_name);
-      if (!group) {
-        group = [];
-        out.set(m.provider_name, group);
-      }
-      group.push({ modelId: m.model_id, displayName: m.display_name });
+      all.push({ modelId: m.model_id, displayName: m.display_name });
     }
+    if (all.length > 0) out.set('', all);
     return out;
   }, [availableModelRows]);
 
@@ -336,10 +343,14 @@ export function RolesPage() {
       if (filter === 'system' && !r.is_system) return false;
       if (filter === 'custom' && r.is_system) return false;
       if (!q) return true;
-      if (r.name.toLowerCase().includes(q)) return true;
+      // Be defensive with `?.`: if the backend ever returns a role
+      // without a `name` or with a non-string policy action, an old
+      // naive `r.name.toLowerCase()` would crash the entire list render
+      // and leave the page blank with no way to recover.
+      if (r.name?.toLowerCase().includes(q)) return true;
       if ((r.description ?? '').toLowerCase().includes(q)) return true;
       const allPerms = extractPolicyActions(r.policy_document);
-      if (allPerms.some((p) => matchPermission(p.toLowerCase(), q))) return true;
+      if (allPerms.some((p) => matchPermission(p?.toLowerCase() ?? '', q))) return true;
       return false;
     });
   }, [roles, search, filter]);
@@ -1583,13 +1594,7 @@ function surfaceFor(group: string): 'ai_gateway' | 'mcp_gateway' | null {
 }
 
 function SurfaceLimitsSlot({ children }: { children: ReactNode }) {
-  const { t } = useTranslation();
-  return (
-    <div className="mt-3 space-y-2 border-t pt-3">
-      <div className="text-xs font-medium">{t('roles.surfaceLimitsHeader')}</div>
-      {children}
-    </div>
-  );
+  return <>{children}</>;
 }
 
 function DangerPermissionWarning() {

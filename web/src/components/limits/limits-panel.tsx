@@ -28,7 +28,7 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronRight, Plus, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -36,6 +36,7 @@ import { Badge } from '@/components/ui/badge';
 import { Switch } from '@/components/ui/switch';
 import { Progress } from '@/components/ui/progress';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { toast } from 'sonner';
 import {
@@ -506,13 +507,17 @@ function AddRuleRow({
     }
   };
 
+  // Inline `height: 32px` on every form element beats any data-attr or
+  // cva class selector in the cascade, so the row always aligns no matter
+  // what shadcn component variants change underneath.
+  const FIELD_HEIGHT = { height: 32 } as const;
   return (
     <div className="flex flex-wrap items-end gap-2 rounded-md border bg-muted/10 p-2">
       {surfaces.length > 1 && (
         <div className="space-y-1">
           <Label className="text-[10px] text-muted-foreground">{t('limits.surface')}</Label>
           <Select value={surface} onValueChange={(v) => setSurfaceWithMetric(v as Surface)}>
-            <SelectTrigger className="h-7 w-32 text-xs">
+            <SelectTrigger className="w-32 text-xs" style={FIELD_HEIGHT}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -532,7 +537,7 @@ function AddRuleRow({
           onValueChange={(v) => setMetric(v as Metric)}
           disabled={surface === 'mcp_gateway'}
         >
-          <SelectTrigger className="h-7 w-28 text-xs">
+          <SelectTrigger className="w-28 text-xs" style={FIELD_HEIGHT}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -544,7 +549,7 @@ function AddRuleRow({
       <div className="space-y-1">
         <Label className="text-[10px] text-muted-foreground">{t('limits.window')}</Label>
         <Select value={String(windowSecs)} onValueChange={(v) => setWindowSecs(Number(v))}>
-          <SelectTrigger className="h-7 w-24 text-xs">
+          <SelectTrigger className="w-24 text-xs" style={FIELD_HEIGHT}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -564,10 +569,11 @@ function AddRuleRow({
           value={maxCount}
           onChange={(e) => setMaxCount(e.target.value)}
           placeholder={metric === 'tokens' ? '100000' : '60'}
-          className="h-7 w-28 text-xs"
+          className="w-28 text-xs"
+          style={FIELD_HEIGHT}
         />
       </div>
-      <Button type="button" size="sm" className="h-7" onClick={submit} disabled={busy || !maxCount}>
+      <Button type="button" onClick={submit} disabled={busy || !maxCount} style={FIELD_HEIGHT}>
         <Plus className="mr-1 h-3 w-3" />
         {t('limits.add')}
       </Button>
@@ -746,7 +752,7 @@ function AddCapRow({
       <div className="space-y-1">
         <Label className="text-[10px] text-muted-foreground">{t('limits.period')}</Label>
         <Select value={period} onValueChange={(v) => setPeriod(v as Period)}>
-          <SelectTrigger className="h-7 w-28 text-xs">
+          <SelectTrigger className="w-28 text-xs" style={{ height: 32 }}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -766,10 +772,11 @@ function AddCapRow({
           value={limitTokens}
           onChange={(e) => setLimitTokens(e.target.value)}
           placeholder="1000000"
-          className="h-7 w-32 text-xs"
+          className="w-32 text-xs"
+          style={{ height: 32 }}
         />
       </div>
-      <Button type="button" size="sm" className="h-7" onClick={submit} disabled={busy || !limitTokens}>
+      <Button type="button" onClick={submit} disabled={busy || !limitTokens} style={{ height: 32 }}>
         <Plus className="mr-1 h-3 w-3" />
         {t('limits.add')}
       </Button>
@@ -856,8 +863,8 @@ function ControlledLimits({
     getBlock(s).budgets.forEach((budget, idx) => allBudgets.push({ surface: s, budget, idx }));
   }
 
-  return (
-    <div className={compact ? 'space-y-3' : 'rounded-md border bg-muted/20 px-3 py-2 space-y-4'}>
+  const body = (
+    <div className="space-y-4">
       <div className="space-y-2">
         <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
           {t('limits.rulesTitle')}
@@ -987,6 +994,40 @@ function ControlledLimits({
       )}
     </div>
   );
+
+  if (compact) {
+    const totalRules = allRules.length;
+    const totalBudgets = allBudgets.length;
+    const summaryText =
+      totalRules === 0 && totalBudgets === 0
+        ? t('roles.unrestricted')
+        : allowBudgets
+          ? t('limits.summary', { rules: totalRules, caps: totalBudgets })
+          : t('limits.summaryRulesOnly', { rules: totalRules });
+    return (
+      <>
+        <span className="text-muted-foreground">{t('limits.title')}:</span>
+        <Popover modal>
+          <PopoverTrigger asChild>
+            <Button type="button" variant="outline" size="sm" className="h-5 gap-1 px-2 text-xs">
+              {summaryText}
+              <ChevronDown className="h-3 w-3 opacity-60" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            className="w-[42rem] overflow-y-auto p-3"
+            style={{ maxHeight: 'var(--radix-popover-content-available-height)' }}
+            align="start"
+            collisionPadding={16}
+          >
+            {body}
+          </PopoverContent>
+        </Popover>
+      </>
+    );
+  }
+
+  return <div className="space-y-4 rounded-md border bg-muted/20 px-3 py-2">{body}</div>;
 }
 
 function AddRuleInline({
@@ -1023,7 +1064,7 @@ function AddRuleInline({
         <div className="space-y-1">
           <Label className="text-[10px] text-muted-foreground">{t('limits.surface')}</Label>
           <Select value={surface} onValueChange={(v) => setSurfaceWithMetric(v as Surface)}>
-            <SelectTrigger className="h-7 w-32 text-xs">
+            <SelectTrigger className="w-32 text-xs" style={{ height: 32 }}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -1043,7 +1084,7 @@ function AddRuleInline({
           onValueChange={(v) => setMetric(v as Metric)}
           disabled={surface === 'mcp_gateway'}
         >
-          <SelectTrigger className="h-7 w-28 text-xs">
+          <SelectTrigger className="w-28 text-xs" style={{ height: 32 }}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -1055,7 +1096,7 @@ function AddRuleInline({
       <div className="space-y-1">
         <Label className="text-[10px] text-muted-foreground">{t('limits.window')}</Label>
         <Select value={windowKey} onValueChange={setWindowKey}>
-          <SelectTrigger className="h-7 w-24 text-xs">
+          <SelectTrigger className="w-24 text-xs" style={{ height: 32 }}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -1075,10 +1116,11 @@ function AddRuleInline({
           value={maxCount}
           onChange={(e) => setMaxCount(e.target.value)}
           placeholder={metric === 'tokens' ? '100000' : '60'}
-          className="h-7 w-28 text-xs"
+          className="w-28 text-xs"
+          style={{ height: 32 }}
         />
       </div>
-      <Button type="button" size="sm" className="h-7" onClick={submit} disabled={!maxCount}>
+      <Button type="button" onClick={submit} disabled={!maxCount} style={{ height: 32 }}>
         <Plus className="mr-1 h-3 w-3" />
         {t('limits.add')}
       </Button>
@@ -1114,7 +1156,7 @@ function AddBudgetInline({
         <div className="space-y-1">
           <Label className="text-[10px] text-muted-foreground">{t('limits.surface')}</Label>
           <Select value={surface} onValueChange={(v) => setSurface(v as Surface)}>
-            <SelectTrigger className="h-7 w-32 text-xs">
+            <SelectTrigger className="w-32 text-xs" style={{ height: 32 }}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -1130,7 +1172,7 @@ function AddBudgetInline({
       <div className="space-y-1">
         <Label className="text-[10px] text-muted-foreground">{t('limits.period')}</Label>
         <Select value={period} onValueChange={(v) => setPeriod(v as Period)}>
-          <SelectTrigger className="h-7 w-28 text-xs">
+          <SelectTrigger className="w-28 text-xs" style={{ height: 32 }}>
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -1150,10 +1192,11 @@ function AddBudgetInline({
           value={limitTokens}
           onChange={(e) => setLimitTokens(e.target.value)}
           placeholder="1000000"
-          className="h-7 w-32 text-xs"
+          className="w-32 text-xs"
+          style={{ height: 32 }}
         />
       </div>
-      <Button type="button" size="sm" className="h-7" onClick={submit} disabled={!limitTokens}>
+      <Button type="button" onClick={submit} disabled={!limitTokens} style={{ height: 32 }}>
         <Plus className="mr-1 h-3 w-3" />
         {t('limits.add')}
       </Button>

@@ -8,6 +8,7 @@
     "refresh": "Refresh",
     "loading": "Loading...",
     "noData": "No data",
+    "noResults": "No results",
     "confirm": "Confirm",
     "actions": "Actions",
     "status": "Status",
@@ -564,6 +565,7 @@
   "limits": {
     "title": "Rate limits & budgets",
     "summary": "{{rules}} rules · {{caps}} budgets",
+    "summaryRulesOnly": "{{rules}} rules",
     "rulesTitle": "Sliding-window rate limits",
     "rulesHint": "Each rule rejects requests when the count for the chosen metric exceeds `max` over the chosen window. Multiple rules combine — any rule firing rejects.",
     "noRules": "No rate limit rules yet.",
@@ -761,7 +763,12 @@
     "allTools": "All tools",
     "allModelsShort": "All models",
     "selected": "selected",
-    "allIncludingFuture": "all incl. future"
+    "allIncludingFuture": "all incl. future",
+    "modelPatternPlaceholder": "Search or type openai/* pattern…",
+    "toolPatternPlaceholder": "Search or type server__* pattern…",
+    "coveredBy": "covered by pattern",
+    "addPattern": "Add pattern",
+    "addExact": "Add"
   },
   "permissions": {
     "resource": {
