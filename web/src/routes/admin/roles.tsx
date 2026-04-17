@@ -12,6 +12,8 @@ import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { DataTablePagination } from '@/components/data-table-pagination';
+import { useClientPagination } from '@/hooks/use-client-pagination';
 import { RoleWizard } from '@/components/roles/RoleWizard';
 import { useRoleForm, fromRoleResponse, emptyRoleForm, buildRolePayload } from '@/components/roles/useRoleForm';
 import { PermissionTree } from '@/components/roles/PermissionTree';
@@ -341,6 +343,8 @@ export function RolesPage() {
       return false;
     });
   }, [roles, search, filter]);
+
+  const rolesPager = useClientPagination(filteredRoles, 20);
 
   // ------------------------------------------------------------------
   // Mutations
@@ -975,7 +979,7 @@ export function RolesPage() {
                 </TableCell>
               </TableRow>
             ) : (
-              filteredRoles.map((role) => (
+              rolesPager.paginated.map((role) => (
                 <TableRow
                   key={role.id}
                   className="cursor-pointer hover:bg-muted/30"
@@ -1045,6 +1049,17 @@ export function RolesPage() {
             )}
           </TableBody>
         </Table>
+        {filteredRoles.length > rolesPager.pageSize && (
+          <div data-slot="card-footer" className="border-t">
+            <DataTablePagination
+              total={rolesPager.total}
+              page={rolesPager.page}
+              pageSize={rolesPager.pageSize}
+              onPageChange={rolesPager.setPage}
+              onPageSizeChange={rolesPager.setPageSize}
+            />
+          </div>
+        )}
       </Card>
 
       {/* Detail drawer */}

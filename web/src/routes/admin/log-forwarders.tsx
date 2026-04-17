@@ -7,6 +7,8 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { DataTablePagination } from '@/components/data-table-pagination';
+import { useClientPagination } from '@/hooks/use-client-pagination';
 import { Checkbox } from '@/components/ui/checkbox';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -88,6 +90,7 @@ export function LogForwardersPage() {
   const { t } = useTranslation();
   const [forwarders, setForwarders] = useState<LogForwarder[]>([]);
   const [loading, setLoading] = useState(true);
+  const pager = useClientPagination(forwarders, 20);
   const [error, setError] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
@@ -511,7 +514,7 @@ export function LogForwardersPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {forwarders.map((f) => (
+                {pager.paginated.map((f) => (
                   <TableRow key={f.id}>
                     <TableCell className="font-medium">{f.name}</TableCell>
                     <TableCell>
@@ -589,6 +592,17 @@ export function LogForwardersPage() {
             </Table>
           )}
         </CardContent>
+        {forwarders.length > pager.pageSize && (
+          <div data-slot="card-footer" className="-mt-4 border-t">
+            <DataTablePagination
+              total={pager.total}
+              page={pager.page}
+              pageSize={pager.pageSize}
+              onPageChange={pager.setPage}
+              onPageSizeChange={pager.setPageSize}
+            />
+          </div>
+        )}
       </Card>
 
       {/* Edit Dialog */}

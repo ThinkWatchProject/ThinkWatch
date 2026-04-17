@@ -31,6 +31,8 @@ import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { slugifyPrefix, resolveCollision, sanitizePrefixInput } from '@/lib/prefix-utils';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { DataTablePagination } from '@/components/data-table-pagination';
+import { useClientPagination } from '@/hooks/use-client-pagination';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
 
@@ -54,6 +56,7 @@ export function McpServersPage() {
   const { t } = useTranslation();
   const [servers, setServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
+  const pager = useClientPagination(servers, 20);
   const [error, setError] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
   const [formError, setFormError] = useState('');
@@ -488,7 +491,7 @@ export function McpServersPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {servers.map((s) => (
+                {pager.paginated.map((s) => (
                   <TableRow key={s.id}>
                     <TableCell className="font-medium">{s.name}</TableCell>
                     <TableCell className="font-mono text-xs">{s.endpoint_url}</TableCell>
@@ -529,6 +532,17 @@ export function McpServersPage() {
             </Table>
           )}
         </CardContent>
+        {servers.length > pager.pageSize && (
+          <div data-slot="card-footer" className="-mt-4 border-t">
+            <DataTablePagination
+              total={pager.total}
+              page={pager.page}
+              pageSize={pager.pageSize}
+              onPageChange={pager.setPage}
+              onPageSizeChange={pager.setPageSize}
+            />
+          </div>
+        )}
       </Card>
 
       {/* Edit MCP Server Dialog */}

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { DataTablePagination } from '@/components/data-table-pagination';
+import { useClientPagination } from '@/hooks/use-client-pagination';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -66,6 +68,9 @@ export function GatewaySecurityPage() {
   const [contentFilters, setContentFilters] = useState<ContentFilterRuleWithId[]>([]);
   const [piiPatterns, setPiiPatterns] = useState<PiiPattern[]>([]);
 
+  const cfPager = useClientPagination(contentFilters, 20);
+  const piiPager = useClientPagination(piiPatterns, 20);
+
   // Unified sandbox state
   const [sandboxOpen, setSandboxOpen] = useState(false);
   const [sandboxText, setSandboxText] = useState('');
@@ -128,11 +133,16 @@ export function GatewaySecurityPage() {
   // Content filter helpers
   // ---------------------------------------------------------------------------
 
-  const addContentFilter = () =>
-    setContentFilters([
+  const addContentFilter = () => {
+    const next = [
       ...contentFilters,
       withClientId({ name: '', pattern: '', match_type: 'contains', action: 'block' }),
-    ]);
+    ];
+    setContentFilters(next);
+    // Jump to the page that now holds the new (empty) row so users don't
+    // click "Add" on page 1 and silently append to page N somewhere else.
+    cfPager.setPage(Math.ceil(next.length / cfPager.pageSize));
+  };
 
   const removeContentFilter = (i: number) =>
     setContentFilters(contentFilters.filter((_, idx) => idx !== i));
@@ -169,8 +179,11 @@ export function GatewaySecurityPage() {
   // PII helpers
   // ---------------------------------------------------------------------------
 
-  const addPiiPattern = () =>
-    setPiiPatterns([...piiPatterns, { name: '', regex: '', placeholder_prefix: '' }]);
+  const addPiiPattern = () => {
+    const next = [...piiPatterns, { name: '', regex: '', placeholder_prefix: '' }];
+    setPiiPatterns(next);
+    piiPager.setPage(Math.ceil(next.length / piiPager.pageSize));
+  };
 
   const removePiiPattern = (i: number) =>
     setPiiPatterns(piiPatterns.filter((_, idx) => idx !== i));
@@ -294,12 +307,16 @@ export function GatewaySecurityPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {contentFilters.map((cf, i) => (
+                {cfPager.paginated.map((cf) => {
+                  // Row handlers operate on the full array's index, not the
+                  // paginated slice's, so look up the current global index.
+                  const globalIndex = contentFilters.indexOf(cf);
+                  return (
                   <TableRow key={cf._clientId}>
                     <TableCell>
                       <Input
                         value={cf.name}
-                        onChange={(e) => updateContentFilter(i, 'name', e.target.value)}
+                        onChange={(e) => updateContentFilter(globalIndex, 'name', e.target.value)}
                         placeholder={t('settings.contentFilter.namePlaceholder')}
                         className="h-8"
                       />
@@ -307,7 +324,7 @@ export function GatewaySecurityPage() {
                     <TableCell>
                       <Select
                         value={cf.match_type}
-                        onValueChange={(v) => v && updateContentFilter(i, 'match_type', v)}
+                        onValueChange={(v) => v && updateContentFilter(globalIndex, 'match_type', v)}
                       >
                         <SelectTrigger className="h-8">
                           <SelectValue />
@@ -321,7 +338,7 @@ export function GatewaySecurityPage() {
                     <TableCell>
                       <Input
                         value={cf.pattern}
-                        onChange={(e) => updateContentFilter(i, 'pattern', e.target.value)}
+                        onChange={(e) => updateContentFilter(globalIndex, 'pattern', e.target.value)}
                         placeholder={cf.match_type === 'regex' ? '\\d{4}-\\d{4}' : 'jailbreak'}
                         className="h-8 font-mono text-xs"
                       />
@@ -329,7 +346,7 @@ export function GatewaySecurityPage() {
                     <TableCell>
                       <Select
                         value={cf.action}
-                        onValueChange={(v) => v && updateContentFilter(i, 'action', v)}
+                        onValueChange={(v) => v && updateContentFilter(globalIndex, 'action', v)}
                       >
                         <SelectTrigger className="h-8">
                           <SelectValue />
@@ -348,14 +365,26 @@ export function GatewaySecurityPage() {
                       </Select>
                     </TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="icon-sm" onClick={() => removeContentFilter(i)}>
+                      <Button variant="ghost" size="icon-sm" onClick={() => removeContentFilter(globalIndex)}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
+          )}
+          {contentFilters.length > cfPager.pageSize && (
+            <div className="border-t mt-4 -mx-4">
+              <DataTablePagination
+                total={cfPager.total}
+                page={cfPager.page}
+                pageSize={cfPager.pageSize}
+                onPageChange={cfPager.setPage}
+                onPageSizeChange={cfPager.setPageSize}
+              />
+            </div>
           )}
           <div className="mt-4 grid grid-cols-1 gap-1 text-xs text-muted-foreground sm:grid-cols-3">
             <p><strong className="text-destructive">{t('settings.contentFilter.actionBlock')}:</strong> {t('settings.contentFilter.actionBlockHint')}</p>
@@ -430,12 +459,14 @@ export function GatewaySecurityPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {piiPatterns.map((pp, i) => (
-                  <TableRow key={i}>
+                {piiPager.paginated.map((pp) => {
+                  const globalIndex = piiPatterns.indexOf(pp);
+                  return (
+                  <TableRow key={globalIndex}>
                     <TableCell>
                       <Input
                         value={pp.name}
-                        onChange={(e) => updatePiiPattern(i, 'name', e.target.value)}
+                        onChange={(e) => updatePiiPattern(globalIndex, 'name', e.target.value)}
                         placeholder={t('settings.pii.namePlaceholder')}
                         className="h-8"
                       />
@@ -443,7 +474,7 @@ export function GatewaySecurityPage() {
                     <TableCell>
                       <Input
                         value={pp.regex}
-                        onChange={(e) => updatePiiPattern(i, 'regex', e.target.value)}
+                        onChange={(e) => updatePiiPattern(globalIndex, 'regex', e.target.value)}
                         placeholder="\\d{3}-\\d{2}-\\d{4}"
                         className="h-8 font-mono text-xs"
                       />
@@ -451,20 +482,32 @@ export function GatewaySecurityPage() {
                     <TableCell>
                       <Input
                         value={pp.placeholder_prefix}
-                        onChange={(e) => updatePiiPattern(i, 'placeholder_prefix', e.target.value)}
+                        onChange={(e) => updatePiiPattern(globalIndex, 'placeholder_prefix', e.target.value)}
                         placeholder="EMAIL"
                         className="h-8 font-mono text-xs"
                       />
                     </TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="icon-sm" onClick={() => removePiiPattern(i)}>
+                      <Button variant="ghost" size="icon-sm" onClick={() => removePiiPattern(globalIndex)}>
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     </TableCell>
                   </TableRow>
-                ))}
+                  );
+                })}
               </TableBody>
             </Table>
+          )}
+          {piiPatterns.length > piiPager.pageSize && (
+            <div className="border-t mt-4 -mx-4">
+              <DataTablePagination
+                total={piiPager.total}
+                page={piiPager.page}
+                pageSize={piiPager.pageSize}
+                onPageChange={piiPager.setPage}
+                onPageSizeChange={piiPager.setPageSize}
+              />
+            </div>
           )}
           <p className="mt-4 text-xs text-muted-foreground">
             {t('settings.pii.behavior')}

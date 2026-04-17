@@ -47,6 +47,8 @@ import {
 } from 'lucide-react';
 import { api, apiDelete, apiPatch, apiPost, hasPermission } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { DataTablePagination } from '@/components/data-table-pagination';
+import { useClientPagination } from '@/hooks/use-client-pagination';
 import type { Team, TeamMember } from '@/lib/types';
 import { toast } from 'sonner';
 
@@ -70,6 +72,7 @@ export function TeamDetailPage() {
   // Members
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [membersLoading, setMembersLoading] = useState(true);
+  const membersPager = useClientPagination(members, 20);
 
   // Edit dialog
   const [editOpen, setEditOpen] = useState(false);
@@ -353,7 +356,7 @@ export function TeamDetailPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {members.map((m) => (
+                    {membersPager.paginated.map((m) => (
                       <TableRow key={m.user_id}>
                         <TableCell className="text-sm">{m.email}</TableCell>
                         <TableCell className="text-sm">{m.display_name || '—'}</TableCell>
@@ -375,6 +378,17 @@ export function TeamDetailPage() {
                     ))}
                   </TableBody>
                 </Table>
+              )}
+              {members.length > membersPager.pageSize && (
+                <div className="border-t mt-4 -mx-4">
+                  <DataTablePagination
+                    total={membersPager.total}
+                    page={membersPager.page}
+                    pageSize={membersPager.pageSize}
+                    onPageChange={membersPager.setPage}
+                    onPageSizeChange={membersPager.setPageSize}
+                  />
+                </div>
               )}
             </CardContent>
           </Card>

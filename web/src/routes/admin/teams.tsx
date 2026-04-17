@@ -26,6 +26,8 @@ import {
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { DataTablePagination } from '@/components/data-table-pagination';
+import { useClientPagination } from '@/hooks/use-client-pagination';
 import { AlertCircle, MoreHorizontal, Plus, Trash2, Users } from 'lucide-react';
 import { api, apiDelete, apiPost, hasPermission } from '@/lib/api';
 import type { Team } from '@/lib/types';
@@ -37,6 +39,7 @@ export function TeamsPage() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const teamsPager = useClientPagination(teams, 20);
 
   // Create
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -154,7 +157,7 @@ export function TeamsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {teams.map((team) => (
+                {teamsPager.paginated.map((team) => (
                   <TableRow key={team.id}>
                     <TableCell
                       className="cursor-pointer font-medium hover:underline"
@@ -192,6 +195,17 @@ export function TeamsPage() {
               </TableBody>
             </Table>
           </CardContent>
+          {teams.length > teamsPager.pageSize && (
+            <div data-slot="card-footer" className="-mt-4 border-t">
+              <DataTablePagination
+                total={teamsPager.total}
+                page={teamsPager.page}
+                pageSize={teamsPager.pageSize}
+                onPageChange={teamsPager.setPage}
+                onPageSizeChange={teamsPager.setPageSize}
+              />
+            </div>
+          )}
         </Card>
       )}
 

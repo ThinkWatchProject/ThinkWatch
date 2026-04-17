@@ -16,6 +16,8 @@ import { Plus, Trash2, Pencil, Plug, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiDelete, hasPermission } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { DataTablePagination } from '@/components/data-table-pagination';
+import { useClientPagination } from '@/hooks/use-client-pagination';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
 import type { Provider } from './provider-types';
@@ -26,6 +28,7 @@ export function ProvidersPage() {
   const { t } = useTranslation();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
+  const pager = useClientPagination(providers, 20);
   const [error, setError] = useState('');
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
 
@@ -124,7 +127,7 @@ export function ProvidersPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {providers.map((p) => (
+                {pager.paginated.map((p) => (
                   <TableRow key={p.id}>
                     <TableCell className="font-medium">{p.display_name || p.name}</TableCell>
                     <TableCell>
@@ -169,6 +172,17 @@ export function ProvidersPage() {
             </Table>
           )}
         </CardContent>
+        {providers.length > pager.pageSize && (
+          <div data-slot="card-footer" className="-mt-4 border-t">
+            <DataTablePagination
+              total={pager.total}
+              page={pager.page}
+              pageSize={pager.pageSize}
+              onPageChange={pager.setPage}
+              onPageSizeChange={pager.setPageSize}
+            />
+          </div>
+        )}
       </Card>
 
       <CreateProviderDialog
