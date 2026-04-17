@@ -30,7 +30,7 @@ use think_watch_common::limits::{
 /// Shared application state for the gateway proxy handlers.
 #[derive(Clone)]
 pub struct GatewayState {
-    pub router: Arc<ModelRouter>,
+    pub router: Arc<ArcSwap<ModelRouter>>,
     pub model_mapper: Arc<ModelMapper>,
     /// Hot-swappable so admins can update rules without restarting the gateway.
     pub content_filter: Arc<ArcSwap<ContentFilter>>,
@@ -398,7 +398,7 @@ async fn preflight_request_limits(
     identity: &GatewayRequestIdentity,
     model: &str,
 ) -> Result<(Option<Uuid>, Vec<limits::RateLimitRule>), GatewayErrorResponse> {
-    let _provider_id = state.router.provider_id_for(model);
+    let _provider_id = state.router.load().provider_id_for(model);
     // Role-inline constraints came in with the identity (materialized
     // once by the auth middleware). No DB fetch here — fail-closed is
     // only relevant for the Redis call below.
@@ -860,7 +860,8 @@ pub async fn proxy_chat_completion(
 
     // Route to provider — multi-route failover
     let original_model = request.model.clone();
-    let routes = state.router.route(&request.model).ok_or_else(|| {
+    let router = state.router.load();
+    let routes = router.route(&request.model).ok_or_else(|| {
         ctx.emit(GatewayError::ProviderError(format!(
             "No provider found for model: {}",
             request.model
@@ -1080,7 +1081,7 @@ pub async fn proxy_chat_completion(
 ///
 /// Returns the list of available models in OpenAI-compatible format.
 pub async fn list_models_handler(State(state): State<GatewayState>) -> Json<serde_json::Value> {
-    let models = state.router.list_models();
+    let models = state.router.load().list_models();
 
     let model_objects: Vec<serde_json::Value> = models
         .into_iter()
@@ -1193,7 +1194,8 @@ pub async fn proxy_anthropic_messages(
     }
 
     // Route to provider — multi-route failover
-    let routes = state.router.route(&mapped_model).ok_or_else(|| {
+    let router = state.router.load();
+    let routes = router.route(&mapped_model).ok_or_else(|| {
         ctx.emit(GatewayError::ProviderError(format!(
             "No provider found for model: {mapped_model}"
         )))
@@ -1596,7 +1598,8 @@ pub async fn proxy_responses(
     };
 
     // Route to provider — multi-route failover
-    let routes = state.router.route(&mapped_model).ok_or_else(|| {
+    let router = state.router.load();
+    let routes = router.route(&mapped_model).ok_or_else(|| {
         ctx.emit(GatewayError::ProviderError(format!(
             "No provider found for model: {mapped_model}"
         )))

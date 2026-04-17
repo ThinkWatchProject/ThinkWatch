@@ -246,6 +246,13 @@ async fn main() -> anyhow::Result<()> {
     let init_http_secs = dynamic_config.perf_http_client_secs().await as u64;
     let init_mcp_pool_secs = dynamic_config.perf_mcp_pool_secs().await as u64;
 
+    // Pre-create the gateway router handle. `create_gateway_app` will
+    // load providers and swap in the real router; CRUD handlers can
+    // later call `rebuild_gateway_router` to hot-reload.
+    let gateway_router = Arc::new(arc_swap::ArcSwap::from_pointee(
+        think_watch_gateway::router::ModelRouter::new(),
+    ));
+
     let state = app::AppState {
         db: pool,
         redis,
@@ -272,6 +279,7 @@ async fn main() -> anyhow::Result<()> {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
         )),
+        gateway_router: gateway_router.clone(),
     };
 
     // --- Hot reload of content filter / PII redactor on config change ---

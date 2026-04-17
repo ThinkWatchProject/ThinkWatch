@@ -361,6 +361,8 @@ pub async fn create_provider(
             .detail(serde_json::json!({ "name": &req.name })),
     );
 
+    crate::app::rebuild_gateway_router(&state).await;
+
     Ok(Json(provider))
 }
 
@@ -445,6 +447,8 @@ pub async fn update_provider(
             .detail(serde_json::json!({ "name": existing.name })),
     );
 
+    crate::app::rebuild_gateway_router(&state).await;
+
     Ok(Json(updated))
 }
 
@@ -522,6 +526,8 @@ pub async fn delete_provider(
             .resource_id(id.to_string())
             .detail(serde_json::json!({ "name": name })),
     );
+
+    crate::app::rebuild_gateway_router(&state).await;
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
 }

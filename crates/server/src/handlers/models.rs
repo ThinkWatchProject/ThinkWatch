@@ -447,6 +447,8 @@ pub async fn sync_models(
             })),
     );
 
+    crate::app::rebuild_gateway_router(&state).await;
+
     Ok(Json(serde_json::json!({
         "synced": synced,
         "deactivated": deactivated.rows_affected(),
@@ -577,6 +579,8 @@ pub async fn create_model_route(
             })),
     );
 
+    crate::app::rebuild_gateway_router(&state).await;
+
     Ok(Json(row))
 }
 
@@ -627,6 +631,8 @@ pub async fn update_model_route(
             .resource_id(route_id.to_string()),
     );
 
+    crate::app::rebuild_gateway_router(&state).await;
+
     Ok(Json(row))
 }
 
@@ -656,6 +662,8 @@ pub async fn delete_model_route(
             .resource("model_route")
             .resource_id(route_id.to_string()),
     );
+
+    crate::app::rebuild_gateway_router(&state).await;
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
 }
@@ -822,6 +830,8 @@ pub async fn batch_create_routes(
                 "created": created,
             })),
     );
+
+    crate::app::rebuild_gateway_router(&state).await;
 
     Ok(Json(serde_json::json!({ "created": created })))
 }

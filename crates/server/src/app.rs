@@ -65,6 +65,9 @@ pub struct AppState {
     /// outbound calls. Wrapped in `ArcSwap` so the timeout can be
     /// changed at runtime via `perf.http_client_secs` without restart.
     pub http_client: Arc<arc_swap::ArcSwap<reqwest::Client>>,
+    /// Gateway model router. Wrapped in `ArcSwap` so route changes
+    /// (provider/model CRUD, sync) take effect without restart.
+    pub gateway_router: Arc<arc_swap::ArcSwap<ModelRouter>>,
 }
 
 /// Build a `ContentFilter` from the current `system_settings` value.
@@ -85,6 +88,18 @@ pub async fn load_pii_redactor(dc: &DynamicConfig) -> PiiRedactor {
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     PiiRedactor::from_config(&configs)
+}
+
+/// Rebuild the gateway model router from the database and hot-swap it in.
+/// Called by provider/model CRUD handlers after changes.
+pub async fn rebuild_gateway_router(state: &AppState) {
+    let mut new_router = ModelRouter::new();
+    if let Err(e) = load_providers_into_router(state, &mut new_router).await {
+        tracing::error!("Failed to rebuild gateway router: {e}");
+        return;
+    }
+    state.gateway_router.store(Arc::new(new_router));
+    tracing::info!("Gateway router hot-reloaded");
 }
 
 /// Common security layers applied to both servers.
@@ -139,17 +154,19 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
     // the first one. The `/health/ready` probe checks the providers
     // table directly, so K8s won't route AI traffic to a pod with
     // an empty router.
-    let mut model_router = ModelRouter::new();
-    if let Err(e) = load_providers_into_router(&state, &mut model_router).await {
+    // Build the initial router and swap it into the shared handle.
+    let mut initial_router = ModelRouter::new();
+    if let Err(e) = load_providers_into_router(&state, &mut initial_router).await {
         metrics::counter!("gateway_provider_load_failed_total").increment(1);
         tracing::error!(
             "Failed to load providers from database; gateway will start with empty router \
              and /health/ready will return 503 until providers are configured: {e}"
         );
     }
-    let model_router = Arc::new(model_router);
+    state.gateway_router.store(Arc::new(initial_router));
+
     let gateway_state = GatewayState {
-        router: model_router,
+        router: state.gateway_router.clone(),
         model_mapper: Arc::new(ModelMapper::new()),
         // Share the hot-swappable filter handles with the gateway state.
         content_filter: state.content_filter.clone(),
