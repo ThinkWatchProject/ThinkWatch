@@ -358,45 +358,23 @@ impl AiProvider for BedrockProvider {
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         let url = self.endpoint_url(&request.model);
-        let custom_headers = self.base.resolve_headers(&request);
         let bedrock_req = convert_to_bedrock(&request);
         let body_bytes = serde_json::to_vec(&bedrock_req)
             .map_err(|e| GatewayError::TransformError(e.to_string()))?;
 
         let signed_headers = self.sign_request(&url, &body_bytes).await?;
 
-        let mut req_builder = self
+        let builder = self
             .base
             .client
             .post(&url)
             .header("content-type", "application/json")
             .body(body_bytes);
+        let builder = ProviderBase::apply_headers(builder, &signed_headers);
+        let builder = self.base.apply_custom_headers(builder, &request);
 
-        for (name, value) in &signed_headers {
-            req_builder = req_builder.header(name.as_str(), value.as_str());
-        }
-        for (k, v) in &custom_headers {
-            req_builder = req_builder.header(k.as_str(), v.as_str());
-        }
-
-        let resp = req_builder
-            .send()
-            .await
-            .map_err(|e| GatewayError::NetworkError(e.to_string()))?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(GatewayError::UpstreamRateLimited);
-        }
-        if status == reqwest::StatusCode::FORBIDDEN || status == reqwest::StatusCode::UNAUTHORIZED {
-            return Err(GatewayError::UpstreamAuthError);
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GatewayError::ProviderError(format!(
-                "Bedrock returned {status}: {body}"
-            )));
-        }
+        let resp = ProviderBase::send(builder).await?;
+        let resp = ProviderBase::check_status(resp, "Bedrock").await?;
 
         let bedrock_resp: BedrockConverseResponse = resp
             .json()
@@ -443,33 +421,21 @@ impl AiProvider for BedrockProvider {
                 }
             };
 
-            let mut req_builder = client
+            let builder = client
                 .post(&url)
                 .header("content-type", "application/json")
                 .body(body_bytes);
+            let builder = ProviderBase::apply_headers(builder, &signed_headers);
+            let builder = ProviderBase::apply_headers(builder, &custom_headers);
 
-            for (name, value) in &signed_headers {
-                req_builder = req_builder.header(name.as_str(), value.as_str());
-            }
-            for (k, v) in &custom_headers {
-                req_builder = req_builder.header(k.as_str(), v.as_str());
-            }
-
-            let resp = match req_builder.send().await {
+            let resp = match ProviderBase::send(builder).await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield Err(GatewayError::NetworkError(e.to_string()));
-                    return;
-                }
+                Err(e) => { yield Err(e); return; }
             };
-
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                yield Err(GatewayError::ProviderError(format!(
-                    "Bedrock stream error: {body}"
-                )));
-                return;
-            }
+            let resp = match ProviderBase::check_status(resp, "Bedrock").await {
+                Ok(r) => r,
+                Err(e) => { yield Err(e); return; }
+            };
 
             let message_id = format!("bedrock-{}", uuid::Uuid::new_v4());
 

@@ -216,37 +216,19 @@ impl AiProvider for AnthropicProvider {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, GatewayError> {
-        let headers = self.base.resolve_headers(&request);
-        let anthropic_req = convert_request(request);
-
-        let mut builder = self
+        let builder = self
             .base
             .client
             .post(format!("{}/v1/messages", self.base.base_url))
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
-        for (k, v) in &headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        let resp = builder
-            .json(&anthropic_req)
-            .send()
-            .await
-            .map_err(|e| GatewayError::NetworkError(e.to_string()))?;
+        let builder = self.base.apply_custom_headers(builder, &request);
 
-        let status = resp.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(GatewayError::UpstreamRateLimited);
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(GatewayError::UpstreamAuthError);
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GatewayError::ProviderError(format!(
-                "Anthropic returned {status}: {body}"
-            )));
-        }
+        let anthropic_req = convert_request(request);
+        let builder = builder.json(&anthropic_req);
+
+        let resp = ProviderBase::send(builder).await?;
+        let resp = ProviderBase::check_status(resp, "Anthropic").await?;
 
         let anthropic_resp: AnthropicResponse = resp
             .json()
@@ -268,34 +250,20 @@ impl AiProvider for AnthropicProvider {
         anthropic_req.stream = Some(true);
 
         Box::pin(async_stream::stream! {
-            let mut builder = client
+            let builder = client
                 .post(&url)
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json");
-            for (k, v) in &headers {
-                builder = builder.header(k.as_str(), v.as_str());
-            }
-            let resp = builder
-                .json(&anthropic_req)
-                .send()
-                .await;
+            let builder = ProviderBase::apply_headers(builder, &headers).json(&anthropic_req);
 
-            let resp = match resp {
+            let resp = match ProviderBase::send(builder).await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield Err(GatewayError::NetworkError(e.to_string()));
-                    return;
-                }
+                Err(e) => { yield Err(e); return; }
             };
-
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                yield Err(GatewayError::ProviderError(format!(
-                    "Anthropic returned {status}: {body}"
-                )));
-                return;
-            }
+            let resp = match ProviderBase::check_status(resp, "Anthropic").await {
+                Ok(r) => r,
+                Err(e) => { yield Err(e); return; }
+            };
 
             let mut event_stream = resp.bytes_stream().sse_events();
 

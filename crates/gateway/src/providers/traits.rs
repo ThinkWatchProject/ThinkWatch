@@ -131,6 +131,71 @@ impl ProviderBase {
             })
             .collect()
     }
+
+    /// Append the caller-resolved custom headers to a `RequestBuilder`.
+    /// Replaces the ~5-line `for (k, v) in &headers { builder = builder.header(...) }`
+    /// pattern that every provider used to repeat in both its
+    /// `chat_completion` and `stream_chat_completion` paths.
+    pub fn apply_custom_headers(
+        &self,
+        builder: reqwest::RequestBuilder,
+        request: &ChatCompletionRequest,
+    ) -> reqwest::RequestBuilder {
+        Self::apply_headers(builder, &self.resolve_headers(request))
+    }
+
+    /// Append a pre-resolved header list to a `RequestBuilder`.
+    /// Streaming providers resolve headers before spawning the
+    /// `async_stream!` block (since `&self` can't cross the `'static`
+    /// boundary) and call this from inside the stream.
+    pub fn apply_headers(
+        mut builder: reqwest::RequestBuilder,
+        headers: &[(String, String)],
+    ) -> reqwest::RequestBuilder {
+        for (k, v) in headers {
+            builder = builder.header(k, v);
+        }
+        builder
+    }
+
+    /// Validate an upstream response status and translate non-2xx
+    /// outcomes into the canonical `GatewayError` variants
+    /// (`UpstreamRateLimited` / `UpstreamAuthError` / `ProviderError`).
+    /// On a 2xx response the response is returned unchanged so the
+    /// caller can continue parsing the body.
+    ///
+    /// `provider_label` appears in the user-visible error message, so
+    /// each provider passes its own friendly name (e.g. "OpenAI",
+    /// "Anthropic", "Bedrock").
+    pub async fn check_status(
+        resp: reqwest::Response,
+        provider_label: &str,
+    ) -> Result<reqwest::Response, GatewayError> {
+        let status = resp.status();
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(GatewayError::UpstreamRateLimited);
+        }
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(GatewayError::UpstreamAuthError);
+        }
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(GatewayError::ProviderError(format!(
+                "{provider_label} returned {status}: {body}"
+            )));
+        }
+        Ok(resp)
+    }
+
+    /// Wrap `RequestBuilder::send` to map transport-level failures into
+    /// `GatewayError::NetworkError` so callers don't have to repeat the
+    /// `.map_err(|e| GatewayError::NetworkError(e.to_string()))?` line.
+    pub async fn send(builder: reqwest::RequestBuilder) -> Result<reqwest::Response, GatewayError> {
+        builder
+            .send()
+            .await
+            .map_err(|e| GatewayError::NetworkError(e.to_string()))
+    }
 }
 
 pub trait AiProvider: Send + Sync {

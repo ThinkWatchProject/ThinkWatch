@@ -175,8 +175,7 @@ impl AiProvider for GoogleProvider {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, GatewayError> {
-        let model = &request.model;
-        let headers = self.base.resolve_headers(&request);
+        let model = request.model.clone();
         let gemini_req = convert_request(&request);
 
         let url = format!(
@@ -184,33 +183,20 @@ impl AiProvider for GoogleProvider {
             self.base.base_url, model
         );
 
-        let mut builder = self.base.client.post(&url);
-        for (k, v) in &headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        let resp = builder
-            .json(&gemini_req)
-            .send()
-            .await
-            .map_err(|e| GatewayError::NetworkError(e.to_string()))?;
+        let builder = self
+            .base
+            .apply_custom_headers(self.base.client.post(&url), &request)
+            .json(&gemini_req);
 
-        let status = resp.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(GatewayError::UpstreamRateLimited);
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GatewayError::ProviderError(format!(
-                "Gemini returned {status}: {body}"
-            )));
-        }
+        let resp = ProviderBase::send(builder).await?;
+        let resp = ProviderBase::check_status(resp, "Gemini").await?;
 
         let gemini_resp: GeminiResponse = resp
             .json()
             .await
             .map_err(|e| GatewayError::ProviderError(e.to_string()))?;
 
-        Ok(convert_response(gemini_resp, model))
+        Ok(convert_response(gemini_resp, &model))
     }
 
     fn stream_chat_completion(
@@ -230,23 +216,16 @@ impl AiProvider for GoogleProvider {
                 base_url, model
             );
 
-            let mut builder = client.post(&url);
-            for (k, v) in &headers {
-                builder = builder.header(k.as_str(), v.as_str());
-            }
-            let resp = match builder.json(&gemini_req).send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    yield Err(GatewayError::NetworkError(e.to_string()));
-                    return;
-                }
-            };
+            let builder = ProviderBase::apply_headers(client.post(&url), &headers).json(&gemini_req);
 
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                yield Err(GatewayError::ProviderError(format!("Gemini stream error: {body}")));
-                return;
-            }
+            let resp = match ProviderBase::send(builder).await {
+                Ok(r) => r,
+                Err(e) => { yield Err(e); return; }
+            };
+            let resp = match ProviderBase::check_status(resp, "Gemini").await {
+                Ok(r) => r,
+                Err(e) => { yield Err(e); return; }
+            };
 
             use crate::sse_parser::SseStreamExt;
             use futures::StreamExt;

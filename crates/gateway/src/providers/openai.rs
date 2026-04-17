@@ -19,6 +19,10 @@ impl OpenAiProvider {
         self.base = self.base.with_custom_headers(headers);
         self
     }
+
+    fn completions_url(&self) -> String {
+        format!("{}/v1/chat/completions", self.base.base_url)
+    }
 }
 
 impl AiProvider for OpenAiProvider {
@@ -30,33 +34,14 @@ impl AiProvider for OpenAiProvider {
         &self,
         request: ChatCompletionRequest,
     ) -> Result<ChatCompletionResponse, GatewayError> {
-        let headers = self.base.resolve_headers(&request);
-        let mut builder = self
+        let builder = self.base.client.post(self.completions_url());
+        let builder = self
             .base
-            .client
-            .post(format!("{}/v1/chat/completions", self.base.base_url));
-        for (k, v) in &headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        let resp = builder
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| GatewayError::NetworkError(e.to_string()))?;
+            .apply_custom_headers(builder, &request)
+            .json(&request);
 
-        let status = resp.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(GatewayError::UpstreamRateLimited);
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(GatewayError::UpstreamAuthError);
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GatewayError::ProviderError(format!(
-                "OpenAI returned {status}: {body}"
-            )));
-        }
+        let resp = ProviderBase::send(builder).await?;
+        let resp = ProviderBase::check_status(resp, "OpenAI").await?;
 
         resp.json::<ChatCompletionResponse>()
             .await
@@ -68,40 +53,25 @@ impl AiProvider for OpenAiProvider {
         request: ChatCompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.base.client.clone();
-        let url = format!("{}/v1/chat/completions", self.base.base_url);
-        let headers = self.base.resolve_headers(&request);
+        let url = self.completions_url();
+        let custom_headers = self.base.resolve_headers(&request);
 
         // Ensure stream is set to true in the outgoing request
         let mut request = request;
         request.stream = Some(true);
 
         Box::pin(async_stream::stream! {
-            let mut builder = client
-                .post(&url);
-            for (k, v) in &headers {
-                builder = builder.header(k.as_str(), v.as_str());
-            }
-            let resp = builder
-                .json(&request)
-                .send()
-                .await;
+            let builder = ProviderBase::apply_headers(client.post(&url), &custom_headers)
+                .json(&request);
 
-            let resp = match resp {
+            let resp = match ProviderBase::send(builder).await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield Err(GatewayError::NetworkError(e.to_string()));
-                    return;
-                }
+                Err(e) => { yield Err(e); return; }
             };
-
-            let status = resp.status();
-            if !status.is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                yield Err(GatewayError::ProviderError(format!(
-                    "OpenAI returned {status}: {body}"
-                )));
-                return;
-            }
+            let resp = match ProviderBase::check_status(resp, "OpenAI").await {
+                Ok(r) => r,
+                Err(e) => { yield Err(e); return; }
+            };
 
             let mut event_stream = resp.bytes_stream().sse_events();
 

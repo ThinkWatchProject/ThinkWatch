@@ -50,42 +50,22 @@ impl AiProvider for AzureOpenAiProvider {
     ) -> Result<ChatCompletionResponse, GatewayError> {
         // In Azure, the "model" field is the deployment name
         let url = self.completions_url(&request.model);
-        let headers = self.base.resolve_headers(&request);
-
-        let mut builder = self
+        let builder = self
             .base
             .client
             .post(&url)
             .header("content-type", "application/json");
-        for (k, v) in &headers {
-            builder = builder.header(k.as_str(), v.as_str());
-        }
-        let resp = builder
-            .json(&request)
-            .send()
+        let builder = self
+            .base
+            .apply_custom_headers(builder, &request)
+            .json(&request);
+
+        let resp = ProviderBase::send(builder).await?;
+        let resp = ProviderBase::check_status(resp, "Azure OpenAI").await?;
+
+        resp.json::<ChatCompletionResponse>()
             .await
-            .map_err(|e| GatewayError::NetworkError(e.to_string()))?;
-
-        let status = resp.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(GatewayError::UpstreamRateLimited);
-        }
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(GatewayError::UpstreamAuthError);
-        }
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(GatewayError::ProviderError(format!(
-                "Azure OpenAI returned {status}: {body}"
-            )));
-        }
-
-        let response: ChatCompletionResponse = resp
-            .json()
-            .await
-            .map_err(|e| GatewayError::ProviderError(e.to_string()))?;
-
-        Ok(response)
+            .map_err(|e| GatewayError::ProviderError(e.to_string()))
     }
 
     fn stream_chat_completion(
@@ -100,32 +80,17 @@ impl AiProvider for AzureOpenAiProvider {
         stream_request.stream = Some(true);
 
         Box::pin(async_stream::stream! {
-            let mut builder = client
-                .post(&url)
-                .header("content-type", "application/json");
-            for (k, v) in &headers {
-                builder = builder.header(k.as_str(), v.as_str());
-            }
-            let resp = builder
-                .json(&stream_request)
-                .send()
-                .await;
+            let builder = client.post(&url).header("content-type", "application/json");
+            let builder = ProviderBase::apply_headers(builder, &headers).json(&stream_request);
 
-            let resp = match resp {
+            let resp = match ProviderBase::send(builder).await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield Err(GatewayError::NetworkError(e.to_string()));
-                    return;
-                }
+                Err(e) => { yield Err(e); return; }
             };
-
-            if !resp.status().is_success() {
-                let body = resp.text().await.unwrap_or_default();
-                yield Err(GatewayError::ProviderError(format!(
-                    "Azure OpenAI stream error: {body}"
-                )));
-                return;
-            }
+            let resp = match ProviderBase::check_status(resp, "Azure OpenAI").await {
+                Ok(r) => r,
+                Err(e) => { yield Err(e); return; }
+            };
 
             let mut event_stream = resp.bytes_stream().sse_events();
 
