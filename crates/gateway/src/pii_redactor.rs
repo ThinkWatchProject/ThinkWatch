@@ -172,7 +172,7 @@ impl PiiRedactor {
                     }
                 }
                 // Sort descending by start for safe replacement
-                filtered.sort_by(|a, b| b.0.cmp(&a.0));
+                filtered.sort_by_key(|b| std::cmp::Reverse(b.0));
 
                 // Collect pattern names for logging before consuming filtered
                 let redacted_pattern_names: Vec<String> = filtered

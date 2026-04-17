@@ -62,7 +62,7 @@ impl CostTracker {
         let mut table: Vec<(String, f64, f64)> =
             overrides.into_iter().map(|(k, (i, o))| (k, i, o)).collect();
         // Sort custom entries by pattern length descending (longer = more specific first)
-        table.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        table.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
         // Append defaults for any models not overridden
         for entry in defaults {
             if !table.iter().any(|(p, _, _)| p == &entry.0) {

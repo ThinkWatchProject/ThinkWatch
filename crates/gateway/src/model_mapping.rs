@@ -46,7 +46,7 @@ impl ModelMapper {
         }
 
         // Sort prefixes by length descending so longest prefix matches first
-        prefix.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        prefix.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
 
         Self { exact, prefix }
     }
@@ -61,7 +61,7 @@ impl ModelMapper {
         self.prefix
             .push((from_prefix.to_string(), to_prefix.to_string()));
         // Re-sort by length descending
-        self.prefix.sort_by(|a, b| b.0.len().cmp(&a.0.len()));
+        self.prefix.sort_by_key(|b| std::cmp::Reverse(b.0.len()));
     }
 
     /// Map a model name through aliases.
