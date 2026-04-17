@@ -426,7 +426,7 @@ export function ModelsPage() {
               </TableBody>
             </Table>
           </CardContent>
-          <div className="border-t">
+          <div data-slot="card-footer" className="-mt-4 border-t">
             <DataTablePagination
               total={totalRoutes}
               page={page}
