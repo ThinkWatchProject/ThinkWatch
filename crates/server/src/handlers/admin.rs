@@ -745,11 +745,30 @@ pub async fn delete_user(
         return Err(AppError::NotFound("User not found".into()));
     }
 
-    // Invalidate signing public key
+    // Invalidate every active credential the deleted user holds:
+    //   - pw_epoch bumps so existing access/refresh JWTs are rejected
+    //     by `require_auth` and the refresh handler (both compare
+    //     `claims.iat` against the epoch).
+    //   - perm cache drop forces the next request to hit the DB.
+    //   - signing pubkey delete closes the HMAC signing channel.
+    //   - API keys are soft-deleted so the key-auth surface (which
+    //     also checks `users.deleted_at` separately) refuses them.
+    // Without these, a deleted user keeps a working session until the
+    // refresh TTL (7 days) expires naturally.
+    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
+    super::auth::invalidate_refresh_tokens(&state.redis, user_id, refresh_ttl_days).await;
+    crate::middleware::auth_guard::invalidate_user_perms(&state.redis, user_id).await;
     let _: () =
         fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_pubkey:{user_id}"))
             .await
             .unwrap_or(());
+    let _ = sqlx::query(
+        "UPDATE api_keys SET is_active = false, deleted_at = now(), disabled_reason = 'user_deleted' \
+         WHERE user_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&state.db)
+    .await;
 
     state.audit.log(
         auth_user

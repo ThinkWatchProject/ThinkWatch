@@ -842,7 +842,7 @@ pub async fn proxy_chat_completion(
                 .insert("X-Cache", axum::http::HeaderValue::from_static("HIT"));
             response.headers_mut().insert(
                 "X-Metadata-Request-Id",
-                metadata.request_id.parse().unwrap(),
+                request_id_header(&metadata.request_id),
             );
             return Ok(response);
         }
@@ -852,7 +852,7 @@ pub async fn proxy_chat_completion(
             .insert("X-Cache", axum::http::HeaderValue::from_static("HIT"));
         response.headers_mut().insert(
             "X-Metadata-Request-Id",
-            metadata.request_id.parse().unwrap(),
+            request_id_header(&metadata.request_id),
         );
         return Ok(response);
     }
@@ -1071,10 +1071,19 @@ pub async fn proxy_chat_completion(
             .insert("X-Cache", axum::http::HeaderValue::from_static("MISS"));
         http_response.headers_mut().insert(
             "X-Metadata-Request-Id",
-            metadata.request_id.parse().unwrap(),
+            request_id_header(&metadata.request_id),
         );
         Ok(http_response)
     }
+}
+
+/// Build a `HeaderValue` from a request id, falling back to a placeholder if
+/// the id contains bytes outside the printable-ASCII range. Validation in
+/// `RequestMetadata::extract` should prevent this, but we never want a
+/// malformed id to crash the response path.
+fn request_id_header(request_id: &str) -> axum::http::HeaderValue {
+    axum::http::HeaderValue::from_str(request_id)
+        .unwrap_or_else(|_| axum::http::HeaderValue::from_static("invalid"))
 }
 
 /// GET /v1/models

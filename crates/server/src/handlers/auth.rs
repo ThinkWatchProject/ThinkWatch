@@ -308,15 +308,50 @@ pub async fn login(
     let password_valid = password::verify_password(&req.password, &password_hash).unwrap_or(false);
 
     if !password_valid || user.is_none() {
+        // Per-email cross-IP failure counter. The `count` above is keyed
+        // on `{ip}:{email}`, so an attacker rotating through a proxy
+        // pool keeps each IP's counter at 1 and never trips the
+        // progressive lockout. This counter aggregates across IPs so
+        // the same email can only fail N times globally in the
+        // rate-limit window regardless of source address.
+        let email_fail_key = format!("auth_email_fails:{}", req.email);
+        let email_fails: u64 = match fred::interfaces::KeysInterface::incr_by(
+            &state.redis,
+            &email_fail_key,
+            1,
+        )
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Redis email-failure counter failed (fail-closed): {e}");
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "Authentication temporarily unavailable"
+                )));
+            }
+        };
+        if email_fails == 1 {
+            let _: () =
+                fred::interfaces::KeysInterface::expire(&state.redis, &email_fail_key, 900, None)
+                    .await
+                    .unwrap_or(());
+        }
+
         // Progressive lockout: lock account after repeated failures.
         // Lockout duration increases: 5 fails=60s, 8=300s, 10+=900s.
         // Fail closed on Redis errors so a Redis outage doesn't disable
         // brute-force protection mid-attack.
-        let lockout_secs: Option<i64> = if count >= 10 {
+        //
+        // The threshold compares against `max(count, email_fails)` so
+        // the lockout trips on either the per-IP+email counter OR the
+        // per-email aggregate — defeating IP-rotation bypass without
+        // punishing a single user on a shared NAT.
+        let trigger = count.max(email_fails);
+        let lockout_secs: Option<i64> = if trigger >= 10 {
             Some(900)
-        } else if count >= 8 {
+        } else if trigger >= 8 {
             Some(300)
-        } else if count >= 5 {
+        } else if trigger >= 5 {
             Some(60)
         } else {
             None
@@ -441,13 +476,19 @@ pub async fn login(
         }
     }
 
-    // Clear rate limit and lockout keys on successful login
+    // Clear rate limit, lockout, and email-failure keys on successful login
     let _: i64 = fred::interfaces::KeysInterface::del(&state.redis, &rate_key)
         .await
         .unwrap_or(0);
     let _: i64 = fred::interfaces::KeysInterface::del(&state.redis, &lockout_key)
         .await
         .unwrap_or(0);
+    let _: i64 = fred::interfaces::KeysInterface::del(
+        &state.redis,
+        &format!("auth_email_fails:{}", req.email),
+    )
+    .await
+    .unwrap_or(0);
 
     let mut entry = AuditEntry::platform("auth.login")
         .user_id(user.id)
@@ -692,7 +733,15 @@ pub async fn refresh(
     let blacklist_key = format!("refresh_blacklist:{token_hash}");
 
     use fred::interfaces::KeysInterface;
-    let already_used: Option<String> = state.redis.get(&blacklist_key).await.ok().flatten();
+    // Fail-closed on Redis errors: if we can't verify the blacklist or
+    // password epoch, we MUST refuse to mint a new session — otherwise
+    // a Redis outage silently re-enables every revoked refresh token
+    // and every pre-password-change token.
+    let already_used: Option<String> = state.redis.get(&blacklist_key).await.map_err(|e| {
+        tracing::error!(error = %e, "Redis unavailable during refresh-token blacklist check");
+        metrics::counter!("auth_refresh_redis_error_total", "op" => "blacklist_get").increment(1);
+        AppError::Unauthorized
+    })?;
     if already_used.is_some() {
         tracing::warn!(
             user_id = %claims.sub,
@@ -706,7 +755,11 @@ pub async fn refresh(
     // pw_epoch:{user_id} is set by change_password and has a TTL
     // equal to the refresh token lifetime so it auto-expires.
     let epoch_key = format!("pw_epoch:{}", claims.sub);
-    let pw_epoch: Option<String> = state.redis.get(&epoch_key).await.ok().flatten();
+    let pw_epoch: Option<String> = state.redis.get(&epoch_key).await.map_err(|e| {
+        tracing::error!(error = %e, "Redis unavailable during refresh-token pw_epoch check");
+        metrics::counter!("auth_refresh_redis_error_total", "op" => "pw_epoch_get").increment(1);
+        AppError::Unauthorized
+    })?;
     if pw_epoch
         .and_then(|s| s.parse::<i64>().ok())
         .is_some_and(|epoch| claims.iat < epoch)
@@ -720,18 +773,26 @@ pub async fn refresh(
 
     // Set the blacklist entry to expire when the OLD token would
     // have expired naturally — anything past that is a no-op anyway.
+    // If this write fails, refresh-token rotation is broken (the old
+    // token would still be usable), so we must surface the failure.
     let now = chrono::Utc::now().timestamp();
     let remaining_secs = (claims.exp - now).max(60);
-    let _: Result<(), _> = state
+    state
         .redis
-        .set(
+        .set::<(), _, _>(
             &blacklist_key,
             "1",
             Some(fred::types::Expiration::EX(remaining_secs)),
             None,
             false,
         )
-        .await;
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "Redis unavailable while writing refresh-token blacklist");
+            metrics::counter!("auth_refresh_redis_error_total", "op" => "blacklist_set")
+                .increment(1);
+            AppError::Unauthorized
+        })?;
 
     // Reload roles + permissions + assignments from the DB rather
     // than trusting the refresh token's snapshot. Critical: if an

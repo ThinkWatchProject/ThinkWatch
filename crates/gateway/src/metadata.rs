@@ -78,11 +78,16 @@ impl RequestMetadata {
         // — letting one client correlate the AI call with its
         // follow-on MCP tools/call under a single trace. Validation
         // mirrors the access_log middleware and the MCP transport.
+        // Restrict to printable ASCII (0x20-0x7E) so the resulting string
+        // is always safe to round-trip through `HeaderValue`. Anything
+        // outside that range is rejected and we fall back to a UUID.
         let request_id = headers
             .get("x-trace-id")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| !c.is_control()))
+            .filter(|s| {
+                !s.is_empty() && s.len() <= 128 && s.bytes().all(|b| (0x20..=0x7E).contains(&b))
+            })
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let timestamp = chrono::Utc::now().to_rfc3339();
 

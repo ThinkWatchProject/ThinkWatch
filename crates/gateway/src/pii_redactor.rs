@@ -50,7 +50,22 @@ impl PiiRedactor {
                     placeholder_prefix: c.placeholder_prefix.clone(),
                 }),
                 Err(e) => {
-                    tracing::warn!("Invalid PII regex pattern '{}': {e}", c.name);
+                    // Save-time validation in admin/settings should prevent
+                    // invalid patterns from ever reaching us. If one shows
+                    // up here it means the DB row was hand-edited or the
+                    // validator drifted — either way, surface loudly so
+                    // operators don't think PII redaction is on when it
+                    // silently isn't.
+                    tracing::error!(
+                        pattern = %c.name,
+                        error = %e,
+                        "Invalid PII regex — pattern is DISABLED for redaction"
+                    );
+                    metrics::counter!(
+                        "gateway_pii_pattern_invalid_total",
+                        "pattern" => c.name.clone(),
+                    )
+                    .increment(1);
                     None
                 }
             })

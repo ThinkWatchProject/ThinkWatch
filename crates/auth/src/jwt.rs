@@ -151,10 +151,19 @@ pub async fn revoke_token(
 }
 
 /// Check whether a token hash has been revoked.
-pub async fn is_revoked(redis: &fred::clients::Client, token_hash: &str) -> bool {
+///
+/// Returns `Err` if the Redis lookup itself fails — callers MUST treat
+/// this as fail-closed (deny the request). Silently returning `false`
+/// on Redis errors would let revoked tokens bypass the blacklist
+/// whenever Redis is unavailable.
+pub async fn is_revoked(
+    redis: &fred::clients::Client,
+    token_hash: &str,
+) -> Result<bool, fred::error::Error> {
     use fred::interfaces::KeysInterface;
     let key = format!("jwt_blacklist:{token_hash}");
-    redis.exists::<u8, _>(&key).await.unwrap_or(0) > 0
+    let count: u8 = redis.exists(&key).await?;
+    Ok(count > 0)
 }
 
 #[cfg(test)]

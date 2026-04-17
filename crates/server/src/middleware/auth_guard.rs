@@ -387,13 +387,27 @@ pub async fn extract_client_ip(
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip().to_string());
 
-    if ip_source != "connection"
-        && let Some(trusted_proxies) = state
+    if ip_source != "connection" {
+        // Require a non-empty trusted-proxy whitelist before trusting
+        // any client-supplied header. If the operator picked `xff` or
+        // `x-real-ip` but didn't configure `security.trusted_proxies`,
+        // the old code happily honored whatever the client sent —
+        // every request could spoof X-Forwarded-For to forge the IP
+        // used for rate limiting, audit logging, and session binding.
+        // Fall back to the TCP peer address in that misconfiguration.
+        let trusted_proxies = state
             .dynamic_config
             .get_string("security.trusted_proxies")
             .await
-        && !trusted_proxies.is_empty()
-    {
+            .unwrap_or_default();
+        if trusted_proxies.trim().is_empty() {
+            tracing::warn!(
+                ip_source = %ip_source,
+                "client_ip_source is not 'connection' but security.trusted_proxies is empty — \
+                 ignoring forwarded-IP headers to prevent spoofing"
+            );
+            return connection_ip;
+        }
         let conn_ip = connection_ip.as_deref().unwrap_or("");
         let is_trusted = trusted_proxies
             .split(',')
@@ -580,10 +594,43 @@ pub async fn require_auth(
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // Check JWT blacklist (revoked tokens)
+    // Check JWT blacklist (revoked tokens). Fail-closed on Redis
+    // errors: if we can't verify the blacklist, deny the request
+    // rather than silently accepting potentially-revoked tokens.
     let token_hash = think_watch_auth::jwt::sha2_hash(&bearer);
-    if think_watch_auth::jwt::is_revoked(&state.redis, &token_hash).await {
-        return Err(StatusCode::UNAUTHORIZED);
+    match think_watch_auth::jwt::is_revoked(&state.redis, &token_hash).await {
+        Ok(true) => return Err(StatusCode::UNAUTHORIZED),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "Redis unavailable during JWT blacklist check");
+            metrics::counter!("auth_jwt_blacklist_redis_error_total").increment(1);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+    }
+
+    // Reject access tokens issued before a password change / force-logout
+    // / user deletion. `pw_epoch:{user_id}` is set by those flows; any
+    // access token whose `iat` predates the epoch must be refused.
+    // Previously the refresh handler was the only gate, so a deleted or
+    // password-rotated user kept working access tokens until the access
+    // TTL elapsed (default 15 min). Fail-closed on Redis errors for the
+    // same reason as the blacklist check.
+    let epoch_key = format!("pw_epoch:{}", claims.sub);
+    use fred::interfaces::KeysInterface;
+    match state.redis.get::<Option<String>, _>(&epoch_key).await {
+        Ok(Some(epoch_str)) => {
+            if let Ok(epoch) = epoch_str.parse::<i64>()
+                && claims.iat < epoch
+            {
+                return Err(StatusCode::UNAUTHORIZED);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "Redis unavailable during pw_epoch check");
+            metrics::counter!("auth_pw_epoch_redis_error_total").increment(1);
+            return Err(StatusCode::UNAUTHORIZED);
+        }
     }
 
     let ip = extract_client_ip(&state, request.headers(), request.extensions()).await;
