@@ -39,6 +39,7 @@ import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import type { TeamSummary } from '@/lib/types';
 import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { DataTablePagination } from '@/components/data-table-pagination';
 import { policyToPerms, type PolicyDocument } from './roles/types';
 
 
@@ -79,6 +80,12 @@ export function UsersPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
+  // Server-side pagination. `debouncedSearch` feeds the API so fast
+  // typing doesn't fan out one request per keystroke.
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [total, setTotal] = useState(0);
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
@@ -110,9 +117,18 @@ export function UsersPage() {
 
   const fetchUsers = async (signal?: AbortSignal) => {
     try {
+      const params = new URLSearchParams({
+        page: String(page),
+        per_page: String(pageSize),
+      });
+      if (debouncedSearch) params.set('search', debouncedSearch);
       const [usersRes, rolesRes] = await Promise.all([
-        api<{ data: User[]; total: number }>('/api/admin/users', { signal }),
-        api<{ items: AvailableRole[] }>('/api/admin/roles', { signal }).catch(() => ({ items: [] })),
+        api<{ data: User[]; total: number }>(`/api/admin/users?${params.toString()}`, { signal }),
+        // Roles list is small and only needed for the picker; fetch
+        // once on mount, not on every page/search change.
+        availableRoles.length === 0
+          ? api<{ items: AvailableRole[] }>('/api/admin/roles', { signal }).catch(() => ({ items: [] }))
+          : Promise.resolve({ items: availableRoles }),
       ]);
       setUsers(
         usersRes.data.map((u) => ({
@@ -120,8 +136,9 @@ export function UsersPage() {
           role_assignments: u.role_assignments ?? [],
         })),
       );
+      setTotal(usersRes.total);
       // Unified picker — system + custom roles all show up together.
-      setAvailableRoles(rolesRes.items);
+      if (availableRoles.length === 0) setAvailableRoles(rolesRes.items);
     } catch (err) {
       if (signal?.aborted) return;
       setError(err instanceof Error ? err.message : 'Failed to load users');
@@ -130,11 +147,26 @@ export function UsersPage() {
     }
   };
 
+  // Debounce the search box so we don't spam the backend on every
+  // keystroke. 250ms matches what most admin panels use.
+  useEffect(() => {
+    const h = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => clearTimeout(h);
+  }, [search]);
+
+  // Typing a new search term should always land on page 1 — otherwise
+  // you'd type "adm" and land on page 4 of a filtered result that
+  // only has 2 pages.
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch]);
+
   useEffect(() => {
     const controller = new AbortController();
     fetchUsers(controller.signal);
     return () => controller.abort();
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, pageSize, debouncedSearch]);
 
   // --- Create user ---
   const resetCreateForm = () => {
@@ -275,24 +307,9 @@ export function UsersPage() {
     return map[r] ?? r;
   };
 
-  const filteredUsers = (() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return users;
-    return users.filter((u) => {
-      if (u.id.toLowerCase().includes(q)) return true;
-      if (u.email.toLowerCase().includes(q)) return true;
-      if (u.display_name.toLowerCase().includes(q)) return true;
-      if (
-        u.role_assignments.some(
-          (a) =>
-            a.name.toLowerCase().includes(q) ||
-            roleLabel(a.name).toLowerCase().includes(q),
-        )
-      )
-        return true;
-      return false;
-    });
-  })();
+  // Server handles filtering (email + display_name ILIKE). Keep the
+  // alias so the JSX below stays readable.
+  const filteredUsers = users;
 
   return (
     <div className="space-y-6">
@@ -370,12 +387,9 @@ export function UsersPage() {
           ) : users.length === 0 ? (
             <div className="flex flex-col items-center justify-center py-12 text-center">
               <UsersIcon className="h-10 w-10 text-muted-foreground mb-3" />
-              <p className="text-sm text-muted-foreground">{t('users.noUsers')}</p>
-            </div>
-          ) : filteredUsers.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-center">
-              <UsersIcon className="h-10 w-10 text-muted-foreground mb-3" />
-              <p className="text-sm text-muted-foreground">{t('users.noMatches')}</p>
+              <p className="text-sm text-muted-foreground">
+                {debouncedSearch ? t('users.noMatches') : t('users.noUsers')}
+              </p>
             </div>
           ) : (
             <Table>
@@ -503,6 +517,17 @@ export function UsersPage() {
             </Table>
           )}
         </CardContent>
+        {total > pageSize && (
+          <div data-slot="card-footer" className="-mt-4 border-t">
+            <DataTablePagination
+              total={total}
+              page={page}
+              pageSize={pageSize}
+              onPageChange={setPage}
+              onPageSizeChange={setPageSize}
+            />
+          </div>
+        )}
       </Card>
 
       {/* Edit dialog */}

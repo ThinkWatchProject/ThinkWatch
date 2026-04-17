@@ -47,13 +47,47 @@ use crate::middleware::auth_guard::{AuthUser, invalidate_user_perms};
 
 // --- User management ---
 
+#[derive(Debug, Deserialize)]
+pub struct ListUsersQuery {
+    pub page: Option<u32>,
+    pub per_page: Option<u32>,
+    /// Case-insensitive substring match against email + display_name.
+    pub search: Option<String>,
+}
+
+impl ListUsersQuery {
+    fn pagination(&self) -> PaginationParams {
+        PaginationParams {
+            page: self.page,
+            per_page: self.per_page,
+        }
+    }
+}
+
+/// Wrap a user-supplied search term in `%…%` for `ILIKE` substring
+/// matching, escaping `\`, `%`, and `_` so they are treated as literals.
+///
+/// This is NOT about SQL injection — the returned string is bound as a
+/// `$N` parameter, so Postgres never parses it as SQL. The escaping is
+/// purely about `LIKE` semantics: without it, a user searching for "50%"
+/// or "_" would match way more than they expected because those
+/// characters are wildcards inside a `LIKE` pattern.
+fn build_ilike_pattern(raw: &str) -> String {
+    let escaped = raw
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
 #[utoipa::path(
     get,
     path = "/api/admin/users",
     tag = "Users",
     params(
         ("page" = Option<i64>, Query, description = "Page number (1-based)"),
-        ("page_size" = Option<i64>, Query, description = "Items per page"),
+        ("per_page" = Option<i64>, Query, description = "Items per page"),
+        ("search" = Option<String>, Query, description = "Search email / display_name (substring, case-insensitive)"),
     ),
     responses(
         (status = 200, description = "Paginated user list"),
@@ -64,12 +98,21 @@ use crate::middleware::auth_guard::{AuthUser, invalidate_user_perms};
 pub async fn list_users(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    Query(pagination): Query<PaginationParams>,
+    Query(query): Query<ListUsersQuery>,
 ) -> Result<Json<PaginatedResponse<UserResponse>>, AppError> {
     auth_user.require_permission("users:read")?;
 
+    let pagination = query.pagination();
     let per_page = pagination.per_page();
     let offset = pagination.offset();
+    // An empty search string means "no filter"; a non-empty term is
+    // passed to Postgres as an `ILIKE` pattern with `%` escaped.
+    let search_pattern = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(build_ilike_pattern);
 
     // Determine the team filter. None = global scope (see all),
     // Some = scoped to those team_ids (see only their members).
@@ -79,14 +122,21 @@ pub async fn list_users(
 
     let (total, users): (i64, Vec<User>) = match owned_teams {
         None => {
-            let total: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL")
-                    .fetch_one(&state.db)
-                    .await?;
-            let users = sqlx::query_as::<_, User>(
-                "SELECT * FROM users WHERE deleted_at IS NULL \
-                 ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+            let total: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM users \
+                  WHERE deleted_at IS NULL \
+                    AND ($1::text IS NULL OR email ILIKE $1 OR display_name ILIKE $1)",
             )
+            .bind(search_pattern.as_deref())
+            .fetch_one(&state.db)
+            .await?;
+            let users = sqlx::query_as::<_, User>(
+                "SELECT * FROM users \
+                  WHERE deleted_at IS NULL \
+                    AND ($1::text IS NULL OR email ILIKE $1 OR display_name ILIKE $1) \
+                  ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+            )
+            .bind(search_pattern.as_deref())
             .bind(per_page as i64)
             .bind(offset as i64)
             .fetch_all(&state.db)
@@ -102,6 +152,7 @@ pub async fn list_users(
             let total: i64 = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM users u \
                   WHERE u.deleted_at IS NULL \
+                    AND ($3::text IS NULL OR u.email ILIKE $3 OR u.display_name ILIKE $3) \
                     AND ( \
                         u.id = $1 \
                         OR EXISTS ( \
@@ -113,11 +164,13 @@ pub async fn list_users(
             )
             .bind(auth_user.claims.sub)
             .bind(&team_ids_vec)
+            .bind(search_pattern.as_deref())
             .fetch_one(&state.db)
             .await?;
             let users = sqlx::query_as::<_, User>(
                 "SELECT u.* FROM users u \
                   WHERE u.deleted_at IS NULL \
+                    AND ($3::text IS NULL OR u.email ILIKE $3 OR u.display_name ILIKE $3) \
                     AND ( \
                         u.id = $1 \
                         OR EXISTS ( \
@@ -126,10 +179,11 @@ pub async fn list_users(
                                AND tm.team_id = ANY($2) \
                         ) \
                     ) \
-                  ORDER BY u.created_at DESC LIMIT $3 OFFSET $4",
+                  ORDER BY u.created_at DESC LIMIT $4 OFFSET $5",
             )
             .bind(auth_user.claims.sub)
             .bind(&team_ids_vec)
+            .bind(search_pattern.as_deref())
             .bind(per_page as i64)
             .bind(offset as i64)
             .fetch_all(&state.db)
