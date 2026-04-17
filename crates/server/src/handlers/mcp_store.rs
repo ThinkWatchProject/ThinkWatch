@@ -242,8 +242,23 @@ pub async fn install_template(
         config
     };
 
-    // c–e. Create server, install record, and increment count — all in one transaction
+    // c–e. Create server, install record, and increment count — all in one transaction.
+    //
+    // We re-fetch the template inside the transaction with `FOR UPDATE`
+    // so a concurrent `sync_registry` (which DELETEs templates) cannot
+    // pull the row out from under us between the initial probe and the
+    // INSERT/UPDATE below. The first fetch above is still useful for
+    // probing without holding a row lock for the network round-trip;
+    // here we just confirm the row is still present and lock it.
     let mut tx = state.db.begin().await?;
+
+    let template = sqlx::query_as::<_, McpStoreTemplate>(
+        "SELECT * FROM mcp_store_templates WHERE id = $1 FOR UPDATE",
+    )
+    .bind(template.id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| AppError::NotFound(format!("Template '{slug}' was removed during install")))?;
 
     // Frontend typically sends already-deconflicted name/prefix. If not,
     // fall back to template defaults and resolve collisions server-side.

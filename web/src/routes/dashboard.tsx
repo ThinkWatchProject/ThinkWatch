@@ -133,8 +133,29 @@ function useLiveDashboard() {
     let cancelled = false;
     let backoff = 1000;
 
+    // Detach all handlers from a WebSocket before closing it so the
+    // close event can't trigger a reconnect we don't want — used both
+    // when the tab goes hidden and when the effect tears down.
+    const closeQuietly = (w: WebSocket | null) => {
+      if (!w) return;
+      w.onopen = null;
+      w.onmessage = null;
+      w.onerror = null;
+      w.onclose = null;
+      try {
+        w.close();
+      } catch {
+        // ignore — best-effort cleanup
+      }
+    };
+
     const connect = async () => {
       if (cancelled) return;
+      // If a previous socket is still around (e.g. an errored one
+      // whose onclose hasn't fired yet), detach it so its delayed
+      // close can't queue another reconnect on top of this one.
+      closeQuietly(ws);
+      ws = null;
       // Auth tokens live in HttpOnly cookies now, so the page JS
       // can't pre-check "are we logged in". We just try to mint
       // the WS ticket — if the user isn't authenticated the api
@@ -224,7 +245,11 @@ function useLiveDashboard() {
 
     const onVis = () => {
       if (document.hidden) {
-        if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+        // Detach handlers BEFORE closing — otherwise the queued
+        // onclose would call scheduleReconnect and we'd silently
+        // reconnect in the background while the tab is hidden.
+        closeQuietly(ws);
+        ws = null;
         if (reconnectTimer) {
           clearTimeout(reconnectTimer);
           reconnectTimer = null;
@@ -239,10 +264,8 @@ function useLiveDashboard() {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVis);
       if (reconnectTimer) clearTimeout(reconnectTimer);
-      if (ws) {
-        ws.onclose = null;
-        ws.close();
-      }
+      closeQuietly(ws);
+      ws = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
