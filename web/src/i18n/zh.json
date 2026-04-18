@@ -247,8 +247,7 @@
     "testConnection": "测试连接",
     "testing": "测试中...",
     "modelCount": "{{count}} 个模型",
-    "creatingAndSyncing": "创建并同步模型中...",
-    "createdAndSynced": "提供商已创建并同步模型。"
+    "providerCreated": "提供商已创建。"
   },
   "apiKeys": {
     "title": "API 密钥",
@@ -312,21 +311,7 @@
     "createTitle": "添加模型",
     "deleteTitle": "删除模型",
     "deleteConfirm": "删除模型行会重置为提供商默认值(倍率 1.0、无单独定价)。已记录的用量数据保持不变。",
-    "formHint": "倍率是相对单位 —— 1.0 表示按原始 token 计配额。把它调好,1M token 的月度预算就不会被一次 gpt-4o 调用打穿。",
-    "multiplierHint": "倍率必须大于零。它喂给限速引擎做加权 token 计算;价格独立配置,仅影响成本报表。",
-    "field": {
-      "provider": "提供商",
-      "modelId": "模型 ID",
-      "displayName": "显示名称",
-      "inputPrice": "输入价格 (USD/token)",
-      "outputPrice": "输出价格 (USD/token)",
-      "inputMult": "输入倍率",
-      "outputMult": "输出倍率",
-      "active": "启用"
-    },
-    "errors": {
-      "multiplierMustBePositive": "倍率必须为正数。"
-    },
+    "formHint": "权重是相对单位。1.0 表示与平台基准价一致。重模型权重越高，计费和预算消耗越多。",
     "syncModels": "同步模型",
     "syncing": "同步中...",
     "syncAll": "同步全部供应商",
@@ -344,6 +329,10 @@
     "noRoutes": "未配置路由",
     "routeAdded": "路由已添加",
     "routeDeleted": "路由已删除",
+    "addRouteTitle": "添加提供商路由",
+    "editRouteTitle": "编辑路由",
+    "deleteRouteTitle": "删除路由",
+    "deleteRouteConfirm": "确认移除此提供商路由？模型本身保留，仅删除此 provider 绑定。",
     "routeTitle": "模型路由",
     "routeSubtitle": "配置模型到提供商的路由映射。",
     "addRoutes": "添加路由",
@@ -367,16 +356,45 @@
     "col": {
       "modelId": "模型 ID",
       "displayName": "显示名称",
-      "inputPrice": "输入 $/token",
-      "outputPrice": "输出 $/token",
-      "inputMult": "输入 ×",
-      "outputMult": "输出 ×",
+      "status": "状态",
+      "routeCount": "路由数",
+      "inputWeight": "输入 ×",
+      "outputWeight": "输出 ×",
       "active": "启用",
       "provider": "提供商",
       "upstreamModel": "上游模型",
       "weight": "权重",
       "priority": "优先级"
     },
+    "status": {
+      "all": "全部模型",
+      "active": "已启用",
+      "draft": "草稿",
+      "unrouted": "未路由"
+    },
+    "filterStatus": "按状态筛选",
+    "weightHint": "相对成本因子。1.0 = 平台基准价。绝对 $/token = 平台基准 × 权重。基准在「设置」中配置。",
+    "costPreview": {
+      "input": "≈ {{amount}} {{currency}} / 每 1M 输入 token",
+      "output": "≈ {{amount}} {{currency}} / 每 1M 输出 token"
+    },
+    "field": {
+      "provider": "提供商",
+      "modelId": "模型 ID",
+      "displayName": "显示名称",
+      "inputWeight": "输入权重",
+      "outputWeight": "输出权重",
+      "active": "启用"
+    },
+    "errors": {
+      "weightMustBePositive": "权重必须为正数。"
+    },
+    "batchImportHint": "从提供商远端 catalog 导入模型条目到已暴露模型列表。",
+    "batchImportWarning": "导入的模型路由默认为禁用状态 —— 在启用之前不会出现在客户端的 /v1/models 里。只勾选你真正想要暴露的几个。",
+    "cleanupAction": "删除所有未路由 ({{count}})",
+    "cleanupTitle": "删除未路由模型",
+    "cleanupConfirm": "删除 {{count}} 个没有任何路由的模型？这些条目是从 provider catalog 导入但从未接入任何启用状态的 provider。此操作无法撤销。",
+    "cleanupDone": "已删除 {{count}} 个未路由模型",
     "toast": {
       "created": "模型已添加。",
       "updated": "模型已更新。",
@@ -823,6 +841,15 @@
   "settingsPage": {
     "title": "设置",
     "subtitle": "系统配置和集成",
+    "platformPricing": {
+      "title": "平台定价基准",
+      "hint": "成本报表按「基准 × 模型权重 × token 数」计算。改这里一次，所有模型的成本自动重算。",
+      "inputPerM": "输入 $ / 每 1M tokens",
+      "outputPerM": "输出 $ / 每 1M tokens",
+      "currency": "货币",
+      "saved": "基准定价已更新。",
+      "invalid": "价格必须为非负数。"
+    },
     "oidc": "OIDC / SSO",
     "serverInfo": "服务器信息",
     "version": "版本",

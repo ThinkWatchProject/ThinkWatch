@@ -23,26 +23,33 @@ use think_watch_common::models::Model;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-/// Row shape returned by `GET /api/admin/models`.
+/// Row shape returned by `GET /api/admin/models`. Route counts are
+/// joined in so the UI can show "active / draft / unrouted" status
+/// without a second round-trip.
 #[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct ModelRow {
     pub id: Uuid,
     pub model_id: String,
     pub display_name: String,
-    #[schema(value_type = Option<f64>)]
-    pub input_price: Option<Decimal>,
-    #[schema(value_type = Option<f64>)]
-    pub output_price: Option<Decimal>,
     #[schema(value_type = f64)]
-    pub input_multiplier: Decimal,
+    pub input_weight: Decimal,
     #[schema(value_type = f64)]
-    pub output_multiplier: Decimal,
+    pub output_weight: Decimal,
     pub is_active: bool,
+    pub route_count: i64,
+    pub enabled_route_count: i64,
 }
 
+/// `status` filter accepted by `GET /api/admin/models`:
+///
+/// * `active`    — at least one enabled route (appears in `/v1/models`)
+/// * `draft`     — has routes, all disabled (user imported but not exposed)
+/// * `unrouted`  — no routes at all (orphan catalog entry)
+/// * anything else or missing = no filter
 #[derive(Debug, Deserialize)]
 pub struct ModelListQuery {
     pub q: Option<String>,
+    pub status: Option<String>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
 }
@@ -82,61 +89,86 @@ pub async fn list_models(
     let page = query.page.unwrap_or(1).max(1);
     let offset = (page - 1) * page_size;
     let search = query.q.as_deref().unwrap_or("").trim();
+    let search_pattern = format!("%{search}%");
+    let status = query.status.as_deref().unwrap_or("");
 
-    let (rows, total): (Vec<ModelRow>, i64) = if search.is_empty() {
-        let total: Option<i64> = sqlx::query_scalar("SELECT COUNT(*) FROM models")
-            .fetch_one(&state.db)
-            .await?;
-        let rows = sqlx::query_as::<_, ModelRow>(
-            r#"SELECT id, model_id, display_name, input_price, output_price,
-                      input_multiplier, output_multiplier, is_active
-               FROM models ORDER BY is_active DESC, model_id
-               LIMIT $1 OFFSET $2"#,
-        )
-        .bind(page_size)
-        .bind(offset)
-        .fetch_all(&state.db)
-        .await?;
-        (rows, total.unwrap_or(0))
-    } else {
-        let pattern = format!("%{search}%");
-        let total: Option<i64> = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM models WHERE model_id ILIKE $1 OR display_name ILIKE $1",
-        )
-        .bind(&pattern)
-        .fetch_one(&state.db)
-        .await?;
-        let rows = sqlx::query_as::<_, ModelRow>(
-            r#"SELECT id, model_id, display_name, input_price, output_price,
-                      input_multiplier, output_multiplier, is_active
-               FROM models WHERE model_id ILIKE $1 OR display_name ILIKE $1
-               ORDER BY is_active DESC, model_id
-               LIMIT $2 OFFSET $3"#,
-        )
-        .bind(&pattern)
-        .bind(page_size)
-        .bind(offset)
-        .fetch_all(&state.db)
-        .await?;
-        (rows, total.unwrap_or(0))
+    // Unified query with `$1='' OR ...` to combine optional search +
+    // status filter. `status_filter`:
+    //   'active'    — enabled_route_count > 0
+    //   'draft'     — route_count > 0 AND enabled_route_count = 0
+    //   'unrouted'  — route_count = 0
+    //   otherwise   — no filter
+    //
+    // We compute `route_count` / `enabled_route_count` via `LATERAL`
+    // subquery so the filter happens on the joined shape; PG rewrites
+    // this to a HashAggregate over `model_routes`.
+    let status_filter_sql = match status {
+        "active" => "AND rc.enabled_route_count > 0",
+        "draft" => "AND rc.route_count > 0 AND rc.enabled_route_count = 0",
+        "unrouted" => "AND rc.route_count = 0",
+        _ => "",
     };
 
-    Ok(Json(ModelListResponse { items: rows, total }))
+    let total_sql = format!(
+        r#"SELECT COUNT(*) FROM models m
+           LEFT JOIN LATERAL (
+             SELECT COUNT(*)                                 AS route_count,
+                    COUNT(*) FILTER (WHERE mr.enabled = true) AS enabled_route_count
+             FROM model_routes mr
+             JOIN providers p ON p.id = mr.provider_id AND p.deleted_at IS NULL
+             WHERE mr.model_id = m.model_id
+           ) rc ON true
+           WHERE ($1 = '' OR m.model_id ILIKE $2 OR m.display_name ILIKE $2)
+             {status_filter_sql}"#,
+    );
+    let list_sql = format!(
+        r#"SELECT m.id, m.model_id, m.display_name,
+                  m.input_weight, m.output_weight, m.is_active,
+                  COALESCE(rc.route_count, 0)         AS route_count,
+                  COALESCE(rc.enabled_route_count, 0) AS enabled_route_count
+           FROM models m
+           LEFT JOIN LATERAL (
+             SELECT COUNT(*)                                 AS route_count,
+                    COUNT(*) FILTER (WHERE mr.enabled = true) AS enabled_route_count
+             FROM model_routes mr
+             JOIN providers p ON p.id = mr.provider_id AND p.deleted_at IS NULL
+             WHERE mr.model_id = m.model_id
+           ) rc ON true
+           WHERE ($1 = '' OR m.model_id ILIKE $2 OR m.display_name ILIKE $2)
+             {status_filter_sql}
+           ORDER BY m.is_active DESC, m.model_id
+           LIMIT $3 OFFSET $4"#,
+    );
+
+    let total: Option<i64> = sqlx::query_scalar(&total_sql)
+        .bind(search)
+        .bind(&search_pattern)
+        .fetch_one(&state.db)
+        .await?;
+    let rows = sqlx::query_as::<_, ModelRow>(&list_sql)
+        .bind(search)
+        .bind(&search_pattern)
+        .bind(page_size)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?;
+
+    Ok(Json(ModelListResponse {
+        items: rows,
+        total: total.unwrap_or(0),
+    }))
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateModelRequest {
     pub model_id: String,
     pub display_name: String,
+    /// Relative input-token cost factor. Defaults to 1.0.
     #[schema(value_type = Option<f64>)]
-    pub input_price: Option<Decimal>,
+    pub input_weight: Option<Decimal>,
+    /// Relative output-token cost factor. Defaults to 1.0.
     #[schema(value_type = Option<f64>)]
-    pub output_price: Option<Decimal>,
-    /// Defaults to 1.0 if omitted.
-    #[schema(value_type = Option<f64>)]
-    pub input_multiplier: Option<Decimal>,
-    #[schema(value_type = Option<f64>)]
-    pub output_multiplier: Option<Decimal>,
+    pub output_weight: Option<Decimal>,
     pub is_active: Option<bool>,
 }
 
@@ -166,30 +198,24 @@ pub async fn create_model(
             "model_id and display_name are required".into(),
         ));
     }
-    let in_mult = req.input_multiplier.unwrap_or(Decimal::ONE);
-    let out_mult = req.output_multiplier.unwrap_or(Decimal::ONE);
-    if in_mult <= Decimal::ZERO || out_mult <= Decimal::ZERO {
+    let in_w = req.input_weight.unwrap_or(Decimal::ONE);
+    let out_w = req.output_weight.unwrap_or(Decimal::ONE);
+    if in_w <= Decimal::ZERO || out_w <= Decimal::ZERO {
         return Err(AppError::BadRequest(
-            "multipliers must be greater than zero".into(),
+            "weights must be greater than zero".into(),
         ));
     }
 
     let model = sqlx::query_as::<_, Model>(
         r#"INSERT INTO models
-              (model_id, display_name,
-               input_price, output_price,
-               input_multiplier, output_multiplier, is_active)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, model_id, display_name,
-                     input_price, output_price,
-                     input_multiplier, output_multiplier, is_active"#,
+              (model_id, display_name, input_weight, output_weight, is_active)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, model_id, display_name, input_weight, output_weight, is_active"#,
     )
     .bind(&req.model_id)
     .bind(&req.display_name)
-    .bind(req.input_price)
-    .bind(req.output_price)
-    .bind(in_mult)
-    .bind(out_mult)
+    .bind(in_w)
+    .bind(out_w)
     .bind(req.is_active.unwrap_or(true))
     .fetch_one(&state.db)
     .await?;
@@ -209,13 +235,9 @@ pub async fn create_model(
 pub struct UpdateModelRequest {
     pub display_name: Option<String>,
     #[schema(value_type = Option<f64>)]
-    pub input_price: Option<Decimal>,
+    pub input_weight: Option<Decimal>,
     #[schema(value_type = Option<f64>)]
-    pub output_price: Option<Decimal>,
-    #[schema(value_type = Option<f64>)]
-    pub input_multiplier: Option<Decimal>,
-    #[schema(value_type = Option<f64>)]
-    pub output_multiplier: Option<Decimal>,
+    pub output_weight: Option<Decimal>,
     pub is_active: Option<bool>,
 }
 
@@ -246,9 +268,7 @@ pub async fn update_model(
         .assert_scope_global(&state.db, "models:write")
         .await?;
     let existing = sqlx::query_as::<_, Model>(
-        r#"SELECT id, model_id, display_name,
-                  input_price, output_price,
-                  input_multiplier, output_multiplier, is_active
+        r#"SELECT id, model_id, display_name, input_weight, output_weight, is_active
            FROM models WHERE id = $1"#,
     )
     .bind(id)
@@ -256,26 +276,22 @@ pub async fn update_model(
     .await?
     .ok_or_else(|| AppError::NotFound("Model not found".into()))?;
 
-    let new_in_mult = req.input_multiplier.unwrap_or(existing.input_multiplier);
-    let new_out_mult = req.output_multiplier.unwrap_or(existing.output_multiplier);
-    if new_in_mult <= Decimal::ZERO || new_out_mult <= Decimal::ZERO {
+    let new_in_w = req.input_weight.unwrap_or(existing.input_weight);
+    let new_out_w = req.output_weight.unwrap_or(existing.output_weight);
+    if new_in_w <= Decimal::ZERO || new_out_w <= Decimal::ZERO {
         return Err(AppError::BadRequest(
-            "multipliers must be greater than zero".into(),
+            "weights must be greater than zero".into(),
         ));
     }
 
     let updated = sqlx::query_as::<_, Model>(
         r#"UPDATE models SET
-              display_name = $2,
-              input_price = $3,
-              output_price = $4,
-              input_multiplier = $5,
-              output_multiplier = $6,
-              is_active = $7
+              display_name   = $2,
+              input_weight   = $3,
+              output_weight  = $4,
+              is_active      = $5
            WHERE id = $1
-           RETURNING id, model_id, display_name,
-                     input_price, output_price,
-                     input_multiplier, output_multiplier, is_active"#,
+           RETURNING id, model_id, display_name, input_weight, output_weight, is_active"#,
     )
     .bind(id)
     .bind(
@@ -283,10 +299,8 @@ pub async fn update_model(
             .as_deref()
             .unwrap_or(&existing.display_name),
     )
-    .bind(req.input_price.or(existing.input_price))
-    .bind(req.output_price.or(existing.output_price))
-    .bind(new_in_mult)
-    .bind(new_out_mult)
+    .bind(new_in_w)
+    .bind(new_out_w)
     .bind(req.is_active.unwrap_or(existing.is_active))
     .fetch_one(&state.db)
     .await?;
@@ -341,6 +355,51 @@ pub async fn delete_model(
             .detail(serde_json::json!({ "model_id": model_id })),
     );
     Ok(Json(serde_json::json!({"status": "deleted"})))
+}
+
+// ---------------------------------------------------------------------------
+// Bulk cleanup of orphan models (no routes at all)
+// ---------------------------------------------------------------------------
+
+/// `DELETE /api/admin/models/unrouted` — remove catalog entries with
+/// zero `model_routes` rows. Used to clean up the aftermath of a large
+/// batch-import where the admin only wanted to expose a handful of
+/// models but the import created rows for all of them.
+///
+/// Note: `model_routes.provider_id` has `ON DELETE CASCADE`, so soft-
+/// deleted providers still count as "having a route". We filter by the
+/// provider's `deleted_at IS NULL` to avoid keeping around models whose
+/// only routes point to dead providers.
+pub async fn delete_unrouted_models(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Value>, AppError> {
+    auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
+
+    let result = sqlx::query(
+        r#"DELETE FROM models
+           WHERE model_id NOT IN (
+             SELECT DISTINCT mr.model_id
+             FROM model_routes mr
+             JOIN providers p ON p.id = mr.provider_id AND p.deleted_at IS NULL
+           )"#,
+    )
+    .execute(&state.db)
+    .await?;
+
+    let deleted = result.rows_affected() as i64;
+
+    state.audit.log(
+        auth_user
+            .audit("models.unrouted_cleanup")
+            .resource("models")
+            .detail(serde_json::json!({ "deleted": deleted })),
+    );
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
 }
 
 // ---------------------------------------------------------------------------
@@ -487,7 +546,7 @@ pub async fn list_model_routes(
                   mr.upstream_model, mr.weight, mr.priority, mr.enabled
            FROM model_routes mr
            JOIN providers p ON p.id = mr.provider_id
-           WHERE mr.model_id = $1
+           WHERE mr.model_id = $1 AND p.deleted_at IS NULL
            ORDER BY mr.priority ASC, mr.weight DESC"#,
     )
     .bind(&model_id)
@@ -797,7 +856,12 @@ pub async fn batch_create_routes(
 
     let model_slice: &[String] = &req.model_ids;
 
-    // Auto-create models that don't exist
+    // Auto-create catalog entries for unseen model ids. Imported models
+    // default to `is_active = true` at the catalog level, but the
+    // route below is inserted `enabled = false` — so even though the
+    // model row exists, the gateway won't route to it until an admin
+    // flips the route on in the Models page. This keeps the "just
+    // imported 500 models" noise out of `/v1/models` for clients.
     sqlx::query(
         r#"INSERT INTO models (model_id, display_name, is_active)
            SELECT m, m, true FROM UNNEST($1::TEXT[]) AS t(m)
@@ -807,10 +871,10 @@ pub async fn batch_create_routes(
     .execute(&state.db)
     .await?;
 
-    // Create routes (skip duplicates)
+    // Create routes disabled-by-default (skip duplicates).
     let result = sqlx::query(
-        r#"INSERT INTO model_routes (model_id, provider_id, weight, priority)
-           SELECT m, $2, 100, 0 FROM UNNEST($1::TEXT[]) AS t(m)
+        r#"INSERT INTO model_routes (model_id, provider_id, weight, priority, enabled)
+           SELECT m, $2, 100, 0, false FROM UNNEST($1::TEXT[]) AS t(m)
            ON CONFLICT (model_id, provider_id) DO NOTHING"#,
     )
     .bind(model_slice)

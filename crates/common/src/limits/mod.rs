@@ -6,7 +6,7 @@
 //
 //   rate_limit_rules     — sliding-window rules (1m / 5m / 1h / 5h / 1d / 1w)
 //   budget_caps          — natural-period token budgets (daily / weekly / monthly)
-//   models               — input_multiplier / output_multiplier for weighted tokens
+//   models               — input_weight / output_weight for weighted tokens
 //
 // And the corresponding submodules in this folder:
 //
@@ -977,14 +977,14 @@ pub async fn validate_persisted(pool: &PgPool) -> anyhow::Result<()> {
 
     let bad_models: Vec<(String,)> = sqlx::query_as(
         "SELECT model_id FROM models \
-          WHERE input_multiplier <= 0 OR output_multiplier <= 0",
+          WHERE input_weight <= 0 OR output_weight <= 0",
     )
     .fetch_all(pool)
     .await?;
     if !bad_models.is_empty() {
         let list: Vec<String> = bad_models.iter().map(|(m,)| m.clone()).collect();
         anyhow::bail!(
-            "Found models with non-positive input/output multiplier: {}",
+            "Found models with non-positive input/output weight: {}",
             list.join(", ")
         );
     }

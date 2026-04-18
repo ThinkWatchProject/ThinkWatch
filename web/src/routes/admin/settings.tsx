@@ -18,6 +18,7 @@ import { Settings, Shield, Key, Database, Lock, AlertCircle, CheckCircle, Memory
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
 import { api, apiPatch } from '@/lib/api';
+import { toast } from 'sonner';
 // Types, value-coercion helpers, and the small NumberField input
 // live in the `settings/` sibling directory. The page component
 // itself is still big — owns all editable state and the save
@@ -670,6 +671,8 @@ export function SettingsPage() {
               </div>
             </CardContent>
           </Card>
+
+          <PlatformPricingCard />
         </TabsContent>
 
         {/* ---------------------------------------------------------------- */}
@@ -928,5 +931,153 @@ export function SettingsPage() {
       </Tabs>
 
     </div>
+  );
+}
+
+/* ---------- Platform pricing card ---------- */
+
+// The baseline `$/token` that Models use as `cost = baseline × weight × tokens`.
+// Self-contained: own fetch, own save, own dirty-flag. Lives under the
+// gateway tab because costs are an AI-Gateway concern.
+function PlatformPricingCard() {
+  const { t } = useTranslation();
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  // Edit in $/1M tokens because 0.0000025 is unreadable — multiply
+  // by 1e6 on load and divide by 1e6 on save.
+  const [inputPerM, setInputPerM] = useState('');
+  const [outputPerM, setOutputPerM] = useState('');
+  const [currency, setCurrency] = useState('USD');
+  const [initial, setInitial] = useState({ input: '', output: '', currency: 'USD' });
+
+  const reload = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const p = await api<{
+        input_price_per_token: string;
+        output_price_per_token: string;
+        currency: string;
+      }>('/api/admin/platform-pricing');
+      const i = (Number(p.input_price_per_token) * 1_000_000).toString();
+      const o = (Number(p.output_price_per_token) * 1_000_000).toString();
+      setInputPerM(i);
+      setOutputPerM(o);
+      setCurrency(p.currency);
+      setInitial({ input: i, output: o, currency: p.currency });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load pricing');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reload();
+  }, [reload]);
+
+  const dirty =
+    inputPerM !== initial.input ||
+    outputPerM !== initial.output ||
+    currency !== initial.currency;
+
+  const save = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      const i = Number(inputPerM);
+      const o = Number(outputPerM);
+      if (!Number.isFinite(i) || !Number.isFinite(o) || i < 0 || o < 0) {
+        setError(t('settingsPage.platformPricing.invalid'));
+        setSaving(false);
+        return;
+      }
+      await apiPatch('/api/admin/platform-pricing', {
+        input_price_per_token: i / 1_000_000,
+        output_price_per_token: o / 1_000_000,
+        currency,
+      });
+      toast.success(t('settingsPage.platformPricing.saved'));
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-base">
+          {t('settingsPage.platformPricing.title')}
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <p className="text-sm text-muted-foreground">
+          {t('settingsPage.platformPricing.hint')}
+        </p>
+        {error && (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        {loading ? (
+          <p className="text-xs italic text-muted-foreground">{t('common.loading')}</p>
+        ) : (
+          <>
+            <div className="grid gap-4 sm:grid-cols-3 max-w-2xl">
+              <div className="space-y-1.5">
+                <Label htmlFor="pp_input">
+                  {t('settingsPage.platformPricing.inputPerM')}
+                </Label>
+                <Input
+                  id="pp_input"
+                  value={inputPerM}
+                  onChange={(e) => setInputPerM(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="2.0"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="pp_output">
+                  {t('settingsPage.platformPricing.outputPerM')}
+                </Label>
+                <Input
+                  id="pp_output"
+                  value={outputPerM}
+                  onChange={(e) => setOutputPerM(e.target.value)}
+                  inputMode="decimal"
+                  placeholder="8.0"
+                />
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="pp_currency">
+                  {t('settingsPage.platformPricing.currency')}
+                </Label>
+                <Input
+                  id="pp_currency"
+                  value={currency}
+                  onChange={(e) => setCurrency(e.target.value.toUpperCase())}
+                  maxLength={3}
+                />
+              </div>
+            </div>
+            <div>
+              <Button
+                type="button"
+                size="sm"
+                disabled={!dirty || saving}
+                onClick={save}
+              >
+                {saving ? t('common.saving') : t('common.save')}
+              </Button>
+            </div>
+          </>
+        )}
+      </CardContent>
+    </Card>
   );
 }

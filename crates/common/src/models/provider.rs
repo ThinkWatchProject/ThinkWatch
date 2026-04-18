@@ -22,9 +22,10 @@ pub struct Model {
     pub id: Uuid,
     pub model_id: String,
     pub display_name: String,
-    pub input_price: Option<Decimal>,
-    pub output_price: Option<Decimal>,
-    pub input_multiplier: Decimal,
-    pub output_multiplier: Decimal,
+    /// Relative input-token cost factor. Absolute `$/token` is
+    /// `platform_pricing.input_price_per_token × input_weight`.
+    pub input_weight: Decimal,
+    /// Relative output-token cost factor.
+    pub output_weight: Decimal,
     pub is_active: bool,
 }

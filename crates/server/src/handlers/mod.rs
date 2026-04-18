@@ -18,6 +18,7 @@ pub mod mcp_tools;
 pub mod metrics;
 pub mod models;
 pub mod platform_logs;
+pub mod platform_pricing;
 pub mod providers;
 pub mod roles;
 pub mod setup;

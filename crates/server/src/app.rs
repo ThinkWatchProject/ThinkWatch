@@ -165,6 +165,11 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
     }
     state.gateway_router.store(Arc::new(initial_router));
 
+    // Share one WeightCache between the limits engine and the cost
+    // tracker so a cache miss loaded for rate limiting also serves the
+    // cost calculation on the same request.
+    let weight_cache = think_watch_common::limits::weight::WeightCache::new();
+
     let gateway_state = GatewayState {
         router: state.gateway_router.clone(),
         model_mapper: Arc::new(ModelMapper::new()),
@@ -173,13 +178,16 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
         quota: Arc::new(QuotaManager::new(state.redis.clone())),
         cache: Arc::new(ResponseCache::new(state.redis.clone(), cache_ttl)),
         pii_redactor: state.pii_redactor.clone(),
-        cost_tracker: Arc::new(think_watch_gateway::cost_tracker::CostTracker::new()),
+        cost_tracker: Arc::new(think_watch_gateway::cost_tracker::CostTracker::new(
+            state.db.clone(),
+            weight_cache.clone(),
+        )),
         rate_limiter: Arc::new(think_watch_gateway::rate_limiter::RateLimiter::new(
             state.redis.clone(),
         )),
         db: state.db.clone(),
         redis: state.redis.clone(),
-        weight_cache: think_watch_common::limits::weight::WeightCache::new(),
+        weight_cache,
         dynamic_config: state.dynamic_config.clone(),
         audit: state.audit.clone(),
     };
@@ -555,6 +563,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             get(handlers::models::list_models).post(handlers::models::create_model),
         )
         .route(
+            "/api/admin/models/unrouted",
+            axum::routing::delete(handlers::models::delete_unrouted_models),
+        )
+        .route(
             "/api/admin/models/{id}",
             patch(handlers::models::update_model).delete(handlers::models::delete_model),
         )
@@ -586,6 +598,11 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .route(
             "/api/admin/providers/{provider_id}/remote-models",
             get(handlers::models::list_remote_models),
+        )
+        .route(
+            "/api/admin/platform-pricing",
+            get(handlers::platform_pricing::get_platform_pricing)
+                .patch(handlers::platform_pricing::update_platform_pricing),
         )
         .route(
             "/api/admin/teams",

@@ -36,3 +36,4 @@ aws-credential-types = { workspace = true }
 aws-smithy-eventstream = { workspace = true }
 arc-swap = { workspace = true }
 http_1x = { package = "http", version = "1" }
+rust_decimal = { workspace = true }

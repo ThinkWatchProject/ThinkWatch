@@ -264,95 +264,6 @@ pub async fn create_provider(
     .fetch_one(&state.db)
     .await?;
 
-    // Auto-test connectivity and bulk-insert discovered models
-    let test_headers: Vec<ProviderHeader> = config
-        .get("headers")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let test_req = TestProviderRequest {
-        provider_type: req.provider_type.clone(),
-        base_url: req.base_url.clone(),
-        headers: test_headers,
-    };
-    match run_provider_test(test_req).await {
-        Ok(Json(resp)) if resp.success => {
-            if let Some(models) = resp.models {
-                for model_id in &models {
-                    // Insert model (standalone, no provider_id) — ON CONFLICT DO NOTHING
-                    if let Err(e) = sqlx::query(
-                        r#"INSERT INTO models (model_id, display_name)
-                           VALUES ($1, $1)
-                           ON CONFLICT (model_id) DO NOTHING"#,
-                    )
-                    .bind(model_id)
-                    .execute(&state.db)
-                    .await
-                    {
-                        tracing::warn!(
-                            provider_id = %provider.id,
-                            model_id = %model_id,
-                            "Failed to insert discovered model: {e}"
-                        );
-                        continue;
-                    }
-
-                    // Check if a route already exists for this model from another provider
-                    let existing_route: Option<i32> = sqlx::query_scalar(
-                        "SELECT MAX(priority) FROM model_routes WHERE model_id = $1",
-                    )
-                    .bind(model_id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .ok()
-                    .flatten();
-
-                    // If routes exist, this new one becomes a fallback (priority=1+)
-                    let priority = match existing_route {
-                        Some(max_prio) => max_prio + 1,
-                        None => 0,
-                    };
-
-                    // Insert route — ON CONFLICT DO NOTHING on (model_id, provider_id)
-                    if let Err(e) = sqlx::query(
-                        r#"INSERT INTO model_routes (model_id, provider_id, weight, priority)
-                           VALUES ($1, $2, 100, $3)
-                           ON CONFLICT (model_id, provider_id) DO NOTHING"#,
-                    )
-                    .bind(model_id)
-                    .bind(provider.id)
-                    .bind(priority)
-                    .execute(&state.db)
-                    .await
-                    {
-                        tracing::warn!(
-                            provider_id = %provider.id,
-                            model_id = %model_id,
-                            "Failed to insert model route: {e}"
-                        );
-                    }
-                }
-                tracing::info!(
-                    provider_id = %provider.id,
-                    model_count = models.len(),
-                    "Auto-discovered and inserted models + routes for new provider"
-                );
-            }
-        }
-        Ok(Json(resp)) => {
-            tracing::warn!(
-                provider_id = %provider.id,
-                message = %resp.message,
-                "Provider connectivity test failed after creation; provider saved without models"
-            );
-        }
-        Err(e) => {
-            tracing::warn!(
-                provider_id = %provider.id,
-                "Provider connectivity test errored after creation: {e}; provider saved without models"
-            );
-        }
-    }
-
     state.audit.log(
         auth_user
             .audit("provider.created")
@@ -514,17 +425,29 @@ pub async fn delete_provider(
         .fetch_optional(&state.db)
         .await?;
 
+    // Soft-delete + drop routes in one transaction. The `model_routes`
+    // FK is `ON DELETE CASCADE`, but since we only flip `deleted_at`
+    // the cascade doesn't fire — hence the explicit DELETE below.
+    // Orphaned routes would otherwise show up in the Models page with
+    // a raw provider UUID and no way to edit them.
+    let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE providers SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL")
         .bind(id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
+    let routes_deleted = sqlx::query("DELETE FROM model_routes WHERE provider_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
 
     state.audit.log(
         auth_user
             .audit("provider.deleted")
             .resource("provider")
             .resource_id(id.to_string())
-            .detail(serde_json::json!({ "name": name })),
+            .detail(serde_json::json!({ "name": name, "routes_deleted": routes_deleted })),
     );
 
     crate::app::rebuild_gateway_router(&state).await;

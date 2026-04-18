@@ -33,8 +33,8 @@ import {
 import {
   AlertCircle,
   Brain,
-  CircleCheck,
-  CircleOff,
+  ChevronDown,
+  ChevronRight,
   Loader2,
   Pencil,
   Plus,
@@ -50,12 +50,42 @@ import { toast } from 'sonner';
 
 /* ---------- types ---------- */
 
+// Decimal fields come back from sqlx as strings (rust_decimal's default
+// Serialize) — keep them that way in TS so we don't lose precision on
+// parse, and let the form work in string space too.
+interface ModelRow {
+  id: string;
+  model_id: string;
+  display_name: string;
+  /// Relative input-token cost factor. Absolute USD cost is
+  /// `platform_pricing.input_price_per_token × input_weight × tokens`.
+  input_weight: string;
+  output_weight: string;
+  is_active: boolean;
+  route_count: number;
+  enabled_route_count: number;
+}
+
+type ModelStatus = 'active' | 'draft' | 'unrouted';
+
+function modelStatus(m: ModelRow): ModelStatus {
+  if (m.route_count === 0) return 'unrouted';
+  if (m.enabled_route_count === 0) return 'draft';
+  return 'active';
+}
+
+interface PlatformPricing {
+  input_price_per_token: string;
+  output_price_per_token: string;
+  currency: string;
+}
+
 interface RouteRow {
   id: string;
   model_id: string;
   provider_id: string;
   provider_name: string;
-  upstream_model: string;
+  upstream_model: string | null;
   weight: number;
   priority: number;
   enabled: boolean;
@@ -68,55 +98,88 @@ interface Provider {
   provider_type: string;
 }
 
-/* ---------- form types ---------- */
+interface ModelFormState {
+  model_id: string;
+  display_name: string;
+  input_weight: string;
+  output_weight: string;
+  is_active: boolean;
+}
 
-interface RouteEditFormState {
+interface RouteFormState {
+  provider_id: string;
   upstream_model: string;
   weight: string;
   priority: string;
   enabled: boolean;
 }
 
+const emptyModelForm: ModelFormState = {
+  model_id: '',
+  display_name: '',
+  input_weight: '1.0',
+  output_weight: '1.0',
+  is_active: true,
+};
+
+const emptyRouteForm: RouteFormState = {
+  provider_id: '',
+  upstream_model: '',
+  weight: '100',
+  priority: '0',
+  enabled: true,
+};
+
 /* ---------- component ---------- */
 
 export function ModelsPage() {
   const { t } = useTranslation();
 
-  // Route table state
-  const [routes, setRoutes] = useState<RouteRow[]>([]);
-  const [totalRoutes, setTotalRoutes] = useState(0);
-  const [providers, setProviders] = useState<Provider[]>([]);
+  // Model list state
+  const [models, setModels] = useState<ModelRow[]>([]);
+  const [totalModels, setTotalModels] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [search, setSearch] = useState('');
-  // `debouncedSearch` feeds the API so fast typing doesn't fan out
-  // one request per keystroke.
   const [debouncedSearch, setDebouncedSearch] = useState('');
-  const [filterProviderId, setFilterProviderId] = useState('');
+  const [statusFilter, setStatusFilter] = useState<'' | ModelStatus>('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
 
-  // Edit route dialog
-  const [editRouteDialogOpen, setEditRouteDialogOpen] = useState(false);
+  // Providers — static lookup for the route editor + batch import.
+  const [providers, setProviders] = useState<Provider[]>([]);
+
+  // Platform baseline pricing — powers the "estimated cost" preview
+  // shown inline under the weight fields. Loaded once on mount.
+  const [pricing, setPricing] = useState<PlatformPricing | null>(null);
+
+  // Delete-all-unrouted confirmation
+  const [cleanupOpen, setCleanupOpen] = useState(false);
+  const [cleanupRunning, setCleanupRunning] = useState(false);
+
+  // Per-model expanded state + lazy-loaded routes cache
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [routesByModel, setRoutesByModel] = useState<Record<string, RouteRow[]>>({});
+  const [routesLoading, setRoutesLoading] = useState<Set<string>>(new Set());
+
+  // Model create/edit
+  const [modelDialogOpen, setModelDialogOpen] = useState(false);
+  const [editingModel, setEditingModel] = useState<ModelRow | null>(null);
+  const [modelForm, setModelForm] = useState<ModelFormState>(emptyModelForm);
+  const [modelFormError, setModelFormError] = useState('');
+  const [modelSaving, setModelSaving] = useState(false);
+  const [deleteModel, setDeleteModel] = useState<ModelRow | null>(null);
+
+  // Route create (one-off via "+ Add Provider") / edit
+  const [routeDialogOpen, setRouteDialogOpen] = useState(false);
+  const [routeTargetModel, setRouteTargetModel] = useState<ModelRow | null>(null);
   const [editingRoute, setEditingRoute] = useState<RouteRow | null>(null);
-  const [routeEditForm, setRouteEditForm] = useState<RouteEditFormState>({
-    upstream_model: '',
-    weight: '100',
-    priority: '0',
-    enabled: true,
-  });
-  const [routeEditFormError, setRouteEditFormError] = useState('');
-  const [routeEditSaving, setRouteEditSaving] = useState(false);
+  const [routeForm, setRouteForm] = useState<RouteFormState>(emptyRouteForm);
+  const [routeFormError, setRouteFormError] = useState('');
+  const [routeSaving, setRouteSaving] = useState(false);
+  const [deleteRoute, setDeleteRoute] = useState<RouteRow | null>(null);
 
-  // Delete route
-  const [deleteRouteId, setDeleteRouteId] = useState<string | null>(null);
-
-  // Row selection for batch actions
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
-  const [batchActionRunning, setBatchActionRunning] = useState(false);
-
-  // Batch add dialog
+  // Batch import (pick a provider, fetch its remote model list, tick a bunch)
   const [batchDialogOpen, setBatchDialogOpen] = useState(false);
   const [batchProviderId, setBatchProviderId] = useState('');
   const [remoteModels, setRemoteModels] = useState<string[]>([]);
@@ -125,193 +188,276 @@ export function ModelsPage() {
   const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set());
   const [batchSearch, setBatchSearch] = useState('');
   const [batchSaving, setBatchSaving] = useState(false);
-  // Track existing routes for the selected provider
   const [existingModelIds, setExistingModelIds] = useState<Set<string>>(new Set());
 
   /* ---------- data fetching ---------- */
 
-  const fetchRoutes = useCallback(
-    async (p = page, q = debouncedSearch, ps = pageSize, pid = filterProviderId) => {
+  const fetchModels = useCallback(
+    async (
+      p = page,
+      q = debouncedSearch,
+      ps = pageSize,
+      status: '' | ModelStatus = statusFilter,
+    ) => {
       setLoading(true);
       try {
         const params = new URLSearchParams({ page: String(p), page_size: String(ps) });
         if (q) params.set('q', q);
-        if (pid) params.set('provider_id', pid);
-        const res = await api<{ items: RouteRow[]; total: number }>(
-          `/api/admin/model-routes?${params}`,
+        if (status) params.set('status', status);
+        const res = await api<{ items: ModelRow[]; total: number }>(
+          `/api/admin/models?${params}`,
         );
-        setRoutes(res.items);
-        setTotalRoutes(res.total);
+        setModels(res.items);
+        setTotalModels(res.total);
         setError('');
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load routes');
+        setError(err instanceof Error ? err.message : 'Failed to load models');
       } finally {
         setLoading(false);
       }
     },
-    [page, debouncedSearch, pageSize, filterProviderId],
+    [page, debouncedSearch, pageSize, statusFilter],
   );
 
-  // Providers list is small and only used by the filter dropdown +
-  // add-route picker — fetch once on mount, not on every keystroke.
+  const fetchPricing = useCallback(async () => {
+    try {
+      const p = await api<PlatformPricing>('/api/admin/platform-pricing');
+      setPricing(p);
+    } catch {
+      // Non-critical — cost preview just won't render.
+    }
+  }, []);
+
   const fetchProviders = useCallback(async () => {
     try {
       const provs = await api<Provider[]>('/api/admin/providers');
       setProviders(provs);
     } catch {
-      // Route fetch surfaces its own error; providers are non-critical here.
+      // Non-critical: the routes list still works without the lookup.
+    }
+  }, []);
+
+  const fetchRoutesFor = useCallback(async (modelId: string) => {
+    setRoutesLoading((s) => new Set(s).add(modelId));
+    try {
+      const rows = await api<RouteRow[]>(
+        `/api/admin/models/${encodeURIComponent(modelId)}/routes`,
+      );
+      setRoutesByModel((m) => ({ ...m, [modelId]: rows }));
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to load routes');
+    } finally {
+      setRoutesLoading((s) => {
+        const next = new Set(s);
+        next.delete(modelId);
+        return next;
+      });
     }
   }, []);
 
   useEffect(() => {
     void fetchProviders();
-  }, [fetchProviders]);
+    void fetchPricing();
+  }, [fetchProviders, fetchPricing]);
 
   useEffect(() => {
-    void fetchRoutes();
-  }, [fetchRoutes]);
+    void fetchModels();
+  }, [fetchModels]);
 
-  // Debounce search input. 250ms matches the users page.
   useEffect(() => {
     const h = setTimeout(() => setDebouncedSearch(search.trim()), 250);
     return () => clearTimeout(h);
   }, [search]);
 
-  // Reset to page 1 when the search term actually changes (post-debounce),
-  // so you don't land on an empty page after filtering.
   useEffect(() => {
     setPage(1);
   }, [debouncedSearch]);
 
-  /* ---------- edit route ---------- */
+  /* ---------- expand / collapse ---------- */
+
+  const toggleExpand = (modelId: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(modelId)) {
+        next.delete(modelId);
+      } else {
+        next.add(modelId);
+        if (!routesByModel[modelId]) void fetchRoutesFor(modelId);
+      }
+      return next;
+    });
+  };
+
+  /* ---------- model CRUD ---------- */
+
+  const openCreateModel = () => {
+    setEditingModel(null);
+    setModelForm(emptyModelForm);
+    setModelFormError('');
+    setModelDialogOpen(true);
+  };
+
+  const openEditModel = (m: ModelRow) => {
+    setEditingModel(m);
+    setModelForm({
+      model_id: m.model_id,
+      display_name: m.display_name,
+      input_weight: m.input_weight,
+      output_weight: m.output_weight,
+      is_active: m.is_active,
+    });
+    setModelFormError('');
+    setModelDialogOpen(true);
+  };
+
+  const submitModel = async (e: FormEvent) => {
+    e.preventDefault();
+    setModelFormError('');
+    const inW = Number(modelForm.input_weight);
+    const outW = Number(modelForm.output_weight);
+    if (!Number.isFinite(inW) || inW <= 0 || !Number.isFinite(outW) || outW <= 0) {
+      setModelFormError(t('models.errors.weightMustBePositive'));
+      return;
+    }
+    const body = {
+      display_name: modelForm.display_name.trim() || modelForm.model_id.trim(),
+      input_weight: inW,
+      output_weight: outW,
+      is_active: modelForm.is_active,
+    };
+    setModelSaving(true);
+    try {
+      if (editingModel) {
+        await apiPatch(`/api/admin/models/${editingModel.id}`, body);
+        toast.success(t('models.toast.updated'));
+      } else {
+        if (!modelForm.model_id.trim()) {
+          setModelFormError(t('models.field.modelId') + ' is required');
+          setModelSaving(false);
+          return;
+        }
+        await apiPost('/api/admin/models', {
+          ...body,
+          model_id: modelForm.model_id.trim(),
+        });
+        toast.success(t('models.toast.created'));
+      }
+      setModelDialogOpen(false);
+      await fetchModels();
+    } catch (err) {
+      setModelFormError(err instanceof Error ? err.message : 'Failed to save');
+    } finally {
+      setModelSaving(false);
+    }
+  };
+
+  const confirmCleanup = async () => {
+    setCleanupRunning(true);
+    try {
+      const res = await apiDelete<{ deleted: number }>('/api/admin/models/unrouted');
+      toast.success(t('models.cleanupDone', { count: res.deleted }));
+      setCleanupOpen(false);
+      await fetchModels();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Cleanup failed');
+    } finally {
+      setCleanupRunning(false);
+    }
+  };
+
+  const confirmDeleteModel = async () => {
+    if (!deleteModel) return;
+    try {
+      await apiDelete(`/api/admin/models/${deleteModel.id}`);
+      toast.success(t('models.toast.deleted'));
+      setDeleteModel(null);
+      await fetchModels();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete');
+    }
+  };
+
+  /* ---------- route CRUD ---------- */
+
+  const openAddRoute = (model: ModelRow) => {
+    setRouteTargetModel(model);
+    setEditingRoute(null);
+    setRouteForm(emptyRouteForm);
+    setRouteFormError('');
+    setRouteDialogOpen(true);
+  };
 
   const openEditRoute = (route: RouteRow) => {
+    setRouteTargetModel(null);
     setEditingRoute(route);
-    setRouteEditForm({
+    setRouteForm({
+      provider_id: route.provider_id,
       upstream_model: route.upstream_model ?? '',
       weight: String(route.weight),
       priority: String(route.priority),
       enabled: route.enabled,
     });
-    setRouteEditFormError('');
-    setEditRouteDialogOpen(true);
+    setRouteFormError('');
+    setRouteDialogOpen(true);
   };
 
-  const submitEditRoute = async (e: FormEvent) => {
+  const submitRoute = async (e: FormEvent) => {
     e.preventDefault();
-    if (!editingRoute) return;
-    setRouteEditFormError('');
-    const weight = Number(routeEditForm.weight);
+    setRouteFormError('');
+    const weight = Number(routeForm.weight);
     if (!Number.isFinite(weight) || weight < 0) {
-      setRouteEditFormError(t('models.weight') + ' must be >= 0');
+      setRouteFormError(t('models.weight') + ' must be >= 0');
       return;
     }
-    const body = {
-      upstream_model: routeEditForm.upstream_model.trim() || null,
-      weight,
-      priority: Number(routeEditForm.priority),
-      enabled: routeEditForm.enabled,
-    };
-    setRouteEditSaving(true);
+    const upstream = routeForm.upstream_model.trim() || null;
+    setRouteSaving(true);
     try {
-      await apiPatch(`/api/admin/model-routes/${editingRoute.id}`, body);
-      toast.success(t('models.toast.updated'));
-      setEditRouteDialogOpen(false);
-      await fetchRoutes();
+      if (editingRoute) {
+        await apiPatch(`/api/admin/model-routes/${editingRoute.id}`, {
+          upstream_model: upstream,
+          weight,
+          priority: Number(routeForm.priority),
+          enabled: routeForm.enabled,
+        });
+        toast.success(t('models.toast.updated'));
+        await fetchRoutesFor(editingRoute.model_id);
+      } else if (routeTargetModel) {
+        if (!routeForm.provider_id) {
+          setRouteFormError(t('models.field.provider') + ' is required');
+          setRouteSaving(false);
+          return;
+        }
+        await apiPost(`/api/admin/models/${routeTargetModel.model_id}/routes`, {
+          provider_id: routeForm.provider_id,
+          upstream_model: upstream,
+          weight,
+          priority: Number(routeForm.priority),
+        });
+        toast.success(t('models.routeAdded'));
+        await fetchRoutesFor(routeTargetModel.model_id);
+      }
+      setRouteDialogOpen(false);
     } catch (err) {
-      setRouteEditFormError(err instanceof Error ? err.message : 'Failed to save');
+      setRouteFormError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
-      setRouteEditSaving(false);
+      setRouteSaving(false);
     }
   };
 
-  /* ---------- delete route ---------- */
-
   const confirmDeleteRoute = async () => {
-    if (!deleteRouteId) return;
+    if (!deleteRoute) return;
     try {
-      await apiDelete(`/api/admin/model-routes/${deleteRouteId}`);
+      await apiDelete(`/api/admin/model-routes/${deleteRoute.id}`);
       toast.success(t('models.routeDeleted'));
-      setDeleteRouteId(null);
-      await fetchRoutes();
+      const modelId = deleteRoute.model_id;
+      setDeleteRoute(null);
+      await fetchRoutesFor(modelId);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to delete route');
     }
   };
 
-  /* ---------- batch actions ---------- */
-
-  // Selections persist across page/search changes — the header checkbox
-  // only reflects the current page, but `selectedIds` keeps everything
-  // the user has ticked so batch ops can target rows from other pages.
-
-  const toggleRowSelected = (id: string) => {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const togglePageSelected = () => {
-    const ids = routes.map((r) => r.id);
-    const allSelected = ids.length > 0 && ids.every((id) => selectedIds.has(id));
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (allSelected) for (const id of ids) next.delete(id);
-      else for (const id of ids) next.add(id);
-      return next;
-    });
-  };
-
-  const pageAllSelected =
-    routes.length > 0 && routes.every((r) => selectedIds.has(r.id));
-  const pageSomeSelected =
-    !pageAllSelected && routes.some((r) => selectedIds.has(r.id));
-
-  const confirmBatchDelete = async () => {
-    if (selectedIds.size === 0) return;
-    setBatchActionRunning(true);
-    try {
-      const res = await apiPost<{ deleted: number }>(
-        '/api/admin/model-routes/batch-delete',
-        { ids: Array.from(selectedIds) },
-      );
-      toast.success(t('models.batchDeleted', { count: res.deleted }));
-      setSelectedIds(new Set());
-      setBatchDeleteOpen(false);
-      await fetchRoutes();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to delete routes');
-    } finally {
-      setBatchActionRunning(false);
-    }
-  };
-
-  const batchToggleEnabled = async (enabled: boolean) => {
-    if (selectedIds.size === 0) return;
-    setBatchActionRunning(true);
-    try {
-      const res = await apiPost<{ updated: number }>(
-        '/api/admin/model-routes/batch-update',
-        { ids: Array.from(selectedIds), enabled },
-      );
-      toast.success(
-        enabled
-          ? t('models.batchEnabled', { count: res.updated })
-          : t('models.batchDisabled', { count: res.updated }),
-      );
-      setSelectedIds(new Set());
-      await fetchRoutes();
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to update routes');
-    } finally {
-      setBatchActionRunning(false);
-    }
-  };
-
-  /* ---------- batch add ---------- */
+  /* ---------- batch import ---------- */
 
   const openBatchDialog = () => {
     setBatchProviderId('');
@@ -323,7 +469,6 @@ export function ModelsPage() {
     setBatchDialogOpen(true);
   };
 
-  // Fetch remote models when provider changes in batch dialog
   const onBatchProviderChange = async (providerId: string) => {
     setBatchProviderId(providerId);
     setBatchSelected(new Set());
@@ -336,15 +481,14 @@ export function ModelsPage() {
 
     setRemoteModelsLoading(true);
     try {
-      // Fetch remote models and existing routes for this provider in parallel
-      const [models, existingRoutes] = await Promise.all([
+      const [rmodels, existing] = await Promise.all([
         api<string[]>(`/api/admin/providers/${providerId}/remote-models`),
         api<{ items: RouteRow[]; total: number }>(
           `/api/admin/model-routes?provider_id=${providerId}&page=1&page_size=10000`,
         ),
       ]);
-      setRemoteModels(models);
-      setExistingModelIds(new Set(existingRoutes.items.map((r) => r.model_id)));
+      setRemoteModels(rmodels);
+      setExistingModelIds(new Set(existing.items.map((r) => r.model_id)));
     } catch (err) {
       setRemoteModelsError(err instanceof Error ? err.message : 'Failed to load models');
     } finally {
@@ -368,22 +512,15 @@ export function ModelsPage() {
     });
   };
 
-  const toggleSelectAll = () => {
+  const toggleBatchSelectAll = () => {
     const selectable = filteredRemoteModels.filter((m) => !existingModelIds.has(m));
     const allSelected = selectable.length > 0 && selectable.every((m) => batchSelected.has(m));
-    if (allSelected) {
-      setBatchSelected((prev) => {
-        const next = new Set(prev);
-        for (const m of selectable) next.delete(m);
-        return next;
-      });
-    } else {
-      setBatchSelected((prev) => {
-        const next = new Set(prev);
-        for (const m of selectable) next.add(m);
-        return next;
-      });
-    }
+    setBatchSelected((prev) => {
+      const next = new Set(prev);
+      if (allSelected) for (const m of selectable) next.delete(m);
+      else for (const m of selectable) next.add(m);
+      return next;
+    });
   };
 
   const submitBatch = async () => {
@@ -396,12 +533,21 @@ export function ModelsPage() {
       });
       toast.success(t('models.batchSuccess', { count: res.created }));
       setBatchDialogOpen(false);
-      await fetchRoutes();
+      await fetchModels();
+      // Any currently-expanded rows need their routes refreshed too.
+      for (const modelId of expanded) void fetchRoutesFor(modelId);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to add routes');
+      toast.error(err instanceof Error ? err.message : 'Failed to import');
     } finally {
       setBatchSaving(false);
     }
+  };
+
+  /* ---------- helpers ---------- */
+
+  const providerLabel = (id: string): string => {
+    const p = providers.find((p) => p.id === id);
+    return p?.display_name || p?.name || id;
   };
 
   /* ---------- render ---------- */
@@ -411,13 +557,19 @@ export function ModelsPage() {
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
         <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{t('models.routeTitle')}</h1>
-          <p className="text-muted-foreground">{t('models.routeSubtitle')}</p>
+          <h1 className="text-2xl font-semibold tracking-tight">{t('models.title')}</h1>
+          <p className="text-muted-foreground">{t('models.subtitle')}</p>
         </div>
-        <Button onClick={openBatchDialog} disabled={providers.length === 0}>
-          <Plus className="mr-1 h-3.5 w-3.5" />
-          {t('models.addRoutes')}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={openBatchDialog} disabled={providers.length === 0}>
+            <Plus className="mr-1 h-3.5 w-3.5" />
+            {t('models.addRoutes')}
+          </Button>
+          <Button onClick={openCreateModel}>
+            <Plus className="mr-1 h-3.5 w-3.5" />
+            {t('models.addModel')}
+          </Button>
+        </div>
       </div>
 
       {error && (
@@ -434,7 +586,7 @@ export function ModelsPage() {
         </Alert>
       )}
 
-      {/* Search + Provider filter + batch actions (when rows selected) */}
+      {/* Search + status filter + cleanup action */}
       <div className="flex items-center gap-2 mb-4">
         <Input
           placeholder={t('models.searchPlaceholder')}
@@ -443,80 +595,48 @@ export function ModelsPage() {
           className="max-w-sm"
         />
         <Select
-          value={filterProviderId}
+          value={statusFilter || '__all__'}
           onValueChange={(v) => {
-            setFilterProviderId(v === '__all__' ? '' : v);
+            setStatusFilter(v === '__all__' ? '' : (v as ModelStatus));
             setPage(1);
           }}
         >
-          <SelectTrigger className="w-[200px]">
-            <SelectValue placeholder={t('models.filterProvider')} />
+          <SelectTrigger className="w-[170px]">
+            <SelectValue placeholder={t('models.filterStatus')} />
           </SelectTrigger>
           <SelectContent>
-            <SelectItem value="__all__">{t('models.filterProvider')}</SelectItem>
-            {providers.map((p) => (
-              <SelectItem key={p.id} value={p.id}>
-                {p.display_name || p.name}
-              </SelectItem>
-            ))}
+            <SelectItem value="__all__">{t('models.status.all')}</SelectItem>
+            <SelectItem value="active">{t('models.status.active')}</SelectItem>
+            <SelectItem value="draft">{t('models.status.draft')}</SelectItem>
+            <SelectItem value="unrouted">{t('models.status.unrouted')}</SelectItem>
           </SelectContent>
         </Select>
-        {selectedIds.size > 0 && (
-          <div className="ml-auto flex items-center gap-2">
-            <span className="text-sm font-medium">
-              {t('models.selected', { count: selectedIds.size })}
-            </span>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={batchActionRunning}
-              onClick={() => batchToggleEnabled(true)}
-            >
-              <CircleCheck className="mr-1 h-3.5 w-3.5" />
-              {t('models.batchEnable')}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={batchActionRunning}
-              onClick={() => batchToggleEnabled(false)}
-            >
-              <CircleOff className="mr-1 h-3.5 w-3.5" />
-              {t('models.batchDisable')}
-            </Button>
-            <Button
-              variant="destructive"
-              size="sm"
-              disabled={batchActionRunning}
-              onClick={() => setBatchDeleteOpen(true)}
-            >
-              <Trash2 className="mr-1 h-3.5 w-3.5" />
-              {t('models.batchDelete')}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={batchActionRunning}
-              onClick={() => setSelectedIds(new Set())}
-            >
-              {t('common.cancel')}
-            </Button>
-          </div>
+        {statusFilter === 'unrouted' && totalModels > 0 && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="ml-auto"
+            onClick={() => setCleanupOpen(true)}
+          >
+            <Trash2 className="mr-1 h-3.5 w-3.5" />
+            {t('models.cleanupAction', { count: totalModels })}
+          </Button>
         )}
       </div>
 
-      {/* Route table */}
+      {/* Models table */}
       {loading ? (
         <div className="space-y-4">
           {[...Array(3)].map((_, i) => (
             <Skeleton key={i} className="h-12 w-full" />
           ))}
         </div>
-      ) : routes.length === 0 ? (
+      ) : models.length === 0 ? (
         <Card>
           <CardContent className="flex flex-col items-center justify-center py-12 text-center">
             <Brain className="mb-3 h-10 w-10 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">{t('models.noRoutes')}</p>
+            <p className="text-sm text-muted-foreground">{t('models.noModels')}</p>
+            <p className="mt-1 text-xs text-muted-foreground">{t('models.noModelsHint')}</p>
           </CardContent>
         </Card>
       ) : (
@@ -525,84 +645,45 @@ export function ModelsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-10">
-                    <Checkbox
-                      checked={
-                        pageAllSelected
-                          ? true
-                          : pageSomeSelected
-                            ? 'indeterminate'
-                            : false
-                      }
-                      onCheckedChange={togglePageSelected}
-                      aria-label={t('models.selectAll')}
-                    />
-                  </TableHead>
+                  <TableHead className="w-8" />
                   <TableHead>{t('models.col.modelId')}</TableHead>
-                  <TableHead>{t('models.col.provider')}</TableHead>
-                  <TableHead>{t('models.col.upstreamModel')}</TableHead>
-                  <TableHead className="text-right">{t('models.col.weight')}</TableHead>
-                  <TableHead>{t('models.col.priority')}</TableHead>
-                  <TableHead className="text-center">{t('models.col.active')}</TableHead>
+                  <TableHead>{t('models.col.displayName')}</TableHead>
+                  <TableHead className="text-center">{t('models.col.status')}</TableHead>
+                  <TableHead className="text-right">{t('models.col.routeCount')}</TableHead>
+                  <TableHead className="text-right">{t('models.col.inputWeight')}</TableHead>
+                  <TableHead className="text-right">{t('models.col.outputWeight')}</TableHead>
                   <TableHead className="text-right">{t('common.actions')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {routes.map((r) => (
-                  <TableRow key={r.id} data-state={selectedIds.has(r.id) ? 'selected' : undefined}>
-                    <TableCell className="w-10">
-                      <Checkbox
-                        checked={selectedIds.has(r.id)}
-                        onCheckedChange={() => toggleRowSelected(r.id)}
-                        aria-label={r.model_id}
-                      />
-                    </TableCell>
-                    <TableCell
-                      className="font-mono text-xs max-w-[220px] truncate"
-                      title={r.model_id}
-                    >
-                      {r.model_id}
-                    </TableCell>
-                    <TableCell className="text-sm">{r.provider_name}</TableCell>
-                    <TableCell
-                      className="font-mono text-xs max-w-[200px] truncate"
-                      title={r.upstream_model || undefined}
-                    >
-                      {r.upstream_model || '\u2014'}
-                    </TableCell>
-                    <TableCell className="text-right font-mono text-xs">{r.weight}</TableCell>
-                    <TableCell>
-                      <Badge variant={r.priority === 0 ? 'default' : 'secondary'}>
-                        {r.priority === 0 ? t('models.primary') : t('models.fallback')}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-center">
-                      {r.enabled ? (
-                        <Badge variant="default">{t('common.yes')}</Badge>
-                      ) : (
-                        <Badge variant="outline">{t('common.no')}</Badge>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <Button variant="ghost" size="icon" onClick={() => openEditRoute(r)}>
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        onClick={() => setDeleteRouteId(r.id)}
-                      >
-                        <Trash2 className="h-4 w-4 text-destructive" />
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                {models.map((m) => {
+                  const isOpen = expanded.has(m.model_id);
+                  const routes = routesByModel[m.model_id];
+                  const rLoading = routesLoading.has(m.model_id);
+                  return (
+                    <ModelRowGroup
+                      key={m.id}
+                      model={m}
+                      isOpen={isOpen}
+                      routes={routes}
+                      routesLoading={rLoading}
+                      providers={providers}
+                      providerLabel={providerLabel}
+                      onToggle={() => toggleExpand(m.model_id)}
+                      onEdit={() => openEditModel(m)}
+                      onDelete={() => setDeleteModel(m)}
+                      onAddRoute={() => openAddRoute(m)}
+                      onEditRoute={openEditRoute}
+                      onDeleteRoute={(r) => setDeleteRoute(r)}
+                    />
+                  );
+                })}
               </TableBody>
             </Table>
           </CardContent>
           <div data-slot="card-footer" className="border-t">
             <DataTablePagination
-              total={totalRoutes}
+              total={totalModels}
               page={page}
               pageSize={pageSize}
               onPageChange={setPage}
@@ -612,34 +693,157 @@ export function ModelsPage() {
         </Card>
       )}
 
-      {/* Edit Route Dialog */}
-      <Dialog open={editRouteDialogOpen} onOpenChange={setEditRouteDialogOpen}>
+      {/* Create / Edit Model Dialog */}
+      <Dialog open={modelDialogOpen} onOpenChange={setModelDialogOpen}>
         <DialogContent className="sm:max-w-md">
-          <form onSubmit={submitEditRoute}>
+          <form onSubmit={submitModel}>
             <DialogHeader>
-              <DialogTitle>{t('models.editTitle')}</DialogTitle>
+              <DialogTitle>
+                {editingModel ? t('models.editTitle') : t('models.createTitle')}
+              </DialogTitle>
+              <DialogDescription>{t('models.formHint')}</DialogDescription>
             </DialogHeader>
             <div className="space-y-4 py-4">
+              {!editingModel && (
+                <div className="space-y-2">
+                  <Label htmlFor="model_id">{t('models.field.modelId')}</Label>
+                  <Input
+                    id="model_id"
+                    value={modelForm.model_id}
+                    onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })}
+                    placeholder="gpt-4o"
+                    required
+                  />
+                </div>
+              )}
               <div className="space-y-2">
-                <Label htmlFor="edit_upstream">{t('models.col.upstreamModel')}</Label>
+                <Label htmlFor="model_display">{t('models.field.displayName')}</Label>
                 <Input
-                  id="edit_upstream"
-                  value={routeEditForm.upstream_model}
+                  id="model_display"
+                  value={modelForm.display_name}
+                  onChange={(e) => setModelForm({ ...modelForm, display_name: e.target.value })}
+                  placeholder={modelForm.model_id}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">{t('models.weightHint')}</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label htmlFor="input_weight">{t('models.field.inputWeight')}</Label>
+                  <Input
+                    id="input_weight"
+                    value={modelForm.input_weight}
+                    onChange={(e) =>
+                      setModelForm({ ...modelForm, input_weight: e.target.value })
+                    }
+                    inputMode="decimal"
+                    required
+                  />
+                  <CostPreview
+                    weight={modelForm.input_weight}
+                    basePerToken={pricing?.input_price_per_token}
+                    currency={pricing?.currency}
+                    side="input"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="output_weight">{t('models.field.outputWeight')}</Label>
+                  <Input
+                    id="output_weight"
+                    value={modelForm.output_weight}
+                    onChange={(e) =>
+                      setModelForm({ ...modelForm, output_weight: e.target.value })
+                    }
+                    inputMode="decimal"
+                    required
+                  />
+                  <CostPreview
+                    weight={modelForm.output_weight}
+                    basePerToken={pricing?.output_price_per_token}
+                    currency={pricing?.currency}
+                    side="output"
+                  />
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="model_active"
+                  checked={modelForm.is_active}
+                  onCheckedChange={(v) => setModelForm({ ...modelForm, is_active: v })}
+                />
+                <Label htmlFor="model_active">{t('models.field.active')}</Label>
+              </div>
+              {modelFormError && (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{modelFormError}</AlertDescription>
+                </Alert>
+              )}
+            </div>
+            <DialogFooter>
+              <Button type="button" variant="outline" onClick={() => setModelDialogOpen(false)}>
+                {t('common.cancel')}
+              </Button>
+              <Button type="submit" disabled={modelSaving}>
+                {modelSaving ? t('common.saving') : t('common.save')}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+
+      {/* Create / Edit Route Dialog */}
+      <Dialog open={routeDialogOpen} onOpenChange={setRouteDialogOpen}>
+        <DialogContent className="sm:max-w-md">
+          <form onSubmit={submitRoute}>
+            <DialogHeader>
+              <DialogTitle>
+                {editingRoute ? t('models.editRouteTitle') : t('models.addRouteTitle')}
+              </DialogTitle>
+              <DialogDescription>
+                {editingRoute
+                  ? editingRoute.model_id
+                  : routeTargetModel?.model_id ?? ''}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="space-y-4 py-4">
+              {!editingRoute && (
+                <div className="space-y-2">
+                  <Label>{t('models.field.provider')}</Label>
+                  <Select
+                    value={routeForm.provider_id}
+                    onValueChange={(v) => setRouteForm({ ...routeForm, provider_id: v })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder={t('models.selectProvider')} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {providers.map((p) => (
+                        <SelectItem key={p.id} value={p.id}>
+                          {p.display_name || p.name}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+              )}
+              <div className="space-y-2">
+                <Label htmlFor="route_upstream">{t('models.col.upstreamModel')}</Label>
+                <Input
+                  id="route_upstream"
+                  value={routeForm.upstream_model}
                   onChange={(e) =>
-                    setRouteEditForm({ ...routeEditForm, upstream_model: e.target.value })
+                    setRouteForm({ ...routeForm, upstream_model: e.target.value })
                   }
                   placeholder={t('models.upstreamModelHint')}
                 />
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-2">
-                  <Label htmlFor="edit_weight">{t('models.col.weight')}</Label>
+                  <Label htmlFor="route_weight">{t('models.col.weight')}</Label>
                   <Input
-                    id="edit_weight"
-                    value={routeEditForm.weight}
-                    onChange={(e) =>
-                      setRouteEditForm({ ...routeEditForm, weight: e.target.value })
-                    }
+                    id="route_weight"
+                    value={routeForm.weight}
+                    onChange={(e) => setRouteForm({ ...routeForm, weight: e.target.value })}
                     inputMode="numeric"
                     required
                   />
@@ -647,8 +851,8 @@ export function ModelsPage() {
                 <div className="space-y-2">
                   <Label>{t('models.col.priority')}</Label>
                   <Select
-                    value={routeEditForm.priority}
-                    onValueChange={(v) => setRouteEditForm({ ...routeEditForm, priority: v })}
+                    value={routeForm.priority}
+                    onValueChange={(v) => setRouteForm({ ...routeForm, priority: v })}
                   >
                     <SelectTrigger>
                       <SelectValue />
@@ -660,46 +864,49 @@ export function ModelsPage() {
                   </Select>
                 </div>
               </div>
-              <div className="flex items-center gap-2">
-                <Switch
-                  id="route_enabled"
-                  checked={routeEditForm.enabled}
-                  onCheckedChange={(v) => setRouteEditForm({ ...routeEditForm, enabled: v })}
-                />
-                <Label htmlFor="route_enabled">{t('models.field.active')}</Label>
-              </div>
-              {routeEditFormError && (
+              {editingRoute && (
+                <div className="flex items-center gap-2">
+                  <Switch
+                    id="route_enabled"
+                    checked={routeForm.enabled}
+                    onCheckedChange={(v) => setRouteForm({ ...routeForm, enabled: v })}
+                  />
+                  <Label htmlFor="route_enabled">{t('models.field.active')}</Label>
+                </div>
+              )}
+              {routeFormError && (
                 <Alert variant="destructive">
                   <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>{routeEditFormError}</AlertDescription>
+                  <AlertDescription>{routeFormError}</AlertDescription>
                 </Alert>
               )}
             </div>
             <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setEditRouteDialogOpen(false)}
-              >
+              <Button type="button" variant="outline" onClick={() => setRouteDialogOpen(false)}>
                 {t('common.cancel')}
               </Button>
-              <Button type="submit" disabled={routeEditSaving}>
-                {routeEditSaving ? t('common.saving') : t('common.save')}
+              <Button type="submit" disabled={routeSaving}>
+                {routeSaving ? t('common.saving') : t('common.save')}
               </Button>
             </DialogFooter>
           </form>
         </DialogContent>
       </Dialog>
 
-      {/* Batch Add Routes Dialog */}
+      {/* Batch Import Dialog — pick a provider, tick remote models, bulk add routes */}
       <Dialog open={batchDialogOpen} onOpenChange={setBatchDialogOpen}>
         <DialogContent className="sm:max-w-lg max-h-[80vh] flex flex-col">
           <DialogHeader>
             <DialogTitle>{t('models.addRoutes')}</DialogTitle>
-            <DialogDescription>{t('models.routeSubtitle')}</DialogDescription>
+            <DialogDescription>{t('models.batchImportHint')}</DialogDescription>
           </DialogHeader>
           <div className="space-y-4 py-2 flex flex-col min-h-0 flex-1">
-            {/* Provider select */}
+            <Alert>
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription className="text-xs">
+                {t('models.batchImportWarning')}
+              </AlertDescription>
+            </Alert>
             <div className="space-y-2">
               <Label>{t('models.selectProvider')}</Label>
               <Select value={batchProviderId} onValueChange={onBatchProviderChange}>
@@ -716,7 +923,6 @@ export function ModelsPage() {
               </Select>
             </div>
 
-            {/* Loading / error state */}
             {remoteModelsLoading && (
               <div className="flex items-center gap-2 text-sm text-muted-foreground">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -731,7 +937,6 @@ export function ModelsPage() {
               </Alert>
             )}
 
-            {/* Model list */}
             {!remoteModelsLoading && remoteModels.length > 0 && (
               <>
                 <div className="flex items-center gap-2">
@@ -747,7 +952,7 @@ export function ModelsPage() {
                   <span className="text-sm text-muted-foreground whitespace-nowrap">
                     {t('models.selected', { count: batchSelected.size })}
                   </span>
-                  <Button type="button" variant="outline" size="sm" onClick={toggleSelectAll}>
+                  <Button type="button" variant="outline" size="sm" onClick={toggleBatchSelectAll}>
                     {filteredRemoteModels.filter((m) => !existingModelIds.has(m)).length > 0 &&
                     filteredRemoteModels
                       .filter((m) => !existingModelIds.has(m))
@@ -770,7 +975,9 @@ export function ModelsPage() {
                           disabled={exists}
                           onCheckedChange={() => toggleBatchModel(modelId)}
                         />
-                        <span className={`font-mono text-xs truncate ${exists ? 'text-muted-foreground' : ''}`}>
+                        <span
+                          className={`font-mono text-xs truncate ${exists ? 'text-muted-foreground' : ''}`}
+                        >
                           {modelId}
                         </span>
                         {exists && (
@@ -794,38 +1001,269 @@ export function ModelsPage() {
               disabled={batchSaving || batchSelected.size === 0}
               onClick={submitBatch}
             >
-              {batchSaving ? (
-                <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />
-              ) : null}
+              {batchSaving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
               {t('models.addNRoutes', { count: batchSelected.size })}
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      {/* Delete Route Confirm */}
+      {/* Delete confirms */}
       <ConfirmDialog
-        open={deleteRouteId !== null}
+        open={deleteModel !== null}
         onOpenChange={(o) => {
-          if (!o) setDeleteRouteId(null);
+          if (!o) setDeleteModel(null);
         }}
         title={t('models.deleteTitle')}
         description={t('models.deleteConfirm')}
         confirmLabel={t('common.delete')}
         variant="destructive"
-        onConfirm={confirmDeleteRoute}
+        onConfirm={confirmDeleteModel}
       />
-
-      {/* Batch Delete Confirm */}
       <ConfirmDialog
-        open={batchDeleteOpen}
-        onOpenChange={setBatchDeleteOpen}
-        title={t('models.batchDeleteTitle')}
-        description={t('models.batchDeleteConfirm', { count: selectedIds.size })}
+        open={deleteRoute !== null}
+        onOpenChange={(o) => {
+          if (!o) setDeleteRoute(null);
+        }}
+        title={t('models.deleteRouteTitle')}
+        description={t('models.deleteRouteConfirm')}
         confirmLabel={t('common.delete')}
         variant="destructive"
-        onConfirm={confirmBatchDelete}
+        onConfirm={confirmDeleteRoute}
+      />
+      <ConfirmDialog
+        open={cleanupOpen}
+        onOpenChange={setCleanupOpen}
+        title={t('models.cleanupTitle')}
+        description={t('models.cleanupConfirm', { count: totalModels })}
+        confirmLabel={t('common.delete')}
+        variant="destructive"
+        onConfirm={confirmCleanup}
+        loading={cleanupRunning}
       />
     </div>
   );
 }
+
+/* ---------- row group ---------- */
+
+function ModelRowGroup({
+  model,
+  isOpen,
+  routes,
+  routesLoading,
+  providerLabel,
+  onToggle,
+  onEdit,
+  onDelete,
+  onAddRoute,
+  onEditRoute,
+  onDeleteRoute,
+}: {
+  model: ModelRow;
+  isOpen: boolean;
+  routes: RouteRow[] | undefined;
+  routesLoading: boolean;
+  providers: Provider[];
+  providerLabel: (id: string) => string;
+  onToggle: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onAddRoute: () => void;
+  onEditRoute: (r: RouteRow) => void;
+  onDeleteRoute: (r: RouteRow) => void;
+}) {
+  const { t } = useTranslation();
+  const status = modelStatus(model);
+  const routesShown = routes?.length ?? model.route_count;
+
+  return (
+    <>
+      <TableRow
+        className="cursor-pointer hover:bg-muted/30"
+        onClick={(e) => {
+          // Don't toggle when the click is on an action button.
+          if ((e.target as HTMLElement).closest('button')) return;
+          onToggle();
+        }}
+      >
+        <TableCell className="w-8">
+          {isOpen ? (
+            <ChevronDown className="h-4 w-4 text-muted-foreground" />
+          ) : (
+            <ChevronRight className="h-4 w-4 text-muted-foreground" />
+          )}
+        </TableCell>
+        <TableCell className="font-mono text-xs max-w-[260px] truncate" title={model.model_id}>
+          {model.model_id}
+        </TableCell>
+        <TableCell className="text-sm">{model.display_name}</TableCell>
+        <TableCell className="text-center">
+          {status === 'active' ? (
+            <Badge variant="default">{t('models.status.active')}</Badge>
+          ) : status === 'draft' ? (
+            <Badge variant="outline" className="border-amber-500/60 text-amber-600 dark:text-amber-400">
+              {t('models.status.draft')}
+            </Badge>
+          ) : (
+            <Badge variant="outline" className="text-muted-foreground">
+              {t('models.status.unrouted')}
+            </Badge>
+          )}
+        </TableCell>
+        <TableCell className="text-right font-mono text-xs tabular-nums">
+          {model.enabled_route_count}
+          {model.route_count > model.enabled_route_count && (
+            <span className="text-muted-foreground">/{model.route_count}</span>
+          )}
+        </TableCell>
+        <TableCell className="text-right font-mono text-xs tabular-nums">
+          {model.input_weight}
+        </TableCell>
+        <TableCell className="text-right font-mono text-xs tabular-nums">
+          {model.output_weight}
+        </TableCell>
+        <TableCell className="text-right whitespace-nowrap">
+          <Button variant="ghost" size="icon" onClick={onEdit} aria-label={t('common.edit')}>
+            <Pencil className="h-4 w-4" />
+          </Button>
+          <Button variant="ghost" size="icon" onClick={onDelete} aria-label={t('common.delete')}>
+            <Trash2 className="h-4 w-4 text-destructive" />
+          </Button>
+        </TableCell>
+      </TableRow>
+      {isOpen && (
+        <TableRow className="hover:bg-transparent">
+          <TableCell />
+          <TableCell colSpan={7} className="pb-4 pt-0">
+            <div className="ml-2 border-l-2 border-muted pl-4 space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+                  {t('models.routes')}{' '}
+                  <span className="font-mono normal-case tracking-normal">
+                    ({routesShown})
+                  </span>
+                </span>
+                <Button size="sm" variant="outline" onClick={onAddRoute} className="h-7 text-xs">
+                  <Plus className="mr-1 h-3 w-3" />
+                  {t('models.addRoute')}
+                </Button>
+              </div>
+              {routesLoading ? (
+                <Skeleton className="h-10 w-full" />
+              ) : !routes || routes.length === 0 ? (
+                <p className="text-xs italic text-muted-foreground py-2">
+                  {t('models.noRoutes')}
+                </p>
+              ) : (
+                <div className="rounded-md border">
+                  <table className="w-full text-xs">
+                    <thead className="border-b bg-muted/30">
+                      <tr className="text-left text-muted-foreground">
+                        <th className="px-2 py-1.5 font-medium">{t('models.col.provider')}</th>
+                        <th className="px-2 py-1.5 font-medium">{t('models.col.upstreamModel')}</th>
+                        <th className="px-2 py-1.5 font-medium text-right">
+                          {t('models.col.weight')}
+                        </th>
+                        <th className="px-2 py-1.5 font-medium">{t('models.col.priority')}</th>
+                        <th className="px-2 py-1.5 font-medium text-center">
+                          {t('models.col.active')}
+                        </th>
+                        <th className="w-16" />
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y">
+                      {routes.map((r) => (
+                        <tr key={r.id}>
+                          <td className="px-2 py-1.5">{providerLabel(r.provider_id)}</td>
+                          <td
+                            className="px-2 py-1.5 font-mono text-[11px] max-w-[240px] truncate"
+                            title={r.upstream_model ?? ''}
+                          >
+                            {r.upstream_model || (
+                              <span className="italic text-muted-foreground">
+                                ({t('models.col.modelId')})
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1.5 text-right font-mono tabular-nums">
+                            {r.weight}
+                          </td>
+                          <td className="px-2 py-1.5">
+                            <Badge variant={r.priority === 0 ? 'default' : 'secondary'}>
+                              {r.priority === 0 ? t('models.primary') : t('models.fallback')}
+                            </Badge>
+                          </td>
+                          <td className="px-2 py-1.5 text-center">
+                            {r.enabled ? (
+                              <Badge variant="default">{t('common.yes')}</Badge>
+                            ) : (
+                              <Badge variant="outline">{t('common.no')}</Badge>
+                            )}
+                          </td>
+                          <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => onEditRoute(r)}
+                              aria-label={t('common.edit')}
+                            >
+                              <Pencil className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => onDeleteRoute(r)}
+                              aria-label={t('common.delete')}
+                            >
+                              <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </TableCell>
+        </TableRow>
+      )}
+    </>
+  );
+}
+
+/* ---------- cost preview ---------- */
+
+/// Inline helper under the weight input showing `baseline × weight = $X/M tokens`.
+/// Baseline comes from the platform_pricing singleton; when it's unavailable
+/// (e.g. no settings:read permission) the preview just renders nothing.
+function CostPreview({
+  weight,
+  basePerToken,
+  currency,
+  side,
+}: {
+  weight: string;
+  basePerToken: string | undefined;
+  currency: string | undefined;
+  side: 'input' | 'output';
+}) {
+  const { t } = useTranslation();
+  if (!basePerToken) return null;
+  const w = Number(weight);
+  const base = Number(basePerToken);
+  if (!Number.isFinite(w) || !Number.isFinite(base) || w <= 0 || base < 0) return null;
+  const perMillion = w * base * 1_000_000;
+  return (
+    <p className="text-[11px] text-muted-foreground font-mono">
+      {t(`models.costPreview.${side}` as 'models.costPreview.input', {
+        amount: perMillion.toFixed(4),
+        currency: currency ?? 'USD',
+      })}
+    </p>
+  );
+}
+

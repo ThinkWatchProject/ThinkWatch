@@ -927,7 +927,7 @@ pub async fn proxy_chat_completion(
                     .as_ref()
                     .map(|u| (u.prompt_tokens, u.completion_tokens))
                     .unwrap_or((0, 0));
-                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct);
+                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
                 emit_gateway_log(
                     &audit_for_done,
                     &trace_id_for_done,
@@ -1047,10 +1047,10 @@ pub async fn proxy_chat_completion(
             .as_ref()
             .map(|u| (u.prompt_tokens, u.completion_tokens))
             .unwrap_or((0, 0));
-        let cost_usd =
-            state
-                .cost_tracker
-                .calculate_cost(&original_model, prompt_tokens, completion_tokens);
+        let cost_usd = state
+            .cost_tracker
+            .calculate_cost(&original_model, prompt_tokens, completion_tokens)
+            .await;
         emit_gateway_log(
             &state.audit,
             &metadata.request_id,
@@ -1298,7 +1298,7 @@ pub async fn proxy_anthropic_messages(
                     .as_ref()
                     .map(|u| (u.prompt_tokens, u.completion_tokens))
                     .unwrap_or((0, 0));
-                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct);
+                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
                 emit_gateway_log(
                     &audit_for_done,
                     &trace_id_for_done,
@@ -1390,7 +1390,10 @@ pub async fn proxy_anthropic_messages(
             .as_ref()
             .map(|u| (u.prompt_tokens, u.completion_tokens))
             .unwrap_or((0, 0));
-        let cost = state.cost_tracker.calculate_cost(&mapped_model, pt, ct);
+        let cost = state
+            .cost_tracker
+            .calculate_cost(&mapped_model, pt, ct)
+            .await;
         emit_gateway_log(
             &state.audit,
             &trace_id,
@@ -1660,7 +1663,7 @@ pub async fn proxy_responses(
                     .as_ref()
                     .map(|u| (u.prompt_tokens, u.completion_tokens))
                     .unwrap_or((0, 0));
-                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct);
+                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
                 emit_gateway_log(
                     &audit_for_done,
                     &trace_id_for_done,
@@ -1753,7 +1756,10 @@ pub async fn proxy_responses(
             .as_ref()
             .map(|u| (u.prompt_tokens, u.completion_tokens))
             .unwrap_or((0, 0));
-        let cost = state.cost_tracker.calculate_cost(&mapped_model, pt, ct);
+        let cost = state
+            .cost_tracker
+            .calculate_cost(&mapped_model, pt, ct)
+            .await;
         emit_gateway_log(
             &state.audit,
             &trace_id,

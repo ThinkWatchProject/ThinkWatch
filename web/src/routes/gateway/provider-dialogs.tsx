@@ -179,7 +179,7 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
       });
       onOpenChange(false);
       resetForm();
-      toast.success(t('providers.createdAndSynced'));
+      toast.success(t('providers.providerCreated'));
       await onSuccess();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Failed to create provider');
@@ -201,12 +201,6 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
           <DialogDescription>{t('providers.dialogDescription')}</DialogDescription>
         </DialogHeader>
         <form onSubmit={handleCreate} className="space-y-4">
-          {formError && (
-            <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>{formError}</AlertDescription>
-            </Alert>
-          )}
           <div className="space-y-2">
             <Label htmlFor="prov-name">{t('common.name')}</Label>
             <Input id="prov-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-openai" required />
@@ -304,6 +298,12 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
             />
           </div>
           <TestResultPanel testResult={testResult} />
+          {formError && (
+            <Alert variant="destructive">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{formError}</AlertDescription>
+            </Alert>
+          )}
           <DialogFooter>
             <TestConnectionButton
               testing={testing}
@@ -312,7 +312,7 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
             />
             <Button type="submit" disabled={submitting}>
               {submitting ? (
-                <><Loader2 className="mr-1 h-4 w-4 animate-spin" />{t('providers.creatingAndSyncing')}</>
+                <><Loader2 className="mr-1 h-4 w-4 animate-spin" />{t('providers.creating')}</>
               ) : t('providers.createProvider')}
             </Button>
           </DialogFooter>
@@ -385,12 +385,6 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
           <DialogDescription>{t('providers.editDescription')}</DialogDescription>
         </DialogHeader>
         <div className="space-y-4">
-          {editError && (
-            <Alert variant="destructive">
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription>{editError}</AlertDescription>
-            </Alert>
-          )}
           <div className="space-y-2">
             <Label>{t('providers.displayName')}</Label>
             <Input value={editDisplayName} onChange={(e) => setEditDisplayName(e.target.value)} />
@@ -431,6 +425,12 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
           </div>
         </div>
         <TestResultPanel testResult={testResult} />
+        {editError && (
+          <Alert variant="destructive">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription>{editError}</AlertDescription>
+          </Alert>
+        )}
         <DialogFooter>
           <Button variant="outline" onClick={() => onOpenChange(false)}>{t('common.cancel')}</Button>
           <TestConnectionButton

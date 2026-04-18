@@ -247,8 +247,7 @@
     "testConnection": "Test Connection",
     "testing": "Testing...",
     "modelCount": "{{count}} models",
-    "creatingAndSyncing": "Creating & syncing models...",
-    "createdAndSynced": "Provider created and models synced."
+    "providerCreated": "Provider created."
   },
   "apiKeys": {
     "title": "API Keys",
@@ -312,21 +311,7 @@
     "createTitle": "Add Model",
     "deleteTitle": "Delete Model",
     "deleteConfirm": "Removing a model row resets it to provider defaults (1.0 multipliers, no per-model pricing). Existing usage records are kept.",
-    "formHint": "Multipliers are relative units — 1.0 means quotas count raw tokens. Tune them so a 1M-token monthly budget can survive a single gpt-4o burst.",
-    "multiplierHint": "Multipliers must be greater than zero. They feed the weighted-token math the limits engine uses; pricing is independent and only affects cost reports.",
-    "field": {
-      "provider": "Provider",
-      "modelId": "Model ID",
-      "displayName": "Display Name",
-      "inputPrice": "Input price (USD per token)",
-      "outputPrice": "Output price (USD per token)",
-      "inputMult": "Input multiplier",
-      "outputMult": "Output multiplier",
-      "active": "Active"
-    },
-    "errors": {
-      "multiplierMustBePositive": "Multipliers must be positive numbers."
-    },
+    "formHint": "Weights are relative units. 1.0 = matches platform baseline pricing. Tune them so heavier models cost more against budgets.",
     "syncModels": "Sync Models",
     "syncing": "Syncing...",
     "syncAll": "Sync All Providers",
@@ -344,6 +329,10 @@
     "noRoutes": "No routes configured",
     "routeAdded": "Route added",
     "routeDeleted": "Route deleted",
+    "addRouteTitle": "Add Provider Route",
+    "editRouteTitle": "Edit Route",
+    "deleteRouteTitle": "Delete Route",
+    "deleteRouteConfirm": "Remove this provider route? The model itself is kept — only this provider binding is deleted.",
     "routeTitle": "Model Routes",
     "routeSubtitle": "Configure model-to-provider routing.",
     "addRoutes": "Add Routes",
@@ -367,16 +356,45 @@
     "col": {
       "modelId": "Model ID",
       "displayName": "Display Name",
-      "inputPrice": "Input $/M",
-      "outputPrice": "Output $/M",
-      "inputMult": "In \u00d7",
-      "outputMult": "Out \u00d7",
+      "status": "Status",
+      "routeCount": "Routes",
+      "inputWeight": "In \u00d7",
+      "outputWeight": "Out \u00d7",
       "active": "Active",
       "provider": "Provider",
       "upstreamModel": "Upstream Model",
       "weight": "Weight",
       "priority": "Priority"
     },
+    "status": {
+      "all": "All models",
+      "active": "Active",
+      "draft": "Draft",
+      "unrouted": "Unrouted"
+    },
+    "filterStatus": "Filter by status",
+    "weightHint": "Relative cost factor. 1.0 = baseline. Absolute $/token = platform baseline \u00d7 weight. Set baseline in Settings.",
+    "costPreview": {
+      "input": "\u2248 {{amount}} {{currency}} per 1M input tokens",
+      "output": "\u2248 {{amount}} {{currency}} per 1M output tokens"
+    },
+    "field": {
+      "provider": "Provider",
+      "modelId": "Model ID",
+      "displayName": "Display Name",
+      "inputWeight": "Input weight",
+      "outputWeight": "Output weight",
+      "active": "Active"
+    },
+    "errors": {
+      "weightMustBePositive": "Weights must be positive numbers."
+    },
+    "batchImportHint": "Import model entries from a provider's remote catalog into your exposed models list.",
+    "batchImportWarning": "Imported models are created with routes disabled by default \u2014 they won't appear in /v1/models for clients until you enable them. Select only the few you actually want to expose.",
+    "cleanupAction": "Delete all unrouted ({{count}})",
+    "cleanupTitle": "Delete unrouted models",
+    "cleanupConfirm": "Delete {{count}} models that have no routes? The entries were imported from a provider's catalog but never attached to any active provider. This cannot be undone.",
+    "cleanupDone": "Deleted {{count}} unrouted models",
     "toast": {
       "created": "Model added.",
       "updated": "Model updated.",
@@ -823,6 +841,15 @@
   "settingsPage": {
     "title": "Settings",
     "subtitle": "System configuration and integrations",
+    "platformPricing": {
+      "title": "Platform Pricing Baseline",
+      "hint": "Cost reports are computed as `baseline × model weight × tokens`. Change this once to re-price every model at once.",
+      "inputPerM": "Input $ / 1M tokens",
+      "outputPerM": "Output $ / 1M tokens",
+      "currency": "Currency",
+      "saved": "Baseline pricing updated.",
+      "invalid": "Prices must be non-negative numbers."
+    },
     "oidc": "OIDC / SSO",
     "serverInfo": "Server Information",
     "version": "Version",
