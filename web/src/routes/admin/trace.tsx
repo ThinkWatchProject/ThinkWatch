@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Checkbox } from '@/components/ui/checkbox';
 import { AlertCircle, Search } from 'lucide-react';
 import { api } from '@/lib/api';
 
@@ -110,12 +111,10 @@ export function TracePage() {
           {t('trace.lookup')}
         </Button>
         {params.traceId && (
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
+          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+            <Checkbox
               checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="h-3.5 w-3.5"
+              onCheckedChange={(v) => setAutoRefresh(v === true)}
             />
             {t('trace.autoRefresh')}
           </label>

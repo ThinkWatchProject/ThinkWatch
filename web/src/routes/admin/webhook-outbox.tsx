@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Checkbox } from '@/components/ui/checkbox';
 import { AlertCircle, RefreshCw, Trash2, Inbox } from 'lucide-react';
 import { api, apiDelete, apiPost } from '@/lib/api';
 import { toast } from 'sonner';
@@ -120,12 +121,10 @@ export function WebhookOutboxPage() {
           <p className="text-muted-foreground">{t('webhookOutbox.subtitle')}</p>
         </div>
         <div className="flex items-center gap-3">
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <input
-              type="checkbox"
+          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+            <Checkbox
               checked={autoRefresh}
-              onChange={(e) => setAutoRefresh(e.target.checked)}
-              className="h-3.5 w-3.5"
+              onCheckedChange={(v) => setAutoRefresh(v === true)}
             />
             {t('webhookOutbox.autoRefresh')}
           </label>
