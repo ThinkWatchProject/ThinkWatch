@@ -837,6 +837,97 @@ pub async fn batch_create_routes(
 }
 
 // ---------------------------------------------------------------------------
+// Batch delete / enable-toggle routes
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BatchRouteIdsRequest {
+    pub ids: Vec<Uuid>,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BatchUpdateRoutesRequest {
+    pub ids: Vec<Uuid>,
+    pub enabled: bool,
+}
+
+/// POST /api/admin/model-routes/batch-delete
+pub async fn batch_delete_routes(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<BatchRouteIdsRequest>,
+) -> Result<Json<Value>, AppError> {
+    auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
+
+    if req.ids.is_empty() {
+        return Err(AppError::BadRequest("ids is empty".into()));
+    }
+
+    let result = sqlx::query("DELETE FROM model_routes WHERE id = ANY($1)")
+        .bind(&req.ids)
+        .execute(&state.db)
+        .await?;
+
+    let deleted = result.rows_affected() as i64;
+
+    state.audit.log(
+        auth_user
+            .audit("model_routes.batch_deleted")
+            .resource("model_routes")
+            .detail(serde_json::json!({
+                "requested": req.ids.len(),
+                "deleted": deleted,
+            })),
+    );
+
+    crate::app::rebuild_gateway_router(&state).await;
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+/// POST /api/admin/model-routes/batch-update — flips `enabled` for many routes.
+pub async fn batch_update_routes(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<BatchUpdateRoutesRequest>,
+) -> Result<Json<Value>, AppError> {
+    auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
+
+    if req.ids.is_empty() {
+        return Err(AppError::BadRequest("ids is empty".into()));
+    }
+
+    let result = sqlx::query("UPDATE model_routes SET enabled = $1 WHERE id = ANY($2)")
+        .bind(req.enabled)
+        .bind(&req.ids)
+        .execute(&state.db)
+        .await?;
+
+    let updated = result.rows_affected() as i64;
+
+    state.audit.log(
+        auth_user
+            .audit("model_routes.batch_updated")
+            .resource("model_routes")
+            .detail(serde_json::json!({
+                "requested": req.ids.len(),
+                "updated": updated,
+                "enabled": req.enabled,
+            })),
+    );
+
+    crate::app::rebuild_gateway_router(&state).await;
+
+    Ok(Json(serde_json::json!({ "updated": updated })))
+}
+
+// ---------------------------------------------------------------------------
 // Fetch remote models from a provider (for the add dialog)
 // ---------------------------------------------------------------------------
 

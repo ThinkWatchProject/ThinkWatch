@@ -99,6 +99,7 @@ const navGroups: NavGroup[] = [
     labelKey: 'nav.logs',
     items: [
       { titleKey: 'nav.logExplorer', icon: ScrollText, href: '/logs', permission: 'logs:read_all' },
+      { titleKey: 'nav.trace', icon: GitBranch, href: '/admin/trace', permission: 'analytics:read_all' },
       {
         titleKey: 'nav.logForwarders',
         icon: Forward,
@@ -122,7 +123,6 @@ const navGroups: NavGroup[] = [
       { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings', permission: 'settings:read' },
       { titleKey: 'nav.apiDocs', icon: FileCode2, href: '/admin/api-docs', permission: 'settings:read' },
       { titleKey: 'nav.usageLicense', icon: Gauge, href: '/admin/usage-license', permission: 'analytics:read_all' },
-      { titleKey: 'nav.trace', icon: GitBranch, href: '/admin/trace', permission: 'analytics:read_all' },
     ],
   },
 ];

@@ -207,32 +207,43 @@ function ScopeDropdown({
   const [query, setQuery] = React.useState('');
   const [open, setOpen] = React.useState(false);
 
+  // Empty selection is the same as "unrestricted" — normalize to null so
+  // callers that persist the role don't have to distinguish an empty Set
+  // from a missing constraint.
+  const applyChange = (next: Set<string>) => {
+    onChange(next.size === 0 ? null : next);
+  };
   const toggleModel = (modelId: string) => {
     const next = new Set(selected ?? []);
     if (next.has(modelId)) next.delete(modelId);
     else next.add(modelId);
-    onChange(next);
+    applyChange(next);
   };
   const toggleProvider = (ms: { modelId: string }[]) => {
     const next = new Set(selected ?? []);
     const allOn = ms.every((m) => next.has(m.modelId));
     if (allOn) for (const m of ms) next.delete(m.modelId);
     else for (const m of ms) next.add(m.modelId);
-    onChange(next);
+    applyChange(next);
   };
   const commitQuery = () => {
     const v = query.trim();
     if (!v) return;
     const next = new Set(selected ?? []);
     next.add(v);
-    onChange(next);
+    applyChange(next);
     setQuery('');
   };
   const removeItem = (item: string) => {
     const next = new Set(selected ?? []);
     next.delete(item);
-    onChange(next);
+    applyChange(next);
   };
+
+  // Treat null as an empty set for all read paths so the picker renders
+  // identically whether the role is unrestricted or has just had its last
+  // selection removed.
+  const sel = selected ?? new Set<string>();
 
   // Single input doubles as search AND pattern entry. Typing filters
   // the list below; pressing Enter commits the text as-is (wildcard
@@ -269,192 +280,184 @@ function ScopeDropdown({
   }, [modelsByProvider]);
   const showAddHint =
     queryTrim.length > 0 &&
-    !(selected?.has(queryTrim) ?? false) &&
+    !sel.has(queryTrim) &&
     (queryTrim.includes('*') || !allModelIds.has(queryTrim));
 
   return (
     <>
       <span className="text-muted-foreground">{label}:</span>
-      <Popover open={open} onOpenChange={setOpen}>
-        <div className="flex items-center gap-1 rounded-md border p-0.5">
+      <Popover open={open} onOpenChange={setOpen} modal>
+        <PopoverTrigger asChild>
           <Button
             type="button"
-            variant={selected === null ? 'secondary' : 'ghost'}
+            variant="outline"
             size="sm"
-            className="h-5 px-2 text-xs"
-            onClick={() => {
-              onChange(null);
-              setOpen(false);
-            }}
+            className="h-6 gap-1 px-2 text-xs font-normal"
           >
-            {t('roles.unrestricted')}
+            {sel.size === 0 ? (
+              t('roles.unrestricted')
+            ) : (
+              <>
+                {t('roles.custom')}
+                <span className="text-muted-foreground">({sel.size})</span>
+              </>
+            )}
+            <ChevronDown className="h-3 w-3 opacity-60" />
           </Button>
-          <PopoverTrigger asChild>
-            <Button
-              type="button"
-              variant={selected !== null ? 'secondary' : 'ghost'}
-              size="sm"
-              className="h-5 gap-1 px-2 text-xs"
-              onClick={() => {
-                // Selecting "Custom" from the unrestricted state should
-                // flip the mode AND open the picker in one click.
-                if (selected === null) {
-                  onChange(new Set());
-                  setOpen(true);
+        </PopoverTrigger>
+        <PopoverContent
+          className="w-[42rem] max-h-[var(--radix-popover-content-available-height)] p-0"
+          align="start"
+          collisionPadding={8}
+        >
+          {/* Selected chips — wildcards get the "default" (filled) variant
+              so rule-shaped entries stand out from exact ids at a glance.
+              Chip row is scrollable so picking 50 models doesn't push the
+              search + list offscreen. */}
+          {sel.size > 0 && (
+            <div className="max-h-20 overflow-y-auto border-b px-2 py-1.5">
+              <div className="flex flex-wrap gap-1">
+                {Array.from(sel)
+                  .sort()
+                  .map((item) => (
+                    <Badge
+                      key={item}
+                      variant={item.includes('*') ? 'default' : 'secondary'}
+                      className="h-5 gap-0.5 pl-1.5 pr-0.5 font-mono text-[10px] font-normal"
+                    >
+                      {item}
+                      <button
+                        type="button"
+                        className="rounded-sm p-0.5 opacity-60 hover:opacity-100"
+                        onClick={() => removeItem(item)}
+                        aria-label={t('common.remove')}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </Badge>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          {/* Unified search + add input. Borderless to blend with the
+              popover; Enter commits whatever's typed. */}
+          <div className="flex items-center gap-2 border-b px-2 py-1">
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  commitQuery();
                 }
               }}
-            >
-              {t('roles.custom')}
-              {selected !== null && selected.size > 0 && (
-                <span className="text-muted-foreground">({selected.size})</span>
+              placeholder={t('roles.modelPatternPlaceholder')}
+              className="h-7 flex-1 border-0 bg-transparent px-0 font-mono text-xs shadow-none focus-visible:ring-0"
+            />
+            {sel.size > 0 && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 shrink-0 px-2 text-xs"
+                onClick={() => onChange(null)}
+              >
+                {t('common.clearAll')}
+              </Button>
+            )}
+          </div>
+
+          <ScrollArea className="h-[min(24rem,calc(var(--radix-popover-content-available-height)_-_7rem))]">
+            <div className="px-2 py-1.5">
+              {showAddHint && (
+                <button
+                  type="button"
+                  className="mb-1 flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-muted"
+                  onClick={commitQuery}
+                >
+                  <span className="rounded bg-primary/10 px-1 text-[10px] text-primary">
+                    {queryTrim.includes('*') ? t('roles.addPattern') : t('roles.addExact')}
+                  </span>
+                  <code className="truncate">{queryTrim}</code>
+                  <kbd className="ml-auto rounded border bg-muted px-1 text-[9px] text-muted-foreground">
+                    ↵
+                  </kbd>
+                </button>
               )}
-              <ChevronDown className="h-3 w-3 opacity-60" />
-            </Button>
-          </PopoverTrigger>
-        </div>
-        <PopoverContent className="w-[42rem] p-0" align="start">
-          {selected !== null && (
-            <>
-              {/* Selected chips — wildcards get the "default" (filled)
-                  variant so rule-shaped entries stand out from exact
-                  ids at a glance. Chip row is scrollable so picking 50
-                  models doesn't push the search + list offscreen. */}
-              {selected.size > 0 && (
-                <div className="max-h-20 overflow-y-auto border-b px-2 py-1.5">
-                  <div className="flex flex-wrap gap-1">
-                    {Array.from(selected)
-                      .sort()
-                      .map((item) => (
-                        <Badge
-                          key={item}
-                          variant={item.includes('*') ? 'default' : 'secondary'}
-                          className="h-5 gap-0.5 pl-1.5 pr-0.5 font-mono text-[10px] font-normal"
+
+              {filteredProviders.length === 0 ? (
+                <p className="py-2 text-center text-xs italic text-muted-foreground">
+                  {modelsByProvider.size === 0 ? t('common.noData') : t('common.noResults')}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {filteredProviders.map(([provider, ms], groupIdx) => {
+                    const checkedCount = ms.filter((m) => sel.has(m.modelId)).length;
+                    const allOn = checkedCount === ms.length;
+                    const someOn = checkedCount > 0 && !allOn;
+                    // When there's no provider label (one collapsed
+                    // bucket), hide the group header and indent — the
+                    // list looks flat, as if it never had a grouping.
+                    const showGroupHeader = Boolean(provider);
+                    return (
+                      <div key={provider || `group-${groupIdx}`}>
+                        {showGroupHeader && (
+                          <label className="flex cursor-pointer items-center gap-1.5 text-xs font-medium">
+                            <Checkbox
+                              checked={allOn}
+                              data-state={
+                                someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'
+                              }
+                              onCheckedChange={() => toggleProvider(ms)}
+                            />
+                            <span className="font-mono text-muted-foreground">{provider}</span>
+                            <span className="text-[10px] font-normal text-muted-foreground">
+                              {checkedCount}/{ms.length}
+                            </span>
+                          </label>
+                        )}
+                        <div
+                          className={`grid grid-cols-3 gap-x-3 gap-y-0.5 ${
+                            showGroupHeader ? 'mt-0.5 pl-5' : ''
+                          }`}
                         >
-                          {item}
-                          <button
-                            type="button"
-                            className="rounded-sm p-0.5 opacity-60 hover:opacity-100"
-                            onClick={() => removeItem(item)}
-                            aria-label={t('common.remove')}
-                          >
-                            <X className="h-2.5 w-2.5" />
-                          </button>
-                        </Badge>
-                      ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Unified search + add input. Borderless to blend with
-                  the popover; Enter commits whatever's typed. */}
-              <div className="border-b px-2 py-1">
-                <Input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      commitQuery();
-                    }
-                  }}
-                  placeholder={t('roles.modelPatternPlaceholder')}
-                  className="h-7 border-0 bg-transparent px-0 font-mono text-xs shadow-none focus-visible:ring-0"
-                />
-              </div>
-
-              <div className="max-h-64 overflow-y-auto">
-                <div className="px-2 py-1.5">
-                  {showAddHint && (
-                    <button
-                      type="button"
-                      className="mb-1 flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-muted"
-                      onClick={commitQuery}
-                    >
-                      <span className="rounded bg-primary/10 px-1 text-[10px] text-primary">
-                        {queryTrim.includes('*') ? t('roles.addPattern') : t('roles.addExact')}
-                      </span>
-                      <code className="truncate">{queryTrim}</code>
-                      <kbd className="ml-auto rounded border bg-muted px-1 text-[9px] text-muted-foreground">
-                        ↵
-                      </kbd>
-                    </button>
-                  )}
-
-                  {filteredProviders.length === 0 ? (
-                    <p className="py-2 text-center text-xs italic text-muted-foreground">
-                      {modelsByProvider.size === 0 ? t('common.noData') : t('common.noResults')}
-                    </p>
-                  ) : (
-                    <div className="space-y-2">
-                      {filteredProviders.map(([provider, ms], groupIdx) => {
-                        const checkedCount = ms.filter((m) => selected.has(m.modelId)).length;
-                        const allOn = checkedCount === ms.length;
-                        const someOn = checkedCount > 0 && !allOn;
-                        // When there's no provider label (one collapsed
-                        // bucket), hide the group header and indent —
-                        // the list looks flat, as if it never had a
-                        // grouping to begin with.
-                        const showGroupHeader = Boolean(provider);
-                        return (
-                          <div key={provider || `group-${groupIdx}`}>
-                            {showGroupHeader && (
-                              <label className="flex cursor-pointer items-center gap-1.5 text-xs font-medium">
+                          {ms.map((m) => {
+                            const covered = coveringPattern(m.modelId, sel);
+                            const coveredOnly = covered !== null && !sel.has(m.modelId);
+                            return (
+                              <label
+                                key={m.modelId}
+                                className="flex min-w-0 cursor-pointer items-center gap-1.5 text-xs"
+                                title={
+                                  covered
+                                    ? `${m.modelId} — ${t('roles.coveredBy')} ${covered}`
+                                    : m.modelId
+                                }
+                              >
                                 <Checkbox
-                                  checked={allOn}
-                                  data-state={
-                                    someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'
-                                  }
-                                  onCheckedChange={() => toggleProvider(ms)}
+                                  checked={sel.has(m.modelId) || covered !== null}
+                                  disabled={coveredOnly}
+                                  onCheckedChange={() => toggleModel(m.modelId)}
                                 />
-                                <span className="font-mono text-muted-foreground">{provider}</span>
-                                <span className="text-[10px] font-normal text-muted-foreground">
-                                  {checkedCount}/{ms.length}
+                                <span
+                                  className={`min-w-0 truncate ${
+                                    coveredOnly ? 'italic text-muted-foreground' : ''
+                                  }`}
+                                >
+                                  {m.displayName}
                                 </span>
                               </label>
-                            )}
-                            <div
-                              className={`grid grid-cols-3 gap-x-3 gap-y-0.5 ${
-                                showGroupHeader ? 'mt-0.5 pl-5' : ''
-                              }`}
-                            >
-                              {ms.map((m) => {
-                                const covered = coveringPattern(m.modelId, selected);
-                                const coveredOnly = covered !== null && !selected.has(m.modelId);
-                                return (
-                                  <label
-                                    key={m.modelId}
-                                    className="flex min-w-0 cursor-pointer items-center gap-1.5 text-xs"
-                                    title={
-                                      covered
-                                        ? `${m.modelId} — ${t('roles.coveredBy')} ${covered}`
-                                        : m.modelId
-                                    }
-                                  >
-                                    <Checkbox
-                                      checked={selected.has(m.modelId) || covered !== null}
-                                      disabled={coveredOnly}
-                                      onCheckedChange={() => toggleModel(m.modelId)}
-                                    />
-                                    <span
-                                      className={`min-w-0 truncate ${
-                                        coveredOnly ? 'italic text-muted-foreground' : ''
-                                      }`}
-                                    >
-                                      {m.displayName}
-                                    </span>
-                                  </label>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              </div>
-            </>
-          )}
+              )}
+            </div>
+          </ScrollArea>
         </PopoverContent>
       </Popover>
     </>
@@ -476,11 +479,14 @@ function ToolScopeDropdown({
   const [query, setQuery] = React.useState('');
   const [open, setOpen] = React.useState(false);
 
+  const applyChange = (next: Set<string>) => {
+    onChange(next.size === 0 ? null : next);
+  };
   const toggleTool = (key: string) => {
     const next = new Set(selected ?? []);
     if (next.has(key)) next.delete(key);
     else next.add(key);
-    onChange(next);
+    applyChange(next);
   };
   /// Toggle the per-server wildcard `<prefix>__*`. Mirrors the model
   /// picker's "provider" checkbox: turning on the wildcard wipes any
@@ -496,21 +502,22 @@ function ToolScopeDropdown({
       next.add(wildcard);
       for (const x of tools) next.delete(x.key);
     }
-    onChange(next);
+    applyChange(next);
   };
   const commitQuery = () => {
     const v = query.trim();
     if (!v) return;
     const next = new Set(selected ?? []);
     next.add(v);
-    onChange(next);
+    applyChange(next);
     setQuery('');
   };
   const removeItem = (item: string) => {
     const next = new Set(selected ?? []);
     next.delete(item);
-    onChange(next);
+    applyChange(next);
   };
+  const sel = selected ?? new Set<string>();
 
   const queryTrim = query.trim();
   const queryLower = queryTrim.toLowerCase();
@@ -545,178 +552,173 @@ function ToolScopeDropdown({
   }, [mcpToolsByServer]);
   const showAddHint =
     queryTrim.length > 0 &&
-    !(selected?.has(queryTrim) ?? false) &&
+    !sel.has(queryTrim) &&
     (queryTrim.includes('*') || !allKeys.has(queryTrim));
 
   return (
     <>
       <span className="text-muted-foreground">{label}:</span>
-      <Popover open={open} onOpenChange={setOpen}>
-        <div className="flex items-center gap-1 rounded-md border p-0.5">
+      <Popover open={open} onOpenChange={setOpen} modal>
+        <PopoverTrigger asChild>
           <Button
             type="button"
-            variant={selected === null ? 'secondary' : 'ghost'}
+            variant="outline"
             size="sm"
-            className="h-5 px-2 text-xs"
-            onClick={() => {
-              onChange(null);
-              setOpen(false);
-            }}
+            className="h-6 gap-1 px-2 text-xs font-normal"
           >
-            {t('roles.unrestricted')}
+            {sel.size === 0 ? (
+              t('roles.unrestricted')
+            ) : (
+              <>
+                {t('roles.custom')}
+                <span className="text-muted-foreground">({sel.size})</span>
+              </>
+            )}
+            <ChevronDown className="h-3 w-3 opacity-60" />
           </Button>
-          <PopoverTrigger asChild>
-            <Button
-              type="button"
-              variant={selected !== null ? 'secondary' : 'ghost'}
-              size="sm"
-              className="h-5 gap-1 px-2 text-xs"
-              onClick={() => {
-                if (selected === null) {
-                  onChange(new Set());
-                  setOpen(true);
+        </PopoverTrigger>
+        <PopoverContent
+          className="w-[42rem] max-h-[var(--radix-popover-content-available-height)] p-0"
+          align="start"
+          collisionPadding={8}
+        >
+          {sel.size > 0 && (
+            <div className="max-h-20 overflow-y-auto border-b px-2 py-1.5">
+              <div className="flex flex-wrap gap-1">
+                {Array.from(sel)
+                  .sort()
+                  .map((item) => (
+                    <Badge
+                      key={item}
+                      variant={item.endsWith('__*') ? 'default' : 'secondary'}
+                      className="h-5 gap-0.5 pl-1.5 pr-0.5 font-mono text-[10px] font-normal"
+                    >
+                      {item}
+                      <button
+                        type="button"
+                        className="rounded-sm p-0.5 opacity-60 hover:opacity-100"
+                        onClick={() => removeItem(item)}
+                        aria-label={t('common.remove')}
+                      >
+                        <X className="h-2.5 w-2.5" />
+                      </button>
+                    </Badge>
+                  ))}
+              </div>
+            </div>
+          )}
+
+          <div className="flex items-center gap-2 border-b px-2 py-1">
+            <Input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  commitQuery();
                 }
               }}
-            >
-              {t('roles.custom')}
-              {selected !== null && selected.size > 0 && (
-                <span className="text-muted-foreground">({selected.size})</span>
-              )}
-              <ChevronDown className="h-3 w-3 opacity-60" />
-            </Button>
-          </PopoverTrigger>
-        </div>
-        <PopoverContent className="w-[42rem] p-0" align="start">
-          {selected !== null && (
-            <>
-              {selected.size > 0 && (
-                <div className="max-h-20 overflow-y-auto border-b px-2 py-1.5">
-                  <div className="flex flex-wrap gap-1">
-                    {Array.from(selected)
-                      .sort()
-                      .map((item) => (
-                        <Badge
-                          key={item}
-                          variant={item.endsWith('__*') ? 'default' : 'secondary'}
-                          className="h-5 gap-0.5 pl-1.5 pr-0.5 font-mono text-[10px] font-normal"
-                        >
-                          {item}
-                          <button
-                            type="button"
-                            className="rounded-sm p-0.5 opacity-60 hover:opacity-100"
-                            onClick={() => removeItem(item)}
-                            aria-label={t('common.remove')}
-                          >
-                            <X className="h-2.5 w-2.5" />
-                          </button>
-                        </Badge>
-                      ))}
-                  </div>
-                </div>
+              placeholder={t('roles.toolPatternPlaceholder')}
+              className="h-7 flex-1 border-0 bg-transparent px-0 font-mono text-xs shadow-none focus-visible:ring-0"
+            />
+            {sel.size > 0 && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-6 shrink-0 px-2 text-xs"
+                onClick={() => onChange(null)}
+              >
+                {t('common.clearAll')}
+              </Button>
+            )}
+          </div>
+
+          <ScrollArea className="h-[min(24rem,calc(var(--radix-popover-content-available-height)_-_7rem))]">
+            <div className="px-2 py-1.5">
+              {showAddHint && (
+                <button
+                  type="button"
+                  className="mb-1 flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-muted"
+                  onClick={commitQuery}
+                >
+                  <span className="rounded bg-primary/10 px-1 text-[10px] text-primary">
+                    {queryTrim.includes('*') ? t('roles.addPattern') : t('roles.addExact')}
+                  </span>
+                  <code className="truncate">{queryTrim}</code>
+                  <kbd className="ml-auto rounded border bg-muted px-1 text-[9px] text-muted-foreground">
+                    ↵
+                  </kbd>
+                </button>
               )}
 
-              <div className="border-b px-2 py-1">
-                <Input
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      e.preventDefault();
-                      commitQuery();
-                    }
-                  }}
-                  placeholder={t('roles.toolPatternPlaceholder')}
-                  className="h-7 border-0 bg-transparent px-0 font-mono text-xs shadow-none focus-visible:ring-0"
-                />
-              </div>
-
-              <div className="max-h-64 overflow-y-auto">
-                <div className="px-2 py-1.5">
-                  {showAddHint && (
-                    <button
-                      type="button"
-                      className="mb-1 flex w-full items-center gap-1.5 rounded px-1.5 py-1 text-left text-xs hover:bg-muted"
-                      onClick={commitQuery}
-                    >
-                      <span className="rounded bg-primary/10 px-1 text-[10px] text-primary">
-                        {queryTrim.includes('*') ? t('roles.addPattern') : t('roles.addExact')}
-                      </span>
-                      <code className="truncate">{queryTrim}</code>
-                      <kbd className="ml-auto rounded border bg-muted px-1 text-[9px] text-muted-foreground">
-                        ↵
-                      </kbd>
-                    </button>
-                  )}
-
-                  {filteredServers.length === 0 ? (
-                    <p className="py-2 text-center text-xs italic text-muted-foreground">
-                      {mcpToolsByServer.size === 0 ? t('common.noData') : t('common.noResults')}
-                    </p>
-                  ) : (
-                    <div className="space-y-2">
-                      {filteredServers.map(([server, group]) => {
-                        const wildcard = `${group.prefix}__*`;
-                        const hasWildcard = selected.has(wildcard);
-                        const checkedCount = hasWildcard
-                          ? group.tools.length
-                          : group.tools.filter((x) => selected.has(x.key)).length;
-                        const allOn = hasWildcard || checkedCount === group.tools.length;
-                        const someOn = !allOn && checkedCount > 0;
-                        return (
-                          <div key={server}>
-                            <label className="flex cursor-pointer items-center gap-1.5 text-xs font-medium">
-                              <Checkbox
-                                checked={allOn}
-                                data-state={
-                                  someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'
+              {filteredServers.length === 0 ? (
+                <p className="py-2 text-center text-xs italic text-muted-foreground">
+                  {mcpToolsByServer.size === 0 ? t('common.noData') : t('common.noResults')}
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {filteredServers.map(([server, group]) => {
+                    const wildcard = `${group.prefix}__*`;
+                    const hasWildcard = sel.has(wildcard);
+                    const checkedCount = hasWildcard
+                      ? group.tools.length
+                      : group.tools.filter((x) => sel.has(x.key)).length;
+                    const allOn = hasWildcard || checkedCount === group.tools.length;
+                    const someOn = !allOn && checkedCount > 0;
+                    return (
+                      <div key={server}>
+                        <label className="flex cursor-pointer items-center gap-1.5 text-xs font-medium">
+                          <Checkbox
+                            checked={allOn}
+                            data-state={
+                              someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'
+                            }
+                            onCheckedChange={() => toggleServer(group.prefix, group.tools)}
+                          />
+                          <span className="font-mono text-muted-foreground">{server}</span>
+                          <span className="text-[10px] font-normal text-muted-foreground">
+                            {hasWildcard
+                              ? t('roles.allIncludingFuture')
+                              : `${checkedCount}/${group.tools.length}`}
+                          </span>
+                        </label>
+                        <div className="mt-0.5 grid grid-cols-3 gap-x-3 gap-y-0.5 pl-5">
+                          {group.tools.map((x) => {
+                            const coveredByWildcard = hasWildcard && !sel.has(x.key);
+                            return (
+                              <label
+                                key={x.key}
+                                className="flex min-w-0 cursor-pointer items-center gap-1.5 text-xs"
+                                title={
+                                  coveredByWildcard
+                                    ? `${x.key} — ${t('roles.coveredBy')} ${wildcard}`
+                                    : x.key
                                 }
-                                onCheckedChange={() => toggleServer(group.prefix, group.tools)}
-                              />
-                              <span className="font-mono text-muted-foreground">{server}</span>
-                              <span className="text-[10px] font-normal text-muted-foreground">
-                                {hasWildcard
-                                  ? t('roles.allIncludingFuture')
-                                  : `${checkedCount}/${group.tools.length}`}
-                              </span>
-                            </label>
-                            <div className="mt-0.5 grid grid-cols-3 gap-x-3 gap-y-0.5 pl-5">
-                              {group.tools.map((x) => {
-                                const coveredByWildcard = hasWildcard && !selected.has(x.key);
-                                return (
-                                  <label
-                                    key={x.key}
-                                    className="flex min-w-0 cursor-pointer items-center gap-1.5 text-xs"
-                                    title={
-                                      coveredByWildcard
-                                        ? `${x.key} — ${t('roles.coveredBy')} ${wildcard}`
-                                        : x.key
-                                    }
-                                  >
-                                    <Checkbox
-                                      checked={selected.has(x.key) || hasWildcard}
-                                      disabled={coveredByWildcard}
-                                      onCheckedChange={() => toggleTool(x.key)}
-                                    />
-                                    <span
-                                      className={`min-w-0 truncate ${
-                                        coveredByWildcard ? 'italic text-muted-foreground' : ''
-                                      }`}
-                                    >
-                                      {x.toolName}
-                                    </span>
-                                  </label>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                              >
+                                <Checkbox
+                                  checked={sel.has(x.key) || hasWildcard}
+                                  disabled={coveredByWildcard}
+                                  onCheckedChange={() => toggleTool(x.key)}
+                                />
+                                <span
+                                  className={`min-w-0 truncate ${
+                                    coveredByWildcard ? 'italic text-muted-foreground' : ''
+                                  }`}
+                                >
+                                  {x.toolName}
+                                </span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
-              </div>
-            </>
-          )}
+              )}
+            </div>
+          </ScrollArea>
         </PopoverContent>
       </Popover>
     </>

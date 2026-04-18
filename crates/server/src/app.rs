@@ -571,6 +571,14 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             post(handlers::models::batch_create_routes),
         )
         .route(
+            "/api/admin/model-routes/batch-delete",
+            post(handlers::models::batch_delete_routes),
+        )
+        .route(
+            "/api/admin/model-routes/batch-update",
+            post(handlers::models::batch_update_routes),
+        )
+        .route(
             "/api/admin/model-routes/{route_id}",
             patch(handlers::models::update_model_route)
                 .delete(handlers::models::delete_model_route),

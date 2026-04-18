@@ -30,7 +30,17 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { AlertCircle, Brain, Loader2, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import {
+  AlertCircle,
+  Brain,
+  CircleCheck,
+  CircleOff,
+  Loader2,
+  Pencil,
+  Plus,
+  Search,
+  Trash2,
+} from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -100,6 +110,11 @@ export function ModelsPage() {
 
   // Delete route
   const [deleteRouteId, setDeleteRouteId] = useState<string | null>(null);
+
+  // Row selection for batch actions
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false);
+  const [batchActionRunning, setBatchActionRunning] = useState(false);
 
   // Batch add dialog
   const [batchDialogOpen, setBatchDialogOpen] = useState(false);
@@ -221,6 +236,78 @@ export function ModelsPage() {
       await fetchRoutes();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to delete route');
+    }
+  };
+
+  /* ---------- batch actions ---------- */
+
+  // Selections persist across page/search changes — the header checkbox
+  // only reflects the current page, but `selectedIds` keeps everything
+  // the user has ticked so batch ops can target rows from other pages.
+
+  const toggleRowSelected = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const togglePageSelected = () => {
+    const ids = routes.map((r) => r.id);
+    const allSelected = ids.length > 0 && ids.every((id) => selectedIds.has(id));
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allSelected) for (const id of ids) next.delete(id);
+      else for (const id of ids) next.add(id);
+      return next;
+    });
+  };
+
+  const pageAllSelected =
+    routes.length > 0 && routes.every((r) => selectedIds.has(r.id));
+  const pageSomeSelected =
+    !pageAllSelected && routes.some((r) => selectedIds.has(r.id));
+
+  const confirmBatchDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setBatchActionRunning(true);
+    try {
+      const res = await apiPost<{ deleted: number }>(
+        '/api/admin/model-routes/batch-delete',
+        { ids: Array.from(selectedIds) },
+      );
+      toast.success(t('models.batchDeleted', { count: res.deleted }));
+      setSelectedIds(new Set());
+      setBatchDeleteOpen(false);
+      await fetchRoutes();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete routes');
+    } finally {
+      setBatchActionRunning(false);
+    }
+  };
+
+  const batchToggleEnabled = async (enabled: boolean) => {
+    if (selectedIds.size === 0) return;
+    setBatchActionRunning(true);
+    try {
+      const res = await apiPost<{ updated: number }>(
+        '/api/admin/model-routes/batch-update',
+        { ids: Array.from(selectedIds), enabled },
+      );
+      toast.success(
+        enabled
+          ? t('models.batchEnabled', { count: res.updated })
+          : t('models.batchDisabled', { count: res.updated }),
+      );
+      setSelectedIds(new Set());
+      await fetchRoutes();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update routes');
+    } finally {
+      setBatchActionRunning(false);
     }
   };
 
@@ -347,7 +434,7 @@ export function ModelsPage() {
         </Alert>
       )}
 
-      {/* Search + Provider filter */}
+      {/* Search + Provider filter + batch actions (when rows selected) */}
       <div className="flex items-center gap-2 mb-4">
         <Input
           placeholder={t('models.searchPlaceholder')}
@@ -374,6 +461,48 @@ export function ModelsPage() {
             ))}
           </SelectContent>
         </Select>
+        {selectedIds.size > 0 && (
+          <div className="ml-auto flex items-center gap-2">
+            <span className="text-sm font-medium">
+              {t('models.selected', { count: selectedIds.size })}
+            </span>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={batchActionRunning}
+              onClick={() => batchToggleEnabled(true)}
+            >
+              <CircleCheck className="mr-1 h-3.5 w-3.5" />
+              {t('models.batchEnable')}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={batchActionRunning}
+              onClick={() => batchToggleEnabled(false)}
+            >
+              <CircleOff className="mr-1 h-3.5 w-3.5" />
+              {t('models.batchDisable')}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={batchActionRunning}
+              onClick={() => setBatchDeleteOpen(true)}
+            >
+              <Trash2 className="mr-1 h-3.5 w-3.5" />
+              {t('models.batchDelete')}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={batchActionRunning}
+              onClick={() => setSelectedIds(new Set())}
+            >
+              {t('common.cancel')}
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Route table */}
@@ -391,11 +520,24 @@ export function ModelsPage() {
           </CardContent>
         </Card>
       ) : (
-        <Card className="flex flex-col min-h-0 flex-1">
+        <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
           <CardContent className="p-0 overflow-auto flex-1">
             <Table>
               <TableHeader>
                 <TableRow>
+                  <TableHead className="w-10">
+                    <Checkbox
+                      checked={
+                        pageAllSelected
+                          ? true
+                          : pageSomeSelected
+                            ? 'indeterminate'
+                            : false
+                      }
+                      onCheckedChange={togglePageSelected}
+                      aria-label={t('models.selectAll')}
+                    />
+                  </TableHead>
                   <TableHead>{t('models.col.modelId')}</TableHead>
                   <TableHead>{t('models.col.provider')}</TableHead>
                   <TableHead>{t('models.col.upstreamModel')}</TableHead>
@@ -407,7 +549,14 @@ export function ModelsPage() {
               </TableHeader>
               <TableBody>
                 {routes.map((r) => (
-                  <TableRow key={r.id}>
+                  <TableRow key={r.id} data-state={selectedIds.has(r.id) ? 'selected' : undefined}>
+                    <TableCell className="w-10">
+                      <Checkbox
+                        checked={selectedIds.has(r.id)}
+                        onCheckedChange={() => toggleRowSelected(r.id)}
+                        aria-label={r.model_id}
+                      />
+                    </TableCell>
                     <TableCell
                       className="font-mono text-xs max-w-[220px] truncate"
                       title={r.model_id}
@@ -451,7 +600,7 @@ export function ModelsPage() {
               </TableBody>
             </Table>
           </CardContent>
-          <div data-slot="card-footer" className="-mt-4 border-t">
+          <div data-slot="card-footer" className="border-t">
             <DataTablePagination
               total={totalRoutes}
               page={page}
@@ -665,6 +814,17 @@ export function ModelsPage() {
         confirmLabel={t('common.delete')}
         variant="destructive"
         onConfirm={confirmDeleteRoute}
+      />
+
+      {/* Batch Delete Confirm */}
+      <ConfirmDialog
+        open={batchDeleteOpen}
+        onOpenChange={setBatchDeleteOpen}
+        title={t('models.batchDeleteTitle')}
+        description={t('models.batchDeleteConfirm', { count: selectedIds.size })}
+        confirmLabel={t('common.delete')}
+        variant="destructive"
+        onConfirm={confirmBatchDelete}
       />
     </div>
   );

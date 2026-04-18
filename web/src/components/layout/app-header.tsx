@@ -43,7 +43,7 @@ const exactBreadcrumbs: Record<string, CrumbEntry> = {
   '/admin/settings': { sectionKey: 'nav.admin', pageKey: 'nav.settings' },
   '/admin/api-docs': { sectionKey: 'nav.admin', pageKey: 'nav.apiDocs' },
   '/admin/usage-license': { sectionKey: 'nav.admin', pageKey: 'nav.usageLicense' },
-  '/admin/trace': { sectionKey: 'nav.admin', pageKey: 'nav.trace' },
+  '/admin/trace': { sectionKey: 'nav.logs', pageKey: 'nav.trace' },
   '/profile': { sectionKey: 'nav.admin', pageKey: 'auth.profile' },
 };
 
@@ -52,7 +52,7 @@ const exactBreadcrumbs: Record<string, CrumbEntry> = {
 /// before `/admin/teams`.
 const prefixBreadcrumbs: { prefix: string; crumb: CrumbEntry }[] = [
   { prefix: '/admin/teams/', crumb: { sectionKey: 'nav.admin', pageKey: 'nav.teams' } },
-  { prefix: '/admin/trace/', crumb: { sectionKey: 'nav.admin', pageKey: 'nav.trace' } },
+  { prefix: '/admin/trace/', crumb: { sectionKey: 'nav.logs', pageKey: 'nav.trace' } },
 ];
 
 function resolveCrumb(pathname: string): CrumbEntry | undefined {
