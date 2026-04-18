@@ -31,10 +31,15 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import {
+  Sheet,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet';
+import {
   AlertCircle,
   Brain,
-  ChevronDown,
-  ChevronRight,
   Loader2,
   Pencil,
   Plus,
@@ -157,8 +162,8 @@ export function ModelsPage() {
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const [cleanupRunning, setCleanupRunning] = useState(false);
 
-  // Per-model expanded state + lazy-loaded routes cache
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // Detail drawer: which model_id is open, and its lazily-loaded routes.
+  const [detailModelId, setDetailModelId] = useState<string | null>(null);
   const [routesByModel, setRoutesByModel] = useState<Record<string, RouteRow[]>>({});
   const [routesLoading, setRoutesLoading] = useState<Set<string>>(new Set());
 
@@ -179,8 +184,13 @@ export function ModelsPage() {
   const [routeSaving, setRouteSaving] = useState(false);
   const [deleteRoute, setDeleteRoute] = useState<RouteRow | null>(null);
 
-  // Batch import (pick a provider, fetch its remote model list, tick a bunch)
+  // Batch import — two-step dialog.
+  //
+  // Step 1: pick a provider, tick remote models from its catalog.
+  // Step 2: for each ticked model decide "new catalog entry" vs
+  //         "attach as route to an existing exposed model".
   const [batchDialogOpen, setBatchDialogOpen] = useState(false);
+  const [batchStep, setBatchStep] = useState<1 | 2>(1);
   const [batchProviderId, setBatchProviderId] = useState('');
   const [remoteModels, setRemoteModels] = useState<string[]>([]);
   const [remoteModelsLoading, setRemoteModelsLoading] = useState(false);
@@ -189,6 +199,14 @@ export function ModelsPage() {
   const [batchSearch, setBatchSearch] = useState('');
   const [batchSaving, setBatchSaving] = useState(false);
   const [existingModelIds, setExistingModelIds] = useState<Set<string>>(new Set());
+  // Picker source for the "attach" mode in step 2. Fetched once per
+  // dialog open from /api/admin/models/ids.
+  const [catalogModels, setCatalogModels] = useState<{ model_id: string; display_name: string }[]>(
+    [],
+  );
+  // Per-upstream decisions made in step 2. Key = upstream name.
+  type ImportDecision = { target_model_id: string | null; priority: number };
+  const [batchDecisions, setBatchDecisions] = useState<Record<string, ImportDecision>>({});
 
   /* ---------- data fetching ---------- */
 
@@ -273,19 +291,11 @@ export function ModelsPage() {
     setPage(1);
   }, [debouncedSearch]);
 
-  /* ---------- expand / collapse ---------- */
+  /* ---------- detail drawer ---------- */
 
-  const toggleExpand = (modelId: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(modelId)) {
-        next.delete(modelId);
-      } else {
-        next.add(modelId);
-        if (!routesByModel[modelId]) void fetchRoutesFor(modelId);
-      }
-      return next;
-    });
+  const openDetail = (modelId: string) => {
+    setDetailModelId(modelId);
+    if (!routesByModel[modelId]) void fetchRoutesFor(modelId);
   };
 
   /* ---------- model CRUD ---------- */
@@ -460,13 +470,45 @@ export function ModelsPage() {
   /* ---------- batch import ---------- */
 
   const openBatchDialog = () => {
+    setBatchStep(1);
     setBatchProviderId('');
     setRemoteModels([]);
     setRemoteModelsError('');
     setBatchSelected(new Set());
     setBatchSearch('');
     setExistingModelIds(new Set());
+    setBatchDecisions({});
     setBatchDialogOpen(true);
+    // Catalog lookup powers step 2's "attach to existing" picker.
+    // Kicked off once per open so stepping back and forward is instant.
+    void api<{ model_id: string; display_name: string }[]>('/api/admin/models/ids')
+      .then(setCatalogModels)
+      .catch(() => setCatalogModels([]));
+  };
+
+  /// Heuristic for "did the admin probably mean to attach this to an
+  /// already-exposed model, or to make a new one?". Matches on exact
+  /// name, else substring, else defaults to "new". Run once when we
+  /// enter step 2 to pre-fill the decisions.
+  const suggestDecision = (
+    upstream: string,
+    catalog: { model_id: string }[],
+  ): ImportDecision => {
+    const exact = catalog.find((c) => c.model_id === upstream);
+    if (exact) return { target_model_id: exact.model_id, priority: 1 };
+    const partial = catalog.find(
+      (c) => upstream.includes(c.model_id) || c.model_id.includes(upstream),
+    );
+    if (partial) return { target_model_id: partial.model_id, priority: 1 };
+    return { target_model_id: null, priority: 0 };
+  };
+
+  const goToStep2 = () => {
+    // Pre-fill one decision per selected upstream using the heuristic.
+    const next: Record<string, ImportDecision> = {};
+    for (const u of batchSelected) next[u] = suggestDecision(u, catalogModels);
+    setBatchDecisions(next);
+    setBatchStep(2);
   };
 
   const onBatchProviderChange = async (providerId: string) => {
@@ -527,15 +569,23 @@ export function ModelsPage() {
     if (!batchProviderId || batchSelected.size === 0) return;
     setBatchSaving(true);
     try {
+      const items = Array.from(batchSelected).map((upstream) => {
+        const d = batchDecisions[upstream] ?? { target_model_id: null, priority: 0 };
+        return {
+          upstream,
+          target_model_id: d.target_model_id,
+          priority: d.priority,
+        };
+      });
       const res = await apiPost<{ created: number }>('/api/admin/model-routes/batch', {
         provider_id: batchProviderId,
-        model_ids: Array.from(batchSelected),
+        items,
       });
       toast.success(t('models.batchSuccess', { count: res.created }));
       setBatchDialogOpen(false);
       await fetchModels();
-      // Any currently-expanded rows need their routes refreshed too.
-      for (const modelId of expanded) void fetchRoutesFor(modelId);
+      // If the drawer is open on a model we just touched, refresh it.
+      if (detailModelId) void fetchRoutesFor(detailModelId);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to import');
     } finally {
@@ -645,39 +695,25 @@ export function ModelsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-8" />
                   <TableHead>{t('models.col.modelId')}</TableHead>
                   <TableHead>{t('models.col.displayName')}</TableHead>
                   <TableHead className="text-center">{t('models.col.status')}</TableHead>
                   <TableHead className="text-right">{t('models.col.routeCount')}</TableHead>
-                  <TableHead className="text-right">{t('models.col.inputWeight')}</TableHead>
-                  <TableHead className="text-right">{t('models.col.outputWeight')}</TableHead>
+                  <TableHead>{t('models.col.provider')}</TableHead>
                   <TableHead className="text-right">{t('common.actions')}</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {models.map((m) => {
-                  const isOpen = expanded.has(m.model_id);
-                  const routes = routesByModel[m.model_id];
-                  const rLoading = routesLoading.has(m.model_id);
-                  return (
-                    <ModelRowGroup
-                      key={m.id}
-                      model={m}
-                      isOpen={isOpen}
-                      routes={routes}
-                      routesLoading={rLoading}
-                      providers={providers}
-                      providerLabel={providerLabel}
-                      onToggle={() => toggleExpand(m.model_id)}
-                      onEdit={() => openEditModel(m)}
-                      onDelete={() => setDeleteModel(m)}
-                      onAddRoute={() => openAddRoute(m)}
-                      onEditRoute={openEditRoute}
-                      onDeleteRoute={(r) => setDeleteRoute(r)}
-                    />
-                  );
-                })}
+                {models.map((m) => (
+                  <ModelRow
+                    key={m.id}
+                    model={m}
+                    routes={routesByModel[m.model_id]}
+                    providerLabel={providerLabel}
+                    onOpen={() => openDetail(m.model_id)}
+                    onDelete={() => setDeleteModel(m)}
+                  />
+                ))}
               </TableBody>
             </Table>
           </CardContent>
@@ -893,117 +929,236 @@ export function ModelsPage() {
         </DialogContent>
       </Dialog>
 
-      {/* Batch Import Dialog — pick a provider, tick remote models, bulk add routes */}
+      {/* Batch Import Dialog — two-step:
+           1. Pick provider + tick remote models
+           2. Decide per-item: new exposed model vs route on an existing one */}
       <Dialog open={batchDialogOpen} onOpenChange={setBatchDialogOpen}>
-        <DialogContent className="sm:max-w-lg max-h-[80vh] flex flex-col">
+        <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
           <DialogHeader>
-            <DialogTitle>{t('models.addRoutes')}</DialogTitle>
-            <DialogDescription>{t('models.batchImportHint')}</DialogDescription>
+            <DialogTitle>
+              {t('models.addRoutes')}{' '}
+              <span className="text-xs font-normal text-muted-foreground">
+                {t('models.stepOf', { current: batchStep, total: 2 })}
+              </span>
+            </DialogTitle>
+            <DialogDescription>
+              {batchStep === 1
+                ? t('models.batchImportHint')
+                : t('models.batchStep2Hint')}
+            </DialogDescription>
           </DialogHeader>
-          <div className="space-y-4 py-2 flex flex-col min-h-0 flex-1">
-            <Alert>
-              <AlertCircle className="h-4 w-4" />
-              <AlertDescription className="text-xs">
-                {t('models.batchImportWarning')}
-              </AlertDescription>
-            </Alert>
-            <div className="space-y-2">
-              <Label>{t('models.selectProvider')}</Label>
-              <Select value={batchProviderId} onValueChange={onBatchProviderChange}>
-                <SelectTrigger>
-                  <SelectValue placeholder={t('models.selectProvider')} />
-                </SelectTrigger>
-                <SelectContent>
-                  {providers.map((p) => (
-                    <SelectItem key={p.id} value={p.id}>
-                      {p.display_name || p.name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
 
-            {remoteModelsLoading && (
-              <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin" />
-                {t('models.loadingModels')}
-              </div>
-            )}
-
-            {remoteModelsError && (
-              <Alert variant="destructive">
+          {batchStep === 1 && (
+            <div className="space-y-4 py-2 flex flex-col min-h-0 flex-1">
+              <Alert>
                 <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{remoteModelsError}</AlertDescription>
+                <AlertDescription className="text-xs">
+                  {t('models.batchImportWarning')}
+                </AlertDescription>
               </Alert>
-            )}
+              <div className="space-y-2">
+                <Label>{t('models.selectProvider')}</Label>
+                <Select value={batchProviderId} onValueChange={onBatchProviderChange}>
+                  <SelectTrigger>
+                    <SelectValue placeholder={t('models.selectProvider')} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {providers.map((p) => (
+                      <SelectItem key={p.id} value={p.id}>
+                        {p.display_name || p.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
 
-            {!remoteModelsLoading && remoteModels.length > 0 && (
-              <>
-                <div className="flex items-center gap-2">
-                  <div className="relative flex-1">
-                    <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                    <Input
-                      placeholder={t('models.searchPlaceholder')}
-                      value={batchSearch}
-                      onChange={(e) => setBatchSearch(e.target.value)}
-                      className="pl-9"
-                    />
-                  </div>
-                  <span className="text-sm text-muted-foreground whitespace-nowrap">
-                    {t('models.selected', { count: batchSelected.size })}
-                  </span>
-                  <Button type="button" variant="outline" size="sm" onClick={toggleBatchSelectAll}>
-                    {filteredRemoteModels.filter((m) => !existingModelIds.has(m)).length > 0 &&
-                    filteredRemoteModels
-                      .filter((m) => !existingModelIds.has(m))
-                      .every((m) => batchSelected.has(m))
-                      ? t('models.deselectAll')
-                      : t('models.selectAll')}
-                  </Button>
+              {remoteModelsLoading && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  {t('models.loadingModels')}
                 </div>
-                <div className="border rounded-md overflow-auto flex-1 min-h-0 max-h-[40vh]">
-                  {filteredRemoteModels.map((modelId) => {
-                    const exists = existingModelIds.has(modelId);
-                    const checked = exists || batchSelected.has(modelId);
-                    return (
-                      <label
-                        key={modelId}
-                        className="flex items-center gap-2 px-3 py-1.5 hover:bg-muted/50 cursor-pointer text-sm border-b last:border-b-0"
-                      >
-                        <Checkbox
-                          checked={checked}
-                          disabled={exists}
-                          onCheckedChange={() => toggleBatchModel(modelId)}
-                        />
-                        <span
-                          className={`font-mono text-xs truncate ${exists ? 'text-muted-foreground' : ''}`}
+              )}
+
+              {remoteModelsError && (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{remoteModelsError}</AlertDescription>
+                </Alert>
+              )}
+
+              {!remoteModelsLoading && remoteModels.length > 0 && (
+                <>
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
+                      <Input
+                        placeholder={t('models.searchPlaceholder')}
+                        value={batchSearch}
+                        onChange={(e) => setBatchSearch(e.target.value)}
+                        className="pl-9"
+                      />
+                    </div>
+                    <span className="text-sm text-muted-foreground whitespace-nowrap">
+                      {t('models.selected', { count: batchSelected.size })}
+                    </span>
+                    <Button type="button" variant="outline" size="sm" onClick={toggleBatchSelectAll}>
+                      {filteredRemoteModels.filter((m) => !existingModelIds.has(m)).length > 0 &&
+                      filteredRemoteModels
+                        .filter((m) => !existingModelIds.has(m))
+                        .every((m) => batchSelected.has(m))
+                        ? t('models.deselectAll')
+                        : t('models.selectAll')}
+                    </Button>
+                  </div>
+                  <div className="border rounded-md overflow-auto flex-1 min-h-0 max-h-[40vh]">
+                    {filteredRemoteModels.map((modelId) => {
+                      const exists = existingModelIds.has(modelId);
+                      const checked = exists || batchSelected.has(modelId);
+                      return (
+                        <label
+                          key={modelId}
+                          className="flex items-center gap-2 px-3 py-1.5 hover:bg-muted/50 cursor-pointer text-sm border-b last:border-b-0"
                         >
-                          {modelId}
-                        </span>
-                        {exists && (
-                          <span className="text-xs text-muted-foreground ml-auto whitespace-nowrap">
-                            ({t('models.alreadyExists')})
+                          <Checkbox
+                            checked={checked}
+                            disabled={exists}
+                            onCheckedChange={() => toggleBatchModel(modelId)}
+                          />
+                          <span
+                            className={`font-mono text-xs truncate ${exists ? 'text-muted-foreground' : ''}`}
+                          >
+                            {modelId}
                           </span>
-                        )}
-                      </label>
+                          {exists && (
+                            <span className="text-xs text-muted-foreground ml-auto whitespace-nowrap">
+                              ({t('models.alreadyExists')})
+                            </span>
+                          )}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
+
+          {batchStep === 2 && (
+            <div className="space-y-3 py-2 flex flex-col min-h-0 flex-1">
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const next = { ...batchDecisions };
+                    for (const u of batchSelected) next[u] = { target_model_id: null, priority: 0 };
+                    setBatchDecisions(next);
+                  }}
+                >
+                  {t('models.batchAllNew')}
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={() => {
+                    const next = { ...batchDecisions };
+                    for (const u of batchSelected) next[u] = suggestDecision(u, catalogModels);
+                    setBatchDecisions(next);
+                  }}
+                >
+                  {t('models.batchResetSuggestions')}
+                </Button>
+              </div>
+              <div className="border rounded-md overflow-auto flex-1 min-h-0 max-h-[50vh] divide-y">
+                {Array.from(batchSelected)
+                  .sort()
+                  .map((upstream) => {
+                    const decision = batchDecisions[upstream] ?? {
+                      target_model_id: null,
+                      priority: 0,
+                    };
+                    const setDecision = (d: ImportDecision) =>
+                      setBatchDecisions({ ...batchDecisions, [upstream]: d });
+                    return (
+                      <div key={upstream} className="p-3 space-y-2">
+                        <div className="font-mono text-xs break-all">{upstream}</div>
+                        <div className="flex items-center gap-2 text-xs">
+                          <Select
+                            value={decision.target_model_id ?? '__new__'}
+                            onValueChange={(v) => {
+                              if (v === '__new__') {
+                                setDecision({ target_model_id: null, priority: 0 });
+                              } else {
+                                setDecision({
+                                  target_model_id: v,
+                                  priority: decision.priority === 0 ? 1 : decision.priority,
+                                });
+                              }
+                            }}
+                          >
+                            <SelectTrigger className="h-7 text-xs flex-1">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="__new__">
+                                {t('models.batchModeNew')}
+                              </SelectItem>
+                              {catalogModels.map((c) => (
+                                <SelectItem key={c.model_id} value={c.model_id}>
+                                  {t('models.batchModeAttach', { target: c.model_id })}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                          {decision.target_model_id && (
+                            <Select
+                              value={String(decision.priority)}
+                              onValueChange={(v) =>
+                                setDecision({ ...decision, priority: Number(v) })
+                              }
+                            >
+                              <SelectTrigger className="h-7 text-xs w-28">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="0">{t('models.primary')}</SelectItem>
+                                <SelectItem value="1">{t('models.fallback')}</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          )}
+                        </div>
+                      </div>
                     );
                   })}
-                </div>
-              </>
-            )}
-          </div>
+              </div>
+            </div>
+          )}
+
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setBatchDialogOpen(false)}>
               {t('common.cancel')}
             </Button>
-            <Button
-              type="button"
-              disabled={batchSaving || batchSelected.size === 0}
-              onClick={submitBatch}
-            >
-              {batchSaving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
-              {t('models.addNRoutes', { count: batchSelected.size })}
-            </Button>
+            {batchStep === 1 ? (
+              <Button
+                type="button"
+                disabled={batchSelected.size === 0}
+                onClick={goToStep2}
+              >
+                {t('models.batchNextStep', { count: batchSelected.size })}
+              </Button>
+            ) : (
+              <>
+                <Button type="button" variant="outline" onClick={() => setBatchStep(1)}>
+                  {t('common.previous')}
+                </Button>
+                <Button type="button" disabled={batchSaving} onClick={submitBatch}>
+                  {batchSaving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
+                  {t('models.addNRoutes', { count: batchSelected.size })}
+                </Button>
+              </>
+            )}
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -1041,197 +1196,303 @@ export function ModelsPage() {
         onConfirm={confirmCleanup}
         loading={cleanupRunning}
       />
+
+      {/* Model detail drawer — right-side Sheet with basics + routes + danger. */}
+      <Sheet
+        open={detailModelId !== null}
+        onOpenChange={(o) => {
+          if (!o) setDetailModelId(null);
+        }}
+      >
+        <SheetContent className="w-full sm:max-w-xl overflow-y-auto">
+          {detailModelId &&
+            (() => {
+              const model = models.find((m) => m.model_id === detailModelId);
+              if (!model) return null;
+              const routes = routesByModel[detailModelId];
+              const rLoading = routesLoading.has(detailModelId);
+              const status = modelStatus(model);
+              return (
+                <>
+                  <SheetHeader>
+                    <SheetTitle className="font-mono text-base break-all">
+                      {model.model_id}
+                    </SheetTitle>
+                    <SheetDescription>
+                      {model.display_name}
+                      {' • '}
+                      <span className="inline-block align-middle">
+                        {status === 'active'
+                          ? t('models.status.active')
+                          : status === 'draft'
+                            ? t('models.status.draft')
+                            : t('models.status.unrouted')}
+                      </span>
+                    </SheetDescription>
+                  </SheetHeader>
+                  <div className="px-4 pb-4 space-y-6">
+                    {/* Basics */}
+                    <section className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                          {t('models.detail.basics')}
+                        </Label>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs"
+                          onClick={() => openEditModel(model)}
+                        >
+                          <Pencil className="mr-1 h-3 w-3" />
+                          {t('common.edit')}
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-xs">
+                        <div>
+                          <div className="text-muted-foreground">
+                            {t('models.col.inputWeight')}
+                          </div>
+                          <div className="font-mono tabular-nums">{model.input_weight}</div>
+                        </div>
+                        <div>
+                          <div className="text-muted-foreground">
+                            {t('models.col.outputWeight')}
+                          </div>
+                          <div className="font-mono tabular-nums">{model.output_weight}</div>
+                        </div>
+                      </div>
+                      <CostPreview
+                        weight={model.input_weight}
+                        basePerToken={pricing?.input_price_per_token}
+                        currency={pricing?.currency}
+                        side="input"
+                      />
+                      <CostPreview
+                        weight={model.output_weight}
+                        basePerToken={pricing?.output_price_per_token}
+                        currency={pricing?.currency}
+                        side="output"
+                      />
+                    </section>
+
+                    {/* Routes */}
+                    <section className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                          {t('models.routes')} ({routes?.length ?? model.route_count})
+                        </Label>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 text-xs"
+                          onClick={() => openAddRoute(model)}
+                        >
+                          <Plus className="mr-1 h-3 w-3" />
+                          {t('models.addRoute')}
+                        </Button>
+                      </div>
+                      {rLoading ? (
+                        <Skeleton className="h-10 w-full" />
+                      ) : !routes || routes.length === 0 ? (
+                        <p className="text-xs italic text-muted-foreground py-2">
+                          {t('models.noRoutes')}
+                        </p>
+                      ) : (
+                        <div className="rounded-md border">
+                          <table className="w-full text-xs">
+                            <thead className="border-b bg-muted/30">
+                              <tr className="text-left text-muted-foreground">
+                                <th className="px-2 py-1.5 font-medium">
+                                  {t('models.col.provider')}
+                                </th>
+                                <th className="px-2 py-1.5 font-medium">
+                                  {t('models.col.upstreamModel')}
+                                </th>
+                                <th className="px-2 py-1.5 font-medium">
+                                  {t('models.col.priority')}
+                                </th>
+                                <th className="px-2 py-1.5 font-medium text-center">
+                                  {t('models.col.active')}
+                                </th>
+                                <th className="w-16" />
+                              </tr>
+                            </thead>
+                            <tbody className="divide-y">
+                              {routes.map((r) => (
+                                <tr key={r.id}>
+                                  <td className="px-2 py-1.5">
+                                    {providerLabel(r.provider_id)}
+                                  </td>
+                                  <td
+                                    className="px-2 py-1.5 font-mono text-[11px] max-w-[180px] truncate"
+                                    title={r.upstream_model ?? ''}
+                                  >
+                                    {r.upstream_model || (
+                                      <span className="italic text-muted-foreground">
+                                        ({t('models.col.modelId')})
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td className="px-2 py-1.5">
+                                    <Badge
+                                      variant={r.priority === 0 ? 'default' : 'secondary'}
+                                      className="text-[10px]"
+                                    >
+                                      {r.priority === 0
+                                        ? t('models.primary')
+                                        : t('models.fallback')}
+                                    </Badge>
+                                  </td>
+                                  <td className="px-2 py-1.5 text-center">
+                                    {r.enabled ? (
+                                      <Badge variant="default" className="text-[10px]">
+                                        {t('common.yes')}
+                                      </Badge>
+                                    ) : (
+                                      <Badge variant="outline" className="text-[10px]">
+                                        {t('common.no')}
+                                      </Badge>
+                                    )}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-7 w-7"
+                                      onClick={() => openEditRoute(r)}
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-7 w-7"
+                                      onClick={() => setDeleteRoute(r)}
+                                    >
+                                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                                    </Button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </section>
+
+                    {/* Danger zone */}
+                    <section className="space-y-2 rounded-md border border-destructive/30 p-3">
+                      <Label className="text-xs font-semibold uppercase tracking-wider text-destructive">
+                        {t('models.detail.danger')}
+                      </Label>
+                      <p className="text-[11px] text-muted-foreground">
+                        {t('models.deleteConfirm')}
+                      </p>
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        onClick={() => {
+                          setDetailModelId(null);
+                          setDeleteModel(model);
+                        }}
+                      >
+                        <Trash2 className="mr-1 h-3.5 w-3.5" />
+                        {t('models.deleteTitle')}
+                      </Button>
+                    </section>
+                  </div>
+                </>
+              );
+            })()}
+        </SheetContent>
+      </Sheet>
     </div>
   );
 }
 
-/* ---------- row group ---------- */
+/* ---------- compact main-table row ---------- */
 
-function ModelRowGroup({
+function ModelRow({
   model,
-  isOpen,
   routes,
-  routesLoading,
   providerLabel,
-  onToggle,
-  onEdit,
+  onOpen,
   onDelete,
-  onAddRoute,
-  onEditRoute,
-  onDeleteRoute,
 }: {
   model: ModelRow;
-  isOpen: boolean;
+  /// Routes cached from a prior drawer-open. Shown as provider chips
+  /// so the admin sees "who serves this?" without opening the drawer.
+  /// When undefined the column renders route_count as a fallback.
   routes: RouteRow[] | undefined;
-  routesLoading: boolean;
-  providers: Provider[];
   providerLabel: (id: string) => string;
-  onToggle: () => void;
-  onEdit: () => void;
+  onOpen: () => void;
   onDelete: () => void;
-  onAddRoute: () => void;
-  onEditRoute: (r: RouteRow) => void;
-  onDeleteRoute: (r: RouteRow) => void;
 }) {
   const { t } = useTranslation();
   const status = modelStatus(model);
-  const routesShown = routes?.length ?? model.route_count;
-
   return (
-    <>
-      <TableRow
-        className="cursor-pointer hover:bg-muted/30"
-        onClick={(e) => {
-          // Don't toggle when the click is on an action button.
-          if ((e.target as HTMLElement).closest('button')) return;
-          onToggle();
-        }}
-      >
-        <TableCell className="w-8">
-          {isOpen ? (
-            <ChevronDown className="h-4 w-4 text-muted-foreground" />
-          ) : (
-            <ChevronRight className="h-4 w-4 text-muted-foreground" />
-          )}
-        </TableCell>
-        <TableCell className="font-mono text-xs max-w-[260px] truncate" title={model.model_id}>
-          {model.model_id}
-        </TableCell>
-        <TableCell className="text-sm">{model.display_name}</TableCell>
-        <TableCell className="text-center">
-          {status === 'active' ? (
-            <Badge variant="default">{t('models.status.active')}</Badge>
-          ) : status === 'draft' ? (
-            <Badge variant="outline" className="border-amber-500/60 text-amber-600 dark:text-amber-400">
-              {t('models.status.draft')}
-            </Badge>
-          ) : (
-            <Badge variant="outline" className="text-muted-foreground">
-              {t('models.status.unrouted')}
-            </Badge>
-          )}
-        </TableCell>
-        <TableCell className="text-right font-mono text-xs tabular-nums">
-          {model.enabled_route_count}
-          {model.route_count > model.enabled_route_count && (
-            <span className="text-muted-foreground">/{model.route_count}</span>
-          )}
-        </TableCell>
-        <TableCell className="text-right font-mono text-xs tabular-nums">
-          {model.input_weight}
-        </TableCell>
-        <TableCell className="text-right font-mono text-xs tabular-nums">
-          {model.output_weight}
-        </TableCell>
-        <TableCell className="text-right whitespace-nowrap">
-          <Button variant="ghost" size="icon" onClick={onEdit} aria-label={t('common.edit')}>
-            <Pencil className="h-4 w-4" />
-          </Button>
-          <Button variant="ghost" size="icon" onClick={onDelete} aria-label={t('common.delete')}>
-            <Trash2 className="h-4 w-4 text-destructive" />
-          </Button>
-        </TableCell>
-      </TableRow>
-      {isOpen && (
-        <TableRow className="hover:bg-transparent">
-          <TableCell />
-          <TableCell colSpan={7} className="pb-4 pt-0">
-            <div className="ml-2 border-l-2 border-muted pl-4 space-y-2">
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-                  {t('models.routes')}{' '}
-                  <span className="font-mono normal-case tracking-normal">
-                    ({routesShown})
-                  </span>
-                </span>
-                <Button size="sm" variant="outline" onClick={onAddRoute} className="h-7 text-xs">
-                  <Plus className="mr-1 h-3 w-3" />
-                  {t('models.addRoute')}
-                </Button>
-              </div>
-              {routesLoading ? (
-                <Skeleton className="h-10 w-full" />
-              ) : !routes || routes.length === 0 ? (
-                <p className="text-xs italic text-muted-foreground py-2">
-                  {t('models.noRoutes')}
-                </p>
-              ) : (
-                <div className="rounded-md border">
-                  <table className="w-full text-xs">
-                    <thead className="border-b bg-muted/30">
-                      <tr className="text-left text-muted-foreground">
-                        <th className="px-2 py-1.5 font-medium">{t('models.col.provider')}</th>
-                        <th className="px-2 py-1.5 font-medium">{t('models.col.upstreamModel')}</th>
-                        <th className="px-2 py-1.5 font-medium text-right">
-                          {t('models.col.weight')}
-                        </th>
-                        <th className="px-2 py-1.5 font-medium">{t('models.col.priority')}</th>
-                        <th className="px-2 py-1.5 font-medium text-center">
-                          {t('models.col.active')}
-                        </th>
-                        <th className="w-16" />
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y">
-                      {routes.map((r) => (
-                        <tr key={r.id}>
-                          <td className="px-2 py-1.5">{providerLabel(r.provider_id)}</td>
-                          <td
-                            className="px-2 py-1.5 font-mono text-[11px] max-w-[240px] truncate"
-                            title={r.upstream_model ?? ''}
-                          >
-                            {r.upstream_model || (
-                              <span className="italic text-muted-foreground">
-                                ({t('models.col.modelId')})
-                              </span>
-                            )}
-                          </td>
-                          <td className="px-2 py-1.5 text-right font-mono tabular-nums">
-                            {r.weight}
-                          </td>
-                          <td className="px-2 py-1.5">
-                            <Badge variant={r.priority === 0 ? 'default' : 'secondary'}>
-                              {r.priority === 0 ? t('models.primary') : t('models.fallback')}
-                            </Badge>
-                          </td>
-                          <td className="px-2 py-1.5 text-center">
-                            {r.enabled ? (
-                              <Badge variant="default">{t('common.yes')}</Badge>
-                            ) : (
-                              <Badge variant="outline">{t('common.no')}</Badge>
-                            )}
-                          </td>
-                          <td className="px-2 py-1.5 text-right whitespace-nowrap">
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => onEditRoute(r)}
-                              aria-label={t('common.edit')}
-                            >
-                              <Pencil className="h-3.5 w-3.5" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon"
-                              className="h-7 w-7"
-                              onClick={() => onDeleteRoute(r)}
-                              aria-label={t('common.delete')}
-                            >
-                              <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                            </Button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </TableCell>
-        </TableRow>
-      )}
-    </>
+    <TableRow
+      className="cursor-pointer hover:bg-muted/30"
+      onClick={(e) => {
+        if ((e.target as HTMLElement).closest('button')) return;
+        onOpen();
+      }}
+    >
+      <TableCell className="font-mono text-xs max-w-[260px] truncate" title={model.model_id}>
+        {model.model_id}
+      </TableCell>
+      <TableCell className="text-sm">{model.display_name}</TableCell>
+      <TableCell className="text-center">
+        {status === 'active' ? (
+          <Badge variant="default">{t('models.status.active')}</Badge>
+        ) : status === 'draft' ? (
+          <Badge
+            variant="outline"
+            className="border-amber-500/60 text-amber-600 dark:text-amber-400"
+          >
+            {t('models.status.draft')}
+          </Badge>
+        ) : (
+          <Badge variant="outline" className="text-muted-foreground">
+            {t('models.status.unrouted')}
+          </Badge>
+        )}
+      </TableCell>
+      <TableCell className="text-right font-mono text-xs tabular-nums">
+        {model.enabled_route_count}
+        {model.route_count > model.enabled_route_count && (
+          <span className="text-muted-foreground">/{model.route_count}</span>
+        )}
+      </TableCell>
+      <TableCell className="max-w-[260px]">
+        {routes && routes.length > 0 ? (
+          <div className="flex flex-wrap gap-1">
+            {routes.slice(0, 3).map((r) => (
+              <Badge
+                key={r.id}
+                variant={r.enabled ? 'secondary' : 'outline'}
+                className="text-[10px] font-normal"
+              >
+                {providerLabel(r.provider_id)}
+              </Badge>
+            ))}
+            {routes.length > 3 && (
+              <span className="text-[10px] text-muted-foreground">+{routes.length - 3}</span>
+            )}
+          </div>
+        ) : (
+          <span className="text-xs italic text-muted-foreground">—</span>
+        )}
+      </TableCell>
+      <TableCell className="text-right whitespace-nowrap">
+        <Button variant="ghost" size="icon" onClick={onOpen} aria-label={t('common.edit')}>
+          <Pencil className="h-4 w-4" />
+        </Button>
+        <Button variant="ghost" size="icon" onClick={onDelete} aria-label={t('common.delete')}>
+          <Trash2 className="h-4 w-4 text-destructive" />
+        </Button>
+      </TableCell>
+    </TableRow>
   );
 }
 

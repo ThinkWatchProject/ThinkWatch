@@ -358,6 +358,40 @@ pub async fn delete_model(
 }
 
 // ---------------------------------------------------------------------------
+// Lightweight list of every exposed model_id
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
+pub struct ModelIdRow {
+    pub model_id: String,
+    pub display_name: String,
+}
+
+/// GET /api/admin/models/ids
+///
+/// Minimal catalog listing used by the batch-import dialog's "attach to
+/// existing model" picker. Paginated `list_models` would work but caps
+/// at 200/page — this one is unpaginated since the expected ceiling is
+/// under a thousand entries (the curated exposed catalog, not provider
+/// remotes).
+pub async fn list_model_ids(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ModelIdRow>>, AppError> {
+    auth_user.require_permission("models:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:read")
+        .await?;
+
+    let rows = sqlx::query_as::<_, ModelIdRow>(
+        "SELECT model_id, display_name FROM models ORDER BY model_id",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(rows))
+}
+
+// ---------------------------------------------------------------------------
 // Bulk cleanup of orphan models (no routes at all)
 // ---------------------------------------------------------------------------
 
@@ -820,17 +854,48 @@ pub async fn list_all_routes(
 }
 
 // ---------------------------------------------------------------------------
-// Batch create routes
+// Batch import routes (two-step dialog driver)
+//
+// Clients pick N remote models from a provider's catalog and decide per
+// item whether each one should:
+//
+//   * `new`     — become a new exposed catalog entry (`models` row) with
+//                 a route to the provider (upstream_model = same name)
+//   * `attach`  — become a new route on an existing exposed model,
+//                 optionally renaming (upstream_model = the remote name,
+//                 model_id = whatever the admin already exposes)
+//
+// The second mode is the aggregator case: OpenRouter exposes
+// `openai/gpt-4o`, but you already expose `gpt-4o` via direct OpenAI.
+// Selecting `attach` adds OpenRouter as a fallback route on the same
+// exposed entry — no duplicate catalog rows.
+//
+// All imported routes default to `enabled = false` so `/v1/models`
+// stays clean until the admin flips them on.
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BatchImportItem {
+    /// Name as it appears in the provider's remote catalog. Always
+    /// goes into `model_routes.upstream_model` (NULL when it matches
+    /// the exposed model_id, to keep the table tidy).
+    pub upstream: String,
+    /// When set, attach a route to this existing `models.model_id`
+    /// instead of creating a new catalog entry.
+    pub target_model_id: Option<String>,
+    /// Route priority. Defaults to 0 for `new`, 1 for `attach`
+    /// (sensible guess: a brand-new exposed model is primary, while
+    /// attaching to an already-served model is usually fallback).
+    pub priority: Option<i32>,
+}
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BatchCreateRoutesRequest {
     pub provider_id: Uuid,
-    pub model_ids: Vec<String>,
+    pub items: Vec<BatchImportItem>,
 }
 
-/// POST /api/admin/model-routes/batch — batch create routes.
-/// Auto-creates models that don't exist yet.
+/// POST /api/admin/model-routes/batch
 pub async fn batch_create_routes(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -841,8 +906,8 @@ pub async fn batch_create_routes(
         .assert_scope_global(&state.db, "models:write")
         .await?;
 
-    if req.model_ids.is_empty() {
-        return Err(AppError::BadRequest("model_ids is empty".into()));
+    if req.items.is_empty() {
+        return Err(AppError::BadRequest("items is empty".into()));
     }
 
     let provider_exists: Option<Uuid> =
@@ -854,35 +919,90 @@ pub async fn batch_create_routes(
         return Err(AppError::BadRequest("Provider not found".into()));
     }
 
-    let model_slice: &[String] = &req.model_ids;
+    // Split the request into the two flows. Each flow is one bulk
+    // INSERT via UNNEST so we stay at O(1) round trips regardless of N.
+    let mut new_ids: Vec<String> = Vec::new();
+    let mut attach_targets: Vec<String> = Vec::new();
+    let mut attach_upstreams: Vec<String> = Vec::new();
+    let mut attach_priorities: Vec<i32> = Vec::new();
 
-    // Auto-create catalog entries for unseen model ids. Imported models
-    // default to `is_active = true` at the catalog level, but the
-    // route below is inserted `enabled = false` — so even though the
-    // model row exists, the gateway won't route to it until an admin
-    // flips the route on in the Models page. This keeps the "just
-    // imported 500 models" noise out of `/v1/models` for clients.
-    sqlx::query(
-        r#"INSERT INTO models (model_id, display_name, is_active)
-           SELECT m, m, true FROM UNNEST($1::TEXT[]) AS t(m)
-           ON CONFLICT (model_id) DO NOTHING"#,
-    )
-    .bind(model_slice)
-    .execute(&state.db)
-    .await?;
+    for it in &req.items {
+        match &it.target_model_id {
+            None => new_ids.push(it.upstream.clone()),
+            Some(target) => {
+                attach_targets.push(target.clone());
+                attach_upstreams.push(it.upstream.clone());
+                attach_priorities.push(it.priority.unwrap_or(1));
+            }
+        }
+    }
 
-    // Create routes disabled-by-default (skip duplicates).
-    let result = sqlx::query(
-        r#"INSERT INTO model_routes (model_id, provider_id, weight, priority, enabled)
-           SELECT m, $2, 100, 0, false FROM UNNEST($1::TEXT[]) AS t(m)
-           ON CONFLICT (model_id, provider_id) DO NOTHING"#,
-    )
-    .bind(model_slice)
-    .bind(req.provider_id)
-    .execute(&state.db)
-    .await?;
+    let mut tx = state.db.begin().await?;
 
-    let created = result.rows_affected() as i64;
+    // --- "new" items -----------------------------------------------
+    //
+    // Catalog insert is idempotent. Route insert counts rows via the
+    // RETURNING/CTE pattern so the response's `created` count reflects
+    // only rows that actually landed (skipping ON CONFLICT dupes).
+    let new_inserted: i64 = if new_ids.is_empty() {
+        0
+    } else {
+        sqlx::query(
+            r#"INSERT INTO models (model_id, display_name, is_active)
+               SELECT m, m, true FROM UNNEST($1::TEXT[]) AS t(m)
+               ON CONFLICT (model_id) DO NOTHING"#,
+        )
+        .bind(&new_ids)
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query_scalar::<_, i64>(
+            r#"WITH ins AS (
+                 INSERT INTO model_routes
+                     (model_id, provider_id, weight, priority, enabled)
+                 SELECT m, $2, 100, 0, false FROM UNNEST($1::TEXT[]) AS t(m)
+                 ON CONFLICT (model_id, provider_id) DO NOTHING
+                 RETURNING 1
+               )
+               SELECT COUNT(*) FROM ins"#,
+        )
+        .bind(&new_ids)
+        .bind(req.provider_id)
+        .fetch_one(&mut *tx)
+        .await?
+    };
+
+    // --- "attach" items --------------------------------------------
+    //
+    // Targets that don't exist in `models` are silently skipped
+    // (EXISTS guard below) to avoid a FK failure on a typo. The audit
+    // log records the discrepancy via the created/requested deltas.
+    let attach_inserted: i64 = if attach_targets.is_empty() {
+        0
+    } else {
+        sqlx::query_scalar::<_, i64>(
+            r#"WITH ins AS (
+                 INSERT INTO model_routes
+                     (model_id, provider_id, upstream_model, weight, priority, enabled)
+                 SELECT t.target, $4, t.upstream, 100, t.pri, false
+                 FROM UNNEST($1::TEXT[], $2::TEXT[], $3::INT[])
+                   AS t(target, upstream, pri)
+                 WHERE EXISTS (SELECT 1 FROM models m WHERE m.model_id = t.target)
+                 ON CONFLICT (model_id, provider_id) DO NOTHING
+                 RETURNING 1
+               )
+               SELECT COUNT(*) FROM ins"#,
+        )
+        .bind(&attach_targets)
+        .bind(&attach_upstreams)
+        .bind(&attach_priorities)
+        .bind(req.provider_id)
+        .fetch_one(&mut *tx)
+        .await?
+    };
+
+    tx.commit().await?;
+    let created = new_inserted + attach_inserted;
 
     state.audit.log(
         auth_user
@@ -890,7 +1010,8 @@ pub async fn batch_create_routes(
             .resource("model_routes")
             .detail(serde_json::json!({
                 "provider_id": req.provider_id,
-                "requested": req.model_ids.len(),
+                "new": new_ids.len(),
+                "attach": attach_targets.len(),
                 "created": created,
             })),
     );

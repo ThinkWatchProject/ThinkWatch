@@ -567,6 +567,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             axum::routing::delete(handlers::models::delete_unrouted_models),
         )
         .route(
+            "/api/admin/models/ids",
+            get(handlers::models::list_model_ids),
+        )
+        .route(
             "/api/admin/models/{id}",
             patch(handlers::models::update_model).delete(handlers::models::delete_model),
         )

@@ -391,6 +391,17 @@
     },
     "batchImportHint": "Import model entries from a provider's remote catalog into your exposed models list.",
     "batchImportWarning": "Imported models are created with routes disabled by default \u2014 they won't appear in /v1/models for clients until you enable them. Select only the few you actually want to expose.",
+    "batchStep2Hint": "For each selected upstream, decide whether to create a new exposed model or attach it as a fallback route to one you already have.",
+    "batchNextStep": "Next ({{count}}) \u2192",
+    "batchAllNew": "All new",
+    "batchResetSuggestions": "Auto-suggest",
+    "batchModeNew": "\u2794 New exposed model",
+    "batchModeAttach": "\u2794 Route on \"{{target}}\"",
+    "stepOf": "Step {{current}} / {{total}}",
+    "detail": {
+      "basics": "Basics",
+      "danger": "Danger zone"
+    },
     "cleanupAction": "Delete all unrouted ({{count}})",
     "cleanupTitle": "Delete unrouted models",
     "cleanupConfirm": "Delete {{count}} models that have no routes? The entries were imported from a provider's catalog but never attached to any active provider. This cannot be undone.",

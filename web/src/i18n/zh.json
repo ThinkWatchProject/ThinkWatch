@@ -391,6 +391,17 @@
     },
     "batchImportHint": "从提供商远端 catalog 导入模型条目到已暴露模型列表。",
     "batchImportWarning": "导入的模型路由默认为禁用状态 —— 在启用之前不会出现在客户端的 /v1/models 里。只勾选你真正想要暴露的几个。",
+    "batchStep2Hint": "为每个选中的上游模型决定：新建暴露项、还是作为已有模型的备用路由。",
+    "batchNextStep": "下一步（{{count}}） →",
+    "batchAllNew": "全部新建",
+    "batchResetSuggestions": "重新推荐",
+    "batchModeNew": "➔ 新建暴露模型",
+    "batchModeAttach": "➔ 作为 「{{target}}」 的路由",
+    "stepOf": "第 {{current}} / {{total}} 步",
+    "detail": {
+      "basics": "基本信息",
+      "danger": "危险操作"
+    },
     "cleanupAction": "删除所有未路由 ({{count}})",
     "cleanupTitle": "删除未路由模型",
     "cleanupConfirm": "删除 {{count}} 个没有任何路由的模型？这些条目是从 provider catalog 导入但从未接入任何启用状态的 provider。此操作无法撤销。",
