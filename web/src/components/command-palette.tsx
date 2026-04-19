@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import {
   Search, Server, Store, Wrench, Key, FileText, Users, Building2, Shield, Settings,
-  Sliders, BookOpen, Activity, DollarSign, UserCog, Braces, Radio,
+  Sliders, BookOpen, Activity, DollarSign, UserCog, Braces, Radio, GitBranch,
 } from 'lucide-react';
+import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
 interface CmdAction {
@@ -14,8 +15,72 @@ interface CmdAction {
   labelKey: string;
   to: string;
   icon: typeof Server;
-  group: 'overview' | 'mcp' | 'gateway' | 'analytics' | 'admin' | 'other';
+  group: 'overview' | 'mcp' | 'gateway' | 'analytics' | 'admin' | 'other' | 'recent';
   keywords?: string;
+  // Optional literal label for items generated at runtime (e.g. traces).
+  // When set, it wins over `labelKey` so we don't need to register every
+  // dynamic id in i18n.
+  label?: string;
+  // Optional subtitle shown on the right — used for trace summaries
+  // like "gpt-4o · 412ms · 200".
+  hint?: string;
+  // When present, overrides the default `navigate({ to })` — trace entries
+  // need a parameterized route call.
+  traceId?: string;
+}
+
+interface RecentGatewayLog {
+  id: string;
+  model_id: string | null;
+  latency_ms: number | null;
+  status_code: number | null;
+}
+
+interface RecentGatewayResponse {
+  items: RecentGatewayLog[];
+}
+
+/// Fetch the 5 most-recent gateway requests when the palette opens so the
+/// operator can jump straight into the trace view. Silent on 401/403 —
+/// users without `logs:read_all` just won't see the section.
+function useRecentTraces(open: boolean): CmdAction[] {
+  const [items, setItems] = useState<CmdAction[]>([]);
+  useEffect(() => {
+    if (!open) {
+      setItems([]);
+      return;
+    }
+    let cancelled = false;
+    api<RecentGatewayResponse>('/api/gateway/logs?limit=5&offset=0', {
+      no401Redirect: true,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        setItems(
+          res.items.map((r) => ({
+            id: `trace:${r.id}`,
+            labelKey: '',
+            label: r.id,
+            to: '/admin/trace/$traceId',
+            traceId: r.id,
+            icon: GitBranch,
+            group: 'recent' as const,
+            hint: [
+              r.model_id ?? '—',
+              r.latency_ms != null ? `${r.latency_ms}ms` : '—',
+              r.status_code != null ? String(r.status_code) : '—',
+            ].join(' · '),
+          })),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setItems([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+  return items;
 }
 
 const ACTIONS: CmdAction[] = [
@@ -67,15 +132,36 @@ export function CommandPalette() {
     }
   }, [open]);
 
+  const recentTraces = useRecentTraces(open);
+
+  const runSelect = (pick: CmdAction) => {
+    setOpen(false);
+    if (pick.traceId) {
+      navigate({ to: '/admin/trace/$traceId', params: { traceId: pick.traceId } });
+    } else {
+      // TanStack's typed-routes signature rejects arbitrary strings; the
+      // ACTIONS list is the only caller and its paths are all valid, so
+      // widen the call with a cast rather than enumerate every union
+      // member.
+      navigate({ to: pick.to } as Parameters<typeof navigate>[0]);
+    }
+  };
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return ACTIONS;
-    return ACTIONS.filter((a) => {
+    if (!q) return [...ACTIONS, ...recentTraces];
+    // Traces are a discovery aid — only surface them when the typed query
+    // actually looks like a UUID fragment. Otherwise they drown out navs.
+    const navMatches = ACTIONS.filter((a) => {
       const label = t(a.labelKey).toLowerCase();
       const kw = a.keywords?.toLowerCase() ?? '';
       return label.includes(q) || kw.includes(q) || a.id.includes(q);
     });
-  }, [query, t]);
+    const traceMatches = recentTraces.filter((a) =>
+      (a.label ?? '').toLowerCase().includes(q),
+    );
+    return [...navMatches, ...traceMatches];
+  }, [query, t, recentTraces]);
 
   const onKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
@@ -87,10 +173,7 @@ export function CommandPalette() {
     } else if (e.key === 'Enter') {
       e.preventDefault();
       const pick = filtered[activeIdx];
-      if (pick) {
-        setOpen(false);
-        navigate({ to: pick.to });
-      }
+      if (pick) runSelect(pick);
     }
   };
 
@@ -118,24 +201,48 @@ export function CommandPalette() {
           {filtered.map((a, i) => {
             const Icon = a.icon;
             const active = i === activeIdx;
+            const label = a.label ?? t(a.labelKey);
+            const prevGroup = i === 0 ? null : filtered[i - 1].group;
+            const showHeader = a.group === 'recent' && prevGroup !== 'recent';
             return (
-              <li
-                key={a.id}
-                className={cn(
-                  'flex cursor-pointer items-center gap-3 px-3 py-2 text-sm',
-                  active ? 'bg-accent text-accent-foreground' : 'hover:bg-muted/50',
+              <Fragment key={a.id}>
+                {showHeader && (
+                  <li className="border-t px-3 pt-2 pb-1 text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                    {t('commandPalette.recentTraces', 'Recent traces')}
+                  </li>
                 )}
-                onMouseEnter={() => setActiveIdx(i)}
-                onMouseDown={(e) => {
-                  e.preventDefault();
-                  setOpen(false);
-                  navigate({ to: a.to });
-                }}
-              >
-                <Icon className="h-4 w-4 text-muted-foreground" />
-                <span className="flex-1 truncate">{t(a.labelKey)}</span>
-                <span className="shrink-0 font-mono text-[10px] uppercase text-muted-foreground">{a.group}</span>
-              </li>
+                <li
+                  className={cn(
+                    'flex cursor-pointer items-center gap-3 px-3 py-2 text-sm',
+                    active ? 'bg-accent text-accent-foreground' : 'hover:bg-muted/50',
+                  )}
+                  onMouseEnter={() => setActiveIdx(i)}
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    runSelect(a);
+                  }}
+                >
+                  <Icon className="h-4 w-4 text-muted-foreground" />
+                  <span
+                    className={cn(
+                      'flex-1 truncate',
+                      a.group === 'recent' ? 'font-mono text-xs' : '',
+                    )}
+                  >
+                    {label}
+                  </span>
+                  {a.hint && (
+                    <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                      {a.hint}
+                    </span>
+                  )}
+                  {!a.hint && (
+                    <span className="shrink-0 font-mono text-[10px] uppercase text-muted-foreground">
+                      {a.group}
+                    </span>
+                  )}
+                </li>
+              </Fragment>
             );
           })}
         </ul>

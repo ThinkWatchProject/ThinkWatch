@@ -47,7 +47,8 @@
   },
   "commandPalette": {
     "placeholder": "Search actions or pages...",
-    "empty": "No matches"
+    "empty": "No matches",
+    "recentTraces": "Recent traces"
   },
   "nav": {
     "dashboard": "Dashboard",
@@ -182,6 +183,8 @@
     "rangeLabel": "Time range",
     "compare": "Compare",
     "compareHint": "Show change vs the immediately-preceding window of the same length",
+    "pause": "Pause",
+    "resume": "Resume",
     "range": {
       "24h": "24h",
       "7d": "7d",

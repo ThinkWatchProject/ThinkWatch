@@ -47,7 +47,8 @@
   },
   "commandPalette": {
     "placeholder": "搜索操作或页面...",
-    "empty": "无匹配项"
+    "empty": "无匹配项",
+    "recentTraces": "最近追踪"
   },
   "nav": {
     "dashboard": "仪表盘",
@@ -182,6 +183,8 @@
     "rangeLabel": "时间范围",
     "compare": "对比",
     "compareHint": "对比同等长度的上一时段差异",
+    "pause": "暂停",
+    "resume": "继续",
     "range": {
       "24h": "24小时",
       "7d": "7天",

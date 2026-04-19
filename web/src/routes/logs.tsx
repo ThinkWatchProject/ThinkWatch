@@ -10,7 +10,7 @@ import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from '@/components/ui/table';
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select';
-import { Search, FileText, ChevronDown, ChevronRight, Plus, Minus } from 'lucide-react';
+import { Search, FileText, ChevronDown, ChevronRight, Plus, Minus, X } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -98,6 +98,17 @@ function parseQuery(input: string): ParsedQuery {
   return { params, excludes };
 }
 
+// Strip the first `key:value` (optionally `-key:value`) token from a raw
+// query string. Used when the user clicks × on a parsed chip. Matches the
+// same shape as `parseQuery` so quoted values come out cleanly.
+function removeFilterToken(input: string, key: string, negate: boolean): string {
+  const prefix = negate ? '-' : '';
+  const pattern = new RegExp(
+    `(^|\\s)${escapeRegex(prefix)}${escapeRegex(key)}:(?:"[^"]*"|\\S+)`,
+  );
+  return input.replace(pattern, '').replace(/\s+/g, ' ').trim();
+}
+
 // ---------------------------------------------------------------------------
 // Column definitions per category
 // ---------------------------------------------------------------------------
@@ -121,6 +132,64 @@ interface ColDef {
    * filter by `user_id`.
    */
   filterValueKey?: string;
+}
+
+// Render parsed `key:value` and `-key:value` tokens as removable pills right
+// below the search row, so the user can see which filters the backend will
+// actually apply. Non-filter free text is intentionally left out — it stays
+// visible in the Input itself. × rewrites `input` to drop that one token.
+function QueryTokenChips({
+  input,
+  onChange,
+}: {
+  input: string;
+  onChange: (next: string) => void;
+}) {
+  const { params, excludes } = parseQuery(input);
+  type Chip = { key: string; value: string; negate: boolean };
+  const chips: Chip[] = [];
+  for (const [k, v] of Object.entries(params)) {
+    if (k === 'q') continue;
+    chips.push({ key: k, value: v, negate: false });
+  }
+  for (const raw of excludes) {
+    const idx = raw.indexOf(':');
+    if (idx <= 0) continue;
+    const key = raw.slice(0, idx);
+    const rawVal = raw.slice(idx + 1);
+    // Unquote for display only. parseQuery already normalized the shape.
+    const value =
+      rawVal.startsWith('"') && rawVal.endsWith('"')
+        ? rawVal.slice(1, -1).replace(/\\"/g, '"').replace(/\\\\/g, '\\')
+        : rawVal;
+    chips.push({ key, value, negate: true });
+  }
+  if (chips.length === 0) return null;
+  return (
+    <div className="-mt-2 mb-4 flex flex-wrap items-center gap-1.5">
+      {chips.map((c) => (
+        <span
+          key={`${c.negate ? '-' : '+'}${c.key}:${c.value}`}
+          className={
+            c.negate
+              ? 'inline-flex items-center gap-1 rounded border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 font-mono text-[11px] text-destructive'
+              : 'inline-flex items-center gap-1 rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] text-primary'
+          }
+        >
+          {c.negate ? '-' : ''}
+          {c.key}:{c.value}
+          <button
+            type="button"
+            aria-label={`Remove ${c.negate ? '-' : ''}${c.key}:${c.value}`}
+            onClick={() => onChange(removeFilterToken(input, c.key, c.negate))}
+            className="rounded p-0.5 hover:bg-background/60"
+          >
+            <X className="h-3 w-3" aria-hidden="true" />
+          </button>
+        </span>
+      ))}
+    </div>
+  );
 }
 
 function statusBadge(code: unknown) {
@@ -573,6 +642,8 @@ export function UnifiedLogsPage() {
           {t('common.search')}
         </Button>
       </div>
+
+      <QueryTokenChips input={searchInput} onChange={setSearchInput} />
 
       {error && (
         <Alert variant="destructive" className="mb-4">

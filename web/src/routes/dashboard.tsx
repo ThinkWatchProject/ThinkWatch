@@ -11,7 +11,7 @@ import {
 } from 'react';
 import { ErrorBoundary } from '@/components/error-boundary';
 import { useTranslation } from 'react-i18next';
-import { Inbox } from 'lucide-react';
+import { Inbox, Pause, Play } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ReferenceLine, YAxis } from 'recharts';
 import {
   Card,
@@ -1065,6 +1065,20 @@ const LiveLogRowItem = memo(function LiveLogRowItem({
 
 function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
   const { t } = useTranslation();
+  // When paused, `snapshot` freezes the rows at the moment the user
+  // clicked pause so new WS frames don't scroll the list out from under
+  // them. Releasing pause drops the snapshot and live rows flow again.
+  const [paused, setPaused] = useState(false);
+  const [snapshot, setSnapshot] = useState<LiveLogRow[] | null>(null);
+  const togglePause = () => {
+    setPaused((p) => {
+      const next = !p;
+      setSnapshot(next ? rows : null);
+      return next;
+    });
+  };
+  const displayed = paused ? snapshot : rows;
+
   // Mirror what the row layout will be so headers and rows align perfectly.
   const cols =
     'grid-cols-[1fr_auto_44px] lg:grid-cols-[64px_44px_1fr_1fr_56px_52px_52px]';
@@ -1072,6 +1086,22 @@ function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
     // `min-h-0` lets this card shrink inside the flex parent so the row
     // list scrolls internally instead of pushing the page.
     <Card className="flex h-full min-h-0 flex-col gap-0 py-0">
+      <div className="flex shrink-0 items-center justify-end border-b px-3 py-1.5">
+        <button
+          type="button"
+          onClick={togglePause}
+          className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider transition-colors ${
+            paused
+              ? 'border-primary/60 bg-primary/10 text-primary'
+              : 'border-border bg-muted/30 text-muted-foreground hover:text-foreground'
+          }`}
+          aria-pressed={paused}
+          title={paused ? t('dashboard.resume') : t('dashboard.pause')}
+        >
+          {paused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
+          {paused ? t('dashboard.resume') : t('dashboard.pause')}
+        </button>
+      </div>
       <div
         className={`hidden shrink-0 gap-3 border-b px-4 py-2 text-[10px] uppercase tracking-wider text-muted-foreground lg:grid ${cols}`}
       >
@@ -1084,18 +1114,18 @@ function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
         <div className="text-right">{t('dashboard.statusCol')}</div>
       </div>
 
-      {rows === null ? (
+      {displayed === null ? (
         <div className="px-4 py-6 text-center font-mono text-xs text-muted-foreground">
           {t('common.loading')}
         </div>
-      ) : rows.length === 0 ? (
+      ) : displayed.length === 0 ? (
         <div className="flex flex-1 flex-col items-center justify-center gap-1 px-4 text-muted-foreground">
           <div className="font-mono text-xs">{t('dashboard.noTraffic')}</div>
           <div className="text-[10px] uppercase tracking-wider">{t('dashboard.noTrafficHint')}</div>
         </div>
       ) : (
         <ul className="min-h-0 flex-1 overflow-y-auto font-mono text-xs">
-          {rows.map((r, i) => (
+          {displayed.map((r, i) => (
             <LiveLogRowItem key={r.id} r={r} i={i} cols={cols} />
           ))}
         </ul>
