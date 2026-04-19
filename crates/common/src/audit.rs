@@ -109,7 +109,7 @@ struct ChAuditRow {
     detail: Option<String>,
     ip_address: Option<String>,
     user_agent: Option<String>,
-    // Order matches CREATE TABLE in deploy/clickhouse/initdb.d/01_tables.sql; trace_id
+    // Order matches CREATE TABLE in deploy/clickhouse/initdb.d/01_init.sql; trace_id
     // must sit here (between user_agent and created_at) so CH's columnar
     // insert lines up. If you move one, move both.
     trace_id: Option<String>,
@@ -1422,41 +1422,33 @@ pub async fn ensure_clickhouse_tables(
         return Ok(());
     };
 
-    // Schema bootstrap files, in apply order. Mirrors the docker
-    // entrypoint mount of deploy/clickhouse/initdb.d/, embedded at
-    // compile time so the binary can re-bootstrap on startup when
-    // the ClickHouse data dir already exists (in which case the
-    // entrypoint init scripts don't run).
-    let init_files: &[&str] = &[
-        include_str!("../../../deploy/clickhouse/initdb.d/01_tables.sql"),
-        include_str!("../../../deploy/clickhouse/initdb.d/02_index_backfills.sql"),
-        include_str!("../../../deploy/clickhouse/initdb.d/03_trace_id_backfill.sql"),
-        include_str!("../../../deploy/clickhouse/initdb.d/04_materialized_views.sql"),
-        include_str!("../../../deploy/clickhouse/initdb.d/05_cost_rollup.sql"),
-    ];
+    // Schema bootstrap. Mirrors the docker entrypoint mount of
+    // deploy/clickhouse/initdb.d/, embedded at compile time so the
+    // binary can re-bootstrap on startup when the ClickHouse data
+    // dir already exists (in which case the entrypoint init scripts
+    // don't run).
+    let init_sql = include_str!("../../../deploy/clickhouse/initdb.d/01_init.sql");
 
-    for init_sql in init_files {
-        // Strip `--` line comments before splitting on `;`, otherwise a
-        // semicolon inside a comment (e.g. "originating handler's
-        // middleware;") splits a CREATE TABLE in half. Our init files
-        // contain no string literals with `--`, so naive line-prefix
-        // stripping is safe.
-        let cleaned: String = init_sql
-            .lines()
-            .map(|l| l.split_once("--").map(|(code, _)| code).unwrap_or(l))
-            .collect::<Vec<_>>()
-            .join("\n");
+    // Strip `--` line comments before splitting on `;`, otherwise a
+    // semicolon inside a comment (e.g. "originating handler's
+    // middleware;") splits a CREATE TABLE in half. The init file
+    // contains no string literals with `--`, so naive line-prefix
+    // stripping is safe.
+    let cleaned: String = init_sql
+        .lines()
+        .map(|l| l.split_once("--").map(|(code, _)| code).unwrap_or(l))
+        .collect::<Vec<_>>()
+        .join("\n");
 
-        for statement in cleaned.split(';') {
-            let stmt = statement.trim();
-            if stmt.is_empty() {
-                continue;
-            }
+    for statement in cleaned.split(';') {
+        let stmt = statement.trim();
+        if stmt.is_empty() {
+            continue;
+        }
 
-            if let Err(e) = client.query(stmt).execute().await {
-                tracing::warn!("ClickHouse init statement failed: {e}");
-                return Err(e);
-            }
+        if let Err(e) = client.query(stmt).execute().await {
+            tracing::warn!("ClickHouse init statement failed: {e}");
+            return Err(e);
         }
     }
 
