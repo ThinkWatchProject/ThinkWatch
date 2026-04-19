@@ -133,9 +133,8 @@ impl ProviderBase {
     }
 
     /// Append the caller-resolved custom headers to a `RequestBuilder`.
-    /// Replaces the ~5-line `for (k, v) in &headers { builder = builder.header(...) }`
-    /// pattern that every provider used to repeat in both its
-    /// `chat_completion` and `stream_chat_completion` paths.
+    /// Centralizes what would otherwise be duplicated in every
+    /// provider's `chat_completion` and `stream_chat_completion`.
     pub fn apply_custom_headers(
         &self,
         builder: reqwest::RequestBuilder,

@@ -75,14 +75,11 @@ CREATE INDEX idx_rbac_roles_is_system ON rbac_roles(is_system);
 -- otherwise consider multiple NULLs distinct). It is never read by
 -- application code.
 --
--- The model is exactly two scope kinds:
+-- Two scope kinds:
 --   * 'global'  — applies platform-wide. scope_id IS NULL.
 --   * 'team'    — applies only when the target subject (user, api_key,
 --                 limits row, ...) belongs to that team. scope_id is
 --                 the team UUID.
--- Earlier migrations had a third 'project' kind. Dropped — there was
--- never a projects table or any UI / handler that consumed it, and
--- keeping it in the CHECK encouraged dead-code design.
 CREATE TABLE rbac_role_assignments (
     user_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     role_id      UUID NOT NULL REFERENCES rbac_roles(id) ON DELETE CASCADE,
@@ -156,21 +153,17 @@ CREATE TABLE api_keys (
     key_hash                VARCHAR(255) NOT NULL,
     name                    VARCHAR(255) NOT NULL,
     user_id                 UUID REFERENCES users(id) ON DELETE SET NULL,
-    -- Which gateways this key can call. Subset of
-    -- {'ai_gateway', 'mcp_gateway'}; the CHECK enforces non-empty
-    -- so a key always has at least one surface. Both gateways
-    -- share the same `tw-` token format and the same auth
-    -- middleware — `surfaces` is what determines which one a
-    -- given key is allowed to hit at request time. The legacy
-    -- `scopes` JSONB column is gone.
+    -- Which gateways this key can call. Non-empty subset of
+    -- {'ai_gateway', 'mcp_gateway', 'console'}. Both gateways share
+    -- the same `tw-` token format and the same auth middleware;
+    -- `surfaces` is what determines which one a given key is allowed
+    -- to hit at request time.
     surfaces                TEXT[] NOT NULL
         CHECK (cardinality(surfaces) > 0
                AND surfaces <@ ARRAY['ai_gateway', 'mcp_gateway', 'console']),
     allowed_models          TEXT[],
     -- Rate limits and budget caps live in `rate_limit_rules` /
-    -- `budget_caps` (subject_kind = 'api_key'). The previous fixed
-    -- columns (rate_limit_rpm / rate_limit_tpm / monthly_budget)
-    -- have been removed.
+    -- `budget_caps` (subject_kind = 'api_key').
     cost_center             VARCHAR(64),
     expires_at              TIMESTAMPTZ,
     last_expiry_warning_days INTEGER,
@@ -222,21 +215,30 @@ CREATE TABLE providers (
 
 CREATE INDEX idx_providers_not_deleted ON providers(created_at) WHERE deleted_at IS NULL;
 
--- Models are first-class entities — not tied to a single provider.
--- Pricing and quota multipliers are global per model.
+-- Exposed catalog of model IDs clients can call via `/v1/models`.
+-- Standalone entities — not tied to a single provider; routing to
+-- providers happens in `model_routes`. Per-model `input_weight` /
+-- `output_weight` scale the platform-wide baseline (`platform_pricing`)
+-- for both cost reporting and weighted-token quota accounting.
 CREATE TABLE models (
-    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    model_id          VARCHAR(255) NOT NULL UNIQUE,
-    display_name      VARCHAR(255) NOT NULL,
-    input_price       DECIMAL(10, 6),
-    output_price      DECIMAL(10, 6),
-    input_multiplier  DECIMAL(8, 4) NOT NULL DEFAULT 1.0
-        CHECK (input_multiplier > 0),
-    output_multiplier DECIMAL(8, 4) NOT NULL DEFAULT 1.0
-        CHECK (output_multiplier > 0),
-    is_active         BOOLEAN NOT NULL DEFAULT TRUE,
-    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id       VARCHAR(255) NOT NULL UNIQUE,
+    display_name   VARCHAR(255) NOT NULL,
+    input_weight   DECIMAL(8, 4) NOT NULL DEFAULT 1.0 CHECK (input_weight  > 0),
+    output_weight  DECIMAL(8, 4) NOT NULL DEFAULT 1.0 CHECK (output_weight > 0),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Platform-wide per-token pricing baseline. Single-row singleton
+-- (PK pinned to 1 via CHECK). `cost($) = tokens × weight × baseline`.
+CREATE TABLE platform_pricing (
+    id                     SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    input_price_per_token  NUMERIC(20, 10) NOT NULL DEFAULT 0.0000020,
+    output_price_per_token NUMERIC(20, 10) NOT NULL DEFAULT 0.0000080,
+    currency               TEXT NOT NULL DEFAULT 'USD',
+    updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+INSERT INTO platform_pricing (id) VALUES (1);
 
 -- Routes map models to providers with traffic splitting + failover.
 -- Same model_id can route to multiple providers.
@@ -318,12 +320,6 @@ CREATE INDEX idx_usage_records_user_id     ON usage_records(user_id, created_at)
 CREATE INDEX idx_usage_records_api_key_id  ON usage_records(api_key_id, created_at);
 CREATE INDEX idx_usage_records_model_id    ON usage_records(model_id, created_at);
 
--- The legacy `budget_alerts` table and its `BudgetAlertManager`
--- runtime were removed in the limits/quotas refactor — alerts now
--- come from cap crossings on `budget_caps` (or, today, from raw
--- usage_records aggregations on the dashboard). The table is gone
--- because nothing reads it anymore.
-
 -- --------------------------------------------------------------------------
 -- Rate limit rules + budget caps
 --
@@ -343,7 +339,7 @@ CREATE TABLE rate_limit_rules (
     surface      VARCHAR(20) NOT NULL
         CHECK (surface IN ('ai_gateway', 'mcp_gateway')),
     -- What we count: requests (1 per call) or weighted tokens (computed
-    -- by `weight.rs` from raw token counts × model multipliers).
+    -- by `weight.rs` from raw token counts × model weights).
     metric       VARCHAR(20) NOT NULL CHECK (metric IN ('requests', 'tokens')),
     -- Sliding window length in seconds. Validated at startup against
     -- the `[60, 60*60*24*7*4]` range — anything outside that is

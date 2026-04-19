@@ -15,8 +15,7 @@ use think_watch_common::dto::{
 ///   "team:<uuid>"      → ("team",   Some(uuid))
 ///
 /// Anything else is rejected with a 400. The schema only knows two
-/// scope kinds (`global`, `team`); the third 'project' kind from
-/// earlier drafts was dropped along with this parser.
+/// scope kinds: `global` and `team`.
 pub(crate) fn parse_scope(input: &str) -> Result<(String, Option<uuid::Uuid>), AppError> {
     let trimmed = input.trim();
     if trimmed == "global" || trimmed.is_empty() {

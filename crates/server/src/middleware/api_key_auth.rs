@@ -53,11 +53,8 @@ type AuthFuture =
 /// the MCP router mounts `require_api_key("mcp_gateway")`. Same key
 /// shape and same lookup logic; only the surface check differs.
 ///
-/// JWT fallback was removed in this commit — the MCP gateway used to
-/// auth via JWT and the AI gateway accepted JWT as a developer
-/// convenience, but both surfaces now require an API key. Internal
-/// admin tooling can still call the console API with JWT; the
-/// gateway data path is API-key-only.
+/// The gateway data path is API-key-only. The console API accepts
+/// JWT for interactive admin users.
 pub fn require_api_key(
     surface: &'static str,
 ) -> impl Fn(State<AppState>, Request, Next) -> AuthFuture + Clone {

@@ -91,12 +91,8 @@ function AllowedModelsEditor({
   const { t } = useTranslation();
   const [search, setSearch] = useState('');
 
-  // Active, search-filtered model list. Provider grouping was dropped
-  // with the route-centric redesign: a model can route to multiple
-  // providers, so `/api/admin/models` no longer carries a single
-  // `provider_name` field. We now render a flat scrollable list with
-  // a search box — grouping by a field that doesn't exist produced
-  // one giant "undefined" bucket.
+  // Flat, search-filtered model list. A model can route to multiple
+  // providers, so grouping by provider isn't meaningful here.
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return available

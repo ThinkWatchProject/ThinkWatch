@@ -1,7 +1,7 @@
 import * as React from "react"
-// Tree-shake recharts: pull only the symbols this wrapper actually touches
-// instead of importing the whole namespace, which used to drag the entire
-// chart library into the dashboard chunk.
+// Tree-shake recharts: pull only the symbols this wrapper actually
+// touches instead of `import * as Recharts` so the chart library
+// doesn't get bundled into the dashboard chunk.
 import {
   Legend,
   ResponsiveContainer,

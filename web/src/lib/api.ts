@@ -37,9 +37,8 @@ interface ApiOptions<T = unknown> {
 // No secret travels from server to client.
 //
 // `permissions` for hasPermission() come from the /api/auth/me
-// response (cached in `permissionsCache` below) — the JWT used to
-// be readable from localStorage and we'd decode it for this, but
-// the cookie is opaque now.
+// response (cached in `permissionsCache` below). The JWT cookie is
+// opaque to the client, so claims have to come over the wire.
 
 let permissionsCache: Set<string> = new Set();
 let deniedPermissionsCache: Set<string> = new Set();

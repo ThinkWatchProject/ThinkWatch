@@ -33,8 +33,7 @@ async fn caller_has_global(
 
 /// Reject the request when the caller neither owns the target key
 /// nor has the supplied permission at global scope. Used by the
-/// single-key endpoints (GET/PATCH/DELETE/rotate) which previously
-/// walked through team membership.
+/// single-key endpoints (GET/PATCH/DELETE/rotate).
 async fn assert_owner_or_global(
     auth_user: &AuthUser,
     pool: &sqlx::PgPool,
