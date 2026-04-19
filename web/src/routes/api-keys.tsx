@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import {
@@ -226,8 +226,8 @@ export function ApiKeysPage() {
   // ---------------------------------------------------------------------------
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">{t('apiKeys.title')}</h1>
           <p className="text-muted-foreground">{t('apiKeys.subtitle')}</p>
@@ -241,7 +241,7 @@ export function ApiKeysPage() {
       </div>
 
       {error && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" className="mb-4">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
         </Alert>
@@ -282,21 +282,19 @@ export function ApiKeysPage() {
       />
 
       {/* ---- Main content ---- */}
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle className="text-base">{t('apiKeys.allKeys')}</CardTitle>
-            <Tabs value={tab} onValueChange={setTab}>
-              <TabsList>
-                <TabsTrigger value="all">{t('common.total')}</TabsTrigger>
-                <TabsTrigger value="expiring">{t('apiKeys.expiringSoon')}</TabsTrigger>
-              </TabsList>
-            </Tabs>
-          </div>
-        </CardHeader>
-        <CardContent>
+      <div className="mb-4 flex items-center">
+        <Tabs value={tab} onValueChange={setTab}>
+          <TabsList>
+            <TabsTrigger value="all">{t('common.total')}</TabsTrigger>
+            <TabsTrigger value="expiring">{t('apiKeys.expiringSoon')}</TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </div>
+
+      <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
+        <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
           {loading ? (
-            <div className="space-y-3">
+            <div className="space-y-3 p-4">
               {[...Array(3)].map((_, i) => (
                 <div key={i} className="flex items-center gap-4">
                   <Skeleton className="h-4 w-28" />
@@ -310,7 +308,7 @@ export function ApiKeysPage() {
               ))}
             </div>
           ) : filteredKeys.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-center">
+            <div className="flex h-full flex-col items-center justify-center text-center">
               <KeyRound className="h-10 w-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground">
                 {tab === 'expiring' ? t('common.noData') : t('apiKeys.noKeys')}
@@ -321,7 +319,7 @@ export function ApiKeysPage() {
             </div>
           ) : (
             <Table>
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
                 <TableRow>
                   <TableHead>{t('common.name')}</TableHead>
                   <TableHead>{t('apiKeys.keyPrefix')}</TableHead>

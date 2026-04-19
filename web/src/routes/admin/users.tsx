@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -320,8 +320,8 @@ export function UsersPage() {
   const filteredUsers = users;
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">{t('users.title')}</h1>
           <p className="text-muted-foreground">{t('users.subtitle')}</p>
@@ -369,24 +369,29 @@ export function UsersPage() {
         </Dialog>
       </div>
 
-      {error && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertDescription>{error}</AlertDescription></Alert>}
+      {error && (
+        <Alert variant="destructive" className="mb-4">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
 
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0">
-          <CardTitle className="text-base">{t('users.allUsers')}</CardTitle>
-          <div className="relative w-full max-w-xs">
-            <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={t('users.searchPlaceholder')}
-              className="pl-8"
-            />
-          </div>
-        </CardHeader>
-        <CardContent>
+      <div className="flex items-center gap-2 mb-4">
+        <div className="relative w-full max-w-sm">
+          <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={t('users.searchPlaceholder')}
+            className="pl-8"
+          />
+        </div>
+      </div>
+
+      <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
+        <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
           {loading ? (
-            <div className="space-y-3">
+            <div className="space-y-3 p-4">
               {[...Array(4)].map((_, i) => (
                 <div key={i} className="flex items-center gap-4">
                   <Skeleton className="h-4 w-40" /><Skeleton className="h-4 w-24" /><Skeleton className="h-5 w-16 rounded-full" /><Skeleton className="h-5 w-14 rounded-full" /><Skeleton className="h-4 w-20" />
@@ -394,7 +399,7 @@ export function UsersPage() {
               ))}
             </div>
           ) : users.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-center">
+            <div className="flex h-full flex-col items-center justify-center text-center">
               <UsersIcon className="h-10 w-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground">
                 {debouncedSearch ? t('users.noMatches') : t('users.noUsers')}
@@ -402,7 +407,7 @@ export function UsersPage() {
             </div>
           ) : (
             <Table>
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
                 <TableRow>
                   <TableHead>{t('users.userId')}</TableHead>
                   <TableHead>{t('auth.email')}</TableHead>
@@ -526,17 +531,15 @@ export function UsersPage() {
             </Table>
           )}
         </CardContent>
-        {total > pageSize && (
-          <div data-slot="card-footer" className="-mt-4 border-t">
-            <DataTablePagination
-              total={total}
-              page={page}
-              pageSize={pageSize}
-              onPageChange={setPage}
-              onPageSizeChange={setPageSize}
-            />
-          </div>
-        )}
+        <div data-slot="card-footer" className="border-t">
+          <DataTablePagination
+            total={total}
+            page={page}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={setPageSize}
+          />
+        </div>
       </Card>
 
       {/* Edit dialog */}

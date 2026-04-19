@@ -760,7 +760,7 @@ export function RolesPage() {
   // ------------------------------------------------------------------
 
   return (
-    <div className="space-y-6">
+    <div className="flex flex-col flex-1 min-h-0 gap-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">{t('roles.title')}</h1>
@@ -962,10 +962,11 @@ export function RolesPage() {
       </div>
 
       {/* Unified table */}
-      <Card className="gap-0 py-0">
-        <Table>
-          <TableHeader>
-            <TableRow>
+      <Card className="flex flex-col min-h-0 flex-1 gap-0 py-0">
+        <div className="flex-1 overflow-auto [&>[data-slot=table-container]]:overflow-visible">
+          <Table>
+            <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
+              <TableRow>
               <TableHead className="w-[200px]">{t('roles.colRole')}</TableHead>
               <TableHead>{t('roles.colDescription')}</TableHead>
               <TableHead className="w-[140px]">{t('roles.colPermissions')}</TableHead>
@@ -1059,18 +1060,17 @@ export function RolesPage() {
               ))
             )}
           </TableBody>
-        </Table>
-        {filteredRoles.length > rolesPager.pageSize && (
-          <div data-slot="card-footer" className="border-t">
-            <DataTablePagination
-              total={rolesPager.total}
-              page={rolesPager.page}
-              pageSize={rolesPager.pageSize}
-              onPageChange={rolesPager.setPage}
-              onPageSizeChange={rolesPager.setPageSize}
-            />
-          </div>
-        )}
+          </Table>
+        </div>
+        <div data-slot="card-footer" className="border-t">
+          <DataTablePagination
+            total={rolesPager.total}
+            page={rolesPager.page}
+            pageSize={rolesPager.pageSize}
+            onPageChange={rolesPager.setPage}
+            onPageSizeChange={rolesPager.setPageSize}
+          />
+        </div>
       </Card>
 
       {/* Detail drawer */}

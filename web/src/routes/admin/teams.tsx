@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from '@tanstack/react-router';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -108,8 +108,8 @@ export function TeamsPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">{t('teams.title')}</h1>
           <p className="text-muted-foreground">{t('teams.subtitle')}</p>
@@ -121,34 +121,29 @@ export function TeamsPage() {
       </div>
 
       {error && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" className="mb-4">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
-      {loading ? (
-        <div className="space-y-4">
-          {[...Array(3)].map((_, i) => (
-            <Skeleton key={i} className="h-16 w-full" />
-          ))}
-        </div>
-      ) : teams.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12 text-center">
-            <Users className="mb-3 h-10 w-10 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">{t('teams.noTeams')}</p>
-            <p className="mt-1 text-xs text-muted-foreground">{t('teams.noTeamsHint')}</p>
-          </CardContent>
-        </Card>
-      ) : (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">{t('teams.allTeams')}</CardTitle>
-          </CardHeader>
-          <CardContent>
+      <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
+        <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
+          {loading ? (
+            <div className="space-y-4 p-4">
+              {[...Array(3)].map((_, i) => (
+                <Skeleton key={i} className="h-16 w-full" />
+              ))}
+            </div>
+          ) : teams.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center text-center">
+              <Users className="mb-3 h-10 w-10 text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">{t('teams.noTeams')}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{t('teams.noTeamsHint')}</p>
+            </div>
+          ) : (
             <Table>
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
                 <TableRow>
                   <TableHead>{t('teams.col.name')}</TableHead>
                   <TableHead>{t('teams.col.description')}</TableHead>
@@ -194,20 +189,18 @@ export function TeamsPage() {
                 ))}
               </TableBody>
             </Table>
-          </CardContent>
-          {teams.length > teamsPager.pageSize && (
-            <div data-slot="card-footer" className="-mt-4 border-t">
-              <DataTablePagination
-                total={teamsPager.total}
-                page={teamsPager.page}
-                pageSize={teamsPager.pageSize}
-                onPageChange={teamsPager.setPage}
-                onPageSizeChange={teamsPager.setPageSize}
-              />
-            </div>
           )}
-        </Card>
-      )}
+        </CardContent>
+        <div data-slot="card-footer" className="border-t">
+          <DataTablePagination
+            total={teamsPager.total}
+            page={teamsPager.page}
+            pageSize={teamsPager.pageSize}
+            onPageChange={teamsPager.setPage}
+            onPageSizeChange={teamsPager.setPageSize}
+          />
+        </div>
+      </Card>
 
       {/* --- Create dialog --- */}
       <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>

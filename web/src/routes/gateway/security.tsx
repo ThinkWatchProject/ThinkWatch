@@ -375,17 +375,15 @@ export function GatewaySecurityPage() {
               </TableBody>
             </Table>
           )}
-          {contentFilters.length > cfPager.pageSize && (
-            <div className="border-t mt-4 -mx-4">
-              <DataTablePagination
-                total={cfPager.total}
-                page={cfPager.page}
-                pageSize={cfPager.pageSize}
-                onPageChange={cfPager.setPage}
-                onPageSizeChange={cfPager.setPageSize}
-              />
-            </div>
-          )}
+          <div className="border-t mt-4 -mx-4">
+            <DataTablePagination
+              total={cfPager.total}
+              page={cfPager.page}
+              pageSize={cfPager.pageSize}
+              onPageChange={cfPager.setPage}
+              onPageSizeChange={cfPager.setPageSize}
+            />
+          </div>
           <div className="mt-4 grid grid-cols-1 gap-1 text-xs text-muted-foreground sm:grid-cols-3">
             <p><strong className="text-destructive">{t('settings.contentFilter.actionBlock')}:</strong> {t('settings.contentFilter.actionBlockHint')}</p>
             <p><strong className="text-amber-600 dark:text-amber-400">{t('settings.contentFilter.actionWarn')}:</strong> {t('settings.contentFilter.actionWarnHint')}</p>
@@ -498,17 +496,15 @@ export function GatewaySecurityPage() {
               </TableBody>
             </Table>
           )}
-          {piiPatterns.length > piiPager.pageSize && (
-            <div className="border-t mt-4 -mx-4">
-              <DataTablePagination
-                total={piiPager.total}
-                page={piiPager.page}
-                pageSize={piiPager.pageSize}
-                onPageChange={piiPager.setPage}
-                onPageSizeChange={piiPager.setPageSize}
-              />
-            </div>
-          )}
+          <div className="border-t mt-4 -mx-4">
+            <DataTablePagination
+              total={piiPager.total}
+              page={piiPager.page}
+              pageSize={piiPager.pageSize}
+              onPageChange={piiPager.setPage}
+              onPageSizeChange={piiPager.setPageSize}
+            />
+          </div>
           <p className="mt-4 text-xs text-muted-foreground">
             {t('settings.pii.behavior')}
           </p>

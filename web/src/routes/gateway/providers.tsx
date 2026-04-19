@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from '@tanstack/react-router';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { StatusIndicator } from '@/components/ui/status-indicator';
 import { ProviderTypeBadge } from '@/components/ui/provider-type-badge';
@@ -74,8 +74,8 @@ export function ProvidersPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex items-center justify-between">
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="flex items-center justify-between mb-4">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">{t('providers.title')}</h1>
           <p className="text-muted-foreground">{t('providers.subtitle')}</p>
@@ -87,17 +87,14 @@ export function ProvidersPage() {
       </div>
 
       {error && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" className="mb-4">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{t('providers.allProviders')}</CardTitle>
-        </CardHeader>
-        <CardContent>
+      <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
+        <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
           {loading ? (
             <div className="space-y-3">
               {[...Array(3)].map((_, i) => (
@@ -111,14 +108,14 @@ export function ProvidersPage() {
               ))}
             </div>
           ) : providers.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-center">
+            <div className="flex h-full flex-col items-center justify-center text-center">
               <Plug className="h-10 w-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground">{t('providers.noProviders')}</p>
               <p className="text-xs text-muted-foreground mt-1">{t('providers.noProvidersHint')}</p>
             </div>
           ) : (
             <Table>
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
                 <TableRow>
                   <TableHead>{t('common.name')}</TableHead>
                   <TableHead>{t('providers.type')}</TableHead>
@@ -191,17 +188,15 @@ export function ProvidersPage() {
             </Table>
           )}
         </CardContent>
-        {providers.length > pager.pageSize && (
-          <div data-slot="card-footer" className="-mt-4 border-t">
-            <DataTablePagination
-              total={pager.total}
-              page={pager.page}
-              pageSize={pager.pageSize}
-              onPageChange={pager.setPage}
-              onPageSizeChange={pager.setPageSize}
-            />
-          </div>
-        )}
+        <div data-slot="card-footer" className="border-t">
+          <DataTablePagination
+            total={pager.total}
+            page={pager.page}
+            pageSize={pager.pageSize}
+            onPageChange={pager.setPage}
+            onPageSizeChange={pager.setPageSize}
+          />
+        </div>
       </Card>
 
       <CreateProviderDialog

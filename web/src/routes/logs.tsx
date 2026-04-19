@@ -2,7 +2,7 @@ import { Fragment, useEffect, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { subHours, format } from 'date-fns';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Badge } from '@/components/ui/badge';
@@ -529,13 +529,13 @@ export function UnifiedLogsPage() {
   };
 
   return (
-    <div className="space-y-4">
-      <div>
+    <div className="flex flex-col flex-1 min-h-0">
+      <div className="mb-4">
         <h1 className="text-2xl font-semibold tracking-tight">{t('unifiedLogs.title', 'Logs')}</h1>
         <p className="text-muted-foreground">{t('unifiedLogs.subtitle', 'Unified log explorer')}</p>
       </div>
 
-      <div className="flex gap-2 items-center">
+      <div className="flex gap-2 items-center mb-4">
         <Select value={category} onValueChange={handleCategoryChange}>
           <SelectTrigger className="w-40 shrink-0">
             {/* Show only the short label in the closed trigger */}
@@ -575,19 +575,13 @@ export function UnifiedLogsPage() {
       </div>
 
       {error && (
-        <Alert variant="destructive">
+        <Alert variant="destructive" className="mb-4">
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
 
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between py-3">
-          <CardTitle className="text-base">{t('unifiedLogs.results', 'Results')}</CardTitle>
-          {total > 0 && (
-            <span className="text-sm text-muted-foreground">{t('common.total')}: {total.toLocaleString()}</span>
-          )}
-        </CardHeader>
-        <CardContent className="p-0">
+      <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
+        <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
           {loading ? (
             <div className="space-y-3 p-6">
               {[...Array(5)].map((_, i) => (
@@ -600,14 +594,14 @@ export function UnifiedLogsPage() {
               ))}
             </div>
           ) : logs.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-16 text-center">
+            <div className="flex h-full flex-col items-center justify-center text-center">
               <FileText className="h-10 w-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground">{t('unifiedLogs.noLogs', 'No logs found.')}</p>
             </div>
           ) : (
             <>
               <Table>
-                <TableHeader>
+                <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
                   <TableRow>
                     <TableHead className="w-8" />
                     {columns.map((col) => (
@@ -702,35 +696,35 @@ export function UnifiedLogsPage() {
                   })}
                 </TableBody>
               </Table>
-              {totalPages > 1 && (
-                <div className="flex items-center justify-between p-4 border-t">
-                  <span className="text-sm text-muted-foreground">
-                    {page * PAGE_SIZE + 1}–{Math.min((page + 1) * PAGE_SIZE, total)} / {total}
-                  </span>
-                  <Pagination className="mx-0 w-auto">
-                    <PaginationContent>
-                      <PaginationItem>
-                        <PaginationPrevious text=""
-                          onClick={(e: React.MouseEvent) => { e.preventDefault(); setPage(page - 1); }}
-                          aria-disabled={page === 0}
-                          className={page === 0 ? 'pointer-events-none opacity-50' : ''} />
-                      </PaginationItem>
-                      <PaginationItem>
-                        <span className="text-sm px-2">{page + 1} / {totalPages}</span>
-                      </PaginationItem>
-                      <PaginationItem>
-                        <PaginationNext text=""
-                          onClick={(e: React.MouseEvent) => { e.preventDefault(); setPage(page + 1); }}
-                          aria-disabled={page >= totalPages - 1}
-                          className={page >= totalPages - 1 ? 'pointer-events-none opacity-50' : ''} />
-                      </PaginationItem>
-                    </PaginationContent>
-                  </Pagination>
-                </div>
-              )}
             </>
           )}
         </CardContent>
+        <div data-slot="card-footer" className="flex items-center justify-between p-4 border-t">
+          <span className="text-sm text-muted-foreground">
+            {total === 0
+              ? '0'
+              : `${page * PAGE_SIZE + 1}–${Math.min((page + 1) * PAGE_SIZE, total)} / ${total}`}
+          </span>
+          <Pagination className="mx-0 w-auto">
+            <PaginationContent>
+              <PaginationItem>
+                <PaginationPrevious text=""
+                  onClick={(e: React.MouseEvent) => { e.preventDefault(); if (page > 0) setPage(page - 1); }}
+                  aria-disabled={page === 0}
+                  className={page === 0 ? 'pointer-events-none opacity-50' : ''} />
+              </PaginationItem>
+              <PaginationItem>
+                <span className="text-sm px-2">{page + 1} / {Math.max(totalPages, 1)}</span>
+              </PaginationItem>
+              <PaginationItem>
+                <PaginationNext text=""
+                  onClick={(e: React.MouseEvent) => { e.preventDefault(); if (page < totalPages - 1) setPage(page + 1); }}
+                  aria-disabled={page >= totalPages - 1}
+                  className={page >= totalPages - 1 ? 'pointer-events-none opacity-50' : ''} />
+              </PaginationItem>
+            </PaginationContent>
+          </Pagination>
+        </div>
       </Card>
     </div>
   );

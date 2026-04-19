@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -313,7 +313,7 @@ export function LogForwardersPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="flex flex-col flex-1 min-h-0 gap-4">
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">{t('logForwarders.title')}</h1>
@@ -475,13 +475,10 @@ export function LogForwardersPage() {
         </Card>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">{t('logForwarders.allForwarders')}</CardTitle>
-        </CardHeader>
-        <CardContent>
+      <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
+        <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
           {loading ? (
-            <div className="space-y-3">
+            <div className="space-y-3 p-4">
               {[...Array(3)].map((_, i) => (
                 <div key={i} className="flex items-center gap-4">
                   <Skeleton className="h-4 w-28" />
@@ -494,14 +491,14 @@ export function LogForwardersPage() {
               ))}
             </div>
           ) : forwarders.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-12 text-center">
+            <div className="flex h-full flex-col items-center justify-center text-center">
               <Send className="h-10 w-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground">{t('logForwarders.noForwarders')}</p>
               <p className="mt-1 text-xs text-muted-foreground">{t('logForwarders.noForwardersHint')}</p>
             </div>
           ) : (
             <Table>
-              <TableHeader>
+              <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
                 <TableRow>
                   <TableHead>{t('common.name')}</TableHead>
                   <TableHead>{t('logForwarders.type')}</TableHead>
@@ -592,17 +589,15 @@ export function LogForwardersPage() {
             </Table>
           )}
         </CardContent>
-        {forwarders.length > pager.pageSize && (
-          <div data-slot="card-footer" className="-mt-4 border-t">
-            <DataTablePagination
-              total={pager.total}
-              page={pager.page}
-              pageSize={pager.pageSize}
-              onPageChange={pager.setPage}
-              onPageSizeChange={pager.setPageSize}
-            />
-          </div>
-        )}
+        <div data-slot="card-footer" className="border-t">
+          <DataTablePagination
+            total={pager.total}
+            page={pager.page}
+            pageSize={pager.pageSize}
+            onPageChange={pager.setPage}
+            onPageSizeChange={pager.setPageSize}
+          />
+        </div>
       </Card>
 
       {/* Edit Dialog */}

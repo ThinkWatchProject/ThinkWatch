@@ -379,17 +379,15 @@ export function TeamDetailPage() {
                   </TableBody>
                 </Table>
               )}
-              {members.length > membersPager.pageSize && (
-                <div className="border-t mt-4 -mx-4">
-                  <DataTablePagination
-                    total={membersPager.total}
-                    page={membersPager.page}
-                    pageSize={membersPager.pageSize}
-                    onPageChange={membersPager.setPage}
-                    onPageSizeChange={membersPager.setPageSize}
-                  />
-                </div>
-              )}
+              <div className="border-t mt-4 -mx-4">
+                <DataTablePagination
+                  total={membersPager.total}
+                  page={membersPager.page}
+                  pageSize={membersPager.pageSize}
+                  onPageChange={membersPager.setPage}
+                  onPageSizeChange={membersPager.setPageSize}
+                />
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
