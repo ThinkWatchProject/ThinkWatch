@@ -71,13 +71,17 @@ interface ModelRow {
   output_weight: string;
   route_count: number;
   enabled_route_count: number;
+  /// Provider display names attached to this model, in priority order.
+  /// Joined server-side so the row can render the column without
+  /// fetching per-row routes.
+  providers: string[];
 }
 
-type ModelStatus = 'active' | 'draft' | 'unrouted';
+type ModelStatus = 'active' | 'disabled' | 'unrouted';
 
 function modelStatus(m: ModelRow): ModelStatus {
   if (m.route_count === 0) return 'unrouted';
-  if (m.enabled_route_count === 0) return 'draft';
+  if (m.enabled_route_count === 0) return 'disabled';
   return 'active';
 }
 
@@ -167,6 +171,13 @@ export function ModelsPage() {
   const [cleanupOpen, setCleanupOpen] = useState(false);
   const [cleanupRunning, setCleanupRunning] = useState(false);
 
+  // Multi-select state for the bulk-delete action.
+  // Stores model `id` (UUID), not `model_id`, since the bulk-delete
+  // endpoint takes UUIDs to match the existing single-delete contract.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+
   // Detail drawer: which model_id is open, and its lazily-loaded routes.
   const [detailModelId, setDetailModelId] = useState<string | null>(null);
   const [routesByModel, setRoutesByModel] = useState<Record<string, RouteRow[]>>({});
@@ -188,6 +199,13 @@ export function ModelsPage() {
   const [routeFormError, setRouteFormError] = useState('');
   const [routeSaving, setRouteSaving] = useState(false);
   const [deleteRoute, setDeleteRoute] = useState<RouteRow | null>(null);
+
+  // Per-provider remote-model list, cached for the route dialog's
+  // upstream-model picker. `null` = not yet fetched, `[]` = fetched
+  // empty (provider has no /models endpoint, fall back to free input).
+  const [routeRemoteCache, setRouteRemoteCache] = useState<Record<string, string[] | null>>({});
+  const [routeRemoteLoading, setRouteRemoteLoading] = useState(false);
+  const [routeRemoteError, setRouteRemoteError] = useState('');
 
   // Batch import — two-step dialog.
   //
@@ -314,6 +332,36 @@ export function ModelsPage() {
     setPage(1);
   }, [debouncedSearch]);
 
+  // Drop selection whenever the visible page changes — selected IDs
+  // could otherwise persist across pages where the user can no longer
+  // see what they're about to delete.
+  useEffect(() => {
+    setSelectedIds(new Set());
+  }, [page, pageSize, debouncedSearch, statusFilter]);
+
+  // Pull the upstream-model picker options from the selected provider's
+  // remote catalog. Cached per provider so reopening the dialog or
+  // switching providers back-and-forth is instant.
+  useEffect(() => {
+    if (!routeDialogOpen) return;
+    const pid = routeForm.provider_id;
+    if (!pid) return;
+    if (routeRemoteCache[pid] !== undefined) return;
+    setRouteRemoteLoading(true);
+    setRouteRemoteError('');
+    void api<string[]>(`/api/admin/providers/${pid}/remote-models`)
+      .then((rows) => {
+        setRouteRemoteCache((c) => ({ ...c, [pid]: rows }));
+      })
+      .catch((err) => {
+        // Provider with no /models endpoint, or temporary fetch
+        // failure — leave cache empty and fall back to free input.
+        setRouteRemoteCache((c) => ({ ...c, [pid]: null }));
+        setRouteRemoteError(err instanceof Error ? err.message : 'Failed to load');
+      })
+      .finally(() => setRouteRemoteLoading(false));
+  }, [routeDialogOpen, routeForm.provider_id, routeRemoteCache]);
+
   /* ---------- detail drawer ---------- */
 
   const openDetail = (modelId: string) => {
@@ -393,6 +441,24 @@ export function ModelsPage() {
       toast.error(err instanceof Error ? err.message : 'Cleanup failed');
     } finally {
       setCleanupRunning(false);
+    }
+  };
+
+  const confirmBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setBulkDeleting(true);
+    try {
+      const res = await apiPost<{ deleted: number }>('/api/admin/models/bulk-delete', {
+        ids: Array.from(selectedIds),
+      });
+      toast.success(t('models.bulkDeleted', { count: res.deleted }));
+      setSelectedIds(new Set());
+      setBulkDeleteOpen(false);
+      await fetchModels();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to delete');
+    } finally {
+      setBulkDeleting(false);
     }
   };
 
@@ -608,7 +674,16 @@ export function ModelsPage() {
         ),
       ]);
       setRemoteModels(rmodels);
-      setExistingModelIds(new Set(existing.items.map((r) => r.model_id)));
+      // A remote name counts as "already imported" when it appears as
+      // either a route's exposed model_id (new-catalog-entry imports) or
+      // its upstream_model (attach-to-existing imports — where model_id
+      // is the rename target, so a model_id-only check would miss it).
+      const seen = new Set<string>();
+      for (const r of existing.items) {
+        seen.add(r.model_id);
+        if (r.upstream_model) seen.add(r.upstream_model);
+      }
+      setExistingModelIds(seen);
     } catch (err) {
       setRemoteModelsError(err instanceof Error ? err.message : 'Failed to load models');
     } finally {
@@ -678,6 +753,34 @@ export function ModelsPage() {
     return p?.display_name || p?.name || id;
   };
 
+  // Tri-state for the header checkbox: every visible row picked = `true`,
+  // some picked = `'indeterminate'`, none picked = `false`.
+  const allSelected = models.length > 0 && models.every((m) => selectedIds.has(m.id));
+  const someSelected = !allSelected && models.some((m) => selectedIds.has(m.id));
+  const headerCheckState: boolean | 'indeterminate' = allSelected
+    ? true
+    : someSelected
+      ? 'indeterminate'
+      : false;
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allSelected) for (const m of models) next.delete(m.id);
+      else for (const m of models) next.add(m.id);
+      return next;
+    });
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
   /* ---------- render ---------- */
 
   return (
@@ -735,11 +838,22 @@ export function ModelsPage() {
           <SelectContent>
             <SelectItem value="__all__">{t('models.status.all')}</SelectItem>
             <SelectItem value="active">{t('models.status.active')}</SelectItem>
-            <SelectItem value="draft">{t('models.status.draft')}</SelectItem>
+            <SelectItem value="disabled">{t('models.status.disabled')}</SelectItem>
             <SelectItem value="unrouted">{t('models.status.unrouted')}</SelectItem>
           </SelectContent>
         </Select>
-        {statusFilter === 'unrouted' && totalModels > 0 && (
+        {selectedIds.size > 0 && (
+          <Button
+            variant="destructive"
+            size="sm"
+            className="ml-auto"
+            onClick={() => setBulkDeleteOpen(true)}
+          >
+            <Trash2 className="mr-1 h-3.5 w-3.5" />
+            {t('models.bulkDeleteAction', { count: selectedIds.size })}
+          </Button>
+        )}
+        {selectedIds.size === 0 && statusFilter === 'unrouted' && totalModels > 0 && (
           <Button
             variant="outline"
             size="sm"
@@ -753,26 +867,39 @@ export function ModelsPage() {
       </div>
 
       {/* Models table */}
-      {loading ? (
-        <div className="space-y-4">
-          {[...Array(3)].map((_, i) => (
-            <Skeleton key={i} className="h-12 w-full" />
-          ))}
-        </div>
-      ) : models.length === 0 ? (
-        <Card>
-          <CardContent className="flex flex-col items-center justify-center py-12 text-center">
-            <Brain className="mb-3 h-10 w-10 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">{t('models.noModels')}</p>
-            <p className="mt-1 text-xs text-muted-foreground">{t('models.noModelsHint')}</p>
-          </CardContent>
-        </Card>
-      ) : (
-        <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
-          <CardContent className="p-0 overflow-auto flex-1">
+      <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
+        {/* Override the shared Table's `overflow-x-auto` wrapper to
+            `overflow-visible` so the sticky `<thead>` resolves to
+            this CardContent's scroll context — otherwise the wrapper
+            acts as the sticky containing block and the header scrolls
+            away with the body. */}
+        <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
+          {loading ? (
+            <div className="space-y-4 p-4">
+              {[...Array(3)].map((_, i) => (
+                <Skeleton key={i} className="h-12 w-full" />
+              ))}
+            </div>
+          ) : models.length === 0 ? (
+            <div className="flex h-full flex-col items-center justify-center text-center">
+              <Brain className="mb-3 h-10 w-10 text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">{t('models.noModels')}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{t('models.noModelsHint')}</p>
+            </div>
+          ) : (
             <Table>
-              <TableHeader>
+              {/* Sticky header keeps column labels visible while the body
+                  scrolls inside the Card. `bg-card` matches the Card
+                  surface so rows don't bleed through during scroll. */}
+              <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
                 <TableRow>
+                  <TableHead className="w-10">
+                    <Checkbox
+                      checked={headerCheckState}
+                      onCheckedChange={toggleSelectAll}
+                      aria-label={t('models.selectAll')}
+                    />
+                  </TableHead>
                   <TableHead>{t('models.col.modelId')}</TableHead>
                   <TableHead>{t('models.col.displayName')}</TableHead>
                   <TableHead className="text-center">{t('models.col.status')}</TableHead>
@@ -786,26 +913,26 @@ export function ModelsPage() {
                   <ModelRow
                     key={m.id}
                     model={m}
-                    routes={routesByModel[m.model_id]}
-                    providerLabel={providerLabel}
+                    selected={selectedIds.has(m.id)}
+                    onToggleSelect={() => toggleSelect(m.id)}
                     onOpen={() => openDetail(m.model_id)}
                     onDelete={() => setDeleteModel(m)}
                   />
                 ))}
               </TableBody>
             </Table>
-          </CardContent>
-          <div data-slot="card-footer" className="border-t">
-            <DataTablePagination
-              total={totalModels}
-              page={page}
-              pageSize={pageSize}
-              onPageChange={setPage}
-              onPageSizeChange={setPageSize}
-            />
-          </div>
-        </Card>
-      )}
+          )}
+        </CardContent>
+        <div data-slot="card-footer" className="border-t">
+          <DataTablePagination
+            total={totalModels}
+            page={page}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={setPageSize}
+          />
+        </div>
+      </Card>
 
       {/* Create / Edit Model Dialog */}
       <Dialog open={modelDialogOpen} onOpenChange={setModelDialogOpen}>
@@ -934,14 +1061,75 @@ export function ModelsPage() {
               )}
               <div className="space-y-2">
                 <Label htmlFor="route_upstream">{t('models.col.upstreamModel')}</Label>
-                <Input
-                  id="route_upstream"
-                  value={routeForm.upstream_model}
-                  onChange={(e) =>
-                    setRouteForm({ ...routeForm, upstream_model: e.target.value })
+                {(() => {
+                  const pid = routeForm.provider_id;
+                  const remote = pid ? routeRemoteCache[pid] : undefined;
+                  // Loading: provider picked, fetch in flight.
+                  if (pid && remote === undefined && routeRemoteLoading) {
+                    return (
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground h-9 px-3 border rounded-md">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        {t('models.loadingModels')}
+                      </div>
+                    );
                   }
-                  placeholder={t('models.upstreamModelHint')}
-                />
+                  // Fetched a usable list → searchable select with an
+                  // explicit "(use catalog model_id)" option for the
+                  // NULL-upstream case.
+                  if (remote && remote.length > 0) {
+                    const INHERIT = '__inherit__';
+                    return (
+                      <Select
+                        value={routeForm.upstream_model || INHERIT}
+                        onValueChange={(v) =>
+                          setRouteForm({
+                            ...routeForm,
+                            upstream_model: v === INHERIT ? '' : v,
+                          })
+                        }
+                      >
+                        <SelectTrigger id="route_upstream">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={INHERIT}>
+                            <span className="italic text-muted-foreground">
+                              {t('models.upstreamModelInherit', {
+                                modelId:
+                                  editingRoute?.model_id ?? routeTargetModel?.model_id ?? '',
+                              })}
+                            </span>
+                          </SelectItem>
+                          {remote.map((m) => (
+                            <SelectItem key={m} value={m}>
+                              <span className="font-mono text-xs">{m}</span>
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    );
+                  }
+                  // No provider chosen yet, or remote list unavailable
+                  // — fall back to free input so the user is never
+                  // blocked from saving a custom upstream name.
+                  return (
+                    <>
+                      <Input
+                        id="route_upstream"
+                        value={routeForm.upstream_model}
+                        onChange={(e) =>
+                          setRouteForm({ ...routeForm, upstream_model: e.target.value })
+                        }
+                        placeholder={t('models.upstreamModelHint')}
+                      />
+                      {pid && routeRemoteError && (
+                        <p className="text-[11px] text-muted-foreground">
+                          {t('models.upstreamModelFreeInput')}
+                        </p>
+                      )}
+                    </>
+                  );
+                })()}
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="space-y-2">
@@ -1264,6 +1452,16 @@ export function ModelsPage() {
         onConfirm={confirmCleanup}
         loading={cleanupRunning}
       />
+      <ConfirmDialog
+        open={bulkDeleteOpen}
+        onOpenChange={setBulkDeleteOpen}
+        title={t('models.bulkDeleteTitle')}
+        description={t('models.bulkDeleteConfirm', { count: selectedIds.size })}
+        confirmLabel={t('common.delete')}
+        variant="destructive"
+        onConfirm={confirmBulkDelete}
+        loading={bulkDeleting}
+      />
 
       {/* Model detail drawer — right-side Sheet with basics + routes + danger. */}
       <Sheet
@@ -1292,8 +1490,8 @@ export function ModelsPage() {
                       <span className="inline-block align-middle">
                         {status === 'active'
                           ? t('models.status.active')
-                          : status === 'draft'
-                            ? t('models.status.draft')
+                          : status === 'disabled'
+                            ? t('models.status.disabled')
                             : t('models.status.unrouted')}
                       </span>
                     </SheetDescription>
@@ -1419,11 +1617,11 @@ export function ModelsPage() {
                                   </td>
                                   <td
                                     className="px-2 py-1.5 font-mono text-[11px] max-w-[180px] truncate"
-                                    title={r.upstream_model ?? ''}
+                                    title={r.upstream_model ?? model.model_id}
                                   >
-                                    {r.upstream_model || (
+                                    {r.upstream_model ?? (
                                       <span className="italic text-muted-foreground">
-                                        ({t('models.col.modelId')})
+                                        {model.model_id}
                                       </span>
                                     )}
                                   </td>
@@ -1528,17 +1726,14 @@ export function ModelsPage() {
 
 function ModelRow({
   model,
-  routes,
-  providerLabel,
+  selected,
+  onToggleSelect,
   onOpen,
   onDelete,
 }: {
   model: ModelRow;
-  /// Routes cached from a prior drawer-open. Shown as provider chips
-  /// so the admin sees "who serves this?" without opening the drawer.
-  /// When undefined the column renders route_count as a fallback.
-  routes: RouteRow[] | undefined;
-  providerLabel: (id: string) => string;
+  selected: boolean;
+  onToggleSelect: () => void;
   onOpen: () => void;
   onDelete: () => void;
 }) {
@@ -1547,11 +1742,32 @@ function ModelRow({
   return (
     <TableRow
       className="cursor-pointer hover:bg-muted/30"
+      data-state={selected ? 'selected' : undefined}
       onClick={(e) => {
-        if ((e.target as HTMLElement).closest('button')) return;
+        const target = e.target as HTMLElement;
+        // Don't open the drawer when the user is interacting with row
+        // controls (action buttons or the select checkbox).
+        if (target.closest('button')) return;
+        if (target.closest('[role="checkbox"]')) return;
         onOpen();
       }}
     >
+      <TableCell
+        className="w-10"
+        onClick={(e) => {
+          // Click anywhere in the cell toggles selection — gives a
+          // generous hit target without making the whole row a no-op
+          // for the drawer.
+          e.stopPropagation();
+          onToggleSelect();
+        }}
+      >
+        <Checkbox
+          checked={selected}
+          onCheckedChange={onToggleSelect}
+          aria-label={t('models.selectAll')}
+        />
+      </TableCell>
       <TableCell className="font-mono text-xs max-w-[260px] truncate" title={model.model_id}>
         {model.model_id}
       </TableCell>
@@ -1559,12 +1775,12 @@ function ModelRow({
       <TableCell className="text-center">
         {status === 'active' ? (
           <Badge variant="default">{t('models.status.active')}</Badge>
-        ) : status === 'draft' ? (
+        ) : status === 'disabled' ? (
           <Badge
             variant="outline"
             className="border-amber-500/60 text-amber-600 dark:text-amber-400"
           >
-            {t('models.status.draft')}
+            {t('models.status.disabled')}
           </Badge>
         ) : (
           <Badge variant="outline" className="text-muted-foreground">
@@ -1579,19 +1795,17 @@ function ModelRow({
         )}
       </TableCell>
       <TableCell className="max-w-[260px]">
-        {routes && routes.length > 0 ? (
+        {model.providers.length > 0 ? (
           <div className="flex flex-wrap gap-1">
-            {routes.slice(0, 3).map((r) => (
-              <Badge
-                key={r.id}
-                variant={r.enabled ? 'secondary' : 'outline'}
-                className="text-[10px] font-normal"
-              >
-                {providerLabel(r.provider_id)}
+            {model.providers.slice(0, 3).map((name, i) => (
+              <Badge key={i} variant="secondary" className="text-[10px] font-normal">
+                {name}
               </Badge>
             ))}
-            {routes.length > 3 && (
-              <span className="text-[10px] text-muted-foreground">+{routes.length - 3}</span>
+            {model.providers.length > 3 && (
+              <span className="text-[10px] text-muted-foreground">
+                +{model.providers.length - 3}
+              </span>
             )}
           </div>
         ) : (

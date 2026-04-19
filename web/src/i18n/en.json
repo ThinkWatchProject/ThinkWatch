@@ -323,6 +323,8 @@
     "fallback": "Fallback",
     "upstreamModel": "Upstream Model",
     "upstreamModelHint": "Model name sent to the provider. Leave empty to use the same name.",
+    "upstreamModelInherit": "Use catalog model ID ({{modelId}})",
+    "upstreamModelFreeInput": "Provider catalog unavailable \u2014 enter the upstream model name manually.",
     "noRoutes": "No routes configured",
     "moveUp": "Move up (higher priority)",
     "moveDown": "Move down (lower priority)",
@@ -370,7 +372,7 @@
     "status": {
       "all": "All models",
       "active": "Active",
-      "draft": "Draft",
+      "disabled": "Disabled",
       "unrouted": "Unrouted"
     },
     "filterStatus": "Filter by status",
@@ -391,7 +393,7 @@
       "weightMustBePositive": "Weights must be positive numbers."
     },
     "batchImportHint": "Import model entries from a provider's remote catalog into your exposed models list.",
-    "batchImportWarning": "Imported models are created with routes disabled by default \u2014 they won't appear in /v1/models for clients until you enable them. Select only the few you actually want to expose.",
+    "batchImportWarning": "Imported routes go live in /v1/models right away. Tick only the models you actually want exposed.",
     "batchStep2Hint": "For each selected upstream, decide whether to create a new exposed model or attach it as a fallback route to one you already have.",
     "batchNextStep": "Next ({{count}}) \u2192",
     "batchAllNew": "All new",
@@ -407,6 +409,10 @@
     "cleanupTitle": "Delete unrouted models",
     "cleanupConfirm": "Delete {{count}} models that have no routes? The entries were imported from a provider's catalog but never attached to any active provider. This cannot be undone.",
     "cleanupDone": "Deleted {{count}} unrouted models",
+    "bulkDeleteAction": "Delete selected ({{count}})",
+    "bulkDeleteTitle": "Delete selected models",
+    "bulkDeleteConfirm": "Delete {{count}} selected models? Catalog entries are removed and all attached routes cascade-delete with them. Usage records are kept. This cannot be undone.",
+    "bulkDeleted": "Deleted {{count}} models",
     "toast": {
       "created": "Model added.",
       "updated": "Model updated.",

@@ -241,7 +241,10 @@ CREATE TABLE platform_pricing (
 INSERT INTO platform_pricing (id) VALUES (1);
 
 -- Routes map models to providers with traffic splitting + failover.
--- Same model_id can route to multiple providers.
+-- A single (model_id, provider_id) pair may have multiple routes
+-- distinguished by upstream_model — e.g. one catalog entry served by
+-- two different upstream models from the same aggregator. NULLS NOT
+-- DISTINCT prevents two NULL upstreams from sneaking past the unique.
 CREATE TABLE model_routes (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_id        VARCHAR(255) NOT NULL REFERENCES models(model_id) ON DELETE CASCADE,
@@ -254,7 +257,7 @@ CREATE TABLE model_routes (
     priority        INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE(model_id, provider_id)
+    UNIQUE NULLS NOT DISTINCT (model_id, provider_id, upstream_model)
 );
 
 CREATE INDEX idx_model_routes_model ON model_routes(model_id);

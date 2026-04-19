@@ -38,6 +38,10 @@ pub struct ModelRow {
     pub output_weight: Decimal,
     pub route_count: i64,
     pub enabled_route_count: i64,
+    /// Provider display names (or `name` if display_name is null) for
+    /// every route attached to the model, ordered by priority. Lets
+    /// the list table show "who serves this?" without an extra fetch.
+    pub providers: Vec<String>,
 }
 
 /// `status` filter accepted by `GET /api/admin/models`:
@@ -95,7 +99,7 @@ pub async fn list_models(
     // Unified query with `$1='' OR ...` to combine optional search +
     // status filter. `status_filter`:
     //   'active'    — enabled_route_count > 0
-    //   'draft'     — route_count > 0 AND enabled_route_count = 0
+    //   'disabled'  — route_count > 0 AND enabled_route_count = 0
     //   'unrouted'  — route_count = 0
     //   otherwise   — no filter
     //
@@ -104,7 +108,7 @@ pub async fn list_models(
     // this to a HashAggregate over `model_routes`.
     let status_filter_sql = match status {
         "active" => "AND rc.enabled_route_count > 0",
-        "draft" => "AND rc.route_count > 0 AND rc.enabled_route_count = 0",
+        "disabled" => "AND rc.route_count > 0 AND rc.enabled_route_count = 0",
         "unrouted" => "AND rc.route_count = 0",
         _ => "",
     };
@@ -125,11 +129,14 @@ pub async fn list_models(
         r#"SELECT m.id, m.model_id, m.display_name,
                   m.input_weight, m.output_weight,
                   COALESCE(rc.route_count, 0)         AS route_count,
-                  COALESCE(rc.enabled_route_count, 0) AS enabled_route_count
+                  COALESCE(rc.enabled_route_count, 0) AS enabled_route_count,
+                  COALESCE(rc.providers, '{{}}'::text[]) AS providers
            FROM models m
            LEFT JOIN LATERAL (
              SELECT COUNT(*)                                 AS route_count,
-                    COUNT(*) FILTER (WHERE mr.enabled = true) AS enabled_route_count
+                    COUNT(*) FILTER (WHERE mr.enabled = true) AS enabled_route_count,
+                    array_agg(COALESCE(p.display_name, p.name)
+                              ORDER BY mr.priority, p.name) AS providers
              FROM model_routes mr
              JOIN providers p ON p.id = mr.provider_id AND p.deleted_at IS NULL
              WHERE mr.model_id = m.model_id
@@ -431,6 +438,54 @@ pub async fn delete_unrouted_models(
 }
 
 // ---------------------------------------------------------------------------
+// Bulk delete catalog entries by id
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BulkDeleteModelsRequest {
+    pub ids: Vec<Uuid>,
+}
+
+/// `POST /api/admin/models/bulk-delete` — remove a curated subset of
+/// catalog entries by their UUIDs. Cascades through `model_routes`,
+/// so we rebuild the gateway router afterwards.
+pub async fn bulk_delete_models(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteModelsRequest>,
+) -> Result<Json<Value>, AppError> {
+    auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
+
+    if req.ids.is_empty() {
+        return Err(AppError::BadRequest("ids is empty".into()));
+    }
+
+    let result = sqlx::query("DELETE FROM models WHERE id = ANY($1)")
+        .bind(&req.ids)
+        .execute(&state.db)
+        .await?;
+
+    let deleted = result.rows_affected() as i64;
+
+    state.audit.log(
+        auth_user
+            .audit("models.bulk_deleted")
+            .resource("models")
+            .detail(serde_json::json!({
+                "requested": req.ids.len(),
+                "deleted": deleted,
+            })),
+    );
+
+    crate::app::rebuild_gateway_router(&state).await;
+
+    Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+// ---------------------------------------------------------------------------
 // Model Routes CRUD
 // ---------------------------------------------------------------------------
 
@@ -478,9 +533,9 @@ pub struct CreateModelRouteRequest {
     pub upstream_model: Option<String>,
     pub weight: Option<i32>,
     pub priority: Option<i32>,
-    /// Optional — defaults to true (manual additions are meant to be
-    /// live). Batch imports via `/model-routes/batch` bypass this and
-    /// always create routes disabled-by-default.
+    /// Optional — falls back to the column default (`TRUE`). New
+    /// routes are live immediately on both manual and batch-import
+    /// paths.
     pub enabled: Option<bool>,
 }
 
@@ -519,16 +574,25 @@ pub async fn create_model_route(
     let weight = req.weight.unwrap_or(100);
     let priority = req.priority.unwrap_or(0);
 
-    // Check for existing route to give a friendly error instead of 500
-    let existing: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM model_routes WHERE model_id = $1 AND provider_id = $2")
-            .bind(&model_id)
-            .bind(req.provider_id)
-            .fetch_optional(&state.db)
-            .await?;
+    // Check for existing route to give a friendly error instead of 500.
+    // Uniqueness is on (model_id, provider_id, upstream_model), so the
+    // dup check has to match — same provider with a different upstream
+    // is a legal second route. `IS NOT DISTINCT FROM` mirrors the
+    // schema's `UNIQUE NULLS NOT DISTINCT` semantics for NULL upstream.
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        r#"SELECT id FROM model_routes
+           WHERE model_id = $1
+             AND provider_id = $2
+             AND upstream_model IS NOT DISTINCT FROM $3"#,
+    )
+    .bind(&model_id)
+    .bind(req.provider_id)
+    .bind(&req.upstream_model)
+    .fetch_optional(&state.db)
+    .await?;
     if existing.is_some() {
         return Err(AppError::BadRequest(
-            "A route for this model+provider already exists".into(),
+            "A route for this model+provider+upstream already exists".into(),
         ));
     }
 
@@ -757,8 +821,9 @@ pub async fn list_all_routes(
 // Selecting `attach` adds OpenRouter as a fallback route on the same
 // exposed entry — no duplicate catalog rows.
 //
-// All imported routes default to `enabled = false` so `/v1/models`
-// stays clean until the admin flips them on.
+// Imported routes are enabled on creation (column default), so they
+// land in `/v1/models` immediately. The dialog is two-step + per-item
+// review precisely so the admin opts in deliberately, not in bulk.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -845,10 +910,9 @@ pub async fn batch_create_routes(
 
         sqlx::query_scalar::<_, i64>(
             r#"WITH ins AS (
-                 INSERT INTO model_routes
-                     (model_id, provider_id, weight, priority, enabled)
-                 SELECT m, $2, 100, 0, false FROM UNNEST($1::TEXT[]) AS t(m)
-                 ON CONFLICT (model_id, provider_id) DO NOTHING
+                 INSERT INTO model_routes (model_id, provider_id, weight, priority)
+                 SELECT m, $2, 100, 0 FROM UNNEST($1::TEXT[]) AS t(m)
+                 ON CONFLICT (model_id, provider_id, upstream_model) DO NOTHING
                  RETURNING 1
                )
                SELECT COUNT(*) FROM ins"#,
@@ -870,12 +934,12 @@ pub async fn batch_create_routes(
         sqlx::query_scalar::<_, i64>(
             r#"WITH ins AS (
                  INSERT INTO model_routes
-                     (model_id, provider_id, upstream_model, weight, priority, enabled)
-                 SELECT t.target, $4, t.upstream, 100, t.pri, false
+                     (model_id, provider_id, upstream_model, weight, priority)
+                 SELECT t.target, $4, t.upstream, 100, t.pri
                  FROM UNNEST($1::TEXT[], $2::TEXT[], $3::INT[])
                    AS t(target, upstream, pri)
                  WHERE EXISTS (SELECT 1 FROM models m WHERE m.model_id = t.target)
-                 ON CONFLICT (model_id, provider_id) DO NOTHING
+                 ON CONFLICT (model_id, provider_id, upstream_model) DO NOTHING
                  RETURNING 1
                )
                SELECT COUNT(*) FROM ins"#,

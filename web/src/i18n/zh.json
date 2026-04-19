@@ -323,6 +323,8 @@
     "fallback": "备用",
     "upstreamModel": "上游模型名",
     "upstreamModelHint": "发送给供应商的模型名。留空则使用相同名称。",
+    "upstreamModelInherit": "沿用 catalog 模型 ID ({{modelId}})",
+    "upstreamModelFreeInput": "无法获取供应商 catalog \u2014 请手动输入上游模型名。",
     "noRoutes": "未配置路由",
     "moveUp": "上移（提升优先级）",
     "moveDown": "下移（降低优先级）",
@@ -370,7 +372,7 @@
     "status": {
       "all": "全部模型",
       "active": "已启用",
-      "draft": "草稿",
+      "disabled": "已停用",
       "unrouted": "未路由"
     },
     "filterStatus": "按状态筛选",
@@ -391,7 +393,7 @@
       "weightMustBePositive": "权重必须为正数。"
     },
     "batchImportHint": "从提供商远端 catalog 导入模型条目到已暴露模型列表。",
-    "batchImportWarning": "导入的模型路由默认为禁用状态 —— 在启用之前不会出现在客户端的 /v1/models 里。只勾选你真正想要暴露的几个。",
+    "batchImportWarning": "导入后路由立即在 /v1/models 生效。只勾选你确实想暴露的模型。",
     "batchStep2Hint": "为每个选中的上游模型决定：新建暴露项、还是作为已有模型的备用路由。",
     "batchNextStep": "下一步（{{count}}） →",
     "batchAllNew": "全部新建",
@@ -407,6 +409,10 @@
     "cleanupTitle": "删除未路由模型",
     "cleanupConfirm": "删除 {{count}} 个没有任何路由的模型？这些条目是从 provider catalog 导入但从未接入任何启用状态的 provider。此操作无法撤销。",
     "cleanupDone": "已删除 {{count}} 个未路由模型",
+    "bulkDeleteAction": "删除选中 ({{count}})",
+    "bulkDeleteTitle": "批量删除模型",
+    "bulkDeleteConfirm": "确认删除选中的 {{count}} 个模型？catalog 条目会被移除,所有已绑定的路由会级联删除。用量记录保留。此操作无法撤销。",
+    "bulkDeleted": "已删除 {{count}} 个模型",
     "toast": {
       "created": "模型已添加。",
       "updated": "模型已更新。",
