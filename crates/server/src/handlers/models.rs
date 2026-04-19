@@ -1,10 +1,11 @@
 // ============================================================================
 // Admin model CRUD
 //
-// Manages rows in the `models` table — the per-model price + multiplier
-// catalog the gateway uses for cost reporting and weighted-token quota
-// accounting. Models are now standalone (no provider_id FK); routing to
-// providers is handled by the `model_routes` table.
+// Manages rows in the `models` table — the exposed catalog clients see
+// via `/v1/models`. Each row carries `input_weight` / `output_weight`
+// (relative factors against `platform_pricing` for cost reporting +
+// weighted-token quota accounting). Routing to providers is handled by
+// the `model_routes` table.
 //
 // Permissions: `models:read` for GET, `models:write` for POST/PATCH/DELETE.
 // ============================================================================

@@ -97,12 +97,12 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     p("providers:update", "providers", "update"),
     d("providers:delete", "providers", "delete"),
     d("providers:rotate_key", "providers", "rotate_key"),
-    // --- Models (per-model price + multiplier catalog) ---
+    // --- Models (exposed catalog + routes) ---
     p("models:read", "models", "read"),
     // Write covers create/update/delete. Marked dangerous because
-    // tweaking `output_multiplier` on a heavily-used model can
-    // silently invalidate every existing budget cap and rate-limit
-    // rule that touches it.
+    // tweaking `output_weight` on a heavily-used model can silently
+    // invalidate every existing budget cap and rate-limit rule that
+    // touches it.
     d("models:write", "models", "write"),
     // --- MCP servers ---
     p("mcp_servers:read", "mcp_servers", "read"),

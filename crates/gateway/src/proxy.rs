@@ -42,13 +42,13 @@ pub struct GatewayState {
     pub rate_limiter: Arc<RateLimiter>,
     /// PG pool — used to query enabled rate-limit rules and budget caps
     /// per request. Cached above the proxy via `WeightCache` for the
-    /// model multipliers; raw rules go through a separate cache later.
+    /// model weights; raw rules go through a separate cache later.
     pub db: PgPool,
     /// Redis client used by the bucketed sliding-window engine and the
     /// natural-period budget counters. Same connection used by `quota`,
     /// `cache`, and the rest of the gateway.
     pub redis: fred::clients::Client,
-    /// LRU cache mapping `model_id → (input_multiplier, output_multiplier)`.
+    /// LRU cache mapping `model_id → (input_weight, output_weight)`.
     /// Looked up once per request to convert raw token counts into
     /// the weighted-token cost the engine consumes.
     pub weight_cache: weight::WeightCache,

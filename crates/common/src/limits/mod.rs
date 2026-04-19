@@ -614,7 +614,7 @@ pub enum RateMetric {
     /// Each call counts as 1 unit. Used for "max N requests per window".
     Requests,
     /// Each call counts as its weighted-token cost. Used for "max N
-    /// tokens per window", where N is in weighted (multiplier-adjusted)
+    /// tokens per window", where N is in weighted (weight-adjusted)
     /// tokens.
     Tokens,
 }
@@ -956,8 +956,8 @@ pub fn limits_changed_channel() -> &'static str {
 // one place. Called once from `main.rs` after migrations.
 // ----------------------------------------------------------------------------
 
-/// Walk every persisted rule + every model multiplier and refuse to
-/// start if anything is out of range. The migration's CHECK constraints
+/// Walk every persisted rule + every model weight and refuse to start
+/// if anything is out of range. The migration's CHECK constraints
 /// catch most of this, but a manual UPDATE can still slip a value
 /// through, and we'd rather fail-fast than silently misbehave.
 pub async fn validate_persisted(pool: &PgPool) -> anyhow::Result<()> {
