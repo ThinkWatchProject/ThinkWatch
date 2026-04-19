@@ -555,10 +555,6 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
                 .delete(handlers::providers::delete_provider),
         )
         .route(
-            "/api/admin/providers/{id}/sync-models",
-            post(handlers::models::sync_models),
-        )
-        .route(
             "/api/admin/models",
             get(handlers::models::list_models).post(handlers::models::create_model),
         )

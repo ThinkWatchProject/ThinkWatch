@@ -430,118 +430,6 @@ pub async fn delete_unrouted_models(
 }
 
 // ---------------------------------------------------------------------------
-// Sync models from upstream provider
-// ---------------------------------------------------------------------------
-
-pub async fn sync_models(
-    auth_user: AuthUser,
-    State(state): State<AppState>,
-    Path(provider_id): Path<Uuid>,
-) -> Result<Json<Value>, AppError> {
-    auth_user.require_permission("models:write")?;
-    auth_user
-        .assert_scope_global(&state.db, "models:write")
-        .await?;
-
-    // Load the provider
-    let provider = sqlx::query_as::<_, think_watch_common::models::Provider>(
-        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(provider_id)
-    .fetch_optional(&state.db)
-    .await?
-    .ok_or(AppError::NotFound("Provider not found".into()))?;
-
-    // Build test request from provider data
-    let headers: Vec<ProviderHeader> = provider
-        .config_json
-        .get("headers")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
-    let test_req = super::providers::TestProviderRequest {
-        provider_type: provider.provider_type.clone(),
-        base_url: provider.base_url.clone(),
-        headers,
-    };
-
-    // Run the connectivity test
-    let Json(resp) = super::providers::run_provider_test(test_req).await?;
-    if !resp.success {
-        return Err(AppError::BadRequest(format!(
-            "Provider test failed: {}",
-            resp.message
-        )));
-    }
-
-    let remote_models = resp.models.unwrap_or_default();
-    if remote_models.is_empty() {
-        return Ok(Json(serde_json::json!({"synced": 0, "deactivated": 0})));
-    }
-
-    // Bulk-insert models + routes using UNNEST arrays. Prior loop issued
-    // 2 round-trips per model (hundreds for large provider catalogs like
-    // OpenRouter). Now it's 2 total round-trips regardless of catalog size.
-    let model_slice: &[String] = &remote_models;
-    let model_result = sqlx::query(
-        r#"INSERT INTO models (model_id, display_name)
-           SELECT m, m FROM UNNEST($1::TEXT[]) AS t(m)
-           ON CONFLICT (model_id) DO NOTHING"#,
-    )
-    .bind(model_slice)
-    .execute(&state.db)
-    .await?;
-    let synced: i64 = model_result.rows_affected() as i64;
-
-    sqlx::query(
-        r#"INSERT INTO model_routes (model_id, provider_id, weight, priority)
-           SELECT m, $2, 100, 0 FROM UNNEST($1::TEXT[]) AS t(m)
-           ON CONFLICT (model_id, provider_id) DO NOTHING"#,
-    )
-    .bind(model_slice)
-    .bind(provider_id)
-    .execute(&state.db)
-    .await?;
-
-    // Deactivate routes for models not in the remote list
-    let deactivated = sqlx::query(
-        r#"UPDATE model_routes SET enabled = false
-           WHERE provider_id = $1 AND model_id != ALL($2) AND enabled = true"#,
-    )
-    .bind(provider_id)
-    .bind(&remote_models)
-    .execute(&state.db)
-    .await?;
-
-    // Re-enable routes that are in the remote list but were previously disabled
-    sqlx::query(
-        r#"UPDATE model_routes SET enabled = true
-           WHERE provider_id = $1 AND model_id = ANY($2) AND enabled = false"#,
-    )
-    .bind(provider_id)
-    .bind(&remote_models)
-    .execute(&state.db)
-    .await?;
-
-    state.audit.log(
-        auth_user
-            .audit("models.synced")
-            .resource("provider")
-            .resource_id(provider_id.to_string())
-            .detail(serde_json::json!({
-                "synced": synced,
-                "deactivated": deactivated.rows_affected(),
-            })),
-    );
-
-    crate::app::rebuild_gateway_router(&state).await;
-
-    Ok(Json(serde_json::json!({
-        "synced": synced,
-        "deactivated": deactivated.rows_affected(),
-    })))
-}
-
-// ---------------------------------------------------------------------------
 // Model Routes CRUD
 // ---------------------------------------------------------------------------
 
@@ -589,6 +477,10 @@ pub struct CreateModelRouteRequest {
     pub upstream_model: Option<String>,
     pub weight: Option<i32>,
     pub priority: Option<i32>,
+    /// Optional — defaults to true (manual additions are meant to be
+    /// live). Batch imports via `/model-routes/batch` bypass this and
+    /// always create routes disabled-by-default.
+    pub enabled: Option<bool>,
 }
 
 /// POST /api/admin/models/{model_id}/routes
@@ -640,8 +532,8 @@ pub async fn create_model_route(
     }
 
     let row = sqlx::query_as::<_, ModelRouteRow>(
-        r#"INSERT INTO model_routes (model_id, provider_id, upstream_model, weight, priority)
-           VALUES ($1, $2, $3, $4, $5)
+        r#"INSERT INTO model_routes (model_id, provider_id, upstream_model, weight, priority, enabled)
+           VALUES ($1, $2, $3, $4, $5, $6)
            RETURNING id, model_id, provider_id,
                      (SELECT name FROM providers WHERE id = provider_id) AS provider_name,
                      upstream_model, weight, priority, enabled"#,
@@ -651,6 +543,7 @@ pub async fn create_model_route(
     .bind(&req.upstream_model)
     .bind(weight)
     .bind(priority)
+    .bind(req.enabled.unwrap_or(true))
     .fetch_one(&state.db)
     .await?;
 

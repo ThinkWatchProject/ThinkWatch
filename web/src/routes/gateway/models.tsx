@@ -463,6 +463,7 @@ export function ModelsPage() {
           upstream_model: upstream,
           weight,
           priority: Number(routeForm.priority),
+          enabled: routeForm.enabled,
         });
         toast.success(t('models.routeAdded'));
         await fetchRoutesFor(routeTargetModel.model_id);
@@ -472,6 +473,30 @@ export function ModelsPage() {
       setRouteFormError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
       setRouteSaving(false);
+    }
+  };
+
+  /// Flip every route on a model on/off in one shot. Post-batch-import
+  /// users land with a pile of `enabled = false` routes; this is how
+  /// they go live without clicking each switch individually.
+  const setAllRoutesEnabled = async (modelId: string, enabled: boolean) => {
+    const list = routesByModel[modelId];
+    if (!list || list.length === 0) return;
+    const ids = list
+      .filter((r) => r.enabled !== enabled)
+      .map((r) => r.id);
+    if (ids.length === 0) return;
+    try {
+      await apiPost('/api/admin/model-routes/batch-update', { ids, enabled });
+      toast.success(
+        enabled
+          ? t('models.batchEnabled', { count: ids.length })
+          : t('models.batchDisabled', { count: ids.length }),
+      );
+      await fetchRoutesFor(modelId);
+      await fetchModels();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed');
     }
   };
 
@@ -945,16 +970,14 @@ export function ModelsPage() {
                   </Select>
                 </div>
               </div>
-              {editingRoute && (
-                <div className="flex items-center gap-2">
-                  <Switch
-                    id="route_enabled"
-                    checked={routeForm.enabled}
-                    onCheckedChange={(v) => setRouteForm({ ...routeForm, enabled: v })}
-                  />
-                  <Label htmlFor="route_enabled">{t('models.field.active')}</Label>
-                </div>
-              )}
+              <div className="flex items-center gap-2">
+                <Switch
+                  id="route_enabled"
+                  checked={routeForm.enabled}
+                  onCheckedChange={(v) => setRouteForm({ ...routeForm, enabled: v })}
+                />
+                <Label htmlFor="route_enabled">{t('models.field.active')}</Label>
+              </div>
               {routeFormError && (
                 <Alert variant="destructive">
                   <AlertCircle className="h-4 w-4" />
@@ -1322,19 +1345,45 @@ export function ModelsPage() {
 
                     {/* Routes */}
                     <section className="space-y-2">
-                      <div className="flex items-center justify-between">
+                      <div className="flex items-center justify-between gap-2">
                         <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                           {t('models.routes')} ({routes?.length ?? model.route_count})
                         </Label>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 text-xs"
-                          onClick={() => openAddRoute(model)}
-                        >
-                          <Plus className="mr-1 h-3 w-3" />
-                          {t('models.addRoute')}
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          {/* Bulk enable/disable — most common post-import
+                              action since batch-import creates routes
+                              disabled by default. Shown only when there's
+                              something in the opposite state to flip. */}
+                          {routes && routes.some((r) => !r.enabled) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={() => setAllRoutesEnabled(model.model_id, true)}
+                            >
+                              {t('models.enableAllRoutes')}
+                            </Button>
+                          )}
+                          {routes && routes.some((r) => r.enabled) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-7 text-xs"
+                              onClick={() => setAllRoutesEnabled(model.model_id, false)}
+                            >
+                              {t('models.disableAllRoutes')}
+                            </Button>
+                          )}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={() => openAddRoute(model)}
+                          >
+                            <Plus className="mr-1 h-3 w-3" />
+                            {t('models.addRoute')}
+                          </Button>
+                        </div>
                       </div>
                       {rLoading ? (
                         <Skeleton className="h-10 w-full" />
@@ -1385,7 +1434,7 @@ export function ModelsPage() {
                                     >
                                       {r.priority === 0
                                         ? t('models.primary')
-                                        : t('models.fallback')}
+                                        : `${t('models.fallback')} (P${r.priority})`}
                                     </Badge>
                                   </td>
                                   <td className="px-2 py-1.5 text-center">
