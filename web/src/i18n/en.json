@@ -915,7 +915,8 @@
       "secretEnterPlaceholder": "Enter client secret",
       "secretConfiguredHint": "Secret is configured. Leave empty to keep unchanged.",
       "redirectUrl": "Redirect URL",
-      "redirectUrlHint": "Must match the callback URL registered with your OIDC provider"
+      "redirectUrlHint": "Must match the callback URL registered with your OIDC provider",
+      "save": "Save SSO settings"
     },
     "general": "General",
     "auth": "Authentication",
@@ -927,6 +928,7 @@
     "perf": "Performance",
     "saved": "Settings saved successfully",
     "saveError": "Failed to save settings",
+    "autosaveHint": "Changes save automatically",
     "requiresRestart": "Requires restart to take effect",
     "addRule": "Add Rule",
     "sandbox": {

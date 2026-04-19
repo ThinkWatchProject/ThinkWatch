@@ -915,7 +915,8 @@
       "secretEnterPlaceholder": "输入客户端密钥",
       "secretConfiguredHint": "已配置密钥。留空则保持不变。",
       "redirectUrl": "回调地址",
-      "redirectUrlHint": "必须与在 OIDC 提供商处注册的回调 URL 一致"
+      "redirectUrlHint": "必须与在 OIDC 提供商处注册的回调 URL 一致",
+      "save": "保存 SSO 配置"
     },
     "general": "通用",
     "auth": "认证",
@@ -927,6 +928,7 @@
     "perf": "性能调优",
     "saved": "设置保存成功",
     "saveError": "保存设置失败",
+    "autosaveHint": "改动自动保存",
     "requiresRestart": "需要重启生效",
     "addRule": "添加规则",
     "sandbox": {

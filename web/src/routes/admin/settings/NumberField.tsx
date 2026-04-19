@@ -1,9 +1,12 @@
+import type { ReactNode } from 'react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 
 /// Small wrapper around `<Input type="number">` with a label and
 /// optional hint. Used everywhere on the Settings page for TTL /
-/// timeout / retention inputs.
+/// timeout / retention inputs. The optional `indicator` slot sits
+/// right of the label so inline-save state is visible without
+/// hijacking the input row.
 export function NumberField({
   label,
   value,
@@ -12,6 +15,7 @@ export function NumberField({
   max,
   hint,
   readOnly,
+  indicator,
 }: {
   label: string;
   value: number;
@@ -20,10 +24,14 @@ export function NumberField({
   max?: number;
   hint?: string;
   readOnly?: boolean;
+  indicator?: ReactNode;
 }) {
   return (
     <div className="space-y-1">
-      <Label className="text-sm">{label}</Label>
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-sm">{label}</Label>
+        {indicator}
+      </div>
       <Input
         type="number"
         value={value}

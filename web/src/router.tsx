@@ -292,10 +292,23 @@ const rolesRoute = createRoute({
   component: RolesPage,
 });
 
+const SETTINGS_TABS = ['general', 'auth', 'gateway', 'security', 'apikeys', 'audit', 'perf'] as const;
+type SettingsTab = (typeof SETTINGS_TABS)[number];
+
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/settings',
   component: SettingsPage,
+  // Deep-link to a specific tab via `?tab=auth`. Unknown values fall
+  // through as undefined so the page defaults to the first tab.
+  validateSearch: (s: Record<string, unknown>): { tab?: SettingsTab } => {
+    const t = s.tab;
+    return {
+      tab: typeof t === 'string' && (SETTINGS_TABS as readonly string[]).includes(t)
+        ? (t as SettingsTab)
+        : undefined,
+    };
+  },
 });
 
 const logForwardersRoute = createRoute({

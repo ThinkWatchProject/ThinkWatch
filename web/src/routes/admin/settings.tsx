@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate, useSearch } from '@tanstack/react-router';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -14,16 +15,13 @@ import {
   SelectContent,
   SelectItem,
 } from '@/components/ui/select';
-import { Settings, Shield, Key, Database, Lock, AlertCircle, CheckCircle, MemoryStick, Search } from 'lucide-react';
+import { Settings, Shield, Key, Database, Lock, AlertCircle, MemoryStick, Search } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
 import { api, apiPatch } from '@/lib/api';
 import { toast } from 'sonner';
 // Types, value-coercion helpers, and the small NumberField input
-// live in the `settings/` sibling directory. The page component
-// itself is still big — owns all editable state and the save
-// flow — but the data shapes and the helpers it consumes are now
-// reusable and unit-testable in isolation.
+// live in the `settings/` sibling directory.
 import {
   type AuditConfig,
   getSettingValue,
@@ -34,6 +32,15 @@ import {
   type SystemInfo,
 } from './settings/types';
 import { NumberField } from './settings/NumberField';
+import { useFieldAutosave } from './settings/useFieldAutosave';
+import { SaveIndicator } from './settings/SaveIndicator';
+
+// One PATCH per field, keyed by the backend's dotted setting id. The
+// server treats the body as a merge so sending a one-key object is the
+// minimum-footprint way to commit an inline edit.
+async function patchOne(key: string, value: unknown): Promise<void> {
+  await apiPatch('/api/admin/settings', { settings: { [key]: value } });
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -41,6 +48,23 @@ import { NumberField } from './settings/NumberField';
 
 export function SettingsPage() {
   const { t } = useTranslation();
+
+  // URL is the source of truth for the active tab — makes the page
+  // deep-linkable and keeps the browser back/forward buttons honest.
+  // `strict: false` so the route's typed search shape doesn't clash
+  // with nested routes; the validator in router.tsx already narrows it.
+  const search = useSearch({ strict: false }) as { tab?: string };
+  const activeTab = search.tab ?? 'general';
+  const navigate = useNavigate();
+  const setTab = (tab: string) => {
+    navigate({
+      to: '/admin/settings',
+      // Tab is re-validated in router.tsx so the cast is safe — anything
+      // unknown falls through to undefined there.
+      search: { tab: tab === 'general' ? undefined : (tab as 'auth') },
+      replace: true,
+    });
+  };
 
   // Read-only state from dedicated endpoints
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
@@ -52,8 +76,9 @@ export function SettingsPage() {
   const [_allSettings, setAllSettings] = useState<Record<string, SettingEntry[]>>({});
 
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [statusMsg, setStatusMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  // OIDC keeps explicit group save because secret handling is write-only
+  // and issuer changes trigger provider re-discovery on the server.
+  const [oidcSaving, setOidcSaving] = useState(false);
 
   // --- Editable form state ---
   // General
@@ -190,58 +215,67 @@ export function SettingsPage() {
   }, [populateForm]);
 
   // ---------------------------------------------------------------------------
-  // Save
+  // Inline autosave — one hook per editable scalar. Text/number fields
+  // debounce 600ms; switches and selects pass 0 so a toggle commits
+  // immediately. The readOnly gateway fields (requestTimeout, bodyLimit)
+  // need a restart to apply so they don't autosave.
+  // ---------------------------------------------------------------------------
+  const isLoaded = !loading;
+
+  // General
+  const siteNameSave = useFieldAutosave({ value: siteName, isLoaded, persist: (v) => patchOne('setup.site_name', v) });
+  const publicProtocolSave = useFieldAutosave({ value: publicProtocol, isLoaded, persist: (v) => patchOne('general.public_protocol', v), debounceMs: 0 });
+  const publicHostSave = useFieldAutosave({ value: publicHost, isLoaded, persist: (v) => patchOne('general.public_host', v) });
+  const publicPortSave = useFieldAutosave({ value: publicPort, isLoaded, persist: (v) => patchOne('general.public_port', v) });
+  // Auth
+  const accessTtlSave = useFieldAutosave({ value: accessTtl, isLoaded, persist: (v) => patchOne('auth.jwt_access_ttl_secs', v) });
+  const refreshTtlSave = useFieldAutosave({ value: refreshTtl, isLoaded, persist: (v) => patchOne('auth.jwt_refresh_ttl_days', v) });
+  const allowRegistrationSave = useFieldAutosave({ value: allowRegistration, isLoaded, persist: (v) => patchOne('auth.allow_registration', v), debounceMs: 0 });
+  const defaultRoleSave = useFieldAutosave({ value: defaultRole, isLoaded, persist: (v) => patchOne('auth.default_role', v), debounceMs: 0 });
+  // Security
+  const signatureDriftSave = useFieldAutosave({ value: signatureDrift, isLoaded, persist: (v) => patchOne('security.signature_drift_secs', v) });
+  const nonceTtlSave = useFieldAutosave({ value: nonceTtl, isLoaded, persist: (v) => patchOne('security.signature_nonce_ttl_secs', v) });
+  const clientIpSourceSave = useFieldAutosave({ value: clientIpSource, isLoaded, persist: (v) => patchOne('security.client_ip_source', v), debounceMs: 0 });
+  const clientIpXffPositionSave = useFieldAutosave({ value: clientIpXffPosition, isLoaded, persist: (v) => patchOne('security.client_ip_xff_position', v), debounceMs: 0 });
+  const clientIpXffDepthSave = useFieldAutosave({ value: clientIpXffDepth, isLoaded, persist: (v) => patchOne('security.client_ip_xff_depth', v) });
+  const rateLimitFailClosedSave = useFieldAutosave({ value: rateLimitFailClosed, isLoaded, persist: (v) => patchOne('security.rate_limit_fail_closed', v), debounceMs: 0 });
+  // MCP Store + runtime
+  const registryUrlSave = useFieldAutosave({ value: registryUrl, isLoaded, persist: (v) => patchOne('mcp_store.registry_url', v) });
+  const mcpHealthIntervalSave = useFieldAutosave({ value: mcpHealthInterval, isLoaded, persist: (v) => patchOne('mcp.health_interval_secs', v) });
+  const mcpSessionTtlSave = useFieldAutosave({ value: mcpSessionTtl, isLoaded, persist: (v) => patchOne('mcp.session_ttl_secs', v) });
+  const mcpCacheTtlSave = useFieldAutosave({ value: mcpCacheTtl, isLoaded, persist: (v) => patchOne('mcp.cache_ttl_secs', v) });
+  // Gateway
+  const cacheTtlSave = useFieldAutosave({ value: cacheTtl, isLoaded, persist: (v) => patchOne('gateway.cache_ttl_secs', v) });
+  // API Keys
+  const defaultExpirySave = useFieldAutosave({ value: defaultExpiry, isLoaded, persist: (v) => patchOne('api_keys.default_expiry_days', v) });
+  const inactivityTimeoutSave = useFieldAutosave({ value: inactivityTimeout, isLoaded, persist: (v) => patchOne('api_keys.inactivity_timeout_days', v) });
+  const rotationPeriodSave = useFieldAutosave({ value: rotationPeriod, isLoaded, persist: (v) => patchOne('api_keys.rotation_period_days', v) });
+  const gracePeriodSave = useFieldAutosave({ value: gracePeriod, isLoaded, persist: (v) => patchOne('api_keys.rotation_grace_period_hours', v) });
+  // Data retention
+  const usageRetentionSave = useFieldAutosave({ value: usageRetention, isLoaded, persist: (v) => patchOne('data.retention_days_usage', v) });
+  const auditRetentionSave = useFieldAutosave({ value: auditRetention, isLoaded, persist: (v) => patchOne('data.retention_days_audit', v) });
+  const gatewayRetentionSave = useFieldAutosave({ value: gatewayRetention, isLoaded, persist: (v) => patchOne('data.retention_days_gateway', v) });
+  const mcpRetentionSave = useFieldAutosave({ value: mcpRetention, isLoaded, persist: (v) => patchOne('data.retention_days_mcp', v) });
+  const platformRetentionSave = useFieldAutosave({ value: platformRetention, isLoaded, persist: (v) => patchOne('data.retention_days_platform', v) });
+  const accessRetentionSave = useFieldAutosave({ value: accessRetention, isLoaded, persist: (v) => patchOne('data.retention_days_access', v) });
+  const appRetentionSave = useFieldAutosave({ value: appRetention, isLoaded, persist: (v) => patchOne('data.retention_days_app', v) });
+  // Performance
+  const perfHttpClientSave = useFieldAutosave({ value: perfHttpClientSecs, isLoaded, persist: (v) => patchOne('perf.http_client_secs', v) });
+  const perfMcpPoolSave = useFieldAutosave({ value: perfMcpPoolSecs, isLoaded, persist: (v) => patchOne('perf.mcp_pool_secs', v) });
+  const perfConsoleRequestSave = useFieldAutosave({ value: perfConsoleRequestSecs, isLoaded, persist: (v) => patchOne('perf.console_request_secs', v) });
+  const perfDashboardWsIoSave = useFieldAutosave({ value: perfDashboardWsIoSecs, isLoaded, persist: (v) => patchOne('perf.dashboard_ws_io_secs', v) });
+  const perfDashboardWsTickSave = useFieldAutosave({ value: perfDashboardWsTickSecs, isLoaded, persist: (v) => patchOne('perf.dashboard_ws_tick_secs', v) });
+  const perfDashboardWsMaxPerUserSave = useFieldAutosave({ value: perfDashboardWsMaxPerUser, isLoaded, persist: (v) => patchOne('perf.dashboard_ws_max_per_user', v) });
+
+  // ---------------------------------------------------------------------------
+  // OIDC group save — dedicated endpoint because the server runs discovery
+  // and write-only secret handling on submit. Can't safely autosave per
+  // keystroke, so the OIDC card keeps its own button.
   // ---------------------------------------------------------------------------
 
-  const handleSave = async () => {
-    setSaving(true);
-    setStatusMsg(null);
+  const handleOidcSave = async () => {
+    setOidcSaving(true);
     try {
-      await apiPatch('/api/admin/settings', {
-        settings: {
-          'setup.site_name': siteName,
-          'general.public_protocol': publicProtocol,
-          'general.public_host': publicHost,
-          'general.public_port': publicPort,
-          'auth.jwt_access_ttl_secs': accessTtl,
-          'auth.jwt_refresh_ttl_days': refreshTtl,
-          'security.signature_drift_secs': signatureDrift,
-          'security.signature_nonce_ttl_secs': nonceTtl,
-          'auth.allow_registration': allowRegistration,
-          'auth.default_role': defaultRole,
-          'mcp_store.registry_url': registryUrl,
-          'mcp.health_interval_secs': mcpHealthInterval,
-          'mcp.session_ttl_secs': mcpSessionTtl,
-          'mcp.cache_ttl_secs': mcpCacheTtl,
-          'gateway.cache_ttl_secs': cacheTtl,
-          'gateway.request_timeout_secs': requestTimeout,
-          'gateway.body_limit_bytes': bodyLimit,
-          'security.client_ip_source': clientIpSource,
-          'security.client_ip_xff_position': clientIpXffPosition,
-          'security.client_ip_xff_depth': clientIpXffDepth,
-          'security.rate_limit_fail_closed': rateLimitFailClosed,
-          'api_keys.default_expiry_days': defaultExpiry,
-          'api_keys.inactivity_timeout_days': inactivityTimeout,
-          'api_keys.rotation_period_days': rotationPeriod,
-          'api_keys.rotation_grace_period_hours': gracePeriod,
-          'data.retention_days_usage': usageRetention,
-          'data.retention_days_audit': auditRetention,
-          'data.retention_days_gateway': gatewayRetention,
-          'data.retention_days_mcp': mcpRetention,
-          'data.retention_days_platform': platformRetention,
-          'data.retention_days_access': accessRetention,
-          'data.retention_days_app': appRetention,
-          'perf.http_client_secs': perfHttpClientSecs,
-          'perf.mcp_pool_secs': perfMcpPoolSecs,
-          'perf.console_request_secs': perfConsoleRequestSecs,
-          'perf.dashboard_ws_io_secs': perfDashboardWsIoSecs,
-          'perf.dashboard_ws_tick_secs': perfDashboardWsTickSecs,
-          'perf.dashboard_ws_max_per_user': perfDashboardWsMaxPerUser,
-        },
-      });
-
-      // OIDC settings use a dedicated endpoint because saving triggers
-      // provider re-discovery and encrypted secret handling.
       await apiPatch('/api/admin/settings/oidc', {
         enabled: oidcEnabled,
         issuer_url: oidcIssuerUrl,
@@ -250,20 +284,16 @@ export function SettingsPage() {
         redirect_url: oidcRedirectUrl,
       });
       setOidcClientSecret('');
-      const updatedOidc = await api<OidcConfig>('/api/admin/settings/oidc').catch(() => null);
-      if (updatedOidc) {
-        setOidcConfig(updatedOidc);
-        setOidcHasSecret(updatedOidc.has_secret ?? false);
+      const updated = await api<OidcConfig>('/api/admin/settings/oidc').catch(() => null);
+      if (updated) {
+        setOidcConfig(updated);
+        setOidcHasSecret(updated.has_secret ?? false);
       }
-
-      setStatusMsg({ type: 'success', text: t('settings.saved') });
+      toast.success(t('settings.saved'));
     } catch (err) {
-      setStatusMsg({
-        type: 'error',
-        text: `${t('settings.saveError')}: ${err instanceof Error ? err.message : 'Unknown error'}`,
-      });
+      toast.error(`${t('settings.saveError')}: ${err instanceof Error ? err.message : 'Unknown error'}`);
     } finally {
-      setSaving(false);
+      setOidcSaving(false);
     }
   };
 
@@ -273,26 +303,14 @@ export function SettingsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold tracking-tight">{t('settingsPage.title')}</h1>
-          <p className="text-muted-foreground">{t('settingsPage.subtitle')}</p>
-        </div>
-        <Button onClick={handleSave} disabled={saving}>
-          {saving ? t('common.loading') : t('common.save')}
-        </Button>
+      <div>
+        <h1 className="text-2xl font-semibold tracking-tight">{t('settingsPage.title')}</h1>
+        <p className="text-muted-foreground">
+          {t('settingsPage.subtitle')} <span className="text-xs">· {t('settings.autosaveHint')}</span>
+        </p>
       </div>
 
-      {statusMsg && (
-        <Alert variant={statusMsg.type === 'success' ? 'default' : 'destructive'}>
-          {statusMsg.type === 'success'
-            ? <CheckCircle className="h-4 w-4" />
-            : <AlertCircle className="h-4 w-4" />}
-          <AlertDescription>{statusMsg.text}</AlertDescription>
-        </Alert>
-      )}
-
-      <Tabs defaultValue="general">
+      <Tabs value={activeTab} onValueChange={setTab}>
         <TabsList>
           <TabsTrigger value="general">
             <Settings className="h-4 w-4" />
@@ -399,7 +417,10 @@ export function SettingsPage() {
             {/* Site name — editable */}
             <Card>
               <CardHeader>
-                <CardTitle className="text-base">{t('settings.siteName')}</CardTitle>
+                <CardTitle className="text-base flex items-center gap-2">
+                  {t('settings.siteName')}
+                  <SaveIndicator state={siteNameSave.state} error={siteNameSave.error} />
+                </CardTitle>
               </CardHeader>
               <CardContent>
                 <div className="max-w-sm">
@@ -423,7 +444,10 @@ export function SettingsPage() {
               <CardContent>
                 <div className="grid gap-4 sm:grid-cols-3">
                   <div>
-                    <Label className="text-sm">{t('settings.publicProtocol')}</Label>
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-sm">{t('settings.publicProtocol')}</Label>
+                      <SaveIndicator state={publicProtocolSave.state} error={publicProtocolSave.error} />
+                    </div>
                     <Select value={publicProtocol || 'auto'} onValueChange={(v) => setPublicProtocol(v === 'auto' ? '' : v)}>
                       <SelectTrigger className="mt-1">
                         <SelectValue />
@@ -436,7 +460,10 @@ export function SettingsPage() {
                     </Select>
                   </div>
                   <div>
-                    <Label className="text-sm">{t('settings.publicHost')}</Label>
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-sm">{t('settings.publicHost')}</Label>
+                      <SaveIndicator state={publicHostSave.state} error={publicHostSave.error} />
+                    </div>
                     <Input
                       className="mt-1"
                       value={publicHost}
@@ -445,7 +472,10 @@ export function SettingsPage() {
                     />
                   </div>
                   <div>
-                    <Label className="text-sm">{t('settings.publicPort')}</Label>
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-sm">{t('settings.publicPort')}</Label>
+                      <SaveIndicator state={publicPortSave.state} error={publicPortSave.error} />
+                    </div>
                     <Input
                       className="mt-1"
                       type="number"
@@ -475,10 +505,14 @@ export function SettingsPage() {
               </CardHeader>
               <CardContent>
                 <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
-                  <NumberField label={t('settings.accessTtl')} value={accessTtl} onChange={setAccessTtl} min={60} max={86400} />
-                  <NumberField label={t('settings.refreshTtl')} value={refreshTtl} onChange={setRefreshTtl} min={1} max={365} />
-                  <NumberField label={t('settings.signatureDrift')} value={signatureDrift} onChange={setSignatureDrift} min={0} max={3600} />
-                  <NumberField label={t('settings.nonceTtl')} value={nonceTtl} onChange={setNonceTtl} min={0} max={3600} />
+                  <NumberField label={t('settings.accessTtl')} value={accessTtl} onChange={setAccessTtl} min={60} max={86400}
+                    indicator={<SaveIndicator state={accessTtlSave.state} error={accessTtlSave.error} />} />
+                  <NumberField label={t('settings.refreshTtl')} value={refreshTtl} onChange={setRefreshTtl} min={1} max={365}
+                    indicator={<SaveIndicator state={refreshTtlSave.state} error={refreshTtlSave.error} />} />
+                  <NumberField label={t('settings.signatureDrift')} value={signatureDrift} onChange={setSignatureDrift} min={0} max={3600}
+                    indicator={<SaveIndicator state={signatureDriftSave.state} error={signatureDriftSave.error} />} />
+                  <NumberField label={t('settings.nonceTtl')} value={nonceTtl} onChange={setNonceTtl} min={0} max={3600}
+                    indicator={<SaveIndicator state={nonceTtlSave.state} error={nonceTtlSave.error} />} />
                 </div>
                 <Separator className="my-6" />
                 <div className="flex items-center justify-between max-w-2xl">
@@ -486,11 +520,17 @@ export function SettingsPage() {
                     <Label className="text-sm">{t('settings.allowRegistration')}</Label>
                     <p className="text-xs text-muted-foreground mt-0.5">{t('settings.allowRegistrationHint')}</p>
                   </div>
-                  <Switch checked={allowRegistration} onCheckedChange={setAllowRegistration} />
+                  <div className="flex items-center gap-2">
+                    <SaveIndicator state={allowRegistrationSave.state} error={allowRegistrationSave.error} />
+                    <Switch checked={allowRegistration} onCheckedChange={setAllowRegistration} />
+                  </div>
                 </div>
                 <Separator className="my-6" />
                 <div className="space-y-2 max-w-2xl">
-                  <Label className="text-sm">{t('settings.defaultRole')}</Label>
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-sm">{t('settings.defaultRole')}</Label>
+                    <SaveIndicator state={defaultRoleSave.state} error={defaultRoleSave.error} />
+                  </div>
                   <p className="text-xs text-muted-foreground">{t('settings.defaultRoleHint')}</p>
                   <Select value={defaultRole || '__none__'} onValueChange={(v) => setDefaultRole(v === '__none__' ? '' : v)}>
                     <SelectTrigger className="w-64">
@@ -507,7 +547,9 @@ export function SettingsPage() {
               </CardContent>
             </Card>
 
-            {/* OIDC / SSO — editable (saved together with the global Save button) */}
+            {/* OIDC / SSO — explicit group save. Secret is write-only and
+                issuer changes re-discover the provider on submit, so
+                inline autosave per keystroke is not appropriate. */}
             <Card>
               <CardHeader>
                 <CardTitle className="text-base">{t('settingsPage.oidcTitle')}</CardTitle>
@@ -562,6 +604,11 @@ export function SettingsPage() {
                       />
                       <p className="text-xs text-muted-foreground">{t('settings.oidc.redirectUrlHint')}</p>
                     </div>
+                    <div className="flex justify-end pt-2">
+                      <Button size="sm" onClick={handleOidcSave} disabled={oidcSaving}>
+                        {oidcSaving ? t('common.saving') : t('settings.oidc.save')}
+                      </Button>
+                    </div>
                   </div>
                 )}
               </CardContent>
@@ -586,6 +633,7 @@ export function SettingsPage() {
                   min={0}
                   max={86400}
                   hint={t('settings.zeroDisabled')}
+                  indicator={<SaveIndicator state={cacheTtlSave.state} error={cacheTtlSave.error} />}
                 />
                 <NumberField
                   label={`${t('settingsPage.gatewayPort')} — Request Timeout (s)`}
@@ -615,7 +663,10 @@ export function SettingsPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-2 max-w-2xl">
-                <Label className="text-sm">{t('settings.registryUrl')}</Label>
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm">{t('settings.registryUrl')}</Label>
+                  <SaveIndicator state={registryUrlSave.state} error={registryUrlSave.error} />
+                </div>
                 <p className="text-xs text-muted-foreground">{t('settings.registryUrlHint')}</p>
                 <Input value={registryUrl} onChange={(e) => setRegistryUrl(e.target.value)} placeholder="https://thinkwatch.dev/registry/mcp-templates.json" />
               </div>
@@ -631,10 +682,11 @@ export function SettingsPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-2 max-w-md">
-                <Label className="text-sm">{t('settings.mcpHealthIntervalLabel')}</Label>
-                <p className="text-xs text-muted-foreground">
-                  {t('settings.mcpHealthIntervalHint')}
-                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm">{t('settings.mcpHealthIntervalLabel')}</Label>
+                  <SaveIndicator state={mcpHealthIntervalSave.state} error={mcpHealthIntervalSave.error} />
+                </div>
+                <p className="text-xs text-muted-foreground">{t('settings.mcpHealthIntervalHint')}</p>
                 <Input
                   type="number"
                   min={5}
@@ -644,10 +696,11 @@ export function SettingsPage() {
                 />
               </div>
               <div className="space-y-2 max-w-md mt-4">
-                <Label className="text-sm">{t('settings.mcpSessionTtlLabel')}</Label>
-                <p className="text-xs text-muted-foreground">
-                  {t('settings.mcpSessionTtlHint')}
-                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm">{t('settings.mcpSessionTtlLabel')}</Label>
+                  <SaveIndicator state={mcpSessionTtlSave.state} error={mcpSessionTtlSave.error} />
+                </div>
+                <p className="text-xs text-muted-foreground">{t('settings.mcpSessionTtlHint')}</p>
                 <Input
                   type="number"
                   min={60}
@@ -657,10 +710,11 @@ export function SettingsPage() {
                 />
               </div>
               <div className="space-y-2 max-w-md mt-4">
-                <Label className="text-sm">{t('settings.mcpCacheTtlLabel')}</Label>
-                <p className="text-xs text-muted-foreground">
-                  {t('settings.mcpCacheTtlHint')}
-                </p>
+                <div className="flex items-center justify-between gap-2">
+                  <Label className="text-sm">{t('settings.mcpCacheTtlLabel')}</Label>
+                  <SaveIndicator state={mcpCacheTtlSave.state} error={mcpCacheTtlSave.error} />
+                </div>
+                <p className="text-xs text-muted-foreground">{t('settings.mcpCacheTtlHint')}</p>
                 <Input
                   type="number"
                   min={0}
@@ -688,7 +742,10 @@ export function SettingsPage() {
               <CardContent>
                 <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
                   <div className="space-y-1">
-                    <Label className="text-sm">{t('settings.clientIpSource')}</Label>
+                    <div className="flex items-center justify-between gap-2">
+                      <Label className="text-sm">{t('settings.clientIpSource')}</Label>
+                      <SaveIndicator state={clientIpSourceSave.state} error={clientIpSourceSave.error} />
+                    </div>
                     <Select value={clientIpSource} onValueChange={setClientIpSource}>
                       <SelectTrigger>
                         <SelectValue />
@@ -704,7 +761,10 @@ export function SettingsPage() {
                   {clientIpSource === 'xff' && (
                     <>
                       <div className="space-y-1">
-                        <Label className="text-sm">{t('settings.xffPosition')}</Label>
+                        <div className="flex items-center justify-between gap-2">
+                          <Label className="text-sm">{t('settings.xffPosition')}</Label>
+                          <SaveIndicator state={clientIpXffPositionSave.state} error={clientIpXffPositionSave.error} />
+                        </div>
                         <Select value={clientIpXffPosition} onValueChange={setClientIpXffPosition}>
                           <SelectTrigger>
                             <SelectValue />
@@ -722,6 +782,7 @@ export function SettingsPage() {
                         min={1}
                         max={20}
                         hint={t('settings.xffDepthHint')}
+                        indicator={<SaveIndicator state={clientIpXffDepthSave.state} error={clientIpXffDepthSave.error} />}
                       />
                     </>
                   )}
@@ -742,10 +803,13 @@ export function SettingsPage() {
                       {t('settings.rateLimiter.failClosedHint')}
                     </p>
                   </div>
-                  <Switch
-                    checked={rateLimitFailClosed}
-                    onCheckedChange={setRateLimitFailClosed}
-                  />
+                  <div className="flex items-center gap-2">
+                    <SaveIndicator state={rateLimitFailClosedSave.state} error={rateLimitFailClosedSave.error} />
+                    <Switch
+                      checked={rateLimitFailClosed}
+                      onCheckedChange={setRateLimitFailClosed}
+                    />
+                  </div>
                 </div>
               </CardContent>
             </Card>
@@ -766,10 +830,14 @@ export function SettingsPage() {
             </CardHeader>
             <CardContent>
               <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
-                <NumberField label={t('settings.defaultExpiry')} value={defaultExpiry} onChange={setDefaultExpiry} min={0} max={3650} hint={t('settings.zeroDisabled')} />
-                <NumberField label={t('settings.inactivityTimeout')} value={inactivityTimeout} onChange={setInactivityTimeout} min={0} max={365} hint={t('settings.zeroDisabled')} />
-                <NumberField label={t('settings.rotationPeriod')} value={rotationPeriod} onChange={setRotationPeriod} min={0} max={365} hint={t('settings.zeroDisabled')} />
-                <NumberField label={t('settings.gracePeriod')} value={gracePeriod} onChange={setGracePeriod} min={0} max={720} />
+                <NumberField label={t('settings.defaultExpiry')} value={defaultExpiry} onChange={setDefaultExpiry} min={0} max={3650} hint={t('settings.zeroDisabled')}
+                  indicator={<SaveIndicator state={defaultExpirySave.state} error={defaultExpirySave.error} />} />
+                <NumberField label={t('settings.inactivityTimeout')} value={inactivityTimeout} onChange={setInactivityTimeout} min={0} max={365} hint={t('settings.zeroDisabled')}
+                  indicator={<SaveIndicator state={inactivityTimeoutSave.state} error={inactivityTimeoutSave.error} />} />
+                <NumberField label={t('settings.rotationPeriod')} value={rotationPeriod} onChange={setRotationPeriod} min={0} max={365} hint={t('settings.zeroDisabled')}
+                  indicator={<SaveIndicator state={rotationPeriodSave.state} error={rotationPeriodSave.error} />} />
+                <NumberField label={t('settings.gracePeriod')} value={gracePeriod} onChange={setGracePeriod} min={0} max={720}
+                  indicator={<SaveIndicator state={gracePeriodSave.state} error={gracePeriodSave.error} />} />
               </div>
             </CardContent>
           </Card>
@@ -839,6 +907,7 @@ export function SettingsPage() {
                       onChange={setUsageRetention}
                       min={1}
                       max={3650}
+                      indicator={<SaveIndicator state={usageRetentionSave.state} error={usageRetentionSave.error} />}
                     />
                   </div>
                 </div>
@@ -855,6 +924,7 @@ export function SettingsPage() {
                       onChange={setAuditRetention}
                       min={1}
                       max={3650}
+                      indicator={<SaveIndicator state={auditRetentionSave.state} error={auditRetentionSave.error} />}
                     />
                     <NumberField
                       label={t('settings.retention.gateway')}
@@ -863,6 +933,7 @@ export function SettingsPage() {
                       onChange={setGatewayRetention}
                       min={1}
                       max={3650}
+                      indicator={<SaveIndicator state={gatewayRetentionSave.state} error={gatewayRetentionSave.error} />}
                     />
                     <NumberField
                       label={t('settings.retention.mcp')}
@@ -871,6 +942,7 @@ export function SettingsPage() {
                       onChange={setMcpRetention}
                       min={1}
                       max={3650}
+                      indicator={<SaveIndicator state={mcpRetentionSave.state} error={mcpRetentionSave.error} />}
                     />
                     <NumberField
                       label={t('settings.retention.platform')}
@@ -879,6 +951,7 @@ export function SettingsPage() {
                       onChange={setPlatformRetention}
                       min={1}
                       max={3650}
+                      indicator={<SaveIndicator state={platformRetentionSave.state} error={platformRetentionSave.error} />}
                     />
                     <NumberField
                       label={t('settings.retention.access')}
@@ -887,6 +960,7 @@ export function SettingsPage() {
                       onChange={setAccessRetention}
                       min={1}
                       max={3650}
+                      indicator={<SaveIndicator state={accessRetentionSave.state} error={accessRetentionSave.error} />}
                     />
                     <NumberField
                       label={t('settings.retention.app')}
@@ -895,6 +969,7 @@ export function SettingsPage() {
                       onChange={setAppRetention}
                       min={1}
                       max={3650}
+                      indicator={<SaveIndicator state={appRetentionSave.state} error={appRetentionSave.error} />}
                     />
                   </div>
                 </div>
@@ -917,12 +992,18 @@ export function SettingsPage() {
               </CardHeader>
               <CardContent>
                 <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
-                  <NumberField label={t('settingsPage.perfHttpClient')} value={perfHttpClientSecs} onChange={setPerfHttpClientSecs} min={1} max={300} hint={t('settingsPage.perfHttpClientHint')} />
-                  <NumberField label={t('settingsPage.perfMcpPool')} value={perfMcpPoolSecs} onChange={setPerfMcpPoolSecs} min={1} max={300} hint={t('settingsPage.perfMcpPoolHint')} />
-                  <NumberField label={t('settingsPage.perfConsoleRequest')} value={perfConsoleRequestSecs} onChange={setPerfConsoleRequestSecs} min={1} max={300} hint={t('settingsPage.perfConsoleRequestHint')} />
-                  <NumberField label={t('settingsPage.perfWsIo')} value={perfDashboardWsIoSecs} onChange={setPerfDashboardWsIoSecs} min={1} max={60} hint={t('settingsPage.perfWsIoHint')} />
-                  <NumberField label={t('settingsPage.perfWsTick')} value={perfDashboardWsTickSecs} onChange={setPerfDashboardWsTickSecs} min={1} max={60} hint={t('settingsPage.perfWsTickHint')} />
-                  <NumberField label={t('settingsPage.perfWsMax')} value={perfDashboardWsMaxPerUser} onChange={setPerfDashboardWsMaxPerUser} min={1} max={50} hint={t('settingsPage.perfWsMaxHint')} />
+                  <NumberField label={t('settingsPage.perfHttpClient')} value={perfHttpClientSecs} onChange={setPerfHttpClientSecs} min={1} max={300} hint={t('settingsPage.perfHttpClientHint')}
+                    indicator={<SaveIndicator state={perfHttpClientSave.state} error={perfHttpClientSave.error} />} />
+                  <NumberField label={t('settingsPage.perfMcpPool')} value={perfMcpPoolSecs} onChange={setPerfMcpPoolSecs} min={1} max={300} hint={t('settingsPage.perfMcpPoolHint')}
+                    indicator={<SaveIndicator state={perfMcpPoolSave.state} error={perfMcpPoolSave.error} />} />
+                  <NumberField label={t('settingsPage.perfConsoleRequest')} value={perfConsoleRequestSecs} onChange={setPerfConsoleRequestSecs} min={1} max={300} hint={t('settingsPage.perfConsoleRequestHint')}
+                    indicator={<SaveIndicator state={perfConsoleRequestSave.state} error={perfConsoleRequestSave.error} />} />
+                  <NumberField label={t('settingsPage.perfWsIo')} value={perfDashboardWsIoSecs} onChange={setPerfDashboardWsIoSecs} min={1} max={60} hint={t('settingsPage.perfWsIoHint')}
+                    indicator={<SaveIndicator state={perfDashboardWsIoSave.state} error={perfDashboardWsIoSave.error} />} />
+                  <NumberField label={t('settingsPage.perfWsTick')} value={perfDashboardWsTickSecs} onChange={setPerfDashboardWsTickSecs} min={1} max={60} hint={t('settingsPage.perfWsTickHint')}
+                    indicator={<SaveIndicator state={perfDashboardWsTickSave.state} error={perfDashboardWsTickSave.error} />} />
+                  <NumberField label={t('settingsPage.perfWsMax')} value={perfDashboardWsMaxPerUser} onChange={setPerfDashboardWsMaxPerUser} min={1} max={50} hint={t('settingsPage.perfWsMaxHint')}
+                    indicator={<SaveIndicator state={perfDashboardWsMaxPerUserSave.state} error={perfDashboardWsMaxPerUserSave.error} />} />
                 </div>
               </CardContent>
             </Card>
