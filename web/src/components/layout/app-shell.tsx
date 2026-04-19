@@ -14,9 +14,9 @@ export function AppShell({ children, userEmail, onLogout }: AppShellProps) {
   return (
     <TooltipProvider>
       <SidebarProvider>
-        <AppSidebar userEmail={userEmail} onLogout={onLogout} />
+        <AppSidebar />
         <SidebarInset className="max-h-svh overflow-hidden">
-          <AppHeader />
+          <AppHeader userEmail={userEmail} onLogout={onLogout} />
           <div className="flex flex-1 flex-col gap-4 p-4 pt-0 min-h-0 overflow-y-auto">
             {children}
           </div>

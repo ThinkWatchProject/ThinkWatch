@@ -63,6 +63,7 @@ const DYNAMIC_ENUMS = {
   'setup.steps.${_}': ['welcome', 'admin', 'settings', 'provider', 'complete'],
   'unifiedLogs.${_}': ['platform', 'audit', 'gateway', 'mcp', 'access', 'app'],
   'unifiedLogs.${_}Desc': ['platform', 'audit', 'gateway', 'mcp', 'access', 'app'],
+  'systemStatus.${_}': ['operational', 'degraded', 'down', 'unknown'],
   // Conditional ternary — enumerate the three literal outcomes.
   "common.${_}": ['healthy', 'down', 'unknown'],
 };

@@ -82,6 +82,12 @@
     "contentSecurity": "内容安全",
     "mcpStore": "商店"
   },
+  "systemStatus": {
+    "operational": "系统运行正常",
+    "degraded": "部分组件降级",
+    "down": "系统不可用",
+    "unknown": "状态未知"
+  },
   "contentSecurity": {
     "subtitle": "应用于 AI 网关请求的内容过滤规则和 PII 脱敏配置"
   },

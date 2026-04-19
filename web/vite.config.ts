@@ -3,8 +3,25 @@ import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { visualizer } from 'rollup-plugin-visualizer'
 import path from 'path'
+import { readFileSync } from 'fs'
+
+// Workspace version source of truth is the root Cargo.toml. Parsed once at
+// config eval and injected as __APP_VERSION__ so the web UI footer stays in
+// lockstep with the Rust crates without a manual bump.
+function readWorkspaceVersion(): string {
+  try {
+    const toml = readFileSync(path.resolve(__dirname, '../Cargo.toml'), 'utf8')
+    const m = toml.match(/^\s*version\s*=\s*"([^"]+)"/m)
+    return m?.[1] ?? '0.0.0'
+  } catch {
+    return '0.0.0'
+  }
+}
 
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(readWorkspaceVersion()),
+  },
   plugins: [
     react(),
     tailwindcss(),

@@ -11,17 +11,7 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
   SidebarRail,
-  useSidebar,
 } from '@/components/ui/sidebar';
-import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import {
   LayoutDashboard,
   Plug,
@@ -39,9 +29,6 @@ import {
   Forward,
   Inbox,
   BookOpen,
-  Menu,
-  LogOut,
-  User,
   FileCode2,
   Gauge,
   GitBranch,
@@ -51,6 +38,7 @@ import {
 import { useNavigate, useLocation } from '@tanstack/react-router';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { hasPermission } from '@/lib/api';
+import { SidebarSystemStatus } from './sidebar-system-status';
 
 interface NavItem {
   titleKey: string;
@@ -127,90 +115,7 @@ const navGroups: NavGroup[] = [
   },
 ];
 
-function NavUser({
-  userEmail,
-  onLogout,
-}: {
-  userEmail?: string;
-  onLogout: () => void;
-}) {
-  const { t } = useTranslation();
-  const navigate = useNavigate();
-  const { isMobile } = useSidebar();
-  const initials = userEmail
-    ? userEmail.substring(0, 2).toUpperCase()
-    : 'AB';
-
-  return (
-    <SidebarMenu>
-      <SidebarMenuItem>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <SidebarMenuButton
-              size="lg"
-              className="data-[state=open]:bg-sidebar-accent data-[state=open]:text-sidebar-accent-foreground"
-            >
-              <Avatar className="h-8 w-8 rounded-lg">
-                <AvatarFallback className="rounded-lg text-xs">
-                  {initials}
-                </AvatarFallback>
-              </Avatar>
-              <div className="grid flex-1 text-left text-sm leading-tight">
-                <span className="truncate font-medium">
-                  {userEmail ?? 'User'}
-                </span>
-                <span className="truncate text-xs text-muted-foreground">
-                  {userEmail}
-                </span>
-              </div>
-              <Menu className="ml-auto size-4" />
-            </SidebarMenuButton>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent
-            className="w-(--radix-dropdown-menu-trigger-width) min-w-56 rounded-lg"
-            side={isMobile ? 'bottom' : 'right'}
-            align="end"
-            sideOffset={4}
-          >
-            <DropdownMenuLabel className="p-0 font-normal">
-              <div className="flex items-center gap-2 px-1 py-1.5 text-left text-sm">
-                <Avatar className="h-8 w-8 rounded-lg">
-                  <AvatarFallback className="rounded-lg text-xs">
-                    {initials}
-                  </AvatarFallback>
-                </Avatar>
-                <div className="grid flex-1 text-left text-sm leading-tight">
-                  <span className="truncate font-medium">
-                    {userEmail ?? 'User'}
-                  </span>
-                  <span className="truncate text-xs">{userEmail}</span>
-                </div>
-              </div>
-            </DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => navigate({ to: '/profile' })}>
-              <User />
-              {t('auth.profile')}
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={onLogout}>
-              <LogOut />
-              {t('auth.logout')}
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
-      </SidebarMenuItem>
-    </SidebarMenu>
-  );
-}
-
-export function AppSidebar({
-  userEmail,
-  onLogout,
-}: {
-  userEmail?: string;
-  onLogout: () => void;
-}) {
+export function AppSidebar() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const location = useLocation();
@@ -278,7 +183,7 @@ export function AppSidebar({
         ))}
       </SidebarContent>
       <SidebarFooter>
-        <NavUser userEmail={userEmail} onLogout={onLogout} />
+        <SidebarSystemStatus />
       </SidebarFooter>
       <SidebarRail />
     </Sidebar>

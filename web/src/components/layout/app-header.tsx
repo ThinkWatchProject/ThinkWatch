@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/breadcrumb';
 import { LanguageSwitcher } from './language-switcher';
 import { ThemeToggle } from './theme-toggle';
+import { HeaderUserMenu } from './header-user-menu';
 
 interface CrumbEntry {
   sectionKey: string;
@@ -64,7 +65,12 @@ function resolveCrumb(pathname: string): CrumbEntry | undefined {
   return undefined;
 }
 
-export function AppHeader() {
+interface AppHeaderProps {
+  userEmail?: string;
+  onLogout: () => void;
+}
+
+export function AppHeader({ userEmail, onLogout }: AppHeaderProps) {
   const { t } = useTranslation();
   const location = useLocation();
   const crumb = resolveCrumb(location.pathname);
@@ -102,6 +108,11 @@ export function AppHeader() {
       <div className="ml-auto flex items-center gap-2 px-4">
         <ThemeToggle />
         <LanguageSwitcher />
+        <Separator
+          orientation="vertical"
+          className="mx-1 data-[orientation=vertical]:h-4"
+        />
+        <HeaderUserMenu userEmail={userEmail} onLogout={onLogout} />
       </div>
     </header>
   );

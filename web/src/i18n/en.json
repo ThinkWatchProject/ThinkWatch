@@ -82,6 +82,12 @@
     "contentSecurity": "Content Security",
     "mcpStore": "Store"
   },
+  "systemStatus": {
+    "operational": "All systems operational",
+    "degraded": "Some systems degraded",
+    "down": "System down",
+    "unknown": "Status unknown"
+  },
   "contentSecurity": {
     "subtitle": "Content filter rules and PII redaction patterns applied to AI gateway requests"
   },
