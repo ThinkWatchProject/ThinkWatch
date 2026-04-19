@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useSearch, useNavigate } from '@tanstack/react-router';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -40,6 +41,8 @@ import {
 import {
   AlertCircle,
   Brain,
+  ChevronDown,
+  ChevronUp,
   Loader2,
   Pencil,
   Plus,
@@ -66,7 +69,6 @@ interface ModelRow {
   /// `platform_pricing.input_price_per_token × input_weight × tokens`.
   input_weight: string;
   output_weight: string;
-  is_active: boolean;
   route_count: number;
   enabled_route_count: number;
 }
@@ -108,7 +110,6 @@ interface ModelFormState {
   display_name: string;
   input_weight: string;
   output_weight: string;
-  is_active: boolean;
 }
 
 interface RouteFormState {
@@ -124,7 +125,6 @@ const emptyModelForm: ModelFormState = {
   display_name: '',
   input_weight: '1.0',
   output_weight: '1.0',
-  is_active: true,
 };
 
 const emptyRouteForm: RouteFormState = {
@@ -139,6 +139,11 @@ const emptyRouteForm: RouteFormState = {
 
 export function ModelsPage() {
   const { t } = useTranslation();
+  // Reads `?import=<providerId>` to auto-open the batch import dialog
+  // on this provider — sent by the "Import Models" shortcut on the
+  // Providers page.
+  const routeSearch = useSearch({ strict: false }) as { import?: string };
+  const navigate = useNavigate();
 
   // Model list state
   const [models, setModels] = useState<ModelRow[]>([]);
@@ -282,6 +287,24 @@ export function ModelsPage() {
     void fetchModels();
   }, [fetchModels]);
 
+  // Deeplink handler: when landed with `?import=<providerId>` and the
+  // provider list has finished loading, auto-open the batch dialog
+  // pre-selected. Strip the param after firing so reopening the dialog
+  // manually doesn't get re-triggered by a refresh.
+  useEffect(() => {
+    if (!routeSearch.import || providers.length === 0) return;
+    const pid = routeSearch.import;
+    if (!providers.some((p) => p.id === pid)) return;
+    openBatchDialog();
+    void onBatchProviderChange(pid);
+    void navigate({
+      to: '/gateway/models',
+      search: { import: undefined },
+      replace: true,
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeSearch.import, providers]);
+
   useEffect(() => {
     const h = setTimeout(() => setDebouncedSearch(search.trim()), 250);
     return () => clearTimeout(h);
@@ -314,7 +337,6 @@ export function ModelsPage() {
       display_name: m.display_name,
       input_weight: m.input_weight,
       output_weight: m.output_weight,
-      is_active: m.is_active,
     });
     setModelFormError('');
     setModelDialogOpen(true);
@@ -333,7 +355,6 @@ export function ModelsPage() {
       display_name: modelForm.display_name.trim() || modelForm.model_id.trim(),
       input_weight: inW,
       output_weight: outW,
-      is_active: modelForm.is_active,
     };
     setModelSaving(true);
     try {
@@ -451,6 +472,38 @@ export function ModelsPage() {
       setRouteFormError(err instanceof Error ? err.message : 'Failed to save');
     } finally {
       setRouteSaving(false);
+    }
+  };
+
+  /// Move a route up/down in the priority list inside the drawer.
+  ///
+  /// Rules:
+  ///   * Different priority than neighbor → swap priorities. Both
+  ///     routes PATCH in parallel; one fetch afterwards refreshes
+  ///     the cached list the drawer reads.
+  ///   * Same priority (same load-balance bucket) → swap is a no-op,
+  ///     so instead bump the moving route's priority by 1 in the
+  ///     chosen direction. Clamped to 0.
+  const moveRoute = async (modelId: string, index: number, dir: 'up' | 'down') => {
+    const list = routesByModel[modelId];
+    if (!list) return;
+    const neighbor = dir === 'up' ? list[index - 1] : list[index + 1];
+    if (!neighbor) return;
+    const current = list[index];
+    try {
+      if (current.priority === neighbor.priority) {
+        const newPri =
+          dir === 'up' ? Math.max(0, current.priority - 1) : current.priority + 1;
+        await apiPatch(`/api/admin/model-routes/${current.id}`, { priority: newPri });
+      } else {
+        await Promise.all([
+          apiPatch(`/api/admin/model-routes/${current.id}`, { priority: neighbor.priority }),
+          apiPatch(`/api/admin/model-routes/${neighbor.id}`, { priority: current.priority }),
+        ]);
+      }
+      await fetchRoutesFor(modelId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to reorder');
     }
   };
 
@@ -799,14 +852,6 @@ export function ModelsPage() {
                     side="output"
                   />
                 </div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Switch
-                  id="model_active"
-                  checked={modelForm.is_active}
-                  onCheckedChange={(v) => setModelForm({ ...modelForm, is_active: v })}
-                />
-                <Label htmlFor="model_active">{t('models.field.active')}</Label>
               </div>
               {modelFormError && (
                 <Alert variant="destructive">
@@ -1318,7 +1363,7 @@ export function ModelsPage() {
                               </tr>
                             </thead>
                             <tbody className="divide-y">
-                              {routes.map((r) => (
+                              {routes.map((r, idx) => (
                                 <tr key={r.id}>
                                   <td className="px-2 py-1.5">
                                     {providerLabel(r.provider_id)}
@@ -1355,6 +1400,26 @@ export function ModelsPage() {
                                     )}
                                   </td>
                                   <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-6 w-6"
+                                      disabled={idx === 0}
+                                      onClick={() => moveRoute(r.model_id, idx, 'up')}
+                                      aria-label={t('models.moveUp')}
+                                    >
+                                      <ChevronUp className="h-3.5 w-3.5" />
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon"
+                                      className="h-6 w-6"
+                                      disabled={idx === routes.length - 1}
+                                      onClick={() => moveRoute(r.model_id, idx, 'down')}
+                                      aria-label={t('models.moveDown')}
+                                    >
+                                      <ChevronDown className="h-3.5 w-3.5" />
+                                    </Button>
                                     <Button
                                       variant="ghost"
                                       size="icon"

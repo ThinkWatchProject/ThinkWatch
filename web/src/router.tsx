@@ -198,6 +198,12 @@ const modelsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/gateway/models',
   component: ModelsPage,
+  // `?import=<providerId>` deeplink from the Providers page — the
+  // Models page reads it on mount and auto-opens the batch import
+  // dialog pre-selected on that provider.
+  validateSearch: (s: Record<string, unknown>) => ({
+    import: typeof s.import === 'string' ? s.import : undefined,
+  }),
 });
 
 const gatewaySecurityRoute = createRoute({

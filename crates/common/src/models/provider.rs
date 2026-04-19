@@ -27,5 +27,4 @@ pub struct Model {
     pub input_weight: Decimal,
     /// Relative output-token cost factor.
     pub output_weight: Decimal,
-    pub is_active: bool,
 }

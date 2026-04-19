@@ -35,7 +35,6 @@ pub struct ModelRow {
     pub input_weight: Decimal,
     #[schema(value_type = f64)]
     pub output_weight: Decimal,
-    pub is_active: bool,
     pub route_count: i64,
     pub enabled_route_count: i64,
 }
@@ -123,7 +122,7 @@ pub async fn list_models(
     );
     let list_sql = format!(
         r#"SELECT m.id, m.model_id, m.display_name,
-                  m.input_weight, m.output_weight, m.is_active,
+                  m.input_weight, m.output_weight,
                   COALESCE(rc.route_count, 0)         AS route_count,
                   COALESCE(rc.enabled_route_count, 0) AS enabled_route_count
            FROM models m
@@ -136,7 +135,7 @@ pub async fn list_models(
            ) rc ON true
            WHERE ($1 = '' OR m.model_id ILIKE $2 OR m.display_name ILIKE $2)
              {status_filter_sql}
-           ORDER BY m.is_active DESC, m.model_id
+           ORDER BY m.model_id
            LIMIT $3 OFFSET $4"#,
     );
 
@@ -169,7 +168,6 @@ pub struct CreateModelRequest {
     /// Relative output-token cost factor. Defaults to 1.0.
     #[schema(value_type = Option<f64>)]
     pub output_weight: Option<Decimal>,
-    pub is_active: Option<bool>,
 }
 
 #[utoipa::path(
@@ -207,16 +205,14 @@ pub async fn create_model(
     }
 
     let model = sqlx::query_as::<_, Model>(
-        r#"INSERT INTO models
-              (model_id, display_name, input_weight, output_weight, is_active)
-           VALUES ($1, $2, $3, $4, $5)
-           RETURNING id, model_id, display_name, input_weight, output_weight, is_active"#,
+        r#"INSERT INTO models (model_id, display_name, input_weight, output_weight)
+           VALUES ($1, $2, $3, $4)
+           RETURNING id, model_id, display_name, input_weight, output_weight"#,
     )
     .bind(&req.model_id)
     .bind(&req.display_name)
     .bind(in_w)
     .bind(out_w)
-    .bind(req.is_active.unwrap_or(true))
     .fetch_one(&state.db)
     .await?;
 
@@ -238,7 +234,6 @@ pub struct UpdateModelRequest {
     pub input_weight: Option<Decimal>,
     #[schema(value_type = Option<f64>)]
     pub output_weight: Option<Decimal>,
-    pub is_active: Option<bool>,
 }
 
 #[utoipa::path(
@@ -268,7 +263,7 @@ pub async fn update_model(
         .assert_scope_global(&state.db, "models:write")
         .await?;
     let existing = sqlx::query_as::<_, Model>(
-        r#"SELECT id, model_id, display_name, input_weight, output_weight, is_active
+        r#"SELECT id, model_id, display_name, input_weight, output_weight
            FROM models WHERE id = $1"#,
     )
     .bind(id)
@@ -288,10 +283,9 @@ pub async fn update_model(
         r#"UPDATE models SET
               display_name   = $2,
               input_weight   = $3,
-              output_weight  = $4,
-              is_active      = $5
+              output_weight  = $4
            WHERE id = $1
-           RETURNING id, model_id, display_name, input_weight, output_weight, is_active"#,
+           RETURNING id, model_id, display_name, input_weight, output_weight"#,
     )
     .bind(id)
     .bind(
@@ -301,7 +295,6 @@ pub async fn update_model(
     )
     .bind(new_in_w)
     .bind(new_out_w)
-    .bind(req.is_active.unwrap_or(existing.is_active))
     .fetch_one(&state.db)
     .await?;
 
@@ -490,8 +483,8 @@ pub async fn sync_models(
     // OpenRouter). Now it's 2 total round-trips regardless of catalog size.
     let model_slice: &[String] = &remote_models;
     let model_result = sqlx::query(
-        r#"INSERT INTO models (model_id, display_name, is_active)
-           SELECT m, m, false FROM UNNEST($1::TEXT[]) AS t(m)
+        r#"INSERT INTO models (model_id, display_name)
+           SELECT m, m FROM UNNEST($1::TEXT[]) AS t(m)
            ON CONFLICT (model_id) DO NOTHING"#,
     )
     .bind(model_slice)
@@ -948,8 +941,8 @@ pub async fn batch_create_routes(
         0
     } else {
         sqlx::query(
-            r#"INSERT INTO models (model_id, display_name, is_active)
-               SELECT m, m, true FROM UNNEST($1::TEXT[]) AS t(m)
+            r#"INSERT INTO models (model_id, display_name)
+               SELECT m, m FROM UNNEST($1::TEXT[]) AS t(m)
                ON CONFLICT (model_id) DO NOTHING"#,
         )
         .bind(&new_ids)

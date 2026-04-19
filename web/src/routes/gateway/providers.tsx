@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from '@tanstack/react-router';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { StatusIndicator } from '@/components/ui/status-indicator';
@@ -12,7 +13,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, Trash2, Pencil, Plug, AlertCircle } from 'lucide-react';
+import { Plus, Trash2, Pencil, Plug, AlertCircle, Download } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiDelete, hasPermission } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -26,6 +27,7 @@ import { EditProviderDialog } from './provider-dialogs';
 
 export function ProvidersPage() {
   const { t } = useTranslation();
+  const navigate = useNavigate();
   const [providers, setProviders] = useState<Provider[]>([]);
   const [loading, setLoading] = useState(true);
   const pager = useClientPagination(providers, 20);
@@ -146,6 +148,23 @@ export function ProvidersPage() {
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() =>
+                            // Jump to Models page with `?import=<providerId>`;
+                            // that page auto-opens the two-step import dialog
+                            // pre-selected on this provider.
+                            void navigate({
+                              to: '/gateway/models',
+                              search: { import: p.id },
+                            })
+                          }
+                          title={t('providers.importModels')}
+                          disabled={!hasPermission('models:write')}
+                        >
+                          <Download className="h-4 w-4" />
+                        </Button>
                         <Button
                           variant="ghost"
                           size="icon-sm"
