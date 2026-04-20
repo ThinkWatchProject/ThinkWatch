@@ -770,28 +770,28 @@ export function UnifiedLogsPage() {
             </>
           )}
         </CardContent>
-        <div data-slot="card-footer" className="flex items-center justify-between p-4 border-t">
-          <span className="text-sm text-muted-foreground">
+        <div data-slot="card-footer" className="flex items-center justify-between border-t px-3 py-1.5">
+          <span className="text-xs text-muted-foreground">
             {total === 0
               ? '0'
               : `${page * PAGE_SIZE + 1}–${Math.min((page + 1) * PAGE_SIZE, total)} / ${total}`}
           </span>
           <Pagination className="mx-0 w-auto">
-            <PaginationContent>
+            <PaginationContent className="gap-0.5">
               <PaginationItem>
-                <PaginationPrevious text=""
+                <PaginationPrevious text="" size="icon"
+                  className={`h-7 w-7 ${page === 0 ? 'pointer-events-none opacity-50' : ''}`}
                   onClick={(e: React.MouseEvent) => { e.preventDefault(); if (page > 0) setPage(page - 1); }}
-                  aria-disabled={page === 0}
-                  className={page === 0 ? 'pointer-events-none opacity-50' : ''} />
+                  aria-disabled={page === 0} />
               </PaginationItem>
               <PaginationItem>
-                <span className="text-sm px-2">{page + 1} / {Math.max(totalPages, 1)}</span>
+                <span className="px-2 text-xs">{page + 1} / {Math.max(totalPages, 1)}</span>
               </PaginationItem>
               <PaginationItem>
-                <PaginationNext text=""
+                <PaginationNext text="" size="icon"
+                  className={`h-7 w-7 ${page >= totalPages - 1 ? 'pointer-events-none opacity-50' : ''}`}
                   onClick={(e: React.MouseEvent) => { e.preventDefault(); if (page < totalPages - 1) setPage(page + 1); }}
-                  aria-disabled={page >= totalPages - 1}
-                  className={page >= totalPages - 1 ? 'pointer-events-none opacity-50' : ''} />
+                  aria-disabled={page >= totalPages - 1} />
               </PaginationItem>
             </PaginationContent>
           </Pagination>
