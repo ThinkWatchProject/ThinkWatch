@@ -320,6 +320,70 @@ pub struct CreateUserByAdminResponse {
     pub generated_password: Option<String>,
 }
 
+// ---------------------------------------------------------------------------
+// Super-admin quorum guard
+//
+// Three operations can lock the platform out of admin recovery:
+//   · deleting the last active super_admin
+//   · disabling (is_active=false) the last active super_admin
+//   · editing the role set so no user holds super_admin anymore
+//
+// Each path calls `assert_super_admin_quorum` inside the same
+// transaction as the mutation, AFTER the write has happened. If the
+// invariant would be violated the tx is dropped without commit.
+//
+// `acquire_super_admin_guard_lock` takes a Postgres advisory lock
+// (released at tx end) so two concurrent super-admin-affecting txs
+// serialize — otherwise both could check "1 remaining" and both
+// commit, leaving zero.
+//
+// Arbitrary 64-bit key picked once; must stay stable across releases.
+// ---------------------------------------------------------------------------
+
+const SUPER_ADMIN_GUARD_LOCK: i64 = 0x5241_4441_5741_5541; // "RADAWAUA"
+
+async fn acquire_super_admin_guard_lock(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), AppError> {
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(SUPER_ADMIN_GUARD_LOCK)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+async fn assert_super_admin_quorum(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<(), AppError> {
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT u.id) FROM users u \
+         JOIN ( \
+            SELECT ra.user_id \
+              FROM rbac_role_assignments ra \
+              JOIN rbac_roles r ON r.id = ra.role_id \
+             WHERE r.name = 'super_admin' \
+            UNION \
+            SELECT tm.user_id \
+              FROM team_members tm \
+              JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
+              JOIN rbac_roles r ON r.id = tra.role_id \
+             WHERE r.name = 'super_admin' \
+         ) s ON s.user_id = u.id \
+         WHERE u.is_active = TRUE AND u.deleted_at IS NULL",
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+
+    if count <= 0 {
+        return Err(AppError::BadRequest(
+            "Operation would leave the platform with zero active super admins. \
+             Add another super admin (directly or via a team role) before continuing."
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Apply a set of role assignments to a user atomically inside `tx`.
 /// Every existing row for `user_id` is deleted first, then the new
 /// rows are inserted. Returns the fully-hydrated assignment list for
@@ -701,6 +765,14 @@ pub async fn update_user(
     // user with display_name changed but is_active and roles unchanged,
     // which then required manual DB cleanup to fix.
     let mut tx = state.db.begin().await?;
+    // Only two kinds of update can erode super-admin quorum: disabling
+    // the user, or swapping in a role set that no longer includes
+    // super_admin. Take the advisory lock on those paths so concurrent
+    // admin edits serialize against each other.
+    let touches_quorum = req.is_active == Some(false) || req.role_assignments.is_some();
+    if touches_quorum {
+        acquire_super_admin_guard_lock(&mut tx).await?;
+    }
 
     if let Some(ref name) = req.display_name {
         if name.trim().is_empty() {
@@ -723,6 +795,13 @@ pub async fn update_user(
 
     if let Some(assignments) = authorized_role_assignments {
         write_user_role_assignments(&mut tx, user_id, assignments, auth_user.claims.sub).await?;
+    }
+
+    // Post-mutation quorum check. Phrased as "≥1 active super admin
+    // after all pending changes" so disabling + role-removal both
+    // funnel into the same guarantee without special-casing either.
+    if touches_quorum {
+        assert_super_admin_quorum(&mut tx).await?;
     }
 
     tx.commit().await?;
@@ -786,17 +865,30 @@ pub async fn delete_user(
         .assert_scope_for_user(&state.db, "users:delete", user_id)
         .await?;
 
+    // Soft-delete + super-admin-quorum check inside one transaction,
+    // serialized against concurrent super-admin-touching operations
+    // via a Postgres advisory lock. The lock is released when the tx
+    // ends, so two racing deletes can't both see "one other super
+    // admin remaining" and both fire.
+    let mut tx = state.db.begin().await?;
+    acquire_super_admin_guard_lock(&mut tx).await?;
+
     let rows = sqlx::query(
         "UPDATE users SET deleted_at = now(), is_active = false, updated_at = now() WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(user_id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?
     .rows_affected();
 
     if rows == 0 {
         return Err(AppError::NotFound("User not found".into()));
     }
+    // Validate the post-mutation invariant. If this delete took out the
+    // last active super admin, we haven't committed yet — the Err short-
+    // circuits and the tx rolls back on drop.
+    assert_super_admin_quorum(&mut tx).await?;
+    tx.commit().await?;
 
     // Invalidate every active credential the deleted user holds:
     //   - pw_epoch bumps so existing access/refresh JWTs are rejected
