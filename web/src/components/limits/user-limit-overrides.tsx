@@ -240,6 +240,7 @@ export function UserLimitOverrides({ userId }: UserLimitOverridesProps) {
           {someSelected && (
             <>
               <Button
+                type="button"
                 size="sm"
                 variant="outline"
                 onClick={() => setBulkAction('disable')}
@@ -248,6 +249,7 @@ export function UserLimitOverrides({ userId }: UserLimitOverridesProps) {
                 {t('userLimitOverrides.disableSelected', { count: selected.size })}
               </Button>
               <Button
+                type="button"
                 size="sm"
                 variant="destructive"
                 onClick={() => setBulkAction('delete')}
@@ -257,7 +259,11 @@ export function UserLimitOverrides({ userId }: UserLimitOverridesProps) {
               </Button>
             </>
           )}
-          <Button size="sm" onClick={() => setAdding((v) => !v)}>
+          {/* Explicit type="button" everywhere — this panel is embedded
+              inside the user-edit `<form>`, and a bare <Button> defaults
+              to submit, which would close the dialog instead of toggling
+              the inline add form. */}
+          <Button type="button" size="sm" onClick={() => setAdding((v) => !v)}>
             <Plus className="mr-1 h-3.5 w-3.5" />
             {adding ? t('common.cancel') : t('userLimitOverrides.addOverride')}
           </Button>
@@ -695,6 +701,9 @@ function AddOverrideForm({
           {busy ? t('common.loading') : t('userLimitOverrides.apply')}
         </Button>
       </div>
+      {/* Note: both buttons above already carry type="button" because
+          AddOverrideForm lives inside a parent `<form>` — bare Buttons
+          would submit it. Same rationale as the toolbar above. */}
     </div>
   );
 }
