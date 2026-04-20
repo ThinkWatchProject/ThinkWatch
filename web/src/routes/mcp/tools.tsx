@@ -250,28 +250,36 @@ function ArgsCell({ schema }: { schema: Record<string, unknown> | null }) {
   if (props.length === 0) {
     return <span className="text-[10px] italic text-muted-foreground">—</span>;
   }
+  // Single-line chip strip with horizontal overflow — keeps the row
+  // one line tall regardless of param count. Tools with 10+ params
+  // previously stretched a row to 4-5 lines and blew the table
+  // vertical budget.
   return (
-    <div className="flex flex-wrap gap-1">
-      {props.slice(0, 4).map((p) => (
-        <span
-          key={p.name}
-          className={cn(
-            'rounded border px-1.5 py-0.5 font-mono text-[10px]',
-            p.required
-              ? 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400'
-              : 'border-border/60 bg-muted/40 text-muted-foreground',
-          )}
-          title={p.description}
-        >
-          {p.name}
-          <span className="ml-1 opacity-60">:{p.type}</span>
-        </span>
-      ))}
-      {props.length > 4 && (
-        <span className="rounded border border-border/60 bg-muted/40 px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
-          +{props.length - 4}
-        </span>
-      )}
+    <div
+      className="max-w-[22rem] overflow-x-auto whitespace-nowrap"
+      // Hide the scrollbar chrome; the overflow is still scrollable
+      // via trackpad / shift-wheel and exposes its scrollable state
+      // via cursor. A visible bar adds noise for what is usually a
+      // 1-param row.
+      style={{ scrollbarWidth: 'none' }}
+    >
+      <div className="inline-flex gap-1">
+        {props.map((p) => (
+          <span
+            key={p.name}
+            className={cn(
+              'shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px]',
+              p.required
+                ? 'border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                : 'border-border/60 bg-muted/40 text-muted-foreground',
+            )}
+            title={p.description}
+          >
+            {p.name}
+            <span className="ml-1 opacity-60">:{p.type}</span>
+          </span>
+        ))}
+      </div>
     </div>
   );
 }
