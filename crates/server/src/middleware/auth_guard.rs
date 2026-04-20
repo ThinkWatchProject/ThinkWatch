@@ -259,9 +259,12 @@ impl AuthUser {
 
     /// Polymorphic scope check for the limits engine. The limits
     /// CRUD endpoints are keyed on `(subject_kind, subject_id)`
-    /// where `subject_kind ∈ {user, api_key, team, provider, mcp_server}`.
-    /// Provider / mcp_server are global resources and only allow
-    /// callers with the perm at global scope.
+    /// where `subject_kind ∈ {user, api_key, role}`. All three are
+    /// admin-level writes and, for now, require the perm at global
+    /// scope — team-scoped grants are not enough to mutate another
+    /// team's user or key. A future revision could relax `user` /
+    /// `api_key` to allow team_manager-style scoping by looking up
+    /// the subject's team membership, but that's not needed today.
     pub async fn assert_scope_for_subject(
         &self,
         pool: &sqlx::PgPool,
@@ -270,9 +273,9 @@ impl AuthUser {
         _subject_id: uuid::Uuid,
     ) -> Result<(), AppError> {
         match subject_kind {
-            "role" => self.assert_scope_global(pool, perm).await,
+            "role" | "user" | "api_key" => self.assert_scope_global(pool, perm).await,
             other => Err(AppError::BadRequest(format!(
-                "unknown subject_kind '{other}' (expected: role)"
+                "unknown subject_kind '{other}' (expected: user, api_key, role)"
             ))),
         }
     }
