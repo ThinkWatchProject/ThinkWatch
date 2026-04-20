@@ -492,7 +492,12 @@ export function UsersPage() {
         </Alert>
       )}
 
-      <div className="flex items-center gap-2 mb-4">
+      {/* Search + selection-action bar on one row. Search sits on the
+          left and takes its natural width; when rows are selected the
+          right side flips into the action cluster (count label +
+          enable/disable/delete/apply-override/clear). Keeps the
+          toolbar compact — no row-shift when selection appears. */}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         <div className="relative w-full max-w-sm">
           <Search className="absolute left-2 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -502,17 +507,11 @@ export function UsersPage() {
             className="pl-8"
           />
         </div>
-      </div>
-
-      {/* Selection action bar — only rendered when at least one row is
-          selected. Sits above the table so the operator can act without
-          scrolling back to the top. */}
-      {selectedUserIds.size > 0 && (
-        <div className="mb-2 flex items-center justify-between rounded-md border bg-muted/40 px-3 py-2 text-sm">
-          <span>
-            {t('users.bulk.selected', { count: selectedUserIds.size })}
-          </span>
-          <div className="flex items-center gap-1.5">
+        {selectedUserIds.size > 0 && (
+          <div className="ml-auto flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-sm text-muted-foreground">
+              {t('users.bulk.selected', { count: selectedUserIds.size })}
+            </span>
             <Button
               type="button"
               size="sm"
@@ -563,8 +562,8 @@ export function UsersPage() {
               {t('users.bulk.clearSelection')}
             </Button>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
         <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
