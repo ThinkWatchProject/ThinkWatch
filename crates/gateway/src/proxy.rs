@@ -113,6 +113,10 @@ fn rules_for_ai_gateway(identity: &GatewayRequestIdentity) -> Vec<RateLimitRule>
             window_secs: r.window_secs,
             max_count: r.max_count,
             enabled: true,
+            // In-memory synthesis — override metadata lives on persisted rows only.
+            expires_at: None,
+            reason: None,
+            created_by: None,
         })
         .collect()
 }
@@ -139,6 +143,9 @@ fn budgets_for_ai_gateway(identity: &GatewayRequestIdentity) -> Vec<BudgetCap> {
             period: b.period,
             limit_tokens: b.limit_tokens,
             enabled: true,
+            expires_at: None,
+            reason: None,
+            created_by: None,
         })
         .collect()
 }

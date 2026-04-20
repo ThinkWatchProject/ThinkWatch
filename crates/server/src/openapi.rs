@@ -17,6 +17,10 @@ use crate::handlers::{
         CapListResponse, CapRow, CapUsage, RuleListResponse, RuleRow, RuleUsage, UpsertCapRequest,
         UpsertRuleRequest, UsageResponse,
     },
+    limits_bulk::{
+        BulkApplyCapRequest, BulkApplyResponse, BulkApplyRuleRequest, BulkIdsOutcome,
+        BulkIdsRequest, BulkIdsResponse, BulkOutcome, SubjectRef,
+    },
     log_forwarders::{CreateForwarderRequest, TestResult, UpdateForwarderRequest},
     mcp_logs::{McpLogEntry, McpLogsResponse},
     mcp_servers::UpdateMcpServerRequest,
@@ -137,6 +141,12 @@ use crate::handlers::{
         crate::handlers::limits::upsert_cap,
         crate::handlers::limits::delete_cap,
         crate::handlers::limits::get_usage,
+        crate::handlers::limits_bulk::bulk_apply_rule,
+        crate::handlers::limits_bulk::bulk_apply_cap,
+        crate::handlers::limits_bulk::bulk_disable_rules,
+        crate::handlers::limits_bulk::bulk_delete_rules,
+        crate::handlers::limits_bulk::bulk_disable_caps,
+        crate::handlers::limits_bulk::bulk_delete_caps,
         // Analytics
         crate::handlers::analytics::get_usage_stats,
         crate::handlers::analytics::get_usage,
@@ -192,6 +202,9 @@ use crate::handlers::{
             // Limits
             RuleRow, RuleListResponse, UpsertRuleRequest, RuleUsage,
             CapRow, CapListResponse, UpsertCapRequest, CapUsage, UsageResponse,
+            // Limits — bulk
+            BulkApplyRuleRequest, BulkApplyCapRequest, BulkApplyResponse, BulkOutcome,
+            BulkIdsRequest, BulkIdsResponse, BulkIdsOutcome, SubjectRef,
             // Analytics
             UsageStats, UsageRow, CostStats, CostBreakdown, CostItem, CostTotals,
             // Dashboard

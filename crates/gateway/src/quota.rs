@@ -2,7 +2,9 @@ use fred::clients::Client;
 use fred::interfaces::{KeysInterface, LuaInterface};
 use think_watch_common::errors::AppError;
 
-/// Per-user/team token quota information.
+/// Per-subject token quota information. Callers today key by user_id or
+/// api_key_id — team/role groupings don't own their own counters (see
+/// `crates/common/src/limits/mod.rs` for the design rationale).
 #[derive(Debug, Clone)]
 pub struct QuotaInfo {
     /// Monthly token limit (0 means unlimited).
@@ -15,7 +17,11 @@ pub struct QuotaInfo {
     pub period: String,
 }
 
-/// Per-user/team token quota with hard limits, backed by Redis.
+/// Per-subject token quota with hard limits, backed by Redis. The `key`
+/// parameter on every method is a free-form string by convention, but
+/// all in-tree callers compose it from user_id or api_key_id — never
+/// team or role id. Keep it that way so a single operator can't
+/// accidentally create a shared counter.
 #[derive(Clone)]
 pub struct QuotaManager {
     redis: Client,

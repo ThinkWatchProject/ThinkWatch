@@ -41,6 +41,10 @@ import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { DataTablePagination } from '@/components/data-table-pagination';
 import { policyToPerms, type PermissionDef, type PolicyDocument } from './roles/types';
+import { UserLimitOverrides } from '@/components/limits/user-limit-overrides';
+import { BulkOverrideDialog } from '@/components/limits/bulk-override-dialog';
+import { Separator } from '@/components/ui/separator';
+import { Gauge } from 'lucide-react';
 
 
 interface RoleAssignment {
@@ -90,6 +94,7 @@ export function UsersPage() {
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
+  const [bulkOverrideOpen, setBulkOverrideOpen] = useState(false);
   const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [email, setEmail] = useState('');
@@ -326,10 +331,15 @@ export function UsersPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('users.title')}</h1>
           <p className="text-muted-foreground">{t('users.subtitle')}</p>
         </div>
-        <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) resetCreateForm(); }}>
-          <DialogTrigger asChild>
-            <Button><Plus className="h-4 w-4" />{t('users.addUser')}</Button>
-          </DialogTrigger>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={() => setBulkOverrideOpen(true)}>
+            <Gauge className="h-4 w-4" />
+            {t('bulkOverride.openButton')}
+          </Button>
+          <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) resetCreateForm(); }}>
+            <DialogTrigger asChild>
+              <Button><Plus className="h-4 w-4" />{t('users.addUser')}</Button>
+            </DialogTrigger>
           <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>{t('users.addUser')}</DialogTitle>
@@ -366,8 +376,11 @@ export function UsersPage() {
               </DialogFooter>
             </form>
           </DialogContent>
-        </Dialog>
+          </Dialog>
+        </div>
       </div>
+
+      <BulkOverrideDialog open={bulkOverrideOpen} onOpenChange={setBulkOverrideOpen} />
 
       {error && (
         <Alert variant="destructive" className="mb-4">
@@ -606,6 +619,12 @@ export function UsersPage() {
               availableRoles={availableRoles}
               availablePermissions={availablePermissions}
             />
+            {editUser && (
+              <>
+                <Separator />
+                <UserLimitOverrides userId={editUser.id} />
+              </>
+            )}
             <DialogFooter>
               <Button type="submit" disabled={editLoading}>{editLoading ? t('users.saving') : t('common.save')}</Button>
             </DialogFooter>

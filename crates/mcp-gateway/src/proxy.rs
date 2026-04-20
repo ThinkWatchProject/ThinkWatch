@@ -317,6 +317,9 @@ impl McpProxy {
                         window_secs: r.window_secs,
                         max_count: r.max_count,
                         enabled: true,
+                        expires_at: None,
+                        reason: None,
+                        created_by: None,
                     })
                     .collect()
             })

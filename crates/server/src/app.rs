@@ -797,6 +797,33 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             "/api/admin/limits/{kind}/{id}/usage",
             get(handlers::limits::get_usage),
         )
+        // Bulk override operations — single action across N subjects
+        // or N row ids. Each row is evaluated independently and the
+        // response carries per-row outcomes.
+        .route(
+            "/api/admin/limits/bulk/rules",
+            post(handlers::limits_bulk::bulk_apply_rule),
+        )
+        .route(
+            "/api/admin/limits/bulk/budgets",
+            post(handlers::limits_bulk::bulk_apply_cap),
+        )
+        .route(
+            "/api/admin/limits/bulk/rules/disable",
+            post(handlers::limits_bulk::bulk_disable_rules),
+        )
+        .route(
+            "/api/admin/limits/bulk/rules/delete",
+            post(handlers::limits_bulk::bulk_delete_rules),
+        )
+        .route(
+            "/api/admin/limits/bulk/budgets/disable",
+            post(handlers::limits_bulk::bulk_disable_caps),
+        )
+        .route(
+            "/api/admin/limits/bulk/budgets/delete",
+            post(handlers::limits_bulk::bulk_delete_caps),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::verify_signature::verify_signature,

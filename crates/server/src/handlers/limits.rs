@@ -31,17 +31,27 @@
 
 use axum::Json;
 use axum::extract::{Path, State};
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use think_watch_common::errors::AppError;
 use think_watch_common::limits::{
     self, BudgetCap, BudgetPeriod, BudgetSubject, RateLimitRule, RateLimitSubject, RateMetric,
-    Surface, UpsertRule, budget, sliding,
+    Surface, UpsertCap, UpsertRule, budget, sliding,
 };
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
+
+/// Hard ceiling on how far into the future a temporary override can
+/// extend. Anything longer is almost certainly a "permanent" change
+/// wearing the wrong hat — the operator should edit the role instead.
+const MAX_OVERRIDE_HORIZON_DAYS: i64 = 90;
+/// Minimum chars the operator must supply as justification. Short
+/// enough not to be annoying, long enough to discourage "test" and ".".
+const MIN_REASON_LEN: usize = 10;
+const MAX_REASON_LEN: usize = 500;
 
 // ----------------------------------------------------------------------------
 // Path parameter parsing
@@ -95,6 +105,12 @@ pub struct RuleRow {
     pub window_secs: i32,
     pub max_count: i64,
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<Uuid>,
 }
 
 impl From<RateLimitRule> for RuleRow {
@@ -108,6 +124,9 @@ impl From<RateLimitRule> for RuleRow {
             window_secs: r.window_secs,
             max_count: r.max_count,
             enabled: r.enabled,
+            expires_at: r.expires_at,
+            reason: r.reason,
+            created_by: r.created_by,
         }
     }
 }
@@ -120,6 +139,12 @@ pub struct CapRow {
     pub period: &'static str,
     pub limit_tokens: i64,
     pub enabled: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<Uuid>,
 }
 
 impl From<BudgetCap> for CapRow {
@@ -131,6 +156,9 @@ impl From<BudgetCap> for CapRow {
             period: c.period.as_str(),
             limit_tokens: c.limit_tokens,
             enabled: c.enabled,
+            expires_at: c.expires_at,
+            reason: c.reason,
+            created_by: c.created_by,
         }
     }
 }
@@ -159,6 +187,15 @@ pub struct UpsertRuleRequest {
     pub max_count: i64,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    /// Optional UTC expiry. Must be in the future and within
+    /// `MAX_OVERRIDE_HORIZON_DAYS`. Pair with `reason` so the audit
+    /// trail makes sense.
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Justification text. Required when `expires_at` is set — a
+    /// bounded override without a documented reason is an anti-pattern.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -167,10 +204,69 @@ pub struct UpsertCapRequest {
     pub limit_tokens: i64,
     #[serde(default = "default_true")]
     pub enabled: bool,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// Public re-export of [`validate_override_meta`] for sibling modules
+/// (bulk endpoints) — keeps the single validation path canonical.
+pub(super) fn validate_override_meta_pub(
+    expires_at: Option<DateTime<Utc>>,
+    reason: Option<String>,
+) -> Result<(Option<DateTime<Utc>>, Option<String>), AppError> {
+    validate_override_meta(expires_at, reason)
+}
+
+/// Shared validation for override metadata. Returns the normalized
+/// `(expires_at, reason)` pair on success. Called from both the
+/// single-subject handlers and the bulk apply endpoint.
+fn validate_override_meta(
+    expires_at: Option<DateTime<Utc>>,
+    reason: Option<String>,
+) -> Result<(Option<DateTime<Utc>>, Option<String>), AppError> {
+    let now = Utc::now();
+    if let Some(t) = expires_at {
+        if t <= now {
+            return Err(AppError::BadRequest(
+                "expires_at must be in the future".into(),
+            ));
+        }
+        if t - now > Duration::days(MAX_OVERRIDE_HORIZON_DAYS) {
+            return Err(AppError::BadRequest(format!(
+                "expires_at must be within {MAX_OVERRIDE_HORIZON_DAYS} days — edit the role for a permanent change"
+            )));
+        }
+    }
+    let trimmed = reason
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if expires_at.is_some() {
+        match &trimmed {
+            Some(r) if r.len() >= MIN_REASON_LEN && r.len() <= MAX_REASON_LEN => {}
+            Some(r) if r.len() < MIN_REASON_LEN => {
+                return Err(AppError::BadRequest(format!(
+                    "reason must be at least {MIN_REASON_LEN} characters"
+                )));
+            }
+            Some(_) => {
+                return Err(AppError::BadRequest(format!(
+                    "reason must be at most {MAX_REASON_LEN} characters"
+                )));
+            }
+            None => {
+                return Err(AppError::BadRequest(
+                    "reason is required when expires_at is set".into(),
+                ));
+            }
+        }
+    }
+    Ok((expires_at, trimmed))
 }
 
 // ----------------------------------------------------------------------------
@@ -248,6 +344,8 @@ pub async fn upsert_rule(
         ))
     })?;
 
+    let (expires_at, reason) = validate_override_meta(req.expires_at, req.reason)?;
+
     // The engine validates window_secs / max_count and bubbles
     // sqlx::Error::Protocol on bad input — translate that into a
     // 400 instead of a 500 so the UI surfaces the message.
@@ -261,6 +359,12 @@ pub async fn upsert_rule(
             window_secs: req.window_secs,
             max_count: req.max_count,
             enabled: req.enabled,
+            expires_at,
+            reason: reason.clone(),
+            // Audit trail — who wrote this row. Parsing from the
+            // `sub` string should always succeed for authenticated
+            // sessions; fall back to None if it somehow doesn't.
+            created_by: Some(auth_user.claims.sub),
         },
     )
     .await
@@ -284,6 +388,8 @@ pub async fn upsert_rule(
                 "window_secs": req.window_secs,
                 "max_count": req.max_count,
                 "enabled": req.enabled,
+                "expires_at": expires_at,
+                "reason": reason,
             })),
     );
 
@@ -403,13 +509,20 @@ pub async fn upsert_cap(
         ))
     })?;
 
+    let (expires_at, reason) = validate_override_meta(req.expires_at, req.reason)?;
+
     let row = limits::upsert_cap(
         &state.db,
-        subject_kind,
-        subject_id,
-        period,
-        req.limit_tokens,
-        req.enabled,
+        UpsertCap {
+            subject_kind,
+            subject_id,
+            period,
+            limit_tokens: req.limit_tokens,
+            enabled: req.enabled,
+            expires_at,
+            reason: reason.clone(),
+            created_by: Some(auth_user.claims.sub),
+        },
     )
     .await
     .map_err(map_validation_error)?;
@@ -427,6 +540,8 @@ pub async fn upsert_cap(
                 "period": req.period,
                 "limit_tokens": req.limit_tokens,
                 "enabled": req.enabled,
+                "expires_at": expires_at,
+                "reason": reason,
             })),
     );
 
@@ -636,5 +751,65 @@ mod tests {
         assert!(parse_rate_subject("api_key").is_ok());
         assert!(parse_budget_subject("user").is_ok());
         assert!(parse_budget_subject("api_key").is_ok());
+    }
+
+    #[test]
+    fn override_meta_rejects_past_expiry() {
+        let past = Utc::now() - Duration::minutes(1);
+        let err = validate_override_meta(Some(past), Some("reason string".into())).unwrap_err();
+        match err {
+            AppError::BadRequest(m) => assert!(m.contains("future"), "got: {m}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn override_meta_rejects_long_horizon() {
+        let far_future = Utc::now() + Duration::days(MAX_OVERRIDE_HORIZON_DAYS + 1);
+        let err =
+            validate_override_meta(Some(far_future), Some("valid reason here".into())).unwrap_err();
+        match err {
+            AppError::BadRequest(m) => assert!(m.contains("days"), "got: {m}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn override_meta_requires_reason_when_expiring() {
+        let future = Utc::now() + Duration::hours(1);
+        let err = validate_override_meta(Some(future), None).unwrap_err();
+        match err {
+            AppError::BadRequest(m) => assert!(m.contains("reason"), "got: {m}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn override_meta_rejects_short_reason() {
+        let future = Utc::now() + Duration::hours(1);
+        let err = validate_override_meta(Some(future), Some("nope".into())).unwrap_err();
+        match err {
+            AppError::BadRequest(m) => assert!(m.contains("reason"), "got: {m}"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn override_meta_accepts_bounded_expiry_with_reason() {
+        let future = Utc::now() + Duration::days(7);
+        let (out_exp, out_reason) =
+            validate_override_meta(Some(future), Some("  Black friday boost  ".into())).unwrap();
+        assert_eq!(out_exp, Some(future));
+        assert_eq!(out_reason.as_deref(), Some("Black friday boost"));
+    }
+
+    #[test]
+    fn override_meta_no_expiry_allowed() {
+        // Permanent override with no reason is still valid at this
+        // layer — the UI nudges operators, the validator doesn't
+        // force it when expires_at is None.
+        let (exp, reason) = validate_override_meta(None, None).unwrap();
+        assert!(exp.is_none());
+        assert!(reason.is_none());
     }
 }

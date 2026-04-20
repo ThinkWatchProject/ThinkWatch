@@ -17,13 +17,20 @@
 // Subject identification: every rule / cap is keyed by a (subject_kind,
 // subject_id) tuple. The kinds are pinned to a small closed enum:
 //
-//   rate_limit_rules.subject_kind ∈ { user, api_key, provider, mcp_server, team }
-//   budget_caps.subject_kind      ∈ { user, api_key, team, provider }
+//   rate_limit_rules.subject_kind ∈ { user, api_key }
+//   budget_caps.subject_kind      ∈ { user, api_key }
 //
-// At request time the proxy resolves which subjects apply (e.g. an AI
-// gateway call resolves to api_key + user + provider) and runs every
-// matching enabled rule through `sliding::check_and_record`. Any single
-// failure rejects the request — Lua handles the all-or-nothing INCR.
+// Role- and team-level constraints are NOT their own subjects — they live
+// in `rbac_roles.policy_document` (and, if ever added, the analogous field
+// on teams) and fold into each member's merged policy at request time,
+// materializing as `subject = User` rules. Redis counters therefore stay
+// user-scoped and grouping membership never becomes a shared pool.
+//
+// At request time the proxy resolves which subjects apply (user +
+// api_key, plus the merged role/team constraint set attributed to that
+// same user) and runs every matching enabled rule through
+// `sliding::check_and_record`. Any single failure rejects the request —
+// Lua handles the all-or-nothing INCR.
 //
 // See `plan.md` (limits chapter) for the full design.
 // ============================================================================
@@ -665,6 +672,13 @@ impl BudgetPeriod {
 
 // ----------------------------------------------------------------------------
 // Row structs (DB shapes)
+//
+// Three "override metadata" fields — `expires_at`, `reason`, `created_by` —
+// are all optional. They're only meaningful on persisted rows; rules the
+// gateway synthesizes in-memory from role-merged constraints leave them
+// None. The admin API populates them from the request + authenticated
+// caller; the hot path ignores them past the "is this row still active?"
+// filter done at SELECT time.
 // ----------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
@@ -677,6 +691,12 @@ pub struct RateLimitRule {
     pub window_secs: i32,
     pub max_count: i64,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -687,6 +707,12 @@ pub struct BudgetCap {
     pub period: BudgetPeriod,
     pub limit_tokens: i64,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub created_by: Option<Uuid>,
 }
 
 // ----------------------------------------------------------------------------
@@ -717,7 +743,8 @@ pub async fn list_rules(
     subject_id: Uuid,
 ) -> Result<Vec<RateLimitRule>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, subject_kind, subject_id, surface, metric, window_secs, max_count, enabled \
+        "SELECT id, subject_kind, subject_id, surface, metric, window_secs, max_count, enabled, \
+                expires_at, reason, created_by \
            FROM rate_limit_rules \
           WHERE subject_kind = $1 AND subject_id = $2 \
           ORDER BY surface, metric, window_secs",
@@ -729,8 +756,10 @@ pub async fn list_rules(
     Ok(rows.into_iter().filter_map(row_to_rule).collect())
 }
 
-/// Load every enabled rule for a subject. Used by the gateway hot path
-/// after the cache misses.
+/// Load every enabled, non-expired rule for a subject. Used by the
+/// override merge path in `auth::rbac::compute_user_surface_constraints`.
+/// `expires_at IS NULL` rows (permanent) and `expires_at > now()` rows
+/// (still active) are both returned.
 pub async fn list_enabled_rules_for_subjects(
     pool: &PgPool,
     subjects: &[(RateLimitSubject, Uuid)],
@@ -744,9 +773,11 @@ pub async fn list_enabled_rules_for_subjects(
     let mut out: Vec<RateLimitRule> = Vec::new();
     for (kind, id) in subjects {
         let rows = sqlx::query(
-            "SELECT id, subject_kind, subject_id, surface, metric, window_secs, max_count, enabled \
+            "SELECT id, subject_kind, subject_id, surface, metric, window_secs, max_count, enabled, \
+                    expires_at, reason, created_by \
                FROM rate_limit_rules \
-              WHERE subject_kind = $1 AND subject_id = $2 AND enabled = TRUE",
+              WHERE subject_kind = $1 AND subject_id = $2 AND enabled = TRUE \
+                AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(kind.as_str())
         .bind(id)
@@ -770,6 +801,18 @@ pub struct UpsertRule {
     pub window_secs: i32,
     pub max_count: i64,
     pub enabled: bool,
+    /// Optional UTC expiry. None = permanent. When set, the request-time
+    /// override merge ignores rows whose `expires_at` is in the past.
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Operator-supplied justification, surfaced in the audit log and
+    /// the admin UI. None allowed for role-default-equivalent rules;
+    /// the handler layer enforces "required when an override differs
+    /// from the role default".
+    pub reason: Option<String>,
+    /// Actor who wrote this row. Populated by the handler from
+    /// `auth_user.id`; None when no auth context is available (e.g.
+    /// system-seeded rules).
+    pub created_by: Option<Uuid>,
 }
 
 pub async fn upsert_rule(pool: &PgPool, req: UpsertRule) -> Result<RateLimitRule, sqlx::Error> {
@@ -786,13 +829,18 @@ pub async fn upsert_rule(pool: &PgPool, req: UpsertRule) -> Result<RateLimitRule
     }
     let row = sqlx::query(
         "INSERT INTO rate_limit_rules \
-            (subject_kind, subject_id, surface, metric, window_secs, max_count, enabled) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7) \
+            (subject_kind, subject_id, surface, metric, window_secs, max_count, enabled, \
+             expires_at, reason, created_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) \
          ON CONFLICT (subject_kind, subject_id, surface, metric, window_secs) \
-         DO UPDATE SET max_count = EXCLUDED.max_count, \
-                       enabled   = EXCLUDED.enabled, \
+         DO UPDATE SET max_count  = EXCLUDED.max_count, \
+                       enabled    = EXCLUDED.enabled, \
+                       expires_at = EXCLUDED.expires_at, \
+                       reason     = EXCLUDED.reason, \
+                       created_by = EXCLUDED.created_by, \
                        updated_at = now() \
-         RETURNING id, subject_kind, subject_id, surface, metric, window_secs, max_count, enabled",
+         RETURNING id, subject_kind, subject_id, surface, metric, window_secs, max_count, enabled, \
+                   expires_at, reason, created_by",
     )
     .bind(req.subject_kind.as_str())
     .bind(req.subject_id)
@@ -801,6 +849,9 @@ pub async fn upsert_rule(pool: &PgPool, req: UpsertRule) -> Result<RateLimitRule
     .bind(req.window_secs)
     .bind(req.max_count)
     .bind(req.enabled)
+    .bind(req.expires_at)
+    .bind(req.reason)
+    .bind(req.created_by)
     .fetch_one(pool)
     .await?;
     row_to_rule(row).ok_or_else(|| sqlx::Error::Protocol("rule row decode failed".into()))
@@ -821,7 +872,8 @@ pub async fn list_caps(
     subject_id: Uuid,
 ) -> Result<Vec<BudgetCap>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT id, subject_kind, subject_id, period, limit_tokens, enabled \
+        "SELECT id, subject_kind, subject_id, period, limit_tokens, enabled, \
+                expires_at, reason, created_by \
            FROM budget_caps \
           WHERE subject_kind = $1 AND subject_id = $2 \
           ORDER BY period",
@@ -843,9 +895,11 @@ pub async fn list_enabled_caps_for_subjects(
     let mut out: Vec<BudgetCap> = Vec::new();
     for (kind, id) in subjects {
         let rows = sqlx::query(
-            "SELECT id, subject_kind, subject_id, period, limit_tokens, enabled \
+            "SELECT id, subject_kind, subject_id, period, limit_tokens, enabled, \
+                    expires_at, reason, created_by \
                FROM budget_caps \
-              WHERE subject_kind = $1 AND subject_id = $2 AND enabled = TRUE",
+              WHERE subject_kind = $1 AND subject_id = $2 AND enabled = TRUE \
+                AND (expires_at IS NULL OR expires_at > now())",
         )
         .bind(kind.as_str())
         .bind(id)
@@ -856,31 +910,48 @@ pub async fn list_enabled_caps_for_subjects(
     Ok(out)
 }
 
-pub async fn upsert_cap(
-    pool: &PgPool,
-    subject_kind: BudgetSubject,
-    subject_id: Uuid,
-    period: BudgetPeriod,
-    limit_tokens: i64,
-    enabled: bool,
-) -> Result<BudgetCap, sqlx::Error> {
-    if limit_tokens <= 0 {
+/// Insert-or-update payload for `upsert_cap`. Mirrors `UpsertRule`'s
+/// shape so handlers can share validation scaffolding; same override
+/// metadata semantics.
+#[derive(Debug, Clone)]
+pub struct UpsertCap {
+    pub subject_kind: BudgetSubject,
+    pub subject_id: Uuid,
+    pub period: BudgetPeriod,
+    pub limit_tokens: i64,
+    pub enabled: bool,
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub reason: Option<String>,
+    pub created_by: Option<Uuid>,
+}
+
+pub async fn upsert_cap(pool: &PgPool, req: UpsertCap) -> Result<BudgetCap, sqlx::Error> {
+    if req.limit_tokens <= 0 {
         return Err(sqlx::Error::Protocol("limit_tokens must be > 0".into()));
     }
     let row = sqlx::query(
-        "INSERT INTO budget_caps (subject_kind, subject_id, period, limit_tokens, enabled) \
-         VALUES ($1, $2, $3, $4, $5) \
+        "INSERT INTO budget_caps \
+            (subject_kind, subject_id, period, limit_tokens, enabled, \
+             expires_at, reason, created_by) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) \
          ON CONFLICT (subject_kind, subject_id, period) \
          DO UPDATE SET limit_tokens = EXCLUDED.limit_tokens, \
                        enabled      = EXCLUDED.enabled, \
+                       expires_at   = EXCLUDED.expires_at, \
+                       reason       = EXCLUDED.reason, \
+                       created_by   = EXCLUDED.created_by, \
                        updated_at   = now() \
-         RETURNING id, subject_kind, subject_id, period, limit_tokens, enabled",
+         RETURNING id, subject_kind, subject_id, period, limit_tokens, enabled, \
+                   expires_at, reason, created_by",
     )
-    .bind(subject_kind.as_str())
-    .bind(subject_id)
-    .bind(period.as_str())
-    .bind(limit_tokens)
-    .bind(enabled)
+    .bind(req.subject_kind.as_str())
+    .bind(req.subject_id)
+    .bind(req.period.as_str())
+    .bind(req.limit_tokens)
+    .bind(req.enabled)
+    .bind(req.expires_at)
+    .bind(req.reason)
+    .bind(req.created_by)
     .fetch_one(pool)
     .await?;
     row_to_cap(row).ok_or_else(|| sqlx::Error::Protocol("cap row decode failed".into()))
@@ -916,6 +987,11 @@ fn row_to_rule(row: sqlx::postgres::PgRow) -> Option<RateLimitRule> {
         window_secs: row.try_get("window_secs").ok()?,
         max_count: row.try_get("max_count").ok()?,
         enabled: row.try_get("enabled").ok()?,
+        // Override metadata. Queries that don't SELECT these columns
+        // (or run against the pre-002 schema) get None — safe default.
+        expires_at: row.try_get("expires_at").ok(),
+        reason: row.try_get("reason").ok(),
+        created_by: row.try_get("created_by").ok(),
     })
 }
 
@@ -929,7 +1005,101 @@ pub fn row_to_cap(row: sqlx::postgres::PgRow) -> Option<BudgetCap> {
         period,
         limit_tokens: row.try_get("limit_tokens").ok()?,
         enabled: row.try_get("enabled").ok()?,
+        expires_at: row.try_get("expires_at").ok(),
+        reason: row.try_get("reason").ok(),
+        created_by: row.try_get("created_by").ok(),
     })
+}
+
+// ----------------------------------------------------------------------------
+// Per-subject override merge
+//
+// The engine's role-derived constraints (synthesized by
+// `extract_surface_constraints` on each role's policy_document) define
+// the baseline for a user. Administrators can then override specific
+// (surface, metric, window) rules or (surface, period) budgets via the
+// side tables — rows that live in `rate_limit_rules` / `budget_caps`
+// keyed by the user's id rather than a role's.
+//
+// Semantics: each override row REPLACES any matching role-derived
+// entry. That is, if a role would give the user 100 rps and a
+// non-expired user override row says 500 rps, the effective limit is
+// 500 rps — overrides can both tighten AND relax. Budgets are
+// per-period only (no surface column on budget_caps today), so a
+// budget override replaces the same-period budget on BOTH surfaces.
+// Non-matching role entries are preserved untouched.
+// ----------------------------------------------------------------------------
+
+/// Turn a list of rate-limit rules and budget caps (typically the
+/// enabled+active subset from the side tables for one subject) into
+/// the same `SurfaceConstraints` shape role extraction produces, so
+/// the two can be merged without special-casing in callers.
+pub fn side_table_as_constraints(
+    rules: &[RateLimitRule],
+    caps: &[BudgetCap],
+) -> SurfaceConstraints {
+    let mut out = SurfaceConstraints::default();
+    for r in rules {
+        if !r.enabled {
+            continue;
+        }
+        let block = out
+            .block_mut(r.surface)
+            .get_or_insert_with(SurfaceBlock::default);
+        block.rules.push(SurfaceRule {
+            metric: r.metric,
+            window_secs: r.window_secs,
+            max_count: r.max_count,
+            enabled: true,
+        });
+    }
+    for c in caps {
+        if !c.enabled {
+            continue;
+        }
+        // Budget caps have no surface column — a cap override applies
+        // to both gateway surfaces at once. Push into each.
+        for surface in [Surface::AiGateway, Surface::McpGateway] {
+            let block = out
+                .block_mut(surface)
+                .get_or_insert_with(SurfaceBlock::default);
+            block.budgets.push(SurfaceBudget {
+                period: c.period,
+                limit_tokens: c.limit_tokens,
+                enabled: true,
+            });
+        }
+    }
+    out
+}
+
+/// Apply `overrides` on top of a baseline `base` constraint set.
+/// Within each surface block, override entries replace base entries
+/// that share the same key — `(metric, window_secs)` for rules,
+/// `period` for budgets. Entries in `base` that don't match anything
+/// in `overrides` pass through untouched.
+pub fn apply_user_overrides(
+    mut base: SurfaceConstraints,
+    overrides: SurfaceConstraints,
+) -> SurfaceConstraints {
+    apply_block_overrides(&mut base.ai_gateway, overrides.ai_gateway);
+    apply_block_overrides(&mut base.mcp_gateway, overrides.mcp_gateway);
+    base
+}
+
+fn apply_block_overrides(target: &mut Option<SurfaceBlock>, overrides: Option<SurfaceBlock>) {
+    let Some(ov) = overrides else { return };
+    let block = target.get_or_insert_with(SurfaceBlock::default);
+    for ov_rule in ov.rules {
+        block
+            .rules
+            .retain(|r| !(r.metric == ov_rule.metric && r.window_secs == ov_rule.window_secs));
+        block.rules.push(ov_rule);
+    }
+    for ov_budget in ov.budgets {
+        block.budgets.retain(|b| b.period != ov_budget.period);
+        block.budgets.push(ov_budget);
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1162,6 +1332,220 @@ mod tests {
         let ai = merged.ai_gateway.as_ref().unwrap();
         assert_eq!(ai.rules[0].max_count, 100);
         assert!(ai.budgets.is_empty());
+    }
+
+    #[test]
+    fn override_replaces_matching_role_rule() {
+        // Role gives 100 req/min; override bumps to 500.
+        let role = SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![SurfaceRule {
+                    metric: RateMetric::Requests,
+                    window_secs: 60,
+                    max_count: 100,
+                    enabled: true,
+                }],
+                budgets: vec![],
+            }),
+            mcp_gateway: None,
+        };
+        let overrides = SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![SurfaceRule {
+                    metric: RateMetric::Requests,
+                    window_secs: 60,
+                    max_count: 500,
+                    enabled: true,
+                }],
+                budgets: vec![],
+            }),
+            mcp_gateway: None,
+        };
+        let merged = apply_user_overrides(role, overrides);
+        let rules = &merged.ai_gateway.as_ref().unwrap().rules;
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].max_count, 500, "override should replace role");
+    }
+
+    #[test]
+    fn override_tightens_role_rule_when_lower() {
+        // Override strictly below role — same replace semantic, just
+        // the tightening direction. This is the "compromised key"
+        // use case: admin clamps to 1 req/min temporarily.
+        let role = SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![SurfaceRule {
+                    metric: RateMetric::Requests,
+                    window_secs: 60,
+                    max_count: 100,
+                    enabled: true,
+                }],
+                budgets: vec![],
+            }),
+            mcp_gateway: None,
+        };
+        let overrides = SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![SurfaceRule {
+                    metric: RateMetric::Requests,
+                    window_secs: 60,
+                    max_count: 1,
+                    enabled: true,
+                }],
+                budgets: vec![],
+            }),
+            mcp_gateway: None,
+        };
+        let merged = apply_user_overrides(role, overrides);
+        assert_eq!(merged.ai_gateway.unwrap().rules[0].max_count, 1);
+    }
+
+    #[test]
+    fn override_preserves_non_matching_role_rules() {
+        // Role has two rules (requests/min, tokens/day). Override
+        // only touches tokens/day. The requests/min rule must remain.
+        let role = SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![
+                    SurfaceRule {
+                        metric: RateMetric::Requests,
+                        window_secs: 60,
+                        max_count: 100,
+                        enabled: true,
+                    },
+                    SurfaceRule {
+                        metric: RateMetric::Tokens,
+                        window_secs: 86_400,
+                        max_count: 1_000_000,
+                        enabled: true,
+                    },
+                ],
+                budgets: vec![],
+            }),
+            mcp_gateway: None,
+        };
+        let overrides = SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![SurfaceRule {
+                    metric: RateMetric::Tokens,
+                    window_secs: 86_400,
+                    max_count: 5_000_000,
+                    enabled: true,
+                }],
+                budgets: vec![],
+            }),
+            mcp_gateway: None,
+        };
+        let merged = apply_user_overrides(role, overrides);
+        let rules = &merged.ai_gateway.as_ref().unwrap().rules;
+        assert_eq!(rules.len(), 2);
+        let tokens_rule = rules
+            .iter()
+            .find(|r| r.metric == RateMetric::Tokens)
+            .unwrap();
+        assert_eq!(tokens_rule.max_count, 5_000_000);
+        let req_rule = rules
+            .iter()
+            .find(|r| r.metric == RateMetric::Requests)
+            .unwrap();
+        assert_eq!(req_rule.max_count, 100, "untouched rule must survive");
+    }
+
+    #[test]
+    fn override_adds_rule_to_surface_without_role_coverage() {
+        // Role doesn't set an mcp_gateway block at all. An override
+        // for mcp_gateway should still get applied.
+        let role = SurfaceConstraints::default();
+        let overrides = SurfaceConstraints {
+            ai_gateway: None,
+            mcp_gateway: Some(SurfaceBlock {
+                rules: vec![SurfaceRule {
+                    metric: RateMetric::Requests,
+                    window_secs: 60,
+                    max_count: 10,
+                    enabled: true,
+                }],
+                budgets: vec![],
+            }),
+        };
+        let merged = apply_user_overrides(role, overrides);
+        assert_eq!(
+            merged.mcp_gateway.unwrap().rules[0].max_count,
+            10,
+            "override should install onto empty surface"
+        );
+    }
+
+    #[test]
+    fn override_budget_replaces_matching_period() {
+        let role = SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![],
+                budgets: vec![SurfaceBudget {
+                    period: BudgetPeriod::Monthly,
+                    limit_tokens: 1_000_000,
+                    enabled: true,
+                }],
+            }),
+            mcp_gateway: None,
+        };
+        let overrides = SurfaceConstraints {
+            ai_gateway: Some(SurfaceBlock {
+                rules: vec![],
+                budgets: vec![SurfaceBudget {
+                    period: BudgetPeriod::Monthly,
+                    limit_tokens: 5_000_000,
+                    enabled: true,
+                }],
+            }),
+            mcp_gateway: None,
+        };
+        let merged = apply_user_overrides(role, overrides);
+        let budgets = &merged.ai_gateway.as_ref().unwrap().budgets;
+        assert_eq!(budgets.len(), 1);
+        assert_eq!(budgets[0].limit_tokens, 5_000_000);
+    }
+
+    #[test]
+    fn side_table_as_constraints_skips_disabled_rows() {
+        let rule = RateLimitRule {
+            id: Uuid::nil(),
+            subject_kind: RateLimitSubject::User,
+            subject_id: Uuid::nil(),
+            surface: Surface::AiGateway,
+            metric: RateMetric::Requests,
+            window_secs: 60,
+            max_count: 10,
+            enabled: false, // disabled → should not appear in constraints
+            expires_at: None,
+            reason: None,
+            created_by: None,
+        };
+        let out = side_table_as_constraints(&[rule], &[]);
+        assert!(out.ai_gateway.is_none());
+    }
+
+    #[test]
+    fn side_table_budget_applies_to_both_surfaces() {
+        // budget_caps has no surface column so an override must
+        // install itself onto BOTH gateway surfaces.
+        let cap = BudgetCap {
+            id: Uuid::nil(),
+            subject_kind: BudgetSubject::User,
+            subject_id: Uuid::nil(),
+            period: BudgetPeriod::Monthly,
+            limit_tokens: 42,
+            enabled: true,
+            expires_at: None,
+            reason: None,
+            created_by: None,
+        };
+        let out = side_table_as_constraints(&[], &[cap]);
+        assert_eq!(out.ai_gateway.as_ref().unwrap().budgets[0].limit_tokens, 42);
+        assert_eq!(
+            out.mcp_gateway.as_ref().unwrap().budgets[0].limit_tokens,
+            42
+        );
     }
 
     #[test]

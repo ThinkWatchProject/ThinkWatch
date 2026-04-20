@@ -475,6 +475,9 @@ pub async fn get_cost_stats(
                         period: b.period,
                         limit_tokens: b.limit_tokens,
                         enabled: true,
+                        expires_at: None,
+                        reason: None,
+                        created_by: None,
                     })
                     .collect()
             })

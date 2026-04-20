@@ -229,14 +229,40 @@ pub async fn compute_user_surface_constraints(
     pool: &PgPool,
     user_id: Uuid,
 ) -> Result<think_watch_common::limits::SurfaceConstraints, sqlx::Error> {
+    use think_watch_common::limits::{
+        self, BudgetSubject, RateLimitSubject, apply_user_overrides,
+        list_enabled_caps_for_subjects, list_enabled_rules_for_subjects, merge_most_restrictive,
+        side_table_as_constraints,
+    };
+
+    // Step 1 — baseline from the user's merged role policies.
     let docs = load_user_policy_documents(pool, user_id).await?;
     let per_role: Vec<think_watch_common::limits::SurfaceConstraints> = docs
         .iter()
         .map(think_watch_common::limits::extract_surface_constraints)
         .collect();
-    Ok(think_watch_common::limits::merge_most_restrictive(
-        &per_role,
-    ))
+    let role_merged = merge_most_restrictive(&per_role);
+
+    // Step 2 — layer on any active user-scoped overrides from the side
+    // tables. Rows filter out on expires_at / enabled at the SQL level
+    // (see `list_enabled_*_for_subjects`), so what we load here is
+    // already the set of currently-enforceable overrides. An override
+    // REPLACES the role value for its (surface, metric, window) or
+    // (surface, period) slot — admins can both tighten and relax.
+    let rule_overrides =
+        list_enabled_rules_for_subjects(pool, &[(RateLimitSubject::User, user_id)]).await?;
+    let cap_overrides =
+        list_enabled_caps_for_subjects(pool, &[(BudgetSubject::User, user_id)]).await?;
+    let override_constraints = side_table_as_constraints(&rule_overrides, &cap_overrides);
+
+    // Short-circuit the merge when there are no overrides so we skip
+    // the field-by-field replacement work on the overwhelmingly common
+    // "no override set" path. Keeps hot-path cost at roughly +1 query.
+    if override_constraints == limits::SurfaceConstraints::default() {
+        return Ok(role_merged);
+    }
+
+    Ok(apply_user_overrides(role_merged, override_constraints))
 }
 
 /// Check if a namespaced MCP tool name matches any of the allowed patterns.

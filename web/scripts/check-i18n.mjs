@@ -64,6 +64,8 @@ const DYNAMIC_ENUMS = {
   'unifiedLogs.${_}': ['platform', 'audit', 'gateway', 'mcp', 'access', 'app'],
   'unifiedLogs.${_}Desc': ['platform', 'audit', 'gateway', 'mcp', 'access', 'app'],
   'systemStatus.${_}': ['operational', 'degraded', 'down', 'unknown'],
+  'userLimitOverrides.bulk_${_}': ['disable', 'delete'],
+  'userLimitOverrides.expiry_${_}': ['4h', '24h', '7d', '30d', 'custom', 'permanent'],
   // Conditional ternary — enumerate the three literal outcomes.
   "common.${_}": ['healthy', 'down', 'unknown'],
 };
