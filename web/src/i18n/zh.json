@@ -518,7 +518,13 @@
     "inputSchema": "输入模式",
     "noDescription": "无描述",
     "searchPlaceholder": "按名称或描述搜索工具",
-    "toolsFound": "个工具"
+    "toolsFound": "个工具",
+    "col": {
+      "tool": "工具",
+      "server": "服务器",
+      "args": "参数",
+      "description": "描述"
+    }
   },
   "mcpLogs": {
     "title": "MCP 调用日志",

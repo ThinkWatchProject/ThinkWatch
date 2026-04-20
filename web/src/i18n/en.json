@@ -518,7 +518,13 @@
     "inputSchema": "Input Schema",
     "noDescription": "No description",
     "searchPlaceholder": "Search tools by name or description",
-    "toolsFound": "tools"
+    "toolsFound": "tools",
+    "col": {
+      "tool": "Tool",
+      "server": "Server",
+      "args": "Args",
+      "description": "Description"
+    }
   },
   "mcpLogs": {
     "title": "MCP Call Logs",
