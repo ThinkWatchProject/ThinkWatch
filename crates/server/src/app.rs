@@ -664,6 +664,16 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             "/api/admin/users",
             get(handlers::admin::list_users).post(handlers::admin::create_user),
         )
+        // Surface-area mirror of the quorum guard: tells the UI who the
+        // active super admins are so destructive row actions can go
+        // disabled instead of red-toast-on-click. Must come BEFORE the
+        // `/api/admin/users/{id}` route — axum is order-sensitive on
+        // path overlap, and `super-admin-ids` would otherwise be
+        // parsed as an id.
+        .route(
+            "/api/admin/users/super-admin-ids",
+            get(handlers::admin::list_super_admin_ids),
+        )
         .route(
             "/api/admin/users/{id}",
             patch(handlers::admin::update_user).delete(handlers::admin::delete_user),

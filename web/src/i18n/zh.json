@@ -771,6 +771,10 @@
     "created": "创建时间",
     "forceLogout": "强制下线",
     "forceLogoutConfirm": "确定要强制该用户退出所有会话吗？",
+    "guard": {
+      "lastSuperAdmin": "当前是最后一个生效的超级管理员，禁用或删除前请先添加另一位超级管理员。",
+      "bulkLastSuperAdmin": "所选用户会把系统内所有生效的超级管理员一起带走。请先添加新的超级管理员，或从批量选择中移除至少一位超级管理员。"
+    },
     "bulk": {
       "selected": "已选中 {{count}} 个用户",
       "selectAllVisible": "全选当前页",

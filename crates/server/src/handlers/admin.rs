@@ -384,6 +384,55 @@ async fn assert_super_admin_quorum(
     Ok(())
 }
 
+/// Small read-only companion to the quorum guard — surfaces the live
+/// list of active super-admin user ids so the admin UI can disable
+/// destructive actions on whichever user is currently the sole holder,
+/// without waiting for the backend to reject the request. Returning
+/// just the ids (not the user rows) keeps the payload tiny and the
+/// endpoint cheap enough to refetch on every users-list reload.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct SuperAdminIds {
+    pub ids: Vec<uuid::Uuid>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/users/super-admin-ids",
+    tag = "Users",
+    responses((status = 200, description = "Active super-admin user ids", body = SuperAdminIds)),
+    security(("BearerAuth" = []))
+)]
+pub async fn list_super_admin_ids(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<SuperAdminIds>, AppError> {
+    // `users:read` is the same gate the list endpoint uses — anyone
+    // who can see the user table can see the super-admin subset.
+    auth_user.require_permission("users:read")?;
+
+    let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
+        "SELECT DISTINCT u.id FROM users u \
+         JOIN ( \
+            SELECT ra.user_id \
+              FROM rbac_role_assignments ra \
+              JOIN rbac_roles r ON r.id = ra.role_id \
+             WHERE r.name = 'super_admin' \
+            UNION \
+            SELECT tm.user_id \
+              FROM team_members tm \
+              JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
+              JOIN rbac_roles r ON r.id = tra.role_id \
+             WHERE r.name = 'super_admin' \
+         ) s ON s.user_id = u.id \
+         WHERE u.is_active = TRUE AND u.deleted_at IS NULL",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(SuperAdminIds {
+        ids: rows.into_iter().map(|(id,)| id).collect(),
+    }))
+}
+
 /// Apply a set of role assignments to a user atomically inside `tx`.
 /// Every existing row for `user_id` is deleted first, then the new
 /// rows are inserted. Returns the fully-hydrated assignment list for

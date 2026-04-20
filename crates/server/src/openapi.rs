@@ -3,7 +3,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::handlers::{
     access_logs::{AccessLogEntry, AccessLogsResponse},
-    admin::UpdateSettingsRequest,
+    admin::{SuperAdminIds, UpdateSettingsRequest},
     analytics::{CostBreakdown, CostItem, CostStats, CostTotals, UsageRow, UsageStats},
     api_keys::UpdateKeyRequest,
     app_logs::{AppLogEntryResponse, AppLogsResponse},
@@ -96,6 +96,7 @@ use crate::handlers::{
         crate::handlers::admin::delete_user,
         crate::handlers::admin::force_logout_user,
         crate::handlers::admin::reset_user_password,
+        crate::handlers::admin::list_super_admin_ids,
         // Settings
         crate::handlers::admin::get_system_settings,
         crate::handlers::admin::get_oidc_settings,
@@ -231,6 +232,8 @@ use crate::handlers::{
             CreateForwarderRequest, UpdateForwarderRequest, TestResult,
             // Settings
             UpdateSettingsRequest,
+            // Admin users (quorum companion)
+            SuperAdminIds,
         )
     ),
     tags(

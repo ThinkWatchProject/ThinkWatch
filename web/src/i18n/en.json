@@ -771,6 +771,10 @@
     "created": "Created",
     "forceLogout": "Force Logout",
     "forceLogoutConfirm": "Force logout this user from all sessions?",
+    "guard": {
+      "lastSuperAdmin": "This is the last active super admin — add another before disabling or deleting this account.",
+      "bulkLastSuperAdmin": "Selection would remove every active super admin. Add another super admin first, or deselect at least one super admin from the batch."
+    },
     "bulk": {
       "selected": "{{count}} user(s) selected",
       "selectAllVisible": "Select all visible",

@@ -93,6 +93,12 @@ export function UsersPage() {
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [total, setTotal] = useState(0);
+  // Global view of who currently holds the super_admin role. Needed
+  // to disable destructive row actions on whoever is the sole holder,
+  // since the paginated user list can't see users on other pages.
+  // Refetched alongside the users list so it stays in sync with
+  // delete / disable / role-change mutations.
+  const [superAdminIds, setSuperAdminIds] = useState<Set<string>>(new Set());
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
@@ -141,7 +147,7 @@ export function UsersPage() {
         per_page: String(pageSize),
       });
       if (debouncedSearch) params.set('search', debouncedSearch);
-      const [usersRes, rolesRes, permsRes] = await Promise.all([
+      const [usersRes, rolesRes, permsRes, superRes] = await Promise.all([
         api<{ data: User[]; total: number }>(`/api/admin/users?${params.toString()}`, { signal }),
         // Roles list is small and only needed for the picker; fetch
         // once on mount, not on every page/search change.
@@ -154,6 +160,10 @@ export function UsersPage() {
         availablePermissions.length === 0
           ? api<PermissionDef[]>('/api/admin/permissions', { signal }).catch(() => [] as PermissionDef[])
           : Promise.resolve(availablePermissions),
+        // Global super-admin id set, refetched every load so the row
+        // action disable state stays accurate after any mutation.
+        api<{ ids: string[] }>('/api/admin/users/super-admin-ids', { signal })
+          .catch(() => ({ ids: [] as string[] })),
       ]);
       setUsers(
         usersRes.data.map((u) => ({
@@ -162,6 +172,7 @@ export function UsersPage() {
         })),
       );
       setTotal(usersRes.total);
+      setSuperAdminIds(new Set(superRes.ids));
       // Unified picker — system + custom roles all show up together.
       if (availableRoles.length === 0) setAvailableRoles(rolesRes.items);
       if (availablePermissions.length === 0) setAvailablePermissions(permsRes);
@@ -172,6 +183,14 @@ export function UsersPage() {
       setLoading(false);
     }
   };
+
+  /// Would a delete / disable / role-strip on this user drop the
+  /// platform's super-admin quorum to zero? Mirrors the backend
+  /// `assert_super_admin_quorum` check so the UI can grey the action
+  /// out instead of letting the user click and get a 400. The backend
+  /// remains authoritative.
+  const isLastSuperAdmin = (u: User): boolean =>
+    superAdminIds.has(u.id) && superAdminIds.size === 1;
 
   // Debounce the search box so we don't spam the backend on every
   // keystroke. 250ms matches what most admin panels use.
@@ -299,6 +318,21 @@ export function UsersPage() {
   const runBulkAction = async (action: 'activate' | 'deactivate' | 'delete') => {
     const ids = Array.from(selectedUserIds);
     if (ids.length === 0) return;
+
+    // Quorum pre-check: refuse bulk delete / disable that would drain
+    // all active super admins. Backend enforces the same invariant so
+    // the operator can't sneak around this, but catching it here
+    // means we don't partially succeed (2 of 3 deletes commit before
+    // the 3rd hits the 400) — cleaner failure mode.
+    if (action === 'delete' || action === 'deactivate') {
+      const selectedSupers = ids.filter((id) => superAdminIds.has(id)).length;
+      const remainingSupers = superAdminIds.size - selectedSupers;
+      if (remainingSupers < 1) {
+        toast.error(t('users.guard.bulkLastSuperAdmin'));
+        return;
+      }
+    }
+
     setBulkBusy(true);
     const call = (id: string): Promise<void> => {
       if (action === 'delete') return apiDelete(`/api/admin/users/${id}`);
@@ -666,7 +700,24 @@ export function UsersPage() {
                           <DropdownMenuItem onClick={() => setResetConfirmUser(u)}>
                             <KeyRound className="h-4 w-4 mr-2" />{t('users.resetPassword')}
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => setConfirmAction({ type: 'toggle', user: u })}>
+                          {/* Disable toggle + delete when this user is the
+                              sole remaining active super admin — the
+                              backend would reject the request anyway
+                              (see `assert_super_admin_quorum`), but
+                              surfacing it at the menu item level is
+                              more honest than a toast after the click.
+                              Disabling is also blocked because setting
+                              is_active=false on the last super admin
+                              violates the same invariant. */}
+                          <DropdownMenuItem
+                            disabled={u.is_active && isLastSuperAdmin(u)}
+                            onClick={() => setConfirmAction({ type: 'toggle', user: u })}
+                            title={
+                              u.is_active && isLastSuperAdmin(u)
+                                ? t('users.guard.lastSuperAdmin')
+                                : undefined
+                            }
+                          >
                             {u.is_active
                               ? <><Ban className="h-4 w-4 mr-2" />{t('users.deactivate')}</>
                               : <><CheckCircle className="h-4 w-4 mr-2" />{t('users.activate')}</>}
@@ -675,7 +726,16 @@ export function UsersPage() {
                             <LogOutIcon className="h-4 w-4 mr-2" />{t('users.forceLogout')}
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
-                          <DropdownMenuItem className="text-destructive" onClick={() => setConfirmAction({ type: 'delete', user: u })}>
+                          <DropdownMenuItem
+                            className="text-destructive"
+                            disabled={isLastSuperAdmin(u)}
+                            onClick={() => setConfirmAction({ type: 'delete', user: u })}
+                            title={
+                              isLastSuperAdmin(u)
+                                ? t('users.guard.lastSuperAdmin')
+                                : undefined
+                            }
+                          >
                             <Trash2 className="h-4 w-4 mr-2" />{t('users.deleteUser')}
                           </DropdownMenuItem>
                         </DropdownMenuContent>
