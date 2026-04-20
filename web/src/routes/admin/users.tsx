@@ -44,6 +44,8 @@ import { policyToPerms, type PermissionDef, type PolicyDocument } from './roles/
 import { UserLimitsTab } from '@/components/limits/user-limits-tab';
 import { BulkOverrideDialog } from '@/components/limits/bulk-override-dialog';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
+import { Checkbox } from '@/components/ui/checkbox';
+import { toast } from 'sonner';
 import { Gauge } from 'lucide-react';
 
 
@@ -116,6 +118,14 @@ export function UsersPage() {
 
   // Confirm dialogs
   const [confirmAction, setConfirmAction] = useState<{ type: 'logout' | 'delete' | 'toggle'; user: User } | null>(null);
+  // Multi-select bulk actions. Selection is keyed by user id and is
+  // purposefully NOT cleared on page change — an operator might page
+  // to pick up more users of the same bucket before acting. We DO
+  // drop ids that no longer exist in the current list (deleted
+  // users, search filter, etc.) so the counter doesn't drift.
+  const [selectedUserIds, setSelectedUserIds] = useState<Set<string>>(new Set());
+  const [bulkAction, setBulkAction] = useState<'activate' | 'deactivate' | 'delete' | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [confirmLoading, setConfirmLoading] = useState(false);
   const [confirmError, setConfirmError] = useState('');
 
@@ -280,6 +290,50 @@ export function UsersPage() {
     } finally { setConfirmLoading(false); }
   };
 
+  // --- Bulk actions (activate / deactivate / delete) ---
+  // Per-user HTTP calls dispatched in parallel via Promise.allSettled.
+  // We don't batch into a single endpoint because the action-to-
+  // endpoint mapping is 1:1 with existing /api/admin/users/{id}
+  // routes — reusing them means the audit trail, permission gates,
+  // and validation stay on the existing code paths unchanged.
+  const runBulkAction = async (action: 'activate' | 'deactivate' | 'delete') => {
+    const ids = Array.from(selectedUserIds);
+    if (ids.length === 0) return;
+    setBulkBusy(true);
+    const call = (id: string): Promise<void> => {
+      if (action === 'delete') return apiDelete(`/api/admin/users/${id}`);
+      return apiPatch(`/api/admin/users/${id}`, {
+        is_active: action === 'activate',
+      });
+    };
+    const results = await Promise.allSettled(ids.map(call));
+    const ok = results.filter((r) => r.status === 'fulfilled').length;
+    const fail = results.length - ok;
+    if (fail === 0) {
+      toast.success(t('users.bulk.allOk', { count: ok, action: t(`users.bulk.action_${action}` as const) }));
+    } else {
+      // Surface the first failure's message so operators know what
+      // to fix, not just a count.
+      const firstErr = results.find((r) => r.status === 'rejected') as
+        | PromiseRejectedResult
+        | undefined;
+      toast.warning(
+        t('users.bulk.partial', {
+          ok,
+          fail,
+          reason:
+            firstErr?.reason instanceof Error
+              ? firstErr.reason.message
+              : String(firstErr?.reason ?? ''),
+        }),
+      );
+    }
+    setSelectedUserIds(new Set());
+    setBulkAction(null);
+    setBulkBusy(false);
+    await fetchUsers();
+  };
+
   // --- Reset password ---
   const handleResetPassword = async () => {
     if (!resetConfirmUser) return;
@@ -404,6 +458,58 @@ export function UsersPage() {
         </div>
       </div>
 
+      {/* Selection action bar — only rendered when at least one row is
+          selected. Sits above the table so the operator can act without
+          scrolling back to the top. */}
+      {selectedUserIds.size > 0 && (
+        <div className="mb-2 flex items-center justify-between rounded-md border bg-muted/40 px-3 py-2 text-sm">
+          <span>
+            {t('users.bulk.selected', { count: selectedUserIds.size })}
+          </span>
+          <div className="flex items-center gap-1.5">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setBulkAction('activate')}
+              disabled={bulkBusy}
+            >
+              <CheckCircle className="mr-1 h-3.5 w-3.5" />
+              {t('users.bulk.enable')}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setBulkAction('deactivate')}
+              disabled={bulkBusy}
+            >
+              <Ban className="mr-1 h-3.5 w-3.5" />
+              {t('users.bulk.disable')}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="destructive"
+              onClick={() => setBulkAction('delete')}
+              disabled={bulkBusy}
+            >
+              <Trash2 className="mr-1 h-3.5 w-3.5" />
+              {t('users.bulk.delete')}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              onClick={() => setSelectedUserIds(new Set())}
+              disabled={bulkBusy}
+            >
+              {t('users.bulk.clearSelection')}
+            </Button>
+          </div>
+        </div>
+      )}
+
       <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
         <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
           {loading ? (
@@ -425,6 +531,26 @@ export function UsersPage() {
             <Table>
               <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
                 <TableRow>
+                  <TableHead className="w-8">
+                    <Checkbox
+                      aria-label={t('users.bulk.selectAllVisible')}
+                      checked={
+                        filteredUsers.length > 0 &&
+                        filteredUsers.every((u) => selectedUserIds.has(u.id))
+                      }
+                      onCheckedChange={(v) => {
+                        setSelectedUserIds((prev) => {
+                          const next = new Set(prev);
+                          if (v) {
+                            filteredUsers.forEach((u) => next.add(u.id));
+                          } else {
+                            filteredUsers.forEach((u) => next.delete(u.id));
+                          }
+                          return next;
+                        });
+                      }}
+                    />
+                  </TableHead>
                   <TableHead>{t('users.userId')}</TableHead>
                   <TableHead>{t('auth.email')}</TableHead>
                   <TableHead>{t('users.displayName')}</TableHead>
@@ -439,6 +565,20 @@ export function UsersPage() {
               <TableBody>
                 {filteredUsers.map((u) => (
                   <TableRow key={u.id} className={!u.is_active ? 'opacity-50' : undefined}>
+                    <TableCell className="w-8">
+                      <Checkbox
+                        aria-label={t('users.bulk.selectRow')}
+                        checked={selectedUserIds.has(u.id)}
+                        onCheckedChange={() => {
+                          setSelectedUserIds((prev) => {
+                            const next = new Set(prev);
+                            if (next.has(u.id)) next.delete(u.id);
+                            else next.add(u.id);
+                            return next;
+                          });
+                        }}
+                      />
+                    </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1">
                         <span
@@ -686,6 +826,33 @@ export function UsersPage() {
           </Tabs>
         </DialogContent>
       </Dialog>
+
+      {/* Bulk confirm */}
+      <ConfirmDialog
+        open={bulkAction !== null}
+        onOpenChange={(open) => {
+          if (!open && !bulkBusy) setBulkAction(null);
+        }}
+        title={
+          bulkAction === 'delete'
+            ? t('users.bulk.confirmDeleteTitle')
+            : bulkAction === 'deactivate'
+              ? t('users.bulk.confirmDisableTitle')
+              : t('users.bulk.confirmEnableTitle')
+        }
+        description={
+          bulkAction === 'delete'
+            ? t('users.bulk.confirmDeleteBody', { count: selectedUserIds.size })
+            : bulkAction === 'deactivate'
+              ? t('users.bulk.confirmDisableBody', { count: selectedUserIds.size })
+              : t('users.bulk.confirmEnableBody', { count: selectedUserIds.size })
+        }
+        variant={bulkAction === 'delete' ? 'destructive' : 'default'}
+        loading={bulkBusy}
+        onConfirm={async () => {
+          if (bulkAction) await runBulkAction(bulkAction);
+        }}
+      />
 
       {/* Confirm dialog (logout / delete / toggle) */}
       <ConfirmDialog
