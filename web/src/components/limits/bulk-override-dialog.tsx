@@ -172,10 +172,6 @@ export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogPro
       toast.error(t('userLimitOverrides.expiryInvalid'));
       return;
     }
-    if (expiry !== null && reason.trim().length < 10) {
-      toast.error(t('userLimitOverrides.reasonRequired'));
-      return;
-    }
     const targets = Array.from(selected).map((id) => ({ kind: 'user', id }));
 
     setBusy(true);
@@ -449,9 +445,6 @@ export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogPro
           <div className="space-y-0.5">
             <Label className="text-[10px] text-muted-foreground">
               {t('userLimitOverrides.col.reason')}
-              {expiryPreset !== 'permanent' && (
-                <span className="ml-1 text-destructive">*</span>
-              )}
             </Label>
             <Textarea
               value={reason}

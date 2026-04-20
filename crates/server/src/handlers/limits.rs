@@ -48,9 +48,8 @@ use crate::middleware::auth_guard::AuthUser;
 /// extend. Anything longer is almost certainly a "permanent" change
 /// wearing the wrong hat — the operator should edit the role instead.
 const MAX_OVERRIDE_HORIZON_DAYS: i64 = 90;
-/// Minimum chars the operator must supply as justification. Short
-/// enough not to be annoying, long enough to discourage "test" and ".".
-const MIN_REASON_LEN: usize = 10;
+/// Upper bound on the reason text. Reason is optional; when supplied
+/// we just clip to a sane length so the audit JSON doesn't balloon.
 const MAX_REASON_LEN: usize = 500;
 
 // ----------------------------------------------------------------------------
@@ -243,28 +242,18 @@ fn validate_override_meta(
             )));
         }
     }
+    // Reason is optional — when supplied, trim and cap its length so
+    // the audit JSON stays bounded. Empty / whitespace-only strings
+    // collapse to None.
     let trimmed = reason
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    if expires_at.is_some() {
-        match &trimmed {
-            Some(r) if r.len() >= MIN_REASON_LEN && r.len() <= MAX_REASON_LEN => {}
-            Some(r) if r.len() < MIN_REASON_LEN => {
-                return Err(AppError::BadRequest(format!(
-                    "reason must be at least {MIN_REASON_LEN} characters"
-                )));
-            }
-            Some(_) => {
-                return Err(AppError::BadRequest(format!(
-                    "reason must be at most {MAX_REASON_LEN} characters"
-                )));
-            }
-            None => {
-                return Err(AppError::BadRequest(
-                    "reason is required when expires_at is set".into(),
-                ));
-            }
-        }
+    if let Some(r) = &trimmed
+        && r.len() > MAX_REASON_LEN
+    {
+        return Err(AppError::BadRequest(format!(
+            "reason must be at most {MAX_REASON_LEN} characters"
+        )));
     }
     Ok((expires_at, trimmed))
 }
@@ -775,23 +764,35 @@ mod tests {
     }
 
     #[test]
-    fn override_meta_requires_reason_when_expiring() {
+    fn override_meta_reason_is_optional_even_with_expiry() {
+        // Reason is a nice-to-have for the audit trail but not
+        // mandatory — operators often set quick temporary boosts
+        // without ceremony, and the action ID alone is enough to
+        // reconstruct intent.
         let future = Utc::now() + Duration::hours(1);
-        let err = validate_override_meta(Some(future), None).unwrap_err();
+        let (out_exp, out_reason) = validate_override_meta(Some(future), None).unwrap();
+        assert_eq!(out_exp, Some(future));
+        assert!(out_reason.is_none());
+    }
+
+    #[test]
+    fn override_meta_rejects_oversized_reason() {
+        let future = Utc::now() + Duration::hours(1);
+        let long = "x".repeat(MAX_REASON_LEN + 1);
+        let err = validate_override_meta(Some(future), Some(long)).unwrap_err();
         match err {
-            AppError::BadRequest(m) => assert!(m.contains("reason"), "got: {m}"),
+            AppError::BadRequest(m) => assert!(m.contains("most"), "got: {m}"),
             other => panic!("expected BadRequest, got {other:?}"),
         }
     }
 
     #[test]
-    fn override_meta_rejects_short_reason() {
+    fn override_meta_trims_whitespace_reason_to_none() {
+        // Whitespace-only reason strings collapse to None so they
+        // don't pollute the audit log with `reason: " "`.
         let future = Utc::now() + Duration::hours(1);
-        let err = validate_override_meta(Some(future), Some("nope".into())).unwrap_err();
-        match err {
-            AppError::BadRequest(m) => assert!(m.contains("reason"), "got: {m}"),
-            other => panic!("expected BadRequest, got {other:?}"),
-        }
+        let (_, out_reason) = validate_override_meta(Some(future), Some("   ".into())).unwrap();
+        assert!(out_reason.is_none());
     }
 
     #[test]
@@ -805,9 +806,6 @@ mod tests {
 
     #[test]
     fn override_meta_no_expiry_allowed() {
-        // Permanent override with no reason is still valid at this
-        // layer — the UI nudges operators, the validator doesn't
-        // force it when expires_at is None.
         let (exp, reason) = validate_override_meta(None, None).unwrap();
         assert!(exp.is_none());
         assert!(reason.is_none());

@@ -932,10 +932,6 @@ function OverrideDrawer({
       toast.error(t('userLimitOverrides.expiryInvalid'));
       return;
     }
-    if (expiry !== null && reason.trim().length < 10) {
-      toast.error(t('userLimitOverrides.reasonRequired'));
-      return;
-    }
     setBusy(true);
     try {
       if (kind === 'rule') {
@@ -1139,9 +1135,6 @@ function OverrideDrawer({
         <div className="space-y-0.5">
           <Label className="text-[10px] text-muted-foreground">
             {t('userLimitOverrides.col.reason')}
-            {expiryPreset !== 'permanent' && (
-              <span className="ml-1 text-destructive">*</span>
-            )}
           </Label>
           <Textarea
             value={reason}
