@@ -1,20 +1,21 @@
 // ============================================================================
 // Bulk override dialog
 //
-// Triggered from the users list toolbar. Operator picks N users +
-// spec one override → we fire a single POST
-// /api/admin/limits/bulk/{rules|budgets} and render per-user
-// outcomes so partial failures are explicit.
+// Receives a pre-selected set of user ids from the users list's
+// multi-select and lets the operator spec one override to apply
+// across all of them in a single round-trip. No user picker inside
+// the dialog — that's the users list's job, and duplicating it here
+// meant operators had to re-find users they'd already checked.
 //
-// Design note: the override meta (expires_at + reason) is validated
-// once on the server for the whole batch, so this dialog shares its
-// form shape with the single-user inline form — same field set,
-// different endpoint.
+// On submit we fire one POST to
+//   /api/admin/limits/bulk/{rules|budgets}
+// with the same override meta (expires_at + reason) as the per-user
+// form. The backend validates the spec once, then upserts per target
+// independently; partial failures surface as per-user outcome rows.
 // ============================================================================
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Search, X } from 'lucide-react';
 import {
   Dialog,
   DialogContent,
@@ -27,9 +28,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
-import { Checkbox } from '@/components/ui/checkbox';
 import { Textarea } from '@/components/ui/textarea';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import {
   Select,
   SelectContent,
@@ -37,11 +36,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { api, apiPost } from '@/lib/api';
+import { apiPost } from '@/lib/api';
 import { toast } from 'sonner';
 
 // ----------------------------------------------------------------------------
-// Static option lists — mirror the per-user form and the backend.
+// Option lists — mirror the per-user form and the backend.
 // ----------------------------------------------------------------------------
 
 type Surface = 'ai_gateway' | 'mcp_gateway';
@@ -68,12 +67,6 @@ const EXPIRY_PRESETS: { key: string; hours: number | null }[] = [
   { key: 'permanent', hours: null },
 ];
 
-interface UserLite {
-  id: string;
-  email: string;
-  display_name?: string | null;
-}
-
 interface BulkOutcome {
   subject_kind: string;
   subject_id: string;
@@ -87,16 +80,28 @@ interface BulkApplyResponse {
   error_count: number;
 }
 
+/// `targetUserIds` comes from the users list selection. `userLookup`
+/// is an optional id → email map so outcome rows can show something
+/// more readable than a UUID fragment; if omitted we fall back to
+/// the short id.
 interface BulkOverrideDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  targetUserIds: string[];
+  userLookup?: Map<string, { email: string; display_name?: string | null }>;
+  /// Fired after a successful batch so the caller can refetch lists
+  /// etc. Not required.
+  onApplied?: () => void;
 }
 
-export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogProps) {
+export function BulkOverrideDialog({
+  open,
+  onOpenChange,
+  targetUserIds,
+  userLookup,
+  onApplied,
+}: BulkOverrideDialogProps) {
   const { t } = useTranslation();
-  const [users, setUsers] = useState<UserLite[]>([]);
-  const [search, setSearch] = useState('');
-  const [selected, setSelected] = useState<Set<string>>(new Set());
   const [kind, setKind] = useState<'rule' | 'cap'>('rule');
   const [surface, setSurface] = useState<Surface>('ai_gateway');
   const [metric, setMetric] = useState<Metric>('requests');
@@ -109,40 +114,22 @@ export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogPro
   const [busy, setBusy] = useState(false);
   const [outcomes, setOutcomes] = useState<BulkOutcome[] | null>(null);
 
-  const reset = useCallback(() => {
-    setSelected(new Set());
-    setSearch('');
+  // Reset form state each time the dialog opens — stale values from a
+  // prior session would be confusing, and the spec is usually
+  // different for each cohort anyway.
+  useEffect(() => {
+    if (!open) return;
+    setKind('rule');
+    setSurface('ai_gateway');
+    setMetric('requests');
+    setWindowSecs(3600);
+    setPeriod('monthly');
     setValue('');
     setExpiryPreset('7d');
     setCustomExpiry('');
     setReason('');
     setOutcomes(null);
-  }, []);
-
-  // Lazy load users only when the dialog opens so the users list
-  // page stays snappy. Uses the existing admin users endpoint.
-  useEffect(() => {
-    if (!open) return;
-    api<{ items: UserLite[] }>('/api/admin/users?limit=500&offset=0')
-      .then((r) => setUsers(r.items))
-      .catch((e) =>
-        toast.error(e instanceof Error ? e.message : t('common.operationFailed')),
-      );
-  }, [open, t]);
-
-  useEffect(() => {
-    if (!open) reset();
-  }, [open, reset]);
-
-  const filteredUsers = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    if (!q) return users;
-    return users.filter(
-      (u) =>
-        u.email.toLowerCase().includes(q) ||
-        (u.display_name ?? '').toLowerCase().includes(q),
-    );
-  }, [users, search]);
+  }, [open]);
 
   const resolveExpiry = (): string | null | 'invalid' => {
     if (expiryPreset === 'permanent') return null;
@@ -158,7 +145,7 @@ export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogPro
   };
 
   const submit = async () => {
-    if (selected.size === 0) {
+    if (targetUserIds.length === 0) {
       toast.error(t('bulkOverride.pickAtLeastOne'));
       return;
     }
@@ -172,7 +159,7 @@ export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogPro
       toast.error(t('userLimitOverrides.expiryInvalid'));
       return;
     }
-    const targets = Array.from(selected).map((id) => ({ kind: 'user', id }));
+    const targets = targetUserIds.map((id) => ({ kind: 'user', id }));
 
     setBusy(true);
     setOutcomes(null);
@@ -198,13 +185,17 @@ export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogPro
               reason: reason.trim() || null,
             };
       const path =
-        kind === 'rule' ? '/api/admin/limits/bulk/rules' : '/api/admin/limits/bulk/budgets';
+        kind === 'rule'
+          ? '/api/admin/limits/bulk/rules'
+          : '/api/admin/limits/bulk/budgets';
       const res = await apiPost<BulkApplyResponse>(path, body);
       setOutcomes(res.outcomes);
       if (res.error_count === 0) {
-        toast.success(
-          t('bulkOverride.allOk', { count: res.success_count }),
-        );
+        toast.success(t('bulkOverride.allOk', { count: res.success_count }));
+        // Auto-close on clean success — operator wants to go back to
+        // their workflow, not stare at a wall of ✓s.
+        onOpenChange(false);
+        onApplied?.();
       } else {
         toast.warning(
           t('bulkOverride.partial', {
@@ -212,6 +203,7 @@ export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogPro
             fail: res.error_count,
           }),
         );
+        onApplied?.();
       }
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t('common.operationFailed'));
@@ -220,91 +212,48 @@ export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogPro
     }
   };
 
-  const toggleUser = (id: string) => {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
+  // Show up to 8 targets inline as chips so the operator can double-
+  // check before hitting apply; past that, collapse to "+ N more"
+  // to keep the dialog compact.
+  const inlinePreview = targetUserIds.slice(0, 8);
+  const overflow = Math.max(0, targetUserIds.length - inlinePreview.length);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+      <DialogContent className="sm:max-w-xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{t('bulkOverride.title')}</DialogTitle>
+          <DialogTitle>
+            {t('bulkOverride.titleForCount', { count: targetUserIds.length })}
+          </DialogTitle>
           <DialogDescription>{t('bulkOverride.description')}</DialogDescription>
         </DialogHeader>
 
-        {/* Step 1: pick users */}
-        <div className="space-y-2">
-          <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            {t('bulkOverride.step1', { selected: selected.size })}
+        {/* Target summary — confirmation chip row instead of a full
+            picker, since the selection already happened on the users
+            list. */}
+        <div className="rounded-md border bg-muted/30 px-3 py-2">
+          <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
+            {t('bulkOverride.targets')}
           </Label>
-          <div className="relative">
-            <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder={t('bulkOverride.searchPlaceholder')}
-              className="pl-7 text-xs"
-              style={{ height: 28 }}
-            />
+          <div className="mt-1 flex flex-wrap gap-1">
+            {inlinePreview.map((id) => {
+              const u = userLookup?.get(id);
+              return (
+                <Badge key={id} variant="secondary" className="font-mono text-[11px]">
+                  {u?.email ?? id.slice(0, 8)}
+                </Badge>
+              );
+            })}
+            {overflow > 0 && (
+              <Badge variant="outline" className="text-[11px]">
+                +{overflow}
+              </Badge>
+            )}
           </div>
-          <ScrollArea className="h-40 rounded-md border">
-            <ul className="divide-y text-xs">
-              {filteredUsers.map((u) => (
-                <li
-                  key={u.id}
-                  className="flex items-center gap-2 px-2 py-1.5 hover:bg-muted/30"
-                >
-                  <Checkbox
-                    checked={selected.has(u.id)}
-                    onCheckedChange={() => toggleUser(u.id)}
-                  />
-                  <span className="flex-1 font-mono text-[11px]">{u.email}</span>
-                  {u.display_name && (
-                    <span className="text-muted-foreground">{u.display_name}</span>
-                  )}
-                </li>
-              ))}
-              {filteredUsers.length === 0 && (
-                <li className="px-2 py-4 text-center italic text-muted-foreground">
-                  {t('common.noResults')}
-                </li>
-              )}
-            </ul>
-          </ScrollArea>
-          {selected.size > 0 && (
-            <div className="flex flex-wrap gap-1">
-              {Array.from(selected).slice(0, 10).map((id) => {
-                const u = users.find((x) => x.id === id);
-                return (
-                  <Badge key={id} variant="secondary" className="gap-1 pr-1">
-                    {u?.email ?? id.slice(0, 8)}
-                    <button
-                      type="button"
-                      className="ml-1 rounded-sm hover:bg-muted"
-                      onClick={() => toggleUser(id)}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </Badge>
-                );
-              })}
-              {selected.size > 10 && (
-                <Badge variant="outline">+ {selected.size - 10}</Badge>
-              )}
-            </div>
-          )}
         </div>
 
-        {/* Step 2: spec override */}
+        {/* Override spec */}
         <div className="space-y-2">
-          <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            {t('bulkOverride.step2')}
-          </Label>
           <div className="flex items-center gap-3">
             <Label className="text-xs">{t('userLimitOverrides.col.type')}</Label>
             <Select value={kind} onValueChange={(v) => setKind(v as 'rule' | 'cap')}>
@@ -456,17 +405,18 @@ export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogPro
           </div>
         </div>
 
-        {/* Outcomes after submission */}
+        {/* Partial-failure outcomes stay rendered so the operator can
+            see which users missed the override and why. */}
         {outcomes && (
           <div className="space-y-1">
-            <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            <Label className="text-[10px] uppercase tracking-wider text-muted-foreground">
               {t('bulkOverride.outcomes')}
             </Label>
             <div className="max-h-40 overflow-y-auto rounded-md border text-xs">
               <table className="w-full">
                 <tbody className="divide-y">
                   {outcomes.map((o) => {
-                    const u = users.find((x) => x.id === o.subject_id);
+                    const u = userLookup?.get(o.subject_id);
                     return (
                       <tr key={o.subject_id}>
                         <td className="px-2 py-1 font-mono text-[11px]">
@@ -489,13 +439,16 @@ export function BulkOverrideDialog({ open, onOpenChange }: BulkOverrideDialogPro
         )}
 
         <DialogFooter>
-          <Button variant="outline" onClick={() => onOpenChange(false)}>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
             {t('common.close')}
           </Button>
-          <Button onClick={submit} disabled={busy || selected.size === 0}>
+          <Button
+            onClick={submit}
+            disabled={busy || targetUserIds.length === 0}
+          >
             {busy
               ? t('common.loading')
-              : t('bulkOverride.submit', { count: selected.size })}
+              : t('bulkOverride.submit', { count: targetUserIds.length })}
           </Button>
         </DialogFooter>
       </DialogContent>

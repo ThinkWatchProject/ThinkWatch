@@ -423,10 +423,6 @@ export function UsersPage() {
           <p className="text-muted-foreground">{t('users.subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={() => setBulkOverrideOpen(true)}>
-            <Gauge className="h-4 w-4" />
-            {t('bulkOverride.openButton')}
-          </Button>
           <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) resetCreateForm(); }}>
             <DialogTrigger asChild>
               <Button><Plus className="h-4 w-4" />{t('users.addUser')}</Button>
@@ -471,7 +467,23 @@ export function UsersPage() {
         </div>
       </div>
 
-      <BulkOverrideDialog open={bulkOverrideOpen} onOpenChange={setBulkOverrideOpen} />
+      <BulkOverrideDialog
+        open={bulkOverrideOpen}
+        onOpenChange={setBulkOverrideOpen}
+        targetUserIds={Array.from(selectedUserIds)}
+        // Build the lookup lazily so it only exists while the dialog
+        // is open — avoids a stale reference in memory on every render.
+        userLookup={
+          bulkOverrideOpen
+            ? new Map(
+                users.map((u) => [
+                  u.id,
+                  { email: u.email, display_name: u.display_name },
+                ]),
+              )
+            : undefined
+        }
+      />
 
       {error && (
         <Alert variant="destructive" className="mb-4">
@@ -530,6 +542,16 @@ export function UsersPage() {
             >
               <Trash2 className="mr-1 h-3.5 w-3.5" />
               {t('users.bulk.delete')}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() => setBulkOverrideOpen(true)}
+              disabled={bulkBusy}
+            >
+              <Gauge className="mr-1 h-3.5 w-3.5" />
+              {t('users.bulk.applyOverride')}
             </Button>
             <Button
               type="button"

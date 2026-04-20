@@ -659,14 +659,11 @@
     "surfaceShort_console": "控制台"
   },
   "bulkOverride": {
-    "openButton": "批量覆盖",
-    "title": "给多个用户下发同一个覆盖",
-    "description": "选中用户、指定一条覆盖配置，系统会对每位目标用户 upsert 同样的覆盖行；到期与说明统一应用。",
-    "step1": "1. 选中目标用户（已选 {{selected}} 人）",
-    "step2": "2. 指定覆盖内容",
-    "searchPlaceholder": "按邮箱或姓名搜索…",
-    "pickAtLeastOne": "请至少选中一个用户",
-    "submit": "下发给 {{count}} 位用户",
+    "titleForCount": "为 {{count}} 位用户应用覆盖",
+    "description": "一条覆盖配置，对每位选中用户 upsert 同样的行；到期与说明统一应用。",
+    "targets": "目标用户",
+    "pickAtLeastOne": "请先在表格中勾选至少一位用户",
+    "submit": "应用到 {{count}} 位用户",
     "outcomes": "执行结果",
     "allOk": "{{count}} 条覆盖全部应用成功",
     "partial": "{{ok}} 条成功 · {{fail}} 条失败 — 详见下表"
@@ -783,6 +780,7 @@
       "enable": "启用",
       "disable": "禁用",
       "delete": "删除",
+      "applyOverride": "应用覆盖",
       "action_activate": "已启用",
       "action_deactivate": "已禁用",
       "action_delete": "已删除",

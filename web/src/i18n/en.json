@@ -659,14 +659,11 @@
     "surfaceShort_console": "Console"
   },
   "bulkOverride": {
-    "openButton": "Bulk override",
-    "title": "Apply override to many users",
-    "description": "Pick users, spec one override, and the same row is upserted against each selected subject. Expiry and reason apply uniformly.",
-    "step1": "1. Select target users ({{selected}} selected)",
-    "step2": "2. Specify the override",
-    "searchPlaceholder": "Search by email or name…",
-    "pickAtLeastOne": "Select at least one user",
-    "submit": "Apply to {{count}} users",
+    "titleForCount": "Apply override to {{count}} user(s)",
+    "description": "One override spec, upserted against each selected user. Expiry and reason apply uniformly.",
+    "targets": "Targets",
+    "pickAtLeastOne": "Select at least one user from the table first",
+    "submit": "Apply to {{count}} user(s)",
     "outcomes": "Outcomes",
     "allOk": "All {{count}} overrides applied successfully",
     "partial": "{{ok}} succeeded, {{fail}} failed — see outcomes below"
@@ -783,6 +780,7 @@
       "enable": "Enable",
       "disable": "Disable",
       "delete": "Delete",
+      "applyOverride": "Apply override",
       "action_activate": "Enabled",
       "action_deactivate": "Disabled",
       "action_delete": "Deleted",
