@@ -29,4 +29,5 @@ pub mod test_rate_limit;
 pub mod time_range;
 pub mod trace;
 pub mod usage_license;
+pub mod user_limits;
 pub mod webhook_outbox;

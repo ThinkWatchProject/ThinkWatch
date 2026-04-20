@@ -35,6 +35,10 @@ use crate::handlers::{
     teams::{
         AddMemberRequest, CreateTeamRequest, Team, TeamMemberRow, TeamWithCount, UpdateTeamRequest,
     },
+    user_limits::{
+        EffectiveCap, EffectiveRule, LimitsAuditEvent, LimitsDashboard, ResetCounterRequest,
+        ResetCounterResponse, UsageDay,
+    },
 };
 
 /// OpenAPI document covering the ThinkWatch console API (port 3001).
@@ -147,6 +151,8 @@ use crate::handlers::{
         crate::handlers::limits_bulk::bulk_delete_rules,
         crate::handlers::limits_bulk::bulk_disable_caps,
         crate::handlers::limits_bulk::bulk_delete_caps,
+        crate::handlers::user_limits::get_limits_dashboard,
+        crate::handlers::user_limits::reset_user_counter,
         // Analytics
         crate::handlers::analytics::get_usage_stats,
         crate::handlers::analytics::get_usage,
@@ -205,6 +211,9 @@ use crate::handlers::{
             // Limits — bulk
             BulkApplyRuleRequest, BulkApplyCapRequest, BulkApplyResponse, BulkOutcome,
             BulkIdsRequest, BulkIdsResponse, BulkIdsOutcome, SubjectRef,
+            // Limits — per-user dashboard
+            LimitsDashboard, EffectiveRule, EffectiveCap, UsageDay, LimitsAuditEvent,
+            ResetCounterRequest, ResetCounterResponse,
             // Analytics
             UsageStats, UsageRow, CostStats, CostBreakdown, CostItem, CostTotals,
             // Dashboard

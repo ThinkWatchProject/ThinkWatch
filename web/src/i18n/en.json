@@ -711,9 +711,51 @@
       "enabled": "Status"
     }
   },
+  "userLimitsTab": {
+    "effectiveTitle": "Effective limits",
+    "effectiveHint": "What's actually enforced for this user right now — role defaults merged with any active per-user overrides.",
+    "noEffectiveLimits": "No limits apply. This user is unrestricted until a role or override defines one.",
+    "usageTitle": "Usage · last 7 days",
+    "usageHint": "Total weighted tokens per day from gateway_logs (UTC).",
+    "auditTitle": "Recent limit changes",
+    "auditHint": "Last 20 events touching this user's rate rules or budget caps.",
+    "overrideThis": "Override…",
+    "editOverride": "Edit",
+    "resetAction": "Reset counter",
+    "resetSuccess": "Counter reset ({{n}} keys cleared)",
+    "confirmResetTitle": "Reset this counter?",
+    "confirmResetBody": "Clears the Redis keys backing {{label}}. The user's current-window usage drops to zero immediately.",
+    "bulkSuccess": "{{action}} applied to {{count}} overrides",
+    "source_role": "role",
+    "source_override": "override",
+    "budgetScope": "budget · {{period}}",
+    "col": {
+      "source": "Source",
+      "scope": "Scope",
+      "limit": "Limit",
+      "usage": "Usage",
+      "expires": "Expires"
+    },
+    "drawer": {
+      "createTitle": "Create override",
+      "editTitle": "Edit override",
+      "roleDefaultHint": "Role default: {{value}}"
+    },
+    "audit": {
+      "when": "When",
+      "action": "Action",
+      "actor": "Actor",
+      "detail": "Detail"
+    }
+  },
   "users": {
     "title": "Users",
     "subtitle": "Manage user accounts",
+    "tab": {
+      "basic": "Basic",
+      "access": "Access",
+      "limits": "Limits"
+    },
     "addUser": "Add User",
     "displayName": "Display Name",
     "role": "Role",

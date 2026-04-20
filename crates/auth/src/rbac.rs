@@ -216,11 +216,31 @@ pub async fn compute_user_resource_limits(
     })
 }
 
+/// Role-only merged surface constraints — the baseline before any
+/// per-user overrides are layered on. Split out from
+/// `compute_user_surface_constraints` so callers that need both the
+/// pre-override and post-override view (the admin dashboard) can avoid
+/// re-running the role document load.
+pub async fn compute_user_role_constraints(
+    pool: &PgPool,
+    user_id: Uuid,
+) -> Result<think_watch_common::limits::SurfaceConstraints, sqlx::Error> {
+    let docs = load_user_policy_documents(pool, user_id).await?;
+    let per_role: Vec<think_watch_common::limits::SurfaceConstraints> = docs
+        .iter()
+        .map(think_watch_common::limits::extract_surface_constraints)
+        .collect();
+    Ok(think_watch_common::limits::merge_most_restrictive(
+        &per_role,
+    ))
+}
+
 /// Aggregate surface constraints from policy_documents across every
 /// role assigned to `user_id` (direct + team-inherited) using "most
 /// restrictive wins": per `(surface, metric, window_secs)` take the
 /// MIN `max_count`; per `(surface, period)` take the MIN
-/// `limit_tokens`. Disabled or non-positive entries are ignored.
+/// `limit_tokens`. Disabled or non-positive entries are ignored, then
+/// any active side-table overrides for the user are applied on top.
 ///
 /// Shared by the AI gateway and MCP gateway request paths — they both
 /// call this once per request and feed the result into the rate-limit
@@ -231,17 +251,11 @@ pub async fn compute_user_surface_constraints(
 ) -> Result<think_watch_common::limits::SurfaceConstraints, sqlx::Error> {
     use think_watch_common::limits::{
         self, BudgetSubject, RateLimitSubject, apply_user_overrides,
-        list_enabled_caps_for_subjects, list_enabled_rules_for_subjects, merge_most_restrictive,
-        side_table_as_constraints,
+        list_enabled_caps_for_subjects, list_enabled_rules_for_subjects, side_table_as_constraints,
     };
 
     // Step 1 — baseline from the user's merged role policies.
-    let docs = load_user_policy_documents(pool, user_id).await?;
-    let per_role: Vec<think_watch_common::limits::SurfaceConstraints> = docs
-        .iter()
-        .map(think_watch_common::limits::extract_surface_constraints)
-        .collect();
-    let role_merged = merge_most_restrictive(&per_role);
+    let role_merged = compute_user_role_constraints(pool, user_id).await?;
 
     // Step 2 — layer on any active user-scoped overrides from the side
     // tables. Rows filter out on expires_at / enabled at the SQL level

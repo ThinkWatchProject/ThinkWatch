@@ -66,6 +66,7 @@ const DYNAMIC_ENUMS = {
   'systemStatus.${_}': ['operational', 'degraded', 'down', 'unknown'],
   'userLimitOverrides.bulk_${_}': ['disable', 'delete'],
   'userLimitOverrides.expiry_${_}': ['4h', '24h', '7d', '30d', 'custom', 'permanent'],
+  'userLimitsTab.source_${_}': ['role', 'override'],
   // Conditional ternary — enumerate the three literal outcomes.
   "common.${_}": ['healthy', 'down', 'unknown'],
 };

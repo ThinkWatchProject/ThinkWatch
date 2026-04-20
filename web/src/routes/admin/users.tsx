@@ -41,9 +41,9 @@ import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { DataTablePagination } from '@/components/data-table-pagination';
 import { policyToPerms, type PermissionDef, type PolicyDocument } from './roles/types';
-import { UserLimitOverrides } from '@/components/limits/user-limit-overrides';
+import { UserLimitsTab } from '@/components/limits/user-limits-tab';
 import { BulkOverrideDialog } from '@/components/limits/bulk-override-dialog';
-import { Separator } from '@/components/ui/separator';
+import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Gauge } from 'lucide-react';
 
 
@@ -95,6 +95,9 @@ export function UsersPage() {
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
   const [bulkOverrideOpen, setBulkOverrideOpen] = useState(false);
+  // Active tab in the user-edit dialog. "limits" tab hides the save
+  // footer because limits edits commit via their own inline actions.
+  const [editTab, setEditTab] = useState<'basic' | 'access' | 'limits'>('basic');
   const [formError, setFormError] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [email, setEmail] = useState('');
@@ -555,80 +558,132 @@ export function UsersPage() {
         </div>
       </Card>
 
-      {/* Edit dialog */}
-      <Dialog open={editOpen} onOpenChange={(open) => { setEditOpen(open); if (!open) setEditUser(null); }}>
-        <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
+      {/* Edit dialog — three tabs:
+          · basic   — email + display name
+          · access  — role assignments + teams + effective perms
+          · limits  — the new UserLimitsTab (effective policy + usage + audit)
+          The form wraps the basic/access tabs so Save commits both.
+          Limits has its own inline actions so the footer is hidden
+          there. */}
+      <Dialog
+        open={editOpen}
+        onOpenChange={(open) => {
+          setEditOpen(open);
+          if (!open) {
+            setEditUser(null);
+            setEditTab('basic');
+          }
+        }}
+      >
+        <DialogContent className="sm:max-w-3xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('users.editUser')}</DialogTitle>
             <DialogDescription>{t('users.editDescription')}</DialogDescription>
           </DialogHeader>
-          <form onSubmit={handleEdit} className="space-y-4">
-            {editError && <Alert variant="destructive"><AlertCircle className="h-4 w-4" /><AlertDescription>{editError}</AlertDescription></Alert>}
-            <div className="space-y-2">
-              <Label>{t('auth.email')}</Label>
-              <Input value={editUser?.email ?? ''} disabled />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-name">{t('users.displayName')}</Label>
-              <Input id="edit-name" value={editName} onChange={(e) => setEditName(e.target.value)} required />
-            </div>
-            <RoleAssignmentEditor
-              value={editAssignments}
-              onChange={setEditAssignments}
-              availableRoles={availableRoles}
-              availableTeams={availableTeams}
-              roleLabel={roleLabel}
-            />
-            <div className="space-y-2">
-              <Label>{t('users.teams')}</Label>
-              <p className="text-xs text-muted-foreground">{t('users.teamsHint')}</p>
-              <div className="flex flex-wrap gap-1">
-                {editTeamIds.map((tid) => {
-                  const team = availableTeams.find((t) => t.id === tid);
-                  return (
-                    <Badge key={tid} variant="secondary" className="gap-1 pr-1">
-                      {team?.name ?? tid}
-                      <button
-                        type="button"
-                        className="ml-1 rounded-sm hover:bg-muted"
-                        onClick={() => setEditTeamIds(editTeamIds.filter((id) => id !== tid))}
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </Badge>
-                  );
-                })}
-              </div>
-              {availableTeams.filter((t) => !editTeamIds.includes(t.id)).length > 0 && (
-                <Select onValueChange={(v) => { if (v && !editTeamIds.includes(v)) setEditTeamIds([...editTeamIds, v]); }}>
-                  <SelectTrigger className="w-64">
-                    <SelectValue placeholder={t('users.addToTeam')} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {availableTeams
-                      .filter((t) => !editTeamIds.includes(t.id))
-                      .map((t) => (
-                        <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
-                      ))}
-                  </SelectContent>
-                </Select>
+          <Tabs value={editTab} onValueChange={(v) => setEditTab(v as typeof editTab)}>
+            <TabsList>
+              <TabsTrigger value="basic">{t('users.tab.basic')}</TabsTrigger>
+              <TabsTrigger value="access">{t('users.tab.access')}</TabsTrigger>
+              <TabsTrigger value="limits">{t('users.tab.limits')}</TabsTrigger>
+            </TabsList>
+            <form onSubmit={handleEdit} className="space-y-4">
+              {editError && (
+                <Alert variant="destructive">
+                  <AlertCircle className="h-4 w-4" />
+                  <AlertDescription>{editError}</AlertDescription>
+                </Alert>
               )}
-            </div>
-            <EffectivePermissionsPreview
-              assignments={editAssignments}
-              availableRoles={availableRoles}
-              availablePermissions={availablePermissions}
-            />
-            {editUser && (
-              <>
-                <Separator />
-                <UserLimitOverrides userId={editUser.id} />
-              </>
-            )}
-            <DialogFooter>
-              <Button type="submit" disabled={editLoading}>{editLoading ? t('users.saving') : t('common.save')}</Button>
-            </DialogFooter>
-          </form>
+              <TabsContent value="basic" className="space-y-4">
+                <div className="space-y-2">
+                  <Label>{t('auth.email')}</Label>
+                  <Input value={editUser?.email ?? ''} disabled />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="edit-name">{t('users.displayName')}</Label>
+                  <Input
+                    id="edit-name"
+                    value={editName}
+                    onChange={(e) => setEditName(e.target.value)}
+                    required
+                  />
+                </div>
+              </TabsContent>
+              <TabsContent value="access" className="space-y-4">
+                <RoleAssignmentEditor
+                  value={editAssignments}
+                  onChange={setEditAssignments}
+                  availableRoles={availableRoles}
+                  availableTeams={availableTeams}
+                  roleLabel={roleLabel}
+                />
+                <div className="space-y-2">
+                  <Label>{t('users.teams')}</Label>
+                  <p className="text-xs text-muted-foreground">{t('users.teamsHint')}</p>
+                  <div className="flex flex-wrap gap-1">
+                    {editTeamIds.map((tid) => {
+                      const team = availableTeams.find((t) => t.id === tid);
+                      return (
+                        <Badge key={tid} variant="secondary" className="gap-1 pr-1">
+                          {team?.name ?? tid}
+                          <button
+                            type="button"
+                            className="ml-1 rounded-sm hover:bg-muted"
+                            onClick={() =>
+                              setEditTeamIds(editTeamIds.filter((id) => id !== tid))
+                            }
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </Badge>
+                      );
+                    })}
+                  </div>
+                  {availableTeams.filter((t) => !editTeamIds.includes(t.id)).length > 0 && (
+                    <Select
+                      onValueChange={(v) => {
+                        if (v && !editTeamIds.includes(v))
+                          setEditTeamIds([...editTeamIds, v]);
+                      }}
+                    >
+                      <SelectTrigger className="w-64">
+                        <SelectValue placeholder={t('users.addToTeam')} />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {availableTeams
+                          .filter((t) => !editTeamIds.includes(t.id))
+                          .map((t) => (
+                            <SelectItem key={t.id} value={t.id}>
+                              {t.name}
+                            </SelectItem>
+                          ))}
+                      </SelectContent>
+                    </Select>
+                  )}
+                </div>
+                <EffectivePermissionsPreview
+                  assignments={editAssignments}
+                  availableRoles={availableRoles}
+                  availablePermissions={availablePermissions}
+                />
+              </TabsContent>
+              <TabsContent value="limits" className="pt-2">
+                {editUser ? (
+                  <UserLimitsTab userId={editUser.id} />
+                ) : (
+                  <p className="text-xs italic text-muted-foreground">
+                    {t('common.loading')}
+                  </p>
+                )}
+              </TabsContent>
+              {editTab !== 'limits' && (
+                <DialogFooter>
+                  <Button type="submit" disabled={editLoading}>
+                    {editLoading ? t('users.saving') : t('common.save')}
+                  </Button>
+                </DialogFooter>
+              )}
+            </form>
+          </Tabs>
         </DialogContent>
       </Dialog>
 

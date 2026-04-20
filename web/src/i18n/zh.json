@@ -711,9 +711,51 @@
       "enabled": "状态"
     }
   },
+  "userLimitsTab": {
+    "effectiveTitle": "生效额度",
+    "effectiveHint": "当前真实生效的额度 —— 角色合并后再叠加所有生效的用户覆盖。",
+    "noEffectiveLimits": "无任何限额 · 用户不受约束，除非角色或覆盖设置一条。",
+    "usageTitle": "近 7 天用量",
+    "usageHint": "来自 gateway_logs 的每日加权 token 总数（UTC）。",
+    "auditTitle": "最近额度变更",
+    "auditHint": "与该用户相关的最近 20 条速率规则/预算上限变更。",
+    "overrideThis": "覆盖此条…",
+    "editOverride": "编辑",
+    "resetAction": "重置计数",
+    "resetSuccess": "已重置计数（清除 {{n}} 个 key）",
+    "confirmResetTitle": "重置该计数器？",
+    "confirmResetBody": "清空 {{label}} 对应的 Redis 键，用户在当前窗口的已用量立即归零。",
+    "bulkSuccess": "已对 {{count}} 条覆盖执行 {{action}}",
+    "source_role": "角色",
+    "source_override": "覆盖",
+    "budgetScope": "预算 · {{period}}",
+    "col": {
+      "source": "来源",
+      "scope": "作用域",
+      "limit": "限额",
+      "usage": "用量",
+      "expires": "到期"
+    },
+    "drawer": {
+      "createTitle": "新增覆盖",
+      "editTitle": "编辑覆盖",
+      "roleDefaultHint": "角色默认值: {{value}}"
+    },
+    "audit": {
+      "when": "时间",
+      "action": "操作",
+      "actor": "执行者",
+      "detail": "详情"
+    }
+  },
   "users": {
     "title": "用户",
     "subtitle": "管理用户账户",
+    "tab": {
+      "basic": "基本",
+      "access": "权限",
+      "limits": "限额"
+    },
     "addUser": "添加用户",
     "displayName": "显示名称",
     "role": "角色",

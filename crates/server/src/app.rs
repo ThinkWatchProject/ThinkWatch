@@ -824,6 +824,18 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             "/api/admin/limits/bulk/budgets/delete",
             post(handlers::limits_bulk::bulk_delete_caps),
         )
+        // Per-user limits dashboard + counter reset. Grouped with the
+        // other limits admin endpoints because they share the
+        // `rate_limits:write` perm and the same request-verification
+        // middleware stack.
+        .route(
+            "/api/admin/users/{user_id}/limits-dashboard",
+            get(handlers::user_limits::get_limits_dashboard),
+        )
+        .route(
+            "/api/admin/users/{user_id}/limits/reset",
+            post(handlers::user_limits::reset_user_counter),
+        )
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::middleware::verify_signature::verify_signature,
