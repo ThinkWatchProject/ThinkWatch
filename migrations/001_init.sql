@@ -355,12 +355,23 @@ CREATE TABLE rate_limit_rules (
     enabled      BOOLEAN NOT NULL DEFAULT TRUE,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Temporary override metadata. NULL expires_at = permanent; set
+    -- expires_at to bound the override and the read path filters stale
+    -- rows automatically. `reason` is operator justification (validated
+    -- to ≥10 chars at the handler layer whenever expires_at is set).
+    -- `created_by` records the actor who wrote the row for the audit
+    -- trail; ON DELETE SET NULL so removing a user doesn't cascade-
+    -- delete their historical override log.
+    expires_at   TIMESTAMPTZ NULL,
+    reason       TEXT        NULL,
+    created_by   UUID        NULL REFERENCES users(id) ON DELETE SET NULL,
     -- One row per (subject, surface, metric, window) — admins enable /
     -- disable via the `enabled` flag rather than re-creating rows.
     UNIQUE(subject_kind, subject_id, surface, metric, window_secs)
 );
-CREATE INDEX idx_rlr_subject  ON rate_limit_rules(subject_kind, subject_id);
-CREATE INDEX idx_rlr_enabled  ON rate_limit_rules(enabled) WHERE enabled = TRUE;
+CREATE INDEX idx_rlr_subject    ON rate_limit_rules(subject_kind, subject_id);
+CREATE INDEX idx_rlr_enabled    ON rate_limit_rules(enabled) WHERE enabled = TRUE;
+CREATE INDEX idx_rlr_expires_at ON rate_limit_rules(expires_at) WHERE expires_at IS NOT NULL;
 
 CREATE TABLE budget_caps (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -379,10 +390,16 @@ CREATE TABLE budget_caps (
     enabled      BOOLEAN NOT NULL DEFAULT TRUE,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    -- Same override metadata as rate_limit_rules. See that table for the
+    -- full rationale.
+    expires_at   TIMESTAMPTZ NULL,
+    reason       TEXT        NULL,
+    created_by   UUID        NULL REFERENCES users(id) ON DELETE SET NULL,
     UNIQUE(subject_kind, subject_id, period)
 );
-CREATE INDEX idx_budget_caps_subject ON budget_caps(subject_kind, subject_id);
-CREATE INDEX idx_budget_caps_enabled ON budget_caps(enabled) WHERE enabled = TRUE;
+CREATE INDEX idx_budget_caps_subject    ON budget_caps(subject_kind, subject_id);
+CREATE INDEX idx_budget_caps_enabled    ON budget_caps(enabled) WHERE enabled = TRUE;
+CREATE INDEX idx_budget_caps_expires_at ON budget_caps(expires_at) WHERE expires_at IS NOT NULL;
 
 -- --------------------------------------------------------------------------
 -- MCP Call Logs
