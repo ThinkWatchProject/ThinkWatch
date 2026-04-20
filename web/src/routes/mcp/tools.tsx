@@ -116,7 +116,12 @@ export function McpToolsPage() {
       </div>
 
       <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
-        <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
+        {/* `overflow-y-auto` (not `overflow-auto`) kills horizontal
+            scroll at the card level — the table uses fixed column
+            widths below, so overflow that used to spill sideways
+            now clips/wraps cleanly inside each cell instead of
+            forcing the whole row wider than the viewport. */}
+        <CardContent className="p-0 overflow-y-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
           {loading ? (
             <div className="space-y-3 p-4">
               {[...Array(5)].map((_, i) => (
@@ -137,10 +142,17 @@ export function McpToolsPage() {
               </p>
             </div>
           ) : (
-            <Table>
+            <Table className="table-fixed">
+              <colgroup>
+                <col style={{ width: '2rem' }} />
+                <col style={{ width: '22%' }} />
+                <col style={{ width: '12rem' }} />
+                <col style={{ width: '22rem' }} />
+                <col />
+              </colgroup>
               <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
                 <TableRow>
-                  <TableHead className="w-8" />
+                  <TableHead />
                   <TableHead>{t('mcpTools.col.tool')}</TableHead>
                   <TableHead>{t('mcpTools.col.server')}</TableHead>
                   <TableHead>{t('mcpTools.col.args')}</TableHead>
@@ -175,8 +187,11 @@ export function McpToolsPage() {
                           ) : null}
                         </TableCell>
                         <TableCell className="align-top">
-                          <div className="flex flex-col">
-                            <code className="font-mono text-xs font-medium">
+                          <div className="flex min-w-0 flex-col">
+                            <code
+                              className="truncate font-mono text-xs font-medium"
+                              title={tool.name}
+                            >
                               {tool.name}
                             </code>
                             <span
@@ -188,15 +203,17 @@ export function McpToolsPage() {
                           </div>
                         </TableCell>
                         <TableCell className="align-top">
-                          <div className="flex items-center gap-1.5">
-                            <ServiceLogo service={tool.server_name} className="size-4" />
-                            <span className="text-xs">{tool.server_name}</span>
+                          <div className="flex min-w-0 items-center gap-1.5">
+                            <ServiceLogo service={tool.server_name} className="size-4 shrink-0" />
+                            <span className="truncate text-xs" title={tool.server_name}>
+                              {tool.server_name}
+                            </span>
                           </div>
                         </TableCell>
                         <TableCell className="align-top">
                           <ArgsCell schema={tool.input_schema} />
                         </TableCell>
-                        <TableCell className="align-top max-w-[32rem]">
+                        <TableCell className="align-top">
                           <p
                             className="line-clamp-2 text-xs text-muted-foreground"
                             title={tool.description ?? undefined}
@@ -256,7 +273,7 @@ function ArgsCell({ schema }: { schema: Record<string, unknown> | null }) {
   // vertical budget.
   return (
     <div
-      className="max-w-[22rem] overflow-x-auto whitespace-nowrap"
+      className="w-full overflow-x-auto whitespace-nowrap"
       // Hide the scrollbar chrome; the overflow is still scrollable
       // via trackpad / shift-wheel and exposes its scrollable state
       // via cursor. A visible bar adds noise for what is usually a
