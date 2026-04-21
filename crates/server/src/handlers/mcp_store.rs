@@ -185,7 +185,7 @@ pub async fn install_template(
     // server list and replaces the old manual "test connection" step in
     // the install dialog.
     let http = state.http_client.load();
-    let probe = super::mcp_servers::probe_mcp_endpoint(
+    let probe = super::mcp_shared::probe_mcp_endpoint(
         &http,
         &endpoint_url,
         template.auth_type.as_deref(),
@@ -202,7 +202,7 @@ pub async fn install_template(
 
     // Auto-detect transport type for hosted endpoints
     let transport_type = {
-        let auth_hdr = super::mcp_servers::build_auth_probe_header(
+        let auth_hdr = super::mcp_shared::build_auth_probe_header(
             template.auth_type.as_deref(),
             req.auth_secret.as_deref(),
         );
@@ -274,7 +274,7 @@ pub async fn install_template(
         .filter(|s| !s.is_empty())
         .unwrap_or(&default_prefix);
     // Validate the prefix shape regardless of source.
-    super::mcp_servers::normalize_namespace_prefix(Some(base_prefix), base_name)?;
+    super::mcp_shared::normalize_namespace_prefix(Some(base_prefix), base_name)?;
     let (resolved_name, resolved_prefix) =
         resolve_server_collisions(&mut tx, base_name, base_prefix).await?;
 
