@@ -603,9 +603,26 @@ pub async fn create_user(
 
     tx.commit().await?;
 
+    // Temp-password expiry: set the Redis marker so the login path
+    // can enforce a TTL on admin-issued credentials. Only when we
+    // generated the password (force_change=true) — admin-supplied
+    // passwords are the user's responsibility.
+    if force_change {
+        crate::handlers::auth::mark_temporary_password(&state.redis, user.id).await;
+    }
+
     // Sensitive operation — audit the creation with role details so
     // tenant admins can trace who provisioned whom. Password itself is
     // not logged (only whether a reset was forced).
+    let temp_expires_at = if force_change {
+        Some(
+            (chrono::Utc::now()
+                + chrono::Duration::seconds(crate::handlers::auth::TEMP_PASSWORD_TTL_SECS))
+            .to_rfc3339(),
+        )
+    } else {
+        None
+    };
     state.audit.log(
         auth_user
             .audit("admin.create_user")
@@ -615,6 +632,7 @@ pub async fn create_user(
                 "email": &user.email,
                 "role_ids": &role_ids,
                 "force_password_change": force_change,
+                "temp_password_expires_at": temp_expires_at,
             })),
     );
 
@@ -1027,10 +1045,19 @@ pub async fn reset_user_password(
             .await
             .unwrap_or(());
 
+    // Mark the new temp password with a TTL; login path enforces it.
+    crate::handlers::auth::mark_temporary_password(&state.redis, user_id).await;
+    let temp_expires_at = (chrono::Utc::now()
+        + chrono::Duration::seconds(crate::handlers::auth::TEMP_PASSWORD_TTL_SECS))
+    .to_rfc3339();
+
     state.audit.log(
         auth_user
             .audit("admin.reset_password")
-            .resource(format!("user:{user_id}")),
+            .resource(format!("user:{user_id}"))
+            .detail(serde_json::json!({
+                "temp_password_expires_at": temp_expires_at,
+            })),
     );
 
     // NOTE: The temporary password is returned here so the admin can securely

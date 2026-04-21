@@ -146,6 +146,42 @@ pub(crate) async fn invalidate_refresh_tokens(
     .await;
 }
 
+/// How long an admin-issued temporary password remains usable.
+/// Anchors both the Redis marker TTL at issuance and the legacy
+/// grandfather window at login; keeping them identical means a
+/// deployed user with `password_change_required=true` is accepted
+/// for exactly one window regardless of which side saw them first.
+pub(crate) const TEMP_PASSWORD_TTL_SECS: i64 = 86400;
+
+pub(crate) fn temp_password_marker_key(user_id: uuid::Uuid) -> String {
+    format!("pw_temp:{user_id}")
+}
+
+/// Record that `user_id` has an active admin-issued temporary password.
+/// Called from `admin::create_user` (when a password was generated)
+/// and `admin::reset_password`. Consumed by the login handler, which
+/// rejects logins after this marker expires.
+pub(crate) async fn mark_temporary_password(redis: &fred::clients::Client, user_id: uuid::Uuid) {
+    let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+        redis,
+        &temp_password_marker_key(user_id),
+        &chrono::Utc::now().timestamp().to_string(),
+        Some(fred::types::Expiration::EX(TEMP_PASSWORD_TTL_SECS)),
+        None,
+        false,
+    )
+    .await;
+}
+
+pub(crate) async fn clear_temporary_password_marker(
+    redis: &fred::clients::Client,
+    user_id: uuid::Uuid,
+) {
+    let _: Result<(), _> =
+        fred::interfaces::KeysInterface::del::<(), _>(redis, &temp_password_marker_key(user_id))
+            .await;
+}
+
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ChangePasswordRequest {
     pub old_password: String,
@@ -487,6 +523,36 @@ pub async fn login(
                     }
                 }
             }
+        }
+    }
+
+    // Temporary-password expiry: a user with `password_change_required`
+    // holds an admin-issued temp. We set a Redis marker with
+    // TEMP_PASSWORD_TTL_SECS at issuance — a missing marker means the
+    // temp has expired and the account must be reset again. The
+    // `updated_at` grandfather window covers pre-deploy accounts and
+    // Redis restart so a freshly-issued temp isn't invalidated out of
+    // band; past that window the marker is authoritative.
+    if user.password_change_required {
+        let marker_exists: bool = fred::interfaces::KeysInterface::exists::<bool, _>(
+            &state.redis,
+            &temp_password_marker_key(user.id),
+        )
+        .await
+        .unwrap_or(false);
+        let within_grandfather = user.updated_at
+            > chrono::Utc::now() - chrono::Duration::seconds(TEMP_PASSWORD_TTL_SECS);
+        if !marker_exists && !within_grandfather {
+            let mut entry = AuditEntry::platform("auth.temp_password_expired")
+                .user_id(user.id)
+                .user_email(&user.email)
+                .resource("auth")
+                .ip_address(&client_ip);
+            if let Some(ref ua) = user_agent {
+                entry = entry.user_agent(ua);
+            }
+            state.audit.log(entry);
+            return Err(AppError::Unauthorized);
         }
     }
 
@@ -1009,6 +1075,10 @@ pub async fn change_password(
     let pubkey_key = format!("signing_pubkey:{}", user.id);
     let _: Result<(), _> =
         fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &pubkey_key).await;
+
+    // User changed their password — any admin-issued temp marker is
+    // stale now.
+    clear_temporary_password_marker(&state.redis, user.id).await;
 
     // Store the password-change epoch so the refresh handler can reject
     // refresh tokens issued before this moment (prevents a stolen refresh
