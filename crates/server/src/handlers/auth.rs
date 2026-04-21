@@ -212,46 +212,61 @@ pub async fn login(
         }
     }
 
-    // Composite rate limiting: per-email AND per-IP
+    // Composite rate limiting: per-email AND per-IP.
+    //
+    // Atomic counter-with-TTL: `SET key 0 EX 60 NX` creates the
+    // counter with a TTL in a single op when absent; a subsequent
+    // INCR can then never land on a key without an expiry. The old
+    // INCR-then-EXPIRE pattern had a window (Redis failure or process
+    // crash between the two) that left a persistent counter and
+    // silently disabled the limit.
     let rate_key = format!("auth_rate:{}:{}", client_ip, req.email);
     let ip_rate_key = format!("auth_rate_ip:{}", client_ip);
-    let count: u64 =
-        match fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Redis rate-limit check failed (fail-closed): {e}");
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "Rate limiting unavailable"
-                )));
-            }
-        };
-    if count == 1 {
-        let _: () = fred::interfaces::KeysInterface::expire(&state.redis, &rate_key, 60, None)
-            .await
-            .unwrap_or(());
-    }
+    let _: bool = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &rate_key,
+        "0",
+        Some(fred::types::Expiration::EX(60)),
+        Some(fred::types::SetOptions::NX),
+        false,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Redis rate-limit init failed (fail-closed): {e}");
+        AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
+    })?;
+    let count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1)
+        .await
+        .map_err(|e| {
+            tracing::error!("Redis rate-limit check failed (fail-closed): {e}");
+            AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
+        })?;
     if count > 10 {
         return Err(AppError::BadRequest(
             "Too many login attempts. Please try again later.".into(),
         ));
     }
 
-    // Per-IP rate limit: max 30 attempts per minute across all emails (fail-closed)
-    let ip_count: u64 =
-        match fred::interfaces::KeysInterface::incr_by(&state.redis, &ip_rate_key, 1).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Redis IP rate-limit check failed (fail-closed): {e}");
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "Rate limiting unavailable"
-                )));
-            }
-        };
-    if ip_count == 1 {
-        let _: () = fred::interfaces::KeysInterface::expire(&state.redis, &ip_rate_key, 60, None)
-            .await
-            .unwrap_or(());
-    }
+    // Per-IP rate limit: max 30 attempts per minute across all emails (fail-closed).
+    let _: bool = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &ip_rate_key,
+        "0",
+        Some(fred::types::Expiration::EX(60)),
+        Some(fred::types::SetOptions::NX),
+        false,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Redis IP rate-limit init failed (fail-closed): {e}");
+        AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
+    })?;
+    let ip_count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &ip_rate_key, 1)
+        .await
+        .map_err(|e| {
+            tracing::error!("Redis IP rate-limit check failed (fail-closed): {e}");
+            AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
+        })?;
     if ip_count > 30 {
         return Err(AppError::BadRequest(
             "Too many login attempts from this address. Please try again later.".into(),
@@ -315,27 +330,26 @@ pub async fn login(
         // the same email can only fail N times globally in the
         // rate-limit window regardless of source address.
         let email_fail_key = format!("auth_email_fails:{}", req.email);
-        let email_fails: u64 = match fred::interfaces::KeysInterface::incr_by(
+        let _: bool = fred::interfaces::KeysInterface::set(
             &state.redis,
             &email_fail_key,
-            1,
+            "0",
+            Some(fred::types::Expiration::EX(900)),
+            Some(fred::types::SetOptions::NX),
+            false,
         )
         .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!("Redis email-failure counter failed (fail-closed): {e}");
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "Authentication temporarily unavailable"
-                )));
-            }
-        };
-        if email_fails == 1 {
-            let _: () =
-                fred::interfaces::KeysInterface::expire(&state.redis, &email_fail_key, 900, None)
-                    .await
-                    .unwrap_or(());
-        }
+        .map_err(|e| {
+            tracing::error!("Redis email-failure counter init failed (fail-closed): {e}");
+            AppError::Internal(anyhow::anyhow!("Authentication temporarily unavailable"))
+        })?;
+        let email_fails: u64 =
+            fred::interfaces::KeysInterface::incr_by(&state.redis, &email_fail_key, 1)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Redis email-failure counter failed (fail-closed): {e}");
+                    AppError::Internal(anyhow::anyhow!("Authentication temporarily unavailable"))
+                })?;
 
         // Progressive lockout: lock account after repeated failures.
         // Lockout duration increases: 5 fails=60s, 8=300s, 10+=900s.
