@@ -7,6 +7,7 @@ use fred::clients::Client;
 use sqlx::PgPool;
 use std::sync::Arc;
 use tower_http::catch_panic::CatchPanicLayer;
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -873,6 +874,14 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         .merge(public_routes)
         .merge(user_routes)
         .merge(admin_routes)
+        // gzip console JSON responses — the dashboard initial snapshot
+        // and the analytics/cost endpoints ship 50-200 KB JSON blobs
+        // that compress 3-5x. Negotiates per Accept-Encoding so curl /
+        // Postman without compression support still gets the raw form.
+        // WebSocket upgrades are NOT compressed by this layer (axum's
+        // upgrade path bypasses tower-http body transforms); permessage-
+        // deflate negotiation belongs at the reverse-proxy layer.
+        .layer(CompressionLayer::new())
         .layer(RequestBodyLimitLayer::new(1024 * 1024)) // 1MB for console API
         .layer(TimeoutLayer::with_status_code(
             axum::http::StatusCode::REQUEST_TIMEOUT,

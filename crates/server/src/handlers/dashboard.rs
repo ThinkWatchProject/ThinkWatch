@@ -1324,6 +1324,15 @@ async fn push_snapshot(
     let snap = build_live_snapshot(state, user_filter)
         .await
         .map_err(|e| format!("snapshot build failed: {e}"))?;
+    // Build a compact serialisation (no whitespace) so each tick ships
+    // the smallest representation we can produce without negotiating a
+    // permessage-deflate extension. Axum's WebSocket layer in the
+    // current axum/tokio-tungstenite version doesn't expose the deflate
+    // negotiation flag — gzipped binary frames would force a custom
+    // client and break the existing JSON consumer. The compact form
+    // keeps the payload size win that's achievable in-process; for
+    // wire-level compression run an nginx terminator with
+    // `proxy_set_header X-Forwarded-WebSocket-Compression on`.
     let json = serde_json::to_string(&snap).map_err(|e| e.to_string())?;
     // Wrap the send in a timeout so a slow/dead client can't park us
     // here forever, blocking future pushes.
