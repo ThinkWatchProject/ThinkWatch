@@ -193,6 +193,19 @@ pub async fn list_users(
 
     let user_ids: Vec<uuid::Uuid> = users.iter().map(|u| u.id).collect();
 
+    // Skip the per-user joins entirely when the page is empty —
+    // happens for any search-with-no-match and for over-paginated
+    // requests, and previously fired both ANY($1) queries against an
+    // empty array round-tripping for nothing.
+    if user_ids.is_empty() {
+        return Ok(Json(PaginatedResponse {
+            data: Vec::new(),
+            total,
+            page: pagination.page.unwrap_or(1).max(1),
+            per_page,
+        }));
+    }
+
     // Single query: every assignment for every user, joined against
     // `rbac_roles` so we can report system + custom uniformly.
     type AssignmentRow = (
@@ -215,8 +228,10 @@ pub async fn list_users(
     .await
     .unwrap_or_default();
 
+    // Pre-size to the page so a 100-row page doesn't bounce through
+    // multiple HashMap rehashes while we drain the join rows.
     let mut assignments_map: std::collections::HashMap<uuid::Uuid, Vec<RoleAssignment>> =
-        std::collections::HashMap::new();
+        std::collections::HashMap::with_capacity(user_ids.len());
     for (uid, role_id, name, is_system, scope_kind, scope_id) in rows {
         let scope = match (scope_kind.as_str(), scope_id) {
             ("global", _) => "global".to_string(),
@@ -255,7 +270,7 @@ pub async fn list_users(
     let mut teams_map: std::collections::HashMap<
         uuid::Uuid,
         Vec<think_watch_common::dto::UserTeamSummary>,
-    > = std::collections::HashMap::new();
+    > = std::collections::HashMap::with_capacity(user_ids.len());
     for (user_id, team_id, team_name) in team_rows {
         teams_map
             .entry(user_id)
