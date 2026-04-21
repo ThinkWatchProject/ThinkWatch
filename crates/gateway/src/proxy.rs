@@ -186,6 +186,7 @@ fn budgets_for_ai_gateway(identity: &GatewayRequestIdentity) -> Vec<BudgetCap> {
 struct LogCtx<'a> {
     audit: &'a think_watch_common::audit::AuditLogger,
     trace_id: String,
+    session_id: Option<String>,
     user_id: Option<String>,
     user_email: Option<String>,
     api_key_id: Option<String>,
@@ -202,6 +203,7 @@ impl LogCtx<'_> {
         emit_gateway_error_log(
             self.audit,
             &self.trace_id,
+            self.session_id.as_deref(),
             self.user_id.as_deref(),
             self.user_email.as_deref(),
             self.api_key_id.as_deref(),
@@ -229,6 +231,22 @@ fn resolve_trace_id(headers: &axum::http::HeaderMap) -> String {
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
 }
 
+/// Resolve the multi-turn conversation id for an AI request from the
+/// `x-session-id` header. Unlike `trace_id`, session_id is purely
+/// optional — absent means the client isn't grouping turns, and we
+/// store NULL so the ClickHouse `idx_session` bloom filter stays
+/// selective for rows that do carry an id.
+///
+/// Same validation envelope as `resolve_trace_id` so the header value
+/// is always safe to round-trip through log fields.
+fn resolve_session_id(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("x-session-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| !c.is_control()))
+}
+
 /// Map a `GatewayError` to the HTTP status we'll actually return so
 /// the error-path `gateway_logs` row carries the same status code the
 /// client saw. Keep in sync with `GatewayErrorResponse::into_response`
@@ -254,6 +272,7 @@ fn gateway_error_status(err: &GatewayError) -> i64 {
 fn emit_gateway_error_log(
     audit: &think_watch_common::audit::AuditLogger,
     trace_id: &str,
+    session_id: Option<&str>,
     user_id: Option<&str>,
     user_email: Option<&str>,
     api_key_id: Option<&str>,
@@ -279,6 +298,9 @@ fn emit_gateway_error_log(
     let mut entry = think_watch_common::audit::AuditEntry::gateway("chat.completion")
         .trace_id(trace_id.to_string())
         .detail(detail);
+    if let Some(sid) = session_id {
+        entry = entry.session_id(sid);
+    }
     if let Some(uid) = user_id
         && let Ok(u) = uuid::Uuid::parse_str(uid)
     {
@@ -303,6 +325,7 @@ fn emit_gateway_error_log(
 fn emit_gateway_log_with_extra(
     audit: &think_watch_common::audit::AuditLogger,
     trace_id: &str,
+    session_id: Option<&str>,
     user_id: Option<&str>,
     user_email: Option<&str>,
     api_key_id: Option<&str>,
@@ -334,6 +357,9 @@ fn emit_gateway_log_with_extra(
     let mut entry = think_watch_common::audit::AuditEntry::gateway("chat.completion")
         .trace_id(trace_id.to_string())
         .detail(detail);
+    if let Some(sid) = session_id {
+        entry = entry.session_id(sid);
+    }
     if let Some(uid) = user_id
         && let Ok(u) = uuid::Uuid::parse_str(uid)
     {
@@ -354,6 +380,7 @@ fn emit_gateway_log_with_extra(
 fn emit_gateway_log(
     audit: &think_watch_common::audit::AuditLogger,
     trace_id: &str,
+    session_id: Option<&str>,
     user_id: Option<&str>,
     user_email: Option<&str>,
     api_key_id: Option<&str>,
@@ -376,6 +403,9 @@ fn emit_gateway_log(
             "latency_ms": latency_ms,
             "status_code": status_code,
         }));
+    if let Some(sid) = session_id {
+        entry = entry.session_id(sid);
+    }
     if let Some(uid) = user_id
         && let Ok(u) = uuid::Uuid::parse_str(uid)
     {
@@ -835,10 +865,12 @@ pub async fn proxy_chat_completion(
     // x-trace-id header further down, so metadata.request_id ends up
     // matching trace_id.
     let trace_id = resolve_trace_id(&headers);
+    let session_id = resolve_session_id(&headers);
     let request_started_at = std::time::Instant::now();
     let ctx = LogCtx {
         audit: &state.audit,
         trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
         user_id: identity.user_id.clone(),
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
@@ -1019,6 +1051,7 @@ pub async fn proxy_chat_completion(
         let audit_for_done = state.audit.clone();
         let cost_tracker = state.cost_tracker.clone();
         let trace_id_for_done = metadata.request_id.clone();
+        let session_id_for_done = session_id.clone();
         let user_id_for_done = identity.user_id.clone();
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
@@ -1066,6 +1099,7 @@ pub async fn proxy_chat_completion(
                 emit_gateway_log_with_extra(
                     &audit_for_done,
                     &trace_id_for_done,
+                    session_id_for_done.as_deref(),
                     user_id_for_done.as_deref(),
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
@@ -1126,6 +1160,7 @@ pub async fn proxy_chat_completion(
             emit_gateway_error_log(
                 &state.audit,
                 &metadata.request_id,
+                session_id.as_deref(),
                 identity.user_id.as_deref(),
                 identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
@@ -1192,6 +1227,7 @@ pub async fn proxy_chat_completion(
         emit_gateway_log(
             &state.audit,
             &metadata.request_id,
+            session_id.as_deref(),
             identity.user_id.as_deref(),
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
@@ -1268,6 +1304,7 @@ pub async fn proxy_anthropic_messages(
     // client correlates this AI call with the MCP tools/call it
     // makes off the back of a tool-use response. Otherwise mint.
     let trace_id = resolve_trace_id(&headers);
+    let session_id = resolve_session_id(&headers);
     let request_started_at = std::time::Instant::now();
 
     // Build LogCtx with model="(unknown)" up-front so a missing-model
@@ -1276,6 +1313,7 @@ pub async fn proxy_anthropic_messages(
     let early_ctx = LogCtx {
         audit: &state.audit,
         trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
         user_id: identity.user_id.clone(),
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
@@ -1300,6 +1338,7 @@ pub async fn proxy_anthropic_messages(
     let ctx = LogCtx {
         audit: &state.audit,
         trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
         user_id: identity.user_id.clone(),
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
@@ -1427,6 +1466,7 @@ pub async fn proxy_anthropic_messages(
         let audit_for_done = state.audit.clone();
         let cost_tracker = state.cost_tracker.clone();
         let trace_id_for_done = trace_id.clone();
+        let session_id_for_done = session_id.clone();
         let user_id_for_done = identity.user_id.clone();
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
@@ -1445,6 +1485,7 @@ pub async fn proxy_anthropic_messages(
                 emit_gateway_log(
                     &audit_for_done,
                     &trace_id_for_done,
+                    session_id_for_done.as_deref(),
                     user_id_for_done.as_deref(),
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
@@ -1495,6 +1536,7 @@ pub async fn proxy_anthropic_messages(
             emit_gateway_error_log(
                 &state.audit,
                 &trace_id,
+                session_id.as_deref(),
                 identity.user_id.as_deref(),
                 identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
@@ -1542,6 +1584,7 @@ pub async fn proxy_anthropic_messages(
         emit_gateway_log(
             &state.audit,
             &trace_id,
+            session_id.as_deref(),
             identity.user_id.as_deref(),
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
@@ -1628,11 +1671,13 @@ pub async fn proxy_responses(
     Json(body): Json<serde_json::Value>,
 ) -> Result<axum::response::Response, GatewayErrorResponse> {
     let trace_id = resolve_trace_id(&headers);
+    let session_id = resolve_session_id(&headers);
     let request_started_at = std::time::Instant::now();
 
     let early_ctx = LogCtx {
         audit: &state.audit,
         trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
         user_id: identity.user_id.clone(),
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
@@ -1656,6 +1701,7 @@ pub async fn proxy_responses(
     let ctx = LogCtx {
         audit: &state.audit,
         trace_id: trace_id.clone(),
+        session_id: session_id.clone(),
         user_id: identity.user_id.clone(),
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
@@ -1799,6 +1845,7 @@ pub async fn proxy_responses(
         let audit_for_done = state.audit.clone();
         let cost_tracker = state.cost_tracker.clone();
         let trace_id_for_done = trace_id.clone();
+        let session_id_for_done = session_id.clone();
         let user_id_for_done = identity.user_id.clone();
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
@@ -1817,6 +1864,7 @@ pub async fn proxy_responses(
                 emit_gateway_log(
                     &audit_for_done,
                     &trace_id_for_done,
+                    session_id_for_done.as_deref(),
                     user_id_for_done.as_deref(),
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
@@ -1870,6 +1918,7 @@ pub async fn proxy_responses(
             emit_gateway_error_log(
                 &state.audit,
                 &trace_id,
+                session_id.as_deref(),
                 identity.user_id.as_deref(),
                 identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
@@ -1915,6 +1964,7 @@ pub async fn proxy_responses(
         emit_gateway_log(
             &state.audit,
             &trace_id,
+            session_id.as_deref(),
             identity.user_id.as_deref(),
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),

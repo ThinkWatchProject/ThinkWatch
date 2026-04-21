@@ -89,6 +89,16 @@ pub struct AuditEntry {
     /// gateway's `metadata.request_id`; `None` for standalone admin
     /// actions where there is no request to correlate against.
     pub trace_id: Option<String>,
+    /// Client-supplied multi-turn conversation id. Rows with the same
+    /// `session_id` collapse into one expandable conversation in the
+    /// trace UI. Only populated on gateway logs today; other log types
+    /// ignore it. Captured from the `x-session-id` request header.
+    ///
+    /// `#[serde(default)]` keeps backward compat with outbox entries
+    /// serialised before this field existed — the drain worker pulls
+    /// them back out of JSONB and deserialises without failing.
+    #[serde(default)]
+    pub session_id: Option<String>,
     pub created_at: String,
 }
 
@@ -153,6 +163,11 @@ struct ChGatewayRow {
     user_agent: Option<String>,
     detail: Option<String>,
     trace_id: Option<String>,
+    // Match gateway_logs column order from
+    // deploy/clickhouse/initdb.d/01_init.sql: session_id sits between
+    // trace_id and created_at. The clickhouse crate's Row derive names
+    // columns in the INSERT by struct field order, so keep them aligned.
+    session_id: Option<String>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
     created_at: chrono::DateTime<Utc>,
 }
@@ -244,6 +259,7 @@ impl AuditEntry {
             ip_address: None,
             user_agent: None,
             trace_id: None,
+            session_id: None,
             created_at: Utc::now().to_rfc3339(),
         }
     }
@@ -319,6 +335,14 @@ impl AuditEntry {
     /// actions that aren't tied to a gateway call.
     pub fn trace_id(mut self, id: impl Into<String>) -> Self {
         self.trace_id = Some(id.into());
+        self
+    }
+
+    /// Group multi-turn conversation rows under one id. Sourced from
+    /// the `x-session-id` request header on AI gateway calls. Only
+    /// `gateway_logs` stores this today; other log types drop it.
+    pub fn session_id(mut self, id: impl Into<String>) -> Self {
+        self.session_id = Some(id.into());
         self
     }
 }
@@ -1542,6 +1566,7 @@ async fn flush_gateway(
             user_agent: entry.user_agent,
             detail: detail_str(&mut entry.detail),
             trace_id: entry.trace_id,
+            session_id: entry.session_id,
             created_at: ts,
         };
         insert.write(&row).await?;
