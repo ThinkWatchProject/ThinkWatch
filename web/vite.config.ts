@@ -35,6 +35,13 @@ export default defineConfig({
   },
   build: {
     chunkSizeWarningLimit: 600,
+    // `hidden` emits .map files next to the bundles but omits the
+    // `//# sourceMappingURL=…` comment from the JS. Prod browsers
+    // ship minified stacks (useless to the end user), while operator
+    // tooling — error-reporting ingest, Sentry, a local `vite preview`
+    // — can still pair the bundles with their maps by filename.
+    // No leak to anyone who only sees what the browser downloads.
+    sourcemap: 'hidden',
     rollupOptions: {
       output: {
         // Conservative manual chunking. We only carve out the
