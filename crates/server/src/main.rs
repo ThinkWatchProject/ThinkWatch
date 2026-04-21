@@ -13,6 +13,7 @@ mod handlers;
 mod mcp_runtime;
 mod middleware;
 mod openapi;
+mod services;
 mod tasks;
 mod tracing_ch;
 

@@ -340,49 +340,10 @@ pub struct CreateUserByAdminResponse {
 // Arbitrary 64-bit key picked once; must stay stable across releases.
 // ---------------------------------------------------------------------------
 
-const SUPER_ADMIN_GUARD_LOCK: i64 = 0x5241_4441_5741_5541; // "RADAWAUA"
-
-async fn acquire_super_admin_guard_lock(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<(), AppError> {
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(SUPER_ADMIN_GUARD_LOCK)
-        .execute(&mut **tx)
-        .await?;
-    Ok(())
-}
-
-async fn assert_super_admin_quorum(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-) -> Result<(), AppError> {
-    let count: i64 = sqlx::query_scalar(
-        "SELECT count(DISTINCT u.id) FROM users u \
-         JOIN ( \
-            SELECT ra.user_id \
-              FROM rbac_role_assignments ra \
-              JOIN rbac_roles r ON r.id = ra.role_id \
-             WHERE r.name = 'super_admin' \
-            UNION \
-            SELECT tm.user_id \
-              FROM team_members tm \
-              JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
-              JOIN rbac_roles r ON r.id = tra.role_id \
-             WHERE r.name = 'super_admin' \
-         ) s ON s.user_id = u.id \
-         WHERE u.is_active = TRUE AND u.deleted_at IS NULL",
-    )
-    .fetch_one(&mut **tx)
-    .await?;
-
-    if count <= 0 {
-        return Err(AppError::BadRequest(
-            "Operation would leave the platform with zero active super admins. \
-             Add another super admin (directly or via a team role) before continuing."
-                .into(),
-        ));
-    }
-    Ok(())
-}
+// Super-admin quorum helpers moved to `crate::services::rbac_service`.
+// Re-exported at their original names so the rest of this handler and
+// any external callers keep compiling.
+use crate::services::rbac_service::{acquire_super_admin_guard_lock, assert_super_admin_quorum};
 
 /// Small read-only companion to the quorum guard — surfaces the live
 /// list of active super-admin user ids so the admin UI can disable
@@ -409,28 +370,8 @@ pub async fn list_super_admin_ids(
     // `users:read` is the same gate the list endpoint uses — anyone
     // who can see the user table can see the super-admin subset.
     auth_user.require_permission("users:read")?;
-
-    let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
-        "SELECT DISTINCT u.id FROM users u \
-         JOIN ( \
-            SELECT ra.user_id \
-              FROM rbac_role_assignments ra \
-              JOIN rbac_roles r ON r.id = ra.role_id \
-             WHERE r.name = 'super_admin' \
-            UNION \
-            SELECT tm.user_id \
-              FROM team_members tm \
-              JOIN team_role_assignments tra ON tra.team_id = tm.team_id \
-              JOIN rbac_roles r ON r.id = tra.role_id \
-             WHERE r.name = 'super_admin' \
-         ) s ON s.user_id = u.id \
-         WHERE u.is_active = TRUE AND u.deleted_at IS NULL",
-    )
-    .fetch_all(&state.db)
-    .await?;
-    Ok(Json(SuperAdminIds {
-        ids: rows.into_iter().map(|(id,)| id).collect(),
-    }))
+    let ids = crate::services::rbac_service::super_admin_ids(&state.db).await?;
+    Ok(Json(SuperAdminIds { ids }))
 }
 
 /// Apply a set of role assignments to a user atomically inside `tx`.
@@ -1017,27 +958,14 @@ pub async fn reset_user_password(
     auth_user
         .assert_scope_for_user(&state.db, "users:update", user_id)
         .await?;
-    let exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL)",
-    )
-    .bind(user_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    if !exists {
+    if !crate::services::user_repository::exists(&state.db, user_id).await? {
         return Err(AppError::NotFound("User not found".into()));
     }
 
     let new_password = password::generate_random_password();
     let hash = password::hash_password(&new_password)?;
 
-    sqlx::query(
-        "UPDATE users SET password_hash = $1, password_change_required = true, updated_at = now() WHERE id = $2",
-    )
-    .bind(&hash)
-    .bind(user_id)
-    .execute(&state.db)
-    .await?;
+    crate::services::user_repository::update_password_hash(&state.db, user_id, &hash, true).await?;
 
     // Invalidate signing public key to force re-login
     let _: () =
