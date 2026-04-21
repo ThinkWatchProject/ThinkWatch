@@ -1374,6 +1374,7 @@ pub async fn proxy_anthropic_messages(
         extra: serde_json::json!({}),
         caller_user_id: identity.user_id.clone(),
         caller_user_email: identity.user_email.clone(),
+        trace_id: Some(trace_id.clone()),
     };
 
     if is_stream {
@@ -1737,6 +1738,7 @@ pub async fn proxy_responses(
         extra: serde_json::json!({}),
         caller_user_id: identity.user_id.clone(),
         caller_user_email: identity.user_email.clone(),
+        trace_id: Some(trace_id.clone()),
     };
 
     // Route to provider — multi-route failover

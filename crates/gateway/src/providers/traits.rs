@@ -21,6 +21,12 @@ pub struct ChatCompletionRequest {
     pub caller_user_id: Option<String>,
     #[serde(skip)]
     pub caller_user_email: Option<String>,
+    /// Per-request trace id from the gateway entry layer. Forwarded
+    /// to the upstream as `x-trace-id` so a single id correlates the
+    /// downstream request, the gateway log, and the provider-side
+    /// request trace (when the provider also threads it through).
+    #[serde(skip)]
+    pub trace_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -158,12 +164,19 @@ impl ProviderBase {
     /// Append the caller-resolved custom headers to a `RequestBuilder`.
     /// Centralizes what would otherwise be duplicated in every
     /// provider's `chat_completion` and `stream_chat_completion`.
+    /// Also injects `x-trace-id` from the request's trace_id so the
+    /// upstream log line and the gateway log line share a correlation
+    /// id (OBS-01).
     pub fn apply_custom_headers(
         &self,
         builder: reqwest::RequestBuilder,
         request: &ChatCompletionRequest,
     ) -> reqwest::RequestBuilder {
-        Self::apply_headers(builder, &self.resolve_headers(request))
+        let mut builder = Self::apply_headers(builder, &self.resolve_headers(request));
+        if let Some(ref trace_id) = request.trace_id {
+            builder = builder.header("x-trace-id", trace_id.as_str());
+        }
+        builder
     }
 
     /// Append a pre-resolved header list to a `RequestBuilder`.

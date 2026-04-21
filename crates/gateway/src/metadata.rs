@@ -125,6 +125,7 @@ mod tests {
             extra: serde_json::json!({}),
             caller_user_id: None,
             caller_user_email: None,
+            trace_id: None,
         }
     }
 
@@ -141,6 +142,7 @@ mod tests {
             extra: serde_json::json!({ "metadata": metadata }),
             caller_user_id: None,
             caller_user_email: None,
+            trace_id: None,
         }
     }
 

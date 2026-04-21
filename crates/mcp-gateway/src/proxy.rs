@@ -468,6 +468,7 @@ impl McpProxy {
                 &upstream_request,
                 Some(&caller),
                 upstream_sid.as_deref(),
+                Some(&call_trace_id),
             )
             .await
         {

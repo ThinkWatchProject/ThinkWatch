@@ -128,6 +128,7 @@ impl ConnectionPool {
         request: &JsonRpcRequest,
         caller: Option<&CallerIdentity>,
         upstream_session_id: Option<&str>,
+        trace_id: Option<&str>,
     ) -> Result<(JsonRpcResponse, Option<String>), PoolError> {
         let mut builder = conn
             .client
@@ -138,6 +139,12 @@ impl ConnectionPool {
         // Attach upstream auth header if the server has one configured.
         if let Some((name, value)) = &conn.auth_header {
             builder = builder.header(name.as_str(), value.as_str());
+        }
+
+        // Forward the gateway-side trace id so the upstream MCP server
+        // can correlate its own log line with this single request.
+        if let Some(t) = trace_id {
+            builder = builder.header("x-trace-id", t);
         }
 
         // Attach custom headers with template variable resolution.
