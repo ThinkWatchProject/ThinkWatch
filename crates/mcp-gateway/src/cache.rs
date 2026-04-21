@@ -65,14 +65,28 @@ impl McpResponseCache {
     ) -> Option<JsonRpcResponse> {
         let key = Self::cache_key(server_id, user_id, request);
         let cached: Option<String> = self.redis.get(&key).await.ok().flatten();
-        cached.and_then(|json| {
+        let hit = cached.is_some();
+        let parsed = cached.and_then(|json| {
             serde_json::from_str::<JsonRpcResponse>(&json)
                 .map_err(|e| {
                     tracing::warn!("Failed to deserialize cached MCP response: {e}");
                     e
                 })
                 .ok()
-        })
+        });
+        // Three counters for one cache lookup:
+        //   * total       — denominator for hit rate
+        //   * hit / miss  — dashboard signal
+        //   * parse_miss  — catches serialisation drift (we stored JSON
+        //                   we can't parse back), which would otherwise
+        //                   silently look like a miss
+        metrics::counter!("mcp_cache_total").increment(1);
+        match (hit, parsed.is_some()) {
+            (true, true) => metrics::counter!("mcp_cache_hit_total").increment(1),
+            (true, false) => metrics::counter!("mcp_cache_parse_miss_total").increment(1),
+            (false, _) => metrics::counter!("mcp_cache_miss_total").increment(1),
+        }
+        parsed
     }
 
     /// Store a response in the cache with the given TTL (in seconds).
@@ -104,8 +118,12 @@ impl McpResponseCache {
             .set(&key, json.as_str(), Some(expiration), None, false)
             .await;
 
-        if let Err(e) = result {
-            tracing::warn!("Failed to cache MCP response: {e}");
+        match result {
+            Ok(()) => metrics::counter!("mcp_cache_store_total").increment(1),
+            Err(e) => {
+                tracing::warn!("Failed to cache MCP response: {e}");
+                metrics::counter!("mcp_cache_store_error_total").increment(1);
+            }
         }
     }
 }
