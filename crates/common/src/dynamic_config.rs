@@ -235,6 +235,27 @@ impl DynamicConfig {
             .unwrap_or(300);
         raw.clamp(1, SIGNATURE_DRIFT_MAX_SECS)
     }
+
+    /// `audit.sample_rate` as a fraction in `[0.0, 1.0]`. Values
+    /// outside that range are clamped — a blown-up "2.0" still just
+    /// means "keep everything", and a negative value means "drop
+    /// everything" rather than the underlying float blowing up the
+    /// atomic conversion. Missing setting defaults to 1.0 (100%).
+    pub async fn audit_sample_rate(&self) -> f64 {
+        // Stored as a float in system_settings.value (JSON number);
+        // fall back to the string representation so edits like "0.1"
+        // still parse when admins type from the UI rather than paste
+        // a JSON literal.
+        let raw = self.get("audit.sample_rate").await;
+        let parsed = raw
+            .as_ref()
+            .and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
+            .unwrap_or(1.0);
+        parsed.clamp(0.0, 1.0)
+    }
 }
 
 dc_getters_i64! {

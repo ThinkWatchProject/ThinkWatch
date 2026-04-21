@@ -624,7 +624,8 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 INSERT INTO system_settings (key, value, category, description) VALUES
 ('audit.batch_size',          '50',    'audit', 'Quickwit batch flush size'),
 ('audit.flush_interval_secs', '2',     'audit', 'Quickwit batch flush interval in seconds'),
-('audit.channel_capacity',    '10000', 'audit', 'Audit log channel buffer capacity');
+('audit.channel_capacity',    '10000', 'audit', 'Audit log channel buffer capacity'),
+('audit.sample_rate',         '1.0',   'audit', 'Fraction of audit events to keep (0.0-1.0). Lower on high-volume deployments to spare ClickHouse; sampled-out entries increment audit_log_sampled_out_total.');
 
 -- API Keys
 INSERT INTO system_settings (key, value, category, description) VALUES

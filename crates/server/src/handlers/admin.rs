@@ -1792,6 +1792,25 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
+        // Audit sampling fraction. Lives in the same dynamic-config
+        // path as other audit knobs; 0.0 keeps no events (a knob worth
+        // having for emergency CH offload), 1.0 keeps everything.
+        // The runtime reads this value through audit_sample_rate(),
+        // which clamps too — this is just the UI-side reject.
+        "audit.sample_rate" => {
+            let v = value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+                .ok_or_else(|| {
+                    AppError::BadRequest(format!("{key} must be a number between 0 and 1"))
+                })?;
+            if !(0.0..=1.0).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "audit.sample_rate must be between 0.0 and 1.0".into(),
+                ));
+            }
+        }
+
         // Request-signature drift tolerance. Upper bound is hard-coded
         // in common::dynamic_config::SIGNATURE_DRIFT_MAX_SECS; the
         // middleware clamps at read time too, but we reject out-of-range

@@ -532,6 +532,11 @@ pub struct AuditLogger {
     tx: mpsc::Sender<AuditEntry>,
     db: Option<PgPool>,
     registry: ForwarderRegistry,
+    /// Sample rate in 1/10000ths (0 = drop everything, 10000 = keep
+    /// everything). Stored as a `u32` so reads are lock-free on the
+    /// hot logging path; written by the dynamic-config subscriber
+    /// when `audit.sample_rate` changes.
+    sample_rate_bps: Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// Bounded audit channel capacity.
@@ -572,9 +577,11 @@ impl AuditLogger {
         _config: AuditConfig,
         db: Option<PgPool>,
         ch: Option<clickhouse::Client>,
+        dynamic_config: Option<Arc<crate::dynamic_config::DynamicConfig>>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(AUDIT_CHANNEL_CAPACITY);
         let registry: ForwarderRegistry = Arc::new(RwLock::new(HashMap::new()));
+        let sample_rate_bps = Arc::new(std::sync::atomic::AtomicU32::new(10_000));
 
         // Populate the forwarder registry BEFORE the worker starts
         // consuming audit entries. Without this, an audit log sent in
@@ -584,6 +591,31 @@ impl AuditLogger {
         // would silently vanish.
         if let Some(pool) = &db {
             reload_forwarders(pool, &registry).await;
+        }
+
+        // Pick up the persisted sample rate once before the worker
+        // sees any traffic, then poll periodically. The dynamic_config
+        // subscriber on Redis already keeps the in-memory cache fresh,
+        // so polling every 30s costs nothing more than an Arc clone.
+        if let Some(dc) = dynamic_config.as_ref() {
+            let initial = dc.audit_sample_rate().await;
+            sample_rate_bps.store(
+                (initial.clamp(0.0, 1.0) * 10_000.0).round() as u32,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            let dc = dc.clone();
+            let bps = sample_rate_bps.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                loop {
+                    interval.tick().await;
+                    let rate = dc.audit_sample_rate().await;
+                    bps.store(
+                        (rate.clamp(0.0, 1.0) * 10_000.0).round() as u32,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+            });
         }
 
         // Spawn the background worker
@@ -629,10 +661,38 @@ impl AuditLogger {
             });
         }
 
-        Self { tx, db, registry }
+        Self {
+            tx,
+            db,
+            registry,
+            sample_rate_bps,
+        }
+    }
+
+    /// Update the audit sample rate (0.0..=1.0). Lower values drop a
+    /// proportional fraction of entries at `log()` time before the
+    /// channel send, so a high-volume deployment can spare CH without
+    /// also starving the forwarder queue. Called by the dynamic-config
+    /// subscriber on startup and on every `audit.sample_rate` update.
+    pub fn set_sample_rate(&self, rate: f64) {
+        let clamped = rate.clamp(0.0, 1.0);
+        let bps = (clamped * 10_000.0).round() as u32;
+        self.sample_rate_bps
+            .store(bps, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn log(&self, entry: AuditEntry) {
+        // Sampling: consult the atomic rate and skip the entry when a
+        // uniform draw falls outside the keep window. A full keep
+        // (10000) short-circuits the RNG so the hot path pays nothing
+        // until an operator actually dials sampling down.
+        let bps = self
+            .sample_rate_bps
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if bps < 10_000 && rand::random_range(0..10_000) >= bps {
+            metrics::counter!("audit_log_sampled_out_total").increment(1);
+            return;
+        }
         if let Err(e) = self.tx.try_send(entry) {
             // Compliance signal: dropped audit entries are a real
             // operational incident, not a debug warning. Bump the
