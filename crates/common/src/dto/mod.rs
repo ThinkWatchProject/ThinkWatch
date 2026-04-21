@@ -1,3 +1,21 @@
+//! # DTO placement convention
+//!
+//! A type belongs here (in `think_watch_common::dto`) when **more than
+//! one crate** names it — auth/gateway/mcp-gateway/server all referring
+//! to the same request or response shape. Classic examples:
+//! `LoginRequest`, `PaginationParams`, `CreateApiKeyResponse`.
+//!
+//! A type belongs **next to its handler** (private or `pub(crate)` in
+//! the handler module) when only that one handler parses or emits it —
+//! `TestMcpServerRequest`, `ForceRevokeRequest`, `UpdateKeyRequest`.
+//! Moving those here would bloat the crate without adding a seam.
+//!
+//! When a handler-local type grows a second caller (another handler,
+//! a gateway, the CLI, etc.), that's the promotion trigger — lift it
+//! into this module and update the imports in one pass. Until then,
+//! leave it where the request actually lands. The rule is "shared
+//! types converge here"; it isn't "every DTO lives here".
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
