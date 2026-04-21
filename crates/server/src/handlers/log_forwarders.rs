@@ -73,6 +73,15 @@ pub async fn create_forwarder(
     auth_user
         .assert_scope_global(&state.db, "log_forwarders:write")
         .await?;
+    // S3 / Splunk live as webhook forwarders today: both accept HTTP
+    // POST with a JSON or NDJSON body, which is what the existing
+    // `webhook` transport already emits. Splunk HEC URL goes in
+    // config.url + a `Splunk <token>` Authorization header; S3 goes
+    // through a presigned-PUT proxy (e.g. AWS API Gateway → Lambda)
+    // to keep the gateway from holding AWS credentials. Native
+    // first-class transports for both can be added by name here when
+    // operator demand justifies a dedicated config schema instead of
+    // re-using the generic webhook.
     let allowed_types = ["udp_syslog", "tcp_syslog", "kafka", "webhook"];
     if !allowed_types.contains(&req.forwarder_type.as_str()) {
         return Err(AppError::BadRequest(format!(
