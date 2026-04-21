@@ -53,8 +53,26 @@ pub async fn store_public_key(
 /// Build the httpOnly access-token cookie. SameSite=Lax (not Strict)
 /// so SSO redirects from external IdPs work — the callback request
 /// is cross-site by definition.
+/// Cookie name for the short-lived access token. The `__Host-` prefix
+/// is a browser-enforced contract: the cookie must be Secure, have
+/// Path=/, and must NOT set a Domain attribute — which collectively
+/// pins it to the exact origin host and prevents any sibling subdomain
+/// from reading or setting it. Spelling this out explicitly means a
+/// future well-intentioned `Domain=` edit would be rejected by the
+/// browser rather than silently widening the session's reach.
+pub const ACCESS_COOKIE_NAME: &str = "__Host-access_token";
+
+/// Cookie name for the longer-lived refresh token. `__Host-` would
+/// require Path=/, but we scope the refresh cookie to
+/// `/api/auth/refresh` so a leaky proxy log on any other path is a
+/// non-event — `__Secure-` is the right prefix here (Secure required,
+/// Path/Domain unconstrained by the prefix itself).
+pub const REFRESH_COOKIE_NAME: &str = "__Secure-refresh_token";
+
 pub fn access_token_cookie(token: &str, max_age_secs: i64) -> String {
-    format!("access_token={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={max_age_secs}")
+    format!(
+        "{ACCESS_COOKIE_NAME}={token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={max_age_secs}"
+    )
 }
 
 /// Build the httpOnly refresh-token cookie. Path scoped to
@@ -63,20 +81,19 @@ pub fn access_token_cookie(token: &str, max_age_secs: i64) -> String {
 /// downstream proxy log.
 pub fn refresh_token_cookie(token: &str, max_age_secs: i64) -> String {
     format!(
-        "refresh_token={token}; HttpOnly; Secure; SameSite=Lax; Path=/api/auth/refresh; Max-Age={max_age_secs}"
+        "{REFRESH_COOKIE_NAME}={token}; HttpOnly; Secure; SameSite=Lax; Path=/api/auth/refresh; Max-Age={max_age_secs}"
     )
 }
 
 /// Build the Set-Cookie values that clear the auth cookies.
 /// Used by the logout handler to evict the session from the
 /// browser without relying on the client to do anything.
-pub fn clear_auth_cookies() -> [String; 3] {
+pub fn clear_auth_cookies() -> [String; 2] {
     [
-        "access_token=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0".to_string(),
-        "refresh_token=; HttpOnly; Secure; SameSite=Lax; Path=/api/auth/refresh; Max-Age=0"
-            .to_string(),
-        // Also clear old broader-path cookie for upgrade path
-        "refresh_token=; HttpOnly; Secure; SameSite=Lax; Path=/api/auth; Max-Age=0".to_string(),
+        format!("{ACCESS_COOKIE_NAME}=; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age=0"),
+        format!(
+            "{REFRESH_COOKIE_NAME}=; HttpOnly; Secure; SameSite=Lax; Path=/api/auth/refresh; Max-Age=0"
+        ),
     ]
 }
 
@@ -326,19 +343,25 @@ mod tests {
     #[test]
     fn access_token_cookie_has_required_attrs() {
         let cookie = access_token_cookie("eyJhbGciOiJIUzI1NiJ9.test", 900);
-        assert!(cookie.starts_with("access_token=eyJhbGciOiJIUzI1NiJ9.test"));
+        assert!(cookie.starts_with("__Host-access_token=eyJhbGciOiJIUzI1NiJ9.test"));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("Secure"));
         // SameSite=Lax (not Strict) so SSO redirects work
         assert!(cookie.contains("SameSite=Lax"));
         assert!(cookie.contains("Path=/;"));
         assert!(cookie.contains("Max-Age=900"));
+        // __Host- prefix forbids a Domain attribute; spell that out so
+        // a future regression trips the test instead of the browser.
+        assert!(
+            !cookie.to_ascii_lowercase().contains("domain="),
+            "__Host- cookies must not set Domain: {cookie}"
+        );
     }
 
     #[test]
     fn refresh_token_cookie_path_is_scoped_to_auth() {
         let cookie = refresh_token_cookie("rt-token-here", 7 * 86400);
-        assert!(cookie.starts_with("refresh_token=rt-token-here"));
+        assert!(cookie.starts_with("__Secure-refresh_token=rt-token-here"));
         assert!(cookie.contains("HttpOnly"));
         assert!(cookie.contains("Secure"));
         assert!(cookie.contains("SameSite=Lax"));
@@ -352,12 +375,12 @@ mod tests {
     #[test]
     fn clear_auth_cookies_evicts_all() {
         let cookies = clear_auth_cookies();
-        assert_eq!(cookies.len(), 3);
+        assert_eq!(cookies.len(), 2);
         let joined = cookies.join("\n");
-        assert!(joined.contains("access_token=;"));
-        assert!(joined.contains("refresh_token=;"));
-        assert!(joined.matches("Max-Age=0").count() == 3);
-        assert!(joined.contains("Path=/api/auth")); // refresh_token
+        assert!(joined.contains("__Host-access_token=;"));
+        assert!(joined.contains("__Secure-refresh_token=;"));
+        assert!(joined.matches("Max-Age=0").count() == 2);
+        assert!(joined.contains("Path=/api/auth/refresh")); // refresh_token
         assert!(joined.contains("Path=/;")); // access_token
     }
 
@@ -366,16 +389,16 @@ mod tests {
         let request = Request::builder()
             .header(
                 "cookie",
-                "session=abc; access_token=eyJ.test.sig; refresh_token=rt-x",
+                "session=abc; __Host-access_token=eyJ.test.sig; __Secure-refresh_token=rt-x",
             )
             .body(axum::body::Body::empty())
             .unwrap();
         assert_eq!(
-            extract_cookie(&request, "access_token").as_deref(),
+            extract_cookie(&request, ACCESS_COOKIE_NAME).as_deref(),
             Some("eyJ.test.sig")
         );
         assert_eq!(
-            extract_cookie(&request, "refresh_token").as_deref(),
+            extract_cookie(&request, REFRESH_COOKIE_NAME).as_deref(),
             Some("rt-x")
         );
         assert_eq!(extract_cookie(&request, "missing"), None);

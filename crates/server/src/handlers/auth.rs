@@ -773,8 +773,10 @@ pub async fn refresh(
     // at login time and falling back to a body field for non-browser
     // clients. The cookie path is the standard browser flow now —
     // the body field is just a courtesy for curl/CI scripts.
-    let cookie_token =
-        crate::middleware::verify_signature::extract_cookie(&request, "refresh_token");
+    let cookie_token = crate::middleware::verify_signature::extract_cookie(
+        &request,
+        crate::middleware::verify_signature::REFRESH_COOKIE_NAME,
+    );
     let presented_token = if let Some(t) = cookie_token {
         t
     } else {

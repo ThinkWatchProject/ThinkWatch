@@ -563,8 +563,10 @@ pub async fn require_auth(
     // sessions — XSS can never exfiltrate it. Bearer header is the fallback
     // for non-browser clients. If the Bearer value is a `tw-` API key with
     // the `console` surface, we do API-key auth instead of JWT auth.
-    let token_from_cookie =
-        crate::middleware::verify_signature::extract_cookie(&request, "access_token");
+    let token_from_cookie = crate::middleware::verify_signature::extract_cookie(
+        &request,
+        crate::middleware::verify_signature::ACCESS_COOKIE_NAME,
+    );
 
     // Resolve as an owned String so we can move `request` later.
     let bearer: String = match token_from_cookie {
