@@ -20,6 +20,18 @@ use uuid::Uuid;
 pub struct RouteEntry {
     pub provider: Arc<dyn DynAiProvider>,
     pub provider_id: Uuid,
+    /// Snapshot of `providers.name` at route-load time. We carry this
+    /// alongside `provider_id` so the post-request `gateway_logs.provider`
+    /// column gets a human-readable string without a second DB hit per
+    /// request, and the value survives provider deletion (where the
+    /// foreign key flips to NULL but the log row stays legible).
+    pub provider_name: String,
+    /// Snapshot of `providers.region` (data-residency tag, e.g.
+    /// `us-east-1`). Copied into `gateway_logs.region` on every emit so
+    /// residency-aware cost / latency dashboards can GROUP BY region
+    /// without joining back to `providers` — that join would break for
+    /// deleted provider rows anyway.
+    pub region: Option<String>,
     pub upstream_model: Option<String>,
     pub weight: u32,
     pub priority: u32,
@@ -158,6 +170,8 @@ mod tests {
             RouteEntry {
                 provider,
                 provider_id: Uuid::nil(),
+                provider_name: "openai".into(),
+                region: None,
                 upstream_model: None,
                 weight: 100,
                 priority: 0,
@@ -180,6 +194,8 @@ mod tests {
             RouteEntry {
                 provider,
                 provider_id: Uuid::nil(),
+                provider_name: "openai".into(),
+                region: None,
                 upstream_model: None,
                 weight: 100,
                 priority: 0,
@@ -211,6 +227,8 @@ mod tests {
             RouteEntry {
                 provider: generic,
                 provider_id: Uuid::nil(),
+                provider_name: "generic".into(),
+                region: None,
                 upstream_model: None,
                 weight: 100,
                 priority: 0,
@@ -221,6 +239,8 @@ mod tests {
             RouteEntry {
                 provider: specific,
                 provider_id: Uuid::nil(),
+                provider_name: "specific".into(),
+                region: None,
                 upstream_model: None,
                 weight: 100,
                 priority: 0,
@@ -245,6 +265,8 @@ mod tests {
             RouteEntry {
                 provider,
                 provider_id: openai_id,
+                provider_name: "openai".into(),
+                region: None,
                 upstream_model: None,
                 weight: 100,
                 priority: 0,
@@ -268,6 +290,8 @@ mod tests {
             RouteEntry {
                 provider: fallback,
                 provider_id: Uuid::nil(),
+                provider_name: "fallback".into(),
+                region: None,
                 upstream_model: None,
                 weight: 100,
                 priority: 1,
@@ -278,6 +302,8 @@ mod tests {
             RouteEntry {
                 provider: primary,
                 provider_id: Uuid::nil(),
+                provider_name: "primary".into(),
+                region: None,
                 upstream_model: None,
                 weight: 100,
                 priority: 0,

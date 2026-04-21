@@ -135,6 +135,13 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     -- conversation into one expandable row instead of a dozen
     -- siblings (FEAT-10).
     session_id       LowCardinality(Nullable(String)),
+    -- region: snapshot of providers.region at request time
+    -- (e.g. 'us-east-1', 'eu-west-1'). Lets residency-aware cost
+    -- and latency dashboards GROUP BY region without joining back
+    -- to Postgres `providers` — that join breaks the moment a
+    -- provider is soft-deleted. Null when the provider has no
+    -- residency tag configured.
+    region           LowCardinality(Nullable(String)),
     created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
 
     INDEX idx_user_id    user_id     TYPE bloom_filter GRANULARITY 4,
@@ -145,6 +152,7 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     INDEX idx_status     status_code TYPE set(50)      GRANULARITY 2,
     INDEX idx_trace      trace_id    TYPE bloom_filter GRANULARITY 4,
     INDEX idx_session    session_id  TYPE bloom_filter GRANULARITY 4,
+    INDEX idx_region     region      TYPE set(50)      GRANULARITY 2,
     INDEX idx_search     id          TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4,
     INDEX idx_detail     ifNull(detail, '') TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
 ) ENGINE = MergeTree()
@@ -158,6 +166,8 @@ ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS user_email LowCardinality(Null
 ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloom_filter GRANULARITY 4;
 ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS session_id LowCardinality(Nullable(String)) AFTER trace_id;
 ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_session session_id TYPE bloom_filter GRANULARITY 4;
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS region LowCardinality(Nullable(String)) AFTER session_id;
+ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_region region TYPE set(50) GRANULARITY 2;
 
 ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_cost (
     SELECT * ORDER BY cost_usd, created_at

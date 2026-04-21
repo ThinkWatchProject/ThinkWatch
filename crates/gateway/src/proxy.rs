@@ -200,6 +200,12 @@ impl LogCtx<'_> {
     /// Emit the error row and return the error unchanged so call sites
     /// stay one-line:  `return Err(ctx.emit(GatewayError::...));`
     fn emit(&self, err: GatewayError) -> GatewayError {
+        // ctx.emit fires on pre-route-selection failures (allowed_models
+        // reject, preflight rate-limit, content filter block, route
+        // lookup miss). The provider and its region are only resolved
+        // after a route is picked, so we legitimately pass None here —
+        // the resulting gateway_logs row has a NULL provider / region,
+        // which is correct: no provider handled the request.
         emit_gateway_error_log(
             self.audit,
             &self.trace_id,
@@ -208,6 +214,8 @@ impl LogCtx<'_> {
             self.user_email.as_deref(),
             self.api_key_id.as_deref(),
             &self.model,
+            None,
+            None,
             self.started.elapsed().as_millis() as i64,
             &err,
         );
@@ -277,12 +285,15 @@ fn emit_gateway_error_log(
     user_email: Option<&str>,
     api_key_id: Option<&str>,
     model_id: &str,
+    provider: Option<&str>,
+    region: Option<&str>,
     latency_ms: i64,
     err: &GatewayError,
 ) {
     let status = gateway_error_status(err);
     let detail = serde_json::json!({
         "model_id": model_id,
+        "provider": provider,
         "input_tokens": 0i64,
         "output_tokens": 0i64,
         "cost_usd": 0.0,
@@ -300,6 +311,9 @@ fn emit_gateway_error_log(
         .detail(detail);
     if let Some(sid) = session_id {
         entry = entry.session_id(sid);
+    }
+    if let Some(r) = region {
+        entry = entry.region(r);
     }
     if let Some(uid) = user_id
         && let Ok(u) = uuid::Uuid::parse_str(uid)
@@ -331,6 +345,7 @@ fn emit_gateway_log_with_extra(
     api_key_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
+    region: Option<&str>,
     prompt_tokens: u32,
     completion_tokens: u32,
     cost_usd: f64,
@@ -360,6 +375,9 @@ fn emit_gateway_log_with_extra(
     if let Some(sid) = session_id {
         entry = entry.session_id(sid);
     }
+    if let Some(r) = region {
+        entry = entry.region(r);
+    }
     if let Some(uid) = user_id
         && let Ok(u) = uuid::Uuid::parse_str(uid)
     {
@@ -386,6 +404,7 @@ fn emit_gateway_log(
     api_key_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
+    region: Option<&str>,
     prompt_tokens: u32,
     completion_tokens: u32,
     cost_usd: f64,
@@ -405,6 +424,9 @@ fn emit_gateway_log(
         }));
     if let Some(sid) = session_id {
         entry = entry.session_id(sid);
+    }
+    if let Some(r) = region {
+        entry = entry.region(r);
     }
     if let Some(uid) = user_id
         && let Ok(u) = uuid::Uuid::parse_str(uid)
@@ -1056,6 +1078,8 @@ pub async fn proxy_chat_completion(
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
         let model_for_log = original_model.clone();
+        let provider_name_for_done = entry.provider_name.clone();
+        let region_for_done = entry.region.clone();
         let started = request_started_at;
         // Clone request for cache write — the original is moved into the provider.
         let request_for_cache = request.clone();
@@ -1104,7 +1128,8 @@ pub async fn proxy_chat_completion(
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
                     &model_for_log,
-                    None,
+                    Some(provider_name_for_done.as_str()),
+                    region_for_done.as_deref(),
                     pt,
                     ct,
                     cost,
@@ -1147,7 +1172,7 @@ pub async fn proxy_chat_completion(
         Ok(stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response())
     } else {
         // Non-streaming: full failover with retry across priority groups
-        let (_entry, mut response) = select_route_with_failover(
+        let (chosen_entry, mut response) = select_route_with_failover(
             routes,
             &state.redis,
             identity.user_id.as_deref(),
@@ -1157,6 +1182,9 @@ pub async fn proxy_chat_completion(
         )
         .await
         .map_err(|e| {
+            // select_route_with_failover just errored across every
+            // candidate — there's no winning provider to attribute
+            // this failure to, so provider / region stay None.
             emit_gateway_error_log(
                 &state.audit,
                 &metadata.request_id,
@@ -1165,6 +1193,8 @@ pub async fn proxy_chat_completion(
                 identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
                 &original_model,
+                None,
+                None,
                 request_started_at.elapsed().as_millis() as i64,
                 &e,
             );
@@ -1232,7 +1262,8 @@ pub async fn proxy_chat_completion(
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
             &original_model,
-            None,
+            Some(chosen_entry.provider_name.as_str()),
+            chosen_entry.region.as_deref(),
             prompt_tokens,
             completion_tokens,
             cost_usd,
@@ -1471,6 +1502,8 @@ pub async fn proxy_anthropic_messages(
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
         let model_for_log = mapped_model.clone();
+        let provider_name_for_done = entry.provider_name.clone();
+        let region_for_done = entry.region.clone();
         let started = request_started_at;
         let stream = entry.provider.stream_chat_completion(stream_request);
         let on_done = move |result: crate::streaming::StreamResult|
@@ -1490,7 +1523,8 @@ pub async fn proxy_anthropic_messages(
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
                     &model_for_log,
-                    None,
+                    Some(provider_name_for_done.as_str()),
+                    region_for_done.as_deref(),
                     pt,
                     ct,
                     cost,
@@ -1523,7 +1557,7 @@ pub async fn proxy_anthropic_messages(
         }
         Ok(http_response)
     } else {
-        let (_entry, mut response) = select_route_with_failover(
+        let (chosen_entry, mut response) = select_route_with_failover(
             routes,
             &state.redis,
             identity.user_id.as_deref(),
@@ -1541,6 +1575,8 @@ pub async fn proxy_anthropic_messages(
                 identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
                 &mapped_model,
+                None,
+                None,
                 request_started_at.elapsed().as_millis() as i64,
                 &e,
             );
@@ -1589,7 +1625,8 @@ pub async fn proxy_anthropic_messages(
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
             &mapped_model,
-            None,
+            Some(chosen_entry.provider_name.as_str()),
+            chosen_entry.region.as_deref(),
             pt,
             ct,
             cost,
@@ -1850,6 +1887,8 @@ pub async fn proxy_responses(
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
         let model_for_log = mapped_model.clone();
+        let provider_name_for_done = entry.provider_name.clone();
+        let region_for_done = entry.region.clone();
         let started = request_started_at;
         let stream = entry.provider.stream_chat_completion(stream_request);
         let on_done = move |result: crate::streaming::StreamResult|
@@ -1869,7 +1908,8 @@ pub async fn proxy_responses(
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
                     &model_for_log,
-                    None,
+                    Some(provider_name_for_done.as_str()),
+                    region_for_done.as_deref(),
                     pt,
                     ct,
                     cost,
@@ -1905,7 +1945,7 @@ pub async fn proxy_responses(
         }
         Ok(http_response)
     } else {
-        let (_entry, mut response) = select_route_with_failover(
+        let (chosen_entry, mut response) = select_route_with_failover(
             routes,
             &state.redis,
             identity.user_id.as_deref(),
@@ -1923,6 +1963,8 @@ pub async fn proxy_responses(
                 identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
                 &mapped_model,
+                None,
+                None,
                 request_started_at.elapsed().as_millis() as i64,
                 &e,
             );
@@ -1969,7 +2011,8 @@ pub async fn proxy_responses(
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
             &mapped_model,
-            None,
+            Some(chosen_entry.provider_name.as_str()),
+            chosen_entry.region.as_deref(),
             pt,
             ct,
             cost,

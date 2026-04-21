@@ -13,6 +13,11 @@ pub struct Provider {
     pub base_url: String,
     pub is_active: bool,
     pub config_json: serde_json::Value,
+    /// Optional data-residency tag (e.g. `us-east-1`, `eu-west-1`).
+    /// Snapshotted into `gateway_logs.region` on every request so
+    /// residency-aware analytics can GROUP BY region without joining
+    /// back to this row (which may be soft-deleted).
+    pub region: Option<String>,
     pub created_at: DateTime<Utc>,
     pub deleted_at: Option<DateTime<Utc>>,
 }
