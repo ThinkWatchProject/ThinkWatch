@@ -32,8 +32,11 @@ clickhouse = { version = "0.13", features = ["time", "chrono"] }
 fred = { version = "10", features = ["subscriber-client", "i-scripts"] }
 
 # Auth
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
-argon2 = "0.5"
+# Crypto-critical crates are pinned with `=` so a silent minor-release
+# change (e.g. a JWT lib's validation-default flip) can't sneak in via
+# `cargo update`. Bumps are deliberate and reviewed.
+jsonwebtoken = { version = "=10.3.0", features = ["rust_crypto"] }
+argon2 = "=0.5.3"
 openidconnect = { version = "4", features = ["reqwest"] }
 totp-rs = { version = "5", features = ["gen_secret", "otpauth"] }
 data-encoding = "2"
@@ -54,16 +57,16 @@ futures = "0.3"
 tokio-stream = "0.1"
 async-stream = "0.3"
 
-# Crypto
-aes-gcm = "0.10"
-sha2 = "0.11"
-sha1 = "0.11"
-hmac = "0.13"
-p256 = { version = "0.13", features = ["ecdsa", "jwk"] }
-ecdsa = { version = "0.16", features = ["verifying"] }
+# Crypto — pinned exact. See the auth section for the rationale.
+aes-gcm = "=0.10.3"
+sha2 = "=0.11.0"
+sha1 = "=0.11.0"
+hmac = "=0.13.0"
+p256 = { version = "=0.13.2", features = ["ecdsa", "jwk"] }
+ecdsa = { version = "=0.16.9", features = ["verifying"] }
 rand = "0.10"
 hex = "0.4"
-subtle = "2"
+subtle = "=2.6.1"
 url = "2"
 
 # Observability
