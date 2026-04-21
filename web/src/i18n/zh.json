@@ -188,6 +188,9 @@
     "pause": "暂停",
     "resume": "继续",
     "previousValuePrefix": "上一时段",
+    "kindCol": "类型",
+    "unitMs": "毫秒",
+    "unitPerMin": "/分钟",
     "providerFilter": {
       "all": "全部",
       "ai": "AI",

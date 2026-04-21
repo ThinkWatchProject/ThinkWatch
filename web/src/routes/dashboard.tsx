@@ -1153,11 +1153,11 @@ function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
         className={`hidden shrink-0 gap-3 border-b px-4 py-2 text-[10px] uppercase tracking-wider text-muted-foreground lg:grid ${cols}`}
       >
         <div>{t('dashboard.time')}</div>
-        <div>kind</div>
+        <div>{t('dashboard.kindCol')}</div>
         <div>{t('dashboard.user')}</div>
         <div>{t('dashboard.subjectCol')}</div>
         <div className="text-right">{t('dashboard.tokens')}</div>
-        <div className="text-right">ms</div>
+        <div className="text-right">{t('dashboard.unitMs')}</div>
         <div className="text-right">{t('dashboard.statusCol')}</div>
       </div>
 
@@ -1322,7 +1322,7 @@ function RpmWindowPanel({
             {last.toLocaleString()}
           </span>
           <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-            /min
+            {t('dashboard.unitPerMin')}
           </span>
         </div>
         <div className="flex items-baseline gap-3 text-[10px] text-muted-foreground">

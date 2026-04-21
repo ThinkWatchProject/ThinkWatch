@@ -188,6 +188,9 @@
     "pause": "Pause",
     "resume": "Resume",
     "previousValuePrefix": "prev",
+    "kindCol": "kind",
+    "unitMs": "ms",
+    "unitPerMin": "/min",
     "providerFilter": {
       "all": "all",
       "ai": "ai",
