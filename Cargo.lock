@@ -4039,6 +4039,7 @@ dependencies = [
  "ecdsa",
  "fred",
  "hex",
+ "hmac 0.13.0",
  "metrics",
  "metrics-exporter-prometheus",
  "openidconnect",

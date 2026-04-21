@@ -1,18 +1,38 @@
 use axum::extract::{Query, State};
 use axum::response::Redirect;
+use hmac::{Hmac, Mac, digest::KeyInit};
 use serde::{Deserialize, Serialize};
+use sha2::Sha256;
+use subtle::ConstantTimeEq;
 
 use think_watch_common::audit::AuditEntry;
+use think_watch_common::crypto::parse_encryption_key;
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
 
 use crate::app::AppState;
 
 // Session payload indexed by the OIDC `state` (csrf_token) in Redis.
-// Only the nonce is stored; one-time-use is enforced via atomic GETDEL on callback.
+// One-time-use is enforced via atomic GETDEL on callback. `binding`
+// is HMAC-SHA256(encryption_key, state || ":" || nonce) and serves
+// as a cryptographic bond between the Redis key (state) and value
+// (nonce). Without it, an operator (or attacker) with Redis write
+// access could swap the nonce under a valid state's key; the HMAC
+// ensures that only a server with the encryption key can produce a
+// valid entry, so any tampering is caught at callback time.
 #[derive(Serialize, Deserialize)]
 struct OidcSessionData {
     nonce: String,
+    binding: String,
+}
+
+fn state_nonce_binding(enc_key: &[u8; 32], state: &str, nonce: &str) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(enc_key).expect("HMAC-SHA256 accepts any key length");
+    mac.update(state.as_bytes());
+    mac.update(b":");
+    mac.update(nonce.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 /// GET /api/auth/sso/authorize — redirect to OIDC provider.
@@ -24,8 +44,12 @@ pub async fn sso_authorize(State(state): State<AppState>) -> Result<Redirect, Ap
 
     let (auth_url, csrf_token, nonce) = oidc.authorize_url();
 
+    let enc_key = parse_encryption_key(&state.config.encryption_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
+    let binding = state_nonce_binding(&enc_key, csrf_token.secret(), nonce.secret());
     let session = OidcSessionData {
         nonce: nonce.secret().clone(),
+        binding,
     };
     let payload = serde_json::to_string(&session)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("serialize oidc session: {e}")))?;
@@ -73,6 +97,24 @@ pub async fn sso_callback(
 
     let session: OidcSessionData =
         serde_json::from_str(&stored).map_err(|_| AppError::BadRequest("Invalid state".into()))?;
+
+    // Re-derive the HMAC from (state, stored nonce) and constant-time
+    // compare with the binding we stored at authorize time. A mismatch
+    // means the Redis entry was tampered with or the encryption key
+    // rotated between authorize and callback — either way, refuse.
+    let enc_key = parse_encryption_key(&state.config.encryption_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
+    let expected = state_nonce_binding(&enc_key, &params.state, &session.nonce);
+    if !bool::from(expected.as_bytes().ct_eq(session.binding.as_bytes())) {
+        tracing::warn!(
+            "OIDC state/nonce binding mismatch for state {}",
+            params.state
+        );
+        return Err(AppError::BadRequest(
+            "SSO session binding failed; please retry".into(),
+        ));
+    }
+
     let nonce = openidconnect::Nonce::new(session.nonce);
 
     // Exchange code for tokens

@@ -29,6 +29,7 @@ openidconnect = { workspace = true }
 rust_decimal = { workspace = true }
 reqwest = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 hex = { workspace = true }
 p256 = { workspace = true }
 ecdsa = { workspace = true }
