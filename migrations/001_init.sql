@@ -189,7 +189,12 @@ CREATE TABLE api_keys (
         CHECK (inactivity_timeout_days IS NULL OR inactivity_timeout_days >= 0)
 );
 
-CREATE INDEX idx_api_keys_key_hash    ON api_keys(key_hash);
+-- UNIQUE: key_hash is the SHA-256 hash of the plaintext API key. A
+-- collision would collapse two distinct credentials into a single
+-- auth row (identity confusion + non-deterministic revoke). Enforce
+-- uniqueness at the DB level so a bug in the key generator can't
+-- silently create duplicates.
+CREATE UNIQUE INDEX idx_api_keys_key_hash ON api_keys(key_hash);
 CREATE INDEX idx_api_keys_key_prefix  ON api_keys(key_prefix);
 CREATE INDEX idx_api_keys_is_active   ON api_keys(is_active)  WHERE is_active = true;
 CREATE INDEX idx_api_keys_expires_at  ON api_keys(expires_at) WHERE expires_at IS NOT NULL;
