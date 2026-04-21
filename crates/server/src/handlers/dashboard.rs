@@ -164,19 +164,19 @@ pub async fn get_dashboard_stats(
             TimeRange::Day => {
                 "SELECT uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= now() - INTERVAL 24 HOUR \
+                 PREWHERE created_at >= now() - INTERVAL 24 HOUR \
                    AND api_key_id IS NOT NULL AND api_key_id != ''"
             }
             TimeRange::Week => {
                 "SELECT uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= now() - INTERVAL 7 DAY \
+                 PREWHERE created_at >= now() - INTERVAL 7 DAY \
                    AND api_key_id IS NOT NULL AND api_key_id != ''"
             }
             TimeRange::Month => {
                 "SELECT uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= now() - INTERVAL 30 DAY \
+                 PREWHERE created_at >= now() - INTERVAL 30 DAY \
                    AND api_key_id IS NOT NULL AND api_key_id != ''"
             }
         };
@@ -184,21 +184,21 @@ pub async fn get_dashboard_stats(
             TimeRange::Day => {
                 "SELECT uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= now() - INTERVAL 24 HOUR \
+                 PREWHERE created_at >= now() - INTERVAL 24 HOUR \
                    AND api_key_id IS NOT NULL AND api_key_id != '' \
                    AND has(?, user_id)"
             }
             TimeRange::Week => {
                 "SELECT uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= now() - INTERVAL 7 DAY \
+                 PREWHERE created_at >= now() - INTERVAL 7 DAY \
                    AND api_key_id IS NOT NULL AND api_key_id != '' \
                    AND has(?, user_id)"
             }
             TimeRange::Month => {
                 "SELECT uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= now() - INTERVAL 30 DAY \
+                 PREWHERE created_at >= now() - INTERVAL 30 DAY \
                    AND api_key_id IS NOT NULL AND api_key_id != '' \
                    AND has(?, user_id)"
             }
@@ -225,7 +225,7 @@ pub async fn get_dashboard_stats(
                 "SELECT toString(toStartOfHour(created_at)) AS bucket, \
                         uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= toStartOfHour(now()) - INTERVAL 23 HOUR \
+                 PREWHERE created_at >= toStartOfHour(now()) - INTERVAL 23 HOUR \
                    AND api_key_id IS NOT NULL AND api_key_id != '' \
                  GROUP BY bucket ORDER BY bucket ASC"
             }
@@ -233,7 +233,7 @@ pub async fn get_dashboard_stats(
                 "SELECT toString(toStartOfDay(created_at)) AS bucket, \
                         uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= toStartOfDay(now()) - INTERVAL 6 DAY \
+                 PREWHERE created_at >= toStartOfDay(now()) - INTERVAL 6 DAY \
                    AND api_key_id IS NOT NULL AND api_key_id != '' \
                  GROUP BY bucket ORDER BY bucket ASC"
             }
@@ -241,7 +241,7 @@ pub async fn get_dashboard_stats(
                 "SELECT toString(toStartOfDay(created_at)) AS bucket, \
                         uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= toStartOfDay(now()) - INTERVAL 29 DAY \
+                 PREWHERE created_at >= toStartOfDay(now()) - INTERVAL 29 DAY \
                    AND api_key_id IS NOT NULL AND api_key_id != '' \
                  GROUP BY bucket ORDER BY bucket ASC"
             }
@@ -251,7 +251,7 @@ pub async fn get_dashboard_stats(
                 "SELECT toString(toStartOfHour(created_at)) AS bucket, \
                         uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= toStartOfHour(now()) - INTERVAL 23 HOUR \
+                 PREWHERE created_at >= toStartOfHour(now()) - INTERVAL 23 HOUR \
                    AND api_key_id IS NOT NULL AND api_key_id != '' \
                    AND has(?, user_id) \
                  GROUP BY bucket ORDER BY bucket ASC"
@@ -260,7 +260,7 @@ pub async fn get_dashboard_stats(
                 "SELECT toString(toStartOfDay(created_at)) AS bucket, \
                         uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= toStartOfDay(now()) - INTERVAL 6 DAY \
+                 PREWHERE created_at >= toStartOfDay(now()) - INTERVAL 6 DAY \
                    AND api_key_id IS NOT NULL AND api_key_id != '' \
                    AND has(?, user_id) \
                  GROUP BY bucket ORDER BY bucket ASC"
@@ -269,7 +269,7 @@ pub async fn get_dashboard_stats(
                 "SELECT toString(toStartOfDay(created_at)) AS bucket, \
                         uniqExact(api_key_id) AS cnt \
                  FROM gateway_logs \
-                 WHERE created_at >= toStartOfDay(now()) - INTERVAL 29 DAY \
+                 PREWHERE created_at >= toStartOfDay(now()) - INTERVAL 29 DAY \
                    AND api_key_id IS NOT NULL AND api_key_id != '' \
                    AND has(?, user_id) \
                  GROUP BY bucket ORDER BY bucket ASC"
@@ -728,7 +728,7 @@ async fn build_live_snapshot(
                     avg(ifNull(latency_ms, 0)) AS avg_latency_ms, \
                     (countIf(status_code < 400) / count()) * 100 AS success_rate \
                  FROM gateway_logs \
-                 WHERE created_at >= now() - INTERVAL 15 MINUTE \
+                 PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                    AND has(?, user_id) \
                  GROUP BY provider \
                  ORDER BY requests DESC \
@@ -748,7 +748,7 @@ async fn build_live_snapshot(
                     avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
                     (countIf(status = 'success') / count()) * 100 AS success_rate \
                  FROM mcp_logs \
-                 WHERE created_at >= now() - INTERVAL 15 MINUTE \
+                 PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                  GROUP BY server_name \
                  ORDER BY requests DESC \
                  LIMIT 8",
@@ -763,7 +763,7 @@ async fn build_live_snapshot(
                     avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
                     (countIf(status = 'success') / count()) * 100 AS success_rate \
                  FROM mcp_logs \
-                 WHERE created_at >= now() - INTERVAL 15 MINUTE \
+                 PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                    AND has(?, user_id) \
                  GROUP BY server_name \
                  ORDER BY requests DESC \
@@ -781,7 +781,7 @@ async fn build_live_snapshot(
                     toString(toStartOfMinute(created_at)) AS minute, \
                     count() AS count \
                  FROM gateway_logs \
-                 WHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE \
+                 PREWHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE \
                  GROUP BY minute \
                  ORDER BY minute ASC",
             )
@@ -793,7 +793,7 @@ async fn build_live_snapshot(
                     toString(toStartOfMinute(created_at)) AS minute, \
                     count() AS count \
                  FROM gateway_logs \
-                 WHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE \
+                 PREWHERE created_at >= toStartOfMinute(now()) - INTERVAL 29 MINUTE \
                    AND has(?, user_id) \
                  GROUP BY minute \
                  ORDER BY minute ASC",

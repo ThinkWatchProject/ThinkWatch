@@ -218,7 +218,7 @@ pub async fn get_trace(
                         formatDateTime(created_at, '%Y-%m-%dT%H:%M:%S.%fZ', 'UTC') AS created_at, \
                         level, message \
                    FROM app_logs \
-                  WHERE created_at >= now() - INTERVAL 1 HOUR \
+                  PREWHERE created_at >= now() - INTERVAL 1 HOUR \
                     AND (fields LIKE ? OR span LIKE ?) \
                   LIMIT 200",
             )
