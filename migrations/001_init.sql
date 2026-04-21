@@ -260,7 +260,12 @@ CREATE TABLE platform_pricing (
     currency               TEXT NOT NULL DEFAULT 'USD',
     updated_at             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-INSERT INTO platform_pricing (id) VALUES (1);
+-- Idempotent singleton bootstrap: a re-run of the init script (e.g.
+-- the binary's in-memory re-apply on an upgraded deployment) must not
+-- clobber operator-edited pricing. Touching updated_at is harmless and
+-- lets the UI show "last reconciled".
+INSERT INTO platform_pricing (id) VALUES (1)
+    ON CONFLICT (id) DO UPDATE SET updated_at = platform_pricing.updated_at;
 
 -- Routes map models to providers with traffic splitting + failover.
 -- A single (model_id, provider_id) pair may have multiple routes
