@@ -34,3 +34,4 @@ deploy/data/
 
 # Local refactor plans (not tracked)
 .plan/
+/REVIEW_*.md
