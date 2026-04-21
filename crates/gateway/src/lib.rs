@@ -11,7 +11,11 @@ pub mod providers;
 pub mod proxy;
 pub mod quota;
 pub mod rate_limiter;
-pub mod retry;
+/// Re-export of `think_watch_common::retry` so existing `crate::retry::`
+/// paths and `use think_watch_gateway::retry;` imports still resolve
+/// after the extraction into common. Delete once every reference
+/// uses the common path directly.
+pub use think_watch_common::retry;
 pub mod router;
 pub mod sse_parser;
 pub mod streaming;
