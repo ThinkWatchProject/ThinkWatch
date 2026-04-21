@@ -93,7 +93,27 @@ async fn run_retention_cleanup(
         );
     }
 
-    // 4. Orphan cleanup for the polymorphic limits engine.
+    // 4. Webhook outbox garbage collection. Rows that have exhausted
+    // their retry budget accumulate forever otherwise and bloat the
+    // admin outbox page. Seven days gives operators a window to see
+    // recent delivery failures, then the failed entry is dropped.
+    let outbox_cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+    let outbox_purged = sqlx::query(
+        "DELETE FROM webhook_outbox \
+          WHERE attempts >= 10 \
+            AND next_attempt_at < $1",
+    )
+    .bind(outbox_cutoff)
+    .execute(db)
+    .await?;
+    if outbox_purged.rows_affected() > 0 {
+        tracing::info!(
+            "Purged {} exhausted webhook_outbox rows older than 7 days",
+            outbox_purged.rows_affected()
+        );
+    }
+
+    // 5. Orphan cleanup for the polymorphic limits engine.
     //
     // `rate_limit_rules` and `budget_caps` use a polymorphic
     // `(subject_kind, subject_id)` pair instead of a real foreign
