@@ -462,6 +462,12 @@ CREATE INDEX idx_budget_caps_created_by ON budget_caps(created_by, created_at DE
 
 -- --------------------------------------------------------------------------
 -- MCP Call Logs
+--
+-- Retention policy: when an MCP server is removed, the historical call
+-- logs STAY — server_id is set NULL via the FK, the row is kept as a
+-- permanent audit record. Deliberate choice over CASCADE so that
+-- deleting a compromised or misconfigured server doesn't erase the
+-- evidence of what was called through it.
 -- --------------------------------------------------------------------------
 
 CREATE TABLE mcp_call_logs (
