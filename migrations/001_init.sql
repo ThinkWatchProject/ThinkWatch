@@ -283,11 +283,22 @@ CREATE TABLE providers (
     base_url          VARCHAR(512) NOT NULL,
     is_active         BOOLEAN NOT NULL DEFAULT TRUE,
     config_json       JSONB DEFAULT '{}',
+    -- Optional data-residency tag (e.g. 'us-east-1', 'eu-west-1',
+    -- 'cn-north-1'). When set, the gateway router can refuse to send
+    -- traffic from a user whose `users.region` doesn't match — buyers
+    -- in regulated jurisdictions get an enforceable "EU traffic stays
+    -- on EU upstreams" guarantee. NULL means "no residency
+    -- constraint" so existing deployments stay backward-compatible.
+    region            VARCHAR(32),
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at        TIMESTAMPTZ
 );
 
 CREATE INDEX idx_providers_not_deleted ON providers(created_at) WHERE deleted_at IS NULL;
+-- Index supports the residency filter "list providers in region X
+-- the router can pick from"; partial because providers without a
+-- region tag aren't part of any residency cohort.
+CREATE INDEX idx_providers_region ON providers(region) WHERE region IS NOT NULL;
 
 -- Exposed catalog of model IDs clients can call via `/v1/models`.
 -- Standalone entities — not tied to a single provider; routing to
