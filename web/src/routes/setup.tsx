@@ -89,6 +89,12 @@ function StepIndicator({ currentStep }: { currentStep: Step }) {
   );
 }
 
+// Module-scoped so each instance shares the compiled regex; recreating
+// these per render adds up across the password-typing hot path.
+const PASSWORD_HAS_UPPER = /[A-Z]/;
+const PASSWORD_HAS_LOWER = /[a-z]/;
+const PASSWORD_HAS_DIGIT = /\d/;
+
 export function SetupPage() {
   const { t, i18n } = useTranslation();
   const [step, setStep] = useState<Step>('welcome');
@@ -125,6 +131,8 @@ export function SetupPage() {
 
   const [adminErrors, setAdminErrors] = useState<Record<string, string>>({});
 
+  // Hoisted out of the closure so the regex literals aren't recompiled
+  // on every render (RegExp inside a body recompiles per call).
   const validateAdmin = useCallback((): boolean => {
     const errors: Record<string, string> = {};
     if (!email.trim()) errors.email = 'Required';
@@ -132,9 +140,9 @@ export function SetupPage() {
     if (password.length < 8) {
       errors.password = t('setup.admin.passwordTooShort');
     } else if (
-      !/[A-Z]/.test(password) ||
-      !/[a-z]/.test(password) ||
-      !/\d/.test(password)
+      !PASSWORD_HAS_UPPER.test(password) ||
+      !PASSWORD_HAS_LOWER.test(password) ||
+      !PASSWORD_HAS_DIGIT.test(password)
     ) {
       errors.password = t('setup.admin.passwordComplexity');
     }
