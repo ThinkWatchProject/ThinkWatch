@@ -1330,24 +1330,52 @@ fn hmac_sha256_hex(secret: &[u8], msg: &[u8]) -> String {
 // ---------------------------------------------------------------------------
 
 fn sanitize_detail(detail: &mut Option<serde_json::Value>) {
-    if let Some(serde_json::Value::Object(map)) = detail {
-        let keys_to_redact: Vec<String> = map
-            .keys()
-            .filter(|k| {
-                let lower = k.to_lowercase();
-                lower.contains("password")
-                    || lower.contains("secret")
-                    || lower.contains("token")
-                    || lower.contains("key")
-                    || lower.contains("authorization")
-                    || lower.contains("credential")
-            })
-            .cloned()
-            .collect();
-        for key in keys_to_redact {
-            map.insert(key, serde_json::Value::String("[REDACTED]".to_string()));
-        }
+    if let Some(value) = detail {
+        sanitize_value(value);
     }
+}
+
+/// Recursively redact values whose keys look secret-shaped, anywhere
+/// in the JSON tree. Top-level-only redaction (the previous version)
+/// missed MCP `arguments.{password,api_key,token,…}` and any other
+/// payload that nests sensitive fields under a benign key. Walks
+/// objects and arrays; leaves primitives alone.
+fn sanitize_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            // Collect candidate keys first so we don't borrow the map
+            // mutably twice in the same step.
+            let keys_to_redact: Vec<String> = map
+                .keys()
+                .filter(|k| is_secret_key_name(k))
+                .cloned()
+                .collect();
+            for key in keys_to_redact {
+                map.insert(key, serde_json::Value::String("[REDACTED]".to_string()));
+            }
+            // Recurse into the surviving children — sub-objects can
+            // hold their own secret-named fields.
+            for v in map.values_mut() {
+                sanitize_value(v);
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                sanitize_value(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_secret_key_name(key: &str) -> bool {
+    let lower = key.to_lowercase();
+    lower.contains("password")
+        || lower.contains("secret")
+        || lower.contains("token")
+        || lower.contains("key")
+        || lower.contains("authorization")
+        || lower.contains("credential")
 }
 
 async fn flush_to_clickhouse(

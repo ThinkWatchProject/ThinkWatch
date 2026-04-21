@@ -532,12 +532,18 @@ impl McpProxy {
         } else {
             ("ok".to_string(), None)
         };
+        // Capture the call arguments alongside the tool name so the
+        // trace endpoint can show what was actually invoked. Secret-
+        // shaped keys are redacted by sanitize_detail downstream
+        // (recursive walk over the JSON tree, see common::audit).
+        let logged_arguments = params.get("arguments").cloned();
         let mut entry = think_watch_common::audit::AuditEntry::mcp("tools.call")
             .trace_id(call_trace_id)
             .detail(serde_json::json!({
                 "server_id": server_id.to_string(),
                 "server_name": server_name,
                 "tool_name": tool_name,
+                "arguments": logged_arguments,
                 "duration_ms": started.elapsed().as_millis() as i64,
                 "status": status,
                 "error_message": error_message,
