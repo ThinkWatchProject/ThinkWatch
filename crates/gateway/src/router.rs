@@ -4,6 +4,19 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 /// A single route entry mapping a model to a provider with weight/priority.
+///
+/// `weight` doubles as both the load-balancing knob and the A/B
+/// traffic-split control: two routes at the same `priority` with
+/// weight `(50, 50)` give a 1:1 split, `(90, 10)` gives a 90 / 10
+/// canary, `(0, 100)` shadows traffic off the route entirely without
+/// removing the row. The weighted-random pick happens in
+/// `pick_weighted` (see proxy.rs); both branches share the same
+/// failover-on-error behaviour, so an A/B variant that fails 5xx
+/// still falls through to its sibling instead of erroring.
+///
+/// To run a controlled experiment between two upstream models on
+/// the same provider, register two routes for the same `model_id`
+/// with different `upstream_model` values and the desired weights.
 pub struct RouteEntry {
     pub provider: Arc<dyn DynAiProvider>,
     pub provider_id: Uuid,
