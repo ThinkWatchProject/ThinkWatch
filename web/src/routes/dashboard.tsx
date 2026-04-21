@@ -408,6 +408,32 @@ function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
 // fetch and falls back to a terminal card variant.
 // ----------------------------------------------------------------------------
 
+// 12s is past every realistic CH analytics query (P99 < 3s on the
+// existing dashboards) but short enough that a frozen result lands
+// the per-card error fallback well before a user gives up scrolling.
+const DASHBOARD_CARD_TIMEOUT_MS = 12_000;
+
+/// Race a promise against a deadline; on timeout reject with a
+/// labelled Error that the ErrorBoundary surfaces. The cleared timer
+/// keeps the JS heap clean when the underlying request resolves first.
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const id = setTimeout(() => {
+      reject(new Error(`Timed out fetching ${label} (>${ms}ms)`));
+    }, ms);
+    p.then(
+      (v) => {
+        clearTimeout(id);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(id);
+        reject(e);
+      },
+    );
+  });
+}
+
 function SuspendedCard({
   children,
   fallbackLabel,
@@ -708,17 +734,36 @@ export function DashboardPage() {
   // one no longer blocks the other two. useMemo keyed on `range` +
   // `compare` makes the promise identity stable across re-renders but
   // refreshes whenever either control changes.
+  // Race each fetch against a generous timeout so a stuck endpoint
+  // surfaces as the per-card error fallback instead of an indefinite
+  // skeleton — Suspense alone has no timeout, and the user can't tell
+  // "loading slowly" from "the page is broken" without one.
   const compareQs = compare ? '&compare=true' : '';
   const statsPromise = useMemo(
-    () => api<DashboardStats>(`/api/dashboard/stats?range=${range}${compareQs}`),
+    () =>
+      withTimeout(
+        api<DashboardStats>(`/api/dashboard/stats?range=${range}${compareQs}`),
+        DASHBOARD_CARD_TIMEOUT_MS,
+        'dashboard.stats',
+      ),
     [range, compareQs],
   );
   const usagePromise = useMemo(
-    () => api<UsageStats>(`/api/analytics/usage/stats?range=${range}${compareQs}`),
+    () =>
+      withTimeout(
+        api<UsageStats>(`/api/analytics/usage/stats?range=${range}${compareQs}`),
+        DASHBOARD_CARD_TIMEOUT_MS,
+        'analytics.usage.stats',
+      ),
     [range, compareQs],
   );
   const costPromise = useMemo(
-    () => api<CostStats>(`/api/analytics/costs/stats?range=${range}${compareQs}`),
+    () =>
+      withTimeout(
+        api<CostStats>(`/api/analytics/costs/stats?range=${range}${compareQs}`),
+        DASHBOARD_CARD_TIMEOUT_MS,
+        'analytics.costs.stats',
+      ),
     [range, compareQs],
   );
 
