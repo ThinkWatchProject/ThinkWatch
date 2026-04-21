@@ -1141,7 +1141,7 @@ function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
 // Fixed-height upstream-health panel with a scrollable list. Each row is a
 // single line so 10+ providers fit comfortably without making the panel
 // taller than the chart next to it.
-const ProviderRow = memo(function ProviderRow({
+function ProviderRowImpl({
   row,
   healthyLabel,
   degradedLabel,
@@ -1175,6 +1175,27 @@ const ProviderRow = memo(function ProviderRow({
       </span>
       <StatusIndicator status={status} label={statusLabel} pulse />
     </li>
+  );
+}
+
+// Custom areEqual: each WS tick produces freshly-deserialised row
+// objects, so reference equality always reports "changed" and every
+// row re-renders on every tick. A field-by-field compare against the
+// previous render's row sidesteps that — when only one provider's
+// numbers actually moved we re-render exactly that one <li>.
+const ProviderRow = memo(ProviderRowImpl, (prev, next) => {
+  if (prev.healthyLabel !== next.healthyLabel) return false;
+  if (prev.degradedLabel !== next.degradedLabel) return false;
+  if (prev.downLabel !== next.downLabel) return false;
+  const a = prev.row;
+  const b = next.row;
+  return (
+    a.provider === b.provider &&
+    a.kind === b.kind &&
+    a.requests === b.requests &&
+    a.success_rate === b.success_rate &&
+    a.avg_latency_ms === b.avg_latency_ms &&
+    (a.cb_state || '') === (b.cb_state || '')
   );
 });
 
