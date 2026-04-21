@@ -1,22 +1,35 @@
 use sqlx::PgPool;
 use std::sync::Arc;
+use think_watch_common::audit::{AuditEntry, AuditLogger};
 use think_watch_common::dynamic_config::DynamicConfig;
+
+/// Retention window for soft-deleted rows before they are hard-deleted.
+/// 30 days matches the GDPR "right to be forgotten" outer bound while
+/// leaving operators a practical restoration window for accidental
+/// deletes. Changing the value is a policy decision — update the
+/// retention docs (deploy/README) and bump the audit entry below
+/// together so the paper trail stays coherent.
+const SOFT_DELETE_RETENTION_DAYS: i64 = 30;
 
 /// Background task that cleans up old data based on retention policies.
 /// Runs daily.
-pub fn spawn_data_retention_task(db: PgPool, config: Arc<DynamicConfig>) {
+pub fn spawn_data_retention_task(db: PgPool, config: Arc<DynamicConfig>, audit: AuditLogger) {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
         loop {
             interval.tick().await;
-            if let Err(e) = run_retention_cleanup(&db, &config).await {
+            if let Err(e) = run_retention_cleanup(&db, &config, &audit).await {
                 tracing::error!("Data retention cleanup failed: {e}");
             }
         }
     });
 }
 
-async fn run_retention_cleanup(db: &PgPool, config: &DynamicConfig) -> anyhow::Result<()> {
+async fn run_retention_cleanup(
+    db: &PgPool,
+    config: &DynamicConfig,
+    audit: &AuditLogger,
+) -> anyhow::Result<()> {
     // 1. Clean up usage records
     let usage_days = config.data_retention_days_usage().await;
     if usage_days > 0 {
@@ -38,8 +51,12 @@ async fn run_retention_cleanup(db: &PgPool, config: &DynamicConfig) -> anyhow::R
     // 2. Audit logs are stored in ClickHouse only; retention is managed by
     //    ClickHouse TTL (see deploy/clickhouse/initdb.d/01_init.sql).
 
-    // 3. Purge soft-deleted records older than 30 days
-    let soft_delete_cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    // 3. Purge soft-deleted records older than the GDPR retention
+    // window. This is the irreversible hard-delete — we emit an audit
+    // entry per table with a non-zero row count so the compliance trail
+    // shows when and how many records left the system.
+    let soft_delete_cutoff =
+        chrono::Utc::now() - chrono::Duration::days(SOFT_DELETE_RETENTION_DAYS);
 
     let users = sqlx::query("DELETE FROM users WHERE deleted_at IS NOT NULL AND deleted_at < $1")
         .bind(soft_delete_cutoff)
@@ -59,7 +76,21 @@ async fn run_retention_cleanup(db: &PgPool, config: &DynamicConfig) -> anyhow::R
 
     let total_purged = users.rows_affected() + keys.rows_affected() + providers.rows_affected();
     if total_purged > 0 {
-        tracing::info!("Purged {total_purged} soft-deleted records older than 30 days");
+        tracing::info!(
+            "Purged {total_purged} soft-deleted records older than {} days",
+            SOFT_DELETE_RETENTION_DAYS
+        );
+        audit.log(
+            AuditEntry::platform("data.gdpr_purge")
+                .resource("data_retention")
+                .detail(serde_json::json!({
+                    "retention_days": SOFT_DELETE_RETENTION_DAYS,
+                    "cutoff": soft_delete_cutoff.to_rfc3339(),
+                    "users_purged": users.rows_affected(),
+                    "api_keys_purged": keys.rows_affected(),
+                    "providers_purged": providers.rows_affected(),
+                })),
+        );
     }
 
     // 4. Orphan cleanup for the polymorphic limits engine.

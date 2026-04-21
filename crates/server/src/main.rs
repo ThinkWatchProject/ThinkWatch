@@ -341,6 +341,7 @@ async fn main() -> anyhow::Result<()> {
     tasks::data_retention::spawn_data_retention_task(
         state.db.clone(),
         state.dynamic_config.clone(),
+        state.audit.clone(),
     );
     tracing::info!("Background tasks started");
 
