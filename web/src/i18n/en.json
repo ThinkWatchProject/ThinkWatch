@@ -28,6 +28,7 @@
     "refresh": "Refresh",
     "loading": "Loading...",
     "required": "required",
+    "dismiss": "Dismiss",
     "noData": "No data",
     "noResults": "No results",
     "confirm": "Confirm",
@@ -210,6 +211,13 @@
     "resume": "Resume",
     "previousValuePrefix": "prev",
     "kindCol": "kind",
+    "gettingStarted": {
+      "title": "Getting started",
+      "subtitle": "Wire up the basics so the dashboard has data to show.",
+      "createKey": "Create your first API key",
+      "addProvider": "Configure a provider",
+      "inviteUsers": "Invite teammates"
+    },
     "unitMs": "ms",
     "unitPerMin": "/min",
     "providerFilter": {

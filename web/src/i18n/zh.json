@@ -28,6 +28,7 @@
     "refresh": "刷新",
     "loading": "加载中...",
     "required": "必填",
+    "dismiss": "关闭",
     "noData": "暂无数据",
     "noResults": "无匹配结果",
     "confirm": "确认",
@@ -210,6 +211,13 @@
     "resume": "继续",
     "previousValuePrefix": "上一时段",
     "kindCol": "类型",
+    "gettingStarted": {
+      "title": "快速上手",
+      "subtitle": "完成下面这几步,仪表盘才会有数据。",
+      "createKey": "创建第一个 API 密钥",
+      "addProvider": "配置 AI 供应商",
+      "inviteUsers": "邀请团队成员"
+    },
     "unitMs": "毫秒",
     "unitPerMin": "/分钟",
     "providerFilter": {

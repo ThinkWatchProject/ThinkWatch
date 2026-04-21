@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from 'react';
 import { ErrorBoundary } from '@/components/error-boundary';
+import { GettingStartedCard } from '@/components/dashboard/getting-started-card';
 import { useTranslation } from 'react-i18next';
 import { Inbox, Pause, Play } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ReferenceLine, YAxis } from 'recharts';
@@ -871,6 +872,18 @@ export function DashboardPage() {
           </div>
         </div>
       </div>
+
+      <GettingStartedCard
+        signals={{
+          // Use the live snapshot so the card disappears the moment
+          // the user finishes the action that satisfied a step,
+          // without an extra round-trip.
+          hasProviders: (live?.providers?.length ?? 0) > 0,
+          // Treat any RPM activity as evidence that an API key is in
+          // use. False until first request — fine for first-run.
+          hasApiKeys: (live?.rpm_buckets ?? []).some((v) => v > 0),
+        }}
+      />
 
       <Section eyebrow={t('dashboard.overviewEyebrow')} className="shrink-0">
         <StatCardGrid
