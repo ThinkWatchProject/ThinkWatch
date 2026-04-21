@@ -373,6 +373,12 @@ CREATE TABLE rate_limit_rules (
     -- delete their historical override log.
     expires_at   TIMESTAMPTZ NULL,
     reason       TEXT        NULL,
+    -- NULL means the original author was deleted (the FK sets NULL on
+    -- cascade so their historical overrides aren't silently purged).
+    -- It does NOT mean "system-created" — those rows either carry a
+    -- real user id or wouldn't hit this column. The index below
+    -- supports audit queries ("show me everything this admin set")
+    -- but skips the NULL tombstones, which aren't actionable.
     created_by   UUID        NULL REFERENCES users(id) ON DELETE SET NULL,
     -- One row per (subject, surface, metric, window) — admins enable /
     -- disable via the `enabled` flag rather than re-creating rows.
@@ -381,6 +387,8 @@ CREATE TABLE rate_limit_rules (
 CREATE INDEX idx_rlr_subject    ON rate_limit_rules(subject_kind, subject_id);
 CREATE INDEX idx_rlr_enabled    ON rate_limit_rules(enabled) WHERE enabled = TRUE;
 CREATE INDEX idx_rlr_expires_at ON rate_limit_rules(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX idx_rlr_created_by ON rate_limit_rules(created_by, created_at DESC)
+    WHERE created_by IS NOT NULL;
 
 CREATE TABLE budget_caps (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -403,12 +411,15 @@ CREATE TABLE budget_caps (
     -- full rationale.
     expires_at   TIMESTAMPTZ NULL,
     reason       TEXT        NULL,
+    -- See rate_limit_rules.created_by for NULL semantics.
     created_by   UUID        NULL REFERENCES users(id) ON DELETE SET NULL,
     UNIQUE(subject_kind, subject_id, period)
 );
 CREATE INDEX idx_budget_caps_subject    ON budget_caps(subject_kind, subject_id);
 CREATE INDEX idx_budget_caps_enabled    ON budget_caps(enabled) WHERE enabled = TRUE;
 CREATE INDEX idx_budget_caps_expires_at ON budget_caps(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX idx_budget_caps_created_by ON budget_caps(created_by, created_at DESC)
+    WHERE created_by IS NOT NULL;
 
 -- --------------------------------------------------------------------------
 -- MCP Call Logs
