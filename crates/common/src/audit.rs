@@ -845,16 +845,16 @@ async fn forward_to_all(
                     .bind(err_msg)
                     .execute(pool)
                     .await;
-                    // Webhook deliveries get a durable second chance —
-                    // park the entry in `webhook_outbox` so the
+                    // Failed deliveries park in `webhook_outbox` so the
                     // background drain worker can keep trying after the
-                    // inline 3x retry exhausted. Other transports
-                    // (syslog/kafka) don't have this safety net yet;
-                    // they're typically point-to-point and a transport
-                    // failure means the upstream is genuinely down.
-                    if runtime.config.forwarder_type == "webhook"
-                        && let Ok(payload_json) = serde_json::to_value(entry)
-                    {
+                    // inline 3x retry exhausted. Originally webhook-only;
+                    // syslog and kafka transports also benefit from a
+                    // safety net — a transient TCP RST or broker
+                    // reconnect shouldn't silently lose the audit row,
+                    // and the same drain pipeline already dispatches
+                    // by forwarder_type so non-webhook entries replay
+                    // through the right transport on retry.
+                    if let Ok(payload_json) = serde_json::to_value(entry) {
                         let _ = sqlx::query(
                             "INSERT INTO webhook_outbox (forwarder_id, payload, last_error) \
                              VALUES ($1, $2, $3)",
@@ -864,6 +864,11 @@ async fn forward_to_all(
                         .bind(err_msg)
                         .execute(pool)
                         .await;
+                        metrics::counter!(
+                            "forwarder_deadletter_total",
+                            "transport" => runtime.config.forwarder_type.clone(),
+                        )
+                        .increment(1);
                     }
                 }
             }
