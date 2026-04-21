@@ -11,6 +11,7 @@ import {
 } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { RequiredMark } from '@/components/ui/required-mark';
 import {
   Select,
   SelectContent,
@@ -327,40 +328,55 @@ export function SetupPage() {
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="setup-email">{t('setup.admin.email')}</Label>
+          <Label htmlFor="setup-email">
+            {t('setup.admin.email')} <RequiredMark />
+          </Label>
           <Input
             id="setup-email"
             type="email"
             placeholder="admin@company.com"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
+            onBlur={() => validateAdmin()}
             required
+            aria-required="true"
+            aria-invalid={!!adminErrors.email}
           />
           {adminErrors.email && (
             <p className="text-xs text-destructive">{adminErrors.email}</p>
           )}
         </div>
         <div className="space-y-2">
-          <Label htmlFor="setup-display-name">{t('setup.admin.displayName')}</Label>
+          <Label htmlFor="setup-display-name">
+            {t('setup.admin.displayName')} <RequiredMark />
+          </Label>
           <Input
             id="setup-display-name"
             placeholder="Admin"
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
+            onBlur={() => validateAdmin()}
             required
+            aria-required="true"
+            aria-invalid={!!adminErrors.displayName}
           />
           {adminErrors.displayName && (
             <p className="text-xs text-destructive">{adminErrors.displayName}</p>
           )}
         </div>
         <div className="space-y-2">
-          <Label htmlFor="setup-password">{t('setup.admin.password')}</Label>
+          <Label htmlFor="setup-password">
+            {t('setup.admin.password')} <RequiredMark />
+          </Label>
           <Input
             id="setup-password"
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
+            onBlur={() => validateAdmin()}
             required
+            aria-required="true"
+            aria-invalid={!!adminErrors.password}
           />
           <p className="text-xs text-muted-foreground">
             {t('setup.admin.passwordHint')}
@@ -370,13 +386,18 @@ export function SetupPage() {
           )}
         </div>
         <div className="space-y-2">
-          <Label htmlFor="setup-confirm-password">{t('setup.admin.confirmPassword')}</Label>
+          <Label htmlFor="setup-confirm-password">
+            {t('setup.admin.confirmPassword')} <RequiredMark />
+          </Label>
           <Input
             id="setup-confirm-password"
             type="password"
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
+            onBlur={() => validateAdmin()}
             required
+            aria-required="true"
+            aria-invalid={!!adminErrors.confirmPassword}
           />
           {adminErrors.confirmPassword && (
             <p className="text-xs text-destructive">{adminErrors.confirmPassword}</p>
