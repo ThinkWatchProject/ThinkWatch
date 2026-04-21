@@ -273,8 +273,13 @@ pub async fn revoke_key(
 ) -> Result<Json<serde_json::Value>, AppError> {
     assert_owner_or_global(&auth_user, &state.db, "api_keys:delete", id).await?;
 
+    // Also clear grace_period_ends_at: the auth middleware accepts a
+    // key that is either is_active=true OR still inside its rotation
+    // grace window, so an is_active=false alone leaves a rotated key
+    // usable until grace expires.
     let result = sqlx::query(
-        "UPDATE api_keys SET is_active = false, disabled_reason = 'revoked' \
+        "UPDATE api_keys SET is_active = false, grace_period_ends_at = NULL, \
+                disabled_reason = 'revoked' \
           WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
@@ -292,6 +297,90 @@ pub async fn revoke_key(
     );
 
     Ok(Json(serde_json::json!({"status": "revoked"})))
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct ForceRevokeRequest {
+    /// Reason for the emergency revocation (e.g. "suspected leak",
+    /// "employee offboarding"). Recorded verbatim in the audit log.
+    pub reason: String,
+}
+
+/// POST /api/admin/keys/{id}/force-revoke — admin-only, immediate kill.
+///
+/// Distinct from the owner-accessible DELETE /api/keys/{id}: this
+/// endpoint requires `api_keys:delete` at GLOBAL scope (no owner
+/// path), mandates a reason, and is intended for compromise-response
+/// workflows where an admin needs to kill any user's key without
+/// waiting for the normal rotation grace window to elapse.
+#[utoipa::path(
+    post,
+    path = "/api/admin/keys/{id}/force-revoke",
+    tag = "API Keys",
+    params(
+        ("id" = Uuid, Path, description = "API key UUID"),
+    ),
+    request_body = ForceRevokeRequest,
+    responses(
+        (status = 200, description = "API key force-revoked"),
+        (status = 400, description = "Reason is required"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden — requires global api_keys:delete"),
+        (status = 404, description = "API key not found"),
+    ),
+)]
+pub async fn force_revoke_key(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<ForceRevokeRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("api_keys:delete")?;
+    if !caller_has_global(&auth_user, &state.db, "api_keys:delete").await? {
+        return Err(AppError::Forbidden(
+            "Force-revoke requires api_keys:delete at global scope".into(),
+        ));
+    }
+    let reason = req.reason.trim();
+    if reason.is_empty() {
+        return Err(AppError::BadRequest("reason is required".into()));
+    }
+    if reason.len() > 500 {
+        return Err(AppError::BadRequest(
+            "reason must be 500 characters or fewer".into(),
+        ));
+    }
+
+    // Truncate to a short disabled_reason tag; full reason goes to audit.
+    let disabled_reason = format!(
+        "force_revoked:{}",
+        reason.chars().take(64).collect::<String>()
+    );
+    let result = sqlx::query(
+        "UPDATE api_keys SET is_active = false, grace_period_ends_at = NULL, \
+                disabled_reason = $1 \
+          WHERE id = $2 AND deleted_at IS NULL",
+    )
+    .bind(&disabled_reason)
+    .bind(id)
+    .execute(&state.db)
+    .await?;
+
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound("API key not found".into()));
+    }
+
+    state.audit.log(
+        AuditEntry::new("api_key.force_revoke")
+            .user_id(auth_user.claims.sub)
+            .resource(format!("api_key:{id}"))
+            .detail(serde_json::json!({ "reason": reason })),
+    );
+
+    Ok(Json(serde_json::json!({
+        "status": "force_revoked",
+        "reason": reason,
+    })))
 }
 
 // --- API key lifecycle management ---

@@ -5,7 +5,7 @@ use crate::handlers::{
     access_logs::{AccessLogEntry, AccessLogsResponse},
     admin::{SuperAdminIds, UpdateSettingsRequest},
     analytics::{CostBreakdown, CostItem, CostStats, CostTotals, UsageRow, UsageStats},
-    api_keys::UpdateKeyRequest,
+    api_keys::{ForceRevokeRequest, UpdateKeyRequest},
     app_logs::{AppLogEntryResponse, AppLogsResponse},
     auth::{ChangePasswordRequest, TotpSetupResponse, TotpVerifyRequest},
     dashboard::{
@@ -79,6 +79,7 @@ use crate::handlers::{
         crate::handlers::api_keys::update_key,
         crate::handlers::api_keys::revoke_key,
         crate::handlers::api_keys::rotate_key,
+        crate::handlers::api_keys::force_revoke_key,
         crate::handlers::api_keys::list_expiring_keys,
         crate::handlers::api_keys::list_cost_centers,
         crate::handlers::usage_license::get_usage_license,
@@ -195,6 +196,7 @@ use crate::handlers::{
             ChangePasswordRequest, TotpSetupResponse, TotpVerifyRequest,
             // API Keys
             UpdateKeyRequest,
+            ForceRevokeRequest,
             // Setup
             AdminSetup, ProviderSetup, SetupInitRequest, SetupInitResponse, SetupStatusResponse,
             // Teams

@@ -470,6 +470,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
             post(handlers::api_keys::rotate_key),
         )
         .route(
+            "/api/admin/keys/{id}/force-revoke",
+            post(handlers::api_keys::force_revoke_key),
+        )
+        .route(
             "/api/dashboard/stats",
             get(handlers::dashboard::get_dashboard_stats),
         )
