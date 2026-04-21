@@ -81,22 +81,49 @@ pub async fn get_dashboard_stats(
         }
     };
 
-    let total_requests: Option<i64> = match &owned_teams_for_usage {
-        None => {
-            sqlx::query_scalar("SELECT COUNT(*) FROM usage_records WHERE created_at >= $1")
-                .bind(window_start)
-                .fetch_one(&state.db)
-                .await?
-        }
+    // Compute prev-window bounds up-front so the current + compare counts
+    // can share a single query (avoids a second usage_records scan when
+    // `?compare=true`). When compare is off the bounds are unused.
+    let want_compare = rq.compare.unwrap_or(false);
+    let (prev_start, prev_end) = if want_compare {
+        range.prev_window(now)
+    } else {
+        // Empty window — the FILTER clauses below short-circuit to 0.
+        (now, now)
+    };
+
+    // Fold "this window" + "previous window" into one PG round-trip via
+    // FILTER aggregates. Without compare the prev_total still computes
+    // (returns 0 because prev_start == prev_end) but the row scan is
+    // identical to the original COUNT(*) — net cost ≈ free.
+    type CountPair = (Option<i64>, Option<i64>);
+    let (total_requests, prev_total_requests_count): CountPair = match &owned_teams_for_usage {
+        None => sqlx::query_as(
+            "SELECT \
+               COUNT(*) FILTER (WHERE created_at >= $1)                                AS current_total, \
+               COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3)            AS prev_total \
+             FROM usage_records \
+             WHERE created_at >= LEAST($1, $2)",
+        )
+        .bind(window_start)
+        .bind(prev_start)
+        .bind(prev_end)
+        .fetch_one(&state.db)
+        .await?,
         Some(team_ids) => {
             let team_ids_vec: Vec<uuid::Uuid> = team_ids.iter().copied().collect();
-            sqlx::query_scalar(
-                "SELECT COUNT(*) FROM usage_records \
-                  WHERE created_at >= $1 \
-                    AND (user_id = $3 \
-                         OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
+            sqlx::query_as(
+                "SELECT \
+                   COUNT(*) FILTER (WHERE created_at >= $1)                              AS current_total, \
+                   COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3)          AS prev_total \
+                 FROM usage_records \
+                 WHERE created_at >= LEAST($1, $2) \
+                   AND (user_id = $5 \
+                        OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($4)))",
             )
             .bind(window_start)
+            .bind(prev_start)
+            .bind(prev_end)
             .bind(&team_ids_vec)
             .bind(caller_id)
             .fetch_one(&state.db)
@@ -323,36 +350,11 @@ pub async fn get_dashboard_stats(
     // Compare-period totals: same query shape, [prev_start, prev_end).
     // Active key count comes from CH when available, falls back to PG
     // last_used_at — same logic as the current-window branch above.
-    let (prev_total_requests, prev_active_api_keys) = if rq.compare.unwrap_or(false) {
-        let (prev_start, prev_end) = range.prev_window(now);
-
-        let prev_reqs: Option<i64> = match &owned_teams_for_usage {
-            None => {
-                sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM usage_records \
-                      WHERE created_at >= $1 AND created_at < $2",
-                )
-                .bind(prev_start)
-                .bind(prev_end)
-                .fetch_one(&state.db)
-                .await?
-            }
-            Some(team_ids) => {
-                let team_ids_vec: Vec<uuid::Uuid> = team_ids.iter().copied().collect();
-                sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM usage_records \
-                      WHERE created_at >= $1 AND created_at < $2 \
-                        AND (user_id = $4 \
-                             OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($3)))",
-                )
-                .bind(prev_start)
-                .bind(prev_end)
-                .bind(&team_ids_vec)
-                .bind(caller_id)
-                .fetch_one(&state.db)
-                .await?
-            }
-        };
+    // `prev_reqs` was computed alongside `total_requests` in the
+    // FILTER-aggregate query at the top of the handler; we only need
+    // the CH key-count round-trip here.
+    let (prev_total_requests, prev_active_api_keys) = if want_compare {
+        let prev_reqs = prev_total_requests_count;
 
         let prev_keys: i64 = if ch_available(&state) {
             #[derive(Debug, clickhouse::Row, Deserialize)]
