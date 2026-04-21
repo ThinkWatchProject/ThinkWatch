@@ -90,12 +90,21 @@ pub async fn list_access_logs(
         binds.push(format!("%{escaped}%"));
     }
     if let Some(ref v) = params.status_code {
+        // Validate as u16 in Rust so malformed values (or injected
+        // fragments) never reach ClickHouse — a type mismatch there
+        // would leak column-type hints via the error response.
+        let parsed: u16 = v
+            .parse()
+            .map_err(|_| AppError::BadRequest("status_code must be an integer".into()))?;
         conditions.push("status_code = ?".into());
-        binds.push(v.clone());
+        binds.push(parsed.to_string());
     }
     if let Some(ref v) = params.port {
+        let parsed: u16 = v
+            .parse()
+            .map_err(|_| AppError::BadRequest("port must be an integer".into()))?;
         conditions.push("port = ?".into());
-        binds.push(v.clone());
+        binds.push(parsed.to_string());
     }
     if let Some(ref v) = params.user_id {
         conditions.push("user_id = ?".into());
@@ -118,7 +127,9 @@ pub async fn list_access_logs(
         binds.push(v.clone());
     }
 
-    // Excludes (-key:value tokens from the unified log explorer)
+    // Excludes (-key:value tokens from the unified log explorer).
+    // Numeric columns (status_code, port) must validate before binding
+    // — same reason as the positive filters above.
     for (frag, val) in parse_exclude_param(
         params.exclude.as_deref(),
         &[
@@ -129,8 +140,19 @@ pub async fn list_access_logs(
             ("user_id", "user_id", ExcludeMode::Equals),
         ],
     ) {
+        let bound = if frag.starts_with("status_code ") {
+            val.parse::<u16>()
+                .map_err(|_| AppError::BadRequest("status_code must be an integer".into()))?
+                .to_string()
+        } else if frag.starts_with("port ") {
+            val.parse::<u16>()
+                .map_err(|_| AppError::BadRequest("port must be an integer".into()))?
+                .to_string()
+        } else {
+            val
+        };
         conditions.push(frag);
-        binds.push(val);
+        binds.push(bound);
     }
 
     let wc = if conditions.is_empty() {
