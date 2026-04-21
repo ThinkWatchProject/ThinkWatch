@@ -316,6 +316,12 @@ CREATE TABLE usage_records (
     api_key_id      UUID REFERENCES api_keys(id) ON DELETE SET NULL,
     user_id         UUID REFERENCES users(id) ON DELETE SET NULL,
     provider_id     UUID REFERENCES providers(id) ON DELETE SET NULL,
+    -- Snapshot of providers.name at insert time. provider_id becomes
+    -- NULL when the provider row is deleted (ON DELETE SET NULL), and
+    -- analytics GROUP BY provider would silently drop those rows
+    -- otherwise. Keeping the name here lets cost/usage dashboards
+    -- stay accurate across provider removals.
+    provider_name   VARCHAR(100),
     model_id        VARCHAR(255) NOT NULL,
     request_type    VARCHAR(50)  NOT NULL,
     input_tokens    INTEGER NOT NULL DEFAULT 0,
@@ -327,10 +333,12 @@ CREATE TABLE usage_records (
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_usage_records_created_at  ON usage_records(created_at);
-CREATE INDEX idx_usage_records_user_id     ON usage_records(user_id, created_at);
-CREATE INDEX idx_usage_records_api_key_id  ON usage_records(api_key_id, created_at);
-CREATE INDEX idx_usage_records_model_id    ON usage_records(model_id, created_at);
+CREATE INDEX idx_usage_records_created_at    ON usage_records(created_at);
+CREATE INDEX idx_usage_records_user_id       ON usage_records(user_id, created_at);
+CREATE INDEX idx_usage_records_api_key_id    ON usage_records(api_key_id, created_at);
+CREATE INDEX idx_usage_records_model_id      ON usage_records(model_id, created_at);
+CREATE INDEX idx_usage_records_provider_name ON usage_records(provider_name, created_at)
+    WHERE provider_name IS NOT NULL;
 
 -- --------------------------------------------------------------------------
 -- Rate limit rules + budget caps

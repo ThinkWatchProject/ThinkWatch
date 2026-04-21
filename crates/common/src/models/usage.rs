@@ -10,6 +10,10 @@ pub struct UsageRecord {
     pub api_key_id: Option<Uuid>,
     pub user_id: Option<Uuid>,
     pub provider_id: Option<Uuid>,
+    /// Snapshot of providers.name at insert time. Survives provider
+    /// deletion (provider_id becomes NULL) so cost attribution stays
+    /// intact across provider churn.
+    pub provider_name: Option<String>,
     pub model_id: String,
     pub request_type: String,
     pub input_tokens: i32,
