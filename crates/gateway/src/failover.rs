@@ -11,6 +11,42 @@ use tokio::sync::Mutex;
 
 use think_watch_common::cb_registry::{CbState, record_cb_with_kind};
 
+// ---------------------------------------------------------------------------
+// Circuit-breaker state machine
+//
+// One breaker per upstream provider, three states:
+//
+//                 success
+//      ┌────────────────────────────┐
+//      │                            ▼
+//   ┌──────────┐  N consec failures  ┌──────────┐
+//   │  Closed  │ ──────────────────► │   Open   │
+//   └──────────┘                     └──────────┘
+//        ▲                                │
+//        │ M consecutive successes        │ recovery_secs elapsed
+//        │                                ▼
+//        │                          ┌──────────┐
+//        └─────────────────────────  │ HalfOpen │
+//             any failure ───────►   └──────────┘
+//
+// Closed:   normal traffic. record_failure increments the failure
+//           counter; after `failure_threshold` consecutive failures
+//           the breaker trips to Open and `last_failure` is captured.
+//
+// Open:     all calls short-circuit (no upstream connection); after
+//           `recovery_secs` since `last_failure` the next caller
+//           transitions us to HalfOpen for a probe.
+//
+// HalfOpen: a small budget of probe requests is allowed through. M
+//           consecutive successes (`half_open_max`) close the
+//           breaker; any failure trips back to Open.
+//
+// All state transitions execute under one mutex (`BreakerInner`) so
+// two concurrent failures can't both observe Closed and both trip the
+// counter independently. Edge changes propagate to the global
+// `cb_registry` so the dashboard reflects them in real time.
+// ---------------------------------------------------------------------------
+
 /// Load-balancing strategy for selecting a backend.
 #[derive(Debug, Clone, Copy)]
 pub enum LoadBalanceStrategy {
