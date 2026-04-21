@@ -128,6 +128,13 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     detail           Nullable(String) CODEC(ZSTD(3)),
     -- trace_id: shared ID across gateway / mcp / audit rows for one request.
     trace_id         Nullable(String),
+    -- session_id: optional grouping for multi-turn conversations.
+    -- Set by the client via the `x-session-id` header (or the
+    -- equivalent request body field once SDKs surface it). All turns
+    -- of one chat carry the same id, so the trace UI can collapse a
+    -- conversation into one expandable row instead of a dozen
+    -- siblings (FEAT-10).
+    session_id       LowCardinality(Nullable(String)),
     created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
 
     INDEX idx_user_id    user_id     TYPE bloom_filter GRANULARITY 4,
@@ -137,6 +144,7 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     INDEX idx_provider   provider    TYPE set(50)      GRANULARITY 2,
     INDEX idx_status     status_code TYPE set(50)      GRANULARITY 2,
     INDEX idx_trace      trace_id    TYPE bloom_filter GRANULARITY 4,
+    INDEX idx_session    session_id  TYPE bloom_filter GRANULARITY 4,
     INDEX idx_search     id          TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4,
     INDEX idx_detail     ifNull(detail, '') TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
 ) ENGINE = MergeTree()
@@ -148,6 +156,8 @@ SETTINGS index_granularity = 8192,
 
 ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS user_email LowCardinality(Nullable(String)) AFTER user_id;
 ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloom_filter GRANULARITY 4;
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS session_id LowCardinality(Nullable(String)) AFTER trace_id;
+ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_session session_id TYPE bloom_filter GRANULARITY 4;
 
 ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_cost (
     SELECT * ORDER BY cost_usd, created_at
