@@ -518,6 +518,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         )
         .route("/api/admin/slo", get(handlers::slo::get_slo_snapshot))
         .route(
+            "/api/analytics/cost-forecast",
+            get(handlers::cost_forecast::get_cost_forecast),
+        )
+        .route(
             "/api/admin/webhook-outbox",
             get(handlers::webhook_outbox::list_outbox),
         )
