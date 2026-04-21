@@ -73,8 +73,31 @@ pub struct ChunkChoice {
 
 #[derive(Debug, thiserror::Error)]
 pub enum GatewayError {
+    /// Catch-all upstream failure that doesn't fit one of the more
+    /// specific variants below. Prefer `ProviderHttpError` /
+    /// `ProviderTimeout` / `ProviderInvalidResponse` when the cause
+    /// is known so dashboards can split errors by class instead of
+    /// regex'ing the message.
     #[error("Provider error: {0}")]
     ProviderError(String),
+    /// Upstream returned a non-2xx, non-429, non-401 status. The
+    /// status is kept structured so error-classifier metrics stay
+    /// readable and the gateway can classify retry-eligible 5xx
+    /// versus poison 4xx without parsing the message.
+    #[error("Provider HTTP {status}: {message}")]
+    ProviderHttpError { status: u16, message: String },
+    /// Upstream took longer than the configured timeout. Distinct
+    /// from a network drop because the request reached the upstream
+    /// — only the response was missing in time.
+    #[error("Provider timeout: {0}")]
+    ProviderTimeout(String),
+    /// Upstream responded but the body wasn't parseable as the
+    /// expected schema (chat completion / messages / etc.). Almost
+    /// always indicates an upstream incident or a model-specific
+    /// quirk, and is poison for retries — failover should still
+    /// happen but retry against the SAME upstream is pointless.
+    #[error("Provider returned invalid response: {0}")]
+    ProviderInvalidResponse(String),
     #[error("Request transform error: {0}")]
     TransformError(String),
     #[error("Network error: {0}")]

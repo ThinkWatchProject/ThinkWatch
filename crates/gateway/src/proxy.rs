@@ -236,6 +236,9 @@ fn resolve_trace_id(headers: &axum::http::HeaderMap) -> String {
 fn gateway_error_status(err: &GatewayError) -> i64 {
     match err {
         GatewayError::ProviderError(_) => 502,
+        GatewayError::ProviderHttpError { status, .. } => i64::from(*status),
+        GatewayError::ProviderTimeout(_) => 504,
+        GatewayError::ProviderInvalidResponse(_) => 502,
         GatewayError::TransformError(_) => 400,
         GatewayError::NetworkError(_) => 502,
         GatewayError::UpstreamRateLimited | GatewayError::LocalRateLimited(_) => 429,
@@ -540,14 +543,29 @@ fn pick_weighted<'a>(
     entries.last().copied()
 }
 
-/// Returns true if the error is retryable (network, 502, 503, 429).
+/// Returns true if the error is retryable.
+///
+/// Retry-eligible:
+///   * NetworkError, ProviderTimeout — request didn't complete; the
+///     same upstream might succeed on a second try.
+///   * ProviderError, UpstreamRateLimited — historical catch-alls.
+///   * ProviderHttpError 5xx — upstream had a transient issue.
+///
+/// Not retryable:
+///   * ProviderHttpError 4xx (except 429) — the request itself is
+///     poison; same upstream will reject again.
+///   * ProviderInvalidResponse — upstream succeeded but the body is
+///     unparseable; retrying the same upstream is pointless. Failover
+///     to a different provider is still triggered upstream of this.
 fn is_retryable(err: &GatewayError) -> bool {
-    matches!(
-        err,
+    match err {
         GatewayError::NetworkError(_)
-            | GatewayError::ProviderError(_)
-            | GatewayError::UpstreamRateLimited
-    )
+        | GatewayError::ProviderError(_)
+        | GatewayError::ProviderTimeout(_)
+        | GatewayError::UpstreamRateLimited => true,
+        GatewayError::ProviderHttpError { status, .. } => *status >= 500 || *status == 408,
+        _ => false,
+    }
 }
 
 /// Group route entries by priority and attempt each group in order.
@@ -1875,6 +1893,14 @@ impl IntoResponse for GatewayErrorResponse {
 
         let (status, error_type) = match &self.0 {
             GatewayError::ProviderError(_) => (StatusCode::BAD_GATEWAY, "provider_error"),
+            GatewayError::ProviderHttpError { status, .. } => (
+                StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY),
+                "provider_http_error",
+            ),
+            GatewayError::ProviderTimeout(_) => (StatusCode::GATEWAY_TIMEOUT, "provider_timeout"),
+            GatewayError::ProviderInvalidResponse(_) => {
+                (StatusCode::BAD_GATEWAY, "provider_invalid_response")
+            }
             GatewayError::TransformError(_) => (StatusCode::BAD_REQUEST, "transform_error"),
             GatewayError::NetworkError(_) => (StatusCode::BAD_GATEWAY, "network_error"),
             GatewayError::UpstreamRateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
