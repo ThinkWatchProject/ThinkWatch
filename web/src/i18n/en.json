@@ -1200,6 +1200,7 @@
   "logs": {
     "title": "Request Logs",
     "subtitle": "Gateway request and response logs",
+    "utcNotice": "All times in UTC.",
     "allRequests": "All Requests",
     "timestamp": "Timestamp",
     "model": "Model",

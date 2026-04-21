@@ -1200,6 +1200,7 @@
   "logs": {
     "title": "请求日志",
     "subtitle": "网关请求和响应日志",
+    "utcNotice": "所有时间均为 UTC。",
     "allRequests": "所有请求",
     "timestamp": "时间戳",
     "model": "模型",

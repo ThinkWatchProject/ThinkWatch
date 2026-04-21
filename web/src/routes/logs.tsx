@@ -660,6 +660,8 @@ export function UnifiedLogsPage() {
         </Button>
       </div>
 
+      <p className="text-[10px] text-muted-foreground -mt-1 mb-1">{t('logs.utcNotice')}</p>
+
       <QueryTokenChips input={searchInput} onChange={setSearchInput} />
 
       {error && (
