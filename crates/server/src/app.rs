@@ -141,7 +141,7 @@ fn security_layers<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Route
 // Gateway server (port 3000) — AI API + MCP, exposed to downstream clients
 // ---------------------------------------------------------------------------
 
-pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router {
+pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow::Result<Router> {
     // Load dynamic config values for gateway initialization
     let dc = &state.dynamic_config;
     let cache_ttl = dc.cache_ttl_secs().await;
@@ -290,7 +290,10 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
     // any other startup path.
     let metrics_route = match _config.metrics_bearer_token.clone() {
         Some(token) => {
-            let prom_handle = handlers::metrics::install_prometheus_recorder();
+            // Failure to install the recorder must abort startup, not
+            // silently land a /metrics endpoint serving empty output —
+            // see OBS-15.
+            let prom_handle = handlers::metrics::install_prometheus_recorder()?;
             tracing::info!("/metrics endpoint enabled (bearer auth required)");
             let metrics_state = handlers::metrics::MetricsState {
                 handle: prom_handle,
@@ -349,7 +352,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
         ))
         .with_state(state.clone());
 
-    security_layers(app)
+    Ok(security_layers(app))
 }
 
 // ---------------------------------------------------------------------------

@@ -40,9 +40,23 @@ pub async fn prometheus_metrics(State(state): State<MetricsState>, headers: Head
 }
 
 /// Install the Prometheus recorder and return the handle for rendering.
-pub fn install_prometheus_recorder() -> PrometheusHandle {
-    let builder = metrics_exporter_prometheus::PrometheusBuilder::new();
-    builder
+///
+/// Returns an error if the recorder could not be installed — typically
+/// this is the second call on the same process (the global recorder
+/// is already registered) or a platform-level issue. The caller is
+/// expected to propagate the error so startup fails loudly rather than
+/// silently dropping metrics: without a recorder registered, every
+/// `counter!`/`histogram!` macro becomes a no-op and dashboards flat-
+/// line with no clue why.
+pub fn install_prometheus_recorder() -> anyhow::Result<PrometheusHandle> {
+    metrics_exporter_prometheus::PrometheusBuilder::new()
         .install_recorder()
-        .expect("Failed to install Prometheus recorder")
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to install Prometheus recorder ({e}). \
+                 If this is not the first call, the global recorder is already \
+                 registered for this process — only one /metrics endpoint should \
+                 exist per binary."
+            )
+        })
 }
