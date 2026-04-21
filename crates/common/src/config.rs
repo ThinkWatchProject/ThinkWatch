@@ -148,6 +148,7 @@ impl AppConfig {
             clickhouse_db: "test".into(),
             clickhouse_user: None,
             clickhouse_password: None,
+            metrics_bearer_token: None,
         }
     }
 
