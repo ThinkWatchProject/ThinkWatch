@@ -137,6 +137,11 @@ pub async fn list_keys(
 /// Allowed values for the `surfaces` column. Kept in lockstep with
 /// the DB CHECK constraint and with `RateLimitSubject::Surface` on
 /// the limits engine — adding a new gateway means updating both.
+/// Surface kinds accepted by `api_keys.surfaces`. Kept in lockstep with
+/// the `api_key_surface_kinds` lookup table in migrations/001_init.sql —
+/// the DB trigger is the final gate, this is the fast-path check so
+/// handlers don't need a round-trip to reject a typo. Adding a surface
+/// means editing both this const and the lookup-table seed.
 pub(crate) const ALLOWED_SURFACES: &[&str] = &["ai_gateway", "mcp_gateway", "console"];
 
 /// Validate + dedupe a caller-supplied surfaces list. Rejects unknown

@@ -173,20 +173,34 @@ INSERT INTO rbac_roles (name, description, is_system, policy_document) VALUES
 -- API Keys
 -- --------------------------------------------------------------------------
 
+-- Canonical list of surfaces an API key can be authorised for. Lifted
+-- out of the inline ARRAY literal so adding a new surface is one
+-- INSERT row instead of a CHECK rewrite + handler edit; the trigger
+-- below enforces api_keys.surfaces against it.
+CREATE TABLE api_key_surface_kinds (
+    name         VARCHAR(20)  PRIMARY KEY,
+    display_name VARCHAR(100) NOT NULL,
+    description  TEXT         NOT NULL
+);
+INSERT INTO api_key_surface_kinds (name, display_name, description) VALUES
+    ('ai_gateway',  'AI Gateway',  'LLM proxy endpoints (/v1/chat/completions, /v1/messages, …).'),
+    ('mcp_gateway', 'MCP Gateway', 'Model Context Protocol tool-call proxy.'),
+    ('console',     'Console API', 'Admin console (users, keys, providers, logs, settings).');
+
 CREATE TABLE api_keys (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     key_prefix              VARCHAR(16)  NOT NULL,
     key_hash                VARCHAR(255) NOT NULL,
     name                    VARCHAR(255) NOT NULL,
     user_id                 UUID REFERENCES users(id) ON DELETE SET NULL,
-    -- Which gateways this key can call. Non-empty subset of
-    -- {'ai_gateway', 'mcp_gateway', 'console'}. Both gateways share
-    -- the same `tw-` token format and the same auth middleware;
-    -- `surfaces` is what determines which one a given key is allowed
-    -- to hit at request time.
+    -- Which gateways this key can call. Non-empty subset of rows in
+    -- `api_key_surface_kinds`. Both gateways share the same `tw-`
+    -- token format and the same auth middleware; `surfaces` is what
+    -- determines which one a given key is allowed to hit at request
+    -- time. The trigger `trg_api_keys_surfaces_valid` validates each
+    -- element against the lookup table below.
     surfaces                TEXT[] NOT NULL
-        CHECK (cardinality(surfaces) > 0
-               AND surfaces <@ ARRAY['ai_gateway', 'mcp_gateway', 'console']),
+        CHECK (cardinality(surfaces) > 0),
     allowed_models          TEXT[],
     -- Rate limits and budget caps live in `rate_limit_rules` /
     -- `budget_caps` (subject_kind = 'api_key').
@@ -231,6 +245,31 @@ CREATE INDEX idx_api_keys_cost_center ON api_keys(cost_center) WHERE cost_center
 CREATE INDEX idx_api_keys_user_not_deleted
     ON api_keys (user_id, created_at DESC)
     WHERE deleted_at IS NULL;
+
+-- Validate api_keys.surfaces against the api_key_surface_kinds lookup.
+-- Done via trigger rather than FK because PG doesn't support FKs on
+-- array elements; the trigger only runs on insert/update, so the cost
+-- is limited to key lifecycle operations (not the hot auth path).
+CREATE OR REPLACE FUNCTION validate_api_key_surfaces() RETURNS trigger AS $$
+DECLARE
+    unknown TEXT;
+BEGIN
+    SELECT s INTO unknown
+    FROM unnest(NEW.surfaces) s
+    WHERE s NOT IN (SELECT name FROM api_key_surface_kinds)
+    LIMIT 1;
+    IF unknown IS NOT NULL THEN
+        RAISE EXCEPTION 'Unknown api_keys.surfaces value: %', unknown
+            USING ERRCODE = 'check_violation';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trg_api_keys_surfaces_valid
+    BEFORE INSERT OR UPDATE OF surfaces ON api_keys
+    FOR EACH ROW
+    EXECUTE FUNCTION validate_api_key_surfaces();
 
 -- --------------------------------------------------------------------------
 -- Providers & Models
