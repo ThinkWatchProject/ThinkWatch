@@ -6,9 +6,7 @@ use utoipa::ToSchema;
 
 use think_watch_auth::password;
 use think_watch_common::audit::AuditEntry;
-use think_watch_common::dto::{
-    CreateUserRequest, LoginRequest, LoginResponse, RefreshRequest, UserResponse,
-};
+use think_watch_common::dto::{CreateUserRequest, LoginRequest, RefreshRequest, UserResponse};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
 use think_watch_common::validation::validate_password;
@@ -32,155 +30,14 @@ pub(crate) async fn parse_json_body<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&body).map_err(|e| AppError::BadRequest(e.to_string()))
 }
 
-/// Intermediate result from [`issue_auth_session`] containing every
-/// piece of data needed to build the final HTTP response: the JWT
-/// cookies (pre-formatted as `Set-Cookie` header values) and the
-/// fields the JSON body exposes to the frontend.
-pub(crate) struct AuthSession {
-    pub permissions: Vec<String>,
-    pub denied_permissions: Vec<String>,
-    pub roles: Vec<String>,
-    pub access_ttl: i64,
-    /// Pre-formatted Set-Cookie header values (access, refresh).
-    cookie_headers: [String; 2],
-}
-
-impl AuthSession {
-    /// Append the auth cookies to an existing response.
-    pub fn set_cookies(&self, response: &mut axum::response::Response) {
-        let headers = response.headers_mut();
-        for cookie_str in &self.cookie_headers {
-            if let Ok(v) = cookie_str.parse() {
-                headers.append(axum::http::header::SET_COOKIE, v);
-            }
-        }
-    }
-
-    /// Build a `LoginResponse`-shaped response with cookies attached.
-    pub fn into_login_response(self, password_change_required: bool) -> axum::response::Response {
-        let mut response = Json(LoginResponse {
-            token_type: "Bearer".into(),
-            expires_in: self.access_ttl,
-            permissions: self.permissions,
-            denied_permissions: self.denied_permissions,
-            roles: self.roles,
-            password_change_required: if password_change_required {
-                Some(true)
-            } else {
-                None
-            },
-        })
-        .into_response();
-        let headers = response.headers_mut();
-        for cookie_str in &self.cookie_headers {
-            if let Ok(v) = cookie_str.parse() {
-                headers.append(axum::http::header::SET_COOKIE, v);
-            }
-        }
-        response
-    }
-}
-
-/// Issue a full auth session: load RBAC, create JWT pair + signing key,
-/// and prepare cookie headers. Shared by login, register, refresh, and
-/// setup_initialize.
-pub(crate) async fn issue_auth_session(
-    state: &AppState,
-    user_id: uuid::Uuid,
-    email: &str,
-    _client_ip: Option<&str>,
-) -> Result<AuthSession, AppError> {
-    // Load roles/permissions for the login response body (frontend needs them),
-    // but they are NOT embedded in the JWT anymore.
-    let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user_id).await?;
-    let all_perm_keys = crate::handlers::roles::all_permission_keys();
-    let permissions =
-        think_watch_auth::rbac::compute_user_permissions(&state.db, user_id, &all_perm_keys)
-            .await?;
-    let denied_permissions =
-        think_watch_auth::rbac::compute_denied_permissions(&state.db, user_id, &permissions)
-            .await?;
-
-    let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
-    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
-
-    // JWT tokens only carry identity (sub, email) — permissions are
-    // computed at request time from DB (with Redis cache).
-    let access_token = state
-        .jwt
-        .create_access_token_with_ttl(user_id, email, access_ttl)?;
-    let refresh_token =
-        state
-            .jwt
-            .create_refresh_token_with_ttl(user_id, email, refresh_ttl_days)?;
-
-    let access_cookie = verify_signature::access_token_cookie(&access_token, access_ttl);
-    let refresh_cookie =
-        verify_signature::refresh_token_cookie(&refresh_token, refresh_ttl_days * 86400);
-
-    Ok(AuthSession {
-        permissions,
-        denied_permissions,
-        roles,
-        access_ttl,
-        cookie_headers: [access_cookie, refresh_cookie],
-    })
-}
-
-/// Store the password-change epoch in Redis so the refresh handler
-/// rejects refresh tokens issued before this moment. Used by
-/// `change_password` and admin `force_logout_user`.
-pub(crate) async fn invalidate_refresh_tokens(
-    redis: &fred::clients::Client,
-    user_id: uuid::Uuid,
-    refresh_ttl_days: i64,
-) {
-    let _: Result<(), _> = fred::interfaces::KeysInterface::set(
-        redis,
-        &format!("pw_epoch:{user_id}"),
-        &chrono::Utc::now().timestamp().to_string(),
-        Some(fred::types::Expiration::EX(refresh_ttl_days * 86400)),
-        None,
-        false,
-    )
-    .await;
-}
-
-/// How long an admin-issued temporary password remains usable.
-/// Anchors both the Redis marker TTL at issuance and the legacy
-/// grandfather window at login; keeping them identical means a
-/// deployed user with `password_change_required=true` is accepted
-/// for exactly one window regardless of which side saw them first.
-pub(crate) const TEMP_PASSWORD_TTL_SECS: i64 = 86400;
-
-pub(crate) fn temp_password_marker_key(user_id: uuid::Uuid) -> String {
-    format!("pw_temp:{user_id}")
-}
-
-/// Record that `user_id` has an active admin-issued temporary password.
-/// Called from `admin::create_user` (when a password was generated)
-/// and `admin::reset_password`. Consumed by the login handler, which
-/// rejects logins after this marker expires.
-pub(crate) async fn mark_temporary_password(redis: &fred::clients::Client, user_id: uuid::Uuid) {
-    let _: Result<(), _> = fred::interfaces::KeysInterface::set(
-        redis,
-        &temp_password_marker_key(user_id),
-        &chrono::Utc::now().timestamp().to_string(),
-        Some(fred::types::Expiration::EX(TEMP_PASSWORD_TTL_SECS)),
-        None,
-        false,
-    )
-    .await;
-}
-
-pub(crate) async fn clear_temporary_password_marker(
-    redis: &fred::clients::Client,
-    user_id: uuid::Uuid,
-) {
-    let _: Result<(), _> =
-        fred::interfaces::KeysInterface::del::<(), _>(redis, &temp_password_marker_key(user_id))
-            .await;
-}
+// Session + temp-password plumbing moved to
+// `crate::services::session_service`. Re-export at the crate-local
+// paths everything else in this file (and admin.rs / setup.rs) used
+// to import.
+pub(crate) use crate::services::session_service::{
+    TEMP_PASSWORD_TTL_SECS, clear_temporary_password_marker, invalidate_refresh_tokens,
+    issue_auth_session, mark_temporary_password, temp_password_marker_key,
+};
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct ChangePasswordRequest {
@@ -451,16 +308,8 @@ pub async fn login(
             Some(code) => {
                 // Verify TOTP code or recovery code
                 let totp_valid = if let Some(ref encrypted_secret) = user.totp_secret {
-                    let enc_key = think_watch_common::crypto::parse_encryption_key(
-                        &state.config.encryption_key,
-                    )
-                    .map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Encryption key error: {e}"))
-                    })?;
-                    let secret = think_watch_auth::totp::decrypt_secret(encrypted_secret, &enc_key)
-                        .map_err(|e| {
-                            AppError::Internal(anyhow::anyhow!("TOTP decrypt error: {e}"))
-                        })?;
+                    let secret =
+                        crate::services::totp_service::decrypt_secret(&state, encrypted_secret)?;
                     think_watch_auth::totp::verify(&secret, code, &user.email).unwrap_or(false)
                 } else {
                     false
@@ -1330,10 +1179,7 @@ pub async fn totp_verify_setup(
     }
 
     // Encrypt and store
-    let enc_key = think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption key error: {e}")))?;
-    let encrypted_secret = totp::encrypt_secret(&pending.secret, &enc_key)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption error: {e}")))?;
+    let encrypted_secret = crate::services::totp_service::encrypt_secret(&state, &pending.secret)?;
     let recovery_json = serde_json::to_string(&pending.recovery_codes)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON serialization error: {e}")))?;
 
