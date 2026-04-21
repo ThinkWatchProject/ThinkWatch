@@ -1304,6 +1304,10 @@
     "subtitle": "配置您的 AI 工具和 MCP 客户端接入 ThinkWatch",
     "gatewayUrl": "网关地址",
     "gatewayUrlDesc": "AI 网关端点，用于 OpenAI / Anthropic 兼容请求",
+    "cta": {
+      "goToApiKeys": "管理 API 密钥",
+      "goToProviders": "配置 AI 供应商"
+    },
     "mcpEndpoint": "MCP 端点",
     "mcpEndpointDesc": "MCP 网关端点，用于 Streamable HTTP 工具调用",
     "aiGatewaySection": "AI 网关",

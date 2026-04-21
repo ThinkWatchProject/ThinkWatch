@@ -1304,6 +1304,10 @@
     "subtitle": "Configure your AI tools and MCP clients to use ThinkWatch",
     "gatewayUrl": "Gateway URL",
     "gatewayUrlDesc": "AI Gateway endpoint for OpenAI / Anthropic compatible requests",
+    "cta": {
+      "goToApiKeys": "Manage API keys",
+      "goToProviders": "Configure providers"
+    },
     "mcpEndpoint": "MCP Endpoint",
     "mcpEndpointDesc": "MCP Gateway endpoint for Streamable HTTP tool invocations",
     "aiGatewaySection": "AI Gateway",

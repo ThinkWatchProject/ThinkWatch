@@ -1,5 +1,6 @@
 import { useState, useCallback, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from '@tanstack/react-router';
 import { api } from '@/lib/api';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -701,6 +702,18 @@ export function GuidePage() {
               <CopyButton text={gatewayUrl} />
             </div>
             <p className="mt-2 text-xs text-muted-foreground">{t('guide.gatewayUrlDesc')}</p>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Link to="/api-keys">
+                <Button variant="outline" size="sm">
+                  {t('guide.cta.goToApiKeys')}
+                </Button>
+              </Link>
+              <Link to="/gateway/providers">
+                <Button variant="outline" size="sm">
+                  {t('guide.cta.goToProviders')}
+                </Button>
+              </Link>
+            </div>
           </CardContent>
         </Card>
 
