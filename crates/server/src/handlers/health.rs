@@ -24,7 +24,11 @@ pub async fn liveness() -> Json<Value> {
 /// its dependencies respond. Includes:
 ///   1. Postgres reachable
 ///   2. Redis reachable
-///   3. At least one active, non-deleted provider configured
+///   3. ClickHouse reachable (when configured) — audit logging is a
+///      hard requirement under most deployments; failing ready so the
+///      load balancer deregisters the pod beats accepting traffic we
+///      can't log.
+///   4. At least one active, non-deleted provider configured
 ///      (without this, every `/v1/*` request would 502 at runtime)
 pub async fn readiness(State(state): State<AppState>) -> Response {
     let pg_ok = sqlx::query_scalar::<_, i32>("SELECT 1")
@@ -35,6 +39,15 @@ pub async fn readiness(State(state): State<AppState>) -> Response {
     let redis_ok: bool = {
         use fred::interfaces::ClientLike;
         state.redis.ping::<String>(None).await.is_ok()
+    };
+
+    // ClickHouse readiness — optional in deployments that don't run
+    // the log store (`CLICKHOUSE_URL` unset). When configured, a
+    // failed ping trips ready so K8s reroutes traffic instead of
+    // accepting requests whose audit / gateway logs will never land.
+    let clickhouse_ok: bool = match state.clickhouse.as_ref() {
+        Some(ch) => ch.query("SELECT 1").fetch_one::<u8>().await.is_ok(),
+        None => true,
     };
 
     // Provider count check — only meaningful if Postgres is up,
@@ -52,11 +65,12 @@ pub async fn readiness(State(state): State<AppState>) -> Response {
         false
     };
 
-    if pg_ok && redis_ok && providers_ready {
+    if pg_ok && redis_ok && clickhouse_ok && providers_ready {
         Json(json!({
             "status": "ready",
             "postgres": true,
             "redis": true,
+            "clickhouse": true,
             "providers": true,
         }))
         .into_response()
@@ -67,6 +81,7 @@ pub async fn readiness(State(state): State<AppState>) -> Response {
                 "status": "not_ready",
                 "postgres": pg_ok,
                 "redis": redis_ok,
+                "clickhouse": clickhouse_ok,
                 "providers": providers_ready,
             })),
         )
