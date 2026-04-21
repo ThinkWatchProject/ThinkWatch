@@ -1,5 +1,13 @@
 -- ============================================================================
 -- ThinkWatch — Consolidated Schema
+--
+-- Time convention: every timestamp column is TIMESTAMPTZ and the server
+-- always writes and reads in UTC. The ClickHouse side mirrors this
+-- explicitly as `DateTime64(3, 'UTC')` (see deploy/clickhouse/initdb.d/
+-- 01_init.sql). The application layer MUST NOT assume the session or
+-- OS timezone — chrono::Utc::now() is the canonical source, and all
+-- formatted output converts to UTC before display unless the UI opts
+-- into a user-local offset.
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
