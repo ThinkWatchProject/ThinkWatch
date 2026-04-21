@@ -314,7 +314,19 @@ export function ApiKeysPage() {
                 {tab === 'expiring' ? t('common.noData') : t('apiKeys.noKeys')}
               </p>
               {tab === 'all' && (
-                <p className="text-xs text-muted-foreground mt-1">{t('apiKeys.noKeysHint')}</p>
+                <>
+                  <p className="text-xs text-muted-foreground mt-1">{t('apiKeys.noKeysHint')}</p>
+                  {hasPermission('api_keys:create') && (
+                    <Button
+                      onClick={() => setCreateDialogOpen(true)}
+                      size="sm"
+                      className="mt-4"
+                    >
+                      <Plus className="h-4 w-4" />
+                      {t('apiKeys.createKey')}
+                    </Button>
+                  )}
+                </>
               )}
             </div>
           ) : (
