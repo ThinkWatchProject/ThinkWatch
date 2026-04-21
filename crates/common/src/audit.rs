@@ -133,11 +133,14 @@ struct ChPlatformRow {
     created_at: chrono::DateTime<Utc>,
 }
 
-/// gateway_logs — model request logs
+/// gateway_logs — model request logs. `user_email` is a point-in-time
+/// snapshot of the user's email — queries against historical rows stay
+/// readable even after the user is hard-deleted.
 #[derive(Debug, clickhouse::Row, Serialize)]
 struct ChGatewayRow {
     id: String,
     user_id: Option<String>,
+    user_email: Option<String>,
     api_key_id: Option<String>,
     model_id: Option<String>,
     provider: Option<String>,
@@ -154,11 +157,13 @@ struct ChGatewayRow {
     created_at: chrono::DateTime<Utc>,
 }
 
-/// mcp_logs — MCP tool invocation logs
+/// mcp_logs — MCP tool invocation logs. `user_email` snapshotted as
+/// in ChGatewayRow.
 #[derive(Debug, clickhouse::Row, Serialize)]
 struct ChMcpRow {
     id: String,
     user_id: Option<String>,
+    user_email: Option<String>,
     server_id: Option<String>,
     server_name: Option<String>,
     tool_name: Option<String>,
@@ -185,7 +190,7 @@ struct ChAppLogRow {
     created_at: chrono::DateTime<Utc>,
 }
 
-/// access_logs — HTTP access log
+/// access_logs — HTTP access log. `user_email` snapshotted as in ChGatewayRow.
 #[derive(Debug, clickhouse::Row, Serialize)]
 struct ChAccessRow {
     id: String,
@@ -195,6 +200,7 @@ struct ChAccessRow {
     latency_ms: i64,
     port: u16,
     user_id: Option<String>,
+    user_email: Option<String>,
     ip_address: Option<String>,
     user_agent: Option<String>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
@@ -1285,6 +1291,7 @@ async fn flush_access(
                 latency_ms: detail_field(&entry.detail, "latency_ms").unwrap_or(0),
                 port: detail_field(&entry.detail, "port").unwrap_or(0),
                 user_id: entry.user_id,
+                user_email: entry.user_email,
                 ip_address: entry.ip_address,
                 user_agent: entry.user_agent,
                 created_at: ts,
@@ -1359,6 +1366,7 @@ async fn flush_gateway(
         let row = ChGatewayRow {
             id: entry.id,
             user_id: entry.user_id,
+            user_email: entry.user_email,
             api_key_id: entry.api_key_id,
             model_id: detail_field(&entry.detail, "model_id"),
             provider: detail_field(&entry.detail, "provider"),
@@ -1389,6 +1397,7 @@ async fn flush_mcp(
         let row = ChMcpRow {
             id: entry.id,
             user_id: entry.user_id,
+            user_email: entry.user_email,
             server_id: detail_field(&entry.detail, "server_id"),
             server_name: detail_field(&entry.detail, "server_name"),
             tool_name: detail_field(&entry.detail, "tool_name"),

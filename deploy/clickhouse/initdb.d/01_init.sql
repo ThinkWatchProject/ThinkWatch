@@ -54,6 +54,10 @@ CREATE TABLE IF NOT EXISTS access_logs (
     latency_ms       Int64 CODEC(Delta(8), ZSTD(1)),
     port             UInt16,
     user_id          LowCardinality(Nullable(String)),
+    -- Snapshot of users.email at request time so audit queries remain
+    -- correct after the user row is hard-deleted. Populated by the
+    -- auth middleware via AccessLogUserSlot.
+    user_email       LowCardinality(Nullable(String)),
     ip_address       Nullable(String),
     user_agent       Nullable(String) CODEC(ZSTD(3)),
     created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
@@ -62,6 +66,7 @@ CREATE TABLE IF NOT EXISTS access_logs (
     INDEX idx_status    status_code TYPE set(100)      GRANULARITY 2,
     INDEX idx_port      port        TYPE set(4)        GRANULARITY 2,
     INDEX idx_user_id   user_id     TYPE bloom_filter  GRANULARITY 4,
+    INDEX idx_user_email user_email TYPE bloom_filter  GRANULARITY 4,
     INDEX idx_path      path        TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(created_at)
@@ -69,6 +74,9 @@ ORDER BY (created_at, id)
 TTL toDateTime(created_at) + INTERVAL 30 DAY
 SETTINGS index_granularity = 8192,
          ttl_only_drop_parts = 1;
+
+ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS user_email LowCardinality(Nullable(String)) AFTER user_id;
+ALTER TABLE access_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloom_filter GRANULARITY 4;
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id               String,
@@ -105,6 +113,8 @@ SETTINGS index_granularity = 8192,
 CREATE TABLE IF NOT EXISTS gateway_logs (
     id               String,
     user_id          LowCardinality(Nullable(String)),
+    -- Snapshot of users.email at request time. See access_logs notes.
+    user_email       LowCardinality(Nullable(String)),
     api_key_id       LowCardinality(Nullable(String)),
     model_id         LowCardinality(Nullable(String)),
     provider         LowCardinality(Nullable(String)),
@@ -121,6 +131,7 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
 
     INDEX idx_user_id    user_id     TYPE bloom_filter GRANULARITY 4,
+    INDEX idx_user_email user_email  TYPE bloom_filter GRANULARITY 4,
     INDEX idx_api_key    api_key_id  TYPE bloom_filter GRANULARITY 4,
     INDEX idx_model      model_id    TYPE set(200)     GRANULARITY 2,
     INDEX idx_provider   provider    TYPE set(50)      GRANULARITY 2,
@@ -135,6 +146,9 @@ TTL toDateTime(created_at) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192,
          ttl_only_drop_parts = 1;
 
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS user_email LowCardinality(Nullable(String)) AFTER user_id;
+ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloom_filter GRANULARITY 4;
+
 ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_cost (
     SELECT * ORDER BY cost_usd, created_at
 );
@@ -146,6 +160,8 @@ ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_latency (
 CREATE TABLE IF NOT EXISTS mcp_logs (
     id               String,
     user_id          LowCardinality(Nullable(String)),
+    -- Snapshot of users.email at request time. See access_logs notes.
+    user_email       LowCardinality(Nullable(String)),
     server_id        LowCardinality(Nullable(String)),
     server_name      LowCardinality(Nullable(String)),
     tool_name        LowCardinality(Nullable(String)),
@@ -158,6 +174,7 @@ CREATE TABLE IF NOT EXISTS mcp_logs (
     created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
 
     INDEX idx_user_id    user_id    TYPE bloom_filter GRANULARITY 4,
+    INDEX idx_user_email user_email TYPE bloom_filter GRANULARITY 4,
     INDEX idx_server_id  server_id  TYPE bloom_filter GRANULARITY 4,
     INDEX idx_tool       tool_name  TYPE set(200)     GRANULARITY 2,
     INDEX idx_status     status     TYPE set(20)      GRANULARITY 2,
@@ -171,6 +188,9 @@ ORDER BY (created_at, id)
 TTL toDateTime(created_at) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192,
          ttl_only_drop_parts = 1;
+
+ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS user_email LowCardinality(Nullable(String)) AFTER user_id;
+ALTER TABLE mcp_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloom_filter GRANULARITY 4;
 
 ALTER TABLE mcp_logs ADD PROJECTION IF NOT EXISTS proj_by_duration (
     SELECT * ORDER BY duration_ms, created_at

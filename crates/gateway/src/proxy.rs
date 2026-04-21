@@ -187,6 +187,7 @@ struct LogCtx<'a> {
     audit: &'a think_watch_common::audit::AuditLogger,
     trace_id: String,
     user_id: Option<String>,
+    user_email: Option<String>,
     api_key_id: Option<String>,
     /// May be "(unknown)" when the failure happens before the model
     /// has been resolved (e.g. transform errors on malformed bodies).
@@ -202,6 +203,7 @@ impl LogCtx<'_> {
             self.audit,
             &self.trace_id,
             self.user_id.as_deref(),
+            self.user_email.as_deref(),
             self.api_key_id.as_deref(),
             &self.model,
             self.started.elapsed().as_millis() as i64,
@@ -250,6 +252,7 @@ fn emit_gateway_error_log(
     audit: &think_watch_common::audit::AuditLogger,
     trace_id: &str,
     user_id: Option<&str>,
+    user_email: Option<&str>,
     api_key_id: Option<&str>,
     model_id: &str,
     latency_ms: i64,
@@ -278,6 +281,9 @@ fn emit_gateway_error_log(
     {
         entry = entry.user_id(u);
     }
+    if let Some(email) = user_email {
+        entry = entry.user_email(email);
+    }
     if let Some(kid) = api_key_id
         && let Ok(u) = uuid::Uuid::parse_str(kid)
     {
@@ -291,6 +297,7 @@ fn emit_gateway_log(
     audit: &think_watch_common::audit::AuditLogger,
     trace_id: &str,
     user_id: Option<&str>,
+    user_email: Option<&str>,
     api_key_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
@@ -315,6 +322,9 @@ fn emit_gateway_log(
         && let Ok(u) = uuid::Uuid::parse_str(uid)
     {
         entry = entry.user_id(u);
+    }
+    if let Some(email) = user_email {
+        entry = entry.user_email(email);
     }
     if let Some(kid) = api_key_id
         && let Ok(u) = uuid::Uuid::parse_str(kid)
@@ -740,6 +750,7 @@ pub async fn proxy_chat_completion(
         audit: &state.audit,
         trace_id: trace_id.clone(),
         user_id: identity.user_id.clone(),
+        user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
         model: request.model.clone(),
         started: request_started_at,
@@ -919,6 +930,7 @@ pub async fn proxy_chat_completion(
         let cost_tracker = state.cost_tracker.clone();
         let trace_id_for_done = metadata.request_id.clone();
         let user_id_for_done = identity.user_id.clone();
+        let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
         let model_for_log = original_model.clone();
         let started = request_started_at;
@@ -939,6 +951,7 @@ pub async fn proxy_chat_completion(
                     &audit_for_done,
                     &trace_id_for_done,
                     user_id_for_done.as_deref(),
+                    user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
                     &model_for_log,
                     None,
@@ -997,6 +1010,7 @@ pub async fn proxy_chat_completion(
                 &state.audit,
                 &metadata.request_id,
                 identity.user_id.as_deref(),
+                identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
                 &original_model,
                 request_started_at.elapsed().as_millis() as i64,
@@ -1062,6 +1076,7 @@ pub async fn proxy_chat_completion(
             &state.audit,
             &metadata.request_id,
             identity.user_id.as_deref(),
+            identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
             &original_model,
             None,
@@ -1145,6 +1160,7 @@ pub async fn proxy_anthropic_messages(
         audit: &state.audit,
         trace_id: trace_id.clone(),
         user_id: identity.user_id.clone(),
+        user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
         model: "(unknown)".into(),
         started: request_started_at,
@@ -1168,6 +1184,7 @@ pub async fn proxy_anthropic_messages(
         audit: &state.audit,
         trace_id: trace_id.clone(),
         user_id: identity.user_id.clone(),
+        user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
         model: mapped_model.clone(),
         started: request_started_at,
@@ -1293,6 +1310,7 @@ pub async fn proxy_anthropic_messages(
         let cost_tracker = state.cost_tracker.clone();
         let trace_id_for_done = trace_id.clone();
         let user_id_for_done = identity.user_id.clone();
+        let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
         let model_for_log = mapped_model.clone();
         let started = request_started_at;
@@ -1310,6 +1328,7 @@ pub async fn proxy_anthropic_messages(
                     &audit_for_done,
                     &trace_id_for_done,
                     user_id_for_done.as_deref(),
+                    user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
                     &model_for_log,
                     None,
@@ -1359,6 +1378,7 @@ pub async fn proxy_anthropic_messages(
                 &state.audit,
                 &trace_id,
                 identity.user_id.as_deref(),
+                identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
                 &mapped_model,
                 request_started_at.elapsed().as_millis() as i64,
@@ -1405,6 +1425,7 @@ pub async fn proxy_anthropic_messages(
             &state.audit,
             &trace_id,
             identity.user_id.as_deref(),
+            identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
             &mapped_model,
             None,
@@ -1495,6 +1516,7 @@ pub async fn proxy_responses(
         audit: &state.audit,
         trace_id: trace_id.clone(),
         user_id: identity.user_id.clone(),
+        user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
         model: "(unknown)".into(),
         started: request_started_at,
@@ -1517,6 +1539,7 @@ pub async fn proxy_responses(
         audit: &state.audit,
         trace_id: trace_id.clone(),
         user_id: identity.user_id.clone(),
+        user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
         model: mapped_model.clone(),
         started: request_started_at,
@@ -1658,6 +1681,7 @@ pub async fn proxy_responses(
         let cost_tracker = state.cost_tracker.clone();
         let trace_id_for_done = trace_id.clone();
         let user_id_for_done = identity.user_id.clone();
+        let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
         let model_for_log = mapped_model.clone();
         let started = request_started_at;
@@ -1675,6 +1699,7 @@ pub async fn proxy_responses(
                     &audit_for_done,
                     &trace_id_for_done,
                     user_id_for_done.as_deref(),
+                    user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
                     &model_for_log,
                     None,
@@ -1727,6 +1752,7 @@ pub async fn proxy_responses(
                 &state.audit,
                 &trace_id,
                 identity.user_id.as_deref(),
+                identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
                 &mapped_model,
                 request_started_at.elapsed().as_millis() as i64,
@@ -1771,6 +1797,7 @@ pub async fn proxy_responses(
             &state.audit,
             &trace_id,
             identity.user_id.as_deref(),
+            identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
             &mapped_model,
             None,

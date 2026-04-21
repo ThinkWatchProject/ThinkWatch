@@ -13,13 +13,23 @@ use std::sync::Arc;
 use think_watch_common::audit::{AuditEntry, AuditLogger, LogType};
 use think_watch_common::dynamic_config::DynamicConfig;
 
+/// Identity published by the auth middleware into the access log's
+/// request-scoped slot. Both the UUID and a snapshot of the user's
+/// email get captured so access_logs can record `user_email` without a
+/// separate PG lookup in the logging hot path.
+#[derive(Clone, Debug)]
+pub struct AccessLogUserInfo {
+    pub user_id: Uuid,
+    pub user_email: Option<String>,
+}
+
 /// Slot inserted into request extensions by the access log layer so the
-/// auth middleware can publish the authenticated user_id back to us after
+/// auth middleware can publish the authenticated user back to us after
 /// it has verified the JWT. We can't read request extensions after
 /// `inner.call(request)` consumes the request, so we share an `Arc<OnceLock>`
 /// instead.
 #[derive(Clone, Default)]
-pub struct AccessLogUserSlot(pub Arc<OnceLock<Uuid>>);
+pub struct AccessLogUserSlot(pub Arc<OnceLock<AccessLogUserInfo>>);
 
 /// Per-request correlation id inserted into request extensions so any
 /// downstream audit emission can tag itself with it. Mirrors what the
@@ -177,8 +187,11 @@ where
                     "latency_ms": latency_ms,
                     "port": port,
                 }));
-            if let Some(uid) = user_slot.0.get().copied() {
-                entry = entry.user_id(uid);
+            if let Some(info) = user_slot.0.get() {
+                entry = entry.user_id(info.user_id);
+                if let Some(ref email) = info.user_email {
+                    entry = entry.user_email(email);
+                }
             }
             if let Some(ip) = ip {
                 entry = entry.ip_address(ip);

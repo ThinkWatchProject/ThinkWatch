@@ -542,7 +542,7 @@ impl McpProxy {
                 "status": status,
                 "error_message": error_message,
             }));
-        entry = entry.user_id(user_id);
+        entry = entry.user_id(user_id).user_email(user_email);
         self.audit.log(entry);
 
         response

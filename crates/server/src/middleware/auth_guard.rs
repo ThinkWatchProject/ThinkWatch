@@ -649,7 +649,12 @@ pub async fn require_auth(
         .extensions()
         .get::<crate::middleware::access_log::AccessLogUserSlot>()
     {
-        let _ = slot.0.set(claims.sub);
+        let _ = slot
+            .0
+            .set(crate::middleware::access_log::AccessLogUserInfo {
+                user_id: claims.sub,
+                user_email: Some(claims.email.clone()),
+            });
     }
 
     request.extensions_mut().insert(AuthUser {
@@ -791,7 +796,12 @@ async fn auth_via_api_key(
         .extensions()
         .get::<crate::middleware::access_log::AccessLogUserSlot>()
     {
-        let _ = slot.0.set(user_id);
+        let _ = slot
+            .0
+            .set(crate::middleware::access_log::AccessLogUserInfo {
+                user_id,
+                user_email: Some(claims.email.clone()),
+            });
     }
 
     request.extensions_mut().insert(AuthUser {
