@@ -363,6 +363,14 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         .route("/api/auth/sso/authorize", get(handlers::sso::sso_authorize))
         .route("/api/auth/sso/callback", get(handlers::sso::sso_callback))
         .route("/api/auth/sso/status", get(handlers::health::sso_status))
+        // Public client-error sink — frontend ErrorBoundary posts here
+        // when a render crashes. Auth-free because a logged-out user
+        // hitting a buggy login page should still produce a server-
+        // side trace; rate-limiting is handled in the boundary itself.
+        .route(
+            "/api/client-errors",
+            post(handlers::client_errors::report_client_error),
+        )
         // Setup routes (public, guarded by initialization check)
         .route("/api/setup/status", get(handlers::setup::setup_status))
         .route(

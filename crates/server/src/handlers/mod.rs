@@ -6,6 +6,7 @@ pub mod app_logs;
 pub mod audit;
 pub mod auth;
 pub(crate) mod clickhouse_util;
+pub mod client_errors;
 pub mod dashboard;
 pub mod gateway_logs;
 pub mod health;
