@@ -22,6 +22,14 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(readWorkspaceVersion()),
   },
+  // React 19 compiler integration is intentionally not wired in here.
+  // @vitejs/plugin-react v6 (the version this project pins) ships
+  // `reactCompilerPreset` but only the upcoming oxc transformer
+  // accepts the `babelPresets` option that the preset returns —
+  // attempting to plug it in fails type-check today. We get the lint
+  // half of the win via eslint-plugin-react-compiler (see
+  // eslint.config.js); the transform half lands when the oxc
+  // integration ships.
   plugins: [
     react(),
     tailwindcss(),
