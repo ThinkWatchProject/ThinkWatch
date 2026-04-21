@@ -935,7 +935,11 @@ export function UsersPage() {
         }}
       />
 
-      {/* Confirm dialog (logout / delete / toggle) */}
+      {/* Confirm dialog (logout / delete / toggle).
+          Delete is irreversible and cascades into audit history; force
+          the operator to type the email so an off-by-one row click
+          can't quietly drop the wrong account. Other actions
+          (force-logout / disable) keep the single-click confirm. */}
       <ConfirmDialog
         open={!!confirmAction}
         onOpenChange={(open) => { if (!open) { setConfirmAction(null); setConfirmError(''); } }}
@@ -944,6 +948,12 @@ export function UsersPage() {
         onConfirm={handleConfirm}
         loading={confirmLoading}
         variant={confirmAction?.type === 'delete' ? 'destructive' : 'default'}
+        requireInput={
+          confirmAction?.type === 'delete' ? confirmAction.user.email : undefined
+        }
+        inputPlaceholder={
+          confirmAction?.type === 'delete' ? confirmAction.user.email : undefined
+        }
       />
 
       {/* Reset password confirm */}
