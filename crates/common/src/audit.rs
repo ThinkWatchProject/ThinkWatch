@@ -882,13 +882,32 @@ async fn webhook_outbox_drain_loop(db: PgPool, registry: ForwarderRegistry) {
         .unwrap_or_default();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Tracks when the backlog first crossed `OUTBOX_ALERT_THRESHOLD`.
+    // Once it has stayed above the threshold for `OUTBOX_ALERT_AFTER`,
+    // we emit an audit entry that the webhook forwarders pick up — and
+    // arm a re-fire window so a chronic backlog isn't silent for hours.
+    let mut over_threshold_since: Option<std::time::Instant> = None;
+    let mut last_alert_at: Option<std::time::Instant> = None;
     loop {
         interval.tick().await;
-        if let Err(e) = drain_once(&db, &registry, &http).await {
+        if let Err(e) = drain_once(
+            &db,
+            &registry,
+            &http,
+            &mut over_threshold_since,
+            &mut last_alert_at,
+        )
+        .await
+        {
             tracing::warn!("webhook_outbox drain failed: {e}");
         }
     }
 }
+
+/// Threshold and dwell-time for the "outbox is backed up" audit alert.
+const OUTBOX_ALERT_THRESHOLD: i64 = 100;
+const OUTBOX_ALERT_AFTER: std::time::Duration = std::time::Duration::from_secs(300);
+const OUTBOX_ALERT_REPEAT: std::time::Duration = std::time::Duration::from_secs(900);
 
 const MAX_OUTBOX_ATTEMPTS: i32 = 24;
 
@@ -910,6 +929,8 @@ async fn drain_once(
     db: &PgPool,
     registry: &ForwarderRegistry,
     http: &reqwest::Client,
+    over_threshold_since: &mut Option<std::time::Instant>,
+    last_alert_at: &mut Option<std::time::Instant>,
 ) -> Result<(), sqlx::Error> {
     // Surface the backlog depth every tick so operators can alert on
     // "outbox > N rows for M minutes". Published before the drain so
@@ -919,6 +940,41 @@ async fn drain_once(
         .await
         .unwrap_or(0);
     metrics::gauge!("webhook_outbox_depth").set(depth as f64);
+
+    // Sustained-backlog alert. The gauge alone tells dashboards what's
+    // happening; the audit entry below routes the same signal through
+    // the existing webhook forwarders so on-call gets paged without
+    // wiring up Prometheus → Alertmanager separately. Forwarders pick
+    // it up by `action = "alert.outbox_depth_high"`.
+    let now = std::time::Instant::now();
+    if depth >= OUTBOX_ALERT_THRESHOLD {
+        let crossed_at = *over_threshold_since.get_or_insert(now);
+        let dwell = now.duration_since(crossed_at);
+        let due_for_first_alert = last_alert_at.is_none() && dwell >= OUTBOX_ALERT_AFTER;
+        let due_for_repeat = last_alert_at
+            .map(|t| now.duration_since(t) >= OUTBOX_ALERT_REPEAT)
+            .unwrap_or(false);
+        if due_for_first_alert || due_for_repeat {
+            // Forwarder dispatch is fire-and-forget: build the alert
+            // payload as if it were a regular audit row and feed it
+            // straight to whichever forwarders are subscribed to
+            // `audit` log_type. We don't go through AuditLogger::log
+            // because we only have access to the registry here, not
+            // the channel.
+            let entry = AuditEntry::platform("alert.outbox_depth_high")
+                .resource("webhook_outbox")
+                .detail(serde_json::json!({
+                    "depth": depth,
+                    "threshold": OUTBOX_ALERT_THRESHOLD,
+                    "sustained_secs": dwell.as_secs(),
+                }));
+            forward_to_all(http, registry, &None, &entry).await;
+            *last_alert_at = Some(now);
+        }
+    } else {
+        *over_threshold_since = None;
+        *last_alert_at = None;
+    }
 
     #[derive(sqlx::FromRow)]
     struct OutboxRow {
