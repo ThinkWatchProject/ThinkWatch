@@ -130,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
     dynamic_config::spawn_config_subscriber(sub_redis, dynamic_config.clone());
 
     let audit_logger =
-        AuditLogger::new(config.audit_config(), Some(pool.clone()), ch_client.clone());
+        AuditLogger::new(config.audit_config(), Some(pool.clone()), ch_client.clone()).await;
 
     // Phase 2: swap in ClickHouse tracing layer now that AuditLogger is ready
     let _ = ch_layer_reload

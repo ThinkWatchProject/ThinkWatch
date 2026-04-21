@@ -568,9 +568,23 @@ fn log_audit_drop_throttled(err: &tokio::sync::mpsc::error::TrySendError<AuditEn
 }
 
 impl AuditLogger {
-    pub fn new(_config: AuditConfig, db: Option<PgPool>, ch: Option<clickhouse::Client>) -> Self {
+    pub async fn new(
+        _config: AuditConfig,
+        db: Option<PgPool>,
+        ch: Option<clickhouse::Client>,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(AUDIT_CHANNEL_CAPACITY);
         let registry: ForwarderRegistry = Arc::new(RwLock::new(HashMap::new()));
+
+        // Populate the forwarder registry BEFORE the worker starts
+        // consuming audit entries. Without this, an audit log sent in
+        // the first few milliseconds after AuditLogger::new() returns
+        // would see an empty registry and skip forwarding — logs that
+        // should have gone to syslog/Kafka/webhooks during bootstrap
+        // would silently vanish.
+        if let Some(pool) = &db {
+            reload_forwarders(pool, &registry).await;
+        }
 
         // Spawn the background worker
         tokio::spawn(audit_worker(ch, rx, db.clone(), registry.clone()));
