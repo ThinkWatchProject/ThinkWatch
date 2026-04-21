@@ -516,6 +516,7 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/admin/trace/{trace_id}",
             get(handlers::trace::get_trace),
         )
+        .route("/api/admin/slo", get(handlers::slo::get_slo_snapshot))
         .route(
             "/api/admin/webhook-outbox",
             get(handlers::webhook_outbox::list_outbox),

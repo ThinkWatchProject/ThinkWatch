@@ -25,6 +25,7 @@ pub mod platform_pricing;
 pub mod providers;
 pub mod roles;
 pub mod setup;
+pub mod slo;
 pub mod sso;
 pub mod teams;
 pub mod test_rate_limit;
