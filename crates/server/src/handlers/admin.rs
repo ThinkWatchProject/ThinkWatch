@@ -1825,7 +1825,6 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
         | "console.request_timeout_secs"
         | "console.body_limit_bytes"
         | "security.signature_nonce_ttl_secs"
-        | "security.signature_drift_secs"
         | "audit.batch_size"
         | "audit.flush_interval_secs"
         | "audit.channel_capacity"
@@ -1835,6 +1834,22 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                 .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
             if v <= 0 {
                 return Err(AppError::BadRequest(format!("{key} must be > 0")));
+            }
+        }
+
+        // Request-signature drift tolerance. Upper bound is hard-coded
+        // in common::dynamic_config::SIGNATURE_DRIFT_MAX_SECS; the
+        // middleware clamps at read time too, but we reject out-of-range
+        // writes here so the admin UI surfaces the error immediately.
+        "security.signature_drift_secs" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            let max = think_watch_common::dynamic_config::SIGNATURE_DRIFT_MAX_SECS;
+            if !(1..=max).contains(&v) {
+                return Err(AppError::BadRequest(format!(
+                    "security.signature_drift_secs must be between 1 and {max}"
+                )));
             }
         }
 

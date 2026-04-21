@@ -216,10 +216,30 @@ macro_rules! dc_getters_u64_from_i64 {
     };
 }
 
+/// Upper bound on `security.signature_drift_secs`, enforced both at
+/// write time (admin settings validation) and at read time (the
+/// getter below). Anything beyond five minutes weakens replay
+/// protection to the point where signed-request freshness is no
+/// longer a meaningful guarantee; the cap stops a misconfiguration
+/// from silently disabling the check.
+pub const SIGNATURE_DRIFT_MAX_SECS: i64 = 300;
+
+impl DynamicConfig {
+    /// `security.signature_drift_secs` with a hard upper bound applied
+    /// at read time. A value outside `[1, SIGNATURE_DRIFT_MAX_SECS]`
+    /// in the DB is clamped to the bound rather than trusted.
+    pub async fn signature_drift_secs(&self) -> i64 {
+        let raw = self
+            .get_i64("security.signature_drift_secs")
+            .await
+            .unwrap_or(300);
+        raw.clamp(1, SIGNATURE_DRIFT_MAX_SECS)
+    }
+}
+
 dc_getters_i64! {
     jwt_access_ttl_secs,              "auth.jwt_access_ttl_secs",              900;
     jwt_refresh_ttl_days,             "auth.jwt_refresh_ttl_days",             7;
-    signature_drift_secs,             "security.signature_drift_secs",         300;
     signature_nonce_ttl_secs,         "security.signature_nonce_ttl_secs",     600;
     api_keys_default_expiry_days,     "api_keys.default_expiry_days",          90;
     api_keys_inactivity_timeout_days, "api_keys.inactivity_timeout_days",      0;
