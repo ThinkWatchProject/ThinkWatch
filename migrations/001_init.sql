@@ -30,7 +30,14 @@ CREATE TABLE users (
     -- bug) could create a row that can never log in — visible in the
     -- admin list but silently unusable.
     CONSTRAINT chk_users_auth_method
-        CHECK (password_hash IS NOT NULL OR oidc_subject IS NOT NULL)
+        CHECK (password_hash IS NOT NULL OR oidc_subject IS NOT NULL),
+    -- OIDC identity is either fully present or fully absent. Half-set
+    -- rows ({issuer='x', subject=NULL}) wouldn't be identifiable under
+    -- the OIDC spec and would slip through the UNIQUE(subject, issuer)
+    -- constraint because Postgres treats NULLs as distinct — allowing
+    -- unlimited half-configured "users" against the same issuer.
+    CONSTRAINT chk_users_oidc_pair
+        CHECK ((oidc_subject IS NULL) = (oidc_issuer IS NULL))
 );
 
 CREATE INDEX idx_users_not_deleted ON users(created_at) WHERE deleted_at IS NULL;
