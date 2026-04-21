@@ -244,15 +244,69 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
       }).catch(() => {});
       window.location.href = '/';
     }
-    throw new Error('Unauthorized');
+    throw new ApiError('Unauthorized', 401, 'unauthorized');
   }
 
   if (!res.ok) {
-    const err = await res.json().catch(() => ({ error: { message: res.statusText } }));
-    throw new Error(err.error?.message ?? 'Request failed');
+    const body = await res.json().catch(() => ({}));
+    const errorBody = body?.error;
+    const serverMessage =
+      typeof errorBody === 'string'
+        ? errorBody
+        : errorBody?.message ?? body?.message ?? res.statusText;
+    const errorType: string | undefined =
+      typeof errorBody === 'object' ? errorBody?.type : undefined;
+    throw new ApiError(serverMessage || 'Request failed', res.status, errorType);
   }
 
   return validate(path, await res.json(), options.schema);
+}
+
+/**
+ * Structured API failure carrying the HTTP status + the server's
+ * `error.type` tag (`unauthorized`, `forbidden`, `rate_limited`,
+ * `service_unavailable`, …) so consumers can render a translated,
+ * actionable message instead of a raw English fragment. Toast
+ * helpers below pick the i18n key off `type` first, falling back to
+ * `status`, finally to the bare server message.
+ */
+export class ApiError extends Error {
+  status: number;
+  type?: string;
+  constructor(message: string, status: number, type?: string) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+    this.type = type;
+  }
+}
+
+/**
+ * Resolve a translated, actionable message for an API failure.
+ *
+ * `type` (server-supplied) gives the most specific tag; falling back
+ * to status code keeps the mapping working for legacy responses; the
+ * raw server message is the last resort when nothing else matches.
+ * `t` is passed in instead of imported so this stays usable from
+ * non-React contexts (toast handlers in api.ts itself).
+ */
+export function describeApiError(
+  err: unknown,
+  t: (key: string, fallback?: { defaultValue?: string }) => string,
+): string {
+  if (err instanceof ApiError) {
+    if (err.type) {
+      const typeKey = `errors.byType.${err.type}`;
+      const translated = t(typeKey, { defaultValue: '' });
+      if (translated) return translated;
+    }
+    const statusKey = `errors.byStatus.${err.status}`;
+    const byStatus = t(statusKey, { defaultValue: '' });
+    if (byStatus) return byStatus;
+    return err.message;
+  }
+  if (err instanceof Error) return err.message;
+  return t('errors.generic');
 }
 
 export const apiPost = <T>(path: string, body: unknown) =>

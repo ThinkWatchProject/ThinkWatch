@@ -1,4 +1,24 @@
 {
+  "errors": {
+    "generic": "Something went wrong. Please try again.",
+    "byType": {
+      "unauthorized": "Your session has expired. Please sign in again.",
+      "forbidden": "You don't have permission to do that.",
+      "not_found": "We couldn't find what you were looking for.",
+      "bad_request": "The request was rejected — check the form and try again.",
+      "rate_limited": "Too many requests — wait a moment and try again.",
+      "conflict": "That conflicts with an existing record.",
+      "service_unavailable": "Service temporarily unavailable — please retry in a few seconds.",
+      "internal_error": "Internal server error. The team has been notified."
+    },
+    "byStatus": {
+      "401": "Your session has expired. Please sign in again.",
+      "403": "You don't have permission to do that.",
+      "404": "We couldn't find what you were looking for.",
+      "429": "Too many requests — wait a moment and try again.",
+      "503": "Service temporarily unavailable — please retry in a few seconds."
+    }
+  },
   "common": {
     "save": "Save",
     "cancel": "Cancel",
