@@ -27,6 +27,17 @@ pub struct AuthUser {
     pub permissions: Vec<String>,
     /// Permissions explicitly denied by policy documents.
     pub denied_permissions: Vec<String>,
+    /// Per-request memo for `owned_team_scope_for_perm`. Some handlers
+    /// (e.g. dashboard) call it three times for three different perms;
+    /// caching here turns those into one RBAC query each instead of
+    /// three round-trips to the same indexed lookup. Wrapped in `Arc`
+    /// so clones (axum's per-handler extractor pattern produces them)
+    /// share the same map.
+    scope_cache: std::sync::Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<String, Option<std::collections::HashSet<uuid::Uuid>>>,
+        >,
+    >,
 }
 
 impl AuthUser {
@@ -298,6 +309,11 @@ impl AuthUser {
         pool: &sqlx::PgPool,
         perm: &str,
     ) -> Result<Option<std::collections::HashSet<uuid::Uuid>>, AppError> {
+        // Per-request memo so repeated calls (dashboard hits this 3x
+        // for 3 perms) collapse to a single DB round-trip per perm.
+        if let Some(cached) = self.scope_cache.read().await.get(perm) {
+            return Ok(cached.clone());
+        }
         // Team-inherited roles grant global scope, so check both paths.
         let global: bool = sqlx::query_scalar(
             "SELECT EXISTS (
@@ -330,6 +346,10 @@ impl AuthUser {
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("scope lookup failed: {e}")))?;
         if global {
+            self.scope_cache
+                .write()
+                .await
+                .insert(perm.to_string(), None);
             return Ok(None);
         }
         let rows: Vec<(uuid::Uuid,)> = sqlx::query_as(
@@ -351,7 +371,13 @@ impl AuthUser {
         .fetch_all(pool)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("scope lookup failed: {e}")))?;
-        Ok(Some(rows.into_iter().map(|(id,)| id).collect()))
+        let scope: std::collections::HashSet<uuid::Uuid> =
+            rows.into_iter().map(|(id,)| id).collect();
+        self.scope_cache
+            .write()
+            .await
+            .insert(perm.to_string(), Some(scope.clone()));
+        Ok(Some(scope))
     }
 }
 
@@ -662,6 +688,9 @@ pub async fn require_auth(
         ip,
         permissions,
         denied_permissions,
+        scope_cache: std::sync::Arc::new(
+            tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        ),
     });
 
     Ok(next.run(request).await)
@@ -809,6 +838,9 @@ async fn auth_via_api_key(
         ip: None,
         permissions,
         denied_permissions,
+        scope_cache: std::sync::Arc::new(
+            tokio::sync::RwLock::new(std::collections::HashMap::new()),
+        ),
     });
     request.extensions_mut().insert(ApiKeyAuthenticated);
 
