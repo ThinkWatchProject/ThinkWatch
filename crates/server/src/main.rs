@@ -406,7 +406,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     // --- Start Console server (Web UI + management API) ---
-    let console_app = app::create_console_app(&config, state);
+    let console_app = app::create_console_app(&config, state)?;
     let console_addr = config.console_addr();
     let console_listener = tokio::net::TcpListener::bind(&console_addr).await?;
     tracing::info!("Console listening on {console_addr} (Web UI + Admin API)");

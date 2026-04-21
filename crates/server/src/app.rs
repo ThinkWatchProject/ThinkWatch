@@ -281,37 +281,15 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
     //     would never be read.
     //   - DO NOT mount the route (404 instead of leaking signals).
     //
-    // Rationale: /metrics on the public gateway port leaks cost /
-    // token-usage / error signals, so the safe default is "the
-    // endpoint does not exist and the recorder isn't even running"
-    // rather than "endpoint exists with no auth". Operators who
-    // want scraping set the token (`deploy/generate-secrets.sh`
-    // does it automatically). Failing to set it does not affect
-    // any other startup path.
-    let metrics_route = match _config.metrics_bearer_token.clone() {
-        Some(token) => {
-            // Failure to install the recorder must abort startup, not
-            // silently land a /metrics endpoint serving empty output —
-            // see OBS-15.
-            let prom_handle = handlers::metrics::install_prometheus_recorder()?;
-            tracing::info!("/metrics endpoint enabled (bearer auth required)");
-            let metrics_state = handlers::metrics::MetricsState {
-                handle: prom_handle,
-                bearer_token: token,
-            };
-            Some(
-                Router::new()
-                    .route("/metrics", get(handlers::metrics::prometheus_metrics))
-                    .with_state(metrics_state),
-            )
-        }
-        None => {
-            tracing::info!(
-                "/metrics endpoint disabled — set METRICS_BEARER_TOKEN to enable Prometheus scraping"
-            );
-            None
-        }
-    };
+    // Metrics live on the console server (port 3001), not the public
+    // gateway port — see `mount_metrics_on_console`. This function
+    // installs the recorder (failure aborts startup, OBS-15) and the
+    // route is attached inside `create_console_app`.
+    //
+    // When METRICS_BEARER_TOKEN is unset: don't install the recorder
+    // at all. The `metrics` crate's macros become silent no-ops at
+    // call sites, wasting neither memory nor CPU on samples that
+    // would never be read — and the /metrics route isn't mounted.
 
     // CORS for gateway — allow configured origins (same as console)
     let gateway_cors = {
@@ -328,11 +306,8 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
             .allow_credentials(true)
     };
 
-    let mut app = Router::new().merge(health);
-    if let Some(mr) = metrics_route {
-        app = app.merge(mr);
-    }
-    let app = app
+    let app = Router::new()
+        .merge(health)
         .merge(ai_routes)
         .merge(mcp_routes)
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024)) // 10MB for large prompts
@@ -359,7 +334,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
 // Console server (port 3001) — Web UI + management API, internal only
 // ---------------------------------------------------------------------------
 
-pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
+pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result<Router> {
     let cors = {
         let origins: Vec<HeaderValue> = config
             .cors_origins
@@ -905,7 +880,29 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> Router {
         .layer(crate::middleware::access_log::AccessLogLayer::new(state.audit.clone(), state.dynamic_config.clone(), config.console_port))
         .with_state(state);
 
-    security_layers(app)
+    // /metrics lives on the CONSOLE port (internal, bearer-gated) so
+    // the public gateway port 3000 never exposes cost / token-usage /
+    // error signals, even behind a bearer check. Recorder install
+    // happens here so we only pay the cost when the route is mounted.
+    let mut app = security_layers(app);
+    if let Some(token) = config.metrics_bearer_token.clone() {
+        let prom_handle = handlers::metrics::install_prometheus_recorder()?;
+        tracing::info!("/metrics endpoint enabled on console port (bearer auth required)");
+        let metrics_state = handlers::metrics::MetricsState {
+            handle: prom_handle,
+            bearer_token: token,
+        };
+        app = app.merge(
+            Router::new()
+                .route("/metrics", get(handlers::metrics::prometheus_metrics))
+                .with_state(metrics_state),
+        );
+    } else {
+        tracing::info!(
+            "/metrics endpoint disabled — set METRICS_BEARER_TOKEN to enable Prometheus scraping"
+        );
+    }
+    Ok(app)
 }
 
 // ---------------------------------------------------------------------------

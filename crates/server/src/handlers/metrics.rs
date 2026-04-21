@@ -16,11 +16,13 @@ pub struct MetricsState {
 
 /// GET /metrics — Prometheus metrics endpoint.
 ///
-/// Lives on the public gateway port (3000) so Prometheus scrapers
-/// can pull from network-accessible deployments. The route is
-/// only mounted when `METRICS_BEARER_TOKEN` is set; if you're
-/// getting 404 here, set the env var and restart. Scrapers must
-/// pass `Authorization: Bearer <value>`.
+/// Lives on the CONSOLE port (3001) only. The public gateway port
+/// 3000 never carries this route — token counts, cost per user, and
+/// per-provider error signals are all visible here, and keeping the
+/// endpoint on the internal network avoids leaking them even behind
+/// a bearer check if operators misconfigure the firewall. Scrapers
+/// must run against 3001 and pass `Authorization: Bearer <token>`.
+/// The route is only mounted when `METRICS_BEARER_TOKEN` is set.
 pub async fn prometheus_metrics(State(state): State<MetricsState>, headers: HeaderMap) -> Response {
     let presented = headers
         .get(header::AUTHORIZATION)
