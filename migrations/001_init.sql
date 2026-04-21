@@ -378,6 +378,17 @@ CREATE INDEX idx_usage_records_provider_name ON usage_records(provider_name, cre
 -- budget caps. Role-level constraints are inline in
 -- rbac_roles.policy_document (Constraints field); these tables are for
 -- user / api_key subjects only.
+--
+-- Team scope is DELIBERATELY not supported. Teams in ThinkWatch are
+-- IAM-group-style permission containers (they grant roles, they don't
+-- own resources or spend). Limits and budgets attach to the actor that
+-- actually spends tokens — the user or the API key. To express "this
+-- team's members should share a budget", grant the team a role whose
+-- policy carries the per-user constraint, or set per-user caps via
+-- bulk-override. A `subject_kind='team'` variant would imply either
+-- shared counters (hard to keep consistent without a distributed
+-- locking story) or team-wide sums (what's already achievable through
+-- role policy) — neither is worth the complexity today.
 -- --------------------------------------------------------------------------
 
 CREATE TABLE rate_limit_rules (
