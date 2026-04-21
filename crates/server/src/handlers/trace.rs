@@ -73,6 +73,7 @@ pub async fn get_trace(
     super::test_rate_limit::check_admin_rate_limit(
         &state.redis,
         auth_user.claims.sub,
+        auth_user.claims.iat,
         "trace_lookup",
         60,
     )

@@ -219,8 +219,13 @@ pub async fn test_mcp_server(
         .await?;
     // The test endpoint makes arbitrary outbound HTTP requests, so
     // cap per-user calls at 5/min to prevent abuse as a port scanner.
-    super::test_rate_limit::check_test_rate_limit(&state.redis, auth_user.claims.sub, "mcp")
-        .await?;
+    super::test_rate_limit::check_test_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        auth_user.claims.iat,
+        "mcp",
+    )
+    .await?;
 
     if req.endpoint_url.is_empty() {
         return Err(AppError::BadRequest("endpoint_url is required".into()));

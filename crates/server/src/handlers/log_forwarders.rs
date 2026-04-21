@@ -374,6 +374,7 @@ pub async fn test_forwarder(
     super::test_rate_limit::check_test_rate_limit(
         &state.redis,
         auth_user.claims.sub,
+        auth_user.claims.iat,
         "log_forwarder",
     )
     .await?;
