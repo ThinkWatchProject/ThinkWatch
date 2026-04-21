@@ -5,6 +5,7 @@ pub mod api_keys;
 pub mod app_logs;
 pub mod audit;
 pub mod auth;
+pub mod chargeback;
 pub(crate) mod clickhouse_util;
 pub mod client_errors;
 pub mod cost_forecast;

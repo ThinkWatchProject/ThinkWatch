@@ -522,6 +522,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             get(handlers::cost_forecast::get_cost_forecast),
         )
         .route(
+            "/api/admin/chargeback.csv",
+            get(handlers::chargeback::export_chargeback_csv),
+        )
+        .route(
             "/api/admin/webhook-outbox",
             get(handlers::webhook_outbox::list_outbox),
         )
