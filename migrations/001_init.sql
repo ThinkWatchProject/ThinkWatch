@@ -132,6 +132,11 @@ CREATE TABLE team_role_assignments (
 );
 
 CREATE INDEX idx_team_role_assignments_role ON team_role_assignments(role_id);
+-- The PK on (team_id, role_id) already supports a team_id-prefix
+-- lookup, but an explicit single-column index makes the planner
+-- consistently prefer it for the common "list roles on team X"
+-- read path and keeps it available after any PK reshuffle.
+CREATE INDEX idx_team_role_assignments_team ON team_role_assignments(team_id);
 
 -- Seed system roles. The policy_document is the single source of truth
 -- for permissions, model scope, tool scope, and constraints. Permission
