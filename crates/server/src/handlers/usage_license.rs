@@ -4,7 +4,7 @@
 //! endpoint is read-only and strictly local.
 //!
 //! Definitions follow [LICENSING.md](../../../../LICENSING.md):
-//!   - Billable Tokens = SUM(input_tokens + output_tokens) on usage_records
+//!   - Billable Tokens = SUM(input_tokens + output_tokens) on gateway_logs
 //!   - MCP Tool Calls  = COUNT(*) on mcp_logs WHERE tool_name != 'tools/list'
 //!     (the spec excludes tool discovery)
 
@@ -18,7 +18,7 @@ use think_watch_common::errors::AppError;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-use super::clickhouse_util::{ch_available, ch_client};
+use super::clickhouse_util::ch_client;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct LicenseTier {
@@ -141,84 +141,103 @@ pub async fn get_usage_license(
         .expect("valid hms")
         .and_utc();
 
-    // Billable tokens from Postgres usage_records.
-    let tokens: i64 = sqlx::query_scalar::<_, Option<i64>>(
-        "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint \
-           FROM usage_records WHERE created_at >= $1",
-    )
-    .bind(month_start)
-    .fetch_one(&state.db)
-    .await?
-    .unwrap_or(0);
+    // All license metrics now come from ClickHouse — gateway_logs for
+    // billable tokens, mcp_logs for tool calls. CH is effectively
+    // required for this endpoint.
+    let ch = ch_client(&state)?;
+    let month_start_str = month_start.format("%Y-%m-%d %H:%M:%S").to_string();
 
-    // Daily token buckets — PG. 1st of month → today, dense so the
-    // frontend can just plot without filling gaps.
-    let token_rows: Vec<(chrono::NaiveDate, i64)> = sqlx::query_as(
-        "SELECT created_at::date AS d, \
-                COALESCE(SUM(total_tokens::bigint), 0)::bigint AS v \
-           FROM usage_records \
-          WHERE created_at >= $1 \
-          GROUP BY d ORDER BY d",
-    )
-    .bind(month_start)
-    .fetch_all(&state.db)
-    .await?;
-    let tokens_daily = densify_daily(&token_rows, month_start, now);
+    #[derive(clickhouse::Row, serde::Deserialize)]
+    struct TokenCount {
+        cnt: u64,
+    }
+    #[derive(clickhouse::Row, serde::Deserialize)]
+    struct DailyTokens {
+        d: String,
+        v: u64,
+    }
 
-    // MCP tool calls from ClickHouse — excludes tools/list per spec.
-    // If ClickHouse isn't available, report 0 and empty buckets; this
-    // matches other handlers' graceful-degradation posture.
-    let (calls, calls_daily) = if ch_available(&state) {
-        let ch = ch_client(&state)?;
+    // Billable tokens MTD — input + output summed over the window.
+    // Wrap in ifNull(…, 0) because CH's `Nullable(Int64)` sums to
+    // Nullable unless we flatten the NULLs up front.
+    let tokens: i64 = ch
+        .query(
+            "SELECT toUInt64(sum(ifNull(input_tokens, 0)) + sum(ifNull(output_tokens, 0))) AS cnt \
+               FROM gateway_logs \
+              WHERE created_at >= parseDateTimeBestEffort(?)",
+        )
+        .bind(&month_start_str)
+        .fetch_one::<TokenCount>()
+        .await
+        .map(|r| r.cnt as i64)
+        .unwrap_or(0);
 
-        #[derive(clickhouse::Row, serde::Deserialize)]
-        struct CallCount {
-            cnt: u64,
-        }
-        #[derive(clickhouse::Row, serde::Deserialize)]
-        struct CallDaily {
-            d: String,
-            v: u64,
-        }
+    let token_rows: Vec<DailyTokens> = ch
+        .query(
+            "SELECT toString(toDate(created_at)) AS d, \
+                    toUInt64(sum(ifNull(input_tokens, 0)) + sum(ifNull(output_tokens, 0))) AS v \
+               FROM gateway_logs \
+              WHERE created_at >= parseDateTimeBestEffort(?) \
+              GROUP BY d ORDER BY d ASC",
+        )
+        .bind(&month_start_str)
+        .fetch_all::<DailyTokens>()
+        .await
+        .unwrap_or_default();
+    let parsed_tokens: Vec<(chrono::NaiveDate, i64)> = token_rows
+        .into_iter()
+        .filter_map(|r| {
+            chrono::NaiveDate::parse_from_str(&r.d, "%Y-%m-%d")
+                .ok()
+                .map(|d| (d, r.v as i64))
+        })
+        .collect();
+    let tokens_daily = densify_daily(&parsed_tokens, month_start, now);
 
-        let month_start_str = month_start.format("%Y-%m-%d %H:%M:%S").to_string();
-        let total = ch
-            .query(
-                "SELECT count() AS cnt FROM mcp_logs \
-                 WHERE created_at >= parseDateTimeBestEffort(?) \
-                   AND (tool_name IS NULL OR tool_name != 'tools/list')",
-            )
-            .bind(&month_start_str)
-            .fetch_one::<CallCount>()
-            .await
-            .map(|r| r.cnt as i64)
-            .unwrap_or(0);
+    // MCP tool calls — excludes tools/list per spec.
+    #[derive(clickhouse::Row, serde::Deserialize)]
+    struct CallCount {
+        cnt: u64,
+    }
+    #[derive(clickhouse::Row, serde::Deserialize)]
+    struct CallDaily {
+        d: String,
+        v: u64,
+    }
 
-        let rows = ch
-            .query(
-                "SELECT toString(toDate(created_at)) AS d, count() AS v \
-                   FROM mcp_logs \
-                  WHERE created_at >= parseDateTimeBestEffort(?) \
-                    AND (tool_name IS NULL OR tool_name != 'tools/list') \
-                  GROUP BY d ORDER BY d ASC",
-            )
-            .bind(&month_start_str)
-            .fetch_all::<CallDaily>()
-            .await
-            .unwrap_or_default();
+    let calls = ch
+        .query(
+            "SELECT count() AS cnt FROM mcp_logs \
+             WHERE created_at >= parseDateTimeBestEffort(?) \
+               AND (tool_name IS NULL OR tool_name != 'tools/list')",
+        )
+        .bind(&month_start_str)
+        .fetch_one::<CallCount>()
+        .await
+        .map(|r| r.cnt as i64)
+        .unwrap_or(0);
 
-        let parsed: Vec<(chrono::NaiveDate, i64)> = rows
-            .into_iter()
-            .filter_map(|r| {
-                chrono::NaiveDate::parse_from_str(&r.d, "%Y-%m-%d")
-                    .ok()
-                    .map(|d| (d, r.v as i64))
-            })
-            .collect();
-        (total, densify_daily(&parsed, month_start, now))
-    } else {
-        (0i64, densify_daily(&[], month_start, now))
-    };
+    let call_rows: Vec<CallDaily> = ch
+        .query(
+            "SELECT toString(toDate(created_at)) AS d, count() AS v \
+               FROM mcp_logs \
+              WHERE created_at >= parseDateTimeBestEffort(?) \
+                AND (tool_name IS NULL OR tool_name != 'tools/list') \
+              GROUP BY d ORDER BY d ASC",
+        )
+        .bind(&month_start_str)
+        .fetch_all::<CallDaily>()
+        .await
+        .unwrap_or_default();
+    let parsed_calls: Vec<(chrono::NaiveDate, i64)> = call_rows
+        .into_iter()
+        .filter_map(|r| {
+            chrono::NaiveDate::parse_from_str(&r.d, "%Y-%m-%d")
+                .ok()
+                .map(|d| (d, r.v as i64))
+        })
+        .collect();
+    let calls_daily = densify_daily(&parsed_calls, month_start, now);
 
     let (cur_idx, next_idx) = resolve_tier_indices(tokens, calls);
     let tier_list = tiers();

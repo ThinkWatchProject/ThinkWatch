@@ -389,38 +389,13 @@ CREATE TABLE mcp_tools (
 );
 
 -- --------------------------------------------------------------------------
--- Usage, Analytics & Budget
--- --------------------------------------------------------------------------
-
-CREATE TABLE usage_records (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    api_key_id      UUID REFERENCES api_keys(id) ON DELETE SET NULL,
-    user_id         UUID REFERENCES users(id) ON DELETE SET NULL,
-    provider_id     UUID REFERENCES providers(id) ON DELETE SET NULL,
-    -- Snapshot of providers.name at insert time. provider_id becomes
-    -- NULL when the provider row is deleted (ON DELETE SET NULL), and
-    -- analytics GROUP BY provider would silently drop those rows
-    -- otherwise. Keeping the name here lets cost/usage dashboards
-    -- stay accurate across provider removals.
-    provider_name   VARCHAR(100),
-    model_id        VARCHAR(255) NOT NULL,
-    request_type    VARCHAR(50)  NOT NULL,
-    input_tokens    INTEGER NOT NULL DEFAULT 0,
-    output_tokens   INTEGER NOT NULL DEFAULT 0,
-    total_tokens    INTEGER NOT NULL DEFAULT 0,
-    cost_usd        DECIMAL(12, 8) NOT NULL DEFAULT 0,
-    latency_ms      INTEGER,
-    status_code     INTEGER,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE INDEX idx_usage_records_created_at    ON usage_records(created_at);
-CREATE INDEX idx_usage_records_user_id       ON usage_records(user_id, created_at);
-CREATE INDEX idx_usage_records_api_key_id    ON usage_records(api_key_id, created_at);
-CREATE INDEX idx_usage_records_model_id      ON usage_records(model_id, created_at);
-CREATE INDEX idx_usage_records_provider_name ON usage_records(provider_name, created_at)
-    WHERE provider_name IS NOT NULL;
-
+-- Per-request usage / analytics data no longer lives in Postgres.
+-- Every gateway call writes a row into ClickHouse `gateway_logs`
+-- (see deploy/clickhouse/initdb.d/01_init.sql); all cost / token /
+-- model / provider dashboards query CH directly. The legacy
+-- `usage_records` table + its five indexes were dropped once the
+-- readers (analytics, dashboard, chargeback, cost_forecast,
+-- usage_license) migrated to CH.
 -- --------------------------------------------------------------------------
 -- Rate limit rules + budget caps
 --
@@ -501,7 +476,7 @@ CREATE TABLE budget_caps (
     period       VARCHAR(20) NOT NULL
         CHECK (period IN ('daily', 'weekly', 'monthly')),
     -- Threshold in weighted tokens. The UI may display "≈ $X" by
-    -- aggregating real `usage_records.cost_usd` for the same period,
+    -- aggregating real `gateway_logs.cost_usd` for the same period,
     -- but the cap itself is unitless tokens.
     limit_tokens BIGINT  NOT NULL CHECK (limit_tokens > 0),
     enabled      BOOLEAN NOT NULL DEFAULT TRUE,
@@ -645,12 +620,11 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 ('api_keys.rotation_period_days',        '0',  'api_keys', 'Auto-rotation period in days (0 = disabled)'),
 ('api_keys.rotation_grace_period_hours', '24', 'api_keys', 'Grace period for old key after rotation');
 
--- Data retention — usage records (PostgreSQL) + per-log-type ClickHouse retention.
+-- Data retention — per-log-type ClickHouse TTL seeds.
 -- Audit/Gateway/MCP/Platform default to 90 days; Access/App default to 30 days.
 -- Changing these via the admin UI issues `ALTER TABLE ... MODIFY TTL` against
 -- the corresponding ClickHouse table, so the value here is the seed default only.
 INSERT INTO system_settings (key, value, category, description) VALUES
-('data.retention_days_usage',    '90', 'data', 'Days to keep usage records in PostgreSQL (0 = forever)'),
 ('data.retention_days_audit',    '90', 'data', 'Days to keep audit logs in ClickHouse'),
 ('data.retention_days_gateway',  '90', 'data', 'Days to keep AI gateway request logs in ClickHouse'),
 ('data.retention_days_mcp',      '90', 'data', 'Days to keep MCP tool invocation logs in ClickHouse'),

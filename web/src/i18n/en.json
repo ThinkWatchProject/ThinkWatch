@@ -1181,11 +1181,8 @@
     "gracePeriod": "Grace Period (hours)",
     "retention": {
       "title": "Data Retention",
-      "intro": "How long to keep records before automatic deletion. Usage records live in PostgreSQL; the six log types live in ClickHouse and are cleaned up by ClickHouse TTL. Saving applies the new TTL to the corresponding table immediately — old data outside the new window is purged in the background.",
-      "postgresGroup": "PostgreSQL",
+      "intro": "How long to keep records before automatic deletion. Every log type lives in ClickHouse and is cleaned up by ClickHouse TTL. Saving applies the new TTL to the corresponding table immediately — old data outside the new window is purged in the background.",
       "clickhouseGroup": "ClickHouse Logs",
-      "usage": "Usage Records (days)",
-      "usageHint": "Per-request token / cost records used by analytics.",
       "audit": "Audit Logs (days)",
       "auditHint": "Security audit trail (login, settings, key ops).",
       "gateway": "Gateway Logs (days)",

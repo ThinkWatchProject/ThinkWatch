@@ -114,7 +114,6 @@ export function SettingsPage() {
   const [rotationPeriod, setRotationPeriod] = useState(0);
   const [gracePeriod, setGracePeriod] = useState(24);
   // Data retention
-  const [usageRetention, setUsageRetention] = useState(90);
   const [auditRetention, setAuditRetention] = useState(90);
   const [gatewayRetention, setGatewayRetention] = useState(90);
   const [mcpRetention, setMcpRetention] = useState(90);
@@ -169,7 +168,6 @@ export function SettingsPage() {
     setRotationPeriod(num(getSettingValue(data, 'api_keys', 'rotation_period_days'), 0));
     setGracePeriod(num(getSettingValue(data, 'api_keys', 'rotation_grace_period_hours'), 24));
 
-    setUsageRetention(num(getSettingValue(data, 'data', 'retention_days_usage'), 90));
     setAuditRetention(num(getSettingValue(data, 'data', 'retention_days_audit'), 90));
     setGatewayRetention(num(getSettingValue(data, 'data', 'retention_days_gateway'), 90));
     setMcpRetention(num(getSettingValue(data, 'data', 'retention_days_mcp'), 90));
@@ -252,7 +250,6 @@ export function SettingsPage() {
   const rotationPeriodSave = useFieldAutosave({ value: rotationPeriod, isLoaded, persist: (v) => patchOne('api_keys.rotation_period_days', v) });
   const gracePeriodSave = useFieldAutosave({ value: gracePeriod, isLoaded, persist: (v) => patchOne('api_keys.rotation_grace_period_hours', v) });
   // Data retention
-  const usageRetentionSave = useFieldAutosave({ value: usageRetention, isLoaded, persist: (v) => patchOne('data.retention_days_usage', v) });
   const auditRetentionSave = useFieldAutosave({ value: auditRetention, isLoaded, persist: (v) => patchOne('data.retention_days_audit', v) });
   const gatewayRetentionSave = useFieldAutosave({ value: gatewayRetention, isLoaded, persist: (v) => patchOne('data.retention_days_gateway', v) });
   const mcpRetentionSave = useFieldAutosave({ value: mcpRetention, isLoaded, persist: (v) => patchOne('data.retention_days_mcp', v) });
@@ -895,23 +892,6 @@ export function SettingsPage() {
                 </p>
               </CardHeader>
               <CardContent className="space-y-6">
-                <div>
-                  <Label className="text-xs uppercase tracking-wide text-muted-foreground mb-3 block">
-                    {t('settings.retention.postgresGroup')}
-                  </Label>
-                  <div className="grid gap-6 sm:grid-cols-2 max-w-2xl">
-                    <NumberField
-                      label={t('settings.retention.usage')}
-                      hint={t('settings.retention.usageHint')}
-                      value={usageRetention}
-                      onChange={setUsageRetention}
-                      min={1}
-                      max={3650}
-                      indicator={<SaveIndicator state={usageRetentionSave.state} error={usageRetentionSave.error} />}
-                    />
-                  </div>
-                </div>
-                <Separator />
                 <div>
                   <Label className="text-xs uppercase tracking-wide text-muted-foreground mb-3 block">
                     {t('settings.retention.clickhouseGroup')}

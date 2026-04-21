@@ -1,32 +1,32 @@
 use axum::Json;
 use axum::extract::{Query, State};
 use chrono::Datelike;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
+use crate::handlers::clickhouse_util::ch_client;
 use crate::handlers::time_range::{RangeQuery, TimeRange};
 use crate::middleware::auth_guard::AuthUser;
 
-/// Resolve the caller's analytics scope.
+/// Resolve the caller's analytics scope as a user-id allowlist that
+/// ClickHouse's `has(?, user_id)` can bind against.
 ///
-/// Returns `Ok(None)` when the caller has `analytics:read_all` at
-/// global scope — they see every row in `usage_records`. Otherwise
-/// returns `Ok(Some(team_ids))` containing every team the caller is
-/// allowed to read; the SQL filter then becomes
-/// `WHERE (user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($team_ids))
-///     OR user_id = $caller)` — caller always sees their own usage even
-/// if they're not in any team. Team scoping flows through the team's
-/// members now that `usage_records.team_id` is gone.
+/// Returns:
+///   - `None` — caller has `analytics:read_all` at global scope, no
+///     filter needed (every row in `gateway_logs` is visible).
+///   - `Some(user_id_strings)` — the caller is scope-limited; the set
+///     always contains the caller's own id, plus every team member of
+///     any team the caller holds `analytics:read_team` for.
 ///
-/// Falls back to `analytics:read_own` (Some(empty set)) for users
-/// who only have own-scoped analytics — they see only their own
-/// usage rows.
-async fn analytics_team_filter(
+/// User ids are stringified because `gateway_logs.user_id` is
+/// `LowCardinality(Nullable(String))` — the CH query binds an array
+/// of strings for the `has()` lookup.
+async fn analytics_user_id_filter(
     auth_user: &AuthUser,
     pool: &sqlx::PgPool,
-) -> Result<Option<Vec<uuid::Uuid>>, AppError> {
+) -> Result<Option<Vec<String>>, AppError> {
     // Global wins outright.
     if auth_user
         .owned_team_scope_for_perm(pool, "analytics:read_all")
@@ -35,18 +35,39 @@ async fn analytics_team_filter(
     {
         return Ok(None);
     }
-    // Otherwise collect team-scoped read_team grants.
-    if let Some(set) = auth_user
+    let caller_id = auth_user.claims.sub;
+    let mut visible: std::collections::HashSet<String> =
+        std::collections::HashSet::from([caller_id.to_string()]);
+    if let Some(team_ids) = auth_user
         .owned_team_scope_for_perm(pool, "analytics:read_team")
         .await?
-        && !set.is_empty()
+        && !team_ids.is_empty()
     {
-        return Ok(Some(set.into_iter().collect()));
+        let team_ids_vec: Vec<uuid::Uuid> = team_ids.into_iter().collect();
+        // Expand team membership → user ids in one pass. ClickHouse
+        // has no concept of team_members, so we resolve membership in
+        // Postgres and pass the flat user-id list to CH.
+        let members: Vec<(String,)> = sqlx::query_as(
+            "SELECT DISTINCT user_id::text FROM team_members WHERE team_id = ANY($1)",
+        )
+        .bind(&team_ids_vec)
+        .fetch_all(pool)
+        .await?;
+        for (uid,) in members {
+            visible.insert(uid);
+        }
     }
-    // No team-level grant either → caller sees only own usage. We
-    // express this as an empty team set; the SQL still ORs with
-    // user_id = caller so the result is non-empty.
-    Ok(Some(Vec::new()))
+    Ok(Some(visible.into_iter().collect()))
+}
+
+/// ClickHouse bucket-start expression for the selected range — mirrors
+/// what `TimeRange::trunc_unit` gives PG. Hourly buckets on 24h,
+/// daily buckets on 7d/30d.
+fn ch_bucket_expr(range: TimeRange) -> &'static str {
+    match range {
+        TimeRange::Day => "toStartOfHour(created_at)",
+        TimeRange::Week | TimeRange::Month => "toStartOfDay(created_at)",
+    }
 }
 
 // --- Usage analytics ---
@@ -93,140 +114,165 @@ pub async fn get_usage_stats(
     let range = TimeRange::parse(q.range.as_deref());
     let now = chrono::Utc::now();
     let window_start = range.window_start(now);
-    let team_filter = analytics_team_filter(&auth_user, &state.db).await?;
-    let caller_id = auth_user.claims.sub;
+    let user_filter = analytics_user_id_filter(&auth_user, &state.db).await?;
 
-    // Fold the SUM(tokens) + COUNT(*) into one scan. Both look at the
-    // same indexed window on usage_records; running them as separate
-    // queries doubled the index walk and the round-trip count for no
-    // additional info.
-    let (total_tokens, total_requests): (Option<i64>, Option<i64>) = match &team_filter {
-        None => sqlx::query_as(
-            "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint AS total_tokens, \
-                    COUNT(*)::bigint                                AS total_requests \
-               FROM usage_records WHERE created_at >= $1",
-        )
-        .bind(window_start)
-        .fetch_one(&state.db)
-        .await?,
-        Some(team_ids) => sqlx::query_as(
-            "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint AS total_tokens, \
-                    COUNT(*)::bigint                                AS total_requests \
-               FROM usage_records \
-              WHERE created_at >= $1 \
-                AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
-        )
-        .bind(window_start)
-        .bind(team_ids)
-        .bind(caller_id)
-        .fetch_one(&state.db)
-        .await?,
+    // Empty visible-user set short-circuits. CH rejects an empty IN
+    // list at parse time, and the answer is zeros anyway.
+    if matches!(user_filter, Some(ref v) if v.is_empty()) {
+        return Ok(Json(UsageStats {
+            total_tokens: 0,
+            total_requests: 0,
+            tokens_buckets: vec![0; range.bucket_count()],
+            range: range_label(range).into(),
+            prev_total_tokens: q.compare.unwrap_or(false).then_some(0),
+            prev_total_requests: q.compare.unwrap_or(false).then_some(0),
+        }));
+    }
+
+    let ch = ch_client(&state)?;
+    let window_start_str = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // Fold SUM(tokens) + COUNT(*) into one scan. Total tokens =
+    // input + output summed across the window.
+    #[derive(clickhouse::Row, Deserialize)]
+    struct Totals {
+        total_tokens: u64,
+        total_requests: u64,
+    }
+    let totals = match &user_filter {
+        None => ch
+            .query(
+                "SELECT \
+                    toUInt64(sum(ifNull(input_tokens, 0)) + sum(ifNull(output_tokens, 0))) AS total_tokens, \
+                    toUInt64(count()) AS total_requests \
+                 FROM gateway_logs \
+                 PREWHERE created_at >= parseDateTimeBestEffort(?)",
+            )
+            .bind(&window_start_str)
+            .fetch_one::<Totals>()
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("usage_stats totals: {e}")))?,
+        Some(ids) => ch
+            .query(
+                "SELECT \
+                    toUInt64(sum(ifNull(input_tokens, 0)) + sum(ifNull(output_tokens, 0))) AS total_tokens, \
+                    toUInt64(count()) AS total_requests \
+                 FROM gateway_logs \
+                 PREWHERE created_at >= parseDateTimeBestEffort(?) \
+                   AND has(?, user_id)",
+            )
+            .bind(&window_start_str)
+            .bind(ids)
+            .fetch_one::<Totals>()
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("usage_stats totals: {e}")))?,
     };
 
-    // Per-bucket token totals over the selected range.
-    let tokens_buckets = {
-        #[derive(sqlx::FromRow)]
-        struct Bucket {
-            bucket: chrono::DateTime<chrono::Utc>,
-            tokens: i64,
-        }
-        let trunc = range.trunc_unit();
-        let sql_common = format!(
-            "SELECT date_trunc('{trunc}', created_at) AS bucket, \
-                    COALESCE(SUM(total_tokens::bigint), 0)::bigint AS tokens \
-               FROM usage_records \
-              WHERE created_at >= $1"
-        );
-        let rows: Vec<Bucket> = match &team_filter {
-            None => {
-                let sql = format!("{sql_common} GROUP BY bucket ORDER BY bucket");
-                sqlx::query_as::<_, Bucket>(&sql)
-                    .bind(window_start)
-                    .fetch_all(&state.db)
-                    .await?
-            }
-            Some(team_ids) => {
-                let sql = format!(
-                    "{sql_common} AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2))) \
-                     GROUP BY bucket ORDER BY bucket"
-                );
-                sqlx::query_as::<_, Bucket>(&sql)
-                    .bind(window_start)
-                    .bind(team_ids)
-                    .bind(caller_id)
-                    .fetch_all(&state.db)
-                    .await?
-            }
-        };
-        let lookup: std::collections::HashMap<i64, i64> = rows
-            .into_iter()
-            .map(|b| (b.bucket.timestamp(), b.tokens))
-            .collect();
-        range
-            .bucket_starts(now)
-            .into_iter()
-            .map(|t| *lookup.get(&t.timestamp()).unwrap_or(&0))
-            .collect::<Vec<i64>>()
+    // Per-bucket token totals. CH emits `toStartOfHour / toStartOfDay`
+    // as the bucket; we align to `range.bucket_starts` in Rust so the
+    // zero-fill stays consistent with the PG implementation we replaced.
+    #[derive(clickhouse::Row, Deserialize)]
+    struct Bucket {
+        bucket: String,
+        tokens: u64,
+    }
+    let bucket_expr = ch_bucket_expr(range);
+    let bucket_sql_no_filter = format!(
+        "SELECT toString({bucket_expr}) AS bucket, \
+                toUInt64(sum(ifNull(input_tokens, 0)) + sum(ifNull(output_tokens, 0))) AS tokens \
+           FROM gateway_logs \
+         PREWHERE created_at >= parseDateTimeBestEffort(?) \
+          GROUP BY bucket ORDER BY bucket ASC"
+    );
+    let bucket_sql_scoped = format!(
+        "SELECT toString({bucket_expr}) AS bucket, \
+                toUInt64(sum(ifNull(input_tokens, 0)) + sum(ifNull(output_tokens, 0))) AS tokens \
+           FROM gateway_logs \
+         PREWHERE created_at >= parseDateTimeBestEffort(?) \
+            AND has(?, user_id) \
+          GROUP BY bucket ORDER BY bucket ASC"
+    );
+    let bucket_rows: Vec<Bucket> = match &user_filter {
+        None => ch
+            .query(&bucket_sql_no_filter)
+            .bind(&window_start_str)
+            .fetch_all::<Bucket>()
+            .await
+            .unwrap_or_default(),
+        Some(ids) => ch
+            .query(&bucket_sql_scoped)
+            .bind(&window_start_str)
+            .bind(ids)
+            .fetch_all::<Bucket>()
+            .await
+            .unwrap_or_default(),
     };
+    let lookup: std::collections::HashMap<i64, i64> = bucket_rows
+        .into_iter()
+        .filter_map(|b| {
+            chrono::NaiveDateTime::parse_from_str(&b.bucket, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|ndt| (ndt.and_utc().timestamp(), b.tokens as i64))
+        })
+        .collect();
+    let tokens_buckets: Vec<i64> = range
+        .bucket_starts(now)
+        .into_iter()
+        .map(|t| *lookup.get(&t.timestamp()).unwrap_or(&0))
+        .collect();
 
-    // Compare-period totals — same query, [prev_start, prev_end) range.
+    // Compare-period totals — same shape, `[prev_start, prev_end)`.
     let (prev_total_tokens, prev_total_requests) = if q.compare.unwrap_or(false) {
         let (prev_start, prev_end) = range.prev_window(now);
-        let (pt, pr) = match &team_filter {
-            None => {
-                let pt: Option<i64> = sqlx::query_scalar(
-                    "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint \
-                       FROM usage_records WHERE created_at >= $1 AND created_at < $2",
+        let prev_start_str = prev_start.format("%Y-%m-%d %H:%M:%S").to_string();
+        let prev_end_str = prev_end.format("%Y-%m-%d %H:%M:%S").to_string();
+        let prev = match &user_filter {
+            None => ch
+                .query(
+                    "SELECT \
+                        toUInt64(sum(ifNull(input_tokens, 0)) + sum(ifNull(output_tokens, 0))) AS total_tokens, \
+                        toUInt64(count()) AS total_requests \
+                     FROM gateway_logs \
+                     PREWHERE created_at >= parseDateTimeBestEffort(?) \
+                       AND created_at <  parseDateTimeBestEffort(?)",
                 )
-                .bind(prev_start)
-                .bind(prev_end)
-                .fetch_one(&state.db)
-                .await?;
-                let pr: Option<i64> = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM usage_records \
-                      WHERE created_at >= $1 AND created_at < $2",
+                .bind(&prev_start_str)
+                .bind(&prev_end_str)
+                .fetch_one::<Totals>()
+                .await
+                .ok(),
+            Some(ids) => ch
+                .query(
+                    "SELECT \
+                        toUInt64(sum(ifNull(input_tokens, 0)) + sum(ifNull(output_tokens, 0))) AS total_tokens, \
+                        toUInt64(count()) AS total_requests \
+                     FROM gateway_logs \
+                     PREWHERE created_at >= parseDateTimeBestEffort(?) \
+                       AND created_at <  parseDateTimeBestEffort(?) \
+                       AND has(?, user_id)",
                 )
-                .bind(prev_start)
-                .bind(prev_end)
-                .fetch_one(&state.db)
-                .await?;
-                (pt, pr)
-            }
-            Some(team_ids) => {
-                let pt: Option<i64> = sqlx::query_scalar(
-                    "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint \
-                       FROM usage_records \
-                      WHERE created_at >= $1 AND created_at < $2 \
-                        AND (user_id = $4 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($3)))",
-                )
-                .bind(prev_start)
-                .bind(prev_end)
-                .bind(team_ids)
-                .bind(caller_id)
-                .fetch_one(&state.db)
-                .await?;
-                let pr: Option<i64> = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM usage_records \
-                      WHERE created_at >= $1 AND created_at < $2 \
-                        AND (user_id = $4 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($3)))",
-                )
-                .bind(prev_start)
-                .bind(prev_end)
-                .bind(team_ids)
-                .bind(caller_id)
-                .fetch_one(&state.db)
-                .await?;
-                (pt, pr)
-            }
+                .bind(&prev_start_str)
+                .bind(&prev_end_str)
+                .bind(ids)
+                .fetch_one::<Totals>()
+                .await
+                .ok(),
         };
-        (Some(pt.unwrap_or(0)), Some(pr.unwrap_or(0)))
+        let prev = prev.unwrap_or(Totals {
+            total_tokens: 0,
+            total_requests: 0,
+        });
+        (
+            Some(prev.total_tokens as i64),
+            Some(prev.total_requests as i64),
+        )
     } else {
         (None, None)
     };
 
     Ok(Json(UsageStats {
-        total_tokens: total_tokens.unwrap_or(0),
-        total_requests: total_requests.unwrap_or(0),
+        total_tokens: totals.total_tokens as i64,
+        total_requests: totals.total_requests as i64,
         tokens_buckets,
         range: range_label(range).into(),
         prev_total_tokens,
@@ -242,15 +288,14 @@ fn range_label(r: TimeRange) -> &'static str {
     }
 }
 
-#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct UsageRow {
     pub date: chrono::NaiveDate,
     pub model_id: String,
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
-    #[schema(value_type = f64)]
-    pub total_cost: rust_decimal::Decimal,
+    pub total_cost: f64,
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
@@ -278,52 +323,80 @@ pub async fn get_usage(
 ) -> Result<Json<Vec<UsageRow>>, AppError> {
     let (limit, offset) =
         super::clickhouse_util::clamp_pagination(params.limit, params.offset, 200);
-    let team_filter = analytics_team_filter(&auth_user, &state.db).await?;
-    let caller_id = auth_user.claims.sub;
+    let user_filter = analytics_user_id_filter(&auth_user, &state.db).await?;
+    if matches!(user_filter, Some(ref v) if v.is_empty()) {
+        return Ok(Json(Vec::new()));
+    }
 
-    let rows = match team_filter {
-        None => {
-            sqlx::query_as::<_, UsageRow>(
-                r#"SELECT
-                    created_at::date as date,
-                    model_id,
-                    COUNT(*) as request_count,
-                    COALESCE(SUM(input_tokens::bigint), 0)::bigint as input_tokens,
-                    COALESCE(SUM(output_tokens::bigint), 0)::bigint as output_tokens,
-                    COALESCE(SUM(cost_usd), 0) as total_cost
-               FROM usage_records
-               GROUP BY created_at::date, model_id
-               ORDER BY date DESC
-               LIMIT $1 OFFSET $2"#,
+    #[derive(clickhouse::Row, Deserialize)]
+    struct UsageRowCh {
+        date: String,
+        model_id: String,
+        request_count: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        total_cost: f64,
+    }
+
+    let ch = ch_client(&state)?;
+    let ch_rows: Vec<UsageRowCh> = match &user_filter {
+        None => ch
+            .query(
+                "SELECT \
+                    toString(toDate(created_at)) AS date, \
+                    ifNull(model_id, '') AS model_id, \
+                    toUInt64(count()) AS request_count, \
+                    toUInt64(sum(ifNull(input_tokens, 0))) AS input_tokens, \
+                    toUInt64(sum(ifNull(output_tokens, 0))) AS output_tokens, \
+                    sum(ifNull(cost_usd, 0)) AS total_cost \
+                 FROM gateway_logs \
+                 GROUP BY date, model_id \
+                 ORDER BY date DESC \
+                 LIMIT ? OFFSET ?",
             )
             .bind(limit)
             .bind(offset)
-            .fetch_all(&state.db)
-            .await?
-        }
-        Some(team_ids) => {
-            sqlx::query_as::<_, UsageRow>(
-                r#"SELECT
-                    created_at::date as date,
-                    model_id,
-                    COUNT(*) as request_count,
-                    COALESCE(SUM(input_tokens::bigint), 0)::bigint as input_tokens,
-                    COALESCE(SUM(output_tokens::bigint), 0)::bigint as output_tokens,
-                    COALESCE(SUM(cost_usd), 0) as total_cost
-               FROM usage_records
-              WHERE user_id = $4 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($3))
-               GROUP BY created_at::date, model_id
-               ORDER BY date DESC
-               LIMIT $1 OFFSET $2"#,
+            .fetch_all::<UsageRowCh>()
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("usage CH query: {e}")))?,
+        Some(ids) => ch
+            .query(
+                "SELECT \
+                    toString(toDate(created_at)) AS date, \
+                    ifNull(model_id, '') AS model_id, \
+                    toUInt64(count()) AS request_count, \
+                    toUInt64(sum(ifNull(input_tokens, 0))) AS input_tokens, \
+                    toUInt64(sum(ifNull(output_tokens, 0))) AS output_tokens, \
+                    sum(ifNull(cost_usd, 0)) AS total_cost \
+                 FROM gateway_logs \
+                 PREWHERE has(?, user_id) \
+                 GROUP BY date, model_id \
+                 ORDER BY date DESC \
+                 LIMIT ? OFFSET ?",
             )
+            .bind(ids)
             .bind(limit)
             .bind(offset)
-            .bind(&team_ids)
-            .bind(caller_id)
-            .fetch_all(&state.db)
-            .await?
-        }
+            .fetch_all::<UsageRowCh>()
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("usage CH query: {e}")))?,
     };
+
+    let rows: Vec<UsageRow> = ch_rows
+        .into_iter()
+        .filter_map(|r| {
+            chrono::NaiveDate::parse_from_str(&r.date, "%Y-%m-%d")
+                .ok()
+                .map(|date| UsageRow {
+                    date,
+                    model_id: r.model_id,
+                    request_count: r.request_count as i64,
+                    input_tokens: r.input_tokens as i64,
+                    output_tokens: r.output_tokens as i64,
+                    total_cost: r.total_cost,
+                })
+        })
+        .collect();
 
     Ok(Json(rows))
 }
@@ -380,60 +453,62 @@ pub async fn get_cost_stats(
         .and_hms_opt(0, 0, 0)
         .expect("valid hms")
         .and_utc();
-    let team_filter = analytics_team_filter(&auth_user, &state.db).await?;
+    let user_filter = analytics_user_id_filter(&auth_user, &state.db).await?;
     let caller_id = auth_user.claims.sub;
 
-    // Range-scoped total.
-    let total: Option<rust_decimal::Decimal> = match &team_filter {
-        None => {
-            sqlx::query_scalar(
-                "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records WHERE created_at >= $1",
-            )
-            .bind(window_start)
-            .fetch_one(&state.db)
-            .await?
-        }
-        Some(team_ids) => {
-            sqlx::query_scalar(
-                "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records \
-          WHERE created_at >= $1 \
-            AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
-            )
-            .bind(window_start)
-            .bind(team_ids)
-            .bind(caller_id)
-            .fetch_one(&state.db)
-            .await?
-        }
-    };
+    // Empty visible-user set → all zeros. Short-circuit so the
+    // `budget_usage_pct` Redis check still runs below — a scope-zero
+    // caller can still have their own budget caps.
+    let empty_scope = matches!(user_filter, Some(ref v) if v.is_empty());
 
-    // Month-to-date total (independent of range).
-    let total_mtd: Option<rust_decimal::Decimal> = match &team_filter {
-        None => {
-            sqlx::query_scalar(
-                "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records WHERE created_at >= $1",
-            )
-            .bind(month_start)
-            .fetch_one(&state.db)
-            .await?
-        }
-        Some(team_ids) => {
-            sqlx::query_scalar(
-                "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records \
-          WHERE created_at >= $1 \
-            AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
-            )
-            .bind(month_start)
-            .bind(team_ids)
-            .bind(caller_id)
-            .fetch_one(&state.db)
-            .await?
-        }
-    };
+    #[derive(clickhouse::Row, Deserialize)]
+    struct CostPair {
+        total: f64,
+        total_mtd: f64,
+    }
 
-    use rust_decimal::prelude::ToPrimitive;
-    let total_f64 = total.and_then(|d| d.to_f64()).unwrap_or(0.0);
-    let total_mtd_f64 = total_mtd.and_then(|d| d.to_f64()).unwrap_or(0.0);
+    let (total_f64, total_mtd_f64) = if empty_scope {
+        (0.0, 0.0)
+    } else {
+        let ch = ch_client(&state)?;
+        let window_start_str = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
+        let month_start_str = month_start.format("%Y-%m-%d %H:%M:%S").to_string();
+        let row = match &user_filter {
+            None => ch
+                .query(
+                    "SELECT \
+                        sumIf(ifNull(cost_usd, 0), created_at >= parseDateTimeBestEffort(?)) AS total, \
+                        sumIf(ifNull(cost_usd, 0), created_at >= parseDateTimeBestEffort(?)) AS total_mtd \
+                     FROM gateway_logs \
+                     WHERE created_at >= least(parseDateTimeBestEffort(?), parseDateTimeBestEffort(?))",
+                )
+                .bind(&window_start_str)
+                .bind(&month_start_str)
+                .bind(&window_start_str)
+                .bind(&month_start_str)
+                .fetch_one::<CostPair>()
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("cost_stats CH query: {e}")))?,
+            Some(ids) => ch
+                .query(
+                    "SELECT \
+                        sumIf(ifNull(cost_usd, 0), created_at >= parseDateTimeBestEffort(?)) AS total, \
+                        sumIf(ifNull(cost_usd, 0), created_at >= parseDateTimeBestEffort(?)) AS total_mtd \
+                     FROM gateway_logs \
+                     WHERE created_at >= least(parseDateTimeBestEffort(?), parseDateTimeBestEffort(?)) \
+                       AND has(?, user_id)",
+                )
+                .bind(&window_start_str)
+                .bind(&month_start_str)
+                .bind(&window_start_str)
+                .bind(&month_start_str)
+                .bind(ids)
+                .fetch_one::<CostPair>()
+                .await
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("cost_stats CH query: {e}")))?,
+        };
+        (row.total, row.total_mtd)
+    };
 
     // Budget usage percentage: ratio of current spend to the monthly
     // limit the caller's role-inline AI gateway constraints impose.
@@ -484,80 +559,102 @@ pub async fn get_cost_stats(
     };
 
     // Per-bucket cost totals over the selected range.
-    let cost_buckets = {
-        #[derive(sqlx::FromRow)]
-        struct Bucket {
-            bucket: chrono::DateTime<chrono::Utc>,
-            cost: rust_decimal::Decimal,
-        }
-        let trunc = range.trunc_unit();
-        let sql_common = format!(
-            "SELECT date_trunc('{trunc}', created_at) AS bucket, \
-                    COALESCE(SUM(cost_usd), 0) AS cost \
-               FROM usage_records \
-              WHERE created_at >= $1"
+    #[derive(clickhouse::Row, Deserialize)]
+    struct CostBucket {
+        bucket: String,
+        cost: f64,
+    }
+    let cost_buckets: Vec<f64> = if empty_scope {
+        vec![0.0; range.bucket_count()]
+    } else {
+        let ch = ch_client(&state)?;
+        let window_start_str = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
+        let bucket_expr = ch_bucket_expr(range);
+        let sql_no_filter = format!(
+            "SELECT toString({bucket_expr}) AS bucket, \
+                    sum(ifNull(cost_usd, 0)) AS cost \
+               FROM gateway_logs \
+             PREWHERE created_at >= parseDateTimeBestEffort(?) \
+              GROUP BY bucket ORDER BY bucket ASC"
         );
-        let rows: Vec<Bucket> = match &team_filter {
-            None => {
-                let sql = format!("{sql_common} GROUP BY bucket ORDER BY bucket");
-                sqlx::query_as::<_, Bucket>(&sql)
-                    .bind(window_start)
-                    .fetch_all(&state.db)
-                    .await?
-            }
-            Some(team_ids) => {
-                let sql = format!(
-                    "{sql_common} AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2))) \
-                     GROUP BY bucket ORDER BY bucket"
-                );
-                sqlx::query_as::<_, Bucket>(&sql)
-                    .bind(window_start)
-                    .bind(team_ids)
-                    .bind(caller_id)
-                    .fetch_all(&state.db)
-                    .await?
-            }
+        let sql_scoped = format!(
+            "SELECT toString({bucket_expr}) AS bucket, \
+                    sum(ifNull(cost_usd, 0)) AS cost \
+               FROM gateway_logs \
+             PREWHERE created_at >= parseDateTimeBestEffort(?) \
+                AND has(?, user_id) \
+              GROUP BY bucket ORDER BY bucket ASC"
+        );
+        let rows: Vec<CostBucket> = match &user_filter {
+            None => ch
+                .query(&sql_no_filter)
+                .bind(&window_start_str)
+                .fetch_all::<CostBucket>()
+                .await
+                .unwrap_or_default(),
+            Some(ids) => ch
+                .query(&sql_scoped)
+                .bind(&window_start_str)
+                .bind(ids)
+                .fetch_all::<CostBucket>()
+                .await
+                .unwrap_or_default(),
         };
-        use rust_decimal::prelude::ToPrimitive;
         let lookup: std::collections::HashMap<i64, f64> = rows
             .into_iter()
-            .map(|b| (b.bucket.timestamp(), b.cost.to_f64().unwrap_or(0.0)))
+            .filter_map(|b| {
+                chrono::NaiveDateTime::parse_from_str(&b.bucket, "%Y-%m-%d %H:%M:%S")
+                    .ok()
+                    .map(|ndt| (ndt.and_utc().timestamp(), b.cost))
+            })
             .collect();
         range
             .bucket_starts(now)
             .into_iter()
             .map(|t| *lookup.get(&t.timestamp()).unwrap_or(&0.0))
-            .collect::<Vec<f64>>()
+            .collect()
     };
 
     let prev_total_cost = if q.compare.unwrap_or(false) {
-        let (prev_start, prev_end) = range.prev_window(now);
-        let prev: Option<rust_decimal::Decimal> = match &team_filter {
-            None => {
-                sqlx::query_scalar(
-                    "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records \
-                      WHERE created_at >= $1 AND created_at < $2",
-                )
-                .bind(prev_start)
-                .bind(prev_end)
-                .fetch_one(&state.db)
-                .await?
+        if empty_scope {
+            Some(0.0)
+        } else {
+            let ch = ch_client(&state)?;
+            let (prev_start, prev_end) = range.prev_window(now);
+            let prev_start_str = prev_start.format("%Y-%m-%d %H:%M:%S").to_string();
+            let prev_end_str = prev_end.format("%Y-%m-%d %H:%M:%S").to_string();
+            #[derive(clickhouse::Row, Deserialize)]
+            struct PrevCost {
+                cost: f64,
             }
-            Some(team_ids) => {
-                sqlx::query_scalar(
-                    "SELECT COALESCE(SUM(cost_usd), 0) FROM usage_records \
-                      WHERE created_at >= $1 AND created_at < $2 \
-                        AND (user_id = $4 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($3)))",
-                )
-                .bind(prev_start)
-                .bind(prev_end)
-                .bind(team_ids)
-                .bind(caller_id)
-                .fetch_one(&state.db)
-                .await?
-            }
-        };
-        Some(prev.and_then(|d| d.to_f64()).unwrap_or(0.0))
+            let prev = match &user_filter {
+                None => ch
+                    .query(
+                        "SELECT sum(ifNull(cost_usd, 0)) AS cost FROM gateway_logs \
+                         PREWHERE created_at >= parseDateTimeBestEffort(?) \
+                            AND created_at <  parseDateTimeBestEffort(?)",
+                    )
+                    .bind(&prev_start_str)
+                    .bind(&prev_end_str)
+                    .fetch_one::<PrevCost>()
+                    .await
+                    .ok(),
+                Some(ids) => ch
+                    .query(
+                        "SELECT sum(ifNull(cost_usd, 0)) AS cost FROM gateway_logs \
+                         PREWHERE created_at >= parseDateTimeBestEffort(?) \
+                            AND created_at <  parseDateTimeBestEffort(?) \
+                            AND has(?, user_id)",
+                    )
+                    .bind(&prev_start_str)
+                    .bind(&prev_end_str)
+                    .bind(ids)
+                    .fetch_one::<PrevCost>()
+                    .await
+                    .ok(),
+            };
+            Some(prev.map(|p| p.cost).unwrap_or(0.0))
+        }
     } else {
         None
     };
@@ -659,23 +756,23 @@ impl CostGroupBy {
         Ok(dims)
     }
 
-    /// The SQL expression that produces this dimension's value.
-    fn sql_expr(self) -> &'static str {
+    /// ClickHouse expression that produces this dimension's raw value
+    /// from a `gateway_logs` row. For `CostCenter` we carry the
+    /// `api_key_id` through CH and remap it to the cost-center label
+    /// in Rust — cost_center lives on `api_keys` and isn't snapshotted.
+    fn ch_expr(self) -> &'static str {
         match self {
-            Self::Model => "u.model_id",
-            Self::User => "COALESCE(u.user_id::text, '(none)')",
-            Self::CostCenter => "COALESCE(k.cost_center, '(untagged)')",
-            Self::Provider => "COALESCE(p.display_name, '(none)')",
-        }
-    }
-
-    /// The column alias used in SELECT / GROUP BY for this dimension.
-    fn alias(self) -> &'static str {
-        match self {
-            Self::Model => "dim_model",
-            Self::User => "dim_user",
-            Self::CostCenter => "dim_cost_center",
-            Self::Provider => "dim_provider",
+            Self::Model => "ifNull(model_id, '(none)')",
+            Self::User => "ifNull(user_id, '(none)')",
+            // Raw api_key_id placeholder — the Rust post-pass
+            // rewrites this into the cost_center label (or
+            // '(untagged)' when no label is set).
+            Self::CostCenter => "ifNull(api_key_id, '')",
+            // `gateway_logs.provider` is already the snapshotted
+            // provider name. We pick that directly instead of
+            // joining back to `providers.display_name` because the
+            // snapshot survives provider soft-delete.
+            Self::Provider => "ifNull(provider, '(none)')",
         }
     }
 
@@ -687,15 +784,6 @@ impl CostGroupBy {
             Self::CostCenter => "cost_center",
             Self::Provider => "provider",
         }
-    }
-
-    /// Whether this dimension requires an extra JOIN.
-    fn needs_api_keys_join(self) -> bool {
-        matches!(self, Self::CostCenter)
-    }
-
-    fn needs_providers_join(self) -> bool {
-        matches!(self, Self::Provider)
     }
 }
 
@@ -754,118 +842,215 @@ pub async fn get_costs(
             .expect("valid hms")
             .and_utc(),
     };
-    let team_filter = analytics_team_filter(&auth_user, &state.db).await?;
-    let caller_id = auth_user.claims.sub;
-
-    // Build dynamic SQL fragments from the validated dimension list.
-    // No user input is interpolated — each enum variant maps to a fixed
-    // SQL expression, so there is no injection surface.
-    let need_api_keys = dims.iter().any(|d| d.needs_api_keys_join());
-    let need_providers = dims.iter().any(|d| d.needs_providers_join());
-
-    let mut from = String::from("usage_records u");
-    if need_api_keys {
-        from.push_str(" LEFT JOIN api_keys k ON k.id = u.api_key_id");
-    }
-    if need_providers {
-        from.push_str(" LEFT JOIN providers p ON p.id = u.provider_id");
+    let user_filter = analytics_user_id_filter(&auth_user, &state.db).await?;
+    if matches!(user_filter, Some(ref v) if v.is_empty()) {
+        return Ok(Json(CostBreakdown {
+            items: Vec::new(),
+            total: CostTotals {
+                request_count: 0,
+                input_tokens: 0,
+                output_tokens: 0,
+                total_cost: 0.0,
+            },
+        })
+        .into_response());
     }
 
-    // SELECT columns: one per dimension alias.
-    let select_dims: String = dims
-        .iter()
-        .map(|d| format!("{} AS {}", d.sql_expr(), d.alias()))
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    // GROUP BY list — use aliases.
-    let group_by_clause: String = dims
-        .iter()
-        .map(|d| d.alias().to_string())
-        .collect::<Vec<_>>()
-        .join(", ");
-
-    // Fetch raw rows via sqlx::Row (dynamic column count).
-    let base_select = format!(
-        "SELECT {select_dims}, \
-                COUNT(*) AS request_count, \
-                COALESCE(SUM(u.input_tokens::bigint), 0)::bigint AS input_tokens, \
-                COALESCE(SUM(u.output_tokens::bigint), 0)::bigint AS output_tokens, \
-                COALESCE(SUM(u.cost_usd), 0) AS total_cost \
-           FROM {from}"
-    );
-
-    use rust_decimal::prelude::ToPrimitive;
-    use sqlx::Row;
-
-    let raw_rows: Vec<sqlx::postgres::PgRow> = match &team_filter {
-        None => {
-            let sql = format!(
-                "{base_select} \
-                  WHERE u.created_at >= $1 \
-                  GROUP BY {group_by_clause} \
-                  ORDER BY total_cost DESC \
-                  LIMIT $2 OFFSET $3"
-            );
-            sqlx::query(&sql)
-                .bind(window_start)
-                .bind(limit)
-                .bind(offset)
-                .fetch_all(&state.db)
-                .await?
-        }
-        Some(team_ids) => {
-            let sql = format!(
-                "{base_select} \
-                  WHERE u.created_at >= $1 \
-                    AND (u.user_id = $5 OR u.user_id IN (\
-                         SELECT user_id FROM team_members WHERE team_id = ANY($4))) \
-                  GROUP BY {group_by_clause} \
-                  ORDER BY total_cost DESC \
-                  LIMIT $2 OFFSET $3"
-            );
-            sqlx::query(&sql)
-                .bind(window_start)
-                .bind(limit)
-                .bind(offset)
-                .bind(team_ids)
-                .bind(caller_id)
-                .fetch_all(&state.db)
-                .await?
-        }
+    // When CostCenter is in the dim list we fetch more raw rows
+    // than the user's LIMIT asks for, because the per-api_key_id
+    // grouping may collapse into fewer cost_center rows after
+    // enrichment. Cap the over-fetch at 10k — enough for realistic
+    // breakdowns, protects against pathological queries.
+    let need_cost_center_remap = dims.contains(&CostGroupBy::CostCenter);
+    let ch_fetch_limit = if need_cost_center_remap {
+        (limit + offset).min(10_000)
+    } else {
+        limit + offset
     };
 
-    // Map raw rows into CostItem structs.
+    let ch = ch_client(&state)?;
+    let window_start_str = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // The clickhouse crate needs a concrete Row-deriving struct for
+    // every fetch_all, but `dims` has a variable column count
+    // (1..=3). Rather than reach for JSONEachRow, we always emit
+    // three dimension slots; unused ones evaluate to an empty
+    // string literal. GROUP BY always includes all three — grouping
+    // by a constant is a no-op — and the Rust pass reads only the
+    // dims actually requested. This keeps the Row struct fixed.
+    let d1_expr = dims.first().map(|d| d.ch_expr()).unwrap_or("''");
+    let d2_expr = dims.get(1).map(|d| d.ch_expr()).unwrap_or("''");
+    let d3_expr = dims.get(2).map(|d| d.ch_expr()).unwrap_or("''");
+
+    #[derive(clickhouse::Row, Deserialize)]
+    struct CostBreakdownRow {
+        dim1: String,
+        dim2: String,
+        dim3: String,
+        request_count: u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        total_cost: f64,
+    }
+
+    let sql_no_filter = format!(
+        "SELECT \
+            {d1_expr} AS dim1, \
+            {d2_expr} AS dim2, \
+            {d3_expr} AS dim3, \
+            toUInt64(count()) AS request_count, \
+            toUInt64(sum(ifNull(input_tokens, 0))) AS input_tokens, \
+            toUInt64(sum(ifNull(output_tokens, 0))) AS output_tokens, \
+            sum(ifNull(cost_usd, 0)) AS total_cost \
+         FROM gateway_logs \
+         PREWHERE created_at >= parseDateTimeBestEffort(?) \
+         GROUP BY dim1, dim2, dim3 \
+         ORDER BY total_cost DESC \
+         LIMIT ?"
+    );
+    let sql_scoped = format!(
+        "SELECT \
+            {d1_expr} AS dim1, \
+            {d2_expr} AS dim2, \
+            {d3_expr} AS dim3, \
+            toUInt64(count()) AS request_count, \
+            toUInt64(sum(ifNull(input_tokens, 0))) AS input_tokens, \
+            toUInt64(sum(ifNull(output_tokens, 0))) AS output_tokens, \
+            sum(ifNull(cost_usd, 0)) AS total_cost \
+         FROM gateway_logs \
+         PREWHERE created_at >= parseDateTimeBestEffort(?) \
+            AND has(?, user_id) \
+         GROUP BY dim1, dim2, dim3 \
+         ORDER BY total_cost DESC \
+         LIMIT ?"
+    );
+    let ch_rows: Vec<CostBreakdownRow> = match &user_filter {
+        None => ch
+            .query(&sql_no_filter)
+            .bind(&window_start_str)
+            .bind(ch_fetch_limit)
+            .fetch_all::<CostBreakdownRow>()
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("get_costs CH: {e}")))?,
+        Some(ids) => ch
+            .query(&sql_scoped)
+            .bind(&window_start_str)
+            .bind(ids)
+            .bind(ch_fetch_limit)
+            .fetch_all::<CostBreakdownRow>()
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("get_costs CH: {e}")))?,
+    };
+
+    // Stage 1 — rebuild `dim_values` using only the dims the user
+    // asked for, picking from the fixed dim1/dim2/dim3 slots.
+    struct RawItem {
+        dim_values: Vec<String>,
+        request_count: i64,
+        input_tokens: i64,
+        output_tokens: i64,
+        total_cost: f64,
+    }
+    let raw_items: Vec<RawItem> = ch_rows
+        .into_iter()
+        .map(|r| {
+            let slot_values = [r.dim1, r.dim2, r.dim3];
+            let dim_values: Vec<String> = (0..dims.len()).map(|i| slot_values[i].clone()).collect();
+            RawItem {
+                dim_values,
+                request_count: r.request_count as i64,
+                input_tokens: r.input_tokens as i64,
+                output_tokens: r.output_tokens as i64,
+                total_cost: r.total_cost,
+            }
+        })
+        .collect();
+
+    // Stage 2 — resolve api_key_id → cost_center if needed.
+    let key_to_center: std::collections::HashMap<uuid::Uuid, String> = if need_cost_center_remap {
+        let cc_idx = dims
+            .iter()
+            .position(|d| *d == CostGroupBy::CostCenter)
+            .expect("cost_center dim present");
+        let key_ids: Vec<uuid::Uuid> = raw_items
+            .iter()
+            .filter_map(|it| uuid::Uuid::parse_str(&it.dim_values[cc_idx]).ok())
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        if key_ids.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            let rows: Vec<(uuid::Uuid, Option<String>)> =
+                sqlx::query_as("SELECT id, cost_center FROM api_keys WHERE id = ANY($1)")
+                    .bind(&key_ids)
+                    .fetch_all(&state.db)
+                    .await?;
+            rows.into_iter()
+                .filter_map(|(id, cc)| cc.map(|c| (id, c)))
+                .collect()
+        }
+    } else {
+        std::collections::HashMap::new()
+    };
+
+    // Stage 3 — remap raw dim values (cost_center only) and re-aggregate.
+    // A single cost_center may absorb multiple api_keys' contributions;
+    // totals stay correct because we sum request_count/tokens/cost.
+    let cc_idx_opt = dims.iter().position(|d| *d == CostGroupBy::CostCenter);
+    type Totals = (i64, i64, i64, f64);
+    let mut grouped: std::collections::BTreeMap<Vec<String>, Totals> =
+        std::collections::BTreeMap::new();
+    for it in raw_items {
+        let mut dim_values = it.dim_values;
+        if let Some(cc_idx) = cc_idx_opt {
+            let cc_label = uuid::Uuid::parse_str(&dim_values[cc_idx])
+                .ok()
+                .and_then(|id| key_to_center.get(&id).cloned())
+                .unwrap_or_else(|| "(untagged)".to_string());
+            dim_values[cc_idx] = cc_label;
+        }
+        let entry = grouped.entry(dim_values).or_insert((0, 0, 0, 0.0));
+        entry.0 += it.request_count;
+        entry.1 += it.input_tokens;
+        entry.2 += it.output_tokens;
+        entry.3 += it.total_cost;
+    }
+
+    // Sort by total_cost DESC, apply offset+limit.
+    let mut ordered: Vec<(Vec<String>, Totals)> = grouped.into_iter().collect();
+    ordered.sort_by(|a, b| {
+        b.1.3
+            .partial_cmp(&a.1.3)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let paged: Vec<(Vec<String>, Totals)> = ordered
+        .into_iter()
+        .skip(offset as usize)
+        .take(limit as usize)
+        .collect();
+
     let mut total_req: i64 = 0;
     let mut total_in: i64 = 0;
     let mut total_out: i64 = 0;
     let mut total_cost_sum: f64 = 0.0;
-
-    let items: Vec<CostItem> = raw_rows
-        .iter()
-        .map(|row| {
+    let items: Vec<CostItem> = paged
+        .into_iter()
+        .map(|(dim_values, (req, in_tok, out_tok, cost))| {
+            total_req += req;
+            total_in += in_tok;
+            total_out += out_tok;
+            total_cost_sum += cost;
             let mut dimensions = std::collections::HashMap::new();
-            for d in &dims {
-                let val: String = row.get(d.alias());
-                dimensions.insert(d.key().to_string(), val);
+            for (d, v) in dims.iter().zip(dim_values) {
+                dimensions.insert(d.key().to_string(), v);
             }
-            let request_count: i64 = row.get("request_count");
-            let input_tokens: i64 = row.get("input_tokens");
-            let output_tokens: i64 = row.get("output_tokens");
-            let cost_dec: rust_decimal::Decimal = row.get("total_cost");
-            let total_cost = cost_dec.to_f64().unwrap_or(0.0);
-
-            total_req += request_count;
-            total_in += input_tokens;
-            total_out += output_tokens;
-            total_cost_sum += total_cost;
-
             CostItem {
                 dimensions,
-                request_count,
-                input_tokens,
-                output_tokens,
-                total_cost,
+                request_count: req,
+                input_tokens: in_tok,
+                output_tokens: out_tok,
+                total_cost: cost,
             }
         })
         .collect();

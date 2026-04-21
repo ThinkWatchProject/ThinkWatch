@@ -1181,11 +1181,8 @@
     "gracePeriod": "过渡期（小时）",
     "retention": {
       "title": "数据保留",
-      "intro": "记录被自动删除前的保留天数。用量记录存于 PostgreSQL，六种日志类型存于 ClickHouse，由 ClickHouse TTL 自动清理。保存后立即应用新 TTL 到对应表，超出新窗口的旧数据会在后台清理。",
-      "postgresGroup": "PostgreSQL",
+      "intro": "记录被自动删除前的保留天数。所有日志类型均存于 ClickHouse，由 ClickHouse TTL 自动清理。保存后立即应用新 TTL 到对应表，超出新窗口的旧数据会在后台清理。",
       "clickhouseGroup": "ClickHouse 日志",
-      "usage": "用量记录（天）",
-      "usageHint": "用于分析的每请求 Token / 成本记录。",
       "audit": "审计日志（天）",
       "auditHint": "安全审计轨迹（登录、设置、密钥操作）。",
       "gateway": "网关日志（天）",

@@ -266,7 +266,6 @@ dc_getters_i64! {
     api_keys_inactivity_timeout_days, "api_keys.inactivity_timeout_days",      0;
     api_keys_rotation_period_days,    "api_keys.rotation_period_days",         0;
     api_keys_rotation_grace_period_hours, "api_keys.rotation_grace_period_hours", 24;
-    data_retention_days_usage,        "data.retention_days_usage",             90;
     data_retention_days_audit,        "data.retention_days_audit",             90;
     data_retention_days_gateway,      "data.retention_days_gateway",           90;
     data_retention_days_mcp,          "data.retention_days_mcp",               90;

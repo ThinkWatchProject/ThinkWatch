@@ -82,53 +82,104 @@ pub async fn get_dashboard_stats(
     };
 
     // Compute prev-window bounds up-front so the current + compare counts
-    // can share a single query (avoids a second usage_records scan when
-    // `?compare=true`). When compare is off the bounds are unused.
+    // can share a single ClickHouse round-trip (avoids a second scan
+    // when `?compare=true`). When compare is off the bounds are unused.
     let want_compare = rq.compare.unwrap_or(false);
     let (prev_start, prev_end) = if want_compare {
         range.prev_window(now)
     } else {
-        // Empty window — the FILTER clauses below short-circuit to 0.
+        // Empty window — the countIf clauses below short-circuit to 0.
         (now, now)
     };
 
-    // Fold "this window" + "previous window" into one PG round-trip via
-    // FILTER aggregates. Without compare the prev_total still computes
-    // (returns 0 because prev_start == prev_end) but the row scan is
-    // identical to the original COUNT(*) — net cost ≈ free.
-    type CountPair = (Option<i64>, Option<i64>);
-    let (total_requests, prev_total_requests_count): CountPair = match &owned_teams_for_usage {
-        None => sqlx::query_as(
-            "SELECT \
-               COUNT(*) FILTER (WHERE created_at >= $1)                                AS current_total, \
-               COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3)            AS prev_total \
-             FROM usage_records \
-             WHERE created_at >= LEAST($1, $2)",
-        )
-        .bind(window_start)
-        .bind(prev_start)
-        .bind(prev_end)
-        .fetch_one(&state.db)
-        .await?,
+    // Expand team scope to a user-id set CH can has(?, user_id) against.
+    // Matches the pattern used elsewhere in this file for the active-key
+    // counts; keeping the expansion local avoids coupling the two
+    // scopes even though they happen to share team-based RBAC.
+    let usage_user_filter: Option<Vec<String>> = match &owned_teams_for_usage {
+        None => None,
         Some(team_ids) => {
             let team_ids_vec: Vec<uuid::Uuid> = team_ids.iter().copied().collect();
-            sqlx::query_as(
-                "SELECT \
-                   COUNT(*) FILTER (WHERE created_at >= $1)                              AS current_total, \
-                   COUNT(*) FILTER (WHERE created_at >= $2 AND created_at < $3)          AS prev_total \
-                 FROM usage_records \
-                 WHERE created_at >= LEAST($1, $2) \
-                   AND (user_id = $5 \
-                        OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($4)))",
+            let rows: Vec<(String,)> = sqlx::query_as(
+                "SELECT DISTINCT u.id::text FROM users u \
+                 WHERE u.id = $1 \
+                    OR EXISTS ( \
+                        SELECT 1 FROM team_members tm \
+                         WHERE tm.user_id = u.id AND tm.team_id = ANY($2) \
+                    )",
             )
-            .bind(window_start)
-            .bind(prev_start)
-            .bind(prev_end)
-            .bind(&team_ids_vec)
             .bind(caller_id)
-            .fetch_one(&state.db)
-            .await?
+            .bind(&team_ids_vec)
+            .fetch_all(&state.db)
+            .await?;
+            Some(rows.into_iter().map(|(s,)| s).collect())
         }
+    };
+
+    // Fold "this window" + "previous window" into one CH round-trip via
+    // countIf — same shape as the PG FILTER aggregates we used to run.
+    // Total requests now live in gateway_logs; the Postgres usage_records
+    // table was dropped.
+    #[derive(clickhouse::Row, Deserialize)]
+    struct ReqCounts {
+        current_total: u64,
+        prev_total: u64,
+    }
+    let (total_requests, prev_total_requests_count): (Option<i64>, Option<i64>) = if ch_available(
+        &state,
+    ) && !matches!(usage_user_filter, Some(ref v) if v.is_empty())
+    {
+        let ch = ch_client(&state)?;
+        let window_start_str = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
+        let prev_start_str = prev_start.format("%Y-%m-%d %H:%M:%S").to_string();
+        let prev_end_str = prev_end.format("%Y-%m-%d %H:%M:%S").to_string();
+        let row = match &usage_user_filter {
+                None => ch
+                    .query(
+                        "SELECT \
+                            toUInt64(countIf(created_at >= parseDateTimeBestEffort(?))) AS current_total, \
+                            toUInt64(countIf(created_at >= parseDateTimeBestEffort(?) \
+                                           AND created_at <  parseDateTimeBestEffort(?))) AS prev_total \
+                         FROM gateway_logs \
+                         WHERE created_at >= least(parseDateTimeBestEffort(?), parseDateTimeBestEffort(?))",
+                    )
+                    .bind(&window_start_str)
+                    .bind(&prev_start_str)
+                    .bind(&prev_end_str)
+                    .bind(&window_start_str)
+                    .bind(&prev_start_str)
+                    .fetch_one::<ReqCounts>()
+                    .await
+                    .ok(),
+                Some(ids) => ch
+                    .query(
+                        "SELECT \
+                            toUInt64(countIf(created_at >= parseDateTimeBestEffort(?))) AS current_total, \
+                            toUInt64(countIf(created_at >= parseDateTimeBestEffort(?) \
+                                           AND created_at <  parseDateTimeBestEffort(?))) AS prev_total \
+                         FROM gateway_logs \
+                         WHERE created_at >= least(parseDateTimeBestEffort(?), parseDateTimeBestEffort(?)) \
+                           AND has(?, user_id)",
+                    )
+                    .bind(&window_start_str)
+                    .bind(&prev_start_str)
+                    .bind(&prev_end_str)
+                    .bind(&window_start_str)
+                    .bind(&prev_start_str)
+                    .bind(ids)
+                    .fetch_one::<ReqCounts>()
+                    .await
+                    .ok(),
+            };
+        let row = row.unwrap_or(ReqCounts {
+            current_total: 0,
+            prev_total: 0,
+        });
+        (Some(row.current_total as i64), Some(row.prev_total as i64))
+    } else {
+        // Team scope resolved to an empty user set, or CH is
+        // disabled — either way the answer is (0, 0).
+        (Some(0), Some(0))
     };
 
     // Filter out soft-deleted rows so the dashboard "active" tile

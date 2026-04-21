@@ -15,13 +15,11 @@
 use axum::Json;
 use axum::extract::State;
 use chrono::{Datelike, Duration, Utc};
-use rust_decimal::Decimal;
-use rust_decimal::prelude::ToPrimitive;
-use serde::Serialize;
-use sqlx::Row;
+use serde::{Deserialize, Serialize};
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
+use crate::handlers::clickhouse_util::ch_client;
 use crate::middleware::auth_guard::AuthUser;
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -88,7 +86,8 @@ pub async fn get_cost_forecast(
 
     // Prior-month same window: from prior month's first day, for
     // exactly the same number of days as elapsed so far this month.
-    // Both spans use SUM(cost_usd) on usage_records.
+    // Both spans read SUM(cost_usd) from ClickHouse `gateway_logs`;
+    // that's now the authoritative store for per-request cost.
     let prior_year = if month == 1 { year - 1 } else { year };
     let prior_month = if month == 1 { 12 } else { month - 1 };
     let prior_start = chrono::NaiveDate::from_ymd_opt(prior_year, prior_month, 1)
@@ -97,23 +96,40 @@ pub async fn get_cost_forecast(
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("date math failed")))?;
     let prior_window_end = prior_start + Duration::days(day as i64);
 
-    let row = sqlx::query(
-        "SELECT \
-           COALESCE(SUM(cost_usd) FILTER (WHERE created_at >= $1), 0)                                AS mtd, \
-           COALESCE(SUM(cost_usd) FILTER (WHERE created_at >= $2 AND created_at < $3), 0)            AS prior \
-         FROM usage_records \
-         WHERE created_at >= LEAST($1, $2)",
-    )
-    .bind(month_start)
-    .bind(prior_start)
-    .bind(prior_window_end)
-    .fetch_one(&state.db)
-    .await?;
+    #[derive(clickhouse::Row, Deserialize)]
+    struct ForecastRow {
+        mtd: f64,
+        prior: f64,
+    }
 
-    let mtd: Decimal = row.try_get("mtd").unwrap_or(Decimal::ZERO);
-    let prior: Decimal = row.try_get("prior").unwrap_or(Decimal::ZERO);
-    let mtd_f = mtd.to_f64().unwrap_or(0.0);
-    let prior_f = prior.to_f64().unwrap_or(0.0);
+    let ch = ch_client(&state)?;
+    // CH doesn't know PG's `FILTER (WHERE …)` clause but `sumIf` does
+    // the same job — conditional sums in a single scan over the union
+    // of both windows. No GROUP BY needed because we want a single
+    // aggregate row.
+    let month_start_str = month_start.format("%Y-%m-%d %H:%M:%S").to_string();
+    let prior_start_str = prior_start.format("%Y-%m-%d %H:%M:%S").to_string();
+    let prior_end_str = prior_window_end.format("%Y-%m-%d %H:%M:%S").to_string();
+    let row = ch
+        .query(
+            "SELECT \
+                sumIf(ifNull(cost_usd, 0), created_at >= parseDateTimeBestEffort(?))                           AS mtd, \
+                sumIf(ifNull(cost_usd, 0), created_at >= parseDateTimeBestEffort(?) \
+                                          AND created_at <  parseDateTimeBestEffort(?)) AS prior \
+             FROM gateway_logs \
+             WHERE created_at >= least(parseDateTimeBestEffort(?), parseDateTimeBestEffort(?))",
+        )
+        .bind(&month_start_str)
+        .bind(&prior_start_str)
+        .bind(&prior_end_str)
+        .bind(&month_start_str)
+        .bind(&prior_start_str)
+        .fetch_one::<ForecastRow>()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("cost_forecast ClickHouse query: {e}")))?;
+
+    let mtd_f = row.mtd;
+    let prior_f = row.prior;
 
     let projected = if day == 0 {
         0.0

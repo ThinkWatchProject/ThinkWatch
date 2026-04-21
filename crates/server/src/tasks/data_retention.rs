@@ -3,6 +3,12 @@ use std::sync::Arc;
 use think_watch_common::audit::{AuditEntry, AuditLogger};
 use think_watch_common::dynamic_config::DynamicConfig;
 
+// DynamicConfig is still threaded through from the call site but
+// `run_retention_cleanup` no longer reads any values off it — every
+// remaining cleanup uses SOFT_DELETE_RETENTION_DAYS as a const.
+// Kept in the signature so adding a new config-driven retention knob
+// (e.g. per-user soft-delete override) stays a one-line change.
+
 /// Retention window for soft-deleted rows before they are hard-deleted.
 /// 30 days matches the GDPR "right to be forgotten" outer bound while
 /// leaving operators a practical restoration window for accidental
@@ -27,29 +33,16 @@ pub fn spawn_data_retention_task(db: PgPool, config: Arc<DynamicConfig>, audit: 
 
 async fn run_retention_cleanup(
     db: &PgPool,
-    config: &DynamicConfig,
+    _config: &DynamicConfig,
     audit: &AuditLogger,
 ) -> anyhow::Result<()> {
-    // 1. Clean up usage records
-    let usage_days = config.data_retention_days_usage().await;
-    if usage_days > 0 {
-        let cutoff = chrono::Utc::now() - chrono::Duration::days(usage_days);
-        let result = sqlx::query("DELETE FROM usage_records WHERE created_at < $1")
-            .bind(cutoff)
-            .execute(db)
-            .await?;
-
-        if result.rows_affected() > 0 {
-            tracing::info!(
-                "Purged {} usage records older than {} days",
-                result.rows_affected(),
-                usage_days
-            );
-        }
-    }
-
-    // 2. Audit logs are stored in ClickHouse only; retention is managed by
-    //    ClickHouse TTL (see deploy/clickhouse/initdb.d/01_init.sql).
+    // 1. Usage rows live in ClickHouse `gateway_logs` only; retention
+    //    is enforced by the table's `TTL toDateTime(created_at)` clause
+    //    (see deploy/clickhouse/initdb.d/01_init.sql). No Postgres
+    //    purge is needed — the legacy `usage_records` table was
+    //    dropped when analytics moved to CH.
+    //
+    // 2. Audit logs follow the same story — CH TTL, no PG purge.
 
     // 3. Purge soft-deleted records older than the GDPR retention
     // window. This is the irreversible hard-delete — we emit an audit

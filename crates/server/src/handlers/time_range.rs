@@ -43,15 +43,6 @@ impl TimeRange {
         }
     }
 
-    /// `hour` for 24h, `day` for 7d/30d — feeds directly into
-    /// `date_trunc('...', created_at)` in SQL.
-    pub fn trunc_unit(self) -> &'static str {
-        match self {
-            Self::Day => "hour",
-            Self::Week | Self::Month => "day",
-        }
-    }
-
     pub fn bucket_count(self) -> usize {
         match self {
             Self::Day => 24,

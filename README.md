@@ -141,7 +141,7 @@ Three numbers float around the system. Don't confuse them.
 
 | Number | Source | Used for | Where it shows up |
 |---|---|---|---|
-| **Raw tokens** | `usage_records.input_tokens / output_tokens` | Real provider-billed token counts | Analytics, cost reports |
+| **Raw tokens** | `gateway_logs.input_tokens / output_tokens` | Real provider-billed token counts | Analytics, cost reports |
 | **Weighted tokens** | `raw × models.input_multiplier / output_multiplier` | Quota accounting (rate limits + budgets) | Limits panel "X / Y used" |
 | **USD cost** | `raw × models.input_price / output_price` | Billing | Costs page |
 

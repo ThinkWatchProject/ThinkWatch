@@ -1891,7 +1891,6 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
         "api_keys.default_expiry_days"
         | "api_keys.inactivity_timeout_days"
         | "api_keys.rotation_period_days"
-        | "data.retention_days_usage"
         | "data.retention_days_audit"
         | "data.retention_days_gateway"
         | "data.retention_days_mcp"
