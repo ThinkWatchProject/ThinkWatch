@@ -191,11 +191,15 @@ CREATE TABLE api_keys (
 
 CREATE INDEX idx_api_keys_key_hash    ON api_keys(key_hash);
 CREATE INDEX idx_api_keys_key_prefix  ON api_keys(key_prefix);
-CREATE INDEX idx_api_keys_user_id     ON api_keys(user_id);
 CREATE INDEX idx_api_keys_is_active   ON api_keys(is_active)  WHERE is_active = true;
 CREATE INDEX idx_api_keys_expires_at  ON api_keys(expires_at) WHERE expires_at IS NOT NULL;
-CREATE INDEX idx_api_keys_not_deleted   ON api_keys(created_at) WHERE deleted_at IS NULL;
-CREATE INDEX idx_api_keys_cost_center  ON api_keys(cost_center) WHERE cost_center IS NOT NULL;
+CREATE INDEX idx_api_keys_cost_center ON api_keys(cost_center) WHERE cost_center IS NOT NULL;
+-- Covers the per-user listing predicate used by list_keys: filters on
+-- user_id + deleted_at IS NULL in one range lookup, with created_at DESC
+-- preserving the paginated scan order the handlers emit.
+CREATE INDEX idx_api_keys_user_not_deleted
+    ON api_keys (user_id, created_at DESC)
+    WHERE deleted_at IS NULL;
 
 -- --------------------------------------------------------------------------
 -- Providers & Models
