@@ -135,8 +135,8 @@ export function SetupPage() {
   // on every render (RegExp inside a body recompiles per call).
   const validateAdmin = useCallback((): boolean => {
     const errors: Record<string, string> = {};
-    if (!email.trim()) errors.email = 'Required';
-    if (!displayName.trim()) errors.displayName = 'Required';
+    if (!email.trim()) errors.email = t('setup.validation.required');
+    if (!displayName.trim()) errors.displayName = t('setup.validation.required');
     if (password.length < 8) {
       errors.password = t('setup.admin.passwordTooShort');
     } else if (
@@ -254,7 +254,7 @@ export function SetupPage() {
       });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ error: { message: res.statusText } }));
-        throw new Error(err.error?.message ?? err.message ?? 'Setup failed');
+        throw new Error(err.error?.message ?? err.message ?? t('setup.error.generic'));
       }
       const data: SetupResult = await res.json();
       setResult(data);
@@ -268,7 +268,7 @@ export function SetupPage() {
       invalidateSetupStatusCache();
       setStep('complete');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Setup failed');
+      setError(err instanceof Error ? err.message : t('setup.error.generic'));
     } finally {
       setSubmitting(false);
     }
@@ -299,7 +299,7 @@ export function SetupPage() {
         <div className="space-y-2">
           <Label className="flex items-center gap-2">
             <Globe className="h-4 w-4" />
-            Language / 语言
+            {t('setup.languageLabel')}
           </Label>
           <Select value={i18n.language} onValueChange={changeLanguage}>
             <SelectTrigger>

@@ -187,6 +187,12 @@
     "compareHint": "Show change vs the immediately-preceding window of the same length",
     "pause": "Pause",
     "resume": "Resume",
+    "previousValuePrefix": "prev",
+    "providerFilter": {
+      "all": "all",
+      "ai": "ai",
+      "mcp": "mcp"
+    },
     "range": {
       "24h": "24h",
       "7d": "7d",
@@ -1368,7 +1374,14 @@
   "setup": {
     "title": "Welcome to ThinkWatch",
     "subtitle": "Enterprise AI API Gateway & MCP Management Platform",
+    "languageLabel": "Language",
     "getStarted": "Get Started",
+    "validation": {
+      "required": "Required"
+    },
+    "error": {
+      "generic": "Setup failed"
+    },
     "steps": {
       "welcome": "Welcome",
       "admin": "Admin Account",

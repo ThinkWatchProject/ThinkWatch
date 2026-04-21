@@ -564,6 +564,7 @@ interface StatCardProps {
 }
 
 function StatCard({ label, value, format, delta, spark, loading, chartIndex, prev }: StatCardProps) {
+  const { t } = useTranslation();
   const animated = useCounter(value);
   const data = useMemo(() => spark.map((v, i) => ({ i, v })), [spark]);
   const config = {
@@ -610,7 +611,7 @@ function StatCard({ label, value, format, delta, spark, loading, chartIndex, pre
               {cmpChip && (
                 <span
                   className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${cmpToneClass[cmpChip.tone]}`}
-                  title={prev !== undefined ? `prev: ${format(prev)}` : undefined}
+                  title={prev !== undefined ? `${t('dashboard.previousValuePrefix')}: ${format(prev)}` : undefined}
                 >
                   {cmpChip.text}
                 </span>
@@ -1000,10 +1001,11 @@ function ProviderFilterTabs({
   onChange: (v: ProviderFilter) => void;
   counts: { all: number; ai: number; mcp: number };
 }) {
+  const { t } = useTranslation();
   const tabs: { key: ProviderFilter; label: string }[] = [
-    { key: 'all', label: 'all' },
-    { key: 'ai', label: 'ai' },
-    { key: 'mcp', label: 'mcp' },
+    { key: 'all', label: t('dashboard.providerFilter.all') },
+    { key: 'ai', label: t('dashboard.providerFilter.ai') },
+    { key: 'mcp', label: t('dashboard.providerFilter.mcp') },
   ];
   // Arrow-key navigation between tabs (W3C tablist pattern). Left/Right
   // wrap around; Home/End jump to the first/last tab.

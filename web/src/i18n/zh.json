@@ -187,6 +187,12 @@
     "compareHint": "对比同等长度的上一时段差异",
     "pause": "暂停",
     "resume": "继续",
+    "previousValuePrefix": "上一时段",
+    "providerFilter": {
+      "all": "全部",
+      "ai": "AI",
+      "mcp": "MCP"
+    },
     "range": {
       "24h": "24小时",
       "7d": "7天",
@@ -1368,7 +1374,14 @@
   "setup": {
     "title": "欢迎使用 ThinkWatch",
     "subtitle": "企业级 AI API 网关与 MCP 管理平台",
+    "languageLabel": "语言",
     "getStarted": "开始配置",
+    "validation": {
+      "required": "必填"
+    },
+    "error": {
+      "generic": "初始化失败"
+    },
     "steps": {
       "welcome": "欢迎",
       "admin": "管理员账户",
