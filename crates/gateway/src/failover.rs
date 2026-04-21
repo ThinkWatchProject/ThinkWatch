@@ -80,7 +80,7 @@ impl FailoverBackend {
                 if inner.half_open_successes >= self.half_open_max {
                     inner.state = CbState::Closed;
                     inner.half_open_successes = 0;
-                    metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(0.0);
+                    metrics::gauge!("circuit_breaker_state", "provider" => crate::metrics_labels::normalize_provider_label(self.provider.name())).set(0.0);
                     record_cb_with_kind(self.provider.name(), CbState::Closed, "ai");
                     tracing::info!(
                         provider = self.provider.name(),
@@ -91,7 +91,7 @@ impl FailoverBackend {
             CbState::Open => {
                 // Should not happen, but handle gracefully
                 inner.state = CbState::Closed;
-                metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(0.0);
+                metrics::gauge!("circuit_breaker_state", "provider" => crate::metrics_labels::normalize_provider_label(self.provider.name())).set(0.0);
                 record_cb_with_kind(self.provider.name(), CbState::Closed, "ai");
             }
             CbState::Closed => {}
@@ -108,7 +108,7 @@ impl FailoverBackend {
                     inner.state = CbState::Open;
                     inner.last_failure = Some(Instant::now());
                     let failures = inner.consecutive_failures;
-                    metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(2.0);
+                    metrics::gauge!("circuit_breaker_state", "provider" => crate::metrics_labels::normalize_provider_label(self.provider.name())).set(2.0);
                     record_cb_with_kind(self.provider.name(), CbState::Open, "ai");
                     tracing::warn!(
                         provider = self.provider.name(),
@@ -121,7 +121,7 @@ impl FailoverBackend {
                 inner.state = CbState::Open;
                 inner.last_failure = Some(Instant::now());
                 inner.half_open_successes = 0;
-                metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(2.0);
+                metrics::gauge!("circuit_breaker_state", "provider" => crate::metrics_labels::normalize_provider_label(self.provider.name())).set(2.0);
                 record_cb_with_kind(self.provider.name(), CbState::Open, "ai");
                 tracing::warn!(
                     provider = self.provider.name(),
@@ -146,7 +146,7 @@ impl FailoverBackend {
             inner.state = CbState::HalfOpen;
             inner.half_open_successes = 0;
             inner.consecutive_failures = 0;
-            metrics::gauge!("circuit_breaker_state", "provider" => self.provider.name().to_string()).set(1.0);
+            metrics::gauge!("circuit_breaker_state", "provider" => crate::metrics_labels::normalize_provider_label(self.provider.name())).set(1.0);
             record_cb_with_kind(self.provider.name(), CbState::HalfOpen, "ai");
             tracing::info!(
                 provider = self.provider.name(),

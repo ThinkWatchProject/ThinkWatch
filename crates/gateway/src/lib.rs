@@ -4,6 +4,7 @@ pub mod content_filter;
 pub mod cost_tracker;
 pub mod failover;
 pub mod metadata;
+pub mod metrics_labels;
 pub mod model_mapping;
 pub mod pii_redactor;
 pub mod prefix_balancer;
