@@ -121,6 +121,13 @@ ${colorConfig
   )
 }
 
+// Re-export the recharts Tooltip under the project's name so every
+// chart consumes the same component surface. Pair with
+// `ChartTooltipContent` and a `ChartConfig` that names the series
+// the way the user reads it (`{ requests: { label: 'Requests' } }`,
+// not `count: { label: 'count' }`) so hover labels match the axis
+// language. Touch behaviour follows recharts defaults — chartContainer
+// supplies the touch sticky wrapper.
 const ChartTooltip = Tooltip
 
 function ChartTooltipContent({

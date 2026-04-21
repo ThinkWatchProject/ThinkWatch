@@ -211,6 +211,12 @@
     "resume": "继续",
     "previousValuePrefix": "上一时段",
     "kindCol": "类型",
+    "insight": {
+      "noActivityToday": "今日尚无请求活动。",
+      "underLoad": "{{count}} 请求/分钟 — 高于近期平均 80%。",
+      "providerDegraded": "{{provider}} 已降级 — 已触发故障转移。",
+      "providerDown": "{{provider}} 熔断已打开 — 已自动转移流量。"
+    },
     "gettingStarted": {
       "title": "快速上手",
       "subtitle": "完成下面这几步,仪表盘才会有数据。",

@@ -211,6 +211,12 @@
     "resume": "Resume",
     "previousValuePrefix": "prev",
     "kindCol": "kind",
+    "insight": {
+      "noActivityToday": "No request activity yet today.",
+      "underLoad": "{{count}} requests/min — above 80% of recent average.",
+      "providerDegraded": "{{provider}} marked degraded — falling back via failover.",
+      "providerDown": "{{provider}} circuit open — automatic failover engaged."
+    },
     "gettingStarted": {
       "title": "Getting started",
       "subtitle": "Wire up the basics so the dashboard has data to show.",
