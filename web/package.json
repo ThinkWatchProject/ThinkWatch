@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "test": "vitest run",
     "check:i18n": "node scripts/check-i18n.mjs",
-    "gen:api": "openapi-typescript http://localhost:3001/api/openapi.json -o src/lib/api-types.ts"
+    "gen:api": "openapi-typescript http://localhost:3001/api/openapi.json -o src/lib/api-types.ts",
+    "gen:sdk:dump-spec": "curl -fsS http://localhost:3001/api/openapi.json -o ../sdk/openapi.json"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",

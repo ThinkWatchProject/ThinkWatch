@@ -1,0 +1,9 @@
+# Generated SDK output isn't checked in — built on demand from the
+# spec snapshot. Spec snapshot itself stays out of git too;
+# operators dump it locally per the README before running the
+# openapi-generator container.
+openapi.json
+python/
+go/
+typescript/
+java/
