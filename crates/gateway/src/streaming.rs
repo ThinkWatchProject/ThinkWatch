@@ -6,6 +6,39 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
+/// Outcome classification for a finished stream — separates a natural
+/// upstream `[DONE]` from a mid-stream error from a client cancel so
+/// the audit row says WHY the stream ended, not just that it didn't
+/// finish cleanly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamOutcome {
+    /// Upstream emitted `[DONE]` and the consumer received every chunk.
+    Natural,
+    /// Upstream produced a `GatewayError` mid-stream. Most common
+    /// after a partial response — includes the error tag for the
+    /// gateway_logs row so dashboards can split provider drops from
+    /// cancellations.
+    UpstreamError {
+        /// `error_type` tag derived from the variant name (e.g.
+        /// `"NetworkError"`, `"ProviderTimeout"`); kept short so it
+        /// works as a Prometheus label value.
+        error_type: String,
+        /// Operator-facing description, truncated.
+        message: String,
+    },
+    /// Consumer dropped the stream future before completion. Signals
+    /// "the user closed the tab" or "axum dropped the connection";
+    /// nothing the gateway did wrong, but cost / token accounting
+    /// still uses whatever chunks did arrive.
+    ClientCancelled,
+}
+
+impl StreamOutcome {
+    pub fn is_natural(&self) -> bool {
+        matches!(self, StreamOutcome::Natural)
+    }
+}
+
 /// Payload delivered to the `on_done` callback when a stream completes
 /// (naturally or via client cancellation).
 pub struct StreamResult {
@@ -20,7 +53,13 @@ pub struct StreamResult {
     pub chunks: Vec<ChatCompletionChunk>,
     /// `true` when the upstream stream ran to its natural `[DONE]`
     /// sentinel.  `false` on client disconnect or mid-stream error.
+    /// Kept for back-compat with existing `on_done` consumers; new
+    /// code should consult `outcome` for the split.
     pub natural_completion: bool,
+    /// Structured reason the stream ended. The natural completion bool
+    /// is just a cached `outcome.is_natural()` for callers that don't
+    /// need the split.
+    pub outcome: StreamOutcome,
 }
 
 /// Converts a stream of `ChatCompletionChunk` results into an Axum SSE response.
@@ -79,36 +118,38 @@ where
         Arc::new(Mutex::new(Vec::with_capacity(64)));
     let chunks_for_done = collected_chunks.clone();
 
-    // `done_tx.send(natural)` runs from the stream loop on graceful
-    // exit. If the loop is dropped before reaching that line, the
-    // sender is dropped and the receiver yields `Err(RecvError)` —
-    // which we treat as "client cancelled mid-stream". Either way
-    // the spawned task wakes up and runs `on_done`.
-    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<bool>();
+    // `done_tx.send(outcome)` runs from the stream loop on graceful
+    // exit (Natural) or after observing a stream Err (UpstreamError).
+    // If the loop is dropped before reaching either line, the sender
+    // is dropped and the receiver yields `Err(RecvError)` — which we
+    // map to ClientCancelled. Either way the spawned task wakes up
+    // and runs `on_done` exactly once.
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
 
     tokio::spawn(async move {
-        let outcome = done_rx.await;
+        let received = done_rx.await;
         let usage = last_usage_for_done.lock().ok().and_then(|mut g| g.take());
         let chunks = chunks_for_done
             .lock()
             .ok()
             .map(|mut g| std::mem::take(&mut *g))
             .unwrap_or_default();
-        let natural = matches!(outcome, Ok(true));
-        match outcome {
-            Ok(true) => {
-                metrics::counter!("gateway_stream_completion_total", "outcome" => "natural")
-                    .increment(1);
-            }
-            Ok(false) | Err(_) => {
-                metrics::counter!("gateway_stream_completion_total", "outcome" => "cancelled")
-                    .increment(1);
-            }
-        }
+        let outcome = received.unwrap_or(StreamOutcome::ClientCancelled);
+        // Three labels instead of two: the `cancelled` bucket used to
+        // hide upstream errors, which masked a real provider problem
+        // as "user closed the tab".
+        let label = match &outcome {
+            StreamOutcome::Natural => "natural",
+            StreamOutcome::UpstreamError { .. } => "upstream_error",
+            StreamOutcome::ClientCancelled => "cancelled",
+        };
+        metrics::counter!("gateway_stream_completion_total", "outcome" => label).increment(1);
+        let natural = outcome.is_natural();
         on_done(StreamResult {
             usage,
             chunks,
             natural_completion: natural,
+            outcome,
         })
         .await;
     });
@@ -165,15 +206,34 @@ where
                 }
                 Err(e) => {
                     tracing::warn!("Stream error, forwarding as SSE error event: {e}");
+                    // Capture the error type tag (variant prefix) so the
+                    // outcome reaches on_done with structured info, not
+                    // just "the stream wasn't natural".
+                    let error_type =
+                        format!("{e:?}").split('(').next().unwrap_or("Error").to_string();
+                    let message = e.to_string();
                     let error_json = serde_json::json!({
                         "error": {
-                            "message": e.to_string(),
-                            "type": "stream_error"
+                            "message": message,
+                            "type": "stream_error",
+                            "error_type": error_type,
                         }
                     });
                     yield Ok::<Event, Infallible>(
                         Event::default().data(error_json.to_string()),
                     );
+                    // Bail the loop — once the upstream errors, the
+                    // remaining chunks are usually a wash. We also
+                    // need to send the outcome before the stream
+                    // future is dropped, otherwise on_done would
+                    // misclassify this as a client cancellation.
+                    if let Some(tx) = done_tx.take() {
+                        let _ = tx.send(StreamOutcome::UpstreamError {
+                            error_type,
+                            message,
+                        });
+                    }
+                    break;
                 }
             }
         }
@@ -199,7 +259,7 @@ where
 
         // Source stream is fully drained — natural completion.
         if let Some(tx) = done_tx.take() {
-            let _ = tx.send(true);
+            let _ = tx.send(StreamOutcome::Natural);
         }
 
         yield Ok::<Event, Infallible>(Event::default().data("[DONE]"));

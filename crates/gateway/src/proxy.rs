@@ -295,6 +295,61 @@ fn emit_gateway_error_log(
     audit.log(entry);
 }
 
+/// Same as `emit_gateway_log` but with an optional `extra` JSON object
+/// whose fields are merged into the audit detail. Used by the
+/// streaming on_done path to attach `error_type` / `error_message` /
+/// `stream_outcome` for non-natural completions, see OBS-02.
+#[allow(clippy::too_many_arguments)]
+fn emit_gateway_log_with_extra(
+    audit: &think_watch_common::audit::AuditLogger,
+    trace_id: &str,
+    user_id: Option<&str>,
+    user_email: Option<&str>,
+    api_key_id: Option<&str>,
+    model_id: &str,
+    provider: Option<&str>,
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    cost_usd: f64,
+    latency_ms: i64,
+    status_code: i64,
+    extra: Option<serde_json::Value>,
+) {
+    let mut detail = serde_json::json!({
+        "model_id": model_id,
+        "provider": provider,
+        "input_tokens": prompt_tokens as i64,
+        "output_tokens": completion_tokens as i64,
+        "cost_usd": cost_usd,
+        "latency_ms": latency_ms,
+        "status_code": status_code,
+    });
+    if let (Some(serde_json::Value::Object(extra_map)), serde_json::Value::Object(detail_map)) =
+        (extra, &mut detail)
+    {
+        for (k, v) in extra_map {
+            detail_map.insert(k, v);
+        }
+    }
+    let mut entry = think_watch_common::audit::AuditEntry::gateway("chat.completion")
+        .trace_id(trace_id.to_string())
+        .detail(detail);
+    if let Some(uid) = user_id
+        && let Ok(u) = uuid::Uuid::parse_str(uid)
+    {
+        entry = entry.user_id(u);
+    }
+    if let Some(email) = user_email {
+        entry = entry.user_email(email);
+    }
+    if let Some(kid) = api_key_id
+        && let Ok(u) = uuid::Uuid::parse_str(kid)
+    {
+        entry = entry.api_key_id(u);
+    }
+    audit.log(entry);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn emit_gateway_log(
     audit: &think_watch_common::audit::AuditLogger,
@@ -965,7 +1020,33 @@ pub async fn proxy_chat_completion(
                     .map(|u| (u.prompt_tokens, u.completion_tokens))
                     .unwrap_or((0, 0));
                 let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
-                emit_gateway_log(
+                // Pick the recorded status + an extra detail blob from
+                // the structured outcome so the gateway_logs row says
+                // exactly why the stream ended:
+                //   * Natural          → 200, no extra detail
+                //   * UpstreamError    → 502 with error_type + message
+                //   * ClientCancelled  → 499 (Nginx convention) marker
+                let (logged_status, error_detail) = match &result.outcome {
+                    crate::streaming::StreamOutcome::Natural => (200i64, None),
+                    crate::streaming::StreamOutcome::UpstreamError {
+                        error_type,
+                        message,
+                    } => (
+                        502i64,
+                        Some(serde_json::json!({
+                            "error_type": error_type,
+                            "error_message": message,
+                            "stream_outcome": "upstream_error",
+                        })),
+                    ),
+                    crate::streaming::StreamOutcome::ClientCancelled => (
+                        499i64,
+                        Some(serde_json::json!({
+                            "stream_outcome": "client_cancelled",
+                        })),
+                    ),
+                };
+                emit_gateway_log_with_extra(
                     &audit_for_done,
                     &trace_id_for_done,
                     user_id_for_done.as_deref(),
@@ -977,7 +1058,8 @@ pub async fn proxy_chat_completion(
                     ct,
                     cost,
                     started.elapsed().as_millis() as i64,
-                    200,
+                    logged_status,
+                    error_detail,
                 );
 
                 // Assemble and cache the complete response when the
