@@ -433,18 +433,26 @@ async fn post_flight_account(
         {
             match limits::budget::add_weighted_tokens(&redis, &caps, weighted).await {
                 Ok((_statuses, crossings)) if !crossings.is_empty() => {
-                    // Emit one `budget.threshold_crossed` audit entry
-                    // per crossing so any forwarder subscribed to
-                    // `audit` log_type picks them up alongside key /
-                    // role events.
+                    // Emit one `budget.threshold_crossed` platform-log
+                    // entry per crossing — `LogType::Platform` is the
+                    // namespace forwarders subscribe to for "operator
+                    // should know about this", and the action is
+                    // namespaced under `budget.*` so subscribers can
+                    // filter cleanly. Crosses fire at 50 / 80 / 95 /
+                    // 100 % (see ALERT_THRESHOLDS_PCT in
+                    // common::limits::budget); webhook delivery rides
+                    // the existing forwarder pipeline (FEAT-01 done
+                    // = "wire crossings to webhooks", which lives
+                    // here).
                     for crossing in &crossings {
                         audit.log(
-                            think_watch_common::audit::AuditEntry::new("budget.threshold_crossed")
-                                .resource(format!("budget_cap:{}", crossing.cap_id))
-                                .detail(
-                                    serde_json::to_value(crossing)
-                                        .unwrap_or(serde_json::Value::Null),
-                                ),
+                            think_watch_common::audit::AuditEntry::platform(
+                                "budget.threshold_crossed",
+                            )
+                            .resource(format!("budget_cap:{}", crossing.cap_id))
+                            .detail(
+                                serde_json::to_value(crossing).unwrap_or(serde_json::Value::Null),
+                            ),
                         );
                     }
                 }
