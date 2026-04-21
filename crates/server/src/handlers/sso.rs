@@ -1,12 +1,19 @@
 use axum::extract::{Query, State};
 use axum::response::Redirect;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use think_watch_common::audit::AuditEntry;
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
 
 use crate::app::AppState;
+
+// Session payload indexed by the OIDC `state` (csrf_token) in Redis.
+// Only the nonce is stored; one-time-use is enforced via atomic GETDEL on callback.
+#[derive(Serialize, Deserialize)]
+struct OidcSessionData {
+    nonce: String,
+}
 
 /// GET /api/auth/sso/authorize — redirect to OIDC provider.
 pub async fn sso_authorize(State(state): State<AppState>) -> Result<Redirect, AppError> {
@@ -17,16 +24,15 @@ pub async fn sso_authorize(State(state): State<AppState>) -> Result<Redirect, Ap
 
     let (auth_url, csrf_token, nonce) = oidc.authorize_url();
 
-    // Store csrf_token and nonce in a short-lived cookie or Redis
-    // For simplicity, store in Redis with csrf_token as key
-    let nonce_json = serde_json::json!({
-        "nonce": nonce.secret(),
-        "csrf": csrf_token.secret(),
-    });
+    let session = OidcSessionData {
+        nonce: nonce.secret().clone(),
+    };
+    let payload = serde_json::to_string(&session)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("serialize oidc session: {e}")))?;
     fred::interfaces::KeysInterface::set::<(), _, _>(
         &state.redis,
         format!("oidc:state:{}", csrf_token.secret()),
-        nonce_json.to_string(),
+        payload,
         Some(fred::types::Expiration::EX(600)), // 10 min TTL
         None,
         false,
@@ -56,25 +62,18 @@ pub async fn sso_callback(
         .as_ref()
         .ok_or(AppError::BadRequest("SSO is not configured".into()))?;
 
-    // Retrieve nonce from Redis
+    // Atomic retrieve + delete — enforces one-time use of the state and
+    // closes the TOCTOU window where a replayed callback could re-fetch the nonce.
     let redis_key = format!("oidc:state:{}", params.state);
-    let stored: Option<String> = fred::interfaces::KeysInterface::get(&state.redis, &redis_key)
+    let stored: Option<String> = fred::interfaces::KeysInterface::getdel(&state.redis, &redis_key)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
 
     let stored = stored.ok_or(AppError::BadRequest("Invalid or expired SSO state".into()))?;
 
-    // Delete the state from Redis (one-time use)
-    let _: () = fred::interfaces::KeysInterface::del(&state.redis, &redis_key)
-        .await
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
-
-    let stored_json: serde_json::Value =
+    let session: OidcSessionData =
         serde_json::from_str(&stored).map_err(|_| AppError::BadRequest("Invalid state".into()))?;
-    let nonce_str = stored_json["nonce"]
-        .as_str()
-        .ok_or(AppError::BadRequest("Invalid nonce".into()))?;
-    let nonce = openidconnect::Nonce::new(nonce_str.to_string());
+    let nonce = openidconnect::Nonce::new(session.nonce);
 
     // Exchange code for tokens
     let user_info = oidc
