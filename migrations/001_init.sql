@@ -24,7 +24,13 @@ CREATE TABLE users (
     created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
     deleted_at              TIMESTAMPTZ,
-    UNIQUE(oidc_subject, oidc_issuer)
+    UNIQUE(oidc_subject, oidc_issuer),
+    -- Every user must have at least one auth method: a password hash or
+    -- an OIDC identity. Without this check, an API misuse (or handler
+    -- bug) could create a row that can never log in — visible in the
+    -- admin list but silently unusable.
+    CONSTRAINT chk_users_auth_method
+        CHECK (password_hash IS NOT NULL OR oidc_subject IS NOT NULL)
 );
 
 CREATE INDEX idx_users_not_deleted ON users(created_at) WHERE deleted_at IS NULL;
