@@ -147,6 +147,17 @@ export function AppSidebar() {
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
+        {/*
+         * Permission-aware nav rendering. Each item declares the
+         * permission its target route requires; we drop the item
+         * (and any group that becomes empty) when the user lacks
+         * the perm so a developer-only login doesn't surface admin
+         * sections they'll just see a 403 on. Defines what UX-10
+         * meant by "hide instead of grey out". Page-level action
+         * buttons inside surviving routes have their own
+         * hasPermission() gates — the route reaches a permitted
+         * user, the action only renders if they can act.
+         */}
         {navGroups
           .map((group) => ({
             ...group,
