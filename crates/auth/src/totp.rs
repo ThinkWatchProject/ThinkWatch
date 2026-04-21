@@ -24,17 +24,27 @@ pub fn verify(secret_base32: &str, code: &str, email: &str) -> anyhow::Result<bo
 }
 
 /// Generate a set of one-time recovery codes (80-bit entropy each).
+///
+/// Codes are guaranteed unique within the returned set. The raw 40-bit
+/// presentation space (8 base32 chars) makes birthday-paradox collisions
+/// vanishingly rare for typical counts (~1 in 2^39 per pair), but the
+/// codes are stored in a single `totp_recovery_codes` JSON column with
+/// no DB-side uniqueness constraint — a duplicate there would let one
+/// code be consumed twice. Dedup at generation so that's impossible by
+/// construction.
 pub fn generate_recovery_codes(count: usize) -> Vec<String> {
-    (0..count)
-        .map(|_| {
-            let mut bytes = [0u8; 10];
-            rand::fill(&mut bytes);
-            let code = data_encoding::BASE32_NOPAD.encode(&bytes);
-            // Format as XXXX-XXXX for readability (take first 8 base32 chars)
-            let code = &code[..8];
-            format!("{}-{}", &code[..4], &code[4..8])
-        })
-        .collect()
+    let mut codes = Vec::with_capacity(count);
+    let mut seen = std::collections::HashSet::with_capacity(count);
+    while codes.len() < count {
+        let mut bytes = [0u8; 10];
+        rand::fill(&mut bytes);
+        let encoded = data_encoding::BASE32_NOPAD.encode(&bytes);
+        let code = format!("{}-{}", &encoded[..4], &encoded[4..8]);
+        if seen.insert(code.clone()) {
+            codes.push(code);
+        }
+    }
+    codes
 }
 
 /// Constant-time comparison of a recovery code against a stored list.
