@@ -369,15 +369,33 @@ export function ApiKeysPage() {
                     </TableCell>
                     <TableCell>
                       <div className="flex items-center gap-1">
-                        <Button variant="ghost" size="icon-sm" onClick={() => openEditDialog(k)} title={t('common.edit')}>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => openEditDialog(k)}
+                          title={t('common.edit')}
+                          aria-label={t('common.edit')}
+                        >
                           <Pencil className="h-4 w-4" />
                         </Button>
                         {k.is_active && (
                           <>
-                            <Button variant="ghost" size="icon-sm" onClick={() => openRotateDialog(k)} title={t('apiKeys.rotate')}>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={() => openRotateDialog(k)}
+                              title={t('apiKeys.rotate')}
+                              aria-label={t('apiKeys.rotate')}
+                            >
                               <RotateCw className="h-4 w-4" />
                             </Button>
-                            <Button variant="ghost" size="icon-sm" onClick={() => setRevokeTargetId(k.id)} title={t('common.revoke')}>
+                            <Button
+                              variant="ghost"
+                              size="icon-sm"
+                              onClick={() => setRevokeTargetId(k.id)}
+                              title={t('common.revoke')}
+                              aria-label={t('common.revoke')}
+                            >
                               <Ban className="h-4 w-4" />
                             </Button>
                           </>
