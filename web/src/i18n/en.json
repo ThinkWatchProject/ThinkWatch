@@ -1,4 +1,12 @@
 {
+  "compliance": {
+    "soc2Verified": "SOC 2 Type II audit completed",
+    "soc2VerifiedOn": "SOC 2 Type II audit completed {{date}}",
+    "baaSigned": "Business Associate Agreement on file",
+    "baaSignedOn": "Business Associate Agreement signed {{date}}",
+    "hipaa": "HIPAA-aligned controls (data handling, audit retention, access logging)",
+    "gdpr": "GDPR data-subject controls (export, erasure, retention)"
+  },
   "errors": {
     "generic": "Something went wrong. Please try again.",
     "byType": {

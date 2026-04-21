@@ -1,4 +1,12 @@
 {
+  "compliance": {
+    "soc2Verified": "已完成 SOC 2 Type II 审计",
+    "soc2VerifiedOn": "已完成 SOC 2 Type II 审计({{date}})",
+    "baaSigned": "已签署业务伙伴协议（BAA）",
+    "baaSignedOn": "已签署 BAA（{{date}}）",
+    "hipaa": "HIPAA 合规控制（数据处理、审计留存、访问日志）",
+    "gdpr": "GDPR 数据主体权利（导出、删除、留存）"
+  },
   "errors": {
     "generic": "出错了，请稍后重试。",
     "byType": {
