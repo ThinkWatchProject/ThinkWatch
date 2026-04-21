@@ -96,46 +96,31 @@ pub async fn get_usage_stats(
     let team_filter = analytics_team_filter(&auth_user, &state.db).await?;
     let caller_id = auth_user.claims.sub;
 
+    // Fold the SUM(tokens) + COUNT(*) into one scan. Both look at the
+    // same indexed window on usage_records; running them as separate
+    // queries doubled the index walk and the round-trip count for no
+    // additional info.
     let (total_tokens, total_requests): (Option<i64>, Option<i64>) = match &team_filter {
-        None => {
-            let tokens: Option<i64> = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint \
-                   FROM usage_records WHERE created_at >= $1",
-            )
-            .bind(window_start)
-            .fetch_one(&state.db)
-            .await?;
-            let reqs: Option<i64> =
-                sqlx::query_scalar("SELECT COUNT(*) FROM usage_records WHERE created_at >= $1")
-                    .bind(window_start)
-                    .fetch_one(&state.db)
-                    .await?;
-            (tokens, reqs)
-        }
-        Some(team_ids) => {
-            let tokens: Option<i64> = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint \
-                   FROM usage_records \
-                  WHERE created_at >= $1 \
-                    AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
-            )
-            .bind(window_start)
-            .bind(team_ids)
-            .bind(caller_id)
-            .fetch_one(&state.db)
-            .await?;
-            let reqs: Option<i64> = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM usage_records \
-                  WHERE created_at >= $1 \
-                    AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
-            )
-            .bind(window_start)
-            .bind(team_ids)
-            .bind(caller_id)
-            .fetch_one(&state.db)
-            .await?;
-            (tokens, reqs)
-        }
+        None => sqlx::query_as(
+            "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint AS total_tokens, \
+                    COUNT(*)::bigint                                AS total_requests \
+               FROM usage_records WHERE created_at >= $1",
+        )
+        .bind(window_start)
+        .fetch_one(&state.db)
+        .await?,
+        Some(team_ids) => sqlx::query_as(
+            "SELECT COALESCE(SUM(total_tokens::bigint), 0)::bigint AS total_tokens, \
+                    COUNT(*)::bigint                                AS total_requests \
+               FROM usage_records \
+              WHERE created_at >= $1 \
+                AND (user_id = $3 OR user_id IN (SELECT user_id FROM team_members WHERE team_id = ANY($2)))",
+        )
+        .bind(window_start)
+        .bind(team_ids)
+        .bind(caller_id)
+        .fetch_one(&state.db)
+        .await?,
     };
 
     // Per-bucket token totals over the selected range.
