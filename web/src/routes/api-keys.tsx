@@ -335,10 +335,10 @@ export function ApiKeysPage() {
                 <TableRow>
                   <TableHead>{t('common.name')}</TableHead>
                   <TableHead>{t('apiKeys.keyPrefix')}</TableHead>
-                  <TableHead>{t('apiKeys.surfaces')}</TableHead>
-                  <TableHead>{t('apiKeys.expires')}</TableHead>
+                  <TableHead className="hidden md:table-cell">{t('apiKeys.surfaces')}</TableHead>
+                  <TableHead className="hidden lg:table-cell">{t('apiKeys.expires')}</TableHead>
                   <TableHead>{t('common.status')}</TableHead>
-                  <TableHead>{t('common.createdAt')}</TableHead>
+                  <TableHead className="hidden lg:table-cell">{t('common.createdAt')}</TableHead>
                   <TableHead className="w-28" />
                 </TableRow>
               </TableHeader>
@@ -349,7 +349,7 @@ export function ApiKeysPage() {
                     <TableCell>
                       <code className="rounded bg-muted px-1.5 py-0.5 text-xs">{k.key_prefix}</code>
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="hidden md:table-cell">
                       <div className="flex flex-wrap gap-1">
                         {(k.surfaces ?? []).map((s) => (
                           <Badge key={s} variant="outline" className="text-[10px]">
@@ -358,13 +358,13 @@ export function ApiKeysPage() {
                         ))}
                       </div>
                     </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
+                    <TableCell className="hidden lg:table-cell text-xs text-muted-foreground">
                       <ExpiryCell apiKey={k} />
                     </TableCell>
                     <TableCell>
                       <StatusBadge apiKey={k} />
                     </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
+                    <TableCell className="hidden lg:table-cell text-xs text-muted-foreground">
                       {new Date(k.created_at).toLocaleDateString()}
                     </TableCell>
                     <TableCell>
