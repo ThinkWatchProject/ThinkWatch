@@ -79,7 +79,16 @@ pub fn require_api_key(
 
             let key_hash = api_key::hash_api_key(token);
 
-            // Active keys OR keys still inside their rotation grace period.
+            // Active keys OR keys still inside their rotation grace period,
+            // with inactivity cutoff applied lazily at auth time so a
+            // compromised-but-idle key cannot be used during the up-to-10-
+            // minute window between lifecycle-sweeper ticks. Per-key
+            // `inactivity_timeout_days` overrides the global setting when
+            // non-zero; otherwise the global applies.
+            let global_inactivity_days = state
+                .dynamic_config
+                .api_keys_inactivity_timeout_days()
+                .await;
             let row = sqlx::query_as::<_, think_watch_common::models::ApiKey>(
                 r#"SELECT * FROM api_keys
                    WHERE key_hash = $1
@@ -87,9 +96,20 @@ pub fn require_api_key(
                      AND (
                          is_active = true
                          OR (grace_period_ends_at IS NOT NULL AND grace_period_ends_at > now())
+                     )
+                     AND (
+                         last_used_at IS NULL
+                         OR last_used_at > now() - CASE
+                             WHEN COALESCE(inactivity_timeout_days, 0) > 0
+                                 THEN make_interval(days => inactivity_timeout_days::int)
+                             WHEN $2::bigint > 0
+                                 THEN make_interval(days => $2::int)
+                             ELSE interval '999999 days'
+                         END
                      )"#,
             )
             .bind(&key_hash)
+            .bind(global_inactivity_days)
             .fetch_optional(&state.db)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

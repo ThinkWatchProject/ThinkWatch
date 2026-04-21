@@ -10,10 +10,14 @@ use think_watch_common::dynamic_config::DynamicConfig;
 /// - Emits `key.expiry_warning` audit events when a key crosses one of
 ///   the 7 / 3 / 1 day-remaining thresholds.
 ///
-/// Runs every hour.
+/// Runs every 10 minutes. The auth middleware also applies the
+/// inactivity and grace-period cutoffs at request time (lazy
+/// disable), so this loop is a bookkeeping backstop — it keeps
+/// `is_active` / `disabled_reason` in sync and fires the expiry-
+/// warning audit events on the 7 / 3 / 1-day thresholds.
 pub fn spawn_api_key_lifecycle_task(db: PgPool, config: Arc<DynamicConfig>, audit: AuditLogger) {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
         loop {
             interval.tick().await;
             if let Err(e) = run_lifecycle_check(&db, &config, &audit).await {

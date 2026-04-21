@@ -671,6 +671,12 @@ async fn auth_via_api_key(
 ) -> Result<Response, StatusCode> {
     let key_hash = api_key::hash_api_key(token);
 
+    // Same lazy inactivity cutoff as require_api_key — see
+    // middleware::api_key_auth for the rationale.
+    let global_inactivity_days = state
+        .dynamic_config
+        .api_keys_inactivity_timeout_days()
+        .await;
     let row = sqlx::query_as::<_, think_watch_common::models::ApiKey>(
         r#"SELECT * FROM api_keys
            WHERE key_hash = $1
@@ -678,9 +684,20 @@ async fn auth_via_api_key(
              AND (
                  is_active = true
                  OR (grace_period_ends_at IS NOT NULL AND grace_period_ends_at > now())
+             )
+             AND (
+                 last_used_at IS NULL
+                 OR last_used_at > now() - CASE
+                     WHEN COALESCE(inactivity_timeout_days, 0) > 0
+                         THEN make_interval(days => inactivity_timeout_days::int)
+                     WHEN $2::bigint > 0
+                         THEN make_interval(days => $2::int)
+                     ELSE interval '999999 days'
+                 END
              )"#,
     )
     .bind(&key_hash)
+    .bind(global_inactivity_days)
     .fetch_optional(&state.db)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
