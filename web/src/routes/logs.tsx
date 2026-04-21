@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState, useCallback, useRef } from 'react';
+import React, { Fragment, useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { subHours, format } from 'date-fns';
@@ -347,7 +347,7 @@ function formatDetailValue(key: string, raw: unknown): React.ReactNode {
   if (key === 'latency_ms' || key === 'duration_ms') return `${raw}ms`;
   if (key === 'created_at' || key === 'timestamp') return formatBackendTimestamp(String(raw));
   if (typeof raw === 'object') {
-    return <code className="font-mono text-xs">{JSON.stringify(raw)}</code>;
+    return <ObjectDetailValue value={raw} />;
   }
   const s = String(raw);
   // Long text (e.g. message, span, fields, user_agent) breaks the 2-column
@@ -361,6 +361,25 @@ function formatDetailValue(key: string, raw: unknown): React.ReactNode {
   }
   return <span className="font-mono text-xs">{s}</span>;
 }
+
+// Stringify off the render path: the same object identity flowing
+// through detail re-renders (table sort, hover state, anything that
+// re-renders the parent row) used to JSON.stringify on every pass.
+// memo + useMemo keep both the React element and the JSON string
+// stable as long as the value reference doesn't change.
+const ObjectDetailValue = React.memo(function ObjectDetailValue({ value }: { value: unknown }) {
+  const text = useMemo(() => JSON.stringify(value), [value]);
+  return <code className="font-mono text-xs">{text}</code>;
+});
+
+const RawJsonBlock = React.memo(function RawJsonBlock({ value }: { value: unknown }) {
+  const text = useMemo(() => JSON.stringify(value, null, 2), [value]);
+  return (
+    <pre className="mt-2 rounded bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
+      {text}
+    </pre>
+  );
+});
 
 function LogDetail({
   log,
@@ -392,9 +411,7 @@ function LogDetail({
           Raw JSON
         </CollapsibleTrigger>
         <CollapsibleContent>
-          <pre className="mt-2 rounded bg-muted p-3 font-mono text-xs whitespace-pre-wrap break-all max-h-64 overflow-y-auto">
-            {JSON.stringify(log, null, 2)}
-          </pre>
+          <RawJsonBlock value={log} />
         </CollapsibleContent>
       </Collapsible>
     </div>
