@@ -717,6 +717,15 @@ async fn select_route_with_failover<'a>(
                         error = %e,
                         "Route failed, trying next"
                     );
+                    // Surface the failover so dashboards can alert on
+                    // "provider X is failing over → Y". Label is the
+                    // normalised provider so cardinality stays bounded
+                    // (see OBS-12).
+                    metrics::counter!(
+                        "gateway_provider_fallback_total",
+                        "from" => crate::metrics_labels::normalize_provider_label(entry.provider.name()),
+                    )
+                    .increment(1);
                     last_error = Some(e);
                     continue;
                 }
