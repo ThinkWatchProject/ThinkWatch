@@ -20,6 +20,11 @@ pub struct AppConfig {
     pub clickhouse_db: String,
     pub clickhouse_user: Option<String>,
     pub clickhouse_password: Option<String>,
+
+    /// Bearer token required on `/metrics`. When absent the endpoint
+    /// (and the Prometheus recorder) is not installed at all, so the
+    /// server has no token-leak surface on that path.
+    pub metrics_bearer_token: Option<String>,
 }
 
 impl AppConfig {
@@ -53,6 +58,11 @@ impl AppConfig {
             clickhouse_db: std::env::var("CLICKHOUSE_DB").unwrap_or_else(|_| "think_watch".into()),
             clickhouse_user: std::env::var("CLICKHOUSE_USER").ok(),
             clickhouse_password: std::env::var("CLICKHOUSE_PASSWORD").ok(),
+
+            // Metrics: empty = disabled (endpoint not installed).
+            metrics_bearer_token: std::env::var("METRICS_BEARER_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
     }
 

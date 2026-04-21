@@ -288,10 +288,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> Router 
     // want scraping set the token (`deploy/generate-secrets.sh`
     // does it automatically). Failing to set it does not affect
     // any other startup path.
-    let metrics_route = match std::env::var("METRICS_BEARER_TOKEN")
-        .ok()
-        .filter(|s| !s.is_empty())
-    {
+    let metrics_route = match _config.metrics_bearer_token.clone() {
         Some(token) => {
             let prom_handle = handlers::metrics::install_prometheus_recorder();
             tracing::info!("/metrics endpoint enabled (bearer auth required)");
