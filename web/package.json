@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
-    "check:i18n": "node scripts/check-i18n.mjs"
+    "check:i18n": "node scripts/check-i18n.mjs",
+    "gen:api": "openapi-typescript http://localhost:3001/api/openapi.json -o src/lib/api-types.ts"
   },
   "dependencies": {
     "@codemirror/lang-json": "^6.0.2",
@@ -49,6 +50,7 @@
     "eslint-plugin-react-refresh": "^0.5.2",
     "globals": "^17.4.0",
     "jsdom": "^29.0.1",
+    "openapi-typescript": "^7.4.4",
     "rollup-plugin-visualizer": "^7.0.1",
     "shadcn": "^4.1.2",
     "typescript": "~6.0.2",
