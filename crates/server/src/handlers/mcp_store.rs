@@ -175,9 +175,9 @@ pub async fn install_template(
         }
     };
 
-    super::providers::validate_url(&endpoint_url)?;
+    think_watch_common::validation::validate_url(&endpoint_url)?;
     if let Some(ref headers) = req.custom_headers {
-        super::providers::validate_custom_headers(headers)?;
+        think_watch_common::validation::validate_custom_headers(headers)?;
     }
 
     // Verify the endpoint actually responds to JSON-RPC tools/list before
@@ -236,7 +236,7 @@ pub async fn install_template(
     let config_json = {
         let mut config = serde_json::json!({});
         if let Some(ref headers) = req.custom_headers {
-            super::providers::validate_custom_headers(headers)?;
+            think_watch_common::validation::validate_custom_headers(headers)?;
             config["custom_headers"] = serde_json::to_value(headers).unwrap_or_default();
         }
         config

@@ -528,7 +528,7 @@ fn validate_forwarder_config(
                     AppError::BadRequest("Kafka config requires 'broker_url' field".into())
                 })?;
             // SSRF: Kafka REST proxy URL must be a public HTTP(S) host.
-            super::providers::validate_url(broker_url)?;
+            think_watch_common::validation::validate_url(broker_url)?;
             let topic = config
                 .get("topic")
                 .and_then(|v| v.as_str())
@@ -542,7 +542,7 @@ fn validate_forwarder_config(
                 AppError::BadRequest("Webhook config requires 'url' field".into())
             })?;
             // SSRF: reject localhost / private IPs / cloud metadata endpoints.
-            super::providers::validate_url(url)?;
+            think_watch_common::validation::validate_url(url)?;
         }
         _ => {}
     }
@@ -580,7 +580,7 @@ fn validate_host_port(addr: &str) -> Result<(), AppError> {
         return Err(AppError::BadRequest("Syslog host is blocked".into()));
     }
     if let Ok(ip) = host.parse::<std::net::IpAddr>()
-        && super::providers::is_blocked_ip(&ip)
+        && think_watch_common::validation::is_blocked_ip(&ip)
     {
         return Err(AppError::BadRequest(
             "Syslog host points to private network".into(),

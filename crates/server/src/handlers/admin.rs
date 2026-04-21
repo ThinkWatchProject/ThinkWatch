@@ -1253,7 +1253,7 @@ pub async fn update_oidc_settings(
     if let Some(ref issuer_url) = req.issuer_url {
         // Validate issuer URL against SSRF: block private/internal
         // addresses the same way we validate AI provider URLs.
-        super::providers::validate_url(issuer_url)?;
+        think_watch_common::validation::validate_url(issuer_url)?;
         dc.upsert(
             "oidc.issuer_url",
             &serde_json::json!(issuer_url),
@@ -2146,7 +2146,7 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                 .as_str()
                 .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
             if !url.is_empty() {
-                super::providers::validate_url(url)?;
+                think_watch_common::validation::validate_url(url)?;
             }
         }
 

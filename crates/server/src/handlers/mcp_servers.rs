@@ -230,9 +230,9 @@ pub async fn test_mcp_server(
     if req.endpoint_url.is_empty() {
         return Err(AppError::BadRequest("endpoint_url is required".into()));
     }
-    super::providers::validate_url(&req.endpoint_url)?;
+    think_watch_common::validation::validate_url(&req.endpoint_url)?;
     if let Some(ref headers) = req.custom_headers {
-        super::providers::validate_custom_headers(headers)?;
+        think_watch_common::validation::validate_custom_headers(headers)?;
     }
 
     // Resolve the auth secret: prefer the one in the request, fall back to
@@ -392,7 +392,7 @@ pub async fn create_server(
     )?;
 
     // SSRF prevention: validate endpoint_url
-    super::providers::validate_url(&req.endpoint_url)?;
+    think_watch_common::validation::validate_url(&req.endpoint_url)?;
 
     let auth_encrypted = if let Some(ref secret) = req.auth_secret {
         let key = crypto::parse_encryption_key(&state.config.encryption_key)
@@ -439,7 +439,7 @@ pub async fn create_server(
     .bind({
         let mut config = serde_json::json!({});
         if let Some(ref headers) = req.custom_headers {
-            super::providers::validate_custom_headers(headers)?;
+            think_watch_common::validation::validate_custom_headers(headers)?;
             config["custom_headers"] = serde_json::to_value(headers).unwrap_or_default();
         }
         if let Some(ttl) = req.cache_ttl_secs {
@@ -593,7 +593,7 @@ pub async fn update_server(
     };
 
     if req.endpoint_url.is_some() {
-        super::providers::validate_url(endpoint_url)?;
+        think_watch_common::validation::validate_url(endpoint_url)?;
     }
 
     // Auto-detect transport type when endpoint changes, otherwise keep existing
@@ -636,7 +636,7 @@ pub async fn update_server(
     // Merge custom_headers + cache_ttl into existing config_json
     let mut config_json = existing.config_json.clone();
     if let Some(ref headers) = req.custom_headers {
-        super::providers::validate_custom_headers(headers)?;
+        think_watch_common::validation::validate_custom_headers(headers)?;
         config_json["custom_headers"] = serde_json::to_value(headers)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to serialize headers: {e}")))?;
     }

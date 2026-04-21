@@ -28,3 +28,4 @@ hmac = { workspace = true }
 metrics = { workspace = true }
 clickhouse = { workspace = true }
 bytes = { workspace = true }
+url = { workspace = true }
