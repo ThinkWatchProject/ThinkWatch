@@ -1070,6 +1070,13 @@
     "perfWsMax": "每用户最大 WS 连接数",
     "perfWsMaxHint": "每用户最大并发 Dashboard WebSocket 连接数。"
   },
+  "admin": {
+    "settings": {
+      "saving": "保存中",
+      "saved": "已保存",
+      "saveFailed": "保存失败"
+    }
+  },
   "settings": {
     "oidc": {
       "clientSecret": "客户端密钥",

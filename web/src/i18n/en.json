@@ -1070,6 +1070,13 @@
     "perfWsMax": "Max WS Per User",
     "perfWsMaxHint": "Maximum concurrent dashboard WebSocket connections per user."
   },
+  "admin": {
+    "settings": {
+      "saving": "Saving",
+      "saved": "Saved",
+      "saveFailed": "Save failed"
+    }
+  },
   "settings": {
     "oidc": {
       "clientSecret": "Client Secret",
