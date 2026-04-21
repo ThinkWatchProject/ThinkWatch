@@ -450,6 +450,7 @@ async fn write_user_role_assignments(
     ),
     security(("BearerAuth" = []))
 )]
+#[tracing::instrument(skip_all, fields(handler = "admin.create_user"))]
 pub async fn create_user(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -613,6 +614,7 @@ pub async fn create_user(
     ),
     security(("BearerAuth" = []))
 )]
+#[tracing::instrument(skip_all, fields(handler = "admin.force_logout_user"))]
 pub async fn force_logout_user(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -855,6 +857,7 @@ pub async fn update_user(
     ),
     security(("BearerAuth" = []))
 )]
+#[tracing::instrument(skip_all, fields(handler = "admin.delete_user"))]
 pub async fn delete_user(
     auth_user: AuthUser,
     State(state): State<AppState>,
@@ -949,6 +952,7 @@ pub async fn delete_user(
     ),
     security(("BearerAuth" = []))
 )]
+#[tracing::instrument(skip_all, fields(handler = "admin.reset_user_password"))]
 pub async fn reset_user_password(
     auth_user: AuthUser,
     State(state): State<AppState>,

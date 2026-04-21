@@ -61,6 +61,7 @@ pub struct ChangePasswordRequest {
     ),
     security(()),
 )]
+#[tracing::instrument(skip_all, fields(handler = "auth.login"))]
 pub async fn login(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -605,6 +606,7 @@ pub async fn register(
     ),
     security(()),
 )]
+#[tracing::instrument(skip_all, fields(handler = "auth.refresh"))]
 pub async fn refresh(
     State(state): State<AppState>,
     request: axum::extract::Request,
@@ -891,6 +893,7 @@ async fn fetch_user_role_assignments(
         (status = 401, description = "Unauthorized or wrong current password"),
     ),
 )]
+#[tracing::instrument(skip_all, fields(handler = "auth.change_password"))]
 pub async fn change_password(
     auth_user: AuthUser,
     State(state): State<AppState>,

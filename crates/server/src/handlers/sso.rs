@@ -36,6 +36,7 @@ fn state_nonce_binding(enc_key: &[u8; 32], state: &str, nonce: &str) -> String {
 }
 
 /// GET /api/auth/sso/authorize — redirect to OIDC provider.
+#[tracing::instrument(skip_all, fields(handler = "sso.authorize"))]
 pub async fn sso_authorize(State(state): State<AppState>) -> Result<Redirect, AppError> {
     let oidc_guard = state.oidc.read().await;
     let oidc = oidc_guard
@@ -77,6 +78,7 @@ pub struct SsoCallbackParams {
 /// httpOnly cookies on the response and redirects to the frontend.
 /// The client generates an ECDSA key pair locally and registers the
 /// public key with the server after the redirect.
+#[tracing::instrument(skip_all, fields(handler = "sso.callback"))]
 pub async fn sso_callback(
     State(state): State<AppState>,
     Query(params): Query<SsoCallbackParams>,

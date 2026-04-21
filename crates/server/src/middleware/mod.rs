@@ -32,6 +32,21 @@
 //!
 //! New cross-cutting concerns should still go here; the existing
 //! split is the deliberate answer to the review.
+//!
+//! ## Span coverage on handlers
+//!
+//! The `TraceLayer::new_for_http()` mounted in `app::security_layers`
+//! emits one `http` span per request with method + path, so every
+//! handler gets baseline coverage automatically. Hot paths (login,
+//! refresh, change_password, admin user mutations, sso, api-key
+//! lifecycle) additionally carry a `#[tracing::instrument(skip_all,
+//! fields(handler = "..."))]` so logs that originate inside those
+//! handlers are tagged with the handler name without parsing the URI.
+//!
+//! Adding `#[instrument]` to a new handler is cheap; reach for it
+//! when the handler does enough orchestration that you want
+//! per-handler timing in dashboards. The HTTP-level span already
+//! satisfies "is anything traced at all".
 
 pub mod access_log;
 pub mod api_key_auth;
