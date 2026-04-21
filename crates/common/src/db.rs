@@ -6,10 +6,14 @@ pub async fn create_pool(database_url: &str) -> anyhow::Result<PgPool> {
         tracing::warn!("DATABASE_URL does not specify sslmode. Use sslmode=require in production.");
     }
 
+    // 80 keeps headroom for ~50 concurrent active users (each request
+    // typically issues 2-3 queries through the auth + RBAC + handler
+    // path). Bump to 120 if QPS sustains over ~500. Override per-env
+    // with DB_MAX_CONNECTIONS without touching code.
     let max_connections: u32 = std::env::var("DB_MAX_CONNECTIONS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(40);
+        .unwrap_or(80);
 
     let pool = PgPoolOptions::new()
         .max_connections(max_connections)
