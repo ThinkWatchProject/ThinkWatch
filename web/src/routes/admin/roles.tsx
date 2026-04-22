@@ -217,13 +217,17 @@ export function RolesPage() {
         // Teams power the scope badge on member rows. team_managers
         // can read this endpoint too — they just see fewer teams.
         api<Array<{ id: string; name: string }>>('/api/admin/teams').catch(() => []),
-        api<McpToolRow[]>('/api/mcp/tools').catch(() => [] as McpToolRow[]),
+        // /api/mcp/tools is paginated and returns `{ items, total }`;
+        // the permission tree needs every tool, so ask for one big page.
+        api<{ items: McpToolRow[]; total: number }>('/api/mcp/tools?page_size=200').catch(
+          () => ({ items: [] as McpToolRow[], total: 0 }),
+        ),
       ]);
       setRoles(rolesRes.items);
       setPermissions(perms);
       setAvailableModelRows(modelsRes.items);
       setAvailableServers(serversRes);
-      setAvailableMcpTools(toolsRes);
+      setAvailableMcpTools(toolsRes.items);
       setTeamsById(new Map(teamsRes.map((t) => [t.id, t])));
     } catch {
       // silently fail (auth / network); leave previous state
