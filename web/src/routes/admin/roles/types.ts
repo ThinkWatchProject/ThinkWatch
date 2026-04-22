@@ -92,11 +92,8 @@ export interface McpToolRow {
 
 export interface ModelRow {
   id: string;
-  provider_id: string;
-  provider_name: string;
   model_id: string;
   display_name: string;
-  is_active: boolean;
 }
 
 // ----------------------------------------------------------------------------

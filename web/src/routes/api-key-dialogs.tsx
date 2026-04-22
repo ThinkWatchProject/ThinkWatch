@@ -50,7 +50,6 @@ export interface ModelRow {
   id: string;
   model_id: string;
   display_name: string;
-  is_active: boolean;
 }
 
 interface CreateKeyResponse {
@@ -96,7 +95,6 @@ function AllowedModelsEditor({
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase();
     return available
-      .filter((m) => m.is_active)
       .filter((m) => {
         if (!q) return true;
         return (
