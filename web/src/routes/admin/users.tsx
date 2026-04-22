@@ -60,11 +60,19 @@ interface User {
   id: string;
   email: string;
   display_name: string;
+  avatar_url: string | null;
   role_assignments: RoleAssignment[];
   /// Teams this user belongs to. Used by the team column on the
   /// admin user list so a team_manager looking at a merged
   /// multi-team result set can tell which row belongs where.
   teams?: Array<{ id: string; name: string }>;
+  /// Flattened from every assigned role's policy_document. The
+  /// admin list handler deliberately returns these as empty arrays
+  /// (the per-row payload would balloon) — /api/auth/me is the
+  /// canonical source. They stay on the interface so consumers
+  /// looking at a single-user response get the right shape.
+  permissions: string[];
+  denied_permissions: string[];
   oidc_subject: string | null;
   is_active: boolean;
   created_at: string;
