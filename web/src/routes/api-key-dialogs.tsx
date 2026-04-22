@@ -233,51 +233,49 @@ export function CreateApiKeyDialog({
               <p className="text-xs text-muted-foreground">
                 {t('apiKeys.surfacesHint')}
               </p>
-              <div className="space-y-2 rounded-md border p-3">
-                {ALL_SURFACES.map((s) => (
-                  <label
-                    key={s}
-                    className="flex cursor-pointer items-center gap-2 text-sm"
-                  >
-                    <Checkbox
-                      checked={createSurfaces.includes(s)}
-                      onCheckedChange={() => toggleSurface(createSurfaces, setCreateSurfaces, s)}
-                    />
-                    {t(`apiKeys.surface_${s}` as const)}
-                  </label>
-                ))}
+              <div className="space-y-3 rounded-md border p-3">
+                {ALL_SURFACES.map((s) => {
+                  const checked = createSurfaces.includes(s);
+                  return (
+                    <div key={s} className="space-y-2">
+                      <label className="flex cursor-pointer items-center gap-2 text-sm">
+                        <Checkbox
+                          checked={checked}
+                          onCheckedChange={() =>
+                            toggleSurface(createSurfaces, setCreateSurfaces, s)
+                          }
+                        />
+                        {t(`apiKeys.surface_${s}` as const)}
+                      </label>
+                      {checked && s === 'ai_gateway' && (
+                        <div className="flex flex-wrap items-center gap-2 pl-6 text-xs">
+                          <ScopeDropdown
+                            label={t('apiKeys.allowedModels')}
+                            selected={selectedModels}
+                            onChange={setSelectedModels}
+                            modelsByProvider={modelsByProvider}
+                          />
+                        </div>
+                      )}
+                      {checked && s === 'mcp_gateway' && (
+                        <div className="flex flex-wrap items-center gap-2 pl-6 text-xs">
+                          <ToolScopeDropdown
+                            label={t('apiKeys.allowedMcpTools')}
+                            selected={selectedMcpTools}
+                            onChange={setSelectedMcpTools}
+                            mcpToolsByServer={mcpToolsByServer}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
-            {(createSurfaces.includes('ai_gateway') ||
-              createSurfaces.includes('mcp_gateway')) && (
-              <div className="space-y-2">
-                <Label>{t('apiKeys.scopeLabel')}</Label>
-                <p className="text-xs text-muted-foreground">
-                  {t('apiKeys.scopeHint')}
-                </p>
-                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border p-3 text-xs">
-                  {createSurfaces.includes('ai_gateway') && (
-                    <ScopeDropdown
-                      label={t('apiKeys.allowedModels')}
-                      selected={selectedModels}
-                      onChange={setSelectedModels}
-                      modelsByProvider={modelsByProvider}
-                    />
-                  )}
-                  {createSurfaces.includes('mcp_gateway') && (
-                    <ToolScopeDropdown
-                      label={t('apiKeys.allowedMcpTools')}
-                      selected={selectedMcpTools}
-                      onChange={setSelectedMcpTools}
-                      mcpToolsByServer={mcpToolsByServer}
-                    />
-                  )}
-                </div>
-              </div>
-            )}
             <div className="space-y-2">
               <Label htmlFor="key-expires">{t('apiKeys.expiresInDays')}</Label>
               <Input id="key-expires" type="number" value={expiresInDays} onChange={(e) => setExpiresInDays(e.target.value)} placeholder="90" />
+              <p className="text-xs text-muted-foreground">{t('apiKeys.expiresInDaysHint')}</p>
             </div>
             <div className="space-y-2">
               <Label htmlFor="key-cost-center">{t('apiKeys.costCenter')}</Label>
@@ -432,48 +430,45 @@ export function EditApiKeyDialog({
           )}
           <div className="space-y-2">
             <Label>{t('apiKeys.surfaces')}</Label>
-            <div className="space-y-2 rounded-md border p-3">
-              {ALL_SURFACES.map((s) => (
-                <label
-                  key={s}
-                  className="flex cursor-pointer items-center gap-2 text-sm"
-                >
-                  <Checkbox
-                    checked={editSurfaces.includes(s)}
-                    onCheckedChange={() => toggleSurface(editSurfaces, setEditSurfaces, s)}
-                  />
-                  {t(`apiKeys.surface_${s}` as const)}
-                </label>
-              ))}
+            <div className="space-y-3 rounded-md border p-3">
+              {ALL_SURFACES.map((s) => {
+                const checked = editSurfaces.includes(s);
+                return (
+                  <div key={s} className="space-y-2">
+                    <label className="flex cursor-pointer items-center gap-2 text-sm">
+                      <Checkbox
+                        checked={checked}
+                        onCheckedChange={() =>
+                          toggleSurface(editSurfaces, setEditSurfaces, s)
+                        }
+                      />
+                      {t(`apiKeys.surface_${s}` as const)}
+                    </label>
+                    {checked && s === 'ai_gateway' && (
+                      <div className="flex flex-wrap items-center gap-2 pl-6 text-xs">
+                        <ScopeDropdown
+                          label={t('apiKeys.allowedModels')}
+                          selected={editSelectedModels}
+                          onChange={setEditSelectedModels}
+                          modelsByProvider={modelsByProvider}
+                        />
+                      </div>
+                    )}
+                    {checked && s === 'mcp_gateway' && (
+                      <div className="flex flex-wrap items-center gap-2 pl-6 text-xs">
+                        <ToolScopeDropdown
+                          label={t('apiKeys.allowedMcpTools')}
+                          selected={editSelectedMcpTools}
+                          onChange={setEditSelectedMcpTools}
+                          mcpToolsByServer={mcpToolsByServer}
+                        />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
           </div>
-          {(editSurfaces.includes('ai_gateway') ||
-            editSurfaces.includes('mcp_gateway')) && (
-            <div className="space-y-2">
-              <Label>{t('apiKeys.scopeLabel')}</Label>
-              <p className="text-xs text-muted-foreground">
-                {t('apiKeys.scopeHint')}
-              </p>
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border p-3 text-xs">
-                {editSurfaces.includes('ai_gateway') && (
-                  <ScopeDropdown
-                    label={t('apiKeys.allowedModels')}
-                    selected={editSelectedModels}
-                    onChange={setEditSelectedModels}
-                    modelsByProvider={modelsByProvider}
-                  />
-                )}
-                {editSurfaces.includes('mcp_gateway') && (
-                  <ToolScopeDropdown
-                    label={t('apiKeys.allowedMcpTools')}
-                    selected={editSelectedMcpTools}
-                    onChange={setEditSelectedMcpTools}
-                    mcpToolsByServer={mcpToolsByServer}
-                  />
-                )}
-              </div>
-            </div>
-          )}
           <div className="space-y-2">
             <Label>{t('apiKeys.expiresIn')}</Label>
             <Input type="number" value={editExpiresInDays} onChange={(e) => setEditExpiresInDays(e.target.value)} placeholder="90" min={1} />
