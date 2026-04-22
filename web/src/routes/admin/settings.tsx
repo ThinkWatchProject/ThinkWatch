@@ -131,6 +131,12 @@ export function SettingsPage() {
   const [oidcEnabled, setOidcEnabled] = useState(false);
   const [oidcIssuerUrl, setOidcIssuerUrl] = useState('');
   const [oidcClientId, setOidcClientId] = useState('');
+  // Snapshot of the value the server initially returned (masked form
+  // like `abcd...wxyz`). On save we only re-send client_id when the
+  // input has actually changed — otherwise the masked sentinel would
+  // get round-tripped back as the new client_id and silently corrupt
+  // the OIDC config.
+  const [oidcClientIdLoaded, setOidcClientIdLoaded] = useState('');
   const [oidcClientSecret, setOidcClientSecret] = useState('');
   const [oidcRedirectUrl, setOidcRedirectUrl] = useState('');
   const [oidcHasSecret, setOidcHasSecret] = useState(false);
@@ -201,6 +207,7 @@ export function SettingsPage() {
           setOidcEnabled(oidc.enabled);
           setOidcIssuerUrl(oidc.issuer_url ?? '');
           setOidcClientId(oidc.client_id ?? '');
+          setOidcClientIdLoaded(oidc.client_id ?? '');
           setOidcRedirectUrl(oidc.redirect_url ?? '');
           setOidcHasSecret(oidc.has_secret ?? false);
         }
@@ -273,10 +280,14 @@ export function SettingsPage() {
   const handleOidcSave = async () => {
     setOidcSaving(true);
     try {
+      // Only re-send `client_id` when the user actually edited the
+      // input — otherwise the masked sentinel returned on read would
+      // get round-tripped back and overwrite the real value.
+      const clientIdChanged = oidcClientId !== oidcClientIdLoaded;
       await apiPatch('/api/admin/settings/oidc', {
         enabled: oidcEnabled,
         issuer_url: oidcIssuerUrl,
-        client_id: oidcClientId,
+        ...(clientIdChanged ? { client_id: oidcClientId } : {}),
         client_secret: oidcClientSecret || undefined,
         redirect_url: oidcRedirectUrl,
       });
@@ -284,6 +295,8 @@ export function SettingsPage() {
       const updated = await api<OidcConfig>('/api/admin/settings/oidc').catch(() => null);
       if (updated) {
         setOidcConfig(updated);
+        setOidcClientId(updated.client_id ?? '');
+        setOidcClientIdLoaded(updated.client_id ?? '');
         setOidcHasSecret(updated.has_secret ?? false);
       }
       toast.success(t('settings.saved'));
