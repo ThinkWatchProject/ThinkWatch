@@ -23,7 +23,10 @@ interface UsageRow {
   request_count: number;
   input_tokens: number;
   output_tokens: number;
-  total_cost: string;
+  // f64 on the wire (gateway_logs.cost_usd is Float64). Decimal-fidelity
+  // billing is a separate migration; until then this is JS-number
+  // precision (~15 significant digits, fine for the dashboard).
+  total_cost: number;
 }
 
 interface UsageStats {
@@ -170,7 +173,7 @@ export function UsagePage() {
                     <TableCell className="text-right">{row.request_count.toLocaleString()}</TableCell>
                     <TableCell className="text-right">{row.input_tokens.toLocaleString()}</TableCell>
                     <TableCell className="text-right">{row.output_tokens.toLocaleString()}</TableCell>
-                    <TableCell className="text-right">${parseFloat(row.total_cost).toFixed(4)}</TableCell>
+                    <TableCell className="text-right">${row.total_cost.toFixed(4)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

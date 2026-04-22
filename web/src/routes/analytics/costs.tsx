@@ -34,7 +34,10 @@ interface CostRow {
   request_count: number;
   input_tokens: number;
   output_tokens: number;
-  total_cost: string;
+  // f64 on the wire (gateway_logs.cost_usd is Float64). Decimal-fidelity
+  // billing is a separate migration; until then this is JS-number
+  // precision (~15 significant digits, fine for the dashboard).
+  total_cost: number;
 }
 
 type CostDimension = 'model' | 'user' | 'cost_center' | 'provider';
@@ -145,17 +148,17 @@ export function CostsPage() {
     const dim = selectedDimensions[0];
     return rows
       .slice()
-      .sort((a, b) => parseFloat(b.total_cost) - parseFloat(a.total_cost))
+      .sort((a, b) => b.total_cost - a.total_cost)
       .map((row) => {
         const label = getDimensionValue(row, dim);
         return {
           label: label.length > 18 ? label.slice(0, 16) + '..' : label,
-          value: parseFloat(row.total_cost),
+          value: row.total_cost,
         };
       });
   }, [rows, isSingleDimension, selectedDimensions]);
 
-  const totalCost = useMemo(() => rows.reduce((sum, r) => sum + parseFloat(r.total_cost), 0), [rows]);
+  const totalCost = useMemo(() => rows.reduce((sum, r) => sum + r.total_cost, 0), [rows]);
   const budgetPct = stats.budget_usage_pct ?? 0;
 
   // ---- Pivot table data (2-dimension mode) ----
@@ -173,7 +176,7 @@ export function CostsPage() {
       rowKeysSet.add(rk);
       colKeysSet.add(ck);
       const key = `${rk}\0${ck}`;
-      cellMap.set(key, (cellMap.get(key) ?? 0) + parseFloat(row.total_cost));
+      cellMap.set(key, (cellMap.get(key) ?? 0) + row.total_cost);
     }
 
     const rowKeys = [...rowKeysSet].sort();
@@ -367,7 +370,7 @@ export function CostsPage() {
               </TableHeader>
               <TableBody>
                 {rows.map((row) => {
-                  const cost = parseFloat(row.total_cost);
+                  const cost = row.total_cost;
                   const pct = totalCost > 0 ? (cost / totalCost) * 100 : 0;
                   const label = getDimensionValue(row, selectedDimensions[0]);
                   return (
