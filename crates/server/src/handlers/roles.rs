@@ -6,6 +6,7 @@ use uuid::Uuid;
 use think_watch_auth::rbac;
 use think_watch_common::errors::AppError;
 
+use super::serde_util::deserialize_some;
 use crate::app::AppState;
 use crate::middleware::auth_guard::{AuthUser, invalidate_role_perms};
 
@@ -457,7 +458,13 @@ pub async fn create_role(
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateRoleRequest {
     pub name: Option<String>,
-    pub description: Option<String>,
+    /// PATCH semantics: absent = leave unchanged, JSON `null` = clear,
+    /// JSON string = replace. Without `deserialize_some` the COALESCE
+    /// below would conflate absent and null, so a user clearing the
+    /// description in the UI silently no-oped.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub description: Option<Option<String>>,
     pub policy_document: Option<serde_json::Value>,
 }
 
@@ -518,18 +525,23 @@ pub async fn update_role(
         validate_policy_constraints_in_doc(doc)?;
     }
 
+    let (description_set, description_value) = match &payload.description {
+        None => (false, None),
+        Some(inner) => (true, inner.as_deref()),
+    };
     sqlx::query(
         "UPDATE rbac_roles SET \
             name             = COALESCE($2, name), \
-            description      = COALESCE($3, description), \
+            description      = CASE WHEN $5 THEN $3 ELSE description END, \
             policy_document  = COALESCE($4, policy_document), \
             updated_at       = now() \
          WHERE id = $1",
     )
     .bind(id)
     .bind(payload.name.as_deref().map(str::trim))
-    .bind(payload.description.as_deref())
+    .bind(description_value)
     .bind(payload.policy_document.as_ref())
+    .bind(description_set)
     .execute(&state.db)
     .await?;
 

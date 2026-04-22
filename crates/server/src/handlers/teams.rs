@@ -34,6 +34,7 @@ use uuid::Uuid;
 
 use think_watch_common::errors::AppError;
 
+use super::serde_util::deserialize_some;
 use crate::app::AppState;
 use crate::middleware::auth_guard::{AuthUser, invalidate_team_perms, invalidate_user_perms};
 
@@ -61,7 +62,11 @@ pub struct CreateTeamRequest {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateTeamRequest {
     pub name: Option<String>,
-    pub description: Option<String>,
+    /// PATCH semantics: absent = unchanged, JSON `null` = clear,
+    /// JSON string = replace.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub description: Option<Option<String>>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -352,12 +357,22 @@ pub async fn update_team(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(&existing.name);
-    let new_desc = req
-        .description
-        .as_deref()
-        .map(str::trim)
-        .map(str::to_string)
-        .or_else(|| existing.description.clone());
+    // None = absent (preserve), Some(None) = clear, Some(Some(s)) = set.
+    // Treat empty / whitespace-only strings as "clear" for parity with
+    // the previous unwrap-empty-then-fallback behaviour the UI relied
+    // on; the API itself still distinguishes the three states.
+    let new_desc: Option<String> = match &req.description {
+        None => existing.description.clone(),
+        Some(None) => None,
+        Some(Some(s)) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+    };
 
     let updated = sqlx::query_as::<_, Team>(
         "UPDATE teams SET name = $2, description = $3 WHERE id = $1 \

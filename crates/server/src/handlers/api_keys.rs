@@ -1,24 +1,10 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-/// Wrap a `T`-deserializer so that `Option<T>` distinguishes "field
-/// absent" from "field is null". Standard serde collapses both to
-/// `None`, which is wrong for PATCH semantics where `null` should
-/// mean "clear" and an absent field should mean "leave unchanged".
-/// Combined with `Option<Option<T>>` + `#[serde(default)]`:
-///   - field absent       → `None`
-///   - JSON `null`        → `Some(None)`
-///   - JSON value         → `Some(Some(v))`
-fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    T: Deserialize<'de>,
-    D: Deserializer<'de>,
-{
-    T::deserialize(deserializer).map(Some)
-}
+use super::serde_util::deserialize_some;
 
 use think_watch_auth::{api_key, rbac};
 use think_watch_common::audit::AuditEntry;

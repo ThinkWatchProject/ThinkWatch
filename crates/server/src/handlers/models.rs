@@ -21,6 +21,7 @@ use think_watch_common::dto::ProviderHeader;
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Model;
 
+use super::serde_util::deserialize_some;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
@@ -630,7 +631,12 @@ pub async fn create_model_route(
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateModelRouteRequest {
-    pub upstream_model: Option<String>,
+    /// PATCH semantics: absent = unchanged, JSON `null` = clear (the
+    /// route falls back to using `model_id` as the upstream identifier),
+    /// JSON string = explicit override.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub upstream_model: Option<Option<String>>,
     pub weight: Option<i32>,
     pub priority: Option<i32>,
     pub enabled: Option<bool>,
@@ -648,9 +654,13 @@ pub async fn update_model_route(
         .assert_scope_global(&state.db, "models:write")
         .await?;
 
+    let (upstream_set, upstream_value) = match &req.upstream_model {
+        None => (false, None),
+        Some(inner) => (true, inner.as_deref()),
+    };
     let row = sqlx::query_as::<_, ModelRouteRow>(
         r#"UPDATE model_routes SET
-              upstream_model = COALESCE($2, upstream_model),
+              upstream_model = CASE WHEN $6 THEN $2 ELSE upstream_model END,
               weight = COALESCE($3, weight),
               priority = COALESCE($4, priority),
               enabled = COALESCE($5, enabled)
@@ -660,10 +670,11 @@ pub async fn update_model_route(
                      upstream_model, weight, priority, enabled"#,
     )
     .bind(route_id)
-    .bind(&req.upstream_model)
+    .bind(upstream_value)
     .bind(req.weight)
     .bind(req.priority)
     .bind(req.enabled)
+    .bind(upstream_set)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("Route not found".into()))?;

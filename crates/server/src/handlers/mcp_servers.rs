@@ -7,6 +7,7 @@ use think_watch_common::dto::CreateMcpServerRequest;
 use think_watch_common::errors::AppError;
 use think_watch_common::models::McpServer;
 
+use super::serde_util::deserialize_some;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
@@ -378,10 +379,18 @@ pub async fn create_server(
 pub struct UpdateMcpServerRequest {
     pub name: Option<String>,
     pub namespace_prefix: Option<String>,
-    pub description: Option<String>,
+    /// PATCH semantics: absent = unchanged, JSON `null` = clear,
+    /// JSON string = replace.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub description: Option<Option<String>>,
     pub endpoint_url: Option<String>,
     pub transport_type: Option<String>,
-    pub auth_type: Option<String>,
+    /// Same PATCH semantics as `description`. Sending `null` clears
+    /// the auth requirement so the server can be probed unauthenticated.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub auth_type: Option<Option<String>>,
     pub auth_secret: Option<String>,
     /// Custom HTTP headers forwarded when connecting to this MCP server.
     /// Values may contain `{{user_id}}` / `{{user_email}}` template variables.
@@ -425,15 +434,19 @@ pub async fn update_server(
         .ok_or(AppError::NotFound("MCP Server not found".into()))?;
 
     let name = req.name.as_deref().unwrap_or(&existing.name);
-    let description = req
-        .description
-        .as_deref()
-        .or(existing.description.as_deref());
+    // None = field absent (preserve), Some(None) = clear, Some(Some) = set.
+    let description: Option<&str> = match &req.description {
+        None => existing.description.as_deref(),
+        Some(inner) => inner.as_deref(),
+    };
     let endpoint_url = req
         .endpoint_url
         .as_deref()
         .unwrap_or(&existing.endpoint_url);
-    let auth_type = req.auth_type.as_deref().or(existing.auth_type.as_deref());
+    let auth_type: Option<&str> = match &req.auth_type {
+        None => existing.auth_type.as_deref(),
+        Some(inner) => inner.as_deref(),
+    };
 
     // Resolve new namespace_prefix: explicit override > existing value.
     // Validated only when the caller provided one (otherwise keep existing).
