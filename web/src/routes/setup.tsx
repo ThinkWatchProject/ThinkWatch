@@ -343,7 +343,7 @@ export function SetupPage() {
             </SelectContent>
           </Select>
         </div>
-        <Button className="w-full" onClick={goNext} size="lg">
+        <Button data-primary-action className="w-full" onClick={goNext} size="lg">
           {t('setup.getStarted')}
           <ArrowRight className="ml-2 h-4 w-4" />
         </Button>
@@ -654,32 +654,34 @@ export function SetupPage() {
   // Enter should advance the wizard regardless of focus — the default
   // form-submit path only fires while an input is focused, so a user
   // who clicked the card background or tabbed to a label would see
-  // Enter do nothing. `isComposing` guards against swallowing the
-  // commit key of an IME (Chinese / Japanese).
+  // Enter do nothing. Dispatch via a DOM-level `.click()` on the
+  // button tagged `data-primary-action` instead of calling goNext /
+  // handleSubmit from the listener directly: the listener has to
+  // survive across renders without its closures going stale on the
+  // current step's validation state, and React attaches the
+  // always-fresh click handler to the rendered button for us.
+  // `isComposing` guards against swallowing an IME commit.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || e.isComposing || e.shiftKey) return;
       // Let explicit button activation through — Space / Enter on a
-      // focused <button> already does the right thing.
+      // focused <button> already does the right thing, and a textarea
+      // legitimately wants Enter as a newline.
       const target = e.target as HTMLElement | null;
       if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON')) {
         return;
       }
-      if (step === 'welcome') {
+      const primary = document.querySelector<HTMLButtonElement>(
+        'button[data-primary-action]:not([disabled])',
+      );
+      if (primary) {
         e.preventDefault();
-        goNext();
-      } else if (step === 'admin' || step === 'settings') {
-        e.preventDefault();
-        goNext();
-      } else if (step === 'provider' && !submitting) {
-        e.preventDefault();
-        handleSubmit(false);
+        primary.click();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [step, submitting]);
+  }, []);
 
   const showBack = step !== 'welcome' && step !== 'complete';
   const showNext = step === 'admin' || step === 'settings';
@@ -723,13 +725,13 @@ export function SetupPage() {
                     </Button>
                   )}
                   {showNext && (
-                    <Button type="submit">
+                    <Button data-primary-action type="submit">
                       {t('setup.next')}
                       <ArrowRight className="ml-2 h-4 w-4" />
                     </Button>
                   )}
                   {showSubmit && (
-                    <Button type="submit" disabled={submitting}>
+                    <Button data-primary-action type="submit" disabled={submitting}>
                       {submitting ? t('common.loading') : t('setup.next')}
                     </Button>
                   )}
