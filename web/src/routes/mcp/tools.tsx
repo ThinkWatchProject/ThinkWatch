@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -16,6 +16,7 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { Skeleton } from '@/components/ui/skeleton';
+import { DataTablePagination } from '@/components/data-table-pagination';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
@@ -29,6 +30,11 @@ interface McpTool {
   input_schema: Record<string, unknown> | null;
 }
 
+interface McpToolListResponse {
+  items: McpTool[];
+  total: number;
+}
+
 interface McpServer {
   id: string;
   name: string;
@@ -37,38 +43,63 @@ interface McpServer {
 export function McpToolsPage() {
   const { t } = useTranslation();
   const [tools, setTools] = useState<McpTool[]>([]);
+  const [total, setTotal] = useState(0);
   const [servers, setServers] = useState<McpServer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [filterServer, setFilterServer] = useState('');
   const [query, setQuery] = useState('');
+  const [debouncedQuery, setDebouncedQuery] = useState('');
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
   const [expanded, setExpanded] = useState<string | null>(null);
 
+  // Load the server filter options once — the list is short and
+  // doesn't need its own pagination.
   useEffect(() => {
-    Promise.all([
-      api<McpTool[]>('/api/mcp/tools'),
-      api<McpServer[]>('/api/mcp/servers'),
-    ])
-      .then(([toolsData, serversData]) => {
-        setTools(toolsData);
-        setServers(serversData);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load tools'))
-      .finally(() => setLoading(false));
+    api<McpServer[]>('/api/mcp/servers')
+      .then(setServers)
+      .catch((err) =>
+        setError(err instanceof Error ? err.message : 'Failed to load servers'),
+      );
   }, []);
 
-  const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return tools.filter((tool) => {
-      if (filterServer && tool.server_id !== filterServer) return false;
-      if (!q) return true;
-      return (
-        tool.name.toLowerCase().includes(q) ||
-        tool.namespaced_name.toLowerCase().includes(q) ||
-        (tool.description ?? '').toLowerCase().includes(q)
-      );
-    });
-  }, [tools, filterServer, query]);
+  // Debounce the search box so we're not hammering the API on every
+  // keystroke.
+  useEffect(() => {
+    const h = setTimeout(() => setDebouncedQuery(query.trim()), 250);
+    return () => clearTimeout(h);
+  }, [query]);
+
+  // Any filter change resets to page 1 — otherwise a filter that
+  // narrows the list would leave us on an empty tail page.
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedQuery, filterServer, pageSize]);
+
+  const fetchTools = useCallback(async () => {
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page: String(page),
+        page_size: String(pageSize),
+      });
+      if (debouncedQuery) params.set('q', debouncedQuery);
+      if (filterServer) params.set('server_id', filterServer);
+      const res = await api<McpToolListResponse>(`/api/mcp/tools?${params}`);
+      setTools(res.items);
+      setTotal(res.total);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load tools');
+    } finally {
+      setLoading(false);
+    }
+  }, [page, pageSize, debouncedQuery, filterServer]);
+
+  useEffect(() => {
+    void fetchTools();
+  }, [fetchTools]);
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -111,7 +142,7 @@ export function McpToolsPage() {
           </SelectContent>
         </Select>
         <span className="ml-auto text-xs text-muted-foreground">
-          {filtered.length} {t('mcpTools.toolsFound')}
+          {total} {t('mcpTools.toolsFound')}
         </span>
       </div>
 
@@ -133,7 +164,7 @@ export function McpToolsPage() {
                 </div>
               ))}
             </div>
-          ) : filtered.length === 0 ? (
+          ) : tools.length === 0 ? (
             <div className="flex h-full flex-col items-center justify-center py-12 text-center">
               <Wrench className="h-10 w-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground">{t('mcpTools.noTools')}</p>
@@ -160,7 +191,7 @@ export function McpToolsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {filtered.map((tool) => {
+                {tools.map((tool) => {
                   const isOpen = expanded === tool.id;
                   const hasSchema =
                     tool.input_schema &&
@@ -238,6 +269,15 @@ export function McpToolsPage() {
             </Table>
           )}
         </CardContent>
+        <div data-slot="card-footer" className="border-t">
+          <DataTablePagination
+            total={total}
+            page={page}
+            pageSize={pageSize}
+            onPageChange={setPage}
+            onPageSizeChange={setPageSize}
+          />
+        </div>
       </Card>
     </div>
   );

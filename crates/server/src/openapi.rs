@@ -24,6 +24,7 @@ use crate::handlers::{
     log_forwarders::{CreateForwarderRequest, TestResult, UpdateForwarderRequest},
     mcp_logs::{McpLogEntry, McpLogsResponse},
     mcp_servers::UpdateMcpServerRequest,
+    mcp_tools::{McpToolListResponse, McpToolRow},
     models::{CreateModelRequest, ModelRow, UpdateModelRequest},
     platform_logs::{PlatformLogEntryResponse, PlatformLogsResponse},
     providers::{TestProviderRequest, TestProviderResponse, UpdateProviderRequest},
@@ -225,6 +226,7 @@ use crate::handlers::{
             // Logs
             GatewayLogEntry, GatewayLogsResponse,
             McpLogEntry, McpLogsResponse,
+            McpToolRow, McpToolListResponse,
             PlatformLogEntryResponse, PlatformLogsResponse,
             AccessLogEntry, AccessLogsResponse,
             AppLogEntryResponse, AppLogsResponse,
