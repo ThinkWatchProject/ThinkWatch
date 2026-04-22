@@ -785,8 +785,8 @@ pub async fn rotate_key(
     let new_key = sqlx::query_as::<_, ApiKey>(
         r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces, allowed_models,
             allowed_mcp_tools, expires_at, rotation_period_days, inactivity_timeout_days,
-            rotated_from_id, last_rotation_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+            cost_center, rotated_from_id, last_rotation_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
            RETURNING *"#,
     )
     .bind(&generated.prefix)
@@ -799,6 +799,7 @@ pub async fn rotate_key(
     .bind(old_key.expires_at)
     .bind(old_key.rotation_period_days)
     .bind(old_key.inactivity_timeout_days)
+    .bind(old_key.cost_center.as_deref())
     .bind(id)
     .fetch_one(&mut *tx)
     .await?;
@@ -975,6 +976,11 @@ pub async fn get_policy_scope(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<PolicyScopeResponse>, AppError> {
+    // Same gate as the page that consumes this endpoint — anyone who
+    // can read API keys can ask "what could a key of mine be scoped
+    // to?". The data is purely about the caller's own roles, so there
+    // is no privilege-escalation risk in exposing it here.
+    auth_user.require_permission("api_keys:read")?;
     let limits = rbac::compute_user_resource_limits(&state.db, auth_user.claims.sub)
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to load role limits: {e}")))?;
