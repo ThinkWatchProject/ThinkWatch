@@ -24,13 +24,14 @@ check:
 	cd web && pnpm exec tsc --noEmit
 
 # Pre-commit: mirrors CI exactly (cargo check + test + clippy + fmt +
-# pnpm build + i18n parity check)
+# i18n parity + pnpm test + pnpm build)
 precommit:
 	cargo check --workspace
 	cargo test --workspace
 	cargo clippy --workspace -- -D warnings
 	cargo fmt --all -- --check
 	cd web && pnpm check:i18n
+	cd web && pnpm test
 	cd web && pnpm build
 
 # Run all tests

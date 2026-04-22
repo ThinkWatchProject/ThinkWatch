@@ -88,6 +88,9 @@ jobs:
       - name: i18n parity
         run: pnpm check:i18n
 
+      - name: Test
+        run: pnpm test
+
       - name: Build
         run: pnpm build
 
