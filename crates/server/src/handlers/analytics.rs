@@ -71,15 +71,14 @@ async fn analytics_user_id_filter(
     };
 
     // Team filter requested. Resolve membership and intersect.
-    let team_members: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
-        "SELECT user_id::text FROM team_members WHERE team_id = $1",
-    )
-    .bind(team_id)
-    .fetch_all(pool)
-    .await?
-    .into_iter()
-    .map(|(s,)| s)
-    .collect();
+    let team_members: std::collections::HashSet<String> =
+        sqlx::query_as::<_, (String,)>("SELECT user_id::text FROM team_members WHERE team_id = $1")
+            .bind(team_id)
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .map(|(s,)| s)
+            .collect();
 
     let intersected: Vec<String> = match scope {
         None => team_members.into_iter().collect(), // global → just the team

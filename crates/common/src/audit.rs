@@ -99,13 +99,6 @@ pub struct AuditEntry {
     /// them back out of JSONB and deserialises without failing.
     #[serde(default)]
     pub session_id: Option<String>,
-    /// Data-residency tag snapshot. Copied from the resolved
-    /// provider's `providers.region` so `gateway_logs.region` stays
-    /// accurate even after the provider row is soft-deleted.
-    /// `#[serde(default)]` for the same outbox-compat reason as
-    /// `session_id`.
-    #[serde(default)]
-    pub region: Option<String>,
     pub created_at: String,
 }
 
@@ -171,12 +164,11 @@ struct ChGatewayRow {
     detail: Option<String>,
     trace_id: Option<String>,
     // Match gateway_logs column order from
-    // deploy/clickhouse/initdb.d/01_init.sql: session_id and region
-    // sit between trace_id and created_at. The clickhouse crate's
-    // Row derive names columns in the INSERT by struct field order,
-    // so keep them aligned.
+    // deploy/clickhouse/initdb.d/01_init.sql: session_id sits between
+    // trace_id and created_at. The clickhouse crate's Row derive
+    // names columns in the INSERT by struct field order, so keep
+    // them aligned.
     session_id: Option<String>,
-    region: Option<String>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
     created_at: chrono::DateTime<Utc>,
 }
@@ -269,7 +261,6 @@ impl AuditEntry {
             user_agent: None,
             trace_id: None,
             session_id: None,
-            region: None,
             created_at: Utc::now().to_rfc3339(),
         }
     }
@@ -353,14 +344,6 @@ impl AuditEntry {
     /// `gateway_logs` stores this today; other log types drop it.
     pub fn session_id(mut self, id: impl Into<String>) -> Self {
         self.session_id = Some(id.into());
-        self
-    }
-
-    /// Snapshot the resolved provider's residency region onto this
-    /// row so `gateway_logs.region` survives provider soft-delete.
-    /// Only `gateway_logs` stores this today.
-    pub fn region(mut self, region: impl Into<String>) -> Self {
-        self.region = Some(region.into());
         self
     }
 }
@@ -1585,7 +1568,6 @@ async fn flush_gateway(
             detail: detail_str(&mut entry.detail),
             trace_id: entry.trace_id,
             session_id: entry.session_id,
-            region: entry.region,
             created_at: ts,
         };
         insert.write(&row).await?;

@@ -215,7 +215,6 @@ impl LogCtx<'_> {
             self.api_key_id.as_deref(),
             &self.model,
             None,
-            None,
             self.started.elapsed().as_millis() as i64,
             &err,
         );
@@ -286,7 +285,6 @@ fn emit_gateway_error_log(
     api_key_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
-    region: Option<&str>,
     latency_ms: i64,
     err: &GatewayError,
 ) {
@@ -311,9 +309,6 @@ fn emit_gateway_error_log(
         .detail(detail);
     if let Some(sid) = session_id {
         entry = entry.session_id(sid);
-    }
-    if let Some(r) = region {
-        entry = entry.region(r);
     }
     if let Some(uid) = user_id
         && let Ok(u) = uuid::Uuid::parse_str(uid)
@@ -345,7 +340,6 @@ fn emit_gateway_log_with_extra(
     api_key_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
-    region: Option<&str>,
     prompt_tokens: u32,
     completion_tokens: u32,
     cost_usd: f64,
@@ -375,9 +369,6 @@ fn emit_gateway_log_with_extra(
     if let Some(sid) = session_id {
         entry = entry.session_id(sid);
     }
-    if let Some(r) = region {
-        entry = entry.region(r);
-    }
     if let Some(uid) = user_id
         && let Ok(u) = uuid::Uuid::parse_str(uid)
     {
@@ -404,7 +395,6 @@ fn emit_gateway_log(
     api_key_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
-    region: Option<&str>,
     prompt_tokens: u32,
     completion_tokens: u32,
     cost_usd: f64,
@@ -424,9 +414,6 @@ fn emit_gateway_log(
         }));
     if let Some(sid) = session_id {
         entry = entry.session_id(sid);
-    }
-    if let Some(r) = region {
-        entry = entry.region(r);
     }
     if let Some(uid) = user_id
         && let Ok(u) = uuid::Uuid::parse_str(uid)
@@ -1079,7 +1066,6 @@ pub async fn proxy_chat_completion(
         let api_key_id_for_done = identity.api_key_id.clone();
         let model_for_log = original_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
-        let region_for_done = entry.region.clone();
         let started = request_started_at;
         // Clone request for cache write — the original is moved into the provider.
         let request_for_cache = request.clone();
@@ -1129,7 +1115,6 @@ pub async fn proxy_chat_completion(
                     api_key_id_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
-                    region_for_done.as_deref(),
                     pt,
                     ct,
                     cost,
@@ -1184,7 +1169,7 @@ pub async fn proxy_chat_completion(
         .map_err(|e| {
             // select_route_with_failover just errored across every
             // candidate — there's no winning provider to attribute
-            // this failure to, so provider / region stay None.
+            // this failure to, so provider stays None.
             emit_gateway_error_log(
                 &state.audit,
                 &metadata.request_id,
@@ -1193,7 +1178,6 @@ pub async fn proxy_chat_completion(
                 identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
                 &original_model,
-                None,
                 None,
                 request_started_at.elapsed().as_millis() as i64,
                 &e,
@@ -1263,7 +1247,6 @@ pub async fn proxy_chat_completion(
             identity.api_key_id.as_deref(),
             &original_model,
             Some(chosen_entry.provider_name.as_str()),
-            chosen_entry.region.as_deref(),
             prompt_tokens,
             completion_tokens,
             cost_usd,
@@ -1503,7 +1486,6 @@ pub async fn proxy_anthropic_messages(
         let api_key_id_for_done = identity.api_key_id.clone();
         let model_for_log = mapped_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
-        let region_for_done = entry.region.clone();
         let started = request_started_at;
         let stream = entry.provider.stream_chat_completion(stream_request);
         let on_done = move |result: crate::streaming::StreamResult|
@@ -1524,7 +1506,6 @@ pub async fn proxy_anthropic_messages(
                     api_key_id_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
-                    region_for_done.as_deref(),
                     pt,
                     ct,
                     cost,
@@ -1576,7 +1557,6 @@ pub async fn proxy_anthropic_messages(
                 identity.api_key_id.as_deref(),
                 &mapped_model,
                 None,
-                None,
                 request_started_at.elapsed().as_millis() as i64,
                 &e,
             );
@@ -1626,7 +1606,6 @@ pub async fn proxy_anthropic_messages(
             identity.api_key_id.as_deref(),
             &mapped_model,
             Some(chosen_entry.provider_name.as_str()),
-            chosen_entry.region.as_deref(),
             pt,
             ct,
             cost,
@@ -1888,7 +1867,6 @@ pub async fn proxy_responses(
         let api_key_id_for_done = identity.api_key_id.clone();
         let model_for_log = mapped_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
-        let region_for_done = entry.region.clone();
         let started = request_started_at;
         let stream = entry.provider.stream_chat_completion(stream_request);
         let on_done = move |result: crate::streaming::StreamResult|
@@ -1909,7 +1887,6 @@ pub async fn proxy_responses(
                     api_key_id_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
-                    region_for_done.as_deref(),
                     pt,
                     ct,
                     cost,
@@ -1964,7 +1941,6 @@ pub async fn proxy_responses(
                 identity.api_key_id.as_deref(),
                 &mapped_model,
                 None,
-                None,
                 request_started_at.elapsed().as_millis() as i64,
                 &e,
             );
@@ -2012,7 +1988,6 @@ pub async fn proxy_responses(
             identity.api_key_id.as_deref(),
             &mapped_model,
             Some(chosen_entry.provider_name.as_str()),
-            chosen_entry.region.as_deref(),
             pt,
             ct,
             cost,

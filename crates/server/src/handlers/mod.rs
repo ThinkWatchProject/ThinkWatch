@@ -26,7 +26,6 @@ pub mod platform_logs;
 pub mod platform_pricing;
 pub mod providers;
 pub mod roles;
-pub mod scim;
 pub(crate) mod serde_util;
 pub mod setup;
 pub mod slo;

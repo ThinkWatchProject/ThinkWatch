@@ -970,15 +970,14 @@ async fn load_providers_into_router(
     .await?;
 
     // Build provider map: id -> (Arc<dyn DynAiProvider>, provider_type,
-    // provider_name, region). The name + region ride through to
-    // RouteEntry and onto every `gateway_logs` row we emit, so the
-    // audit pipeline can snapshot "which provider handled this request,
-    // in what data-residency region" without a second DB hit per call.
+    // provider_name). The name rides through to RouteEntry and onto
+    // every `gateway_logs` row we emit, so the audit pipeline can
+    // snapshot "which provider handled this request" without a second
+    // DB hit per call.
     type ProviderMapEntry = (
         Arc<dyn think_watch_gateway::providers::DynAiProvider>,
         String,
         String,
-        Option<String>,
     );
     let mut provider_map: HashMap<uuid::Uuid, ProviderMapEntry> = HashMap::new();
 
@@ -1058,7 +1057,6 @@ async fn load_providers_into_router(
                 dyn_provider,
                 provider.provider_type.clone(),
                 provider.name.clone(),
-                provider.region.clone(),
             ),
         );
 
@@ -1094,14 +1092,13 @@ async fn load_providers_into_router(
         std::collections::HashSet::new();
 
     for row in &route_rows {
-        if let Some((dyn_provider, _, provider_name, region)) = provider_map.get(&row.provider_id) {
+        if let Some((dyn_provider, _, provider_name)) = provider_map.get(&row.provider_id) {
             router.register_route(
                 &row.model_id,
                 RouteEntry {
                     provider: Arc::clone(dyn_provider),
                     provider_id: row.provider_id,
                     provider_name: provider_name.clone(),
-                    region: region.clone(),
                     upstream_model: row.upstream_model.clone(),
                     weight: row.weight as u32,
                     priority: row.priority as u32,
@@ -1113,7 +1110,7 @@ async fn load_providers_into_router(
     }
 
     // Default prefix fallback for providers with no specific model routes
-    for (provider_id, (dyn_provider, provider_type, provider_name, region)) in &provider_map {
+    for (provider_id, (dyn_provider, provider_type, provider_name)) in &provider_map {
         if !providers_with_routes.contains(provider_id) {
             let prefixes = default_model_prefixes(provider_type);
             for prefix in &prefixes {
@@ -1123,7 +1120,6 @@ async fn load_providers_into_router(
                         provider: Arc::clone(dyn_provider),
                         provider_id: *provider_id,
                         provider_name: provider_name.clone(),
-                        region: region.clone(),
                         upstream_model: None,
                         weight: 100,
                         priority: 0,
