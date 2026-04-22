@@ -102,12 +102,11 @@ interface RouteRow {
   enabled: boolean;
 }
 
-interface Provider {
-  id: string;
-  name: string;
-  display_name: string;
-  provider_type: string;
-}
+// `Provider` reused from provider-types so models.tsx and providers.tsx
+// can't drift apart. We previously declared a narrow local interface
+// with only id/name/display_name/provider_type which silently ignored
+// later additions to the canonical shape (e.g. region, config_json).
+import type { Provider } from './provider-types';
 
 interface ModelFormState {
   model_id: string;

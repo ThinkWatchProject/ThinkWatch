@@ -40,7 +40,7 @@ interface McpServer {
   id: string;
   name: string;
   namespace_prefix: string;
-  description: string;
+  description: string | null;
   endpoint_url: string;
   transport_type: string;
   auth_type: string | null;
@@ -238,7 +238,7 @@ export function McpServersPage() {
   const openEditDialog = (s: McpServer) => {
     setEditServer(s);
     setEditName(s.name);
-    setEditDescription(s.description);
+    setEditDescription(s.description ?? '');
     setEditEndpointUrl(s.endpoint_url);
     setEditNamespacePrefix(s.namespace_prefix ?? '');
     setEditAuthType(s.auth_type ?? 'none');

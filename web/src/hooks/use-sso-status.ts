@@ -3,14 +3,12 @@ import { API_BASE } from '@/lib/api';
 
 interface SsoStatus {
   ssoEnabled: boolean;
-  ssoUrl: string | null;
   allowRegistration: boolean;
   loading: boolean;
 }
 
 interface SsoStatusResponse {
   enabled: boolean;
-  sso_url?: string | null;
   allow_registration?: boolean;
 }
 
@@ -42,12 +40,11 @@ export function useSsoStatus(): SsoStatus {
     if (cached) {
       return {
         ssoEnabled: cached.enabled,
-        ssoUrl: cached.sso_url ?? null,
         allowRegistration: cached.allow_registration === true,
         loading: false,
       };
     }
-    return { ssoEnabled: false, ssoUrl: null, allowRegistration: false, loading: true };
+    return { ssoEnabled: false, allowRegistration: false, loading: true };
   });
 
   useEffect(() => {
@@ -57,7 +54,6 @@ export function useSsoStatus(): SsoStatus {
       if (cancelled) return;
       setStatus({
         ssoEnabled: data.enabled,
-        ssoUrl: data.sso_url ?? null,
         allowRegistration: data.allow_registration === true,
         loading: false,
       });

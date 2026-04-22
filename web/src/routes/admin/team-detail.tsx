@@ -46,6 +46,7 @@ import {
   X,
 } from 'lucide-react';
 import { api, apiDelete, apiPatch, apiPost, hasPermission } from '@/lib/api';
+import { fetchAllPaginated } from '@/lib/paginated-fetch';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { DataTablePagination } from '@/components/data-table-pagination';
 import { useClientPagination } from '@/hooks/use-client-pagination';
@@ -180,10 +181,15 @@ export function TeamDetailPage() {
     setPendingUserId('');
     setMemberError('');
     try {
-      const users = await api<{ data: UserSummary[] }>('/api/admin/users?per_page=200').catch(
-        () => ({ data: [] }),
-      );
-      setAllUsers(users.data ?? []);
+      // Backend caps per_page at 100; loop-fetch so the picker still
+      // shows everyone in orgs with 100+ users. /api/admin/users uses
+      // the legacy `{data, total, per_page}` pagination shape.
+      const users = await fetchAllPaginated<UserSummary>(
+        '/api/admin/users',
+        100,
+        'data',
+      ).catch(() => [] as UserSummary[]);
+      setAllUsers(users);
     } catch {
       // ignore
     }

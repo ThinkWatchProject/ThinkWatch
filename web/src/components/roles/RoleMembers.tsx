@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { api, apiPatch } from '@/lib/api';
+import { fetchAllPaginated } from '@/lib/paginated-fetch';
 import type { RoleMember, RoleResponse } from '@/routes/admin/roles/types';
 
 interface PickableUser {
@@ -117,8 +118,14 @@ export function RoleMembers({ role, teamsById, onMembersChanged }: RoleMembersPr
     setBusy(true);
     setMemberError('');
     try {
-      const fresh = await api<{ data: PickableUser[] }>(`/api/admin/users?per_page=1000`);
-      const user = fresh.data.find((u) => u.id === m.user_id);
+      // Backend caps per_page at 100; loop-fetch so the per-member
+      // reassign flow doesn't silently miss users in 100+ user orgs.
+      const fresh = await fetchAllPaginated<PickableUser>(
+        '/api/admin/users',
+        100,
+        'data',
+      );
+      const user = fresh.find((u) => u.id === m.user_id);
       if (!user) {
         setMemberError(t('roles.memberNotFound'));
         return;
@@ -127,7 +134,7 @@ export function RoleMembers({ role, teamsById, onMembersChanged }: RoleMembersPr
         (a) => !(a.role_id === role.id && a.scope === m.scope),
       );
       await writeAssignments(user, next);
-      setUsers(fresh.data);
+      setUsers(fresh);
       await reloadMembers();
       onMembersChanged();
     } catch (e) {

@@ -879,7 +879,7 @@ pub async fn list_role_members(
 // and surface dangerous permissions with extra confirmation.
 #[utoipa::path(
     get,
-    path = "/api/admin/roles/permissions",
+    path = "/api/admin/permissions",
     tag = "Roles",
     responses(
         (status = 200, description = "Full permission catalog"),

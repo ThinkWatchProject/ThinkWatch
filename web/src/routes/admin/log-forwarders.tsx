@@ -49,6 +49,12 @@ interface LogForwarder {
   id: string;
   name: string;
   forwarder_type: string;
+  // Backend wire shape is `serde_json::Value`. Every adapter the UI
+  // currently knows about (syslog / kafka / webhook) only reads flat
+  // string scalars off this map; the nested `custom_headers` case
+  // is handled defensively in openEditDialog. Tightening the type to
+  // string keeps that read path ergonomic — if a future adapter
+  // needs nested objects, widen here.
   config: Record<string, string>;
   log_types: string[];
   enabled: boolean;
