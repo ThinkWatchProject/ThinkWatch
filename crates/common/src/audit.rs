@@ -156,7 +156,14 @@ struct ChGatewayRow {
     provider: Option<String>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
-    cost_usd: Option<f64>,
+    // Raw ClickHouse encoding of `Decimal(18, 10)` — the value is
+    // `decimal × 10^10` stored as an i64. The clickhouse 0.13 crate
+    // has no Decimal type of its own, but its RowBinary serializer
+    // maps i64 1:1 to a `Decimal(_, 10)` column (CH stores Decimal64
+    // natively as i64). `cost_decimal::encode_i64` / `decode_i64`
+    // are the only sites that should create or unwrap these raw
+    // integers.
+    cost_usd: Option<i64>,
     latency_ms: Option<i64>,
     status_code: Option<i64>,
     ip_address: Option<String>,
@@ -243,6 +250,20 @@ fn detail_field<T: serde::de::DeserializeOwned>(
         .as_ref()?
         .get(key)
         .and_then(|v| serde_json::from_value(v.clone()).ok())
+}
+
+/// Extract a Decimal-stringified field from the audit JSON detail
+/// and encode it as the raw i64 ClickHouse expects under a
+/// `Decimal(_, 10)` column. The producer side (proxy.rs emit_*
+/// helpers) always writes cost_usd as a `Decimal::to_string()`
+/// string so the f64 intermediate in the JSON number path can't
+/// collapse precision.
+fn detail_cost_usd(detail: &Option<serde_json::Value>) -> Option<i64> {
+    use std::str::FromStr;
+    let raw = detail.as_ref()?.get("cost_usd")?;
+    let text = raw.as_str()?;
+    let decimal = rust_decimal::Decimal::from_str(text).ok()?;
+    Some(crate::cost_decimal::encode_i64(decimal))
 }
 
 impl AuditEntry {
@@ -1560,7 +1581,7 @@ async fn flush_gateway(
             provider: detail_field(&entry.detail, "provider"),
             input_tokens: detail_field(&entry.detail, "input_tokens"),
             output_tokens: detail_field(&entry.detail, "output_tokens"),
-            cost_usd: detail_field(&entry.detail, "cost_usd"),
+            cost_usd: detail_cost_usd(&entry.detail),
             latency_ms: detail_field(&entry.detail, "latency_ms"),
             status_code: detail_field(&entry.detail, "status_code"),
             ip_address: entry.ip_address,

@@ -120,7 +120,14 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     provider         LowCardinality(Nullable(String)),
     input_tokens     Nullable(Int64)   CODEC(Delta, ZSTD(1)),
     output_tokens    Nullable(Int64)   CODEC(Delta, ZSTD(1)),
-    cost_usd         Nullable(Float64) CODEC(Delta, ZSTD(1)),
+    -- cost_usd stored as Decimal(18, 10): precision 18 total digits,
+    -- scale 10 fractional. Float64 would accumulate rounding errors
+    -- under sum() — Decimal keeps billing aggregates exact. Scale 10
+    -- covers sub-cent token pricing (cheapest commercial model is
+    -- ~$1.5e-7 / token). See `common::cost_decimal` for the Rust-side
+    -- encode/decode helpers — the clickhouse crate has no Decimal
+    -- type of its own, so the wire is the column's raw i64 / i128.
+    cost_usd         Nullable(Decimal(18, 10)) CODEC(ZSTD(1)),
     latency_ms       Nullable(Int64)   CODEC(Delta, ZSTD(1)),
     status_code      Nullable(Int64),
     ip_address       Nullable(String),
@@ -287,7 +294,10 @@ CREATE TABLE IF NOT EXISTS cost_rollup_hourly (
     request_count  UInt64,
     input_tokens   Int64,
     output_tokens  Int64,
-    cost_usd       Float64
+    -- Decimal(38, 10) for the rollup — wider than the source column
+    -- so repeated sum() under SummingMergeTree can't overflow across
+    -- an extremely active hour. Scale matches the base column.
+    cost_usd       Decimal(38, 10)
 ) ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(hour)
 ORDER BY (hour, model_id, provider, user_id, api_key_id)

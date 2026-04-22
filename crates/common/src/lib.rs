@@ -38,6 +38,7 @@ pub mod models;
 pub mod audit; // AuditEntry / AuditLogger — used by every ingest path
 pub mod cb_registry;
 pub mod clickhouse_client;
+pub mod cost_decimal; // Decimal ↔ raw i64/i128 helpers for CH Decimal(18, 10) columns
 pub mod limits; // rate-limit & budget evaluation
 pub mod retry;
 

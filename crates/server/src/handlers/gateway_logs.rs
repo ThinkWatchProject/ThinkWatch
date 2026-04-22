@@ -1,7 +1,9 @@
 use axum::Json;
 use axum::extract::{Query, State};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use think_watch_common::cost_decimal::decode_i64;
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
@@ -26,7 +28,11 @@ pub struct GatewayLogsQuery {
     pub offset: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, clickhouse::Row, utoipa::ToSchema)]
+/// Wire shape returned to the frontend — `cost_usd` is the friendly
+/// Decimal-as-string form (via `rust_decimal::serde::str_option`).
+/// Separate from the CH read struct below because `clickhouse::Row`
+/// needs the raw i64 decimal encoding, not a serialized string.
+#[derive(Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct GatewayLogEntry {
     pub id: String,
     pub user_id: Option<String>,
@@ -35,11 +41,32 @@ pub struct GatewayLogEntry {
     pub provider: Option<String>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
-    pub cost_usd: Option<f64>,
+    #[schema(value_type = Option<String>)]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub cost_usd: Option<Decimal>,
     pub latency_ms: Option<i64>,
     pub status_code: Option<i64>,
     pub ip_address: Option<String>,
     pub created_at: String,
+}
+
+/// CH row shape — `cost_usd` is the raw i64 under a
+/// `Nullable(Decimal(18, 10))` column. Mapped to `GatewayLogEntry`
+/// via `decode_i64` before the response is serialized.
+#[derive(Debug, Deserialize, clickhouse::Row)]
+struct GatewayLogRow {
+    id: String,
+    user_id: Option<String>,
+    api_key_id: Option<String>,
+    model_id: Option<String>,
+    provider: Option<String>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cost_usd: Option<i64>,
+    latency_ms: Option<i64>,
+    status_code: Option<i64>,
+    ip_address: Option<String>,
+    created_at: String,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -170,10 +197,28 @@ pub async fn list_gateway_logs(
     for v in &bind_values {
         data_query = data_query.bind(v.as_str());
     }
-    let items: Vec<GatewayLogEntry> = data_query
+    let rows: Vec<GatewayLogRow> = data_query
         .fetch_all()
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse query failed: {e}")))?;
+
+    let items: Vec<GatewayLogEntry> = rows
+        .into_iter()
+        .map(|r| GatewayLogEntry {
+            id: r.id,
+            user_id: r.user_id,
+            api_key_id: r.api_key_id,
+            model_id: r.model_id,
+            provider: r.provider,
+            input_tokens: r.input_tokens,
+            output_tokens: r.output_tokens,
+            cost_usd: r.cost_usd.map(decode_i64),
+            latency_ms: r.latency_ms,
+            status_code: r.status_code,
+            ip_address: r.ip_address,
+            created_at: r.created_at,
+        })
+        .collect();
 
     Ok(Json(GatewayLogsResponse { total, items }))
 }

@@ -1,8 +1,10 @@
 use axum::Json;
 use axum::extract::{Query, State};
 use chrono::Datelike;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
+use think_watch_common::cost_decimal::decode_i128;
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
@@ -322,7 +324,13 @@ pub struct UsageRow {
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub total_cost: f64,
+    /// USD total for the (date, model) bucket. Serialized as a
+    /// string so JS consumers don't downgrade to f64 before they can
+    /// feed it into decimal.js — the whole cost pipeline is Decimal
+    /// end-to-end now.
+    #[schema(value_type = String)]
+    #[serde(with = "rust_decimal::serde::str")]
+    pub total_cost: Decimal,
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::IntoParams)]
@@ -358,6 +366,11 @@ pub async fn get_usage(
         return Ok(Json(Vec::new()));
     }
 
+    // `total_cost` here is the raw i128 ClickHouse returns for
+    // `sum(Decimal(18, 10))` (widened to Decimal(38, 10) under
+    // aggregation). `cost_decimal::decode_i128` lifts it back into
+    // Decimal at the boundary; the CH crate has no Decimal of its
+    // own to deserialize directly into.
     #[derive(clickhouse::Row, Deserialize)]
     struct UsageRowCh {
         date: String,
@@ -365,7 +378,7 @@ pub async fn get_usage(
         request_count: u64,
         input_tokens: u64,
         output_tokens: u64,
-        total_cost: f64,
+        total_cost: i128,
     }
 
     let ch = ch_client(&state)?;
@@ -423,7 +436,7 @@ pub async fn get_usage(
                     request_count: r.request_count as i64,
                     input_tokens: r.input_tokens as i64,
                     output_tokens: r.output_tokens as i64,
-                    total_cost: r.total_cost,
+                    total_cost: decode_i128(r.total_cost),
                 })
         })
         .collect();
@@ -435,24 +448,36 @@ pub async fn get_usage(
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CostStats {
-    /// Total cost (USD) over the selected range. For 24h this is "today";
-    /// for 7d / 30d it's the last N days. `budget_usage_pct` below remains
-    /// tied to the caller's monthly budget caps regardless of range.
-    pub total_cost: f64,
+    /// Total cost (USD) over the selected range, serialized as a
+    /// string so the JS side stays precision-safe.
+    #[schema(value_type = String)]
+    #[serde(with = "rust_decimal::serde::str")]
+    pub total_cost: Decimal,
+    /// Budget utilisation is a ratio (0..100) computed in Rust from
+    /// Redis counters — stays f64, it isn't a money value.
     pub budget_usage_pct: Option<f64>,
     /// Per-bucket cost totals (USD, oldest → newest). Length depends on range.
-    pub cost_buckets: Vec<f64>,
+    pub cost_buckets: Vec<CostBucket>,
     /// Echo of the range the server used.
     pub range: String,
-    /// Month-to-date cost, always included regardless of `range` — the
-    /// "you've spent $X this month" figure needs to stay stable even when
-    /// the user is inspecting a 24h window.
-    pub total_cost_mtd: f64,
+    /// Month-to-date cost, always included regardless of `range`.
+    #[schema(value_type = String)]
+    #[serde(with = "rust_decimal::serde::str")]
+    pub total_cost_mtd: Decimal,
     /// Total cost over the immediately-preceding window of the same
     /// length. Populated only when `?compare=true`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prev_total_cost: Option<f64>,
+    #[schema(value_type = Option<String>)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "rust_decimal::serde::str_option")]
+    pub prev_total_cost: Option<Decimal>,
 }
+
+/// Single bucket's cost — wrapped so we get `rust_decimal::serde::str`
+/// on each element without needing a Vec-level helper.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[serde(transparent)]
+#[schema(value_type = String)]
+pub struct CostBucket(#[serde(with = "rust_decimal::serde::str")] pub Decimal);
 
 #[utoipa::path(
     get,
@@ -493,12 +518,12 @@ pub async fn get_cost_stats(
 
     #[derive(clickhouse::Row, Deserialize)]
     struct CostPair {
-        total: f64,
-        total_mtd: f64,
+        total: i128,
+        total_mtd: i128,
     }
 
-    let (total_f64, total_mtd_f64) = if empty_scope {
-        (0.0, 0.0)
+    let (total_decimal, total_mtd_decimal) = if empty_scope {
+        (Decimal::ZERO, Decimal::ZERO)
     } else {
         let ch = ch_client(&state)?;
         let window_start_str = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -537,7 +562,7 @@ pub async fn get_cost_stats(
                 .await
                 .map_err(|e| AppError::Internal(anyhow::anyhow!("cost_stats CH query: {e}")))?,
         };
-        (row.total, row.total_mtd)
+        (decode_i128(row.total), decode_i128(row.total_mtd))
     };
 
     // Budget usage percentage: ratio of current spend to the monthly
@@ -588,14 +613,18 @@ pub async fn get_cost_stats(
         }
     };
 
-    // Per-bucket cost totals over the selected range.
+    // Per-bucket cost totals over the selected range. CH row struct
+    // keeps the raw i128 (sum widens to Decimal128); we decode to
+    // Decimal at the bucket lookup boundary.
     #[derive(clickhouse::Row, Deserialize)]
-    struct CostBucket {
+    struct CostBucketCh {
         bucket: String,
-        cost: f64,
+        cost: i128,
     }
-    let cost_buckets: Vec<f64> = if empty_scope {
-        vec![0.0; range.bucket_count()]
+    let cost_buckets: Vec<CostBucket> = if empty_scope {
+        (0..range.bucket_count())
+            .map(|_| CostBucket(Decimal::ZERO))
+            .collect()
     } else {
         let ch = ch_client(&state)?;
         let window_start_str = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -615,39 +644,39 @@ pub async fn get_cost_stats(
                 AND has(?, user_id) \
               GROUP BY bucket ORDER BY bucket ASC"
         );
-        let rows: Vec<CostBucket> = match &user_filter {
+        let rows: Vec<CostBucketCh> = match &user_filter {
             None => ch
                 .query(&sql_no_filter)
                 .bind(&window_start_str)
-                .fetch_all::<CostBucket>()
+                .fetch_all::<CostBucketCh>()
                 .await
                 .unwrap_or_default(),
             Some(ids) => ch
                 .query(&sql_scoped)
                 .bind(&window_start_str)
                 .bind(ids)
-                .fetch_all::<CostBucket>()
+                .fetch_all::<CostBucketCh>()
                 .await
                 .unwrap_or_default(),
         };
-        let lookup: std::collections::HashMap<i64, f64> = rows
+        let lookup: std::collections::HashMap<i64, Decimal> = rows
             .into_iter()
             .filter_map(|b| {
                 chrono::NaiveDateTime::parse_from_str(&b.bucket, "%Y-%m-%d %H:%M:%S")
                     .ok()
-                    .map(|ndt| (ndt.and_utc().timestamp(), b.cost))
+                    .map(|ndt| (ndt.and_utc().timestamp(), decode_i128(b.cost)))
             })
             .collect();
         range
             .bucket_starts(now)
             .into_iter()
-            .map(|t| *lookup.get(&t.timestamp()).unwrap_or(&0.0))
+            .map(|t| CostBucket(lookup.get(&t.timestamp()).copied().unwrap_or(Decimal::ZERO)))
             .collect()
     };
 
-    let prev_total_cost = if q.compare.unwrap_or(false) {
+    let prev_total_cost: Option<Decimal> = if q.compare.unwrap_or(false) {
         if empty_scope {
-            Some(0.0)
+            Some(Decimal::ZERO)
         } else {
             let ch = ch_client(&state)?;
             let (prev_start, prev_end) = range.prev_window(now);
@@ -655,7 +684,7 @@ pub async fn get_cost_stats(
             let prev_end_str = prev_end.format("%Y-%m-%d %H:%M:%S").to_string();
             #[derive(clickhouse::Row, Deserialize)]
             struct PrevCost {
-                cost: f64,
+                cost: i128,
             }
             let prev = match &user_filter {
                 None => ch
@@ -683,18 +712,18 @@ pub async fn get_cost_stats(
                     .await
                     .ok(),
             };
-            Some(prev.map(|p| p.cost).unwrap_or(0.0))
+            Some(prev.map(|p| decode_i128(p.cost)).unwrap_or(Decimal::ZERO))
         }
     } else {
         None
     };
 
     Ok(Json(CostStats {
-        total_cost: total_f64,
+        total_cost: total_decimal,
         budget_usage_pct,
         cost_buckets,
         range: range_label(range).into(),
-        total_cost_mtd: total_mtd_f64,
+        total_cost_mtd: total_mtd_decimal,
         prev_total_cost,
     }))
 }
@@ -707,8 +736,9 @@ pub struct CostItem {
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
-    #[schema(value_type = f64)]
-    pub total_cost: f64,
+    #[schema(value_type = String)]
+    #[serde(with = "rust_decimal::serde::str")]
+    pub total_cost: Decimal,
 }
 
 /// Aggregate totals across all groups.
@@ -717,7 +747,9 @@ pub struct CostTotals {
     pub request_count: i64,
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub total_cost: f64,
+    #[schema(value_type = String)]
+    #[serde(with = "rust_decimal::serde::str")]
+    pub total_cost: Decimal,
 }
 
 /// Top-level cost breakdown response.
@@ -883,7 +915,7 @@ pub async fn get_costs(
                 request_count: 0,
                 input_tokens: 0,
                 output_tokens: 0,
-                total_cost: 0.0,
+                total_cost: Decimal::ZERO,
             },
         })
         .into_response());
@@ -923,7 +955,9 @@ pub async fn get_costs(
         request_count: u64,
         input_tokens: u64,
         output_tokens: u64,
-        total_cost: f64,
+        // Raw widened sum from CH (Decimal(38, 10)). Decoded via
+        // cost_decimal::decode_i128 once per row below.
+        total_cost: i128,
     }
 
     let sql_no_filter = format!(
@@ -982,7 +1016,7 @@ pub async fn get_costs(
         request_count: i64,
         input_tokens: i64,
         output_tokens: i64,
-        total_cost: f64,
+        total_cost: Decimal,
     }
     let raw_items: Vec<RawItem> = ch_rows
         .into_iter()
@@ -994,7 +1028,7 @@ pub async fn get_costs(
                 request_count: r.request_count as i64,
                 input_tokens: r.input_tokens as i64,
                 output_tokens: r.output_tokens as i64,
-                total_cost: r.total_cost,
+                total_cost: decode_i128(r.total_cost),
             }
         })
         .collect();
@@ -1031,7 +1065,7 @@ pub async fn get_costs(
     // A single cost_center may absorb multiple api_keys' contributions;
     // totals stay correct because we sum request_count/tokens/cost.
     let cc_idx_opt = dims.iter().position(|d| *d == CostGroupBy::CostCenter);
-    type Totals = (i64, i64, i64, f64);
+    type Totals = (i64, i64, i64, Decimal);
     let mut grouped: std::collections::BTreeMap<Vec<String>, Totals> =
         std::collections::BTreeMap::new();
     for it in raw_items {
@@ -1043,7 +1077,9 @@ pub async fn get_costs(
                 .unwrap_or_else(|| "(untagged)".to_string());
             dim_values[cc_idx] = cc_label;
         }
-        let entry = grouped.entry(dim_values).or_insert((0, 0, 0, 0.0));
+        let entry = grouped
+            .entry(dim_values)
+            .or_insert((0, 0, 0, Decimal::ZERO));
         entry.0 += it.request_count;
         entry.1 += it.input_tokens;
         entry.2 += it.output_tokens;
@@ -1052,11 +1088,7 @@ pub async fn get_costs(
 
     // Sort by total_cost DESC, apply offset+limit.
     let mut ordered: Vec<(Vec<String>, Totals)> = grouped.into_iter().collect();
-    ordered.sort_by(|a, b| {
-        b.1.3
-            .partial_cmp(&a.1.3)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    ordered.sort_by_key(|b| std::cmp::Reverse(b.1.3));
     let paged: Vec<(Vec<String>, Totals)> = ordered
         .into_iter()
         .skip(offset as usize)
@@ -1066,7 +1098,7 @@ pub async fn get_costs(
     let mut total_req: i64 = 0;
     let mut total_in: i64 = 0;
     let mut total_out: i64 = 0;
-    let mut total_cost_sum: f64 = 0.0;
+    let mut total_cost_sum: Decimal = Decimal::ZERO;
     let items: Vec<CostItem> = paged
         .into_iter()
         .map(|(dim_values, (req, in_tok, out_tok, cost))| {

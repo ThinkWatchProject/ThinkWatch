@@ -4,6 +4,7 @@ use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use rand::RngExt;
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -294,7 +295,10 @@ fn emit_gateway_error_log(
         "provider": provider,
         "input_tokens": 0i64,
         "output_tokens": 0i64,
-        "cost_usd": 0.0,
+        // Decimal-as-string in the audit JSON so the CH flush reader
+        // can reconstruct exact precision — the JSON `number` path
+        // would collapse through f64 in between.
+        "cost_usd": Decimal::ZERO.to_string(),
         "latency_ms": latency_ms,
         "status_code": status,
         "error_type": format!("{err:?}").split('(').next().unwrap_or("Error"),
@@ -342,7 +346,7 @@ fn emit_gateway_log_with_extra(
     provider: Option<&str>,
     prompt_tokens: u32,
     completion_tokens: u32,
-    cost_usd: f64,
+    cost_usd: Decimal,
     latency_ms: i64,
     status_code: i64,
     extra: Option<serde_json::Value>,
@@ -352,7 +356,7 @@ fn emit_gateway_log_with_extra(
         "provider": provider,
         "input_tokens": prompt_tokens as i64,
         "output_tokens": completion_tokens as i64,
-        "cost_usd": cost_usd,
+        "cost_usd": cost_usd.to_string(),
         "latency_ms": latency_ms,
         "status_code": status_code,
     });
@@ -397,7 +401,7 @@ fn emit_gateway_log(
     provider: Option<&str>,
     prompt_tokens: u32,
     completion_tokens: u32,
-    cost_usd: f64,
+    cost_usd: Decimal,
     latency_ms: i64,
     status_code: i64,
 ) {
@@ -408,7 +412,7 @@ fn emit_gateway_log(
             "provider": provider,
             "input_tokens": prompt_tokens as i64,
             "output_tokens": completion_tokens as i64,
-            "cost_usd": cost_usd,
+            "cost_usd": cost_usd.to_string(),
             "latency_ms": latency_ms,
             "status_code": status_code,
         }));

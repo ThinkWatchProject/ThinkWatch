@@ -26,22 +26,25 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use rust_decimal::Decimal;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 
 use think_watch_common::limits::weight::WeightCache;
 
-/// Platform-wide per-token prices in USD. Fresh copy loaded from
-/// `platform_pricing` on first call / after TTL.
-#[derive(Debug, Clone, Copy)]
+/// Platform-wide per-token prices in USD as `Decimal` so the cost
+/// math stays precision-preserving end-to-end — stored as-is in the
+/// `platform_pricing` row and compared against tokens + weights
+/// without a lossy `f64` round trip.
+#[derive(Debug, Clone)]
 struct Baseline {
-    input_per_token: f64,
-    output_per_token: f64,
+    input_per_token: Decimal,
+    output_per_token: Decimal,
     expires: Instant,
 }
 
 impl Baseline {
-    fn fresh(input: f64, output: f64) -> Self {
+    fn fresh(input: Decimal, output: Decimal) -> Self {
         Self {
             input_per_token: input,
             output_per_token: output,
@@ -54,8 +57,12 @@ const BASELINE_TTL: Duration = Duration::from_secs(60);
 
 /// Fallback used when the platform_pricing query fails at first call.
 /// Matches the DB defaults so cost logs are still useful pre-config.
-const FALLBACK_INPUT_PER_TOKEN: f64 = 0.0000020;
-const FALLBACK_OUTPUT_PER_TOKEN: f64 = 0.0000080;
+fn fallback_input() -> Decimal {
+    Decimal::new(20, 7) // 0.0000020
+}
+fn fallback_output() -> Decimal {
+    Decimal::new(80, 7) // 0.0000080
+}
 
 pub struct CostTracker {
     pool: PgPool,
@@ -72,14 +79,29 @@ impl CostTracker {
         }
     }
 
-    /// Compute USD cost for a request. Async because both the baseline
-    /// and the weight can fall through to the DB on a cache miss.
-    pub async fn calculate_cost(&self, model: &str, input_tokens: u32, output_tokens: u32) -> f64 {
+    /// Compute USD cost for a request as `Decimal`. Async because
+    /// both the baseline and the weight can fall through to the DB on
+    /// a cache miss.
+    ///
+    /// The per-model weight stored in `WeightCache` is `f64` (used
+    /// elsewhere to scale i64 token counts for rate-limiting); we
+    /// lift it to `Decimal` for the money multiply. Precision loss
+    /// at the weight boundary is ~15 sig-figs which is ample for the
+    /// 0.1–10× range weights actually live in.
+    pub async fn calculate_cost(
+        &self,
+        model: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) -> Decimal {
         let baseline = self.baseline_value().await;
         let w = self.weight_cache.get(&self.pool, model).await;
 
-        let input_cost = f64::from(input_tokens) * baseline.input_per_token * w.input;
-        let output_cost = f64::from(output_tokens) * baseline.output_per_token * w.output;
+        let w_input = Decimal::try_from(w.input).unwrap_or(Decimal::ONE);
+        let w_output = Decimal::try_from(w.output).unwrap_or(Decimal::ONE);
+
+        let input_cost = Decimal::from(input_tokens) * baseline.input_per_token * w_input;
+        let output_cost = Decimal::from(output_tokens) * baseline.output_per_token * w_output;
         input_cost + output_cost
     }
 
@@ -93,35 +115,29 @@ impl CostTracker {
         // Fast path: fresh cached value.
         {
             let r = self.baseline.read().await;
-            if let Some(b) = *r
+            if let Some(ref b) = *r
                 && b.expires > Instant::now()
             {
-                return b;
+                return b.clone();
             }
         }
 
         // Slow path: query the singleton.
-        let loaded = match sqlx::query_as::<_, (rust_decimal::Decimal, rust_decimal::Decimal)>(
+        let loaded = match sqlx::query_as::<_, (Decimal, Decimal)>(
             "SELECT input_price_per_token, output_price_per_token \
              FROM platform_pricing WHERE id = 1",
         )
         .fetch_optional(&self.pool)
         .await
         {
-            Ok(Some((i, o))) => {
-                use rust_decimal::prelude::ToPrimitive;
-                Baseline::fresh(
-                    i.to_f64().unwrap_or(FALLBACK_INPUT_PER_TOKEN),
-                    o.to_f64().unwrap_or(FALLBACK_OUTPUT_PER_TOKEN),
-                )
-            }
+            Ok(Some((i, o))) => Baseline::fresh(i, o),
             _ => {
                 tracing::warn!("platform_pricing lookup failed; using built-in defaults");
-                Baseline::fresh(FALLBACK_INPUT_PER_TOKEN, FALLBACK_OUTPUT_PER_TOKEN)
+                Baseline::fresh(fallback_input(), fallback_output())
             }
         };
 
-        *self.baseline.write().await = Some(loaded);
+        *self.baseline.write().await = Some(loaded.clone());
         loaded
     }
 }

@@ -17,16 +17,19 @@ import { TeamFilter } from '@/components/filters/team-filter';
 import { SimpleBarChart } from '@/components/ui/simple-chart';
 import { Skeleton } from '@/components/ui/skeleton';
 
+import Decimal from 'decimal.js';
+
 interface UsageRow {
   date: string;
   model_id: string;
   request_count: number;
   input_tokens: number;
   output_tokens: number;
-  // f64 on the wire (gateway_logs.cost_usd is Float64). Decimal-fidelity
-  // billing is a separate migration; until then this is JS-number
-  // precision (~15 significant digits, fine for the dashboard).
-  total_cost: number;
+  // Decimal string on the wire (CH `Decimal(18, 10)`, serialized via
+  // `rust_decimal::serde::str`). Keep it as a string in state so a
+  // stray JS-number coercion can't downgrade to f64; lift to Decimal
+  // only when we do math or format for display.
+  total_cost: string;
 }
 
 interface UsageStats {
@@ -173,7 +176,7 @@ export function UsagePage() {
                     <TableCell className="text-right">{row.request_count.toLocaleString()}</TableCell>
                     <TableCell className="text-right">{row.input_tokens.toLocaleString()}</TableCell>
                     <TableCell className="text-right">{row.output_tokens.toLocaleString()}</TableCell>
-                    <TableCell className="text-right">${row.total_cost.toFixed(4)}</TableCell>
+                    <TableCell className="text-right">${new Decimal(row.total_cost).toFixed(4)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

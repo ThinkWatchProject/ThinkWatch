@@ -18,7 +18,9 @@ use axum::extract::{Query, State};
 use axum::http::{HeaderMap, header};
 use axum::response::IntoResponse;
 use chrono::{DateTime, Datelike, Utc};
+use rust_decimal::Decimal;
 use serde::Deserialize;
+use think_watch_common::cost_decimal::decode_i128;
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
@@ -77,7 +79,9 @@ pub async fn export_chargeback_csv(
     struct ChRow {
         api_key_id: String,
         model_id: String,
-        cost_usd: f64,
+        // Raw widened sum from CH (Decimal(38, 10)). Decoded to
+        // Decimal below before any Rust-side aggregation.
+        cost_usd: i128,
         total_tokens: u64,
         request_count: u64,
     }
@@ -133,7 +137,7 @@ pub async fn export_chargeback_csv(
     // the same model may now collapse into one line if they share a
     // cost_center (e.g. two api_keys both tagged "marketing").
     use std::collections::BTreeMap;
-    type Totals = (f64, u64, u64);
+    type Totals = (Decimal, u64, u64);
     let mut grouped: BTreeMap<(String, String), Totals> = BTreeMap::new();
     for r in ch_rows {
         let cost_center = uuid::Uuid::parse_str(&r.api_key_id)
@@ -142,8 +146,8 @@ pub async fn export_chargeback_csv(
             .unwrap_or_else(|| "(unassigned)".to_string());
         let entry = grouped
             .entry((cost_center, r.model_id))
-            .or_insert((0.0, 0, 0));
-        entry.0 += r.cost_usd;
+            .or_insert((Decimal::ZERO, 0, 0));
+        entry.0 += decode_i128(r.cost_usd);
         entry.1 += r.total_tokens;
         entry.2 += r.request_count;
     }
@@ -151,13 +155,7 @@ pub async fn export_chargeback_csv(
     // Sort: cost_center ASC, cost_usd DESC within each group —
     // matches the original SQL ORDER BY.
     let mut ordered: Vec<((String, String), Totals)> = grouped.into_iter().collect();
-    ordered.sort_by(|a, b| {
-        a.0.0.cmp(&b.0.0).then_with(|| {
-            b.1.0
-                .partial_cmp(&a.1.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
-    });
+    ordered.sort_by(|a, b| a.0.0.cmp(&b.0.0).then_with(|| b.1.0.cmp(&a.1.0)));
 
     // Manual CSV serialisation — pulling in a csv crate for one
     // endpoint isn't worth the dep. Each value is escaped with

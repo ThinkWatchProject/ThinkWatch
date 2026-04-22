@@ -61,12 +61,16 @@ interface UsageStats {
 }
 
 interface CostStats {
-  total_cost: number;
+  // Decimal string on the wire (CH `Decimal(18, 10)`). Dashboard
+  // converts to Number for the card widgets — the backend is the
+  // source of truth for billing-grade precision; the dashboard just
+  // needs the rough value for display.
+  total_cost: string;
   budget_usage_pct: number | null;
-  cost_buckets: number[];
+  cost_buckets: string[];
   range: string;
-  total_cost_mtd: number;
-  prev_total_cost?: number;
+  total_cost_mtd: string;
+  prev_total_cost?: string;
 }
 
 type TimeRange = '24h' | '7d' | '30d';
@@ -508,16 +512,20 @@ function CostCard({
   label: string;
 }) {
   const cost = use(promise);
+  // Dashboard uses Number for the visual card / sparkline — display
+  // precision is fine. The backend keeps Decimal end-to-end for any
+  // consumer that needs billing-grade numbers (costs page, chargeback
+  // CSV); this is deliberately the one place the frontend downgrades.
   return (
     <StatCard
       label={label}
-      value={cost.total_cost}
+      value={Number(cost.total_cost)}
       format={(v) => fmtUsd(v, locale)}
       delta={cost.budget_usage_pct != null ? `${cost.budget_usage_pct.toFixed(1)}%` : undefined}
-      spark={cost.cost_buckets}
+      spark={cost.cost_buckets.map(Number)}
       loading={false}
       chartIndex={2}
-      prev={cost.prev_total_cost}
+      prev={cost.prev_total_cost !== undefined ? Number(cost.prev_total_cost) : undefined}
     />
   );
 }

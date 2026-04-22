@@ -32,6 +32,9 @@ importers:
       date-fns:
         specifier: ^4.1.0
         version: 4.1.0
+      decimal.js:
+        specifier: ^10.6.0
+        version: 10.6.0
       i18next:
         specifier: ^26.0.3
         version: 26.0.3(typescript@6.0.2)

@@ -28,16 +28,17 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import Decimal from 'decimal.js';
 
 interface CostRow {
   dimensions: Record<string, string>;
   request_count: number;
   input_tokens: number;
   output_tokens: number;
-  // f64 on the wire (gateway_logs.cost_usd is Float64). Decimal-fidelity
-  // billing is a separate migration; until then this is JS-number
-  // precision (~15 significant digits, fine for the dashboard).
-  total_cost: number;
+  // Decimal string on the wire (CH `Decimal(18, 10)`). Kept as a
+  // string in state so every sort / sum / display goes through
+  // decimal.js instead of round-tripping through f64.
+  total_cost: string;
 }
 
 type CostDimension = 'model' | 'user' | 'cost_center' | 'provider';
@@ -48,7 +49,7 @@ type TimeRange = '24h' | '7d' | '30d' | 'mtd';
 const TIME_RANGE_OPTIONS: readonly TimeRange[] = ['24h', '7d', '30d', 'mtd'] as const;
 
 interface CostStats {
-  total_cost_mtd: number;
+  total_cost_mtd: string;
   budget_usage_pct: number | null;
 }
 
@@ -60,7 +61,7 @@ function getDimensionValue(row: CostRow, dim: CostDimension): string {
 export function CostsPage() {
   const { t } = useTranslation();
   const [rows, setRows] = useState<CostRow[]>([]);
-  const [stats, setStats] = useState<CostStats>({ total_cost_mtd: 0, budget_usage_pct: null });
+  const [stats, setStats] = useState<CostStats>({ total_cost_mtd: '0', budget_usage_pct: null });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
 
@@ -104,7 +105,7 @@ export function CostsPage() {
   const fetchData = useCallback(() => {
     setLoading(true);
     Promise.all([
-      api<{ items: CostRow[]; total: { request_count: number; input_tokens: number; output_tokens: number; total_cost: number } }>(`/api/analytics/costs${queryString()}`),
+      api<{ items: CostRow[]; total: { request_count: number; input_tokens: number; output_tokens: number; total_cost: string } }>(`/api/analytics/costs${queryString()}`),
       api<CostStats>(`/api/analytics/costs/stats${selectedTeam ? `?team_id=${selectedTeam}` : ''}`),
     ])
       .then(([costData, statsData]) => {
@@ -142,23 +143,34 @@ export function CostsPage() {
     }
   }, [queryString, selectedDimensions, t]);
 
-  // Chart: top N rows by cost for single-dimension mode
+  // Chart: top N rows by cost for single-dimension mode. Sort via
+  // Decimal so extreme values don't get compared as f64.
   const chartData = useMemo(() => {
     if (!isSingleDimension) return [];
     const dim = selectedDimensions[0];
     return rows
       .slice()
-      .sort((a, b) => b.total_cost - a.total_cost)
+      .sort((a, b) => new Decimal(b.total_cost).comparedTo(new Decimal(a.total_cost)))
       .map((row) => {
         const label = getDimensionValue(row, dim);
         return {
           label: label.length > 18 ? label.slice(0, 16) + '..' : label,
-          value: row.total_cost,
+          // simple-chart takes a number; converting to Number here
+          // keeps the visual plot happy while the source of truth
+          // stays as a Decimal string on every other path.
+          value: new Decimal(row.total_cost).toNumber(),
         };
       });
   }, [rows, isSingleDimension, selectedDimensions]);
 
-  const totalCost = useMemo(() => rows.reduce((sum, r) => sum + r.total_cost, 0), [rows]);
+  const totalCost = useMemo(
+    () =>
+      rows.reduce(
+        (sum, r) => sum.plus(new Decimal(r.total_cost)),
+        new Decimal(0),
+      ),
+    [rows],
+  );
   const budgetPct = stats.budget_usage_pct ?? 0;
 
   // ---- Pivot table data (2-dimension mode) ----
@@ -168,7 +180,7 @@ export function CostsPage() {
     const [rowDim, colDim] = selectedDimensions;
     const rowKeysSet = new Set<string>();
     const colKeysSet = new Set<string>();
-    const cellMap = new Map<string, number>();
+    const cellMap = new Map<string, Decimal>();
 
     for (const row of rows) {
       const rk = getDimensionValue(row, rowDim);
@@ -176,29 +188,35 @@ export function CostsPage() {
       rowKeysSet.add(rk);
       colKeysSet.add(ck);
       const key = `${rk}\0${ck}`;
-      cellMap.set(key, (cellMap.get(key) ?? 0) + row.total_cost);
+      const prev = cellMap.get(key) ?? new Decimal(0);
+      cellMap.set(key, prev.plus(new Decimal(row.total_cost)));
     }
 
     const rowKeys = [...rowKeysSet].sort();
     const colKeys = [...colKeysSet].sort();
 
     // Row totals
-    const rowTotals = new Map<string, number>();
+    const rowTotals = new Map<string, Decimal>();
     for (const rk of rowKeys) {
-      let sum = 0;
-      for (const ck of colKeys) sum += cellMap.get(`${rk}\0${ck}`) ?? 0;
+      let sum = new Decimal(0);
+      for (const ck of colKeys)
+        sum = sum.plus(cellMap.get(`${rk}\0${ck}`) ?? new Decimal(0));
       rowTotals.set(rk, sum);
     }
 
     // Column totals
-    const colTotals = new Map<string, number>();
+    const colTotals = new Map<string, Decimal>();
     for (const ck of colKeys) {
-      let sum = 0;
-      for (const rk of rowKeys) sum += cellMap.get(`${rk}\0${ck}`) ?? 0;
+      let sum = new Decimal(0);
+      for (const rk of rowKeys)
+        sum = sum.plus(cellMap.get(`${rk}\0${ck}`) ?? new Decimal(0));
       colTotals.set(ck, sum);
     }
 
-    const grandTotal = [...rowTotals.values()].reduce((a, b) => a + b, 0);
+    const grandTotal = [...rowTotals.values()].reduce(
+      (a, b) => a.plus(b),
+      new Decimal(0),
+    );
 
     return { rowDim, colDim, rowKeys, colKeys, cellMap, rowTotals, colTotals, grandTotal };
   }, [rows, isSingleDimension, selectedDimensions]);
@@ -288,7 +306,7 @@ export function CostsPage() {
           </CardHeader>
           <CardContent>
             <div className="text-2xl font-bold">
-              {loading ? <Skeleton className="h-8 w-24" /> : `$${stats.total_cost_mtd.toFixed(2)}`}
+              {loading ? <Skeleton className="h-8 w-24" /> : `$${new Decimal(stats.total_cost_mtd).toFixed(2)}`}
             </div>
           </CardContent>
         </Card>
@@ -370,8 +388,10 @@ export function CostsPage() {
               </TableHeader>
               <TableBody>
                 {rows.map((row) => {
-                  const cost = row.total_cost;
-                  const pct = totalCost > 0 ? (cost / totalCost) * 100 : 0;
+                  const cost = new Decimal(row.total_cost);
+                  const pct = totalCost.greaterThan(0)
+                    ? cost.dividedBy(totalCost).times(100).toNumber()
+                    : 0;
                   const label = getDimensionValue(row, selectedDimensions[0]);
                   return (
                     <TableRow key={label}>
@@ -408,15 +428,15 @@ export function CostsPage() {
                     <TableRow key={rk}>
                       <TableCell className="font-mono text-xs">{rk}</TableCell>
                       {pivotData.colKeys.map((ck) => {
-                        const val = pivotData.cellMap.get(`${rk}\0${ck}`) ?? 0;
+                        const val = pivotData.cellMap.get(`${rk}\0${ck}`) ?? new Decimal(0);
                         return (
                           <TableCell key={ck} className="text-right tabular-nums">
-                            {val > 0 ? `$${val.toFixed(2)}` : '—'}
+                            {val.greaterThan(0) ? `$${val.toFixed(2)}` : '—'}
                           </TableCell>
                         );
                       })}
                       <TableCell className="text-right font-semibold tabular-nums">
-                        ${(pivotData.rowTotals.get(rk) ?? 0).toFixed(2)}
+                        ${(pivotData.rowTotals.get(rk) ?? new Decimal(0)).toFixed(2)}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -425,7 +445,7 @@ export function CostsPage() {
                     <TableCell className="font-semibold">{t('analyticsCosts.pivotTotal')}</TableCell>
                     {pivotData.colKeys.map((ck) => (
                       <TableCell key={ck} className="text-right font-semibold tabular-nums">
-                        ${(pivotData.colTotals.get(ck) ?? 0).toFixed(2)}
+                        ${(pivotData.colTotals.get(ck) ?? new Decimal(0)).toFixed(2)}
                       </TableCell>
                     ))}
                     <TableCell className="text-right font-bold tabular-nums">
