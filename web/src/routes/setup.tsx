@@ -1,4 +1,4 @@
-import { useState, useCallback, type FormEvent } from 'react';
+import { useState, useCallback, useEffect, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invalidateSetupStatusCache } from '@/router';
 import { Button } from '@/components/ui/button';
@@ -619,6 +619,36 @@ export function SetupPage() {
       goNext();
     }
   };
+
+  // Enter should advance the wizard regardless of focus — the default
+  // form-submit path only fires while an input is focused, so a user
+  // who clicked the card background or tabbed to a label would see
+  // Enter do nothing. `isComposing` guards against swallowing the
+  // commit key of an IME (Chinese / Japanese).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.isComposing || e.shiftKey) return;
+      // Let explicit button activation through — Space / Enter on a
+      // focused <button> already does the right thing.
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === 'TEXTAREA' || target.tagName === 'BUTTON')) {
+        return;
+      }
+      if (step === 'welcome') {
+        e.preventDefault();
+        goNext();
+      } else if (step === 'admin' || step === 'settings') {
+        e.preventDefault();
+        goNext();
+      } else if (step === 'provider' && !submitting) {
+        e.preventDefault();
+        handleSubmit(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [step, submitting]);
 
   const showBack = step !== 'welcome' && step !== 'complete';
   const showNext = step === 'admin' || step === 'settings';
