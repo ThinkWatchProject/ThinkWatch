@@ -3,6 +3,19 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { SetupPage } from './setup'
 
+// SetupPage dynamically imports @/lib/api once init succeeds to register
+// the freshly-generated ECDSA key pair. Both crypto.subtle.generateKey
+// and indexedDB are unavailable / unstable in jsdom, so the original
+// registerKeyPair() rejects and the page never advances to the complete
+// step. Stubbing it (and invalidateSetupStatusCache, which the same
+// import block touches) keeps the happy-path tests focused on the UI
+// flow, not the auth-handshake plumbing.
+vi.mock('@/lib/api', () => ({
+  registerKeyPair: vi.fn().mockResolvedValue(undefined),
+  invalidateSetupStatusCache: vi.fn(),
+  API_BASE: '',
+}))
+
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
     ok: true,
@@ -27,7 +40,7 @@ describe('SetupPage', () => {
     expect(screen.getByText('Create Admin Account')).toBeInTheDocument()
     expect(screen.getByLabelText(/email/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/display name/i)).toBeInTheDocument()
-    expect(screen.getByLabelText(/^password$/i)).toBeInTheDocument()
+    expect(screen.getByLabelText(/^password\b/i)).toBeInTheDocument()
     expect(screen.getByLabelText(/confirm password/i)).toBeInTheDocument()
   })
 
@@ -41,7 +54,7 @@ describe('SetupPage', () => {
     // Fill in required fields with short password
     await user.type(screen.getByLabelText(/email/i), 'admin@test.com')
     await user.type(screen.getByLabelText(/display name/i), 'Admin')
-    await user.type(screen.getByLabelText(/^password$/i), 'short')
+    await user.type(screen.getByLabelText(/^password\b/i), 'short')
     await user.type(screen.getByLabelText(/confirm password/i), 'short')
 
     // Click Next
@@ -58,7 +71,7 @@ describe('SetupPage', () => {
 
     await user.type(screen.getByLabelText(/email/i), 'admin@test.com')
     await user.type(screen.getByLabelText(/display name/i), 'Admin')
-    await user.type(screen.getByLabelText(/^password$/i), 'password123')
+    await user.type(screen.getByLabelText(/^password\b/i), 'password123')
     await user.type(screen.getByLabelText(/confirm password/i), 'password456')
 
     await user.click(screen.getByRole('button', { name: /next/i }))
@@ -88,7 +101,7 @@ describe('SetupPage', () => {
     // Fill admin form
     await user.type(screen.getByLabelText(/email/i), 'admin@test.com')
     await user.type(screen.getByLabelText(/display name/i), 'Admin')
-    await user.type(screen.getByLabelText(/^password$/i), 'Password123')
+    await user.type(screen.getByLabelText(/^password\b/i), 'Password123')
     await user.type(screen.getByLabelText(/confirm password/i), 'Password123')
     await user.click(screen.getByRole('button', { name: /next/i }))
 
@@ -127,7 +140,7 @@ describe('SetupPage', () => {
 
     await user.type(screen.getByLabelText(/email/i), 'admin@test.com')
     await user.type(screen.getByLabelText(/display name/i), 'Admin')
-    await user.type(screen.getByLabelText(/^password$/i), 'Password123')
+    await user.type(screen.getByLabelText(/^password\b/i), 'Password123')
     await user.type(screen.getByLabelText(/confirm password/i), 'Password123')
     await user.click(screen.getByRole('button', { name: /next/i }))
 

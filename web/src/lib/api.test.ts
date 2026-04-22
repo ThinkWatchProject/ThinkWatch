@@ -1,5 +1,17 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
+// crypto-store reaches for indexedDB + crypto.subtle.generateKey, both
+// shaky in jsdom. registerKeyPair() (called inside tryRefreshToken)
+// would silently fail, the catch swallowed it, and the refresh path
+// returned false — leaving the 401 retry test thinking refresh just
+// didn't happen. A no-op stub keeps the test focused on api.ts's own
+// retry-on-401 behaviour.
+vi.mock('./crypto-store', () => ({
+  generateAndStoreKeyPair: vi.fn().mockResolvedValue({ kty: 'EC' }),
+  getSigningKey: vi.fn().mockResolvedValue(null),
+  clearSigningKey: vi.fn().mockResolvedValue(undefined),
+}))
+
 // We need to reset modules between tests because api.ts has module-level state
 let apiModule: typeof import('./api')
 

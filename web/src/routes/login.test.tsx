@@ -3,10 +3,13 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { LoginPage } from './login'
 
-// Mock fetch for SSO status
+// Mock fetch for SSO status. The login page now reads
+// `allow_registration` from the same payload to decide whether to
+// show the "Don't have an account? Register" link, so the mock must
+// include that flag for the register-link test to pass.
 beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-    json: () => Promise.resolve({ enabled: false }),
+    json: () => Promise.resolve({ enabled: false, allow_registration: true }),
   }))
 })
 
