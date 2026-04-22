@@ -15,6 +15,7 @@ import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Plus, Ban, RotateCw, Pencil, KeyRound, AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, hasPermission } from '@/lib/api';
+import { fetchAllPaginated } from '@/lib/paginated-fetch';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
 import {
@@ -175,10 +176,10 @@ export function ApiKeysPage() {
     api<string[]>('/api/keys/cost-centers')
       .then(setCostCenterOptions)
       .catch(() => setCostCenterOptions([]));
-    // /api/admin/models returns `{ items, total }`, not a bare array.
-    // Request a wide page so the allowed-models picker sees every row.
-    api<{ items: ModelRow[]; total: number }>('/api/admin/models?page_size=200')
-      .then((res) => setAvailableModels(res.items))
+    // /api/admin/models is paginated and clamps page_size to 200; the
+    // allowed-models picker needs every row, so loop-fetch the full set.
+    fetchAllPaginated<ModelRow>('/api/admin/models')
+      .then(setAvailableModels)
       .catch(() => setAvailableModels([]));
   }, []);
 

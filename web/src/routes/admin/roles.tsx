@@ -85,6 +85,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { fetchAllPaginated } from '@/lib/paginated-fetch';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { LimitsPanel } from '@/components/limits/limits-panel';
@@ -112,28 +113,6 @@ type RoleResponse = BaseRoleResponse;
 // (Types, POLICY_TEMPLATES, SIMPLE_TEMPLATES, and the simple↔policy
 // conversion helpers all live in `./roles/types.ts` — see the
 // imports at the top of this file.)
-
-// Fetch every active MCP tool for the permission-tree picker. The
-// /api/mcp/tools endpoint is paginated and clamps page_size to 200,
-// so if a deployment crosses that threshold we'd silently truncate the
-// permission tree (users would be unable to grant/deny the dropped
-// tools). First page doubles as the `total` probe; remaining pages fan
-// out in parallel.
-const MCP_TOOLS_PAGE_SIZE = 200;
-async function fetchAllMcpTools(): Promise<McpToolRow[]> {
-  type Page = { items: McpToolRow[]; total: number };
-  const first = await api<Page>(`/api/mcp/tools?page_size=${MCP_TOOLS_PAGE_SIZE}`);
-  if (first.items.length >= first.total) return first.items;
-  const pageCount = Math.ceil(first.total / MCP_TOOLS_PAGE_SIZE);
-  const rest = await Promise.all(
-    Array.from({ length: pageCount - 1 }, (_, i) =>
-      api<Page>(
-        `/api/mcp/tools?page=${i + 2}&page_size=${MCP_TOOLS_PAGE_SIZE}`,
-      ).then((r) => r.items),
-    ),
-  );
-  return [...first.items, ...rest.flat()];
-}
 
 // ----------------------------------------------------------------------------
 // Page
@@ -229,21 +208,20 @@ export function RolesPage() {
       const [rolesRes, perms, modelsRes, serversRes, teamsRes, toolsRes] = await Promise.all([
         api<{ items: RoleResponse[] }>('/api/admin/roles'),
         api<PermissionDef[]>('/api/admin/permissions'),
-        // /api/admin/models is paginated and returns `{ items, total }`,
-        // not a bare array. Ask for a single large page since the
-        // picker needs every model name for the role-scope dropdown.
-        api<{ items: ModelRow[]; total: number }>('/api/admin/models?page_size=200').catch(
-          () => ({ items: [] as ModelRow[], total: 0 }),
-        ),
+        // Both /api/admin/models and /api/mcp/tools are paginated and
+        // clamp page_size server-side. The role wizard's permission
+        // tree needs the complete catalog — loop-fetch so a deployment
+        // with 200+ models or tools doesn't silently lose rows.
+        fetchAllPaginated<ModelRow>('/api/admin/models').catch(() => [] as ModelRow[]),
         api<McpServer[]>('/api/mcp/servers').catch(() => [] as McpServer[]),
         // Teams power the scope badge on member rows. team_managers
         // can read this endpoint too — they just see fewer teams.
         api<Array<{ id: string; name: string }>>('/api/admin/teams').catch(() => []),
-        fetchAllMcpTools().catch(() => [] as McpToolRow[]),
+        fetchAllPaginated<McpToolRow>('/api/mcp/tools').catch(() => [] as McpToolRow[]),
       ]);
       setRoles(rolesRes.items);
       setPermissions(perms);
-      setAvailableModelRows(modelsRes.items);
+      setAvailableModelRows(modelsRes);
       setAvailableServers(serversRes);
       setAvailableMcpTools(toolsRes);
       setTeamsById(new Map(teamsRes.map((t) => [t.id, t])));
