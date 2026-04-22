@@ -131,6 +131,11 @@ export function SetupPage() {
   } | null>(null);
 
   const [adminErrors, setAdminErrors] = useState<Record<string, string>>({});
+  // Per-field touched state. `validateAdmin` always rebuilds the full
+  // error map, but the render path gates visibility on `touched[field]`
+  // so blurring the email input doesn't immediately flash "必填" under
+  // every other field the user has yet to visit.
+  const [adminTouched, setAdminTouched] = useState<Record<string, boolean>>({});
 
   // Hoisted out of the closure so the regex literals aren't recompiled
   // on every render (RegExp inside a body recompiles per call).
@@ -152,9 +157,24 @@ export function SetupPage() {
     return Object.keys(errors).length === 0;
   }, [email, displayName, password, confirmPassword, t]);
 
+  const markAdminTouched = (field: string) => {
+    setAdminTouched((prev) => (prev[field] ? prev : { ...prev, [field]: true }));
+    validateAdmin();
+  };
+
   const goNext = () => {
     const currentIndex = STEPS.indexOf(step);
-    if (step === 'admin' && !validateAdmin()) return;
+    if (step === 'admin') {
+      // Submit attempt: surface every error the user hasn't yet seen
+      // by pretending they touched every field.
+      setAdminTouched({
+        email: true,
+        displayName: true,
+        password: true,
+        confirmPassword: true,
+      });
+      if (!validateAdmin()) return;
+    }
     if (currentIndex < STEPS.length - 1) {
       setError('');
       setStep(STEPS[currentIndex + 1]);
@@ -337,12 +357,12 @@ export function SetupPage() {
             placeholder="admin@company.com"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            onBlur={() => validateAdmin()}
+            onBlur={() => markAdminTouched('email')}
             required
             aria-required="true"
-            aria-invalid={!!adminErrors.email}
+            aria-invalid={adminTouched.email && !!adminErrors.email}
           />
-          {adminErrors.email && (
+          {adminTouched.email && adminErrors.email && (
             <p className="text-xs text-destructive">{adminErrors.email}</p>
           )}
         </div>
@@ -355,12 +375,12 @@ export function SetupPage() {
             placeholder="Admin"
             value={displayName}
             onChange={(e) => setDisplayName(e.target.value)}
-            onBlur={() => validateAdmin()}
+            onBlur={() => markAdminTouched('displayName')}
             required
             aria-required="true"
-            aria-invalid={!!adminErrors.displayName}
+            aria-invalid={adminTouched.displayName && !!adminErrors.displayName}
           />
-          {adminErrors.displayName && (
+          {adminTouched.displayName && adminErrors.displayName && (
             <p className="text-xs text-destructive">{adminErrors.displayName}</p>
           )}
         </div>
@@ -373,15 +393,15 @@ export function SetupPage() {
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            onBlur={() => validateAdmin()}
+            onBlur={() => markAdminTouched('password')}
             required
             aria-required="true"
-            aria-invalid={!!adminErrors.password}
+            aria-invalid={adminTouched.password && !!adminErrors.password}
           />
           <p className="text-xs text-muted-foreground">
             {t('setup.admin.passwordHint')}
           </p>
-          {adminErrors.password && (
+          {adminTouched.password && adminErrors.password && (
             <p className="text-xs text-destructive">{adminErrors.password}</p>
           )}
         </div>
@@ -394,12 +414,12 @@ export function SetupPage() {
             type="password"
             value={confirmPassword}
             onChange={(e) => setConfirmPassword(e.target.value)}
-            onBlur={() => validateAdmin()}
+            onBlur={() => markAdminTouched('confirmPassword')}
             required
             aria-required="true"
-            aria-invalid={!!adminErrors.confirmPassword}
+            aria-invalid={adminTouched.confirmPassword && !!adminErrors.confirmPassword}
           />
-          {adminErrors.confirmPassword && (
+          {adminTouched.confirmPassword && adminErrors.confirmPassword && (
             <p className="text-xs text-destructive">{adminErrors.confirmPassword}</p>
           )}
         </div>
