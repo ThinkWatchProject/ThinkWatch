@@ -8,6 +8,17 @@ vi.mock('@/lib/api', () => ({
   apiPost: vi.fn(),
   apiPatch: vi.fn(),
   apiDelete: vi.fn(),
+  // ApiKeysPage gates the "Create" button on this. Stub to true so
+  // the button renders in tests; individual cases that need denial
+  // can `vi.mocked(hasPermission).mockReturnValueOnce(false)`.
+  hasPermission: vi.fn(() => true),
+}))
+
+// `api-keys.tsx` loops over /api/admin/models and /api/mcp/tools via
+// fetchAllPaginated to populate the scope pickers. The page renders
+// without them, so a no-op stub keeps the mount path clean.
+vi.mock('@/lib/paginated-fetch', () => ({
+  fetchAllPaginated: vi.fn().mockResolvedValue([]),
 }))
 
 import { api } from '@/lib/api'
@@ -19,7 +30,9 @@ const makeKey = (overrides: Record<string, unknown> = {}) => ({
   name: 'test-key',
   key_prefix: 'tw_test_',
   user_id: 'user-1',
+  surfaces: ['ai_gateway'],
   allowed_models: null,
+  allowed_mcp_tools: null,
   expires_at: null,
   is_active: true,
   last_used_at: null,
@@ -31,8 +44,21 @@ const makeKey = (overrides: Record<string, unknown> = {}) => ({
   inactivity_timeout_days: null,
   disabled_reason: null,
   last_rotation_at: null,
+  cost_center: null,
   ...overrides,
 })
+
+// Different endpoints have different response shapes — route by URL so
+// /api/keys returns the paginated key list while /api/keys/cost-centers
+// and /api/keys/policy-scope get their own appropriate shapes.
+function mockKeysFetch(keys: ReturnType<typeof makeKey>[]) {
+  mockApi.mockImplementation(async (url: string) => {
+    if (url.startsWith('/api/keys/cost-centers')) return [] as string[]
+    if (url.startsWith('/api/keys/policy-scope'))
+      return { allowed_models: null, allowed_mcp_tools: null }
+    return { data: keys, total: keys.length, page: 1, page_size: 20 }
+  })
+}
 
 beforeEach(() => {
   vi.clearAllMocks()
@@ -40,7 +66,7 @@ beforeEach(() => {
 
 describe('ApiKeysPage', () => {
   it('renders API keys table', async () => {
-    mockApi.mockResolvedValue({ data: [makeKey()], total: 1, page: 1, page_size: 20 })
+    mockKeysFetch([makeKey()])
 
     render(<ApiKeysPage />)
 
@@ -56,16 +82,11 @@ describe('ApiKeysPage', () => {
   })
 
   it('shows status badges for active and expired keys', async () => {
-    mockApi.mockResolvedValue({
-      data: [
-        makeKey({ id: 'key-1', name: 'active-key', disabled_reason: null, is_active: true }),
-        makeKey({ id: 'key-2', name: 'expired-key', disabled_reason: 'expired', is_active: false }),
-        makeKey({ id: 'key-3', name: 'revoked-key', disabled_reason: 'revoked', is_active: false }),
-      ],
-      total: 3,
-      page: 1,
-      page_size: 20,
-    })
+    mockKeysFetch([
+      makeKey({ id: 'key-1', name: 'active-key', disabled_reason: null, is_active: true }),
+      makeKey({ id: 'key-2', name: 'expired-key', disabled_reason: 'expired', is_active: false }),
+      makeKey({ id: 'key-3', name: 'revoked-key', disabled_reason: 'revoked', is_active: false }),
+    ])
 
     render(<ApiKeysPage />)
 
@@ -81,12 +102,7 @@ describe('ApiKeysPage', () => {
   it('shows expiry warning for keys expiring soon', async () => {
     const threeDaysFromNow = new Date(Date.now() + 3 * 24 * 60 * 60 * 1000).toISOString()
 
-    mockApi.mockResolvedValue({
-      data: [makeKey({ id: 'key-1', name: 'expiring-key', expires_at: threeDaysFromNow })],
-      total: 1,
-      page: 1,
-      page_size: 20,
-    })
+    mockKeysFetch([makeKey({ id: 'key-1', name: 'expiring-key', expires_at: threeDaysFromNow })])
 
     render(<ApiKeysPage />)
 
@@ -99,7 +115,7 @@ describe('ApiKeysPage', () => {
   })
 
   it('create key dialog opens on button click', async () => {
-    mockApi.mockResolvedValue({ data: [], total: 0, page: 1, page_size: 20 })
+    mockKeysFetch([])
 
     const user = userEvent.setup()
     render(<ApiKeysPage />)
@@ -109,8 +125,10 @@ describe('ApiKeysPage', () => {
       expect(screen.queryByText('Loading keys...')).not.toBeInTheDocument()
     })
 
-    // Click the create button
-    await user.click(screen.getByRole('button', { name: /create api key/i }))
+    // Both the page header and the empty-state CTA carry the same
+    // "Create API Key" label — either opens the same dialog, so click
+    // the first match.
+    await user.click(screen.getAllByRole('button', { name: /create api key/i })[0])
 
     // Verify dialog content appears
     await waitFor(() => {

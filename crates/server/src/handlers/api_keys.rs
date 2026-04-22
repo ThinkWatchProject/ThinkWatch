@@ -1,8 +1,24 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use utoipa::ToSchema;
 use uuid::Uuid;
+
+/// Wrap a `T`-deserializer so that `Option<T>` distinguishes "field
+/// absent" from "field is null". Standard serde collapses both to
+/// `None`, which is wrong for PATCH semantics where `null` should
+/// mean "clear" and an absent field should mean "leave unchanged".
+/// Combined with `Option<Option<T>>` + `#[serde(default)]`:
+///   - field absent       → `None`
+///   - JSON `null`        → `Some(None)`
+///   - JSON value         → `Some(Some(v))`
+fn deserialize_some<'de, T, D>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
 
 use think_watch_auth::{api_key, rbac};
 use think_watch_common::audit::AuditEntry;
@@ -492,14 +508,21 @@ pub async fn force_revoke_key(
 
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct UpdateKeyRequest {
-    /// When `Some(None-inside)` field omitted → leave unchanged. A JSON
-    /// `null` for allowed_models means "all models"; a non-empty array
-    /// means restrict to that list.
-    pub allowed_models: Option<Vec<String>>,
-    /// Parallel to `allowed_models` but for MCP tools. Same semantics:
-    /// omit = leave unchanged; `[]` = deny all; non-empty array =
-    /// restrict. Must be a subset of the caller's role-granted tools.
-    pub allowed_mcp_tools: Option<Vec<String>>,
+    /// PATCH semantics:
+    ///   - field absent → leave unchanged
+    ///   - JSON `null`  → clear the restriction (= unrestricted)
+    ///   - JSON array   → replace with that list
+    ///
+    /// Use `deserialize_some` so the inner `None` (= JSON null)
+    /// survives serde's normal collapse.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<Vec<String>>)]
+    pub allowed_models: Option<Option<Vec<String>>>,
+    /// Parallel to `allowed_models`. Same PATCH semantics; must be a
+    /// subset of the caller's role-granted tools when set.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<Vec<String>>)]
+    pub allowed_mcp_tools: Option<Option<Vec<String>>>,
     /// When `Some`, replaces the entire surfaces list. Must still
     /// be non-empty. Omit the field to leave surfaces untouched.
     pub surfaces: Option<Vec<String>>,
@@ -544,15 +567,14 @@ pub async fn update_key(
 
     // Subset check against the *key owner's* roles, not the caller's —
     // a super-admin editing someone else's key still can't grant tools
-    // the owner's roles don't already permit.
+    // the owner's roles don't already permit. Only validates when the
+    // request is actually setting an explicit list; clearing (Some(None))
+    // is always allowed since it just removes the key-level tightening
+    // and leaves the role-level grant in place.
     if let Some(owner) = key.user_id {
-        validate_allowlists_within_role(
-            &state.db,
-            owner,
-            req.allowed_models.as_deref(),
-            req.allowed_mcp_tools.as_deref(),
-        )
-        .await?;
+        let req_models = req.allowed_models.as_ref().and_then(|o| o.as_deref());
+        let req_tools = req.allowed_mcp_tools.as_ref().and_then(|o| o.as_deref());
+        validate_allowlists_within_role(&state.db, owner, req_models, req_tools).await?;
     }
 
     let normalized_surfaces = req
@@ -594,10 +616,23 @@ pub async fn update_key(
         _ => false,
     };
 
+    // Distinguish "field absent" (preserve) from "field is null"
+    // (clear). COALESCE collapses both to "preserve", which silently
+    // strands users who try to widen a tightened key — they tick the
+    // picker back to Unrestricted, save, and the old list survives.
+    let (models_set, models_value) = match &req.allowed_models {
+        None => (false, None),
+        Some(inner) => (true, inner.as_deref()),
+    };
+    let (mcp_tools_set, mcp_tools_value) = match &req.allowed_mcp_tools {
+        None => (false, None),
+        Some(inner) => (true, inner.as_deref()),
+    };
+
     let updated = sqlx::query_as::<_, ApiKey>(
         r#"UPDATE api_keys SET
-            allowed_models = COALESCE($1, allowed_models),
-            allowed_mcp_tools = COALESCE($10, allowed_mcp_tools),
+            allowed_models = CASE WHEN $11 THEN $1 ELSE allowed_models END,
+            allowed_mcp_tools = CASE WHEN $12 THEN $10 ELSE allowed_mcp_tools END,
             surfaces = COALESCE($2, surfaces),
             expires_at = $3,
             rotation_period_days = COALESCE($4, rotation_period_days),
@@ -607,7 +642,7 @@ pub async fn update_key(
                                             ELSE last_expiry_warning_days END
            WHERE id = $8 RETURNING *"#,
     )
-    .bind(&req.allowed_models)
+    .bind(models_value)
     .bind(normalized_surfaces.as_ref())
     .bind(expires_at)
     .bind(req.rotation_period_days)
@@ -616,7 +651,9 @@ pub async fn update_key(
     .bind(cost_center_set)
     .bind(id)
     .bind(expiry_extended)
-    .bind(&req.allowed_mcp_tools)
+    .bind(mcp_tools_value)
+    .bind(models_set)
+    .bind(mcp_tools_set)
     .fetch_one(&state.db)
     .await?;
 
@@ -624,7 +661,7 @@ pub async fn update_key(
     // allowed_models / limits carry real security weight, so capturing
     // before/after values lets admins trace who loosened a key's scope.
     let mut changes = serde_json::Map::new();
-    if req.allowed_models.is_some() && req.allowed_models != key.allowed_models {
+    if models_set && key.allowed_models != updated.allowed_models {
         changes.insert(
             "allowed_models".into(),
             serde_json::json!({
@@ -633,7 +670,7 @@ pub async fn update_key(
             }),
         );
     }
-    if req.allowed_mcp_tools.is_some() && req.allowed_mcp_tools != key.allowed_mcp_tools {
+    if mcp_tools_set && key.allowed_mcp_tools != updated.allowed_mcp_tools {
         changes.insert(
             "allowed_mcp_tools".into(),
             serde_json::json!({
