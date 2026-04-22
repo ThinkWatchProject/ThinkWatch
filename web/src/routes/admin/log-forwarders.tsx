@@ -49,13 +49,11 @@ interface LogForwarder {
   id: string;
   name: string;
   forwarder_type: string;
-  // Backend wire shape is `serde_json::Value`. Every adapter the UI
-  // currently knows about (syslog / kafka / webhook) only reads flat
-  // string scalars off this map; the nested `custom_headers` case
-  // is handled defensively in openEditDialog. Tightening the type to
-  // string keeps that read path ergonomic — if a future adapter
-  // needs nested objects, widen here.
-  config: Record<string, string>;
+  // Backend wire shape is `serde_json::Value` — most adapters are
+  // flat string→string, but the webhook adapter nests an object
+  // under `custom_headers`. Type as `unknown` per key so callers
+  // are forced to be explicit about the shape they expect.
+  config: Record<string, unknown>;
   log_types: string[];
   enabled: boolean;
   sent_count: number;
@@ -246,32 +244,43 @@ export function LogForwardersPage() {
     }
   };
 
+  // `config` is typed as Record<string, unknown> because the wire is
+  // serde_json::Value — cfgStr lifts a flat scalar back out for the
+  // adapters that store strings, falling back to '' so the input
+  // controls stay controlled. The webhook adapter's nested
+  // custom_headers object is handled separately below.
+  const cfgStr = (cfg: Record<string, unknown>, key: string): string =>
+    typeof cfg[key] === 'string' ? (cfg[key] as string) : '';
+
   const openEditDialog = (f: LogForwarder) => {
     setEditForwarder(f);
     setEditName(f.name);
-    setEditAddress(f.config.address || '');
-    setEditFacility(f.config.facility || '16');
-    setEditBrokerUrl(f.config.broker_url || '');
-    setEditTopic(f.config.topic || '');
-    setEditWebhookUrl(f.config.url || '');
+    setEditAddress(cfgStr(f.config, 'address'));
+    setEditFacility(cfgStr(f.config, 'facility') || '16');
+    setEditBrokerUrl(cfgStr(f.config, 'broker_url'));
+    setEditTopic(cfgStr(f.config, 'topic'));
+    setEditWebhookUrl(cfgStr(f.config, 'url'));
     const rawHeaders = f.config.custom_headers;
     if (rawHeaders) {
       try {
-        const parsed = typeof rawHeaders === 'string' ? JSON.parse(rawHeaders) : rawHeaders;
-        const entries = Object.entries(parsed as Record<string, string>).map(([k, v]) => [k, v] as [string, string]);
+        const parsed =
+          typeof rawHeaders === 'string' ? JSON.parse(rawHeaders) : rawHeaders;
+        const entries = Object.entries(parsed as Record<string, string>).map(
+          ([k, v]) => [k, v] as [string, string],
+        );
         setEditHeaders(entries);
       } catch {
-        setEditHeaders(f.config.auth_header ? [['Authorization', f.config.auth_header] as [string, string]] : []);
+        const auth = cfgStr(f.config, 'auth_header');
+        setEditHeaders(auth ? [['Authorization', auth]] : []);
       }
-    } else if (f.config.auth_header) {
-      setEditHeaders([['Authorization', f.config.auth_header]]);
     } else {
-      setEditHeaders([]);
+      const auth = cfgStr(f.config, 'auth_header');
+      setEditHeaders(auth ? [['Authorization', auth]] : []);
     }
     // Signing secret is returned by the API as-is (same privilege
     // bar as config read elsewhere). Showing it masked in a password
     // field lets the operator replace without losing the existing one.
-    setEditSigningSecret(f.config.signing_secret || '');
+    setEditSigningSecret(cfgStr(f.config, 'signing_secret'));
     setEditLogTypes(new Set(f.log_types || ['audit']));
     setEditDialogOpen(true);
   };
@@ -524,7 +533,10 @@ export function LogForwardersPage() {
                       <Badge variant="outline">{typeLabel(f.forwarder_type)}</Badge>
                     </TableCell>
                     <TableCell className="font-mono text-xs text-muted-foreground max-w-48 truncate">
-                      {f.config.address || f.config.broker_url || f.config.url || '—'}
+                      {cfgStr(f.config, 'address') ||
+                        cfgStr(f.config, 'broker_url') ||
+                        cfgStr(f.config, 'url') ||
+                        '—'}
                     </TableCell>
                     <TableCell>
                       <Badge variant={f.enabled ? 'default' : 'secondary'}>

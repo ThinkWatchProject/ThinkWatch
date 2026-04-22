@@ -385,7 +385,6 @@ pub struct UpdateMcpServerRequest {
     #[schema(value_type = Option<String>)]
     pub description: Option<Option<String>>,
     pub endpoint_url: Option<String>,
-    pub transport_type: Option<String>,
     /// Same PATCH semantics as `description`. Sending `null` clears
     /// the auth requirement so the server can be probed unauthenticated.
     #[serde(default, deserialize_with = "deserialize_some")]
@@ -459,7 +458,11 @@ pub async fn update_server(
         think_watch_common::validation::validate_url(endpoint_url)?;
     }
 
-    // Auto-detect transport type when endpoint changes, otherwise keep existing
+    // Auto-detect transport type when endpoint changes; otherwise the
+    // value the server is already storing stays. There's no manual
+    // override path — if detection picks the wrong transport for an
+    // unusual server, the right fix is to land detector logic, not to
+    // expose a settings knob.
     let transport_type = if req.endpoint_url.is_some() {
         let auth_hdr = build_auth_probe_header(auth_type, req.auth_secret.as_deref());
         let auth_ref = auth_hdr.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
@@ -474,8 +477,6 @@ pub async fn update_server(
             Ok(detected) => detected.as_str().to_owned(),
             Err(_) => existing.transport_type.clone(),
         }
-    } else if let Some(ref tt) = req.transport_type {
-        tt.clone()
     } else {
         existing.transport_type.clone()
     };
