@@ -162,6 +162,17 @@ export function SetupPage() {
     validateAdmin();
   };
 
+  // Keep `adminErrors` in sync with the live form values. Without this,
+  // after the user clicks Next on an empty form (which marks every
+  // field touched), typing into a field fixes its value but the stale
+  // "必填" error stays on screen until the user also blurs that field
+  // — which looks like the validator is ignoring their input.
+  // validateAdmin is useCallback-ed on [email, displayName, password,
+  // confirmPassword, t] so this effect fires on every real change.
+  useEffect(() => {
+    validateAdmin();
+  }, [validateAdmin]);
+
   const goNext = () => {
     const currentIndex = STEPS.indexOf(step);
     if (step === 'admin') {
