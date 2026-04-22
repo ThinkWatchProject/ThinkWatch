@@ -292,6 +292,7 @@ pub async fn list_users(
                 display_name: u.display_name,
                 avatar_url: u.avatar_url,
                 is_active: u.is_active,
+                oidc_subject: u.oidc_subject,
                 role_assignments,
                 // Admin user-list intentionally omits permissions —
                 // the per-row payload would balloon and the admin
@@ -600,6 +601,7 @@ pub async fn create_user(
             display_name: user.display_name,
             avatar_url: user.avatar_url,
             is_active: user.is_active,
+            oidc_subject: user.oidc_subject,
             role_assignments,
             permissions: Vec::new(),
             denied_permissions: Vec::new(),

@@ -774,8 +774,12 @@ pub struct RoleMember {
     pub user_id: Uuid,
     pub email: String,
     pub display_name: Option<String>,
-    pub scope_kind: String,
-    pub scope_id: Option<Uuid>,
+    /// Encoded scope string matching `RoleAssignment.scope` shape:
+    /// `"global"` for unscoped, `"team:<uuid>"` for team-scoped. Kept
+    /// as a single string (not a kind/id pair) because every other
+    /// scope-bearing DTO in this codebase uses the same encoding —
+    /// admins comparing assignments across endpoints expect one shape.
+    pub scope: String,
     pub assigned_at: String,
 }
 
@@ -837,13 +841,19 @@ pub async fn list_role_members(
     let items = rows
         .into_iter()
         .map(
-            |(user_id, email, display_name, scope_kind, scope_id, assigned_at)| RoleMember {
-                user_id,
-                email,
-                display_name,
-                scope_kind,
-                scope_id,
-                assigned_at: assigned_at.to_rfc3339(),
+            |(user_id, email, display_name, scope_kind, scope_id, assigned_at)| {
+                let scope = match (scope_kind.as_str(), scope_id) {
+                    ("global", _) => "global".to_string(),
+                    (kind, Some(id)) => format!("{kind}:{id}"),
+                    (kind, None) => kind.to_string(),
+                };
+                RoleMember {
+                    user_id,
+                    email,
+                    display_name,
+                    scope,
+                    assigned_at: assigned_at.to_rfc3339(),
+                }
             },
         )
         .collect();

@@ -133,6 +133,12 @@ pub struct UserResponse {
     pub display_name: String,
     pub avatar_url: Option<String>,
     pub is_active: bool,
+    /// OIDC subject identifier, present iff the user was provisioned
+    /// (or last logged in) via SSO. Surfaced to the admin user list
+    /// so the OIDC badge column has a real source — without this the
+    /// frontend was reading an undefined field and never showing it.
+    #[serde(default)]
+    pub oidc_subject: Option<String>,
     /// All role assignments for this user (system + custom, union).
     #[serde(default)]
     pub role_assignments: Vec<RoleAssignment>,

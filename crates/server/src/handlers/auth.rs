@@ -838,6 +838,7 @@ pub async fn me(
         display_name: user.display_name,
         avatar_url: user.avatar_url,
         is_active: user.is_active,
+        oidc_subject: user.oidc_subject,
         role_assignments,
         permissions,
         denied_permissions,

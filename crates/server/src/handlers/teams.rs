@@ -217,7 +217,7 @@ impl From<TeamWithCountRow> for TeamWithCount {
         ("id" = uuid::Uuid, Path, description = "Team ID"),
     ),
     responses(
-        (status = 200, description = "Team details", body = Team),
+        (status = 200, description = "Team details", body = TeamWithCount),
         (status = 403, description = "Forbidden"),
         (status = 404, description = "Team not found"),
     ),
@@ -227,17 +227,28 @@ pub async fn get_team(
     auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-) -> Result<Json<Team>, AppError> {
+) -> Result<Json<TeamWithCount>, AppError> {
     auth_user.require_permission("teams:read")?;
     assert_can_view_team(&auth_user, &state.db, id).await?;
-    let team = sqlx::query_as::<_, Team>(
-        "SELECT id, name, description, created_at FROM teams WHERE id = $1",
+    // Same shape the list endpoint returns — frontend types both as
+    // `Team` (which declares member_count), and the detail page
+    // renders the count card off this field. Returning a bare Team
+    // here left the card showing undefined and any optimistic
+    // decrement after a member removal flipping to NaN.
+    let row = sqlx::query_as::<_, TeamWithCountRow>(
+        "SELECT t.id, t.name, t.description, t.created_at, \
+                COALESCE(c.cnt, 0) AS member_count \
+           FROM teams t \
+           LEFT JOIN (SELECT team_id, COUNT(*) AS cnt \
+                        FROM team_members GROUP BY team_id) c \
+                  ON c.team_id = t.id \
+          WHERE t.id = $1",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("Team not found".into()))?;
-    Ok(Json(team))
+    Ok(Json(row.into()))
 }
 
 /// POST /api/admin/teams
