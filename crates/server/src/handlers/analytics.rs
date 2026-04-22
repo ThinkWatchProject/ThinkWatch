@@ -14,11 +14,18 @@ use crate::middleware::auth_guard::AuthUser;
 /// ClickHouse's `has(?, user_id)` can bind against.
 ///
 /// Returns:
-///   - `None` — caller has `analytics:read_all` at global scope, no
-///     filter needed (every row in `gateway_logs` is visible).
-///   - `Some(user_id_strings)` — the caller is scope-limited; the set
-///     always contains the caller's own id, plus every team member of
-///     any team the caller holds `analytics:read_team` for.
+///   - `None` — caller has `analytics:read_all` AND no `team_filter`
+///     was requested. Every row in `gateway_logs` is visible.
+///   - `Some(user_id_strings)` — the caller is scope-limited (or the
+///     caller asked to narrow to a specific team). Set contains the
+///     caller's own id, every member of any team they hold
+///     `analytics:read_team` for, intersected with `team_filter`'s
+///     members when supplied. May be empty (the team filter excluded
+///     everything visible).
+///
+/// `team_filter` is the optional `?team_id=` from the caller; the
+/// dropdown on the analytics pages was previously sending it but the
+/// handlers ignored it, so the picker did nothing.
 ///
 /// User ids are stringified because `gateway_logs.user_id` is
 /// `LowCardinality(Nullable(String))` — the CH query binds an array
@@ -26,38 +33,59 @@ use crate::middleware::auth_guard::AuthUser;
 async fn analytics_user_id_filter(
     auth_user: &AuthUser,
     pool: &sqlx::PgPool,
+    team_filter: Option<uuid::Uuid>,
 ) -> Result<Option<Vec<String>>, AppError> {
-    // Global wins outright.
-    if auth_user
+    // Compute the caller's role-derived scope first.
+    let scope: Option<std::collections::HashSet<String>> = if auth_user
         .owned_team_scope_for_perm(pool, "analytics:read_all")
         .await?
         .is_none()
     {
-        return Ok(None);
-    }
-    let caller_id = auth_user.claims.sub;
-    let mut visible: std::collections::HashSet<String> =
-        std::collections::HashSet::from([caller_id.to_string()]);
-    if let Some(team_ids) = auth_user
-        .owned_team_scope_for_perm(pool, "analytics:read_team")
-        .await?
-        && !team_ids.is_empty()
-    {
-        let team_ids_vec: Vec<uuid::Uuid> = team_ids.into_iter().collect();
-        // Expand team membership → user ids in one pass. ClickHouse
-        // has no concept of team_members, so we resolve membership in
-        // Postgres and pass the flat user-id list to CH.
-        let members: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT user_id::text FROM team_members WHERE team_id = ANY($1)",
-        )
-        .bind(&team_ids_vec)
-        .fetch_all(pool)
-        .await?;
-        for (uid,) in members {
-            visible.insert(uid);
+        None
+    } else {
+        let caller_id = auth_user.claims.sub;
+        let mut visible: std::collections::HashSet<String> =
+            std::collections::HashSet::from([caller_id.to_string()]);
+        if let Some(team_ids) = auth_user
+            .owned_team_scope_for_perm(pool, "analytics:read_team")
+            .await?
+            && !team_ids.is_empty()
+        {
+            let team_ids_vec: Vec<uuid::Uuid> = team_ids.into_iter().collect();
+            let members: Vec<(String,)> = sqlx::query_as(
+                "SELECT DISTINCT user_id::text FROM team_members WHERE team_id = ANY($1)",
+            )
+            .bind(&team_ids_vec)
+            .fetch_all(pool)
+            .await?;
+            for (uid,) in members {
+                visible.insert(uid);
+            }
         }
-    }
-    Ok(Some(visible.into_iter().collect()))
+        Some(visible)
+    };
+
+    // No team filter → return scope as-is.
+    let Some(team_id) = team_filter else {
+        return Ok(scope.map(|s| s.into_iter().collect()));
+    };
+
+    // Team filter requested. Resolve membership and intersect.
+    let team_members: std::collections::HashSet<String> = sqlx::query_as::<_, (String,)>(
+        "SELECT user_id::text FROM team_members WHERE team_id = $1",
+    )
+    .bind(team_id)
+    .fetch_all(pool)
+    .await?
+    .into_iter()
+    .map(|(s,)| s)
+    .collect();
+
+    let intersected: Vec<String> = match scope {
+        None => team_members.into_iter().collect(), // global → just the team
+        Some(scope) => scope.intersection(&team_members).cloned().collect(),
+    };
+    Ok(Some(intersected))
 }
 
 /// ClickHouse bucket-start expression for the selected range — mirrors
@@ -114,7 +142,7 @@ pub async fn get_usage_stats(
     let range = TimeRange::parse(q.range.as_deref());
     let now = chrono::Utc::now();
     let window_start = range.window_start(now);
-    let user_filter = analytics_user_id_filter(&auth_user, &state.db).await?;
+    let user_filter = analytics_user_id_filter(&auth_user, &state.db, q.team_id).await?;
 
     // Empty visible-user set short-circuits. CH rejects an empty IN
     // list at parse time, and the answer is zeros anyway.
@@ -302,6 +330,9 @@ pub struct UsageRow {
 pub struct AnalyticsQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// Narrow rows to a specific team (only members visible to the
+    /// caller are kept; cross-team requests collapse to empty).
+    pub team_id: Option<uuid::Uuid>,
 }
 
 #[utoipa::path(
@@ -323,7 +354,7 @@ pub async fn get_usage(
 ) -> Result<Json<Vec<UsageRow>>, AppError> {
     let (limit, offset) =
         super::clickhouse_util::clamp_pagination(params.limit, params.offset, 200);
-    let user_filter = analytics_user_id_filter(&auth_user, &state.db).await?;
+    let user_filter = analytics_user_id_filter(&auth_user, &state.db, params.team_id).await?;
     if matches!(user_filter, Some(ref v) if v.is_empty()) {
         return Ok(Json(Vec::new()));
     }
@@ -453,7 +484,7 @@ pub async fn get_cost_stats(
         .and_hms_opt(0, 0, 0)
         .expect("valid hms")
         .and_utc();
-    let user_filter = analytics_user_id_filter(&auth_user, &state.db).await?;
+    let user_filter = analytics_user_id_filter(&auth_user, &state.db, q.team_id).await?;
     let caller_id = auth_user.claims.sub;
 
     // Empty visible-user set → all zeros. Short-circuit so the
@@ -801,6 +832,9 @@ pub struct CostsQuery {
     /// Optional range filter: `24h` | `7d` | `30d` | `mtd` (default).
     /// MTD is what the Costs page has always shown.
     pub range: Option<String>,
+    /// Narrow rows to a specific team (only members visible to the
+    /// caller are kept; cross-team requests collapse to empty).
+    pub team_id: Option<uuid::Uuid>,
 }
 
 #[utoipa::path(
@@ -842,7 +876,7 @@ pub async fn get_costs(
             .expect("valid hms")
             .and_utc(),
     };
-    let user_filter = analytics_user_id_filter(&auth_user, &state.db).await?;
+    let user_filter = analytics_user_id_filter(&auth_user, &state.db, params.team_id).await?;
     if matches!(user_filter, Some(ref v) if v.is_empty()) {
         return Ok(Json(CostBreakdown {
             items: Vec::new(),

@@ -22,6 +22,12 @@ pub struct RangeQuery {
     pub range: Option<String>,
     #[serde(default)]
     pub compare: Option<bool>,
+    /// Optional analytics team filter — surfaces consumed by the
+    /// analytics handlers so the page-level "filter by team" dropdown
+    /// actually reaches the SQL. Other RangeQuery consumers (the
+    /// dashboard) silently ignore an unrecognized field.
+    #[serde(default)]
+    pub team_id: Option<uuid::Uuid>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
