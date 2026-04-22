@@ -16,6 +16,12 @@ pub struct ApiKey {
     /// `mcp_gateway`.
     pub surfaces: Vec<String>,
     pub allowed_models: Option<Vec<String>>,
+    /// MCP tool allow-list, parallel to `allowed_models` but for the
+    /// MCP gateway. `None` = unrestricted; entries are namespaced tool
+    /// keys (`github__list_issues`) or per-server wildcards
+    /// (`github__*`). The middleware intersects this with the bearer's
+    /// role-granted `allowed_mcp_tools` at request time.
+    pub allowed_mcp_tools: Option<Vec<String>>,
     // Rate limits and budget caps are stored in `rate_limit_rules` /
     // `budget_caps` (subject_kind = 'api_key').
     pub expires_at: Option<DateTime<Utc>>,

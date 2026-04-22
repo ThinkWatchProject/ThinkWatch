@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -24,8 +24,52 @@ import {
   RotateApiKeyDialog,
   DeleteApiKeyDialog,
   type ApiKey,
-  type ModelRow,
 } from './api-key-dialogs';
+import type {
+  ModelsByProvider,
+  McpToolsByServer,
+} from '@/components/roles/PermissionTree';
+
+interface ModelRow {
+  id: string;
+  model_id: string;
+  display_name: string;
+}
+
+interface McpToolRow {
+  id: string;
+  server_name: string;
+  name: string;
+  namespaced_name: string;
+}
+
+interface PolicyScope {
+  allowed_models: string[] | null;
+  allowed_mcp_tools: string[] | null;
+}
+
+/// True when `id` is covered by the caller's role-granted `allowed` list.
+/// Mirrors the gateway's `request.model == g || request.model.starts_with(g)`
+/// so the picker only surfaces models the eventual request would accept.
+function modelAllowed(id: string, allowed: string[] | null): boolean {
+  if (allowed === null) return true;
+  return allowed.some((g) => id === g || id.startsWith(g));
+}
+
+/// Mirrors the MCP access-control pattern grammar from
+/// `crates/mcp-gateway/src/access_control.rs`: `*`, `<server>__*`, or
+/// `<server>__<tool>`.
+function mcpToolAllowed(key: string, allowed: string[] | null): boolean {
+  if (allowed === null) return true;
+  return allowed.some((p) => {
+    if (p === '*' || p === key) return true;
+    if (p.endsWith('__*')) {
+      const prefix = p.slice(0, -'__*'.length);
+      return key.startsWith(prefix + '__');
+    }
+    return false;
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -146,7 +190,14 @@ export function ApiKeysPage() {
 
   // Shared data for dialogs
   const [costCenterOptions, setCostCenterOptions] = useState<string[]>([]);
+  // Full catalog — filtered down to the caller's policy scope below
+  // before it reaches the dialog pickers.
   const [availableModels, setAvailableModels] = useState<ModelRow[]>([]);
+  const [availableMcpTools, setAvailableMcpTools] = useState<McpToolRow[]>([]);
+  const [policyScope, setPolicyScope] = useState<PolicyScope>({
+    allowed_models: null,
+    allowed_mcp_tools: null,
+  });
 
   // Dialog states
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -176,12 +227,54 @@ export function ApiKeysPage() {
     api<string[]>('/api/keys/cost-centers')
       .then(setCostCenterOptions)
       .catch(() => setCostCenterOptions([]));
-    // /api/admin/models is paginated and clamps page_size to 200; the
-    // allowed-models picker needs every row, so loop-fetch the full set.
+    // /api/admin/models and /api/mcp/tools are both paginated and clamp
+    // page_size to 200; the dialog pickers want the complete catalog so
+    // they can be filtered down to the caller's policy scope locally.
     fetchAllPaginated<ModelRow>('/api/admin/models')
       .then(setAvailableModels)
       .catch(() => setAvailableModels([]));
+    fetchAllPaginated<McpToolRow>('/api/mcp/tools')
+      .then(setAvailableMcpTools)
+      .catch(() => setAvailableMcpTools([]));
+    api<PolicyScope>('/api/keys/policy-scope')
+      .then(setPolicyScope)
+      .catch(() =>
+        setPolicyScope({ allowed_models: null, allowed_mcp_tools: null }),
+      );
   }, []);
+
+  // Shape + filter the raw catalogs into the maps the scope dropdowns
+  // consume. `allowed_models === null` means the caller's roles grant
+  // everything, so the picker shows the full catalog.
+  const modelsByProvider = useMemo<ModelsByProvider>(() => {
+    const bucket = availableModels
+      .filter((m) => modelAllowed(m.model_id, policyScope.allowed_models))
+      .map((m) => ({ modelId: m.model_id, displayName: m.display_name }));
+    const out = new Map<string, { modelId: string; displayName: string }[]>();
+    if (bucket.length > 0) out.set('', bucket);
+    return out;
+  }, [availableModels, policyScope.allowed_models]);
+
+  const mcpToolsByServer = useMemo<McpToolsByServer>(() => {
+    const out: McpToolsByServer = new Map();
+    for (const tool of availableMcpTools) {
+      if (!mcpToolAllowed(tool.namespaced_name, policyScope.allowed_mcp_tools)) {
+        continue;
+      }
+      // namespaced_name is `<prefix>__<tool_name>` (tool_name itself may
+      // contain single underscores but never `__`).
+      const sep = tool.namespaced_name.indexOf('__');
+      const prefix = sep >= 0 ? tool.namespaced_name.slice(0, sep) : '';
+      const entry = out.get(tool.server_name) ?? {
+        serverName: tool.server_name,
+        prefix,
+        tools: [] as { key: string; toolName: string }[],
+      };
+      entry.tools.push({ key: tool.namespaced_name, toolName: tool.name });
+      out.set(tool.server_name, entry);
+    }
+    return out;
+  }, [availableMcpTools, policyScope.allowed_mcp_tools]);
 
   // ---------------------------------------------------------------------------
   // Filtered keys
@@ -253,7 +346,8 @@ export function ApiKeysPage() {
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
         onSuccess={fetchKeys}
-        availableModels={availableModels}
+        modelsByProvider={modelsByProvider}
+        mcpToolsByServer={mcpToolsByServer}
         costCenterOptions={costCenterOptions}
         onCostCenterAdded={handleCostCenterAdded}
       />
@@ -263,7 +357,8 @@ export function ApiKeysPage() {
         onOpenChange={setEditDialogOpen}
         onSuccess={fetchKeys}
         apiKey={editingKey}
-        availableModels={availableModels}
+        modelsByProvider={modelsByProvider}
+        mcpToolsByServer={mcpToolsByServer}
         costCenterOptions={costCenterOptions}
         onCostCenterAdded={handleCostCenterAdded}
       />

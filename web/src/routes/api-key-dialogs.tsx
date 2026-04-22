@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -16,6 +16,12 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Copy, Check, AlertCircle } from 'lucide-react';
 import { apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import {
+  ScopeDropdown,
+  ToolScopeDropdown,
+  type ModelsByProvider,
+  type McpToolsByServer,
+} from '@/components/roles/PermissionTree';
 
 // ---------------------------------------------------------------------------
 // Shared types
@@ -32,6 +38,7 @@ export interface ApiKey {
   user_id: string | null;
   surfaces: Surface[];
   allowed_models: string[] | null;
+  allowed_mcp_tools: string[] | null;
   expires_at: string | null;
   is_active: boolean;
   last_used_at: string | null;
@@ -44,12 +51,6 @@ export interface ApiKey {
   disabled_reason: string | null;
   last_rotation_at: string | null;
   cost_center: string | null;
-}
-
-export interface ModelRow {
-  id: string;
-  model_id: string;
-  display_name: string;
 }
 
 interface CreateKeyResponse {
@@ -66,128 +67,6 @@ interface RotateKeyResponse {
   key: string;
   name: string;
   key_prefix: string;
-}
-
-// ---------------------------------------------------------------------------
-// AllowedModelsEditor
-// ---------------------------------------------------------------------------
-
-interface AllowedModelsEditorProps {
-  mode: 'all' | 'specific';
-  onModeChange: (m: 'all' | 'specific') => void;
-  selected: string[];
-  onSelectedChange: (ids: string[]) => void;
-  available: ModelRow[];
-}
-
-function AllowedModelsEditor({
-  mode,
-  onModeChange,
-  selected,
-  onSelectedChange,
-  available,
-}: AllowedModelsEditorProps) {
-  const { t } = useTranslation();
-  const [search, setSearch] = useState('');
-
-  // Flat, search-filtered model list. A model can route to multiple
-  // providers, so grouping by provider isn't meaningful here.
-  const filtered = useMemo(() => {
-    const q = search.trim().toLowerCase();
-    return available
-      .filter((m) => {
-        if (!q) return true;
-        return (
-          m.model_id.toLowerCase().includes(q) ||
-          m.display_name.toLowerCase().includes(q)
-        );
-      })
-      .sort((a, b) => a.model_id.localeCompare(b.model_id));
-  }, [available, search]);
-
-  const toggleModel = (modelId: string) => {
-    if (selected.includes(modelId)) {
-      onSelectedChange(selected.filter((id) => id !== modelId));
-    } else {
-      onSelectedChange([...selected, modelId]);
-    }
-  };
-
-  return (
-    <div className="space-y-2">
-      <Label>{t('apiKeys.allowedModels')}</Label>
-      <div
-        role="radiogroup"
-        aria-label={t('apiKeys.allowedModels')}
-        className="flex gap-4 text-sm"
-      >
-        <label className="flex cursor-pointer items-center gap-2">
-          <input
-            type="radio"
-            name="allowed-models-mode"
-            checked={mode === 'all'}
-            onChange={() => onModeChange('all')}
-          />
-          {t('apiKeys.allowedModels_allModels')}
-        </label>
-        <label className="flex cursor-pointer items-center gap-2">
-          <input
-            type="radio"
-            name="allowed-models-mode"
-            checked={mode === 'specific'}
-            onChange={() => onModeChange('specific')}
-          />
-          {t('apiKeys.allowedModels_specificModels')}
-        </label>
-      </div>
-      {mode === 'specific' && (
-        <div className="space-y-2 rounded-md border p-3 text-sm">
-          <p className="text-xs text-muted-foreground">
-            {t('apiKeys.allowedModels_pickModelsHint')}
-          </p>
-          {available.length === 0 ? (
-            <p className="text-xs text-muted-foreground">
-              {t('apiKeys.allowedModels_noModels')}
-            </p>
-          ) : (
-            <>
-              <Input
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder={t('models.searchPlaceholder')}
-                className="h-8 text-xs"
-              />
-              <div className="max-h-64 overflow-y-auto rounded-md border bg-muted/20">
-                {filtered.length === 0 ? (
-                  <p className="p-3 text-xs text-muted-foreground">
-                    {t('apiKeys.allowedModels_noModels')}
-                  </p>
-                ) : (
-                  <div className="grid grid-cols-1 gap-1 p-2 sm:grid-cols-2">
-                    {filtered.map((m) => (
-                      <label
-                        key={m.id}
-                        className="flex cursor-pointer items-center gap-2 rounded px-1 py-0.5 hover:bg-muted/50"
-                      >
-                        <Checkbox
-                          checked={selected.includes(m.model_id)}
-                          onCheckedChange={() => toggleModel(m.model_id)}
-                        />
-                        <span className="truncate">{m.display_name}</span>
-                        <code className="ml-auto truncate text-[10px] text-muted-foreground">
-                          {m.model_id}
-                        </code>
-                      </label>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +93,8 @@ interface CreateApiKeyDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSuccess: () => void;
-  availableModels: ModelRow[];
+  modelsByProvider: ModelsByProvider;
+  mcpToolsByServer: McpToolsByServer;
   costCenterOptions: string[];
   onCostCenterAdded: (tag: string) => void;
 }
@@ -223,15 +103,19 @@ export function CreateApiKeyDialog({
   open,
   onOpenChange,
   onSuccess,
-  availableModels,
+  modelsByProvider,
+  mcpToolsByServer,
   costCenterOptions,
   onCostCenterAdded,
 }: CreateApiKeyDialogProps) {
   const { t } = useTranslation();
 
   const [name, setName] = useState('');
-  const [allowedModelsMode, setAllowedModelsMode] = useState<'all' | 'specific'>('all');
-  const [selectedModels, setSelectedModels] = useState<string[]>([]);
+  // null = unrestricted (use every model/tool the role grants). Any Set
+  // = explicit subset. Scope pickers collapse empty Set → null on
+  // change, so "clear all" from the dropdown returns us to unrestricted.
+  const [selectedModels, setSelectedModels] = useState<Set<string> | null>(null);
+  const [selectedMcpTools, setSelectedMcpTools] = useState<Set<string> | null>(null);
   const [createSurfaces, setCreateSurfaces] = useState<Surface[]>(['ai_gateway', 'mcp_gateway']);
   const [expiresInDays, setExpiresInDays] = useState('');
   const [createCostCenter, setCreateCostCenter] = useState('');
@@ -243,8 +127,8 @@ export function CreateApiKeyDialog({
 
   const resetForm = () => {
     setName('');
-    setAllowedModelsMode('all');
-    setSelectedModels([]);
+    setSelectedModels(null);
+    setSelectedMcpTools(null);
     setCreateSurfaces(['ai_gateway', 'mcp_gateway']);
     setExpiresInDays('');
     setCreateCostCenter('');
@@ -269,15 +153,24 @@ export function CreateApiKeyDialog({
     setCopied(false);
     setSubmitting(true);
     try {
+      // A scope only applies if the matching surface is selected — an
+      // mcp_gateway-less key carrying an allowed_mcp_tools list would
+      // just be dead weight. Null = inherit role limits.
       const aiEnabled = createSurfaces.includes('ai_gateway');
+      const mcpEnabled = createSurfaces.includes('mcp_gateway');
       const allowedModels =
-        aiEnabled && allowedModelsMode === 'specific' && selectedModels.length > 0
-          ? selectedModels
+        aiEnabled && selectedModels && selectedModels.size > 0
+          ? Array.from(selectedModels)
+          : null;
+      const allowedMcpTools =
+        mcpEnabled && selectedMcpTools && selectedMcpTools.size > 0
+          ? Array.from(selectedMcpTools)
           : null;
       const res = await apiPost<CreateKeyResponse>('/api/keys', {
         name,
         surfaces: createSurfaces,
         allowed_models: allowedModels,
+        allowed_mcp_tools: allowedMcpTools,
         expires_in_days: expiresInDays ? parseInt(expiresInDays, 10) : undefined,
         cost_center: createCostCenter.trim() ? createCostCenter.trim() : undefined,
       });
@@ -355,14 +248,32 @@ export function CreateApiKeyDialog({
                 ))}
               </div>
             </div>
-            {createSurfaces.includes('ai_gateway') && (
-              <AllowedModelsEditor
-                mode={allowedModelsMode}
-                onModeChange={setAllowedModelsMode}
-                selected={selectedModels}
-                onSelectedChange={setSelectedModels}
-                available={availableModels}
-              />
+            {(createSurfaces.includes('ai_gateway') ||
+              createSurfaces.includes('mcp_gateway')) && (
+              <div className="space-y-2">
+                <Label>{t('apiKeys.scopeLabel')}</Label>
+                <p className="text-xs text-muted-foreground">
+                  {t('apiKeys.scopeHint')}
+                </p>
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border p-3 text-xs">
+                  {createSurfaces.includes('ai_gateway') && (
+                    <ScopeDropdown
+                      label={t('apiKeys.allowedModels')}
+                      selected={selectedModels}
+                      onChange={setSelectedModels}
+                      modelsByProvider={modelsByProvider}
+                    />
+                  )}
+                  {createSurfaces.includes('mcp_gateway') && (
+                    <ToolScopeDropdown
+                      label={t('apiKeys.allowedMcpTools')}
+                      selected={selectedMcpTools}
+                      onChange={setSelectedMcpTools}
+                      mcpToolsByServer={mcpToolsByServer}
+                    />
+                  )}
+                </div>
+              </div>
             )}
             <div className="space-y-2">
               <Label htmlFor="key-expires">{t('apiKeys.expiresInDays')}</Label>
@@ -406,7 +317,8 @@ interface EditApiKeyDialogProps {
   onOpenChange: (open: boolean) => void;
   onSuccess: () => void;
   apiKey: ApiKey | null;
-  availableModels: ModelRow[];
+  modelsByProvider: ModelsByProvider;
+  mcpToolsByServer: McpToolsByServer;
   costCenterOptions: string[];
   onCostCenterAdded: (tag: string) => void;
 }
@@ -416,14 +328,15 @@ export function EditApiKeyDialog({
   onOpenChange,
   onSuccess,
   apiKey,
-  availableModels,
+  modelsByProvider,
+  mcpToolsByServer,
   costCenterOptions,
   onCostCenterAdded,
 }: EditApiKeyDialogProps) {
   const { t } = useTranslation();
 
-  const [editAllowedModelsMode, setEditAllowedModelsMode] = useState<'all' | 'specific'>('all');
-  const [editSelectedModels, setEditSelectedModels] = useState<string[]>([]);
+  const [editSelectedModels, setEditSelectedModels] = useState<Set<string> | null>(null);
+  const [editSelectedMcpTools, setEditSelectedMcpTools] = useState<Set<string> | null>(null);
   const [editSurfaces, setEditSurfaces] = useState<Surface[]>([]);
   const [editExpiresInDays, setEditExpiresInDays] = useState('');
   const [editRotationPeriod, setEditRotationPeriod] = useState('');
@@ -436,13 +349,16 @@ export function EditApiKeyDialog({
   const [lastKeyId, setLastKeyId] = useState<string | null>(null);
   if (apiKey && apiKey.id !== lastKeyId) {
     setLastKeyId(apiKey.id);
-    if (apiKey.allowed_models && apiKey.allowed_models.length > 0) {
-      setEditAllowedModelsMode('specific');
-      setEditSelectedModels(apiKey.allowed_models);
-    } else {
-      setEditAllowedModelsMode('all');
-      setEditSelectedModels([]);
-    }
+    setEditSelectedModels(
+      apiKey.allowed_models && apiKey.allowed_models.length > 0
+        ? new Set(apiKey.allowed_models)
+        : null,
+    );
+    setEditSelectedMcpTools(
+      apiKey.allowed_mcp_tools && apiKey.allowed_mcp_tools.length > 0
+        ? new Set(apiKey.allowed_mcp_tools)
+        : null,
+    );
     setEditSurfaces(apiKey.surfaces ?? []);
     setEditExpiresInDays('');
     setEditRotationPeriod(apiKey.rotation_period_days?.toString() ?? '');
@@ -470,12 +386,18 @@ export function EditApiKeyDialog({
     setEditError('');
     try {
       const aiEnabled = editSurfaces.includes('ai_gateway');
+      const mcpEnabled = editSurfaces.includes('mcp_gateway');
       const allowedModels =
-        aiEnabled && editAllowedModelsMode === 'specific' && editSelectedModels.length > 0
-          ? editSelectedModels
+        aiEnabled && editSelectedModels && editSelectedModels.size > 0
+          ? Array.from(editSelectedModels)
+          : null;
+      const allowedMcpTools =
+        mcpEnabled && editSelectedMcpTools && editSelectedMcpTools.size > 0
+          ? Array.from(editSelectedMcpTools)
           : null;
       await apiPatch(`/api/keys/${apiKey.id}`, {
         allowed_models: allowedModels,
+        allowed_mcp_tools: allowedMcpTools,
         surfaces: editSurfaces,
         expires_in_days: editExpiresInDays ? parseInt(editExpiresInDays, 10) : undefined,
         rotation_period_days: editRotationPeriod ? parseInt(editRotationPeriod, 10) : null,
@@ -525,14 +447,32 @@ export function EditApiKeyDialog({
               ))}
             </div>
           </div>
-          {editSurfaces.includes('ai_gateway') && (
-            <AllowedModelsEditor
-              mode={editAllowedModelsMode}
-              onModeChange={setEditAllowedModelsMode}
-              selected={editSelectedModels}
-              onSelectedChange={setEditSelectedModels}
-              available={availableModels}
-            />
+          {(editSurfaces.includes('ai_gateway') ||
+            editSurfaces.includes('mcp_gateway')) && (
+            <div className="space-y-2">
+              <Label>{t('apiKeys.scopeLabel')}</Label>
+              <p className="text-xs text-muted-foreground">
+                {t('apiKeys.scopeHint')}
+              </p>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 rounded-md border p-3 text-xs">
+                {editSurfaces.includes('ai_gateway') && (
+                  <ScopeDropdown
+                    label={t('apiKeys.allowedModels')}
+                    selected={editSelectedModels}
+                    onChange={setEditSelectedModels}
+                    modelsByProvider={modelsByProvider}
+                  />
+                )}
+                {editSurfaces.includes('mcp_gateway') && (
+                  <ToolScopeDropdown
+                    label={t('apiKeys.allowedMcpTools')}
+                    selected={editSelectedMcpTools}
+                    onChange={setEditSelectedMcpTools}
+                    mcpToolsByServer={mcpToolsByServer}
+                  />
+                )}
+              </div>
+            </div>
           )}
           <div className="space-y-2">
             <Label>{t('apiKeys.expiresIn')}</Label>

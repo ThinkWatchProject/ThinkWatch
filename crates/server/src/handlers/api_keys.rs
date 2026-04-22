@@ -4,7 +4,7 @@ use serde::Deserialize;
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use think_watch_auth::api_key;
+use think_watch_auth::{api_key, rbac};
 use think_watch_common::audit::AuditEntry;
 use think_watch_common::dto::{
     CreateApiKeyRequest, CreateApiKeyResponse, PaginatedResponse, PaginationParams,
@@ -61,6 +61,93 @@ async fn assert_owner_or_global(
     Err(AppError::Forbidden(format!(
         "{perm} not granted for this API key"
     )))
+}
+
+/// Check that `requested` is a subset of `granted` using the same
+/// match semantics the gateway applies at request time. An `m` in
+/// `requested` is covered iff some `g` in `granted` satisfies
+/// `m == g || m.starts_with(g)` — matches the `starts_with` prefix
+/// grant logic in [`crates/gateway/src/proxy.rs`]. Returns the first
+/// uncovered id (for a helpful error message) or `None` if all are
+/// covered.
+fn first_uncovered_model<'a>(requested: &'a [String], granted: &[String]) -> Option<&'a str> {
+    requested
+        .iter()
+        .find(|m| !granted.iter().any(|g| *m == g || m.starts_with(g)))
+        .map(String::as_str)
+}
+
+/// Check that every `requested` MCP tool pattern is covered by some
+/// pattern in `granted`. "Covered" means every tool the requested
+/// pattern would match is also matched by at least one granted
+/// pattern — the user can narrow (`github__*` → `github__list_issues`)
+/// but not widen (`github__list_issues` → `github__*`).
+fn first_uncovered_mcp_tool<'a>(requested: &'a [String], granted: &[String]) -> Option<&'a str> {
+    requested
+        .iter()
+        .find(|p| !mcp_pattern_covered(p, granted))
+        .map(String::as_str)
+}
+
+fn mcp_pattern_covered(requested: &str, granted: &[String]) -> bool {
+    // `*` in granted covers everything.
+    if granted.iter().any(|g| g == "*") {
+        return true;
+    }
+    // Exact match in granted.
+    if granted.iter().any(|g| g == requested) {
+        return true;
+    }
+    // Requested is a concrete tool `<server>__<tool>` — a server-wide
+    // grant `<server>__*` covers it. Wildcard-to-wildcard widening is
+    // intentionally NOT allowed: a request for `github__*` is only
+    // covered by an identical grant or `*`.
+    if !requested.ends_with("__*")
+        && let Some((server, _)) = requested.split_once("__")
+    {
+        let server_wild = format!("{server}__*");
+        if granted.iter().any(|g| g == &server_wild) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Enforce that any explicit allow-list on the incoming request is a
+/// subset of what the caller's roles already grant them. Callers that
+/// don't set the field (leave it as `None`) are unrestricted at the
+/// key layer and get intersected with role grants at request time —
+/// that path doesn't need validation here.
+///
+/// `None` in a granted list means "unrestricted" — no check needed.
+async fn validate_allowlists_within_role(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    requested_models: Option<&[String]>,
+    requested_mcp_tools: Option<&[String]>,
+) -> Result<(), AppError> {
+    if requested_models.is_none() && requested_mcp_tools.is_none() {
+        return Ok(());
+    }
+    let limits = rbac::compute_user_resource_limits(pool, user_id)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to load role limits: {e}")))?;
+
+    if let (Some(req), Some(granted)) = (requested_models, limits.allowed_models.as_deref())
+        && let Some(bad) = first_uncovered_model(req, granted)
+    {
+        return Err(AppError::BadRequest(format!(
+            "allowed_models entry '{bad}' is not granted by your roles"
+        )));
+    }
+    if let (Some(req), Some(granted)) = (requested_mcp_tools, limits.allowed_mcp_tools.as_deref())
+        && let Some(bad) = first_uncovered_mcp_tool(req, granted)
+    {
+        return Err(AppError::BadRequest(format!(
+            "allowed_mcp_tools entry '{bad}' is not granted by your roles"
+        )));
+    }
+    Ok(())
 }
 
 /// GET /api/keys
@@ -197,6 +284,14 @@ pub async fn create_key(
 
     let surfaces = normalize_surfaces(&req.surfaces)?;
 
+    validate_allowlists_within_role(
+        &state.db,
+        auth_user.claims.sub,
+        req.allowed_models.as_deref(),
+        req.allowed_mcp_tools.as_deref(),
+    )
+    .await?;
+
     let generated = api_key::generate_api_key();
 
     let expires_at = req
@@ -206,8 +301,9 @@ pub async fn create_key(
     let cost_center = validate_cost_center(req.cost_center.as_deref())?;
 
     let row = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces, allowed_models, expires_at, cost_center)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
+        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces,
+                allowed_models, allowed_mcp_tools, expires_at, cost_center)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *"#,
     )
     .bind(&generated.prefix)
     .bind(&generated.hash)
@@ -215,6 +311,7 @@ pub async fn create_key(
     .bind(auth_user.claims.sub)
     .bind(&surfaces)
     .bind(&req.allowed_models)
+    .bind(&req.allowed_mcp_tools)
     .bind(expires_at)
     .bind(cost_center.as_deref())
     .fetch_one(&state.db)
@@ -399,6 +496,10 @@ pub struct UpdateKeyRequest {
     /// `null` for allowed_models means "all models"; a non-empty array
     /// means restrict to that list.
     pub allowed_models: Option<Vec<String>>,
+    /// Parallel to `allowed_models` but for MCP tools. Same semantics:
+    /// omit = leave unchanged; `[]` = deny all; non-empty array =
+    /// restrict. Must be a subset of the caller's role-granted tools.
+    pub allowed_mcp_tools: Option<Vec<String>>,
     /// When `Some`, replaces the entire surfaces list. Must still
     /// be non-empty. Omit the field to leave surfaces untouched.
     pub surfaces: Option<Vec<String>>,
@@ -440,6 +541,19 @@ pub async fn update_key(
             .fetch_optional(&state.db)
             .await?
             .ok_or(AppError::NotFound("API key not found".into()))?;
+
+    // Subset check against the *key owner's* roles, not the caller's —
+    // a super-admin editing someone else's key still can't grant tools
+    // the owner's roles don't already permit.
+    if let Some(owner) = key.user_id {
+        validate_allowlists_within_role(
+            &state.db,
+            owner,
+            req.allowed_models.as_deref(),
+            req.allowed_mcp_tools.as_deref(),
+        )
+        .await?;
+    }
 
     let normalized_surfaces = req
         .surfaces
@@ -483,6 +597,7 @@ pub async fn update_key(
     let updated = sqlx::query_as::<_, ApiKey>(
         r#"UPDATE api_keys SET
             allowed_models = COALESCE($1, allowed_models),
+            allowed_mcp_tools = COALESCE($10, allowed_mcp_tools),
             surfaces = COALESCE($2, surfaces),
             expires_at = $3,
             rotation_period_days = COALESCE($4, rotation_period_days),
@@ -501,6 +616,7 @@ pub async fn update_key(
     .bind(cost_center_set)
     .bind(id)
     .bind(expiry_extended)
+    .bind(&req.allowed_mcp_tools)
     .fetch_one(&state.db)
     .await?;
 
@@ -514,6 +630,15 @@ pub async fn update_key(
             serde_json::json!({
                 "before": key.allowed_models,
                 "after": updated.allowed_models,
+            }),
+        );
+    }
+    if req.allowed_mcp_tools.is_some() && req.allowed_mcp_tools != key.allowed_mcp_tools {
+        changes.insert(
+            "allowed_mcp_tools".into(),
+            serde_json::json!({
+                "before": key.allowed_mcp_tools,
+                "after": updated.allowed_mcp_tools,
             }),
         );
     }
@@ -622,9 +747,9 @@ pub async fn rotate_key(
 
     let new_key = sqlx::query_as::<_, ApiKey>(
         r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces, allowed_models,
-            expires_at, rotation_period_days, inactivity_timeout_days,
+            allowed_mcp_tools, expires_at, rotation_period_days, inactivity_timeout_days,
             rotated_from_id, last_rotation_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
            RETURNING *"#,
     )
     .bind(&generated.prefix)
@@ -633,6 +758,7 @@ pub async fn rotate_key(
     .bind(old_key.user_id)
     .bind(&old_key.surfaces)
     .bind(&old_key.allowed_models)
+    .bind(&old_key.allowed_mcp_tools)
     .bind(old_key.expires_at)
     .bind(old_key.rotation_period_days)
     .bind(old_key.inactivity_timeout_days)
@@ -777,6 +903,48 @@ pub async fn list_cost_centers(
     .fetch_all(&state.db)
     .await?;
     Ok(Json(rows.into_iter().map(|(s,)| s).collect()))
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct PolicyScopeResponse {
+    /// `None` means unrestricted at the role layer — the API-key picker
+    /// can offer every model in the catalog. `Some(list)` is a
+    /// patterns/exact-id allow-list that narrows the picker to those
+    /// entries.
+    pub allowed_models: Option<Vec<String>>,
+    /// Same semantics as `allowed_models`. Patterns may include
+    /// `<server>__*` wildcards.
+    pub allowed_mcp_tools: Option<Vec<String>>,
+}
+
+/// GET /api/keys/policy-scope — effective resource limits for the
+/// caller, aggregated across every role they hold. Returned to the
+/// web UI so the "allowed models" / "allowed MCP tools" pickers on
+/// the API-key create/edit dialogs can hide entries the caller could
+/// not then use anyway. The same data also bounds what the handler
+/// will accept back on POST / PATCH (see
+/// `validate_allowlists_within_role`).
+#[utoipa::path(
+    get,
+    path = "/api/keys/policy-scope",
+    tag = "API Keys",
+    responses(
+        (status = 200, description = "Caller's effective allow-lists", body = PolicyScopeResponse),
+        (status = 401, description = "Unauthorized"),
+    ),
+    security(("bearer_token" = []))
+)]
+pub async fn get_policy_scope(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<PolicyScopeResponse>, AppError> {
+    let limits = rbac::compute_user_resource_limits(&state.db, auth_user.claims.sub)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to load role limits: {e}")))?;
+    Ok(Json(PolicyScopeResponse {
+        allowed_models: limits.allowed_models,
+        allowed_mcp_tools: limits.allowed_mcp_tools,
+    }))
 }
 
 #[cfg(test)]

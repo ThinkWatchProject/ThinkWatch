@@ -444,6 +444,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             get(handlers::api_keys::list_cost_centers),
         )
         .route(
+            "/api/keys/policy-scope",
+            get(handlers::api_keys::get_policy_scope),
+        )
+        .route(
             "/api/keys/{id}",
             get(handlers::api_keys::get_key)
                 .patch(handlers::api_keys::update_key)

@@ -202,6 +202,13 @@ CREATE TABLE api_keys (
     surfaces                TEXT[] NOT NULL
         CHECK (cardinality(surfaces) > 0),
     allowed_models          TEXT[],
+    -- MCP tool allow-list. Parallel to `allowed_models` but for the
+    -- MCP gateway surface. Entries are namespaced tool keys (e.g.
+    -- `github__list_issues`) or per-server wildcards (`github__*`).
+    -- Request-time policy = intersection(api_key.allowed_mcp_tools,
+    -- role_merged.allowed_mcp_tools) — the key can only narrow what
+    -- the bearer's roles already grant.
+    allowed_mcp_tools       TEXT[],
     -- Rate limits and budget caps live in `rate_limit_rules` /
     -- `budget_caps` (subject_kind = 'api_key').
     cost_center             VARCHAR(64),

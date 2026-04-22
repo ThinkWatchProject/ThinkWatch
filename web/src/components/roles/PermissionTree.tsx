@@ -192,7 +192,7 @@ export function PermissionTree({
   );
 }
 
-function ScopeDropdown({
+export function ScopeDropdown({
   label,
   selected,
   onChange,
@@ -464,7 +464,7 @@ function ScopeDropdown({
   );
 }
 
-function ToolScopeDropdown({
+export function ToolScopeDropdown({
   label,
   selected,
   onChange,

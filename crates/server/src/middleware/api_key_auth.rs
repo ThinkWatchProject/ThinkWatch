@@ -187,6 +187,8 @@ pub fn require_api_key(
             };
             let merged_models =
                 intersect_allowlists(row.allowed_models.clone(), role_limits.allowed_models);
+            let merged_mcp_tools =
+                intersect_allowlists(row.allowed_mcp_tools.clone(), role_limits.allowed_mcp_tools);
 
             // Load email for template header resolution ({{user_email}})
             let user_email: Option<String> = if let Some(uid) = row.user_id {
@@ -232,7 +234,7 @@ pub fn require_api_key(
                     user_email,
                     user_roles,
                     surface_constraints: surface_constraints.clone(),
-                    allowed_mcp_tools: role_limits.allowed_mcp_tools.clone(),
+                    allowed_mcp_tools: merged_mcp_tools.clone(),
                 };
                 request.extensions_mut().insert(mcp_identity);
             }

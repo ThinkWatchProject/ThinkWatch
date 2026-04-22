@@ -164,6 +164,10 @@ pub struct CreateApiKeyRequest {
     /// handler validates and normalizes the list.
     pub surfaces: Vec<String>,
     pub allowed_models: Option<Vec<String>>,
+    /// MCP tool allow-list, parallel to `allowed_models`. `None`
+    /// = unrestricted; must be a subset of the caller's
+    /// role-granted `allowed_mcp_tools` (enforced by the handler).
+    pub allowed_mcp_tools: Option<Vec<String>>,
     pub expires_in_days: Option<i32>,
     /// Optional cost-center / project tag for analytics attribution.
     /// Free-form up to 64 chars; the admin UI autocompletes from the
