@@ -39,11 +39,13 @@ import {
   Send,
   AlertCircle,
   Pencil,
+  Inbox,
 } from 'lucide-react';
 import { HeaderEditor } from '@/components/header-editor';
 import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription, AlertAction } from '@/components/ui/alert';
+import { OutboxBacklogDialog } from './outbox-backlog-dialog';
 
 interface LogForwarder {
   id: string;
@@ -132,6 +134,10 @@ export function LogForwardersPage() {
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
 
+  // Per-forwarder outbox backlog counts + the drawer triaging one of them.
+  const [backlogCounts, setBacklogCounts] = useState<Record<string, number>>({});
+  const [backlogForwarderId, setBacklogForwarderId] = useState<string | null>(null);
+
   const loadForwarders = useCallback(async () => {
     try {
       const data = await api<LogForwarder[]>('/api/admin/log-forwarders');
@@ -144,9 +150,30 @@ export function LogForwardersPage() {
     }
   }, []);
 
+  const loadBacklogCounts = useCallback(async () => {
+    try {
+      const rows = await api<Array<{ forwarder_id: string; count: number }>>(
+        '/api/admin/webhook-outbox/counts',
+      );
+      const map: Record<string, number> = {};
+      for (const r of rows) map[r.forwarder_id] = r.count;
+      setBacklogCounts(map);
+    } catch {
+      // Non-critical — leave the column blank if the endpoint hiccups.
+    }
+  }, []);
+
   useEffect(() => {
     loadForwarders();
-  }, [loadForwarders]);
+    loadBacklogCounts();
+  }, [loadForwarders, loadBacklogCounts]);
+
+  // Poll backlog counts on the same cadence as the drain worker so the
+  // operator watching a stuck destination sees it drain down live.
+  useEffect(() => {
+    const id = window.setInterval(loadBacklogCounts, 10_000);
+    return () => window.clearInterval(id);
+  }, [loadBacklogCounts]);
 
   const resetForm = () => {
     setFormName('');
@@ -521,6 +548,7 @@ export function LogForwardersPage() {
                   <TableHead>{t('common.status')}</TableHead>
                   <TableHead className="text-right">{t('logForwarders.sent')}</TableHead>
                   <TableHead className="text-right">{t('logForwarders.errors')}</TableHead>
+                  <TableHead className="text-right">{t('logForwarders.backlog')}</TableHead>
                   <TableHead>{t('logForwarders.lastSent')}</TableHead>
                   <TableHead>{t('common.actions')}</TableHead>
                 </TableRow>
@@ -552,6 +580,26 @@ export function LogForwardersPage() {
                       ) : (
                         '0'
                       )}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {(() => {
+                        const count = backlogCounts[f.id] ?? 0;
+                        if (count === 0) {
+                          return <span className="text-muted-foreground">0</span>;
+                        }
+                        return (
+                          <button
+                            type="button"
+                            className="inline-flex items-center gap-1 rounded hover:underline"
+                            onClick={() => setBacklogForwarderId(f.id)}
+                            title={t('logForwarders.viewBacklog')}
+                          >
+                            <Badge variant={count >= 100 ? 'destructive' : 'default'} className="font-mono">
+                              {formatNumber(count)}
+                            </Badge>
+                          </button>
+                        );
+                      })()}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">{formatTime(f.last_sent_at)}</TableCell>
                     <TableCell>
@@ -588,6 +636,14 @@ export function LogForwardersPage() {
                           onClick={() => handleResetStats(f.id)}
                         >
                           <RotateCcw className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title={t('logForwarders.viewBacklog')}
+                          onClick={() => setBacklogForwarderId(f.id)}
+                        >
+                          <Inbox className="h-4 w-4" />
                         </Button>
                         <Separator orientation="vertical" className="mx-1 h-4" />
                         <Button
@@ -728,6 +784,19 @@ export function LogForwardersPage() {
         variant="destructive"
         confirmLabel={t('common.delete')}
         onConfirm={() => { if (deleteTargetId) handleDelete(deleteTargetId); }}
+      />
+
+      <OutboxBacklogDialog
+        forwarderId={backlogForwarderId}
+        forwarderName={
+          backlogForwarderId
+            ? forwarders.find((x) => x.id === backlogForwarderId)?.name
+            : undefined
+        }
+        onOpenChange={(open) => {
+          if (!open) setBacklogForwarderId(null);
+        }}
+        onChanged={loadBacklogCounts}
       />
     </div>
   );

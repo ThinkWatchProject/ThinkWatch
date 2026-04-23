@@ -534,6 +534,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             get(handlers::webhook_outbox::list_outbox),
         )
         .route(
+            "/api/admin/webhook-outbox/counts",
+            get(handlers::webhook_outbox::outbox_counts),
+        )
+        .route(
             "/api/admin/webhook-outbox/{id}",
             delete(handlers::webhook_outbox::delete_outbox_row),
         )

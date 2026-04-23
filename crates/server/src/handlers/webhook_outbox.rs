@@ -10,9 +10,9 @@
 //! forwarder admin UI uses.
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use think_watch_common::errors::AppError;
@@ -47,15 +47,31 @@ pub struct WebhookOutboxListResponse {
     pub total: i64,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ListOutboxQuery {
+    /// When set, only rows targeting this forwarder are returned.
+    /// The log-forwarders admin page uses this to render a
+    /// per-forwarder backlog drawer inline.
+    pub forwarder_id: Option<Uuid>,
+}
+
 /// `GET /api/admin/webhook-outbox` — list pending deliveries oldest-first.
 ///
 /// Capped at 200 rows; an operator with a backlog larger than that
 /// has bigger problems than pagination. `total` is returned separately
 /// so the UI can show "showing 200 of 1,453 — drain is behind".
+///
+/// With `?forwarder_id=<uuid>`, the result is narrowed to that
+/// forwarder — mounted directly under each row on the log-forwarders
+/// admin page, so operators don't have to bounce to a separate
+/// outbox view to see which of their destinations is backing up.
 #[utoipa::path(
     get,
     path = "/api/admin/webhook-outbox",
     tag = "Admin",
+    params(
+        ("forwarder_id" = Option<String>, Query, description = "Narrow to one forwarder"),
+    ),
     responses(
         (status = 200, description = "Pending webhook deliveries", body = WebhookOutboxListResponse),
         (status = 401, description = "Unauthorized"),
@@ -66,33 +82,90 @@ pub struct WebhookOutboxListResponse {
 pub async fn list_outbox(
     auth_user: AuthUser,
     State(state): State<AppState>,
+    Query(q): Query<ListOutboxQuery>,
 ) -> Result<Json<WebhookOutboxListResponse>, AppError> {
     auth_user.require_permission("log_forwarders:write")?;
     auth_user
         .assert_scope_global(&state.db, "log_forwarders:write")
         .await?;
 
-    // Pull the URL out of the forwarder's JSONB config at query time.
-    // `->>` returns TEXT and casts NULL on a missing key — safer than
-    // a second materialised column that'd drift from the forwarder's
-    // canonical config.
+    // `$1::uuid IS NULL OR o.forwarder_id = $1` lets one prepared
+    // statement serve both the "show everything" and "only this
+    // forwarder" calls. `->>` returns TEXT for the URL column —
+    // safer than a second materialised column that'd drift from the
+    // forwarder's canonical config.
     let items: Vec<WebhookOutboxRow> = sqlx::query_as(
         "SELECT o.id, o.forwarder_id, f.name AS forwarder_name, \
                 (f.config->>'url')::text AS forwarder_url, \
                 o.attempts, o.next_attempt_at, o.last_error, o.created_at \
            FROM webhook_outbox o \
            LEFT JOIN log_forwarders f ON f.id = o.forwarder_id \
+          WHERE $1::uuid IS NULL OR o.forwarder_id = $1 \
           ORDER BY o.next_attempt_at ASC \
           LIMIT 200",
     )
+    .bind(q.forwarder_id)
     .fetch_all(&state.db)
     .await?;
 
-    let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM webhook_outbox")
-        .fetch_one(&state.db)
-        .await?;
+    let total: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM webhook_outbox \
+          WHERE $1::uuid IS NULL OR forwarder_id = $1",
+    )
+    .bind(q.forwarder_id)
+    .fetch_one(&state.db)
+    .await?;
 
     Ok(Json(WebhookOutboxListResponse { items, total }))
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WebhookOutboxCount {
+    #[schema(value_type = String, format = Uuid)]
+    pub forwarder_id: Uuid,
+    pub count: i64,
+}
+
+/// `GET /api/admin/webhook-outbox/counts` — backlog size per forwarder.
+///
+/// Feeds the "backlog" column on the log-forwarders admin table so
+/// operators see at-a-glance which destinations are stuck. Returns
+/// only forwarders with `count > 0` — the table joins by id and
+/// defaults missing rows to zero.
+#[utoipa::path(
+    get,
+    path = "/api/admin/webhook-outbox/counts",
+    tag = "Admin",
+    responses(
+        (status = 200, description = "Per-forwarder backlog counts", body = Vec<WebhookOutboxCount>),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
+pub async fn outbox_counts(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<WebhookOutboxCount>>, AppError> {
+    auth_user.require_permission("log_forwarders:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "log_forwarders:write")
+        .await?;
+    let rows: Vec<(Uuid, i64)> = sqlx::query_as(
+        "SELECT forwarder_id, COUNT(*) AS count \
+           FROM webhook_outbox \
+          GROUP BY forwarder_id",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    Ok(Json(
+        rows.into_iter()
+            .map(|(forwarder_id, count)| WebhookOutboxCount {
+                forwarder_id,
+                count,
+            })
+            .collect(),
+    ))
 }
 
 /// `DELETE /api/admin/webhook-outbox/{id}` — drop a single stuck row.

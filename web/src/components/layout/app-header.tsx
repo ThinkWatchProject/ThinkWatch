@@ -37,7 +37,6 @@ const exactBreadcrumbs: Record<string, CrumbEntry> = {
   '/analytics/costs': { sectionKey: 'nav.analytics', pageKey: 'nav.costs' },
   '/logs': { sectionKey: 'nav.logs', pageKey: 'nav.logExplorer' },
   '/logs/forwarders': { sectionKey: 'nav.logs', pageKey: 'nav.logForwarders' },
-  '/admin/webhook-outbox': { sectionKey: 'nav.logs', pageKey: 'nav.webhookOutbox' },
   '/admin/users': { sectionKey: 'nav.admin', pageKey: 'nav.users' },
   '/admin/teams': { sectionKey: 'nav.admin', pageKey: 'nav.teams' },
   '/admin/roles': { sectionKey: 'nav.admin', pageKey: 'nav.roles' },

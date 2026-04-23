@@ -12,8 +12,8 @@ import { cn } from "@/lib/utils"
  *
  *   - `routes/admin/users.tsx`        — table-row skeleton matching
  *                                       the real columns
- *   - `routes/admin/webhook-outbox.tsx` — single block skeleton when
- *                                       the entire panel is loading
+ *   - `routes/admin/outbox-backlog-dialog.tsx` — single block skeleton
+ *                                       when the entire panel is loading
  *   - `routes/api-keys.tsx`           — repeated row skeletons for
  *                                       the list view
  *

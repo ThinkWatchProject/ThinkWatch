@@ -111,7 +111,6 @@
     "apiDocs": "API 文档",
     "usageLicense": "用量与许可",
     "trace": "请求追踪",
-    "webhookOutbox": "Webhook 出箱",
     "contentSecurity": "内容安全",
     "mcpStore": "商店"
   },
@@ -1288,6 +1287,8 @@
     "destination": "目标地址",
     "sent": "已发送",
     "errors": "错误",
+    "backlog": "积压",
+    "viewBacklog": "查看积压",
     "lastSent": "最后发送",
     "running": "运行中",
     "paused": "已暂停",

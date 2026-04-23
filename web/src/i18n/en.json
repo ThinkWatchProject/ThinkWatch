@@ -111,7 +111,6 @@
     "apiDocs": "API Docs",
     "usageLicense": "Usage & License",
     "trace": "Request Trace",
-    "webhookOutbox": "Webhook Outbox",
     "contentSecurity": "Content Security",
     "mcpStore": "Store"
   },
@@ -1288,6 +1287,8 @@
     "destination": "Destination",
     "sent": "Sent",
     "errors": "Errors",
+    "backlog": "Backlog",
+    "viewBacklog": "View backlog",
     "lastSent": "Last Sent",
     "running": "Running",
     "paused": "Paused",

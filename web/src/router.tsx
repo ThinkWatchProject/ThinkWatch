@@ -48,10 +48,6 @@ const UsageLicensePage = lazyRouteComponent(
   'UsageLicensePage',
 );
 const TracePage = lazyRouteComponent(() => import('@/routes/admin/trace'), 'TracePage');
-const WebhookOutboxPage = lazyRouteComponent(
-  () => import('@/routes/admin/webhook-outbox'),
-  'WebhookOutboxPage',
-);
 const ProfilePage = lazyRouteComponent(() => import('@/routes/profile'), 'ProfilePage');
 
 let cachedSetupStatus: SetupStatus | null = null;
@@ -342,12 +338,6 @@ const traceDetailRoute = createRoute({
   component: TracePage,
 });
 
-const webhookOutboxRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: '/admin/webhook-outbox',
-  component: WebhookOutboxPage,
-});
-
 const profileRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/profile',
@@ -399,7 +389,6 @@ const routeTree = rootRoute.addChildren([
   usageLicenseRoute,
   traceIndexRoute,
   traceDetailRoute,
-  webhookOutboxRoute,
   profileRoute,
   registerRoute,
   setupRoute,
