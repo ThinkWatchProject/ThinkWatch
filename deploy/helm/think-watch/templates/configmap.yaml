@@ -3,26 +3,14 @@ kind: ConfigMap
 metadata:
   name: {{ .Release.Name }}-config
   labels:
-    app.kubernetes.io/name: {{ .Chart.Name }}
-    app.kubernetes.io/instance: {{ .Release.Name }}
+    {{- include "tw.labels" . | nindent 4 }}
 data:
   SERVER_HOST: "0.0.0.0"
   GATEWAY_PORT: "3000"
   CONSOLE_PORT: "3001"
   CORS_ORIGINS: {{ .Values.config.corsOrigins | quote }}
   RUST_LOG: {{ .Values.config.rustLog | quote }}
-  {{- if .Values.clickhouse.enabled }}
-  CLICKHOUSE_URL: {{ .Values.clickhouse.url | quote }}
-  CLICKHOUSE_DB: {{ .Values.clickhouse.db | quote }}
-  CLICKHOUSE_USER: {{ .Values.clickhouse.user | quote }}
-  {{- end }}
-  {{- if .Values.secrets.oidcIssuerUrl }}
-  OIDC_ISSUER_URL: {{ .Values.secrets.oidcIssuerUrl | quote }}
-  {{- end }}
-  {{- if .Values.secrets.oidcRedirectUrl }}
-  OIDC_REDIRECT_URL: {{ .Values.secrets.oidcRedirectUrl | quote }}
-  {{- end }}
-{{- if and .Values.clickhouse.enabled .Values.clickhouse.configMaps.enabled }}
+{{- if and .Values.clickhouse.bundled .Values.clickhouse.configMaps.enabled }}
 ---
 # ClickHouse optimized config — mount into your ClickHouse pod at /etc/clickhouse-server/config.d/
 apiVersion: v1

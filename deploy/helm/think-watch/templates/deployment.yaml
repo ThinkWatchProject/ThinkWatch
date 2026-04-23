@@ -3,9 +3,8 @@ kind: Deployment
 metadata:
   name: {{ .Release.Name }}-server
   labels:
-    app.kubernetes.io/name: {{ .Chart.Name }}
+    {{- include "tw.labels" . | nindent 4 }}
     app.kubernetes.io/component: server
-    app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
@@ -56,9 +55,25 @@ spec:
               app.kubernetes.io/name: {{ .Chart.Name }}
               app.kubernetes.io/component: server
       {{- end }}
+      initContainers:
+        {{- if .Values.postgres.bundled }}
+        - name: wait-postgres
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ include "tw.postgres.name" . }} 5432; do echo waiting for postgres; sleep 2; done']
+        {{- end }}
+        {{- if .Values.redis.bundled }}
+        - name: wait-redis
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ include "tw.redis.name" . }} 6379; do echo waiting for redis; sleep 2; done']
+        {{- end }}
+        {{- if .Values.clickhouse.bundled }}
+        - name: wait-clickhouse
+          image: busybox:1.36
+          command: ['sh', '-c', 'until nc -z {{ include "tw.clickhouse.name" . }} 8123; do echo waiting for clickhouse; sleep 2; done']
+        {{- end }}
       containers:
         - name: server
-          image: "{{ .Values.image.server.repository }}:{{ .Values.image.server.tag }}"
+          image: "{{ .Values.image.server.repository }}:{{ include "tw.imageTag" (dict "tag" .Values.image.server.tag "ctx" .) }}"
           imagePullPolicy: {{ .Values.image.server.pullPolicy }}
           securityContext:
             runAsNonRoot: true
@@ -109,9 +124,8 @@ kind: Deployment
 metadata:
   name: {{ .Release.Name }}-web
   labels:
-    app.kubernetes.io/name: {{ .Chart.Name }}
+    {{- include "tw.labels" . | nindent 4 }}
     app.kubernetes.io/component: web
-    app.kubernetes.io/instance: {{ .Release.Name }}
 spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
@@ -128,7 +142,7 @@ spec:
     spec:
       containers:
         - name: web
-          image: "{{ .Values.image.web.repository }}:{{ .Values.image.web.tag }}"
+          image: "{{ .Values.image.web.repository }}:{{ include "tw.imageTag" (dict "tag" .Values.image.web.tag "ctx" .) }}"
           imagePullPolicy: {{ .Values.image.web.pullPolicy }}
           securityContext:
             runAsNonRoot: true

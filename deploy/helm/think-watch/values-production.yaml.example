@@ -1,0 +1,84 @@
+# Copy to values-production.yaml and edit.
+#   helm upgrade --install thinkwatch deploy/helm/think-watch \
+#     -n thinkwatch --create-namespace -f deploy/helm/think-watch/values-production.yaml
+#
+# Anything left commented uses chart defaults. Secrets are auto-generated
+# on first install and preserved on upgrade — only set them here if you
+# need to pin a specific value.
+
+replicaCount: 3
+
+image:
+  server:
+    tag: ""   # "" → .Chart.AppVersion; set e.g. "v0.2.0" to pin
+  web:
+    tag: ""
+
+ingress:
+  enabled: true
+  className: nginx
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+  gateway:
+    host: api.example.com
+    tls:
+      - hosts: [api.example.com]
+        secretName: api-example-com-tls
+  console:
+    host: console.internal.example.com
+    tls:
+      - hosts: [console.internal.example.com]
+        secretName: console-internal-example-com-tls
+
+config:
+  corsOrigins: "https://console.internal.example.com"
+  rustLog: "info,think_watch=info"
+
+# Swap any of these to bundled: false + externalUrl to point at a managed
+# service (RDS, ElastiCache, ClickHouse Cloud). Bundled=true gives you a
+# single-replica in-cluster StatefulSet — fine for small prod, not for HA.
+
+postgres:
+  bundled: false
+  externalUrl: "postgres://thinkwatch:REDACTED@pg.internal:5432/think_watch?sslmode=require"
+
+redis:
+  bundled: false
+  externalUrl: "redis://:REDACTED@redis.internal:6379"
+
+clickhouse:
+  bundled: false
+  externalUrl: "http://clickhouse.internal:8123"
+  user: thinkwatch
+  database: think_watch
+
+autoscaling:
+  enabled: true
+  minReplicas: 3
+  maxReplicas: 10
+  targetCPUUtilizationPercentage: 70
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 2
+
+networkPolicy:
+  enabled: true
+
+topologySpreadConstraints:
+  enabled: true
+  maxSkew: 1
+  topologyKey: topology.kubernetes.io/zone
+
+resources:
+  server:
+    requests: { cpu: "1",   memory: 1Gi }
+    limits:   { cpu: "4",   memory: 4Gi }
+
+# Optional SSO/OIDC — can also be configured via the web console later.
+secrets:
+  # jwtSecret and encryptionKey left empty → auto-generated.
+  oidcIssuerUrl: ""
+  oidcClientId: ""
+  oidcClientSecret: ""
+  oidcRedirectUrl: ""

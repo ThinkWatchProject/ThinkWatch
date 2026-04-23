@@ -3,11 +3,12 @@ replicaCount: 1
 image:
   server:
     repository: ghcr.io/thinkwatch/think-watch-server
-    tag: v0.1.0
+    # Defaults to .Chart.AppVersion when empty
+    tag: ""
     pullPolicy: IfNotPresent
   web:
     repository: ghcr.io/thinkwatch/think-watch-web
-    tag: v0.1.0
+    tag: ""
     pullPolicy: IfNotPresent
 
 service:
@@ -25,11 +26,9 @@ ingress:
   enabled: false
   className: nginx
   annotations: {}
-  # Gateway ingress — public
   gateway:
     host: gateway.example.com
     tls: []
-  # Console ingress — internal
   console:
     host: console.internal.example.com
     tls: []
@@ -38,27 +37,72 @@ config:
   corsOrigins: "https://console.internal.example.com"
   rustLog: "info,think_watch=info"
 
-# External secrets — provide via --set or external secrets operator
+# Secrets — leave empty to auto-generate on first install.
+# Values are preserved across `helm upgrade` via the chart's lookup pattern.
+# Override here or with --set to pin specific values.
 secrets:
   jwtSecret: ""
   encryptionKey: ""
-  databaseUrl: ""
-  redisUrl: ""
   oidcClientId: ""
   oidcClientSecret: ""
   oidcIssuerUrl: ""
   oidcRedirectUrl: ""
 
+# ---- Bundled databases (in-chart StatefulSets) ----
+# Set `bundled: false` to use an external service; then set `externalUrl`.
+
+postgres:
+  bundled: true
+  image: postgres:18-alpine
+  user: thinkwatch
+  database: think_watch
+  # Used only when bundled=false; e.g. postgres://user:pass@host:5432/db
+  externalUrl: ""
+  storage: 10Gi
+  storageClassName: ""
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
+
+redis:
+  bundled: true
+  image: redis:8-alpine
+  # Used only when bundled=false; e.g. redis://:pass@host:6379
+  externalUrl: ""
+  storage: 2Gi
+  storageClassName: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: "1"
+      memory: 1Gi
+
 clickhouse:
-  enabled: true
-  url: "http://clickhouse:8123"
-  db: "think_watch"
-  user: "thinkwatch"
-  password: ""  # stored in Secret, not ConfigMap
-  # Deploy optimized ClickHouse config as ConfigMaps
-  # Mount these into your ClickHouse StatefulSet / Operator CR
+  bundled: true
+  image: clickhouse/clickhouse-server:26.3-alpine
+  user: thinkwatch
+  database: think_watch
+  # Used only when bundled=false; e.g. http://host:8123
+  externalUrl: ""
+  storage: 20Gi
+  storageClassName: ""
+  # Mount the chart's optimized config + init SQL ConfigMaps into the bundled
+  # ClickHouse pod. Ignored when bundled=false.
   configMaps:
     enabled: true
+  resources:
+    requests:
+      cpu: 500m
+      memory: 512Mi
+    limits:
+      cpu: "2"
+      memory: 2Gi
 
 networkPolicy:
   enabled: false
@@ -69,18 +113,14 @@ autoscaling:
   maxReplicas: 5
   targetCPUUtilizationPercentage: 70
 
-# Pod disruption budget (enabled when replicaCount > 1 or autoscaling)
 podDisruptionBudget:
   enabled: false
   minAvailable: 1
 
-# Graceful shutdown
 terminationGracePeriodSeconds: 30
 
-# Pod scheduling
 podAntiAffinity:
   enabled: true
-  # preferred (soft) or required (hard)
   type: preferred
 
 topologySpreadConstraints:

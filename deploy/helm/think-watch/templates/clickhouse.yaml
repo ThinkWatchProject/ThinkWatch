@@ -1,0 +1,115 @@
+{{- if .Values.clickhouse.bundled -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "tw.clickhouse.name" . }}
+  labels:
+    {{- include "tw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+spec:
+  ports:
+    - name: http
+      port: 8123
+      targetPort: http
+    - name: native
+      port: 9000
+      targetPort: native
+  selector:
+    app.kubernetes.io/name: {{ .Chart.Name }}
+    app.kubernetes.io/component: clickhouse
+    app.kubernetes.io/instance: {{ .Release.Name }}
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "tw.clickhouse.name" . }}
+  labels:
+    {{- include "tw.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clickhouse
+spec:
+  serviceName: {{ include "tw.clickhouse.name" . }}
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/component: clickhouse
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "tw.labels" . | nindent 8 }}
+        app.kubernetes.io/component: clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: {{ .Values.clickhouse.image | quote }}
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8123
+            - name: native
+              containerPort: 9000
+          env:
+            - name: CLICKHOUSE_USER
+              value: {{ .Values.clickhouse.user | quote }}
+            - name: CLICKHOUSE_DB
+              value: {{ .Values.clickhouse.database | quote }}
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tw.secret.name" . }}
+                  key: CLICKHOUSE_PASSWORD
+            - name: CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT
+              value: "1"
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse
+            {{- if .Values.clickhouse.configMaps.enabled }}
+            - name: optimize-config
+              mountPath: /etc/clickhouse-server/config.d/optimize.xml
+              subPath: optimize.xml
+            - name: user-profile
+              mountPath: /etc/clickhouse-server/users.d/default-profile.xml
+              subPath: default-profile.xml
+            - name: init-sql
+              mountPath: /docker-entrypoint-initdb.d/init.sql
+              subPath: init.sql
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.clickhouse.resources | nindent 12 }}
+      {{- if .Values.clickhouse.configMaps.enabled }}
+      volumes:
+        - name: optimize-config
+          configMap:
+            name: {{ .Release.Name }}-clickhouse-config
+        - name: user-profile
+          configMap:
+            name: {{ .Release.Name }}-clickhouse-users
+        - name: init-sql
+          configMap:
+            name: {{ .Release.Name }}-clickhouse-init
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: [ReadWriteOnce]
+        {{- if .Values.clickhouse.storageClassName }}
+        storageClassName: {{ .Values.clickhouse.storageClassName | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.clickhouse.storage | quote }}
+{{- end }}
