@@ -70,6 +70,22 @@ const DYNAMIC_ENUMS = {
   'users.bulk.action_${_}': ['activate', 'deactivate', 'delete'],
   // Conditional ternary — enumerate the three literal outcomes.
   "common.${_}": ['healthy', 'down', 'unknown'],
+  'limits.metric_${_}': ['requests', 'tokens'],
+  // Tier names come from crates/server/src/handlers/usage_license.rs::tiers()
+  // lowercased client-side. Keep in sync with the backend array.
+  'usageLicense.tier.${_}': ['starter', 'growth', 'scale', 'enterprise', 'custom'],
+  'analyticsCosts.range_${_}': ['24h', '7d', '30d', 'mtd'],
+  'analyticsCosts.group.${_}': ['model', 'user', 'cost_center', 'provider'],
+  'dashboard.range.${_}': ['24h', '7d', '30d'],
+  'models.costPreview.${_}': ['input', 'output'],
+  // describeApiError in src/lib/api.ts builds `errors.byStatus.${n}` /
+  // `errors.byType.${t}` off the wire. Types come from AppError in
+  // crates/common/src/errors.rs — keep both arrays in sync with it.
+  'errors.byStatus.${_}': ['401', '403', '404', '429', '503'],
+  'errors.byType.${_}': [
+    'unauthorized', 'forbidden', 'not_found', 'bad_request',
+    'rate_limited', 'conflict', 'service_unavailable', 'internal_error',
+  ],
 };
 
 // Normalize an observed dynamic pattern (from source) to the form used as
@@ -114,24 +130,33 @@ function walk(dir, exts = ['.ts', '.tsx']) {
 // Match: t('foo.bar') / t("foo.bar") / t(`foo.bar`) — but NOT t(`foo.${x}`)
 // For template literal `t(\`foo.${x}\`)` we report as dynamic.
 const T_CALL = /\bt\(\s*(['"`])([^'"`$)]+)\1/g;
+// Dynamic forms:
+//   (a) direct — t(`foo.${x}`)
+//   (b) bare   — `foo.${x}` on its own line (e.g. assigned then passed to t()).
+//       We accept any template literal whose prefix looks like a dotted
+//       i18n key. False positives are harmless — they just add entries
+//       to the "no DYNAMIC_ENUMS" warning list until you resolve them.
 const T_DYNAMIC = /\bt\(\s*`([^`]*\$\{[^}]*\}[^`]*)`/g;
+const T_DYNAMIC_BARE = /`([a-zA-Z][\w]*(?:\.[a-zA-Z][\w]*)+[^`]*\$\{[^}]*\}[^`]*)`/g;
+// Plain string literal that looks like an i18n key — used both for static
+// `t(key)` indirection (store key in variable, then call t) and for the
+// unused-keys audit below. Same shape as an i18n key: at least one dot.
+const KEY_LITERAL = /(['"`])([a-zA-Z][\w]*(?:\.[a-zA-Z][\w]*)+)\1/g;
 
 function extractTKeys(file) {
   const src = readFileSync(file, 'utf8');
   const keys = new Set();
+  const literalKeys = new Set();
   const dynamic = new Set();
   let m;
   while ((m = T_CALL.exec(src)) !== null) {
     const key = m[2];
-    // Heuristic: i18n keys are dotted identifiers, not bare strings.
-    if (/^[a-zA-Z][\w]*(\.[a-zA-Z][\w]*)+$/.test(key)) {
-      keys.add(key);
-    }
+    if (/^[a-zA-Z][\w]*(\.[a-zA-Z][\w]*)+$/.test(key)) keys.add(key);
   }
-  while ((m = T_DYNAMIC.exec(src)) !== null) {
-    dynamic.add(m[1]);
-  }
-  return { keys, dynamic };
+  while ((m = T_DYNAMIC.exec(src)) !== null) dynamic.add(m[1]);
+  while ((m = T_DYNAMIC_BARE.exec(src)) !== null) dynamic.add(m[1]);
+  while ((m = KEY_LITERAL.exec(src)) !== null) literalKeys.add(m[2]);
+  return { keys, dynamic, literalKeys };
 }
 
 // ---------------------------------------------------------------------------
@@ -167,10 +192,12 @@ if (!failed) {
 // ---------------------------------------------------------------------------
 
 const usedKeys = new Set();
+const referencedLiterals = new Set(); // strings matching the key shape
 const dynamicHits = new Map(); // pattern -> file
 for (const file of walk(srcDir)) {
-  const { keys, dynamic } = extractTKeys(file);
+  const { keys, dynamic, literalKeys } = extractTKeys(file);
   for (const k of keys) usedKeys.add(k);
+  for (const k of literalKeys) referencedLiterals.add(k);
   for (const d of dynamic) {
     if (!dynamicHits.has(d)) dynamicHits.set(d, file);
   }
@@ -191,6 +218,7 @@ if (undefinedKeys.length > 0) {
 
 const unresolvedPatterns = [];
 const missingDynamicKeys = [];
+const expandedDynamicKeys = new Set();
 let resolvedPatternCount = 0;
 let resolvedKeyCount = 0;
 
@@ -205,6 +233,7 @@ for (const [pattern, file] of dynamicHits) {
   for (const v of values) {
     const key = norm.replace('${_}', v);
     resolvedKeyCount += 1;
+    expandedDynamicKeys.add(key);
     if (!enKeys.has(key)) {
       missingDynamicKeys.push({ key, pattern, file });
     }
@@ -226,12 +255,44 @@ if (missingDynamicKeys.length > 0) {
 }
 
 if (unresolvedPatterns.length > 0) {
-  console.log(
-    `${YELLOW}ℹ${RESET} ${unresolvedPatterns.length} dynamic pattern(s) lack a DYNAMIC_ENUMS entry — add one to enable static checking:`,
+  console.error(
+    `${RED}✗ ${unresolvedPatterns.length} dynamic pattern(s) lack a DYNAMIC_ENUMS entry — declare the enum so all keys can be verified:${RESET}`,
   );
   for (const { pattern, file } of unresolvedPatterns) {
-    console.log(`    \`${pattern}\` in ${file.replace(webRoot + '/', '')}`);
+    console.error(`    \`${pattern}\` in ${file.replace(webRoot + '/', '')}`);
   }
+  failed = true;
+}
+
+// ---------------------------------------------------------------------------
+// Step 4: every en.json key is actually referenced somewhere.
+//
+// A key counts as referenced if it appears as:
+//   - a static t('foo.bar') call, OR
+//   - a plain string literal matching the dotted-key shape (covers
+//     indirection like `const k = 'foo.bar'; t(k)`), OR
+//   - an expansion of a dynamic pattern registered in DYNAMIC_ENUMS.
+//
+// With step 3 failing on unresolved patterns, we know every dynamic-key
+// namespace is enumerated — so anything left unreferenced here is dead.
+// ---------------------------------------------------------------------------
+
+const unusedKeys = [];
+for (const key of enKeys) {
+  if (usedKeys.has(key)) continue;
+  if (referencedLiterals.has(key)) continue;
+  if (expandedDynamicKeys.has(key)) continue;
+  unusedKeys.push(key);
+}
+
+if (unusedKeys.length > 0) {
+  console.error(
+    `${RED}✗ ${unusedKeys.length} key(s) in en.json are not referenced anywhere in src/ — delete them or wire them up:${RESET}`,
+  );
+  for (const k of unusedKeys.sort()) console.error(`    ${k}`);
+  failed = true;
+} else {
+  console.log(`${GREEN}✓${RESET} every en.json key is referenced (no dead keys)`);
 }
 
 process.exit(failed ? 1 : 0);
