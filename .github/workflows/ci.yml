@@ -82,15 +82,16 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Type check
-        run: pnpm exec tsc --noEmit
-
       - name: i18n parity
         run: pnpm check:i18n
 
       - name: Test
         run: pnpm test
 
+      # `pnpm build` runs `tsc -b && vite build`. `tsc -b` (project
+      # references) is stricter than `tsc --noEmit` — it catches
+      # unused imports (TS6133) that --noEmit silently accepts — so
+      # we rely on the build step for type checking.
       - name: Build
         run: pnpm build
 
