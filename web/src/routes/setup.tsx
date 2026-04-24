@@ -22,7 +22,7 @@ import {
 import { Check, Copy, Globe, ArrowRight, ArrowLeft, AlertTriangle, AlertCircle, Plus, X } from 'lucide-react';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, registerKeyPair } from '@/lib/api';
 
 const STEPS = ['welcome', 'admin', 'settings', 'provider', 'complete'] as const;
 type Step = (typeof STEPS)[number];
@@ -292,7 +292,6 @@ export function SetupPage() {
       setResult(data);
       // Generate ECDSA key pair and register public key so the admin
       // is authenticated immediately after setup completes.
-      const { registerKeyPair } = await import('@/lib/api');
       await registerKeyPair();
       // Drop the cached setup status so the next router check re-fetches.
       // Without this the user has to hard-refresh after clicking
