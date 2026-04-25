@@ -294,13 +294,13 @@ async fn upsert_rule_emits_audit_entry_with_override_meta() {
     .unwrap()
     .assert_ok();
 
-    // Wait for the audit flush — log_type=platform for limits ops.
+    // Wait for the audit flush — limits ops emit into audit_logs.
     let ch = app.state.clickhouse.as_ref().expect("CH client");
     let mut found: Option<(String, String)> = None;
     for _ in 0..40 {
         let row: Option<(String, String)> = ch
             .query(
-                "SELECT action, ifNull(detail, '') FROM platform_logs \
+                "SELECT action, ifNull(detail, '') FROM audit_logs \
                    WHERE action LIKE 'rate_limit.%' \
                    ORDER BY created_at DESC LIMIT 1",
             )

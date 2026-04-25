@@ -1419,7 +1419,6 @@ const RETENTION_TABLES: &[(&str, &str)] = &[
     ("data.retention_days_audit", "audit_logs"),
     ("data.retention_days_gateway", "gateway_logs"),
     ("data.retention_days_mcp", "mcp_logs"),
-    ("data.retention_days_platform", "platform_logs"),
     ("data.retention_days_access", "access_logs"),
     ("data.retention_days_app", "app_logs"),
 ];
@@ -1436,7 +1435,6 @@ const VALID_LOG_TABLES: &[&str] = &[
     "audit_logs",
     "gateway_logs",
     "mcp_logs",
-    "platform_logs",
     "access_logs",
     "app_logs",
 ];
@@ -1494,11 +1492,10 @@ pub async fn reconcile_clickhouse_ttls(state: &AppState) {
         return;
     };
     let dc = &state.dynamic_config;
-    let pairs: [(i64, &str); 6] = [
+    let pairs: [(i64, &str); 5] = [
         (dc.data_retention_days_audit().await, "audit_logs"),
         (dc.data_retention_days_gateway().await, "gateway_logs"),
         (dc.data_retention_days_mcp().await, "mcp_logs"),
-        (dc.data_retention_days_platform().await, "platform_logs"),
         (dc.data_retention_days_access().await, "access_logs"),
         (dc.data_retention_days_app().await, "app_logs"),
     ];
@@ -1896,7 +1893,6 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
         | "data.retention_days_audit"
         | "data.retention_days_gateway"
         | "data.retention_days_mcp"
-        | "data.retention_days_platform"
         | "data.retention_days_access"
         | "data.retention_days_app" => {
             let v = value

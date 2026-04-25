@@ -287,7 +287,7 @@ pub async fn login(
         }
 
         // Log failed attempt
-        let mut entry = AuditEntry::platform("auth.login_failed")
+        let mut entry = AuditEntry::new("auth.login_failed")
             .resource("auth")
             .user_email(&req.email)
             .ip_address(&client_ip)
@@ -353,7 +353,7 @@ pub async fn login(
                         if rows == 1 {
                             recovery_used = true;
                             state.audit.log(
-                                AuditEntry::platform("auth.totp_recovery_used")
+                                AuditEntry::new("auth.totp_recovery_used")
                                     .user_id(user.id)
                                     .user_email(&user.email)
                                     .resource("auth")
@@ -363,7 +363,7 @@ pub async fn login(
                     }
 
                     if !recovery_used {
-                        let mut entry = AuditEntry::platform("auth.totp_failed")
+                        let mut entry = AuditEntry::new("auth.totp_failed")
                             .user_id(user.id)
                             .user_email(&user.email)
                             .resource("auth")
@@ -397,7 +397,7 @@ pub async fn login(
         let within_grandfather = user.updated_at
             > chrono::Utc::now() - chrono::Duration::seconds(TEMP_PASSWORD_TTL_SECS);
         if !marker_exists && !within_grandfather {
-            let mut entry = AuditEntry::platform("auth.temp_password_expired")
+            let mut entry = AuditEntry::new("auth.temp_password_expired")
                 .user_id(user.id)
                 .user_email(&user.email)
                 .resource("auth")
@@ -424,7 +424,7 @@ pub async fn login(
     .await
     .unwrap_or(0);
 
-    let mut entry = AuditEntry::platform("auth.login")
+    let mut entry = AuditEntry::new("auth.login")
         .user_id(user.id)
         .user_email(&user.email)
         .resource("auth")
@@ -583,7 +583,7 @@ pub async fn register(
     tx.commit().await?;
 
     state.audit.log(
-        AuditEntry::platform("auth.register")
+        AuditEntry::new("auth.register")
             .user_id(user.id)
             .user_email(&user.email)
             .resource("auth")
@@ -950,7 +950,7 @@ pub async fn change_password(
     invalidate_refresh_tokens(&state.redis, user.id, refresh_ttl_days).await;
 
     state.audit.log(
-        AuditEntry::platform("auth.password_changed")
+        AuditEntry::new("auth.password_changed")
             .user_id(user.id)
             .resource("auth"),
     );
@@ -1055,7 +1055,7 @@ pub async fn revoke_sessions(
     .unwrap_or(());
 
     state.audit.log(
-        AuditEntry::platform("auth.sessions_revoked")
+        AuditEntry::new("auth.sessions_revoked")
             .user_id(user_id)
             .resource("auth"),
     );
@@ -1217,7 +1217,7 @@ pub async fn totp_verify_setup(
         .unwrap_or(0);
 
     state.audit.log(
-        AuditEntry::platform("auth.totp_enabled")
+        AuditEntry::new("auth.totp_enabled")
             .user_id(user_id)
             .resource("auth"),
     );
@@ -1270,7 +1270,7 @@ pub async fn totp_disable(
     .await?;
 
     state.audit.log(
-        AuditEntry::platform("auth.totp_disabled")
+        AuditEntry::new("auth.totp_disabled")
             .user_id(user.id)
             .resource("auth"),
     );

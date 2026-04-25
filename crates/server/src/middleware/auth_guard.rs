@@ -43,7 +43,7 @@ pub struct AuthUser {
 impl AuthUser {
     /// Build an audit entry pre-filled with user_id, user_email, and ip_address.
     pub fn audit(&self, action: impl Into<String>) -> AuditEntry {
-        let mut e = AuditEntry::platform(action)
+        let mut e = AuditEntry::new(action)
             .user_id(self.claims.sub)
             .user_email(&self.claims.email);
         if let Some(ref ip) = self.ip {

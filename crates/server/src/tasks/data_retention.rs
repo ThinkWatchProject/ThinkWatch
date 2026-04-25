@@ -76,7 +76,7 @@ pub async fn run_retention_cleanup(
             SOFT_DELETE_RETENTION_DAYS
         );
         audit.log(
-            AuditEntry::platform("data.gdpr_purge")
+            AuditEntry::new("data.gdpr_purge")
                 .resource("data_retention")
                 .detail(serde_json::json!({
                     "retention_days": SOFT_DELETE_RETENTION_DAYS,

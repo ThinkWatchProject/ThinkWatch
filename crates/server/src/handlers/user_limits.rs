@@ -392,7 +392,7 @@ async fn load_recent_events(state: &AppState, user_id: Uuid) -> Vec<LimitsAuditE
     //      when the dashboard is viewed for an admin account.
     let sql = "\
         SELECT id, action, resource, resource_id, detail, user_email, created_at \
-        FROM platform_logs \
+        FROM audit_logs \
         WHERE resource IN ('rate_limit_rule', 'budget_cap') \
           AND (user_id = ? OR JSONExtractString(ifNull(detail, '{}'), 'subject_id') = ?) \
         ORDER BY created_at DESC \

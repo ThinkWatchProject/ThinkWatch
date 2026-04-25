@@ -1,7 +1,7 @@
 //! Audit-log shape contract for representative mutating handlers.
 //!
 //! Every mutating admin endpoint is supposed to emit exactly one
-//! `platform_logs` row with a `verb.subject` action, the actor's
+//! `audit_logs` row with a `verb.subject` action, the actor's
 //! `user_id`, and a `resource` / `resource_id` that together
 //! identify the row that changed. A future refactor that forgets
 //! `state.audit.log(...)` is invisible at compile time and fails
@@ -163,22 +163,17 @@ async fn mutating_handlers_emit_one_audit_row_each() {
     let mut seen: BTreeMap<String, SeenRow> = BTreeMap::new();
 
     for _ in 0..200 {
-        // Query both `platform_logs` and `audit_logs` — admin/user
-        // handlers route through `auth_user.audit(...)` (Platform),
-        // while api-key / mcp / forwarder handlers emit
-        // `AuditEntry::new(...)` which lands in `audit_logs`. The
-        // contract this test pins is "every mutating handler emits
-        // *somewhere*", so we union both.
+        // Single-table query — every actor-attributed event lands in
+        // `audit_logs`. The codebase used to split admin operations
+        // into a separate `platform_logs` table; that split was
+        // collapsed because the schemas were identical and the split
+        // only fragmented the audit explorer.
         let rows: Vec<(String, String, String, String)> = ch
             .query(
                 "SELECT action, ifNull(user_id, ''), ifNull(resource, ''), ifNull(resource_id, '') \
-                   FROM platform_logs WHERE user_id = ? \
-                 UNION ALL \
-                 SELECT action, ifNull(user_id, ''), ifNull(resource, ''), ifNull(resource_id, '') \
                    FROM audit_logs WHERE user_id = ? \
                  ORDER BY 1 LIMIT 400",
             )
-            .bind(&admin_id)
             .bind(&admin_id)
             .fetch_all()
             .await

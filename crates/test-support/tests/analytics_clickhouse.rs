@@ -210,7 +210,7 @@ async fn audit_log_endpoint_lists_recent_entries() {
     let ch = app.state.clickhouse.as_ref().unwrap();
     for _ in 0..100 {
         let n: u64 = ch
-            .query("SELECT count() FROM platform_logs WHERE action = 'auth.login'")
+            .query("SELECT count() FROM audit_logs WHERE action = 'auth.login'")
             .fetch_one()
             .await
             .unwrap_or(0);
@@ -220,17 +220,17 @@ async fn audit_log_endpoint_lists_recent_entries() {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    let resp = con.get("/api/admin/platform-logs").await.unwrap();
+    let resp = con.get("/api/audit/logs").await.unwrap();
     resp.assert_ok();
     let body: Value = resp.json().unwrap();
     let arr = body
         .as_array()
         .or_else(|| body.get("items").and_then(|v| v.as_array()))
         .or_else(|| body.get("data").and_then(|v| v.as_array()))
-        .expect("platform-logs list");
+        .expect("audit-logs list");
     assert!(
         arr.iter()
             .any(|r| r["action"].as_str().is_some_and(|s| s.starts_with("auth."))),
-        "expected an auth.* row in platform-logs: {arr:#?}"
+        "expected an auth.* row in audit-logs: {arr:#?}"
     );
 }

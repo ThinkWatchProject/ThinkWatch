@@ -269,7 +269,6 @@ dc_getters_i64! {
     data_retention_days_audit,        "data.retention_days_audit",             90;
     data_retention_days_gateway,      "data.retention_days_gateway",           90;
     data_retention_days_mcp,          "data.retention_days_mcp",               90;
-    data_retention_days_platform,     "data.retention_days_platform",          90;
     data_retention_days_access,       "data.retention_days_access",            30;
     data_retention_days_app,          "data.retention_days_app",               30;
     client_ip_xff_depth,              "security.client_ip_xff_depth",          1;

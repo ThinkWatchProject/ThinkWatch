@@ -213,30 +213,12 @@ ALTER TABLE mcp_logs ADD PROJECTION IF NOT EXISTS proj_by_duration (
     SELECT * ORDER BY duration_ms, created_at
 );
 
-CREATE TABLE IF NOT EXISTS platform_logs (
-    id               String,
-    user_id          LowCardinality(Nullable(String)),
-    user_email       LowCardinality(Nullable(String)),
-    action           LowCardinality(String),
-    resource         LowCardinality(Nullable(String)),
-    resource_id      Nullable(String),
-    detail           Nullable(String) CODEC(ZSTD(3)),
-    ip_address       Nullable(String),
-    user_agent       Nullable(String) CODEC(ZSTD(3)),
-    created_at       DateTime64(3, 'UTC') DEFAULT now64(3) CODEC(DoubleDelta, ZSTD(1)),
-
-    INDEX idx_user_id    user_id    TYPE bloom_filter GRANULARITY 4,
-    INDEX idx_user_email user_email TYPE bloom_filter GRANULARITY 4,
-    INDEX idx_action     action     TYPE set(100)     GRANULARITY 2,
-    INDEX idx_resource   resource   TYPE set(100)     GRANULARITY 2,
-    INDEX idx_ip         ip_address TYPE bloom_filter GRANULARITY 4,
-    INDEX idx_search     id         TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4
-) ENGINE = MergeTree()
-PARTITION BY toYYYYMM(created_at)
-ORDER BY (created_at, id)
-TTL toDateTime(created_at) + INTERVAL 90 DAY
-SETTINGS index_granularity = 8192,
-         ttl_only_drop_parts = 1;
+-- platform_logs used to live here as a separate table for management
+-- operations. Its schema was a strict subset of audit_logs (no
+-- api_key_id, no trace_id), so the split only fragmented the audit
+-- explorer and broke trace correlation for admin actions. Everything
+-- now flows into audit_logs; LogType::Platform was removed.
+DROP TABLE IF EXISTS platform_logs;
 
 -- ---------------------------------------------------------------------------
 -- Materialized views and rollups

@@ -187,7 +187,7 @@ pub async fn sso_callback(
 
     // Audit log
     state.audit.log(
-        AuditEntry::platform("auth.sso_login")
+        AuditEntry::new("auth.sso_login")
             .user_id(user.id)
             .resource("auth")
             .detail(serde_json::json!({

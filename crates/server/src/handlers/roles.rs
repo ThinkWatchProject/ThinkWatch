@@ -994,7 +994,7 @@ pub async fn list_role_history(
     // typical activity for a single role.
     let sql = "SELECT id, action, user_id, user_email, ip_address, detail, \
                       toString(created_at) AS created_at \
-               FROM platform_logs \
+               FROM audit_logs \
               WHERE resource = 'role' AND resource_id = ? \
               ORDER BY created_at DESC \
               LIMIT 100";

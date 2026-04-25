@@ -756,11 +756,6 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/admin/log-forwarders/{id}/reset-stats",
             post(handlers::log_forwarders::reset_stats),
         )
-        // Platform operation logs
-        .route(
-            "/api/admin/platform-logs",
-            get(handlers::platform_logs::list_platform_logs),
-        )
         // Access logs
         .route(
             "/api/admin/access-logs",

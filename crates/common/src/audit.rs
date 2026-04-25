@@ -16,6 +16,12 @@ use crate::models::LogForwarder;
 
 /// The category of a log entry, determining which ClickHouse table it's stored in
 /// and which forwarders will receive it.
+///
+/// `Audit` is the catch-all for every actor-attributed event — API key usage,
+/// user / team / provider / role / settings mutations, login attempts. There
+/// used to be a separate `Platform` variant for management operations, but
+/// the schemas were identical (with `audit_logs` strictly richer: it carries
+/// `api_key_id` + `trace_id`), so the split only fragmented the explorer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogType {
@@ -23,14 +29,12 @@ pub enum LogType {
     Access,
     /// Runtime application logs (info/warn/error/debug)
     App,
-    /// API request audit (gateway usage)
+    /// Every actor-attributed event: API key usage AND platform management.
     Audit,
     /// Gateway request logs (model calls, tokens, costs)
     Gateway,
     /// MCP tool invocation logs
     Mcp,
-    /// Platform management operations (user/team/provider/settings changes)
-    Platform,
 }
 
 impl LogType {
@@ -41,7 +45,6 @@ impl LogType {
             LogType::Audit => "audit",
             LogType::Gateway => "gateway",
             LogType::Mcp => "mcp",
-            LogType::Platform => "platform",
         }
     }
 
@@ -52,7 +55,6 @@ impl LogType {
             LogType::Audit => "audit_logs",
             LogType::Gateway => "gateway_logs",
             LogType::Mcp => "mcp_logs",
-            LogType::Platform => "platform_logs",
         }
     }
 }
@@ -123,22 +125,6 @@ struct ChAuditRow {
     // must sit here (between user_agent and created_at) so CH's columnar
     // insert lines up. If you move one, move both.
     trace_id: Option<String>,
-    #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
-    created_at: chrono::DateTime<Utc>,
-}
-
-/// platform_logs — admin/management operations (no api_key_id)
-#[derive(Debug, clickhouse::Row, Serialize)]
-struct ChPlatformRow {
-    id: String,
-    user_id: Option<String>,
-    user_email: Option<String>,
-    action: String,
-    resource: Option<String>,
-    resource_id: Option<String>,
-    detail: Option<String>,
-    ip_address: Option<String>,
-    user_agent: Option<String>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
     created_at: chrono::DateTime<Utc>,
 }
@@ -286,13 +272,6 @@ impl AuditEntry {
         }
     }
 
-    /// Create entry for platform management operations.
-    pub fn platform(action: impl Into<String>) -> Self {
-        let mut entry = Self::new(action);
-        entry.log_type = LogType::Platform;
-        entry
-    }
-
     /// Create entry for gateway request logs.
     pub fn gateway(action: impl Into<String>) -> Self {
         let mut entry = Self::new(action);
@@ -406,9 +385,13 @@ mod tests {
     }
 
     #[test]
-    fn platform_entry_has_correct_type() {
-        let entry = AuditEntry::platform("user.created");
-        assert_eq!(entry.log_type, LogType::Platform);
+    fn default_entry_routes_to_audit_logs() {
+        // Every actor-attributed event — API key usage AND platform
+        // management — lands in `audit_logs`. There used to be a
+        // separate `Platform` variant; the schemas were identical,
+        // so the split was collapsed to make the explorer single-stream.
+        let entry = AuditEntry::new("user.created");
+        assert_eq!(entry.log_type, LogType::Audit);
         assert_eq!(entry.action, "user.created");
     }
 
@@ -1030,7 +1013,7 @@ async fn drain_once(
             // `audit` log_type. We don't go through AuditLogger::log
             // because we only have access to the registry here, not
             // the channel.
-            let entry = AuditEntry::platform("alert.outbox_depth_high")
+            let entry = AuditEntry::new("alert.outbox_depth_high")
                 .resource("webhook_outbox")
                 .detail(serde_json::json!({
                     "depth": depth,
@@ -1460,7 +1443,6 @@ async fn flush_to_clickhouse(
         Some(LogType::Access) => flush_access(client, table, batch).await,
         Some(LogType::App) => flush_app(client, table, batch).await,
         Some(LogType::Audit) => flush_audit(client, table, batch).await,
-        Some(LogType::Platform) => flush_platform(client, table, batch).await,
         Some(LogType::Gateway) => flush_gateway(client, table, batch).await,
         Some(LogType::Mcp) => flush_mcp(client, table, batch).await,
         None => {
@@ -1549,32 +1531,6 @@ async fn flush_audit(
                 ip_address: entry.ip_address,
                 user_agent: entry.user_agent,
                 trace_id: entry.trace_id,
-                created_at: ts,
-            })
-            .await?;
-    }
-    insert.end().await
-}
-
-async fn flush_platform(
-    client: &clickhouse::Client,
-    table: &str,
-    batch: &mut Vec<AuditEntry>,
-) -> Result<(), clickhouse::error::Error> {
-    let mut insert = client.insert::<ChPlatformRow>(table)?;
-    for mut entry in batch.drain(..) {
-        let ts = parse_created_at(&entry.created_at);
-        insert
-            .write(&ChPlatformRow {
-                id: entry.id,
-                user_id: entry.user_id,
-                user_email: entry.user_email,
-                action: entry.action,
-                resource: entry.resource,
-                resource_id: entry.resource_id,
-                detail: detail_str(&mut entry.detail),
-                ip_address: entry.ip_address,
-                user_agent: entry.user_agent,
                 created_at: ts,
             })
             .await?;

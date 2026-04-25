@@ -26,7 +26,6 @@ use crate::handlers::{
     mcp_servers::UpdateMcpServerRequest,
     mcp_tools::{McpToolListResponse, McpToolRow},
     models::{CreateModelRequest, ModelRow, UpdateModelRequest},
-    platform_logs::{PlatformLogEntryResponse, PlatformLogsResponse},
     providers::{TestProviderRequest, TestProviderResponse, UpdateProviderRequest},
     roles::{
         CreateRoleRequest, PermissionDef, RoleHistoryResponse, RoleMember, RoleMembersResponse,
@@ -173,7 +172,6 @@ use crate::handlers::{
         crate::handlers::audit::list_audit_logs,
         crate::handlers::gateway_logs::list_gateway_logs,
         crate::handlers::mcp_logs::list_mcp_logs,
-        crate::handlers::platform_logs::list_platform_logs,
         crate::handlers::access_logs::list_access_logs,
         crate::handlers::app_logs::list_app_logs,
         // MCP
@@ -230,7 +228,6 @@ use crate::handlers::{
             GatewayLogEntry, GatewayLogsResponse,
             McpLogEntry, McpLogsResponse,
             McpToolRow, McpToolListResponse,
-            PlatformLogEntryResponse, PlatformLogsResponse,
             AccessLogEntry, AccessLogsResponse,
             AppLogEntryResponse, AppLogsResponse,
             // MCP

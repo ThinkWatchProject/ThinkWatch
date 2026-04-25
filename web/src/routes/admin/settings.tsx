@@ -117,7 +117,6 @@ export function SettingsPage() {
   const [auditRetention, setAuditRetention] = useState(90);
   const [gatewayRetention, setGatewayRetention] = useState(90);
   const [mcpRetention, setMcpRetention] = useState(90);
-  const [platformRetention, setPlatformRetention] = useState(90);
   const [accessRetention, setAccessRetention] = useState(30);
   const [appRetention, setAppRetention] = useState(30);
   // Performance tuning
@@ -177,7 +176,6 @@ export function SettingsPage() {
     setAuditRetention(num(getSettingValue(data, 'data', 'retention_days_audit'), 90));
     setGatewayRetention(num(getSettingValue(data, 'data', 'retention_days_gateway'), 90));
     setMcpRetention(num(getSettingValue(data, 'data', 'retention_days_mcp'), 90));
-    setPlatformRetention(num(getSettingValue(data, 'data', 'retention_days_platform'), 90));
     setAccessRetention(num(getSettingValue(data, 'data', 'retention_days_access'), 30));
     setAppRetention(num(getSettingValue(data, 'data', 'retention_days_app'), 30));
 
@@ -260,7 +258,6 @@ export function SettingsPage() {
   const auditRetentionSave = useFieldAutosave({ value: auditRetention, isLoaded, persist: (v) => patchOne('data.retention_days_audit', v) });
   const gatewayRetentionSave = useFieldAutosave({ value: gatewayRetention, isLoaded, persist: (v) => patchOne('data.retention_days_gateway', v) });
   const mcpRetentionSave = useFieldAutosave({ value: mcpRetention, isLoaded, persist: (v) => patchOne('data.retention_days_mcp', v) });
-  const platformRetentionSave = useFieldAutosave({ value: platformRetention, isLoaded, persist: (v) => patchOne('data.retention_days_platform', v) });
   const accessRetentionSave = useFieldAutosave({ value: accessRetention, isLoaded, persist: (v) => patchOne('data.retention_days_access', v) });
   const appRetentionSave = useFieldAutosave({ value: appRetention, isLoaded, persist: (v) => patchOne('data.retention_days_app', v) });
   // Performance
@@ -936,15 +933,6 @@ export function SettingsPage() {
                       min={1}
                       max={3650}
                       indicator={<SaveIndicator state={mcpRetentionSave.state} error={mcpRetentionSave.error} />}
-                    />
-                    <NumberField
-                      label={t('settings.retention.platform')}
-                      hint={t('settings.retention.platformHint')}
-                      value={platformRetention}
-                      onChange={setPlatformRetention}
-                      min={1}
-                      max={3650}
-                      indicator={<SaveIndicator state={platformRetentionSave.state} error={platformRetentionSave.error} />}
                     />
                     <NumberField
                       label={t('settings.retention.access')}

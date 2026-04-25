@@ -41,7 +41,7 @@ export interface RoleMember {
 }
 
 /// One audit-log row scoped to a single role. Sourced from
-/// `platform_logs` via `GET /api/admin/roles/:id/history`.
+/// `audit_logs` via `GET /api/admin/roles/:id/history`.
 export interface RoleHistoryEntry {
   id: string;
   action: string;

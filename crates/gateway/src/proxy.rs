@@ -489,13 +489,12 @@ async fn post_flight_account(
                     // here).
                     for crossing in &crossings {
                         audit.log(
-                            think_watch_common::audit::AuditEntry::platform(
-                                "budget.threshold_crossed",
-                            )
-                            .resource(format!("budget_cap:{}", crossing.cap_id))
-                            .detail(
-                                serde_json::to_value(crossing).unwrap_or(serde_json::Value::Null),
-                            ),
+                            think_watch_common::audit::AuditEntry::new("budget.threshold_crossed")
+                                .resource(format!("budget_cap:{}", crossing.cap_id))
+                                .detail(
+                                    serde_json::to_value(crossing)
+                                        .unwrap_or(serde_json::Value::Null),
+                                ),
                         );
                     }
                 }

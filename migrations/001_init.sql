@@ -624,7 +624,6 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 ('data.retention_days_audit',    '90', 'data', 'Days to keep audit logs in ClickHouse'),
 ('data.retention_days_gateway',  '90', 'data', 'Days to keep AI gateway request logs in ClickHouse'),
 ('data.retention_days_mcp',      '90', 'data', 'Days to keep MCP tool invocation logs in ClickHouse'),
-('data.retention_days_platform', '90', 'data', 'Days to keep platform management logs in ClickHouse'),
 ('data.retention_days_access',   '30', 'data', 'Days to keep HTTP access logs in ClickHouse'),
 ('data.retention_days_app',      '30', 'data', 'Days to keep application runtime logs in ClickHouse');
 

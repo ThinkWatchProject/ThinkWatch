@@ -22,7 +22,7 @@ import { Pagination, PaginationContent, PaginationItem, PaginationNext, Paginati
 // Types
 // ---------------------------------------------------------------------------
 
-type LogCategory = 'gateway' | 'mcp' | 'audit' | 'platform' | 'access' | 'app';
+type LogCategory = 'gateway' | 'mcp' | 'audit' | 'access' | 'app';
 
 interface LogEntry {
   id: string;
@@ -39,7 +39,6 @@ const CATEGORY_API: Record<LogCategory, string> = {
   gateway: '/api/gateway/logs',
   mcp: '/api/mcp/logs',
   audit: '/api/audit/logs',
-  platform: '/api/admin/platform-logs',
   access: '/api/admin/access-logs',
   app: '/api/admin/app-logs',
 };
@@ -238,14 +237,6 @@ function getColumns(cat: LogCategory): ColDef[] {
         { key: 'resource', label: 'Resource', filterKey: 'resource' },
         { key: 'ip_address', label: 'IP', mono: true },
       ];
-    case 'platform':
-      return [
-        { key: 'created_at', label: 'Time' },
-        { key: 'user_email', label: 'User', filterKey: 'user_id', filterValueKey: 'user_id' },
-        { key: 'action', label: 'Action', filterKey: 'action' },
-        { key: 'resource', label: 'Resource', filterKey: 'resource' },
-        { key: 'ip_address', label: 'IP', mono: true },
-      ];
     case 'access':
       return [
         { key: 'created_at', label: 'Time' },
@@ -310,7 +301,6 @@ const DETAIL_HIGHLIGHTS: Record<LogCategory, string[]> = {
   gateway: ['model_id', 'provider', 'input_tokens', 'output_tokens', 'cost_usd', 'latency_ms', 'status_code', 'user_id', 'api_key_id', 'ip_address'],
   mcp: ['tool_name', 'server_name', 'duration_ms', 'status', 'error_message', 'user_id', 'ip_address'],
   audit: ['action', 'resource', 'resource_id', 'user_email', 'user_id', 'ip_address', 'user_agent'],
-  platform: ['action', 'resource', 'resource_id', 'user_email', 'user_id', 'ip_address', 'user_agent'],
   access: ['method', 'path', 'status_code', 'latency_ms', 'port', 'user_id', 'ip_address', 'user_agent'],
   app: ['level', 'target', 'message', 'span', 'fields'],
 };
@@ -423,14 +413,7 @@ function LogDetail({
 // ---------------------------------------------------------------------------
 
 function isLogCategory(v: string | undefined): v is LogCategory {
-  return (
-    v === 'gateway' ||
-    v === 'mcp' ||
-    v === 'audit' ||
-    v === 'platform' ||
-    v === 'access' ||
-    v === 'app'
-  );
+  return v === 'gateway' || v === 'mcp' || v === 'audit' || v === 'access' || v === 'app';
 }
 
 export function UnifiedLogsPage() {
@@ -446,9 +429,7 @@ export function UnifiedLogsPage() {
     page?: number;
   };
 
-  const category: LogCategory = isLogCategory(search.category)
-    ? search.category
-    : 'platform';
+  const category: LogCategory = isLogCategory(search.category) ? search.category : 'audit';
   const activeQuery = search.q ?? '';
   const from = search.from ?? defaultFromLocal();
   const to = search.to ?? defaultToLocal();
@@ -491,7 +472,7 @@ export function UnifiedLogsPage() {
           const merged = { ...prev, ...patch };
           // Strip empty / default values so the URL stays clean.
           return {
-            category: merged.category && merged.category !== 'platform' ? merged.category : undefined,
+            category: merged.category && merged.category !== 'audit' ? merged.category : undefined,
             q: merged.q || undefined,
             from: merged.from || undefined,
             to: merged.to || undefined,
@@ -608,8 +589,7 @@ export function UnifiedLogsPage() {
   const placeholders: Record<LogCategory, string> = {
     gateway: 'model:gpt-4o status_code:200 provider:openai  (or just: gpt-4o)',
     mcp: 'tool_name:search status:error  (or just: search)',
-    audit: 'action:create resource:provider user_id:xxx',
-    platform: 'action:role.deleted resource:role user_id:xxx',
+    audit: 'action:provider.created resource:provider user_id:xxx',
     access: 'method:POST path:/api/admin status_code:500  (or just: /admin)',
     app: 'level:error target:auth  (or any text from the message)',
   };
@@ -628,7 +608,7 @@ export function UnifiedLogsPage() {
             <span className="truncate">{t(`unifiedLogs.${category}`)}</span>
           </SelectTrigger>
           <SelectContent className="max-w-sm">
-            {(['platform', 'audit', 'gateway', 'mcp', 'access', 'app'] as const).map((cat) => (
+            {(['audit', 'gateway', 'mcp', 'access', 'app'] as const).map((cat) => (
               <SelectItem key={cat} value={cat} className="py-2">
                 <div className="flex flex-col gap-0.5">
                   <span className="font-medium">{t(`unifiedLogs.${cat}`)}</span>
