@@ -413,6 +413,62 @@ mod tests {
         assert_eq!(entry.trace_id.as_deref(), Some("abc-123"));
     }
 
+    // ---- detail sanitizer ----
+
+    #[test]
+    fn detail_sanitizer_redacts_obvious_credential_field_names() {
+        // The matcher is deliberately substring-based and aggressive
+        // on unfamiliar names — better to over-redact than miss a
+        // real secret. Pin the canonical positives so a future
+        // refactor that swaps to e.g. exact-match matching is caught.
+        let mut detail = Some(serde_json::json!({
+            "password": "hunter2",
+            "api_key": "sk-live-xxx",
+            "auth_token": "eyJ…",
+            "client_secret": "zzz",
+            "Authorization": "Bearer …",
+            "credential": {"aws": "AKIA…"},
+            "nested": {"refresh_token": "rt-…"},
+        }));
+        sanitize_detail(&mut detail);
+        let v = detail.unwrap();
+        assert_eq!(v["password"], "[REDACTED]");
+        assert_eq!(v["api_key"], "[REDACTED]");
+        assert_eq!(v["auth_token"], "[REDACTED]");
+        assert_eq!(v["client_secret"], "[REDACTED]");
+        assert_eq!(v["Authorization"], "[REDACTED]");
+        assert_eq!(v["credential"], "[REDACTED]");
+        // Recursive: nested credential-shaped key also redacted.
+        assert_eq!(v["nested"]["refresh_token"], "[REDACTED]");
+    }
+
+    #[test]
+    fn detail_sanitizer_keeps_pricing_and_token_count_fields_visible() {
+        // `_per_token` and `_tokens` show up in pricing + usage rows
+        // that operators need to see verbatim. Without the
+        // SAFE_SUFFIXES escape hatch, the audit row for
+        // `platform_pricing.updated` came out as
+        // `{"input_price_per_token":"[REDACTED]"}` and the operator
+        // couldn't tell what the new rate was. Pin the carve-out so
+        // tightening the matcher later doesn't silently re-redact.
+        let mut detail = Some(serde_json::json!({
+            "input_price_per_token": "0.00000015",
+            "output_price_per_token": "0.00000060",
+            "input_tokens": 12,
+            "output_tokens": 5,
+            "total_tokens": 17,
+            "prompt_tokens": 12,
+            "completion_tokens": 5,
+        }));
+        sanitize_detail(&mut detail);
+        let v = detail.unwrap();
+        assert_eq!(v["input_price_per_token"], "0.00000015");
+        assert_eq!(v["output_price_per_token"], "0.00000060");
+        assert_eq!(v["input_tokens"], 12);
+        assert_eq!(v["total_tokens"], 17);
+        assert_eq!(v["completion_tokens"], 5);
+    }
+
     #[test]
     fn hmac_sha256_hex_matches_rfc4231_vector() {
         // RFC 4231 Test Case 1: key = 20 bytes of 0x0b, data = "Hi There".
@@ -1417,6 +1473,24 @@ fn sanitize_value(value: &mut serde_json::Value) {
 
 fn is_secret_key_name(key: &str) -> bool {
     let lower = key.to_lowercase();
+
+    // Escape hatch: field names that contain "token"/"key" as a
+    // unit-of-measure or lookup-key rather than a credential. The
+    // straight substring check below is intentionally aggressive on
+    // unfamiliar names, so this list only needs to grow when a
+    // concrete observability complaint surfaces. Pricing was the
+    // first such complaint: `input_price_per_token` was being
+    // emitted as `[REDACTED]` in `platform_pricing.updated` audit
+    // rows, which broke billing-change traceability — the price IS
+    // the auditable fact.
+    const SAFE_SUFFIXES: &[&str] = &[
+        "_per_token", // input_price_per_token, output_price_per_token
+        "_tokens",    // input_tokens, output_tokens, total_tokens, prompt_tokens
+    ];
+    if SAFE_SUFFIXES.iter().any(|s| lower.ends_with(s)) {
+        return false;
+    }
+
     lower.contains("password")
         || lower.contains("secret")
         || lower.contains("token")
