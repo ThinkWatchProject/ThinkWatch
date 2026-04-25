@@ -411,6 +411,7 @@ pub async fn bulk_disable_rules(
     auth_user.require_permission("rate_limits:write")?;
     run_bulk_id_op(
         &state,
+        &auth_user,
         &req.ids,
         "rate_limit_rules",
         BulkIdOp::Disable,
@@ -440,6 +441,7 @@ pub async fn bulk_delete_rules(
     auth_user.require_permission("rate_limits:write")?;
     run_bulk_id_op(
         &state,
+        &auth_user,
         &req.ids,
         "rate_limit_rules",
         BulkIdOp::Delete,
@@ -469,6 +471,7 @@ pub async fn bulk_disable_caps(
     auth_user.require_permission("rate_limits:write")?;
     run_bulk_id_op(
         &state,
+        &auth_user,
         &req.ids,
         "budget_caps",
         BulkIdOp::Disable,
@@ -498,6 +501,7 @@ pub async fn bulk_delete_caps(
     auth_user.require_permission("rate_limits:write")?;
     run_bulk_id_op(
         &state,
+        &auth_user,
         &req.ids,
         "budget_caps",
         BulkIdOp::Delete,
@@ -522,6 +526,7 @@ enum BulkIdOp {
 
 async fn run_bulk_id_op(
     state: &AppState,
+    auth_user: &AuthUser,
     ids: &[Uuid],
     table: &'static str,
     op: BulkIdOp,
@@ -538,15 +543,62 @@ async fn run_bulk_id_op(
     let mut outcomes = Vec::with_capacity(ids.len());
     let mut success = 0usize;
     let mut errors = 0usize;
-    let sql = match op {
+    let mutate_sql = match op {
         BulkIdOp::Disable => {
             format!("UPDATE {table} SET enabled = FALSE, updated_at = now() WHERE id = $1")
         }
         BulkIdOp::Delete => format!("DELETE FROM {table} WHERE id = $1"),
     };
+    // SECURITY: pre-flight scope check per row. The single-row
+    // `delete_rule` / `delete_cap` handlers take `(kind, subject_id)`
+    // in their URL path and call `assert_scope_for_subject` against
+    // those values; the bulk variant takes only row ids, so we have
+    // to look up each row's subject ourselves before mutating it.
+    // Without this, a team-scoped caller with `rate_limits:write` can
+    // pass arbitrary ids and disable / delete rows for users outside
+    // their scope.
+    let lookup_sql = format!("SELECT subject_kind, subject_id FROM {table} WHERE id = $1");
 
     for id in ids {
-        let result = sqlx::query(&sql).bind(id).execute(&state.db).await;
+        let subject: Option<(String, Uuid)> = match sqlx::query_as(&lookup_sql)
+            .bind(id)
+            .fetch_optional(&state.db)
+            .await
+        {
+            Ok(row) => row,
+            Err(e) => {
+                errors += 1;
+                outcomes.push(BulkIdsOutcome {
+                    id: *id,
+                    success: false,
+                    error: Some(db_error_message(&e)),
+                });
+                continue;
+            }
+        };
+        let Some((subject_kind, subject_id)) = subject else {
+            errors += 1;
+            outcomes.push(BulkIdsOutcome {
+                id: *id,
+                success: false,
+                error: Some("not found".into()),
+            });
+            continue;
+        };
+        if let Err(e) = auth_user
+            .assert_scope_for_subject(&state.db, "rate_limits:write", &subject_kind, subject_id)
+            .await
+        {
+            errors += 1;
+            outcomes.push(BulkIdsOutcome {
+                id: *id,
+                success: false,
+                error: Some(format!("forbidden: {e}")),
+            });
+            continue;
+        }
+
+        let result = sqlx::query(&mutate_sql).bind(id).execute(&state.db).await;
         match result {
             Ok(r) if r.rows_affected() > 0 => {
                 success += 1;

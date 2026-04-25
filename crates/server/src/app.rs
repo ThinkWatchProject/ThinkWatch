@@ -457,10 +457,13 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/keys/{id}/rotate",
             post(handlers::api_keys::rotate_key),
         )
-        .route(
-            "/api/admin/keys/{id}/force-revoke",
-            post(handlers::api_keys::force_revoke_key),
-        )
+        // NOTE: `/api/admin/keys/{id}/force-revoke` lives in
+        // `admin_routes` further down — keep this comment so a
+        // future "alphabetise the routes" pass doesn't move it
+        // back to user_routes. The handler enforces
+        // `caller_has_global("api_keys:delete")` either way, but
+        // mounting an admin URL on `user_routes` would mislead
+        // readers about its protection model.
         .route(
             "/api/dashboard/stats",
             get(handlers::dashboard::get_dashboard_stats),
@@ -512,6 +515,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
 
     // Admin routes (admin/super_admin role required)
     let admin_routes = Router::new()
+        .route(
+            "/api/admin/keys/{id}/force-revoke",
+            post(handlers::api_keys::force_revoke_key),
+        )
         .route(
             "/api/admin/usage-license",
             get(handlers::usage_license::get_usage_license),
