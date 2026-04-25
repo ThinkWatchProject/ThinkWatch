@@ -16,6 +16,20 @@ cd web && pnpm build          # tsc -b && vite build
 
 **Do NOT use `tsc --noEmit` alone** as the frontend check. `tsc -b` (inside `pnpm build`) is stricter and catches unused imports (TS6133) that `--noEmit` misses.
 
+## Integration tests
+
+Cross-cutting integration tests live in `crates/test-support/tests/`. They boot the full server in-process against a fresh per-test Postgres database and a dedicated Redis logical DB (1 by default). Each test fn carries `#[ignore]` so `cargo test --workspace` skips them — `make test-it` opts in.
+
+Required infra: `make infra` (Postgres + Redis). Tests run serially via `--test-threads=1` because they share the Redis instance.
+
+Add a new test by dropping a function into the appropriate file (`auth.rs`, `gateway_proxy.rs`, `console_admin.rs`, …) — fixtures and the `TestApp` harness handle DB / Redis isolation, signed-client wiring, and wiremock for upstream AI providers. The full prelude is `use think_watch_test_support::prelude::*;`.
+
+ClickHouse-dependent tests (analytics, gateway_logs cost) call `TestApp::spawn_with_clickhouse()` instead — that creates a per-test CH database, loads the production schema into it, and drops it on teardown. They live in `tests/analytics_clickhouse.rs`.
+
+## Frontend E2E (Playwright)
+
+Browser E2E specs live in `web/e2e/`. Run via `make test-e2e` (requires `make dev-backend` in another terminal — the vite dev server is started by the playwright config). Tests use accessibility-friendly selectors (`getByRole`, `getByLabel`) so the i18n bundle can change without breaking them.
+
 ## Project structure
 
 - `crates/server` — Dual-port Axum server (gateway :3000 + console :3001)

@@ -9,6 +9,8 @@
     "lint": "eslint .",
     "preview": "vite preview",
     "test": "vitest run",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
     "check:i18n": "node scripts/check-i18n.mjs",
     "gen:api": "openapi-typescript http://localhost:3001/api/openapi.json -o src/lib/api-types.ts",
     "gen:sdk:dump-spec": "curl -fsS http://localhost:3001/api/openapi.json -o ../sdk/openapi.json"
@@ -40,6 +42,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.59.1",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

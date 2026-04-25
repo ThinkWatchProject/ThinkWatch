@@ -6,6 +6,7 @@ members = [
     "crates/mcp-gateway",
     "crates/auth",
     "crates/common",
+    "crates/test-support",
 ]
 
 [workspace.package]

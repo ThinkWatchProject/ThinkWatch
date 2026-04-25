@@ -1,4 +1,4 @@
-.PHONY: dev dev-backend dev-frontend infra infra-down check precommit test build clean \
+.PHONY: dev dev-backend dev-frontend infra infra-down check precommit test test-it test-e2e build clean \
         deploy deploy-down secrets helm-deploy helm-deploy-down helm-template helm-lint
 
 # Start full dev environment
@@ -38,6 +38,29 @@ precommit:
 # Run all tests
 test:
 	cargo test --workspace
+
+# Run the full integration test suite (test-support crate). Tests
+# are #[ignore]-marked so the default `cargo test --workspace` skips
+# them — this target opts in. Required infra: Postgres + Redis from
+# `make infra` (or any deploy/docker-compose.dev.yml stack).
+#
+# Tests share a single Redis logical DB (1 by default) and run
+# serially via --test-threads=1 to keep nonce / lockout counters
+# from cross-pollinating.
+#
+# Override the infra targets when running against a different stack:
+#   TEST_DATABASE_BASE_URL=postgres://user:pwd@host:5432 \
+#   TEST_REDIS_URL=redis://:pwd@host:6379/1 \
+#   make test-it
+test-it:
+	cargo test -p think-watch-test-support -- --ignored --test-threads=1
+
+# Browser E2E via Playwright. Requires the backend to already be
+# running (`make dev-backend`); the vite dev server is started by
+# the playwright config's `webServer` block automatically. Override
+# `PW_BASE_URL` to point at a deployed environment.
+test-e2e:
+	cd web && pnpm test:e2e
 
 # Build release
 build:
