@@ -1382,10 +1382,10 @@ pub async fn get_all_settings(
     Ok(Json(grouped))
 }
 
-/// GET /api/admin/settings/{category} — return settings for a specific category.
+/// GET /api/admin/settings/category/{category} — return settings for a specific category.
 #[utoipa::path(
     get,
-    path = "/api/admin/settings/{category}",
+    path = "/api/admin/settings/category/{category}",
     tag = "Settings",
     params(
         ("category" = String, Path, description = "Settings category name"),
