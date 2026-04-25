@@ -34,12 +34,18 @@ async fn caller_has_global(
 }
 
 /// Reject the request when the caller neither owns the target key
-/// nor has the supplied permission at global scope. Used by the
-/// single-key endpoints (GET/PATCH/DELETE/rotate).
-async fn assert_owner_or_global(
+/// nor holds the dedicated `api_keys:admin` perm.
+///
+/// Owners always pass — the basic perm gate (`api_keys:read`,
+/// `api_keys:update`, `api_keys:rotate`) is checked at the route
+/// layer and means "caller can perform this op on their OWN
+/// keys". Cross-tenant reach goes exclusively through
+/// `api_keys:admin` so a developer / viewer / team_manager who
+/// happens to hold the basic perm at global scope can no longer
+/// read every key in the system.
+async fn assert_owner_or_admin(
     auth_user: &AuthUser,
     pool: &sqlx::PgPool,
-    perm: &str,
     key_id: Uuid,
 ) -> Result<(), AppError> {
     let owner: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM api_keys WHERE id = $1")
@@ -47,22 +53,32 @@ async fn assert_owner_or_global(
         .fetch_optional(pool)
         .await?;
     let owner = owner.ok_or_else(|| AppError::NotFound("API key not found".into()))?;
-    let has_perm = !auth_user.denied_permissions.iter().any(|p| p == perm)
-        && auth_user.permissions.iter().any(|p| p == perm);
-    if !has_perm {
-        return Err(AppError::Forbidden(format!(
-            "Missing required permission: {perm}"
-        )));
-    }
     if auth_user.claims.sub == owner {
         return Ok(());
     }
-    if caller_has_global(auth_user, pool, perm).await? {
+    let has_admin = !auth_user
+        .denied_permissions
+        .iter()
+        .any(|p| p == "api_keys:admin")
+        && auth_user.permissions.iter().any(|p| p == "api_keys:admin");
+    if has_admin {
         return Ok(());
     }
-    Err(AppError::Forbidden(format!(
-        "{perm} not granted for this API key"
-    )))
+    Err(AppError::Forbidden(
+        "api_keys:admin required to operate on another user's key".into(),
+    ))
+}
+
+/// Returns whether the caller holds `api_keys:admin` (admin tier).
+/// Used by the list endpoints to decide between "all keys" and
+/// "own keys" without leaking other tenants' data when a basic
+/// `api_keys:read` happens to be granted at global scope.
+fn caller_is_admin_tier(auth_user: &AuthUser) -> bool {
+    !auth_user
+        .denied_permissions
+        .iter()
+        .any(|p| p == "api_keys:admin")
+        && auth_user.permissions.iter().any(|p| p == "api_keys:admin")
 }
 
 /// Check that `requested` is a subset of `granted` using the same
@@ -180,7 +196,11 @@ pub async fn list_keys(
     let per_page = pagination.per_page();
     let offset = pagination.offset();
     let caller_id = auth_user.claims.sub;
-    let global = caller_has_global(&auth_user, &state.db, "api_keys:read").await?;
+    // Cross-tenant visibility requires the dedicated admin perm.
+    // Holding `api_keys:read` at global scope is no longer enough
+    // — that would let any developer / viewer paginate through
+    // every key in the system.
+    let global = caller_is_admin_tier(&auth_user);
 
     let (total, keys): (i64, Vec<ApiKey>) = if global {
         let total: i64 =
@@ -346,7 +366,8 @@ pub async fn get_key(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ApiKey>, AppError> {
-    assert_owner_or_global(&auth_user, &state.db, "api_keys:read", id).await?;
+    auth_user.require_permission("api_keys:read")?;
+    assert_owner_or_admin(&auth_user, &state.db, id).await?;
     let key =
         sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
@@ -377,7 +398,8 @@ pub async fn revoke_key(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    assert_owner_or_global(&auth_user, &state.db, "api_keys:delete", id).await?;
+    auth_user.require_permission("api_keys:delete")?;
+    assert_owner_or_admin(&auth_user, &state.db, id).await?;
 
     // Also clear grace_period_ends_at: the auth middleware accepts a
     // key that is either is_active=true OR still inside its rotation
@@ -543,7 +565,8 @@ pub async fn update_key(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateKeyRequest>,
 ) -> Result<Json<ApiKey>, AppError> {
-    assert_owner_or_global(&auth_user, &state.db, "api_keys:update", id).await?;
+    auth_user.require_permission("api_keys:update")?;
+    assert_owner_or_admin(&auth_user, &state.db, id).await?;
     let key =
         sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
@@ -737,7 +760,8 @@ pub async fn rotate_key(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<CreateApiKeyResponse>, AppError> {
-    assert_owner_or_global(&auth_user, &state.db, "api_keys:rotate", id).await?;
+    auth_user.require_permission("api_keys:rotate")?;
+    assert_owner_or_admin(&auth_user, &state.db, id).await?;
     let old_key =
         sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
@@ -849,7 +873,7 @@ pub async fn list_expiring_keys(
     let threshold = chrono::Utc::now() + chrono::Duration::days(days as i64);
     let caller_id = auth_user.claims.sub;
 
-    let global = caller_has_global(&auth_user, &state.db, "api_keys:read").await?;
+    let global = caller_is_admin_tier(&auth_user);
 
     let keys = if global {
         sqlx::query_as::<_, ApiKey>(

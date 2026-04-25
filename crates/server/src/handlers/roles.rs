@@ -72,11 +72,20 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     // --- MCP gateway ---
     p("mcp_gateway:use", "mcp_gateway", "use"),
     // --- API keys ---
+    // The basic perms are scoped to "your own keys": a developer
+    // with `api_keys:read` can list / get / rotate / update keys
+    // they own. Cross-user reach (admins seeing every tenant's
+    // keys, force-revoking someone else's) goes through the
+    // dedicated `api_keys:admin` perm so we don't have to overload
+    // "perm at global scope" to mean "admin tier" — that
+    // overloading let any role with a basic perm at global read
+    // every key in the system.
     p("api_keys:read", "api_keys", "read"),
     p("api_keys:create", "api_keys", "create"),
     p("api_keys:update", "api_keys", "update"),
     d("api_keys:rotate", "api_keys", "rotate"),
     d("api_keys:delete", "api_keys", "delete"),
+    d("api_keys:admin", "api_keys", "admin"),
     // --- Teams ---
     // Teams are the unit of "scoped admin": a custom role with
     // `team_members:write` granted in scope `team:<id>` lets the
@@ -187,7 +196,7 @@ pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &str)] = &[
     ),
     (
         "admin",
-        r#"{"Version":"2024-01-01","Statement":[{"Sid":"AdminAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","api_keys:delete","providers:read","providers:create","providers:update","providers:delete","providers:rotate_key","models:read","models:write","mcp_servers:read","mcp_servers:create","mcp_servers:update","mcp_servers:delete","users:read","users:create","users:update","teams:read","teams:create","teams:update","teams:delete","team_members:write","team:read","team:write","sessions:revoke","roles:read","roles:create","roles:update","roles:delete","analytics:read_all","audit_logs:read_all","logs:read_all","log_forwarders:read","log_forwarders:write","webhooks:read","webhooks:write","content_filter:read","content_filter:write","pii_redactor:read","pii_redactor:write","rate_limits:read","rate_limits:write","settings:read","settings:write"],"Resource":"*"}]}"#,
+        r#"{"Version":"2024-01-01","Statement":[{"Sid":"AdminAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","api_keys:delete","api_keys:admin","providers:read","providers:create","providers:update","providers:delete","providers:rotate_key","models:read","models:write","mcp_servers:read","mcp_servers:create","mcp_servers:update","mcp_servers:delete","users:read","users:create","users:update","teams:read","teams:create","teams:update","teams:delete","team_members:write","team:read","team:write","sessions:revoke","roles:read","roles:create","roles:update","roles:delete","analytics:read_all","audit_logs:read_all","logs:read_all","log_forwarders:read","log_forwarders:write","webhooks:read","webhooks:write","content_filter:read","content_filter:write","pii_redactor:read","pii_redactor:write","rate_limits:read","rate_limits:write","settings:read","settings:write"],"Resource":"*"}]}"#,
     ),
     (
         "team_manager",

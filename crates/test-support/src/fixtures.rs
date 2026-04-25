@@ -62,6 +62,32 @@ pub async fn create_admin_user(db: &PgPool) -> Result<SeededUser> {
     Ok(user)
 }
 
+/// Create a user and grant them the named system role at the
+/// given scope. `scope_kind` is `"global"` or `"team"`; pass
+/// `scope_id = None` for global.
+pub async fn create_user_with_role(
+    db: &PgPool,
+    role: &str,
+    scope_kind: &str,
+    scope_id: Option<Uuid>,
+) -> Result<SeededUser> {
+    let email = format!("{role}-{}@example.com", Uuid::new_v4().simple());
+    let display = format!("Test {role}");
+    let user = create_user(db, &email, &display, "TestPwd_1234567!").await?;
+    sqlx::query(
+        r#"INSERT INTO rbac_role_assignments (user_id, role_id, scope_kind, scope_id, assigned_by)
+           SELECT $1, id, $2, $3, $1 FROM rbac_roles WHERE name = $4"#,
+    )
+    .bind(user.user.id)
+    .bind(scope_kind)
+    .bind(scope_id)
+    .bind(role)
+    .execute(db)
+    .await
+    .with_context(|| format!("assign role {role} ({scope_kind})"))?;
+    Ok(user)
+}
+
 /// Attach a system role to the user at `scope_kind = 'global'`.
 pub async fn assign_role_global(db: &PgPool, user_id: Uuid, role_name: &str) -> Result<()> {
     sqlx::query(
