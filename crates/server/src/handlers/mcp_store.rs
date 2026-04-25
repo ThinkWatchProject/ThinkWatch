@@ -242,72 +242,22 @@ pub async fn install_template(
         config
     };
 
-    // c–e. Create server, install record, and increment count — all in one transaction.
-    //
-    // We re-fetch the template inside the transaction with `FOR UPDATE`
-    // so a concurrent `sync_registry` (which DELETEs templates) cannot
-    // pull the row out from under us between the initial probe and the
-    // INSERT/UPDATE below. The first fetch above is still useful for
-    // probing without holding a row lock for the network round-trip;
-    // here we just confirm the row is still present and lock it.
-    let mut tx = state.db.begin().await?;
-
-    let template = sqlx::query_as::<_, McpStoreTemplate>(
-        "SELECT * FROM mcp_store_templates WHERE id = $1 FOR UPDATE",
+    // c–e. Server creation, install record, and counter bump go
+    // through the shared `install_template_into_db` helper so the
+    // exact same TX shape is exercised by the integration suite.
+    let server = install_template_into_db(
+        &state.db,
+        template.id,
+        &slug,
+        &endpoint_url,
+        &transport_type,
+        auth_encrypted.as_deref(),
+        config_json,
+        req.name.as_deref(),
+        req.namespace_prefix.as_deref(),
+        auth_user.claims.sub,
     )
-    .bind(template.id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("Template '{slug}' was removed during install")))?;
-
-    // Frontend typically sends already-deconflicted name/prefix. If not,
-    // fall back to template defaults and resolve collisions server-side.
-    let base_name = req
-        .name
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&template.name);
-    let default_prefix = template.slug.replace('-', "_");
-    let base_prefix = req
-        .namespace_prefix
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&default_prefix);
-    // Validate the prefix shape regardless of source.
-    super::mcp_shared::normalize_namespace_prefix(Some(base_prefix), base_name)?;
-    let (resolved_name, resolved_prefix) =
-        resolve_server_collisions(&mut tx, base_name, base_prefix).await?;
-
-    let server = sqlx::query_as::<_, McpServer>(
-        r#"INSERT INTO mcp_servers (name, namespace_prefix, description, endpoint_url, transport_type, auth_type, auth_secret_encrypted, config_json)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
-    )
-    .bind(&resolved_name)
-    .bind(&resolved_prefix)
-    .bind(&template.description)
-    .bind(&endpoint_url)
-    .bind(&transport_type)
-    .bind(&template.auth_type)
-    .bind(&auth_encrypted)
-    .bind(&config_json)
-    .fetch_one(&mut *tx)
     .await?;
-
-    sqlx::query(
-        "INSERT INTO mcp_store_installs (template_id, server_id, installed_by) VALUES ($1, $2, $3)",
-    )
-    .bind(template.id)
-    .bind(server.id)
-    .bind(auth_user.claims.sub)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query("UPDATE mcp_store_templates SET install_count = install_count + 1 WHERE id = $1")
-        .bind(template.id)
-        .execute(&mut *tx)
-        .await?;
-
-    tx.commit().await?;
 
     // Sync the in-memory MCP registry
     if let Ok(registered) = crate::mcp_runtime::build_registered_server(
@@ -559,6 +509,103 @@ pub async fn sync_registry(
     ))
 }
 
+/// Process-wide advisory-lock key for the install path. Any 64-bit
+/// constant works; the literal spells "mcpStore" in ASCII so a DBA
+/// glancing at `pg_locks` can tell what's holding the row.
+const INSTALL_LOCK_KEY: i64 = 0x6D637053746F7265;
+
+/// Persist a store-template install in one transaction:
+/// 1. acquire a process-wide advisory lock so concurrent installs
+///    of templates that happen to share a default name can never
+///    both grab the same `(name, namespace_prefix)` slot;
+/// 2. re-fetch the template `FOR UPDATE` so a concurrent
+///    `sync_registry` deletion can't pull the row out from under us;
+/// 3. resolve a free `(name, prefix)` pair, INSERT the server,
+///    INSERT the install record, bump `install_count`.
+///
+/// Exposed so integration tests can drive the TX without going
+/// through the HTTP probe + SSRF guard the public handler runs first.
+#[allow(clippy::too_many_arguments)]
+pub async fn install_template_into_db(
+    db: &sqlx::PgPool,
+    template_id: uuid::Uuid,
+    slug_for_error: &str,
+    endpoint_url: &str,
+    transport_type: &str,
+    auth_encrypted: Option<&[u8]>,
+    config_json: serde_json::Value,
+    name_override: Option<&str>,
+    prefix_override: Option<&str>,
+    installed_by: Uuid,
+) -> Result<McpServer, AppError> {
+    let mut tx = db.begin().await?;
+
+    // Serialize all install transactions globally on one advisory
+    // lock. This is the "no count drift / no UNIQUE-violation"
+    // guarantee — the FOR UPDATE on the template row alone only
+    // serializes installs of the *same* template, leaving a race
+    // when two different templates' default names collide.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(INSTALL_LOCK_KEY)
+        .execute(&mut *tx)
+        .await?;
+
+    let template = sqlx::query_as::<_, McpStoreTemplate>(
+        "SELECT * FROM mcp_store_templates WHERE id = $1 FOR UPDATE",
+    )
+    .bind(template_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or_else(|| {
+        AppError::NotFound(format!(
+            "Template '{slug_for_error}' was removed during install"
+        ))
+    })?;
+
+    let base_name = name_override
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&template.name);
+    let default_prefix = template.slug.replace('-', "_");
+    let base_prefix = prefix_override
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&default_prefix);
+    super::mcp_shared::normalize_namespace_prefix(Some(base_prefix), base_name)?;
+    let (resolved_name, resolved_prefix) =
+        resolve_server_collisions(&mut tx, base_name, base_prefix).await?;
+
+    let server = sqlx::query_as::<_, McpServer>(
+        r#"INSERT INTO mcp_servers (name, namespace_prefix, description, endpoint_url, transport_type, auth_type, auth_secret_encrypted, config_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
+    )
+    .bind(&resolved_name)
+    .bind(&resolved_prefix)
+    .bind(&template.description)
+    .bind(endpoint_url)
+    .bind(transport_type)
+    .bind(&template.auth_type)
+    .bind(auth_encrypted)
+    .bind(&config_json)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        "INSERT INTO mcp_store_installs (template_id, server_id, installed_by) VALUES ($1, $2, $3)",
+    )
+    .bind(template.id)
+    .bind(server.id)
+    .bind(installed_by)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE mcp_store_templates SET install_count = install_count + 1 WHERE id = $1")
+        .bind(template.id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(server)
+}
+
 /// Find an available `(name, namespace_prefix)` pair by appending `_2`, `_3`, …
 /// when the base values are already taken. Runs inside the caller's tx so
 /// two concurrent installs of the same template can't pick the same suffix.
@@ -573,7 +620,11 @@ async fn resolve_server_collisions(
         } else {
             (format!("{base_name} #{i}"), format!("{base_prefix}_{i}"))
         };
-        let conflict: Option<i64> = sqlx::query_scalar(
+        // `SELECT 1` is INT4 on the wire; binding into `Option<i64>`
+        // panics with a column-decode mismatch the moment a row
+        // comes back. We don't actually care about the value — only
+        // whether the row exists — so use Option<i32>.
+        let conflict: Option<i32> = sqlx::query_scalar(
             "SELECT 1 FROM mcp_servers WHERE name = $1 OR namespace_prefix = $2 LIMIT 1",
         )
         .bind(&n)
