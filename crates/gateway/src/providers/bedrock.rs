@@ -563,3 +563,239 @@ impl AiProvider for BedrockProvider {
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// Conversion-layer unit tests
+//
+// `BedrockProvider` itself can't be exercised in integration tests:
+// the endpoint URL is hard-coded to the public AWS host
+// (`bedrock-runtime.{region}.amazonaws.com`) with no `base_url`
+// override hook, so wiremock can't intercept it without DNS
+// hijacking. The conversion functions are pure, so we test them
+// directly against the wire shapes the AWS SDK documents — this
+// catches the high-frequency regression: someone tweaks an OpenAI
+// field name and the Bedrock translation silently drops it.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn req(messages: Vec<(&str, &str)>) -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "anthropic.claude-3-haiku".into(),
+            messages: messages
+                .into_iter()
+                .map(|(role, text)| ChatMessage {
+                    role: role.into(),
+                    content: serde_json::Value::String(text.into()),
+                })
+                .collect(),
+            temperature: Some(0.7),
+            max_tokens: Some(256),
+            stream: None,
+            extra: serde_json::Value::Null,
+            caller_user_id: None,
+            caller_user_email: None,
+            trace_id: None,
+        }
+    }
+
+    // ---- convert_to_bedrock ----
+
+    #[test]
+    fn system_messages_are_hoisted_to_top_level_system_block() {
+        // OpenAI puts the system prompt inside `messages[]`; Bedrock's
+        // Converse API expects it at the top level. Failing to hoist
+        // it leaves the system instruction inside `messages` where
+        // Bedrock ignores it — silent quality regression.
+        let r = req(vec![("system", "you are concise"), ("user", "hi")]);
+        let out = convert_to_bedrock(&r);
+        let system = out
+            .system
+            .as_ref()
+            .expect("system block must be present when a system message exists");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0].text, "you are concise");
+        // The user message survives, the system message must NOT.
+        assert_eq!(out.messages.len(), 1);
+        assert_eq!(out.messages[0].role, "user");
+        assert_eq!(out.messages[0].content[0].text, "hi");
+    }
+
+    #[test]
+    fn no_system_messages_yields_none_system_block() {
+        // Serializing `Some(vec![])` would emit an empty `system: []`
+        // — Bedrock rejects it. Verify we project to None and the
+        // skip_serializing_if drops the field entirely.
+        let r = req(vec![("user", "hello")]);
+        let out = convert_to_bedrock(&r);
+        assert!(out.system.is_none());
+        let body = serde_json::to_value(&out).unwrap();
+        assert!(
+            body.get("system").is_none(),
+            "system field must be omitted when empty: {body}"
+        );
+    }
+
+    #[test]
+    fn inference_config_carries_max_tokens_and_temperature() {
+        let r = req(vec![("user", "x")]);
+        let out = convert_to_bedrock(&r);
+        let cfg = out.inference_config.as_ref().expect("inferenceConfig set");
+        assert_eq!(cfg.max_tokens, Some(256));
+        assert_eq!(cfg.temperature, Some(0.7));
+        // Wire shape: camelCase keys (Bedrock spec).
+        let body = serde_json::to_value(&out).unwrap();
+        assert_eq!(body["inferenceConfig"]["maxTokens"], 256);
+        assert!(
+            body["inferenceConfig"]["temperature"].as_f64().unwrap() > 0.69,
+            "temperature must round-trip: {body}"
+        );
+    }
+
+    #[test]
+    fn multiple_user_assistant_turns_preserve_order() {
+        // Bedrock requires strictly alternating user/assistant turns.
+        // The converter must keep every non-system message and
+        // preserve the order, otherwise multi-turn context breaks.
+        let r = req(vec![
+            ("user", "first"),
+            ("assistant", "reply 1"),
+            ("user", "second"),
+            ("assistant", "reply 2"),
+            ("user", "third"),
+        ]);
+        let out = convert_to_bedrock(&r);
+        let roles: Vec<&str> = out.messages.iter().map(|m| m.role.as_str()).collect();
+        assert_eq!(
+            roles,
+            vec!["user", "assistant", "user", "assistant", "user"]
+        );
+        let texts: Vec<&str> = out
+            .messages
+            .iter()
+            .map(|m| m.content[0].text.as_str())
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["first", "reply 1", "second", "reply 2", "third"]
+        );
+    }
+
+    #[test]
+    fn non_string_content_serializes_to_json_text() {
+        // OpenAI clients sometimes send `content` as an array (image
+        // parts). Bedrock's Converse API takes plain text; we collapse
+        // the structured content into its JSON representation so the
+        // upstream still gets *something* meaningful instead of
+        // silently dropping the message.
+        let mut r = req(vec![]);
+        r.messages.push(ChatMessage {
+            role: "user".into(),
+            content: json!([{"type": "text", "text": "hi"}]),
+        });
+        let out = convert_to_bedrock(&r);
+        assert_eq!(out.messages.len(), 1);
+        assert!(
+            out.messages[0].content[0].text.contains("\"hi\""),
+            "non-string content must collapse to JSON text, got {:?}",
+            out.messages[0].content[0].text
+        );
+    }
+
+    // ---- convert_from_bedrock ----
+
+    fn bedrock_response(text: &str, stop_reason: Option<&str>) -> BedrockConverseResponse {
+        BedrockConverseResponse {
+            output: BedrockOutput {
+                message: BedrockOutputMessage {
+                    role: "assistant".into(),
+                    content: vec![BedrockOutputContent {
+                        text: Some(text.into()),
+                    }],
+                },
+            },
+            usage: BedrockUsage {
+                input_tokens: 12,
+                output_tokens: 5,
+                total_tokens: 17,
+            },
+            stop_reason: stop_reason.map(|s| s.into()),
+        }
+    }
+
+    #[test]
+    fn bedrock_response_round_trips_into_openai_shape() {
+        let resp = bedrock_response("hello world", Some("end_turn"));
+        let out = convert_from_bedrock(resp, "anthropic.claude-3-haiku");
+        assert_eq!(out.object, "chat.completion");
+        assert_eq!(out.model, "anthropic.claude-3-haiku");
+        assert_eq!(out.choices.len(), 1);
+        assert_eq!(out.choices[0].message.role, "assistant");
+        assert_eq!(out.choices[0].message.content, json!("hello world"));
+        // OpenAI's `finish_reason` mapping: end_turn → stop, max_tokens →
+        // length. Anything else passes through verbatim.
+        assert_eq!(out.choices[0].finish_reason.as_deref(), Some("stop"));
+        let usage = out.usage.expect("usage must be Some");
+        assert_eq!(usage.prompt_tokens, 12);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 17);
+    }
+
+    #[test]
+    fn stop_reason_max_tokens_maps_to_length() {
+        // Pin the OpenAI-side mapping — clients use this field to
+        // decide whether to retry-with-bigger-budget vs accept the
+        // truncated answer. Mis-mapping it == "user thinks they got
+        // a complete answer when they didn't".
+        let resp = bedrock_response("partial", Some("max_tokens"));
+        let out = convert_from_bedrock(resp, "x");
+        assert_eq!(out.choices[0].finish_reason.as_deref(), Some("length"));
+    }
+
+    #[test]
+    fn unknown_stop_reason_passes_through_verbatim() {
+        // A future Bedrock release that introduces a new stop reason
+        // shouldn't be silently mapped to a wrong OpenAI value. Pass
+        // it through so dashboards can see "unknown" buckets.
+        let resp = bedrock_response("blocked", Some("content_filtered"));
+        let out = convert_from_bedrock(resp, "x");
+        assert_eq!(
+            out.choices[0].finish_reason.as_deref(),
+            Some("content_filtered")
+        );
+    }
+
+    #[test]
+    fn multiple_text_content_blocks_concatenate() {
+        // Bedrock can return multiple content blocks (e.g. tool-use
+        // splits the response). The OpenAI envelope is a single
+        // string, so we join them — losing the boundary is acceptable
+        // since the OpenAI shape doesn't model it anyway.
+        let resp = BedrockConverseResponse {
+            output: BedrockOutput {
+                message: BedrockOutputMessage {
+                    role: "assistant".into(),
+                    content: vec![
+                        BedrockOutputContent {
+                            text: Some("part one ".into()),
+                        },
+                        BedrockOutputContent {
+                            text: Some("part two".into()),
+                        },
+                    ],
+                },
+            },
+            usage: BedrockUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+                total_tokens: 2,
+            },
+            stop_reason: Some("end_turn".into()),
+        };
+        let out = convert_from_bedrock(resp, "x");
+        assert_eq!(out.choices[0].message.content, json!("part one part two"));
+    }
+}
