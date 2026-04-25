@@ -40,15 +40,18 @@ fn pattern_matches(pattern: &str, name: &str) -> bool {
         );
     }
 
-    // Exact match: `<server>__<tool>` with one `__` separator and no
-    // stray `*`. Rejects bare server names ("mysql__") or bare tool
-    // names ("query") that would otherwise sneak through string
-    // equality while being semantically invalid.
+    // Exact match: `<server>__<tool>` with at least one `__`
+    // separator (the FIRST one demarcates server from tool) and no
+    // stray `*`. The tool segment is allowed to contain `__` —
+    // upstream MCP servers like AWS Knowledge ("aws___list_regions")
+    // use embedded double-underscores as a real part of the tool
+    // identifier, and rejecting those would silently make
+    // exact-match allow-lists unable to grant any of those tools.
     if pattern.contains('*') {
         return false;
     }
     match pattern.split_once("__") {
-        Some((s, t)) if !s.is_empty() && !t.is_empty() && !t.contains("__") => pattern == name,
+        Some((s, t)) if !s.is_empty() && !t.is_empty() => pattern == name,
         _ => false,
     }
 }
@@ -115,9 +118,19 @@ mod tests {
     }
 
     #[test]
-    fn tool_name_with_double_underscore_rejected_as_pattern() {
-        let pats = vec!["mysql__a__b".into()];
-        assert!(!is_tool_allowed(Some(&pats), "mysql__a__b"));
+    fn tool_name_with_double_underscore_matches_exactly() {
+        // Real MCP servers (AWS Knowledge MCP, langchain tools, …)
+        // use embedded `__` inside the tool segment as part of the
+        // upstream identifier. Exact-match patterns must allow them
+        // through — the FIRST `__` separates server from tool, and
+        // anything after is the tool name verbatim.
+        let pats = vec!["aws_docs__aws___list_regions".into()];
+        assert!(is_tool_allowed(Some(&pats), "aws_docs__aws___list_regions"));
+        // Different tool in the same namespace still doesn't match.
+        assert!(!is_tool_allowed(
+            Some(&pats),
+            "aws_docs__aws___search_documentation"
+        ));
     }
 
     #[test]
