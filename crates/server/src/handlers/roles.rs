@@ -554,7 +554,10 @@ pub async fn update_role(
     .execute(&state.db)
     .await?;
 
-    let row: RoleRow = sqlx::query_as(&format!("{ROLE_SELECT} WHERE id = $1"))
+    // Qualify with `r.id`: ROLE_SELECT joins `users u`, which also
+    // has an `id` column — an unqualified WHERE here used to bubble
+    // a 500 from "column reference \"id\" is ambiguous".
+    let row: RoleRow = sqlx::query_as(&format!("{ROLE_SELECT} WHERE r.id = $1"))
         .bind(id)
         .fetch_one(&state.db)
         .await?;
@@ -644,7 +647,10 @@ pub async fn reset_role(
     .execute(&state.db)
     .await?;
 
-    let row: RoleRow = sqlx::query_as(&format!("{ROLE_SELECT} WHERE id = $1"))
+    // Qualify with `r.id`: ROLE_SELECT joins `users u`, which also
+    // has an `id` column — an unqualified WHERE here used to bubble
+    // a 500 from "column reference \"id\" is ambiguous".
+    let row: RoleRow = sqlx::query_as(&format!("{ROLE_SELECT} WHERE r.id = $1"))
         .bind(id)
         .fetch_one(&state.db)
         .await?;
