@@ -84,9 +84,14 @@ pub async fn get_slo_snapshot(
     struct Row {
         total: u64,
         errors: u64,
-        p50: f64,
-        p95: f64,
-        p99: f64,
+        // `quantileExact` returns NULL when there are zero matching
+        // rows (fresh deployment, empty table, or out-of-window
+        // queries). `f64` would fail to decode in that case and the
+        // whole snapshot 500s — `Option<f64>` lets us project the
+        // empty case to 0.0 below.
+        p50: Option<f64>,
+        p95: Option<f64>,
+        p99: Option<f64>,
     }
 
     // quantileExact rather than the tuple-returning quantilesExact —
@@ -119,8 +124,8 @@ pub async fn get_slo_snapshot(
         total_requests: row.total,
         error_requests: row.errors,
         error_rate,
-        p50_ms: row.p50,
-        p95_ms: row.p95,
-        p99_ms: row.p99,
+        p50_ms: row.p50.unwrap_or(0.0),
+        p95_ms: row.p95.unwrap_or(0.0),
+        p99_ms: row.p99.unwrap_or(0.0),
     }))
 }
