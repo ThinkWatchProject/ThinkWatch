@@ -9,7 +9,7 @@ import { expect, test } from '@playwright/test';
  * are set, redirect lands on /dashboard, the admin email is shown.
  */
 
-const CONSOLE = process.env.PW_CONSOLE_API ?? 'http://localhost:3001';
+const CONSOLE = process.env.PW_CONSOLE_API ?? 'http://127.0.0.1:3001';
 
 test('setup wizard provisions an admin and lands on the dashboard', async ({ page }) => {
   // Skip when the platform is already set up — re-running the
