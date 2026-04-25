@@ -1,6 +1,13 @@
 services:
   postgres:
     image: postgres:18-alpine
+    # Docker's default /dev/shm of 64MB is too small for parallel
+    # workers + auto-ANALYZE under the integration suite (one
+    # ephemeral DB per test, dozens of concurrent stat targets).
+    # Crashes show up as `could not resize shared memory segment "/PostgreSQL.…"
+    # to 33554432 bytes: No space left on device` and the container
+    # eventually goes unhealthy. 512MB clears the suite with headroom.
+    shm_size: 512m
     command:
       - postgres
       # --- Memory ---

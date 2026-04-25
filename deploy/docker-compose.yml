@@ -70,6 +70,13 @@ services:
 
   postgres:
     image: postgres:18-alpine
+    # Docker's default /dev/shm is 64MB. Production runs with
+    # shared_buffers=512MB and parallel workers, both of which spill
+    # into shm — the default is undersized and crashes show up as
+    # `could not resize shared memory segment` under any non-trivial
+    # load. 1GB matches the prod shared_buffers + parallel-query
+    # working set with comfortable headroom.
+    shm_size: 1g
     command:
       - postgres
       # --- Memory ---
