@@ -37,6 +37,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 hex = { workspace = true }
 sha2 = { workspace = true }
+hmac = { workspace = true }
 data-encoding = { workspace = true }
 p256 = { workspace = true }
 ecdsa = { workspace = true }

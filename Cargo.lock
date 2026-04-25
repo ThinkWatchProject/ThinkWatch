@@ -4191,6 +4191,7 @@ dependencies = [
  "fred",
  "futures",
  "hex",
+ "hmac 0.13.0",
  "once_cell",
  "p256",
  "rand 0.10.0",

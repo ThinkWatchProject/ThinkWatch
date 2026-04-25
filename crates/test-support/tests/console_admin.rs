@@ -197,7 +197,7 @@ async fn admin_can_list_create_update_delete_users() {
         .await
         .unwrap()
         .json()
-        .unwrap_or_else(|_| Value::Null);
+        .unwrap_or(Value::Null);
     if !post_delete.is_null() {
         // Admin endpoint may either 404 or return tombstoned shape.
         assert!(post_delete["deleted_at"].is_string() || post_delete["is_active"] == json!(false));
