@@ -135,6 +135,39 @@ pub async fn create_provider(
     .context("INSERT providers")
 }
 
+/// Register a model + an explicit route. `priority` 0 = primary,
+/// higher numbers fail over after lower ones; `weight` controls
+/// weighted random selection inside a priority group.
+pub async fn create_model_route(
+    db: &PgPool,
+    provider_id: Uuid,
+    model_id: &str,
+    priority: i32,
+    weight: i32,
+) -> Result<()> {
+    sqlx::query(
+        r#"INSERT INTO models (model_id, display_name)
+           VALUES ($1, $1)
+           ON CONFLICT (model_id) DO NOTHING"#,
+    )
+    .bind(model_id)
+    .execute(db)
+    .await
+    .context("INSERT models")?;
+    sqlx::query(
+        r#"INSERT INTO model_routes (model_id, provider_id, upstream_model, weight, priority, enabled)
+           VALUES ($1, $2, NULL, $3, $4, true)"#,
+    )
+    .bind(model_id)
+    .bind(provider_id)
+    .bind(weight)
+    .bind(priority)
+    .execute(db)
+    .await
+    .context("INSERT model_routes")?;
+    Ok(())
+}
+
 /// Register a model + a default route to `provider_id` so the gateway
 /// can dispatch to it. Use a unique `model_id` per test.
 pub async fn create_model_and_route(db: &PgPool, provider_id: Uuid, model_id: &str) -> Result<()> {

@@ -619,6 +619,24 @@ fn log_audit_drop_throttled(err: &tokio::sync::mpsc::error::TrySendError<AuditEn
 }
 
 impl AuditLogger {
+    /// Run one pass of the webhook-outbox drain loop. Production
+    /// invokes the same code path on a 10-second tick from the
+    /// background task spawned in `AuditLogger::new`; tests call
+    /// this method directly so they don't have to wait for the
+    /// real interval.
+    pub async fn drain_webhook_outbox_once(&self) -> Result<(), sqlx::Error> {
+        let Some(db) = &self.db else {
+            return Ok(());
+        };
+        let http = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap_or_default();
+        let mut over: Option<std::time::Instant> = None;
+        let mut last: Option<std::time::Instant> = None;
+        drain_once(db, &self.registry, &http, &mut over, &mut last).await
+    }
+
     pub async fn new(
         _config: AuditConfig,
         db: Option<PgPool>,
