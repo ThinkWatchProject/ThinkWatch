@@ -31,7 +31,9 @@ pub fn spawn_data_retention_task(db: PgPool, config: Arc<DynamicConfig>, audit: 
     });
 }
 
-async fn run_retention_cleanup(
+/// Single deterministic retention pass. `pub` so integration tests
+/// can drive it without sleeping for 24h.
+pub async fn run_retention_cleanup(
     db: &PgPool,
     _config: &DynamicConfig,
     audit: &AuditLogger,

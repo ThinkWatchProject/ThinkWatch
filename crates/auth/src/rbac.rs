@@ -279,6 +279,47 @@ pub async fn compute_user_surface_constraints(
     Ok(apply_user_overrides(role_merged, override_constraints))
 }
 
+/// Like [`compute_user_surface_constraints`] but also folds in any
+/// active rate-limit / budget overrides keyed on a specific
+/// `api_key_id`. Per-key overrides REPLACE the user-derived value
+/// in the matching `(surface, metric, window)` / `(surface, period)`
+/// slot — the same merge semantics as user-scope overrides.
+///
+/// Use this in the gateway hot path (where the auth middleware
+/// already knows the api_key id). Other callers (analytics
+/// dashboards, admin "what does this user see today" views) keep
+/// using the user-only variant since they have no key context.
+pub async fn compute_effective_surface_constraints(
+    pool: &PgPool,
+    user_id: Uuid,
+    api_key_id: Uuid,
+) -> Result<think_watch_common::limits::SurfaceConstraints, sqlx::Error> {
+    use think_watch_common::limits::{
+        self, BudgetSubject, RateLimitSubject, apply_user_overrides,
+        list_enabled_caps_for_subjects, list_enabled_rules_for_subjects, side_table_as_constraints,
+    };
+
+    let user_merged = compute_user_surface_constraints(pool, user_id).await?;
+
+    // The api_key-side overrides are loaded separately so the
+    // existing `compute_user_*` helper stays a pure function of
+    // user_id (used by analytics + admin views). Loading both kinds
+    // here is two queries instead of one — that's bounded and the
+    // hot path already does enough DB round-trips that it doesn't
+    // dominate latency.
+    let key_rules =
+        list_enabled_rules_for_subjects(pool, &[(RateLimitSubject::ApiKey, api_key_id)]).await?;
+    let key_caps =
+        list_enabled_caps_for_subjects(pool, &[(BudgetSubject::ApiKey, api_key_id)]).await?;
+    let key_overrides = side_table_as_constraints(&key_rules, &key_caps);
+
+    if key_overrides == limits::SurfaceConstraints::default() {
+        return Ok(user_merged);
+    }
+
+    Ok(apply_user_overrides(user_merged, key_overrides))
+}
+
 /// Check if a namespaced MCP tool name matches any of the allowed patterns.
 /// Patterns: `"*"` matches all, `"mysql__*"` matches prefix, exact otherwise.
 pub fn is_mcp_tool_allowed(patterns: Option<&[String]>, namespaced_name: &str) -> bool {

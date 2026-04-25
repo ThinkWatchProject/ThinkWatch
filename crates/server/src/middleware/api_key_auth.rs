@@ -165,9 +165,16 @@ pub fn require_api_key(
                 let names = rbac::load_user_role_names(&state.db, uid)
                     .await
                     .unwrap_or_default();
-                let constraints = rbac::compute_user_surface_constraints(&state.db, uid)
-                    .await
-                    .unwrap_or_default();
+                // Use the api_key-aware variant so per-key
+                // `rate_limit_rules` / `budget_caps` rows fire on the
+                // gateway hot path. Falling back to the user-only
+                // function would silently drop api_key-scope
+                // overrides — the schema supports them but the
+                // gateway would never see them.
+                let constraints =
+                    rbac::compute_effective_surface_constraints(&state.db, uid, row.id)
+                        .await
+                        .unwrap_or_default();
                 (limits, names, constraints)
             } else {
                 // Service-account API keys (no user_id) inherit only

@@ -23,6 +23,16 @@ pub fn verify(secret_base32: &str, code: &str, email: &str) -> anyhow::Result<bo
     Ok(totp.check_current(code).unwrap_or(false))
 }
 
+/// Compute the current 6-digit TOTP code for the given secret +
+/// email pair. Used by integration tests that need to drive the
+/// TOTP login flow end-to-end without typing into a real
+/// authenticator app.
+pub fn current_code(secret_base32: &str, email: &str) -> anyhow::Result<String> {
+    let totp = build_totp(secret_base32, email)?;
+    totp.generate_current()
+        .map_err(|e| anyhow::anyhow!("TOTP generate failed: {e}"))
+}
+
 /// Generate a set of one-time recovery codes (80-bit entropy each).
 ///
 /// Codes are guaranteed unique within the returned set. The raw 40-bit

@@ -3,6 +3,13 @@ name = "think-watch-server"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "think-watch-server"
+path = "src/main.rs"
+
 [dependencies]
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }

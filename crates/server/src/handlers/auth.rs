@@ -116,7 +116,11 @@ pub async fn login(
     // silently disabled the limit.
     let rate_key = format!("auth_rate:{}:{}", client_ip, req.email);
     let ip_rate_key = format!("auth_rate_ip:{}", client_ip);
-    let _: bool = fred::interfaces::KeysInterface::set(
+    // SET ... NX returns nil when the counter already exists. Bind
+    // to `()` so fred's reply parser accepts both the OK and nil
+    // shapes — the previous `let _: bool` panicked on the second
+    // login from the same `(ip, email)` pair.
+    let _: () = fred::interfaces::KeysInterface::set(
         &state.redis,
         &rate_key,
         "0",
@@ -142,7 +146,7 @@ pub async fn login(
     }
 
     // Per-IP rate limit: max 30 attempts per minute across all emails (fail-closed).
-    let _: bool = fred::interfaces::KeysInterface::set(
+    let _: () = fred::interfaces::KeysInterface::set(
         &state.redis,
         &ip_rate_key,
         "0",
@@ -224,7 +228,7 @@ pub async fn login(
         // the same email can only fail N times globally in the
         // rate-limit window regardless of source address.
         let email_fail_key = format!("auth_email_fails:{}", req.email);
-        let _: bool = fred::interfaces::KeysInterface::set(
+        let _: () = fred::interfaces::KeysInterface::set(
             &state.redis,
             &email_fail_key,
             "0",
@@ -695,11 +699,15 @@ pub async fn refresh(
     })?;
     if pw_epoch
         .and_then(|s| s.parse::<i64>().ok())
-        .is_some_and(|epoch| claims.iat < epoch)
+        .is_some_and(|epoch| claims.iat <= epoch)
     {
+        // `<=` — JWT `iat` is whole-seconds. A refresh token minted in
+        // the same second the user changed their password (or the admin
+        // force-logged them out) would otherwise sail through the
+        // strict-`<` check, leaking a one-second replay window.
         tracing::warn!(
             user_id = %claims.sub,
-            "refresh token issued before password change — rejecting"
+            "refresh token issued at or before password change — rejecting"
         );
         return Err(AppError::Unauthorized);
     }
@@ -1022,6 +1030,13 @@ pub async fn revoke_sessions(
         fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_pubkey:{user_id}"))
             .await
             .unwrap_or(());
+
+    // Reject every refresh token issued before this moment. Without
+    // this, /revoke-sessions only killed the signing-key path —
+    // refresh tokens already in another browser tab kept minting
+    // fresh access tokens, which contradicts the endpoint's name.
+    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
+    invalidate_refresh_tokens(&state.redis, user_id, refresh_ttl_days).await;
 
     // Force-close any live dashboard WebSockets for this user. The WS
     // loop polls this key every ~32s; setting it triggers a Close frame.

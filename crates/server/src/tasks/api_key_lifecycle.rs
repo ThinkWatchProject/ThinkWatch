@@ -27,7 +27,10 @@ pub fn spawn_api_key_lifecycle_task(db: PgPool, config: Arc<DynamicConfig>, audi
     });
 }
 
-async fn run_lifecycle_check(
+/// Single deterministic pass of the lifecycle loop. `pub` so
+/// integration tests can drive it without `tokio::time::pause`-ing
+/// the whole 10-minute interval.
+pub async fn run_lifecycle_check(
     db: &PgPool,
     config: &DynamicConfig,
     audit: &AuditLogger,
