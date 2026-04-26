@@ -301,6 +301,21 @@ pub async fn compute_effective_surface_constraints(
 
     let user_merged = compute_user_surface_constraints(pool, user_id).await?;
 
+    // Per-key overrides are stored against the key's `lineage_id`
+    // (subject_kind = 'api_key_lineage') so they survive rotation.
+    // Resolve api_key_id → lineage_id once and bind every lookup on
+    // the lineage. A non-existent api_key_id (never happens at
+    // runtime — the auth middleware just authenticated this id —
+    // but defend anyway) maps to an empty override set.
+    let lineage_id: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT lineage_id FROM api_keys WHERE id = $1")
+            .bind(api_key_id)
+            .fetch_optional(pool)
+            .await?;
+    let Some(lineage_id) = lineage_id else {
+        return Ok(user_merged);
+    };
+
     // The api_key-side overrides are loaded separately so the
     // existing `compute_user_*` helper stays a pure function of
     // user_id (used by analytics + admin views). Loading both kinds
@@ -308,9 +323,10 @@ pub async fn compute_effective_surface_constraints(
     // hot path already does enough DB round-trips that it doesn't
     // dominate latency.
     let key_rules =
-        list_enabled_rules_for_subjects(pool, &[(RateLimitSubject::ApiKey, api_key_id)]).await?;
+        list_enabled_rules_for_subjects(pool, &[(RateLimitSubject::ApiKeyLineage, lineage_id)])
+            .await?;
     let key_caps =
-        list_enabled_caps_for_subjects(pool, &[(BudgetSubject::ApiKey, api_key_id)]).await?;
+        list_enabled_caps_for_subjects(pool, &[(BudgetSubject::ApiKeyLineage, lineage_id)]).await?;
     let key_overrides = side_table_as_constraints(&key_rules, &key_caps);
 
     if key_overrides == limits::SurfaceConstraints::default() {

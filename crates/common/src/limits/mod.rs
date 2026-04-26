@@ -17,8 +17,16 @@
 // Subject identification: every rule / cap is keyed by a (subject_kind,
 // subject_id) tuple. The kinds are pinned to a small closed enum:
 //
-//   rate_limit_rules.subject_kind ∈ { user, api_key }
-//   budget_caps.subject_kind      ∈ { user, api_key }
+//   rate_limit_rules.subject_kind ∈ { user, api_key_lineage }
+//   budget_caps.subject_kind      ∈ { user, api_key_lineage }
+//
+// `api_key_lineage` (NOT `api_key`) is deliberate: a rule attached to a
+// key's `lineage_id` automatically applies to every generation of the
+// rotation chain. Rotating an api_key mints a fresh row with a new `id`
+// but the same `lineage_id`, so the rule keeps biting without anyone
+// having to copy it forward. The handler layer keeps the URL surface as
+// `…/limits/api_key/{api_key_id}` (frontend stays unaware of lineage)
+// and resolves the path id to its lineage_id before the SELECT/INSERT.
 //
 // Role- and team-level constraints are NOT their own subjects — they live
 // in `rbac_roles.policy_document` (and, if ever added, the analogous field
@@ -56,21 +64,24 @@ pub mod weight;
 #[serde(rename_all = "snake_case")]
 pub enum RateLimitSubject {
     User,
-    ApiKey,
+    /// Rule attached to an api_key's `lineage_id`. Survives rotation:
+    /// every generation in the chain shares the same lineage_id, so
+    /// the rule keeps applying without copy-forward on rotation.
+    ApiKeyLineage,
 }
 
 impl RateLimitSubject {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
-            Self::ApiKey => "api_key",
+            Self::ApiKeyLineage => "api_key_lineage",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "user" => Self::User,
-            "api_key" => Self::ApiKey,
+            "api_key_lineage" => Self::ApiKeyLineage,
             _ => return None,
         })
     }
@@ -80,21 +91,23 @@ impl RateLimitSubject {
 #[serde(rename_all = "snake_case")]
 pub enum BudgetSubject {
     User,
-    ApiKey,
+    /// Cap attached to an api_key's `lineage_id`. See
+    /// `RateLimitSubject::ApiKeyLineage` for the rotation rationale.
+    ApiKeyLineage,
 }
 
 impl BudgetSubject {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::User => "user",
-            Self::ApiKey => "api_key",
+            Self::ApiKeyLineage => "api_key_lineage",
         }
     }
 
     pub fn parse(s: &str) -> Option<Self> {
         Some(match s {
             "user" => Self::User,
-            "api_key" => Self::ApiKey,
+            "api_key_lineage" => Self::ApiKeyLineage,
             _ => return None,
         })
     }

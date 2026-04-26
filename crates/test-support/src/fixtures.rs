@@ -244,11 +244,18 @@ pub async fn create_api_key(
     let models_vec: Option<Vec<String>> =
         allowed_models.map(|m| m.iter().map(|s| (*s).to_string()).collect());
 
+    // Pre-mint the id so it can be bound to BOTH `id` and `lineage_id`
+    // — fresh keys are their own lineage root (id == lineage_id), the
+    // same invariant the production POST /api/keys handler enforces.
+    // Without this, the column default mints a random lineage_id and
+    // tests that exercise rotation lineage break.
+    let id = Uuid::new_v4();
     let row = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces, allowed_models, expires_at, is_active)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+        r#"INSERT INTO api_keys (id, lineage_id, key_prefix, key_hash, name, user_id, surfaces, allowed_models, expires_at, is_active)
+           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, true)
            RETURNING *"#,
     )
+    .bind(id)
     .bind(&generated.prefix)
     .bind(&generated.hash)
     .bind(name)

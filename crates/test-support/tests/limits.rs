@@ -167,17 +167,18 @@ async fn rate_limit_window_validation_rejects_off_grid_seconds() {
 #[tokio::test]
 async fn api_key_scope_rate_limit_isolates_from_other_keys() {
     // Per-key rate-limit rules MUST fire on the gateway hot path —
-    // schema supports `subject_kind='api_key'` and the auth
+    // schema supports `subject_kind='api_key_lineage'` and the auth
     // middleware passes `api_key_id` through
-    // `compute_effective_surface_constraints`. Two keys for the
-    // same user: one carries a max_count=1 rule, the other
+    // `compute_effective_surface_constraints`, which resolves it to
+    // `lineage_id` before binding. Two keys for the same user: one
+    // carries a max_count=1 rule keyed on its lineage_id, the other
     // carries nothing. Each key must behave independently.
     let app = TestApp::spawn().await;
     let (key_a_plain, user_id) = seed_runtime(&app).await;
 
-    // Locate key_a's id (created by `seed_runtime`).
-    let key_a_id: uuid::Uuid =
-        sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM api_keys WHERE user_id = $1")
+    // Locate key_a's lineage_id (created by `seed_runtime`).
+    let key_a_lineage: uuid::Uuid =
+        sqlx::query_scalar::<_, uuid::Uuid>("SELECT lineage_id FROM api_keys WHERE user_id = $1")
             .bind(user_id)
             .fetch_one(&app.db)
             .await
@@ -197,8 +198,8 @@ async fn api_key_scope_rate_limit_isolates_from_other_keys() {
 
     fixtures::create_rate_limit_rule(
         &app.db,
-        "api_key",
-        key_a_id,
+        "api_key_lineage",
+        key_a_lineage,
         "ai_gateway",
         "requests",
         60,
@@ -245,4 +246,121 @@ async fn api_key_scope_rate_limit_isolates_from_other_keys() {
     .await
     .unwrap()
     .assert_ok();
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn api_key_rate_limit_survives_rotation_via_lineage_id() {
+    // The whole point of `subject_kind = 'api_key_lineage'`: a rule
+    // attached to the key's lineage must keep biting after rotation
+    // without anyone copying the row forward. Concretely: create a
+    // key, attach a max_count=1 rule keyed on its lineage_id, drive
+    // one allowed request, rotate the key, then send a request under
+    // the freshly-minted generation-2 plaintext — it must STILL be
+    // rejected because the lineage counter has already reached its
+    // ceiling.
+    let app = TestApp::spawn().await;
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+
+    let mock = MockProvider::openai_chat_ok("gpt-test").await;
+    let uri = mock.uri();
+    Box::leak(Box::new(mock));
+    let provider =
+        fixtures::create_provider(&app.db, &unique_name("rot-prov"), "openai", &uri, None)
+            .await
+            .unwrap();
+    fixtures::create_model_and_route(&app.db, provider.id, "gpt-test")
+        .await
+        .unwrap();
+    app.rebuild_gateway_router().await;
+
+    // Login as admin to use the public rotate endpoint.
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let con = app.console_client();
+    con.post(
+        "/api/auth/login",
+        json!({"email": admin.user.email, "password": admin.plaintext_password}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    // Generation 1: create a key for the regular user, attach the rule.
+    let key_v1 = fixtures::create_api_key(
+        &app.db,
+        user.user.id,
+        &unique_name("rot-key"),
+        &["ai_gateway"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let key_v1_id = key_v1.row.id;
+    let lineage_id = key_v1.row.lineage_id;
+    assert_eq!(lineage_id, key_v1_id, "fresh key: lineage_id == id");
+
+    fixtures::create_rate_limit_rule(
+        &app.db,
+        "api_key_lineage",
+        lineage_id,
+        "ai_gateway",
+        "requests",
+        60,
+        1,
+    )
+    .await
+    .unwrap();
+
+    // First request under gen-1: allowed.
+    let gw1 = app.gateway_client();
+    gw1.set_bearer(&key_v1.plaintext);
+    gw1.post(
+        "/v1/chat/completions",
+        json!({"model": "gpt-test", "messages": [{"role": "user", "content": "g1"}]}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    // Rotate via the public endpoint so lineage_id propagation goes
+    // through the same path the operator hits in the UI.
+    let rotated: serde_json::Value = con
+        .post_empty(&format!("/api/keys/{key_v1_id}/rotate"))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let plaintext_v2 = rotated["key"].as_str().unwrap().to_string();
+    let key_v2_id: uuid::Uuid = uuid::Uuid::parse_str(rotated["id"].as_str().unwrap()).unwrap();
+    assert_ne!(key_v2_id, key_v1_id, "rotation must mint a fresh id");
+
+    // Sanity: gen-2 must inherit the SAME lineage_id.
+    let lineage_v2: uuid::Uuid =
+        sqlx::query_scalar("SELECT lineage_id FROM api_keys WHERE id = $1")
+            .bind(key_v2_id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(lineage_v2, lineage_id, "rotation must preserve lineage_id");
+
+    // Generation 2 request — the lineage counter is already at 1/1
+    // from gen-1, so this MUST be rejected. If the gateway were
+    // resolving on `api_key.id` (the old subject_kind='api_key'
+    // scheme) gen-2's fresh id would have a fresh counter and slip
+    // through; the lineage_id resolution is what closes that gap.
+    let gw2 = app.gateway_client();
+    gw2.set_bearer(&plaintext_v2);
+    let r = gw2
+        .post(
+            "/v1/chat/completions",
+            json!({"model": "gpt-test", "messages": [{"role": "user", "content": "g2"}]}),
+        )
+        .await
+        .unwrap();
+    assert!(
+        !r.status.is_success(),
+        "gen-2 must inherit gen-1's exhausted lineage counter; got {}",
+        r.status
+    );
 }

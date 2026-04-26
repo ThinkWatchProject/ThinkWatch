@@ -210,7 +210,10 @@ CREATE TABLE api_keys (
     -- the bearer's roles already grant.
     allowed_mcp_tools       TEXT[],
     -- Rate limits and budget caps live in `rate_limit_rules` /
-    -- `budget_caps` (subject_kind = 'api_key').
+    -- `budget_caps` (subject_kind = 'api_key_lineage', subject_id =
+    -- this row's `lineage_id`) so they survive rotation — every
+    -- generation in the chain shares one lineage_id and is bound by
+    -- the same rules without copy-forward.
     cost_center             VARCHAR(64),
     expires_at              TIMESTAMPTZ,
     last_expiry_warning_days INTEGER,
@@ -409,7 +412,14 @@ CREATE TABLE mcp_tools (
 -- Generic rule storage for sliding-window rate limits and natural-period
 -- budget caps. Role-level constraints are inline in
 -- rbac_roles.policy_document (Constraints field); these tables are for
--- user / api_key subjects only.
+-- user / api_key_lineage subjects only.
+--
+-- `api_key_lineage` (NOT `api_key`) means the rule is keyed by the key's
+-- `lineage_id` rather than its current `id`. Rotating an api_key mints a
+-- new id but reuses the lineage_id, so a rule attached to the lineage
+-- automatically applies to every generation. Admin handlers translate
+-- `…/limits/api_key/{api_key_id}` URLs to `(api_key_lineage, lineage_id)`
+-- before persisting / reading.
 --
 -- Team scope is DELIBERATELY not supported. Teams in ThinkWatch are
 -- IAM-group-style permission containers (they grant roles, they don't
@@ -427,7 +437,7 @@ CREATE TABLE rate_limit_rules (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     -- Who the rule applies to.
     subject_kind VARCHAR(20) NOT NULL
-        CHECK (subject_kind IN ('user', 'api_key')),
+        CHECK (subject_kind IN ('user', 'api_key_lineage')),
     subject_id   UUID NOT NULL,
     -- Which gateway this rule guards.
     surface      VARCHAR(20) NOT NULL
@@ -475,7 +485,7 @@ CREATE INDEX idx_rlr_created_by ON rate_limit_rules(created_by, created_at DESC)
 CREATE TABLE budget_caps (
     id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     subject_kind VARCHAR(20) NOT NULL
-        CHECK (subject_kind IN ('user', 'api_key')),
+        CHECK (subject_kind IN ('user', 'api_key_lineage')),
     subject_id   UUID NOT NULL,
     -- Natural calendar period — counters reset on the period boundary
     -- (system TZ). NOT a sliding window; that's what rate_limit_rules

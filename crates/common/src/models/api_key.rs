@@ -23,7 +23,8 @@ pub struct ApiKey {
     /// role-granted `allowed_mcp_tools` at request time.
     pub allowed_mcp_tools: Option<Vec<String>>,
     // Rate limits and budget caps are stored in `rate_limit_rules` /
-    // `budget_caps` (subject_kind = 'api_key').
+    // `budget_caps` (subject_kind = 'api_key_lineage', subject_id =
+    // lineage_id) so they survive rotation across all generations.
     pub expires_at: Option<DateTime<Utc>>,
     pub is_active: bool,
     pub last_used_at: Option<DateTime<Utc>>,

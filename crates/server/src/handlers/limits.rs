@@ -71,22 +71,51 @@ fn reject_role_kind(kind: &str) -> Result<(), AppError> {
 /// Parse a `subject_kind` path segment for rate-limit rules. Rejects
 /// any value not in the closed enum so callers get a 400 instead of
 /// the engine silently returning an empty list.
+///
+/// URL kind `"api_key"` resolves to the internal `ApiKeyLineage`
+/// variant — frontend / operator vocabulary stays "api_key", but the
+/// rule is persisted against the key's lineage so it survives
+/// rotation. Subject id resolution (api_key.id → lineage_id) happens
+/// in `resolve_subject_id`.
 fn parse_rate_subject(kind: &str) -> Result<RateLimitSubject, AppError> {
     reject_role_kind(kind)?;
-    RateLimitSubject::parse(kind).ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "Unknown rate-limit subject kind '{kind}' (allowed: user, api_key)"
-        ))
+    Ok(match kind {
+        "user" => RateLimitSubject::User,
+        "api_key" => RateLimitSubject::ApiKeyLineage,
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "Unknown rate-limit subject kind '{other}' (allowed: user, api_key)"
+            )));
+        }
     })
 }
 
 fn parse_budget_subject(kind: &str) -> Result<BudgetSubject, AppError> {
     reject_role_kind(kind)?;
-    BudgetSubject::parse(kind).ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "Unknown budget subject kind '{kind}' (allowed: user, api_key)"
-        ))
+    Ok(match kind {
+        "user" => BudgetSubject::User,
+        "api_key" => BudgetSubject::ApiKeyLineage,
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "Unknown budget subject kind '{other}' (allowed: user, api_key)"
+            )));
+        }
     })
+}
+
+/// For `ApiKeyLineage` subjects the URL carries an `api_key.id` (so
+/// the operator can paste a key id from the keys list); persistence
+/// keys on `lineage_id`. Other kinds pass through unchanged.
+async fn resolve_subject_id(pool: &sqlx::PgPool, kind: &str, id: Uuid) -> Result<Uuid, AppError> {
+    if kind != "api_key" {
+        return Ok(id);
+    }
+    let lineage_id: Option<Uuid> =
+        sqlx::query_scalar("SELECT lineage_id FROM api_keys WHERE id = $1")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    lineage_id.ok_or_else(|| AppError::NotFound(format!("api_key {id} not found")))
 }
 
 // ----------------------------------------------------------------------------
@@ -287,7 +316,8 @@ pub async fn list_rules(
         .assert_scope_for_subject(&state.db, "rate_limits:read", &kind, subject_id)
         .await?;
     let subject_kind = parse_rate_subject(&kind)?;
-    let rules = limits::list_rules(&state.db, subject_kind, subject_id).await?;
+    let storage_id = resolve_subject_id(&state.db, &kind, subject_id).await?;
+    let rules = limits::list_rules(&state.db, subject_kind, storage_id).await?;
     Ok(Json(RuleListResponse {
         items: rules.into_iter().map(RuleRow::from).collect(),
     }))
@@ -320,6 +350,7 @@ pub async fn upsert_rule(
         .assert_scope_for_subject(&state.db, "rate_limits:write", &kind, subject_id)
         .await?;
     let subject_kind = parse_rate_subject(&kind)?;
+    let storage_id = resolve_subject_id(&state.db, &kind, subject_id).await?;
     let surface = Surface::parse(&req.surface).ok_or_else(|| {
         AppError::BadRequest(format!(
             "Unknown surface '{}' (allowed: ai_gateway, mcp_gateway)",
@@ -342,7 +373,7 @@ pub async fn upsert_rule(
         &state.db,
         UpsertRule {
             subject_kind,
-            subject_id,
+            subject_id: storage_id,
             surface,
             metric,
             window_secs: req.window_secs,
@@ -458,7 +489,8 @@ pub async fn list_caps(
         .assert_scope_for_subject(&state.db, "rate_limits:read", &kind, subject_id)
         .await?;
     let subject_kind = parse_budget_subject(&kind)?;
-    let caps = limits::list_caps(&state.db, subject_kind, subject_id).await?;
+    let storage_id = resolve_subject_id(&state.db, &kind, subject_id).await?;
+    let caps = limits::list_caps(&state.db, subject_kind, storage_id).await?;
     Ok(Json(CapListResponse {
         items: caps.into_iter().map(CapRow::from).collect(),
     }))
@@ -491,6 +523,7 @@ pub async fn upsert_cap(
         .assert_scope_for_subject(&state.db, "rate_limits:write", &kind, subject_id)
         .await?;
     let subject_kind = parse_budget_subject(&kind)?;
+    let storage_id = resolve_subject_id(&state.db, &kind, subject_id).await?;
     let period = BudgetPeriod::parse(&req.period).ok_or_else(|| {
         AppError::BadRequest(format!(
             "Unknown period '{}' (allowed: daily, weekly, monthly)",
@@ -504,7 +537,7 @@ pub async fn upsert_cap(
         &state.db,
         UpsertCap {
             subject_kind,
-            subject_id,
+            subject_id: storage_id,
             period,
             limit_tokens: req.limit_tokens,
             enabled: req.enabled,
@@ -639,7 +672,8 @@ pub async fn get_usage(
     // ones), so the UI can show "this rule is paused but the
     // counter is still ticking" if a request mid-flight bumped it.
     let rate_subject = parse_rate_subject(&kind)?;
-    let rules = limits::list_rules(&state.db, rate_subject, subject_id).await?;
+    let storage_id = resolve_subject_id(&state.db, &kind, subject_id).await?;
+    let rules = limits::list_rules(&state.db, rate_subject, storage_id).await?;
     let mut rule_usage: Vec<RuleUsage> = Vec::with_capacity(rules.len());
     for r in &rules {
         let resolved = sliding::ResolvedRule {
@@ -666,7 +700,7 @@ pub async fn get_usage(
     // support. user / api_key / provider overlap; mcp_server has
     // no budget surface so it returns an empty list.
     let cap_usage: Vec<CapUsage> = if let Some(budget_kind) = budget_kind_for(rate_subject) {
-        let caps = limits::list_caps(&state.db, budget_kind, subject_id).await?;
+        let caps = limits::list_caps(&state.db, budget_kind, storage_id).await?;
         let statuses = budget::current_spend(&state.redis, &caps)
             .await
             .unwrap_or_default();
@@ -689,11 +723,12 @@ pub async fn get_usage(
 }
 
 /// Translate a rate-limit subject into the matching budget subject.
-/// The kinds overlap 1:1 today (both sides accept user / api_key).
+/// The kinds overlap 1:1 today (both sides accept user /
+/// api_key_lineage).
 fn budget_kind_for(subject: RateLimitSubject) -> Option<BudgetSubject> {
     match subject {
         RateLimitSubject::User => Some(BudgetSubject::User),
-        RateLimitSubject::ApiKey => Some(BudgetSubject::ApiKey),
+        RateLimitSubject::ApiKeyLineage => Some(BudgetSubject::ApiKeyLineage),
     }
 }
 
