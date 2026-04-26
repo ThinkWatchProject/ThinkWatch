@@ -109,6 +109,14 @@ impl TestClient {
         *self.signing.lock().unwrap() = None;
     }
 
+    /// Swap in a previously-generated signing key. Tests use this to
+    /// pin rotation behaviour: register key A, register key B,
+    /// restore the client to key A, and assert that A-signed requests
+    /// now fail because Redis has B's pubkey.
+    pub fn set_signing_key(&self, key: SignedKey) {
+        *self.signing.lock().unwrap() = Some(key);
+    }
+
     // ---- request methods --------------------------------------------------
 
     pub async fn get(&self, path: &str) -> Result<TestResponse> {
