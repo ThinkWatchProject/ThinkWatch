@@ -544,6 +544,7 @@ function TemplateCard({
             size="sm"
             variant={template.installed ? 'outline' : 'default'}
             onClick={onInstall}
+            disabled={!hasPermission('mcp_servers:create')}
             title={template.installed ? t('mcpStore.installAgainHint') : undefined}
           >
             {template.installed ? (

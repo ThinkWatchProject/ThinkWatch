@@ -16,6 +16,29 @@ import { AppShell } from '@/components/layout/app-shell';
 import { API_BASE } from '@/lib/api';
 import { SetupStatusSchema, type SetupStatus } from '@/lib/schemas';
 import { useSsoStatus } from '@/hooks/use-sso-status';
+import { RequirePermission } from '@/components/require-permission';
+import { permissionForRoute } from '@/lib/route-permissions';
+
+/**
+ * Wrap a route component with the RBAC route guard. Keeps the
+ * router file declarative — `component: gate(ProvidersPage, '/gateway/providers')`
+ * looks up the required permission from `route-permissions.ts` so
+ * a future role rename touches one file, not twenty.
+ *
+ * Returning a function (not a JSX element) is what `component:`
+ * expects on TanStack Router — the inner lazy component is mounted
+ * inside the wrapper and Suspense still works.
+ */
+function gate(Component: React.ComponentType, routePath: string) {
+  const perm = permissionForRoute(routePath);
+  return function Gated() {
+    return (
+      <RequirePermission perm={perm}>
+        <Component />
+      </RequirePermission>
+    );
+  };
+}
 
 // Eagerly loaded — entry/auth screens that the user always hits first.
 import { LoginPage } from '@/routes/login';
@@ -181,19 +204,22 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/',
-  component: DashboardPage,
+  component: gate(DashboardPage as unknown as React.ComponentType, '/'),
 });
 
 const providersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/gateway/providers',
-  component: ProvidersPage,
+  component: gate(
+    ProvidersPage as unknown as React.ComponentType,
+    '/gateway/providers',
+  ),
 });
 
 const modelsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/gateway/models',
-  component: ModelsPage,
+  component: gate(ModelsPage as unknown as React.ComponentType, '/gateway/models'),
   // `?import=<providerId>` deeplink from the Providers page — the
   // Models page reads it on mount and auto-opens the batch import
   // dialog pre-selected on that provider.
@@ -205,19 +231,22 @@ const modelsRoute = createRoute({
 const gatewaySecurityRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/gateway/security',
-  component: GatewaySecurityPage,
+  component: gate(
+    GatewaySecurityPage as unknown as React.ComponentType,
+    '/gateway/security',
+  ),
 });
 
 const apiKeysRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/api-keys',
-  component: ApiKeysPage,
+  component: gate(ApiKeysPage as unknown as React.ComponentType, '/api-keys'),
 });
 
 const logsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/logs',
-  component: UnifiedLogsPage,
+  component: gate(UnifiedLogsPage as unknown as React.ComponentType, '/logs'),
   validateSearch: (search: Record<string, unknown>) => ({
     category: typeof search.category === 'string' ? search.category : undefined,
     q: typeof search.q === 'string' ? search.q : undefined,
@@ -230,62 +259,68 @@ const logsRoute = createRoute({
 const guideRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/guide',
-  component: GuidePage,
+  component: gate(GuidePage as unknown as React.ComponentType, '/guide'),
 });
 
 const mcpServersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/mcp/servers',
-  component: McpServersPage,
+  component: gate(
+    McpServersPage as unknown as React.ComponentType,
+    '/mcp/servers',
+  ),
 });
 
 const mcpToolsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/mcp/tools',
-  component: McpToolsPage,
+  component: gate(McpToolsPage as unknown as React.ComponentType, '/mcp/tools'),
 });
 
 const mcpStoreRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/mcp/store',
-  component: McpStorePage,
+  component: gate(McpStorePage as unknown as React.ComponentType, '/mcp/store'),
 });
 
 const usageRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/analytics/usage',
-  component: UsagePage,
+  component: gate(UsagePage as unknown as React.ComponentType, '/analytics/usage'),
 });
 
 const costsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/analytics/costs',
-  component: CostsPage,
+  component: gate(CostsPage as unknown as React.ComponentType, '/analytics/costs'),
 });
 
 
 const usersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/users',
-  component: UsersPage,
+  component: gate(UsersPage as unknown as React.ComponentType, '/admin/users'),
 });
 
 const teamsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/teams',
-  component: TeamsPage,
+  component: gate(TeamsPage as unknown as React.ComponentType, '/admin/teams'),
 });
 
 const teamDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/teams/$id',
-  component: TeamDetailPage,
+  component: gate(
+    TeamDetailPage as unknown as React.ComponentType,
+    '/admin/teams/$id',
+  ),
 });
 
 const rolesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/roles',
-  component: RolesPage,
+  component: gate(RolesPage as unknown as React.ComponentType, '/admin/roles'),
 });
 
 const SETTINGS_TABS = ['general', 'auth', 'gateway', 'security', 'apikeys', 'audit', 'perf'] as const;
@@ -294,7 +329,10 @@ type SettingsTab = (typeof SETTINGS_TABS)[number];
 const settingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/settings',
-  component: SettingsPage,
+  component: gate(
+    SettingsPage as unknown as React.ComponentType,
+    '/admin/settings',
+  ),
   // Deep-link to a specific tab via `?tab=auth`. Unknown values fall
   // through as undefined so the page defaults to the first tab.
   validateSearch: (s: Record<string, unknown>): { tab?: SettingsTab } => {
@@ -310,32 +348,44 @@ const settingsRoute = createRoute({
 const logForwardersRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/logs/forwarders',
-  component: LogForwardersPage,
+  component: gate(
+    LogForwardersPage as unknown as React.ComponentType,
+    '/logs/forwarders',
+  ),
 });
 
 
 const apiDocsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/api-docs',
-  component: ApiDocsPage,
+  component: gate(
+    ApiDocsPage as unknown as React.ComponentType,
+    '/admin/api-docs',
+  ),
 });
 
 const usageLicenseRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/usage-license',
-  component: UsageLicensePage,
+  component: gate(
+    UsageLicensePage as unknown as React.ComponentType,
+    '/admin/usage-license',
+  ),
 });
 
 const traceIndexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/trace',
-  component: TracePage,
+  component: gate(TracePage as unknown as React.ComponentType, '/admin/trace'),
 });
 
 const traceDetailRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/admin/trace/$traceId',
-  component: TracePage,
+  component: gate(
+    TracePage as unknown as React.ComponentType,
+    '/admin/trace/$traceId',
+  ),
 });
 
 const profileRoute = createRoute({

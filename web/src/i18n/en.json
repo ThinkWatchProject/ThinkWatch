@@ -1298,6 +1298,12 @@
     "title": "404",
     "message": "Page not found"
   },
+  "forbidden": {
+    "title": "You don't have access to this page",
+    "message": "Your current role doesn't include the permission this page requires. Ask an admin to grant it, or head back to the dashboard.",
+    "requiredPermission": "Required permission",
+    "backToDashboard": "Back to dashboard"
+  },
   "setup": {
     "title": "Welcome to ThinkWatch",
     "subtitle": "Enterprise AI API Gateway & MCP Management Platform",

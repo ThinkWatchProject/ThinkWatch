@@ -42,7 +42,7 @@ import {
   Inbox,
 } from 'lucide-react';
 import { HeaderEditor } from '@/components/header-editor';
-import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription, AlertAction } from '@/components/ui/alert';
 import { OutboxBacklogDialog } from './outbox-backlog-dialog';
@@ -363,7 +363,10 @@ export function LogForwardersPage() {
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger asChild>
-            <Button onClick={() => { resetForm(); setDialogOpen(true); }}>
+            <Button
+              onClick={() => { resetForm(); setDialogOpen(true); }}
+              disabled={!hasPermission('log_forwarders:write')}
+            >
               <Plus className="mr-2 h-4 w-4" />
               {t('logForwarders.addForwarder')}
             </Button>
@@ -609,6 +612,7 @@ export function LogForwardersPage() {
                           size="icon"
                           title={t('common.edit')}
                           onClick={() => openEditDialog(f)}
+                          disabled={!hasPermission('log_forwarders:write')}
                         >
                           <Pencil className="h-4 w-4" />
                         </Button>
@@ -617,6 +621,7 @@ export function LogForwardersPage() {
                           size="icon"
                           title={f.enabled ? t('logForwarders.pause') : t('logForwarders.resume')}
                           onClick={() => handleToggle(f.id)}
+                          disabled={!hasPermission('log_forwarders:write')}
                         >
                           {f.enabled ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}
                         </Button>
@@ -624,7 +629,9 @@ export function LogForwardersPage() {
                           variant="ghost"
                           size="icon"
                           title={t('logForwarders.test')}
-                          disabled={testing === f.id}
+                          disabled={
+                            testing === f.id || !hasPermission('log_forwarders:write')
+                          }
                           onClick={() => handleTest(f.id)}
                         >
                           <TestTube className="h-4 w-4" />
@@ -634,6 +641,7 @@ export function LogForwardersPage() {
                           size="icon"
                           title={t('logForwarders.resetStats')}
                           onClick={() => handleResetStats(f.id)}
+                          disabled={!hasPermission('log_forwarders:write')}
                         >
                           <RotateCcw className="h-4 w-4" />
                         </Button>
@@ -652,6 +660,7 @@ export function LogForwardersPage() {
                           className="text-destructive hover:text-destructive"
                           title={t('common.delete')}
                           onClick={() => { setDeleteTargetId(f.id); setDeleteDialogOpen(true); }}
+                          disabled={!hasPermission('log_forwarders:write')}
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>

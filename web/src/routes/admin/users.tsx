@@ -35,7 +35,7 @@ import {
 } from '@/components/ui/table';
 import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, Ban, CheckCircle, Users as UsersIcon, AlertCircle, Copy, Search, ChevronRight, ChevronDown, X } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import type { TeamSummary } from '@/lib/types';
 import { useTeams } from '@/hooks/use-teams';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -433,7 +433,9 @@ export function UsersPage() {
         <div className="flex items-center gap-2">
           <Dialog open={createOpen} onOpenChange={(open) => { setCreateOpen(open); if (!open) resetCreateForm(); }}>
             <DialogTrigger asChild>
-              <Button><Plus className="h-4 w-4" />{t('users.addUser')}</Button>
+              <Button disabled={!hasPermission('users:create')}>
+                <Plus className="h-4 w-4" />{t('users.addUser')}
+              </Button>
             </DialogTrigger>
           <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
             <DialogHeader>
@@ -525,7 +527,7 @@ export function UsersPage() {
               size="sm"
               variant="outline"
               onClick={() => setBulkAction('activate')}
-              disabled={bulkBusy}
+              disabled={bulkBusy || !hasPermission('users:update')}
             >
               <CheckCircle className="mr-1 h-3.5 w-3.5" />
               {t('users.bulk.enable')}
@@ -535,7 +537,7 @@ export function UsersPage() {
               size="sm"
               variant="outline"
               onClick={() => setBulkAction('deactivate')}
-              disabled={bulkBusy}
+              disabled={bulkBusy || !hasPermission('users:update')}
             >
               <Ban className="mr-1 h-3.5 w-3.5" />
               {t('users.bulk.disable')}
@@ -545,7 +547,7 @@ export function UsersPage() {
               size="sm"
               variant="destructive"
               onClick={() => setBulkAction('delete')}
-              disabled={bulkBusy}
+              disabled={bulkBusy || !hasPermission('users:update')}
             >
               <Trash2 className="mr-1 h-3.5 w-3.5" />
               {t('users.bulk.delete')}
@@ -555,7 +557,7 @@ export function UsersPage() {
               size="sm"
               variant="outline"
               onClick={() => setBulkOverrideOpen(true)}
-              disabled={bulkBusy}
+              disabled={bulkBusy || !hasPermission('rate_limits:write')}
             >
               <Gauge className="mr-1 h-3.5 w-3.5" />
               {t('users.bulk.applyOverride')}
@@ -723,10 +725,16 @@ export function UsersPage() {
                           </Button>
                         </DropdownMenuTrigger>
                         <DropdownMenuContent align="end">
-                          <DropdownMenuItem onClick={() => openEdit(u)}>
+                          <DropdownMenuItem
+                            onClick={() => openEdit(u)}
+                            disabled={!hasPermission('users:update')}
+                          >
                             <Pencil className="h-4 w-4 mr-2" />{t('users.editUser')}
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => setResetConfirmUser(u)}>
+                          <DropdownMenuItem
+                            onClick={() => setResetConfirmUser(u)}
+                            disabled={!hasPermission('users:update')}
+                          >
                             <KeyRound className="h-4 w-4 mr-2" />{t('users.resetPassword')}
                           </DropdownMenuItem>
                           {/* Disable toggle + delete when this user is the
@@ -739,7 +747,10 @@ export function UsersPage() {
                               is_active=false on the last super admin
                               violates the same invariant. */}
                           <DropdownMenuItem
-                            disabled={u.is_active && isLastSuperAdmin(u)}
+                            disabled={
+                              !hasPermission('users:update') ||
+                              (u.is_active && isLastSuperAdmin(u))
+                            }
                             onClick={() => setConfirmAction({ type: 'toggle', user: u })}
                             title={
                               u.is_active && isLastSuperAdmin(u)
@@ -751,13 +762,18 @@ export function UsersPage() {
                               ? <><Ban className="h-4 w-4 mr-2" />{t('users.deactivate')}</>
                               : <><CheckCircle className="h-4 w-4 mr-2" />{t('users.activate')}</>}
                           </DropdownMenuItem>
-                          <DropdownMenuItem onClick={() => setConfirmAction({ type: 'logout', user: u })}>
+                          <DropdownMenuItem
+                            onClick={() => setConfirmAction({ type: 'logout', user: u })}
+                            disabled={!hasPermission('sessions:revoke')}
+                          >
                             <LogOutIcon className="h-4 w-4 mr-2" />{t('users.forceLogout')}
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
                             className="text-destructive"
-                            disabled={isLastSuperAdmin(u)}
+                            disabled={
+                              !hasPermission('users:update') || isLastSuperAdmin(u)
+                            }
                             onClick={() => setConfirmAction({ type: 'delete', user: u })}
                             title={
                               isLastSuperAdmin(u)

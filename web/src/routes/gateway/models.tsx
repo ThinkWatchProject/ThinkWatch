@@ -53,7 +53,7 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { DataTablePagination } from '@/components/data-table-pagination';
-import { api, apiDelete, apiPatch, apiPost } from '@/lib/api';
+import { api, apiDelete, apiPatch, apiPost, hasPermission } from '@/lib/api';
 import { toast } from 'sonner';
 
 /* ---------- types ---------- */
@@ -791,11 +791,18 @@ export function ModelsPage() {
           <p className="text-muted-foreground">{t('models.subtitle')}</p>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" onClick={openBatchDialog} disabled={providers.length === 0}>
+          <Button
+            variant="outline"
+            onClick={openBatchDialog}
+            disabled={providers.length === 0 || !hasPermission('models:write')}
+          >
             <Plus className="mr-1 h-3.5 w-3.5" />
             {t('models.addRoutes')}
           </Button>
-          <Button onClick={openCreateModel}>
+          <Button
+            onClick={openCreateModel}
+            disabled={!hasPermission('models:write')}
+          >
             <Plus className="mr-1 h-3.5 w-3.5" />
             {t('models.addModel')}
           </Button>
@@ -847,6 +854,7 @@ export function ModelsPage() {
             size="sm"
             className="ml-auto"
             onClick={() => setBulkDeleteOpen(true)}
+            disabled={!hasPermission('models:write')}
           >
             <Trash2 className="mr-1 h-3.5 w-3.5" />
             {t('models.bulkDeleteAction', { count: selectedIds.size })}
@@ -858,6 +866,7 @@ export function ModelsPage() {
             size="sm"
             className="ml-auto"
             onClick={() => setCleanupOpen(true)}
+            disabled={!hasPermission('models:write')}
           >
             <Trash2 className="mr-1 h-3.5 w-3.5" />
             {t('models.cleanupAction', { count: totalModels })}
@@ -1812,10 +1821,22 @@ function ModelRow({
         )}
       </TableCell>
       <TableCell className="text-right whitespace-nowrap">
-        <Button variant="ghost" size="icon" onClick={onOpen} aria-label={t('common.edit')}>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onOpen}
+          aria-label={t('common.edit')}
+          disabled={!hasPermission('models:write')}
+        >
           <Pencil className="h-4 w-4" />
         </Button>
-        <Button variant="ghost" size="icon" onClick={onDelete} aria-label={t('common.delete')}>
+        <Button
+          variant="ghost"
+          size="icon"
+          onClick={onDelete}
+          aria-label={t('common.delete')}
+          disabled={!hasPermission('models:write')}
+        >
           <Trash2 className="h-4 w-4 text-destructive" />
         </Button>
       </TableCell>

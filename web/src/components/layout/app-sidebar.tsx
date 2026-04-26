@@ -37,19 +37,24 @@ import {
 import { useNavigate, useLocation } from '@tanstack/react-router';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { hasPermission } from '@/lib/api';
+import { permissionForRoute } from '@/lib/route-permissions';
 import { SidebarSystemStatus } from './sidebar-system-status';
 
 interface NavItem {
   titleKey: string;
   icon: typeof LayoutDashboard;
   href: string;
-  permission?: string;
 }
 interface NavGroup {
   labelKey: string;
   items: NavItem[];
 }
 
+// Per-item permission lives in `route-permissions.ts` (single source
+// of truth shared with the router guard). This file owns layout
+// concerns only — labels, icons, group order. To gate a new entry,
+// add the route's permission to `route-permissions.ts` and the
+// sidebar / route guard pick it up automatically.
 const navGroups: NavGroup[] = [
   {
     labelKey: 'nav.overview',
@@ -62,48 +67,43 @@ const navGroups: NavGroup[] = [
   {
     labelKey: 'nav.aiGateway',
     items: [
-      { titleKey: 'nav.providers', icon: Plug, href: '/gateway/providers', permission: 'providers:read' },
-      { titleKey: 'nav.models', icon: BrainCircuit, href: '/gateway/models', permission: 'models:read' },
-      { titleKey: 'nav.contentSecurity', icon: Filter, href: '/gateway/security', permission: 'content_filter:read' },
+      { titleKey: 'nav.providers', icon: Plug, href: '/gateway/providers' },
+      { titleKey: 'nav.models', icon: BrainCircuit, href: '/gateway/models' },
+      { titleKey: 'nav.contentSecurity', icon: Filter, href: '/gateway/security' },
     ],
   },
   {
     labelKey: 'nav.mcpGateway',
     items: [
-      { titleKey: 'nav.mcpServers', icon: Server, href: '/mcp/servers', permission: 'mcp_servers:read' },
-      { titleKey: 'nav.tools', icon: Wrench, href: '/mcp/tools', permission: 'mcp_servers:read' },
-      { titleKey: 'nav.mcpStore', icon: Store, href: '/mcp/store', permission: 'mcp_servers:read' },
+      { titleKey: 'nav.mcpServers', icon: Server, href: '/mcp/servers' },
+      { titleKey: 'nav.tools', icon: Wrench, href: '/mcp/tools' },
+      { titleKey: 'nav.mcpStore', icon: Store, href: '/mcp/store' },
     ],
   },
   {
     labelKey: 'nav.analytics',
     items: [
-      { titleKey: 'nav.usage', icon: BarChart3, href: '/analytics/usage', permission: 'analytics:read_own' },
-      { titleKey: 'nav.costs', icon: DollarSign, href: '/analytics/costs', permission: 'analytics:read_own' },
+      { titleKey: 'nav.usage', icon: BarChart3, href: '/analytics/usage' },
+      { titleKey: 'nav.costs', icon: DollarSign, href: '/analytics/costs' },
     ],
   },
   {
     labelKey: 'nav.logs',
     items: [
-      { titleKey: 'nav.logExplorer', icon: ScrollText, href: '/logs', permission: 'logs:read_all' },
-      { titleKey: 'nav.trace', icon: GitBranch, href: '/admin/trace', permission: 'analytics:read_all' },
-      {
-        titleKey: 'nav.logForwarders',
-        icon: Forward,
-        href: '/logs/forwarders',
-        permission: 'log_forwarders:read',
-      },
+      { titleKey: 'nav.logExplorer', icon: ScrollText, href: '/logs' },
+      { titleKey: 'nav.trace', icon: GitBranch, href: '/admin/trace' },
+      { titleKey: 'nav.logForwarders', icon: Forward, href: '/logs/forwarders' },
     ],
   },
   {
     labelKey: 'nav.admin',
     items: [
-      { titleKey: 'nav.users', icon: Users, href: '/admin/users', permission: 'users:read' },
-      { titleKey: 'nav.teams', icon: UsersRound, href: '/admin/teams', permission: 'teams:read' },
-      { titleKey: 'nav.roles', icon: Shield, href: '/admin/roles', permission: 'roles:read' },
-      { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings', permission: 'settings:read' },
-      { titleKey: 'nav.apiDocs', icon: FileCode2, href: '/admin/api-docs', permission: 'settings:read' },
-      { titleKey: 'nav.usageLicense', icon: Gauge, href: '/admin/usage-license', permission: 'analytics:read_all' },
+      { titleKey: 'nav.users', icon: Users, href: '/admin/users' },
+      { titleKey: 'nav.teams', icon: UsersRound, href: '/admin/teams' },
+      { titleKey: 'nav.roles', icon: Shield, href: '/admin/roles' },
+      { titleKey: 'nav.settings', icon: Settings, href: '/admin/settings' },
+      { titleKey: 'nav.apiDocs', icon: FileCode2, href: '/admin/api-docs' },
+      { titleKey: 'nav.usageLicense', icon: Gauge, href: '/admin/usage-license' },
     ],
   },
 ];
@@ -154,9 +154,10 @@ export function AppSidebar() {
         {navGroups
           .map((group) => ({
             ...group,
-            items: group.items.filter(
-              (item) => !item.permission || hasPermission(item.permission),
-            ),
+            items: group.items.filter((item) => {
+              const perm = permissionForRoute(item.href);
+              return !perm || hasPermission(perm);
+            }),
           }))
           .filter((group) => group.items.length > 0)
           .map((group) => (

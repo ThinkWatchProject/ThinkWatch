@@ -1298,6 +1298,12 @@
     "title": "404",
     "message": "页面未找到"
   },
+  "forbidden": {
+    "title": "无权访问此页面",
+    "message": "你当前的角色不包含此页面所需权限。可以联系管理员授权，或返回仪表盘。",
+    "requiredPermission": "所需权限",
+    "backToDashboard": "返回仪表盘"
+  },
   "setup": {
     "title": "欢迎使用 ThinkWatch",
     "subtitle": "企业级 AI API 网关与 MCP 管理平台",

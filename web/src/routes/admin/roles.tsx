@@ -84,7 +84,7 @@ import {
   Download,
   Upload,
 } from 'lucide-react';
-import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import { fetchAllPaginated } from '@/lib/paginated-fetch';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -798,7 +798,7 @@ export function RolesPage() {
             variant="outline"
             size="sm"
             onClick={() => importInputRef.current?.click()}
-            disabled={importing}
+            disabled={importing || !hasPermission('roles:create')}
           >
             <Upload className="mr-1 h-3.5 w-3.5" />
             {importing ? t('common.loading') : t('roles.importRoles')}
@@ -811,7 +811,7 @@ export function RolesPage() {
           }}
         >
           <DialogTrigger asChild>
-            <Button>
+            <Button disabled={!hasPermission('roles:create')}>
               <Plus className="mr-2 h-4 w-4" />
               {t('roles.addRole')}
             </Button>
@@ -1039,6 +1039,7 @@ export function RolesPage() {
                           className="h-7 w-7"
                           onClick={() => openEdit(role)}
                           aria-label={t('common.edit')}
+                          disabled={!hasPermission('roles:update')}
                         >
                           <Pencil className="h-3.5 w-3.5" />
                         </Button>
@@ -1050,6 +1051,7 @@ export function RolesPage() {
                           className="h-7 w-7 text-destructive"
                           onClick={() => openDelete(role)}
                           aria-label={t('common.delete')}
+                          disabled={!hasPermission('roles:delete')}
                         >
                           <Trash2 className="h-3.5 w-3.5" />
                         </Button>
@@ -1116,7 +1118,7 @@ export function RolesPage() {
                 <Button
                   type="button"
                   variant="outline"
-                  disabled={saving}
+                  disabled={saving || !hasPermission('roles:update')}
                   onClick={() => setResetConfirmOpen(true)}
                 >
                   {t('roles.resetToDefaults')}

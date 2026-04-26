@@ -35,7 +35,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { api, apiPatch, apiPost } from '@/lib/api';
+import { api, apiPatch, apiPost, hasPermission } from '@/lib/api';
 import { toast } from 'sonner';
 import {
   type ContentFilterPreset,
@@ -253,7 +253,10 @@ export function GatewaySecurityPage() {
             <FlaskConical className="h-4 w-4" />
             {t('settings.sandbox.title')}
           </Button>
-          <Button onClick={handleSave} disabled={saving}>
+          <Button
+            onClick={handleSave}
+            disabled={saving || !hasPermission('content_filter:write')}
+          >
             {saving ? t('common.loading') : t('common.save')}
           </Button>
         </div>
@@ -279,11 +282,21 @@ export function GatewaySecurityPage() {
               </p>
             </div>
             <div className="flex gap-2 shrink-0">
-              <Button variant="outline" size="sm" onClick={openCfPresets}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={openCfPresets}
+                disabled={!hasPermission('content_filter:write')}
+              >
                 <Sparkles className="h-4 w-4" />
                 {t('settings.contentFilter.loadPresets')}
               </Button>
-              <Button variant="outline" size="sm" onClick={addContentFilter}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={addContentFilter}
+                disabled={!hasPermission('content_filter:write')}
+              >
                 <Plus className="h-4 w-4" />
                 {t('settings.addRule')}
               </Button>
@@ -434,7 +447,12 @@ export function GatewaySecurityPage() {
                   </div>
                 </PopoverContent>
               </Popover>
-              <Button variant="outline" size="sm" onClick={addPiiPattern}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={addPiiPattern}
+                disabled={!hasPermission('pii_redactor:write')}
+              >
                 <Plus className="h-4 w-4" />
                 {t('settings.pii.addPattern')}
               </Button>

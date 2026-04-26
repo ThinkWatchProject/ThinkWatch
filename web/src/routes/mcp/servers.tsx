@@ -27,7 +27,7 @@ import {
 import { Plus, Trash2, Pencil, Server, AlertCircle, Zap, Loader2, CheckCircle2, XCircle, RefreshCw } from 'lucide-react';
 import { HeaderEditor } from '@/components/header-editor';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import { slugifyPrefix, resolveCollision, sanitizePrefixInput } from '@/lib/prefix-utils';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -308,7 +308,7 @@ export function McpServersPage() {
         </div>
         <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
           <DialogTrigger asChild>
-            <Button>
+            <Button disabled={!hasPermission('mcp_servers:create')}>
               <Plus className="h-4 w-4" />
               {t('mcpServers.registerServer')}
             </Button>
@@ -512,13 +512,33 @@ export function McpServersPage() {
                     </TableCell>
                     <TableCell>
                       <div className="flex gap-1">
-                        <Button variant="ghost" size="icon-sm" onClick={() => openEditDialog(s)} title={t('common.edit')}>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => openEditDialog(s)}
+                          title={t('common.edit')}
+                          disabled={!hasPermission('mcp_servers:update')}
+                        >
                           <Pencil className="h-4 w-4" />
                         </Button>
-                        <Button variant="ghost" size="icon-sm" onClick={() => handleDiscover(s.id)} disabled={discoveringId === s.id} title={t('mcpServers.discoverTools')}>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => handleDiscover(s.id)}
+                          disabled={
+                            discoveringId === s.id || !hasPermission('mcp_servers:update')
+                          }
+                          title={t('mcpServers.discoverTools')}
+                        >
                           {discoveringId === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                         </Button>
-                        <Button variant="ghost" size="icon-sm" onClick={() => setDeleteTargetId(s.id)} title={t('common.delete')}>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => setDeleteTargetId(s.id)}
+                          title={t('common.delete')}
+                          disabled={!hasPermission('mcp_servers:delete')}
+                        >
                           <Trash2 className="h-4 w-4" />
                         </Button>
                       </div>

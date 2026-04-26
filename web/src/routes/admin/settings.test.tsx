@@ -6,6 +6,10 @@ import { SettingsPage } from './settings'
 vi.mock('@/lib/api', () => ({
   api: vi.fn(),
   apiPatch: vi.fn(),
+  // Default to "has every permission" so existing settings-tab
+  // tests don't have to set this up. Per-test overrides via
+  // `vi.mocked(hasPermission).mockReturnValueOnce(false)`.
+  hasPermission: vi.fn(() => true),
 }))
 
 // SettingsPage now reads / writes the active tab via TanStack Router's

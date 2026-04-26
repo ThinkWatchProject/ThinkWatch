@@ -18,7 +18,7 @@ import {
 import { Settings, Shield, Key, Database, Lock, AlertCircle, MemoryStick, Search } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
-import { api, apiPatch } from '@/lib/api';
+import { api, apiPatch, hasPermission } from '@/lib/api';
 import { toast } from 'sonner';
 // Types, value-coercion helpers, and the small NumberField input
 // live in the `settings/` sibling directory.
@@ -612,7 +612,11 @@ export function SettingsPage() {
                       <p className="text-xs text-muted-foreground">{t('settings.oidc.redirectUrlHint')}</p>
                     </div>
                     <div className="flex justify-end pt-2">
-                      <Button size="sm" onClick={handleOidcSave} disabled={oidcSaving}>
+                      <Button
+                        size="sm"
+                        onClick={handleOidcSave}
+                        disabled={oidcSaving || !hasPermission('settings:write')}
+                      >
                         {oidcSaving ? t('common.saving') : t('settings.oidc.save')}
                       </Button>
                     </div>
