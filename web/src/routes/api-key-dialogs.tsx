@@ -50,6 +50,14 @@ export interface ApiKey {
   inactivity_timeout_days: number | null;
   disabled_reason: string | null;
   last_rotation_at: string | null;
+  /**
+   * Stable api-key identity across rotation. Every generation in a
+   * rotation chain shares the same `lineage_id`; brand-new keys
+   * have `lineage_id === id`. Use this to roll up usage / cost in
+   * any per-key view that should follow the chain instead of
+   * showing a single generation's silo.
+   */
+  lineage_id: string;
   cost_center: string | null;
 }
 

@@ -213,6 +213,7 @@ pub fn require_api_key(
                 user_id: row.user_id.map(|u| u.to_string()),
                 user_email,
                 api_key_id: Some(row.id.to_string()),
+                api_key_lineage_id: Some(row.lineage_id.to_string()),
                 allowed_models: merged_models.clone(),
                 surface_constraints: surface_constraints.clone(),
             };

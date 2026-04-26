@@ -19,6 +19,11 @@ pub struct GatewayLogsQuery {
     pub provider: Option<String>,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+    /// Stable api-key identity that survives rotation. Filtering on
+    /// this column rolls up usage across every generation in a
+    /// rotation chain — what the operator sees as "this key's
+    /// history" regardless of how many times it has been rotated.
+    pub api_key_lineage_id: Option<String>,
     pub status_code: Option<i64>,
     pub from: Option<String>,
     pub to: Option<String>,
@@ -37,6 +42,11 @@ pub struct GatewayLogEntry {
     pub id: String,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
+    /// Stable api-key identity across rotation. The frontend can
+    /// link "this key's history" using this column without caring
+    /// which generation a given row was emitted by.
+    #[serde(default)]
+    pub api_key_lineage_id: Option<String>,
     pub model_id: Option<String>,
     pub provider: Option<String>,
     pub input_tokens: Option<i64>,
@@ -58,6 +68,7 @@ struct GatewayLogRow {
     id: String,
     user_id: Option<String>,
     api_key_id: Option<String>,
+    api_key_lineage_id: Option<String>,
     model_id: Option<String>,
     provider: Option<String>,
     input_tokens: Option<i64>,
@@ -123,6 +134,10 @@ pub async fn list_gateway_logs(
         conditions.push("api_key_id = ?".to_string());
         bind_values.push(v.clone());
     }
+    if let Some(ref v) = params.api_key_lineage_id {
+        conditions.push("api_key_lineage_id = ?".to_string());
+        bind_values.push(v.clone());
+    }
     if let Some(v) = params.status_code {
         conditions.push("status_code = ?".to_string());
         bind_values.push(v.to_string());
@@ -156,6 +171,11 @@ pub async fn list_gateway_logs(
             ("provider", "provider", ExcludeMode::Equals),
             ("user_id", "user_id", ExcludeMode::Equals),
             ("api_key_id", "api_key_id", ExcludeMode::Equals),
+            (
+                "api_key_lineage_id",
+                "api_key_lineage_id",
+                ExcludeMode::Equals,
+            ),
             ("status_code", "status_code", ExcludeMode::Equals),
         ],
     ) {
@@ -188,8 +208,8 @@ pub async fn list_gateway_logs(
 
     // Data query
     let data_sql = format!(
-        "SELECT id, user_id, api_key_id, model_id, provider, input_tokens, output_tokens, \
-         cost_usd, latency_ms, status_code, ip_address, \
+        "SELECT id, user_id, api_key_id, api_key_lineage_id, model_id, provider, input_tokens, \
+         output_tokens, cost_usd, latency_ms, status_code, ip_address, \
          toString(created_at) as created_at \
          FROM gateway_logs {where_clause} ORDER BY {order_by} LIMIT {limit} OFFSET {offset}"
     );
@@ -208,6 +228,7 @@ pub async fn list_gateway_logs(
             id: r.id,
             user_id: r.user_id,
             api_key_id: r.api_key_id,
+            api_key_lineage_id: r.api_key_lineage_id,
             model_id: r.model_id,
             provider: r.provider,
             input_tokens: r.input_tokens,

@@ -322,11 +322,20 @@ pub async fn create_key(
 
     let cost_center = validate_cost_center(req.cost_center.as_deref())?;
 
+    // Pre-mint the row's id so we can bind it to BOTH `id` and
+    // `lineage_id`. A brand-new key is its own lineage root —
+    // making the two columns equal at creation makes the
+    // root-of-chain invariant trivially observable in psql:
+    // `WHERE id = lineage_id` returns every "first generation"
+    // key. Subsequent rotations carry over the same lineage_id,
+    // so descendants will have id != lineage_id.
+    let id = uuid::Uuid::new_v4();
     let row = sqlx::query_as::<_, ApiKey>(
-        r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces,
+        r#"INSERT INTO api_keys (id, lineage_id, key_prefix, key_hash, name, user_id, surfaces,
                 allowed_models, allowed_mcp_tools, expires_at, cost_center)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING *"#,
+           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *"#,
     )
+    .bind(id)
     .bind(&generated.prefix)
     .bind(&generated.hash)
     .bind(&req.name)
@@ -795,8 +804,8 @@ pub async fn rotate_key(
     let new_key = sqlx::query_as::<_, ApiKey>(
         r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces, allowed_models,
             allowed_mcp_tools, expires_at, rotation_period_days, inactivity_timeout_days,
-            cost_center, rotated_from_id, last_rotation_at)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+            cost_center, rotated_from_id, last_rotation_at, lineage_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now(), $13)
            RETURNING *"#,
     )
     .bind(&generated.prefix)
@@ -818,6 +827,11 @@ pub async fn rotate_key(
     .bind(old_key.inactivity_timeout_days)
     .bind(old_key.cost_center.as_deref())
     .bind(id)
+    // Inherit the parent's lineage_id so every generation in the
+    // rotation chain shares one stable identity. Per-key analytics
+    // can then group on `api_key_lineage_id` instead of recursing
+    // on `rotated_from_id`.
+    .bind(old_key.lineage_id)
     .fetch_one(&mut *tx)
     .await?;
 

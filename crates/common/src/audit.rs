@@ -80,6 +80,14 @@ pub struct AuditEntry {
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub api_key_id: Option<String>,
+    /// Stable identity for the api key across rotation. Always set
+    /// to `api_keys.lineage_id` for the row that authenticated this
+    /// request; `None` for standalone admin actions or
+    /// session-token requests where no api key is involved. Per-key
+    /// analytics group on this column instead of `api_key_id` to
+    /// roll up usage across rotation generations.
+    #[serde(default)]
+    pub api_key_lineage_id: Option<String>,
     pub action: String,
     pub resource: Option<String>,
     pub resource_id: Option<String>,
@@ -115,6 +123,11 @@ struct ChAuditRow {
     user_id: Option<String>,
     user_email: Option<String>,
     api_key_id: Option<String>,
+    // Stable identity across api-key rotation. Sits immediately
+    // after `api_key_id` to match the column order in
+    // `deploy/clickhouse/initdb.d/01_init.sql` — the clickhouse
+    // crate's Row derive binds positionally, not by name.
+    api_key_lineage_id: Option<String>,
     action: String,
     resource: Option<String>,
     resource_id: Option<String>,
@@ -138,6 +151,9 @@ struct ChGatewayRow {
     user_id: Option<String>,
     user_email: Option<String>,
     api_key_id: Option<String>,
+    // Stable identity across api-key rotation. Same position as in
+    // `deploy/clickhouse/initdb.d/01_init.sql::gateway_logs`.
+    api_key_lineage_id: Option<String>,
     model_id: Option<String>,
     provider: Option<String>,
     input_tokens: Option<i64>,
@@ -260,6 +276,7 @@ impl AuditEntry {
             user_id: None,
             user_email: None,
             api_key_id: None,
+            api_key_lineage_id: None,
             action: action.into(),
             resource: None,
             resource_id: None,
@@ -303,6 +320,11 @@ impl AuditEntry {
 
     pub fn api_key_id(mut self, id: Uuid) -> Self {
         self.api_key_id = Some(id.to_string());
+        self
+    }
+
+    pub fn api_key_lineage_id(mut self, id: Uuid) -> Self {
+        self.api_key_lineage_id = Some(id.to_string());
         self
     }
 
@@ -1598,6 +1620,7 @@ async fn flush_audit(
                 user_id: entry.user_id,
                 user_email: entry.user_email,
                 api_key_id: entry.api_key_id,
+                api_key_lineage_id: entry.api_key_lineage_id,
                 action: entry.action,
                 resource: entry.resource,
                 resource_id: entry.resource_id,
@@ -1625,6 +1648,7 @@ async fn flush_gateway(
             user_id: entry.user_id,
             user_email: entry.user_email,
             api_key_id: entry.api_key_id,
+            api_key_lineage_id: entry.api_key_lineage_id,
             model_id: detail_field(&entry.detail, "model_id"),
             provider: detail_field(&entry.detail, "provider"),
             input_tokens: detail_field(&entry.detail, "input_tokens"),

@@ -225,6 +225,13 @@ CREATE TABLE api_keys (
     inactivity_timeout_days INTEGER,
     disabled_reason         VARCHAR(100),
     last_rotation_at        TIMESTAMPTZ,
+    -- Stable identity that survives rotation. On INSERT, brand-new
+    -- keys self-reference (lineage_id = id); rotated keys inherit
+    -- the parent's lineage_id. Every row in a rotation chain shares
+    -- the same value, so analytics can roll up "this logical key"
+    -- across generations without recursively walking
+    -- `rotated_from_id`.
+    lineage_id              UUID NOT NULL DEFAULT gen_random_uuid(),
     -- Constraints
     -- Note: grace_period_ends_at lives on the OLD key (to schedule its
     -- retirement), while rotated_from_id lives on the NEW key (to record
@@ -246,6 +253,10 @@ CREATE INDEX idx_api_keys_key_prefix  ON api_keys(key_prefix);
 CREATE INDEX idx_api_keys_is_active   ON api_keys(is_active)  WHERE is_active = true;
 CREATE INDEX idx_api_keys_expires_at  ON api_keys(expires_at) WHERE expires_at IS NOT NULL;
 CREATE INDEX idx_api_keys_cost_center ON api_keys(cost_center) WHERE cost_center IS NOT NULL;
+-- lineage roll-up: "show me every key in the same rotation chain"
+-- runs as a single index lookup. Without it the analytics
+-- WHERE-clause scans the table for every per-key view.
+CREATE INDEX idx_api_keys_lineage_id  ON api_keys(lineage_id);
 -- Covers the per-user listing predicate used by list_keys: filters on
 -- user_id + deleted_at IS NULL in one range lookup, with created_at DESC
 -- preserving the paginated scan order the handlers emit.

@@ -36,6 +36,13 @@ pub struct ApiKey {
     pub inactivity_timeout_days: Option<i32>,
     pub disabled_reason: Option<String>,
     pub last_rotation_at: Option<DateTime<Utc>>,
+    /// Stable identity that survives rotation. Brand-new keys
+    /// self-reference (`lineage_id == id`); rotated keys inherit
+    /// the parent's `lineage_id`. Every row in a rotation chain
+    /// shares the same value, so per-key analytics roll up across
+    /// generations on a single index lookup. Backed by
+    /// `idx_api_keys_lineage_id`.
+    pub lineage_id: Uuid,
     /// Optional cost-center / project tag for per-subject analytics
     /// group-by. Free-form up to 64 chars, or NULL when untagged.
     pub cost_center: Option<String>,

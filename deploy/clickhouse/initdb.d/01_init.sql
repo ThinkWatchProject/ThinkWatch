@@ -83,6 +83,11 @@ CREATE TABLE IF NOT EXISTS audit_logs (
     user_id          LowCardinality(Nullable(String)),
     user_email       LowCardinality(Nullable(String)),
     api_key_id       LowCardinality(Nullable(String)),
+    -- Stable identity that survives api-key rotation. Every row
+    -- emitted on behalf of any generation in a rotation chain
+    -- carries the same `api_key_lineage_id`, so per-key analytics
+    -- can roll up usage across generations without recursing on PG.
+    api_key_lineage_id LowCardinality(Nullable(String)),
     action           LowCardinality(String),
     resource         LowCardinality(Nullable(String)),
     resource_id      Nullable(String),
@@ -116,6 +121,8 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     -- Snapshot of users.email at request time. See access_logs notes.
     user_email       LowCardinality(Nullable(String)),
     api_key_id       LowCardinality(Nullable(String)),
+    -- Stable identity across api-key rotation. See `audit_logs` above.
+    api_key_lineage_id LowCardinality(Nullable(String)),
     model_id         LowCardinality(Nullable(String)),
     provider         LowCardinality(Nullable(String)),
     input_tokens     Nullable(Int64)   CODEC(Delta, ZSTD(1)),
@@ -273,6 +280,10 @@ CREATE TABLE IF NOT EXISTS cost_rollup_hourly (
     provider       LowCardinality(Nullable(String)),
     user_id        LowCardinality(Nullable(String)),
     api_key_id     LowCardinality(Nullable(String)),
+    -- Lineage identity matching `gateway_logs.api_key_lineage_id`
+    -- so the costs page can pivot on a stable per-key identity
+    -- across rotation generations.
+    api_key_lineage_id LowCardinality(Nullable(String)),
     request_count  UInt64,
     input_tokens   Int64,
     output_tokens  Int64,
@@ -282,7 +293,7 @@ CREATE TABLE IF NOT EXISTS cost_rollup_hourly (
     cost_usd       Decimal(38, 10)
 ) ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(hour)
-ORDER BY (hour, model_id, provider, user_id, api_key_id)
+ORDER BY (hour, model_id, provider, user_id, api_key_id, api_key_lineage_id)
 -- provider/user_id/api_key_id are Nullable; CH 26.3 rejects them in
 -- ORDER BY unless this is opted in per-table.
 SETTINGS allow_nullable_key = 1;
@@ -295,6 +306,7 @@ SELECT
     provider,
     user_id,
     api_key_id,
+    api_key_lineage_id,
     toUInt64(1) AS request_count,
     ifNull(input_tokens, 0) AS input_tokens,
     ifNull(output_tokens, 0) AS output_tokens,

@@ -73,6 +73,12 @@ pub struct GatewayRequestIdentity {
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub api_key_id: Option<String>,
+    /// Stable identity that survives api-key rotation. Carries the
+    /// `api_keys.lineage_id` of the row that authenticated this
+    /// request. Stamped onto every `gateway_logs` emit so the
+    /// "this logical key's usage" rollup never has to recurse on
+    /// PG via `rotated_from_id`.
+    pub api_key_lineage_id: Option<String>,
     pub allowed_models: Option<Vec<String>>,
     /// Merged-across-roles inline limits (most restrictive per
     /// surface+metric+window / surface+period). Computed once by the
@@ -191,6 +197,7 @@ struct LogCtx<'a> {
     user_id: Option<String>,
     user_email: Option<String>,
     api_key_id: Option<String>,
+    api_key_lineage_id: Option<String>,
     /// May be "(unknown)" when the failure happens before the model
     /// has been resolved (e.g. transform errors on malformed bodies).
     model: String,
@@ -214,6 +221,7 @@ impl LogCtx<'_> {
             self.user_id.as_deref(),
             self.user_email.as_deref(),
             self.api_key_id.as_deref(),
+            self.api_key_lineage_id.as_deref(),
             &self.model,
             None,
             self.started.elapsed().as_millis() as i64,
@@ -284,6 +292,7 @@ fn emit_gateway_error_log(
     user_id: Option<&str>,
     user_email: Option<&str>,
     api_key_id: Option<&str>,
+    api_key_lineage_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
     latency_ms: i64,
@@ -327,6 +336,11 @@ fn emit_gateway_error_log(
     {
         entry = entry.api_key_id(u);
     }
+    if let Some(lid) = api_key_lineage_id
+        && let Ok(u) = uuid::Uuid::parse_str(lid)
+    {
+        entry = entry.api_key_lineage_id(u);
+    }
     audit.log(entry);
 }
 
@@ -342,6 +356,7 @@ fn emit_gateway_log_with_extra(
     user_id: Option<&str>,
     user_email: Option<&str>,
     api_key_id: Option<&str>,
+    api_key_lineage_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
     prompt_tokens: u32,
@@ -386,6 +401,11 @@ fn emit_gateway_log_with_extra(
     {
         entry = entry.api_key_id(u);
     }
+    if let Some(lid) = api_key_lineage_id
+        && let Ok(u) = uuid::Uuid::parse_str(lid)
+    {
+        entry = entry.api_key_lineage_id(u);
+    }
     audit.log(entry);
 }
 
@@ -397,6 +417,7 @@ fn emit_gateway_log(
     user_id: Option<&str>,
     user_email: Option<&str>,
     api_key_id: Option<&str>,
+    api_key_lineage_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
     prompt_tokens: u32,
@@ -431,6 +452,11 @@ fn emit_gateway_log(
         && let Ok(u) = uuid::Uuid::parse_str(kid)
     {
         entry = entry.api_key_id(u);
+    }
+    if let Some(lid) = api_key_lineage_id
+        && let Ok(u) = uuid::Uuid::parse_str(lid)
+    {
+        entry = entry.api_key_lineage_id(u);
     }
     audit.log(entry);
 }
@@ -886,6 +912,7 @@ pub async fn proxy_chat_completion(
         user_id: identity.user_id.clone(),
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
+        api_key_lineage_id: identity.api_key_lineage_id.clone(),
         model: request.model.clone(),
         started: request_started_at,
     };
@@ -1067,6 +1094,7 @@ pub async fn proxy_chat_completion(
         let user_id_for_done = identity.user_id.clone();
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
+        let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
         let model_for_log = original_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
         let started = request_started_at;
@@ -1116,6 +1144,7 @@ pub async fn proxy_chat_completion(
                     user_id_for_done.as_deref(),
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
+                    api_key_lineage_id_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
                     pt,
@@ -1180,6 +1209,7 @@ pub async fn proxy_chat_completion(
                 identity.user_id.as_deref(),
                 identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
+                identity.api_key_lineage_id.as_deref(),
                 &original_model,
                 None,
                 request_started_at.elapsed().as_millis() as i64,
@@ -1248,6 +1278,7 @@ pub async fn proxy_chat_completion(
             identity.user_id.as_deref(),
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
+            identity.api_key_lineage_id.as_deref(),
             &original_model,
             Some(chosen_entry.provider_name.as_str()),
             prompt_tokens,
@@ -1334,6 +1365,7 @@ pub async fn proxy_anthropic_messages(
         user_id: identity.user_id.clone(),
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
+        api_key_lineage_id: identity.api_key_lineage_id.clone(),
         model: "(unknown)".into(),
         started: request_started_at,
     };
@@ -1359,6 +1391,7 @@ pub async fn proxy_anthropic_messages(
         user_id: identity.user_id.clone(),
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
+        api_key_lineage_id: identity.api_key_lineage_id.clone(),
         model: mapped_model.clone(),
         started: request_started_at,
     };
@@ -1487,6 +1520,7 @@ pub async fn proxy_anthropic_messages(
         let user_id_for_done = identity.user_id.clone();
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
+        let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
         let model_for_log = mapped_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
         let started = request_started_at;
@@ -1507,6 +1541,7 @@ pub async fn proxy_anthropic_messages(
                     user_id_for_done.as_deref(),
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
+                    api_key_lineage_id_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
                     pt,
@@ -1558,6 +1593,7 @@ pub async fn proxy_anthropic_messages(
                 identity.user_id.as_deref(),
                 identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
+                identity.api_key_lineage_id.as_deref(),
                 &mapped_model,
                 None,
                 request_started_at.elapsed().as_millis() as i64,
@@ -1607,6 +1643,7 @@ pub async fn proxy_anthropic_messages(
             identity.user_id.as_deref(),
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
+            identity.api_key_lineage_id.as_deref(),
             &mapped_model,
             Some(chosen_entry.provider_name.as_str()),
             pt,
@@ -1700,6 +1737,7 @@ pub async fn proxy_responses(
         user_id: identity.user_id.clone(),
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
+        api_key_lineage_id: identity.api_key_lineage_id.clone(),
         model: "(unknown)".into(),
         started: request_started_at,
     };
@@ -1724,6 +1762,7 @@ pub async fn proxy_responses(
         user_id: identity.user_id.clone(),
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
+        api_key_lineage_id: identity.api_key_lineage_id.clone(),
         model: mapped_model.clone(),
         started: request_started_at,
     };
@@ -1868,6 +1907,7 @@ pub async fn proxy_responses(
         let user_id_for_done = identity.user_id.clone();
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
+        let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
         let model_for_log = mapped_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
         let started = request_started_at;
@@ -1888,6 +1928,7 @@ pub async fn proxy_responses(
                     user_id_for_done.as_deref(),
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
+                    api_key_lineage_id_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
                     pt,
@@ -1942,6 +1983,7 @@ pub async fn proxy_responses(
                 identity.user_id.as_deref(),
                 identity.user_email.as_deref(),
                 identity.api_key_id.as_deref(),
+                identity.api_key_lineage_id.as_deref(),
                 &mapped_model,
                 None,
                 request_started_at.elapsed().as_millis() as i64,
@@ -1989,6 +2031,7 @@ pub async fn proxy_responses(
             identity.user_id.as_deref(),
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
+            identity.api_key_lineage_id.as_deref(),
             &mapped_model,
             Some(chosen_entry.provider_name.as_str()),
             pt,
