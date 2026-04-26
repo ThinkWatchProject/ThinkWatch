@@ -44,7 +44,6 @@ const makeKey = (overrides: Record<string, unknown> = {}) => ({
   inactivity_timeout_days: null,
   disabled_reason: null,
   last_rotation_at: null,
-  lineage_id: '00000000-0000-0000-0000-000000000001',
   cost_center: null,
   ...overrides,
 })

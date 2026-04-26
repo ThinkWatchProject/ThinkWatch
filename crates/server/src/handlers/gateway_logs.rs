@@ -18,12 +18,13 @@ pub struct GatewayLogsQuery {
     pub model: Option<String>,
     pub provider: Option<String>,
     pub user_id: Option<String>,
+    /// `?api_key_id=X` is rotation-transparent: the backend resolves
+    /// X to its lineage and filters on `api_key_lineage_id`, so the
+    /// caller gets the full history of the logical key without
+    /// having to know about rotation generations. The lineage column
+    /// is an internal CH detail; it never appears on the public
+    /// query / response surface.
     pub api_key_id: Option<String>,
-    /// Stable api-key identity that survives rotation. Filtering on
-    /// this column rolls up usage across every generation in a
-    /// rotation chain — what the operator sees as "this key's
-    /// history" regardless of how many times it has been rotated.
-    pub api_key_lineage_id: Option<String>,
     pub status_code: Option<i64>,
     pub from: Option<String>,
     pub to: Option<String>,
@@ -42,11 +43,6 @@ pub struct GatewayLogEntry {
     pub id: String,
     pub user_id: Option<String>,
     pub api_key_id: Option<String>,
-    /// Stable api-key identity across rotation. The frontend can
-    /// link "this key's history" using this column without caring
-    /// which generation a given row was emitted by.
-    #[serde(default)]
-    pub api_key_lineage_id: Option<String>,
     pub model_id: Option<String>,
     pub provider: Option<String>,
     pub input_tokens: Option<i64>,
@@ -68,7 +64,6 @@ struct GatewayLogRow {
     id: String,
     user_id: Option<String>,
     api_key_id: Option<String>,
-    api_key_lineage_id: Option<String>,
     model_id: Option<String>,
     provider: Option<String>,
     input_tokens: Option<i64>,
@@ -130,13 +125,36 @@ pub async fn list_gateway_logs(
         conditions.push("user_id = ?".to_string());
         bind_values.push(v.clone());
     }
-    if let Some(ref v) = params.api_key_id {
-        conditions.push("api_key_id = ?".to_string());
-        bind_values.push(v.clone());
-    }
-    if let Some(ref v) = params.api_key_lineage_id {
-        conditions.push("api_key_lineage_id = ?".to_string());
-        bind_values.push(v.clone());
+    // Rotation-transparent api-key filter: callers pass an exact
+    // api_key.id, but we resolve it to its lineage and filter on
+    // `api_key_lineage_id` so the result includes every generation
+    // of the rotation chain. Keeps the public API shape stable
+    // while delivering "this logical key's full history" for free.
+    //
+    // Edge cases:
+    //   - api_key_id parses but the row is gone (hard-deleted): we
+    //     fall back to filtering on the raw api_key_id column so
+    //     historical rows still surface.
+    //   - api_key_id isn't a UUID: skip the lookup and filter raw,
+    //     letting the empty result speak for itself.
+    if let Some(ref raw) = params.api_key_id {
+        let lineage_id = match raw.parse::<uuid::Uuid>() {
+            Ok(id) => {
+                sqlx::query_scalar::<_, uuid::Uuid>("SELECT lineage_id FROM api_keys WHERE id = $1")
+                    .bind(id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("lineage lookup: {e}")))?
+            }
+            Err(_) => None,
+        };
+        if let Some(lid) = lineage_id {
+            conditions.push("api_key_lineage_id = ?".to_string());
+            bind_values.push(lid.to_string());
+        } else {
+            conditions.push("api_key_id = ?".to_string());
+            bind_values.push(raw.clone());
+        }
     }
     if let Some(v) = params.status_code {
         conditions.push("status_code = ?".to_string());
@@ -171,11 +189,6 @@ pub async fn list_gateway_logs(
             ("provider", "provider", ExcludeMode::Equals),
             ("user_id", "user_id", ExcludeMode::Equals),
             ("api_key_id", "api_key_id", ExcludeMode::Equals),
-            (
-                "api_key_lineage_id",
-                "api_key_lineage_id",
-                ExcludeMode::Equals,
-            ),
             ("status_code", "status_code", ExcludeMode::Equals),
         ],
     ) {
@@ -208,8 +221,8 @@ pub async fn list_gateway_logs(
 
     // Data query
     let data_sql = format!(
-        "SELECT id, user_id, api_key_id, api_key_lineage_id, model_id, provider, input_tokens, \
-         output_tokens, cost_usd, latency_ms, status_code, ip_address, \
+        "SELECT id, user_id, api_key_id, model_id, provider, input_tokens, output_tokens, \
+         cost_usd, latency_ms, status_code, ip_address, \
          toString(created_at) as created_at \
          FROM gateway_logs {where_clause} ORDER BY {order_by} LIMIT {limit} OFFSET {offset}"
     );
@@ -228,7 +241,6 @@ pub async fn list_gateway_logs(
             id: r.id,
             user_id: r.user_id,
             api_key_id: r.api_key_id,
-            api_key_lineage_id: r.api_key_lineage_id,
             model_id: r.model_id,
             provider: r.provider,
             input_tokens: r.input_tokens,

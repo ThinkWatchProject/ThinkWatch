@@ -236,12 +236,14 @@ async fn lineage_id_is_stable_across_every_rotation_generation() {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn gateway_logs_lineage_filter_rolls_up_history_across_rotations() {
-    // The whole point of lineage_id: a request issued under
-    // generation N and queried under generation M (or any
-    // generation) by lineage_id pulls the row back. Verifies the
-    // CH side's `api_key_lineage_id` column is populated and
-    // matches between Rust write + Rust read.
+async fn gateway_logs_filter_by_api_key_id_rolls_up_history_after_rotation() {
+    // The whole point of `lineage_id` from the operator's POV:
+    // querying `?api_key_id=<gen-1>` after the key has been rotated
+    // returns the rows from BOTH generation 1 (driven below) AND
+    // generation 2 (also driven below). The handler resolves
+    // api_key_id → lineage_id internally and filters CH on the
+    // lineage column, so the caller never has to know about
+    // rotation generations.
     let app = TestApp::spawn_with_clickhouse().await;
     let admin = fixtures::create_admin_user(&app.db).await.unwrap();
     let con = app.console_client();
@@ -253,8 +255,6 @@ async fn gateway_logs_lineage_filter_rolls_up_history_across_rotations() {
     .unwrap()
     .assert_ok();
 
-    // Stand up a real upstream so the gateway proxy emits a
-    // gateway_logs row.
     let upstream = MockProvider::openai_chat_ok("lineage-test-model").await;
     let uri = upstream.uri();
     Box::leak(Box::new(upstream));
@@ -267,75 +267,99 @@ async fn gateway_logs_lineage_filter_rolls_up_history_across_rotations() {
         .unwrap();
     app.rebuild_gateway_router().await;
 
-    // Create a key via the public endpoint so lineage_id ends up
-    // self-referential (root invariant).
+    // Generation 1.
     let create_resp: Value = con
         .post(
             "/api/keys",
-            json!({
-                "name": "lineage-gateway-key",
-                "surfaces": ["ai_gateway"]
-            }),
+            json!({"name": "lineage-gateway-key", "surfaces": ["ai_gateway"]}),
         )
         .await
         .unwrap()
         .json()
         .unwrap();
-    let plaintext = create_resp["key"].as_str().unwrap().to_string();
+    let plaintext_v1 = create_resp["key"].as_str().unwrap().to_string();
     let key_id_v1 = create_resp["id"].as_str().unwrap().to_string();
-    let lineage_id: uuid::Uuid =
-        sqlx::query_scalar("SELECT lineage_id FROM api_keys WHERE id = $1")
-            .bind(uuid::Uuid::parse_str(&key_id_v1).unwrap())
-            .fetch_one(&app.db)
-            .await
-            .unwrap();
-    assert_eq!(lineage_id.to_string(), key_id_v1);
 
-    // Drive a request under generation 1.
+    // Drive 1 request under gen 1.
     let gw = app.gateway_client();
-    gw.set_bearer(&plaintext);
+    gw.set_bearer(&plaintext_v1);
     gw.post(
         "/v1/chat/completions",
-        json!({"model": "lineage-test-model", "messages": [{"role": "user", "content": "x"}]}),
+        json!({"model": "lineage-test-model", "messages": [{"role": "user", "content": "gen1"}]}),
     )
     .await
     .unwrap()
     .assert_ok();
 
-    // Wait for the row to land in CH with the lineage column set.
+    // Rotate → generation 2.
+    let rotated: Value = con
+        .post_empty(&format!("/api/keys/{key_id_v1}/rotate"))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let plaintext_v2 = rotated["key"].as_str().unwrap().to_string();
+
+    // Drive 1 request under gen 2.
+    let gw2 = app.gateway_client();
+    gw2.set_bearer(&plaintext_v2);
+    gw2.post(
+        "/v1/chat/completions",
+        json!({"model": "lineage-test-model", "messages": [{"role": "user", "content": "gen2"}]}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    // Wait for both rows to land in CH.
     let ch = app.state.clickhouse.as_ref().unwrap();
     for _ in 0..200 {
         let n: u64 = ch
-            .query("SELECT count() FROM gateway_logs WHERE api_key_lineage_id = ?")
-            .bind(lineage_id.to_string())
+            .query("SELECT count() FROM gateway_logs WHERE cost_usd IS NOT NULL")
             .fetch_one()
             .await
             .unwrap_or(0);
-        if n > 0 {
+        if n >= 2 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
-    // Filter the read endpoint by lineage_id — expect ≥1 row.
+    // Filter the read endpoint by the GENERATION-1 api_key_id —
+    // the handler must transparently resolve to lineage and return
+    // BOTH generations' rows.
     let body: Value = con
         .get(&format!(
-            "/api/gateway/logs?api_key_lineage_id={lineage_id}&limit=50"
+            "/api/gateway/logs?api_key_id={key_id_v1}&limit=50"
         ))
         .await
         .unwrap()
         .json()
         .unwrap();
     let items = body["items"].as_array().unwrap();
-    assert!(
-        !items.is_empty(),
-        "lineage filter must return the row from generation 1: {body}"
+    assert_eq!(
+        items.len(),
+        2,
+        "rotation-transparent filter must return both gen-1 + gen-2 rows: {body}"
     );
-    for row in items {
-        assert_eq!(
-            row["api_key_lineage_id"].as_str(),
-            Some(lineage_id.to_string().as_str()),
-            "row must carry the same lineage_id we filtered on: {row}"
-        );
-    }
+
+    // The two rows have DIFFERENT api_key_ids (one per generation),
+    // proving the rollup wasn't just an exact-match filter.
+    let ids: std::collections::HashSet<&str> = items
+        .iter()
+        .filter_map(|r| r["api_key_id"].as_str())
+        .collect();
+    assert_eq!(
+        ids.len(),
+        2,
+        "rolled-up rows must come from 2 distinct api_key_ids (the rotation chain): {ids:?}"
+    );
+
+    // The response must NOT leak `api_key_lineage_id` to the client
+    // — lineage is a server-internal concept now.
+    assert!(
+        items[0].get("api_key_lineage_id").is_none(),
+        "api_key_lineage_id must not appear in the response: {}",
+        items[0]
+    );
 }
