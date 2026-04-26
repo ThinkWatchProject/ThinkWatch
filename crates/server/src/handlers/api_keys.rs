@@ -801,7 +801,14 @@ pub async fn rotate_key(
     )
     .bind(&generated.prefix)
     .bind(&generated.hash)
-    .bind(format!("{} (rotated)", old_key.name))
+    // Carry the original name verbatim. The provenance / generation
+    // chain is already captured by `rotated_from_id` + `last_rotation_at`,
+    // and the row's status badge ("已轮换" / "活跃") tells the operator
+    // which generation is which. An earlier version stamped a literal
+    // " (rotated)" suffix into `name`, which (a) outlived the old key
+    // (the suffix has no removal logic), and (b) stacked on every
+    // subsequent rotation — "Foo (rotated) (rotated) (rotated)…".
+    .bind(&old_key.name)
     .bind(old_key.user_id)
     .bind(&old_key.surfaces)
     .bind(&old_key.allowed_models)
