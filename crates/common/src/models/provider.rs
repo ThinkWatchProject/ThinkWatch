@@ -27,4 +27,18 @@ pub struct Model {
     pub input_weight: Decimal,
     /// Relative output-token cost factor.
     pub output_weight: Decimal,
+    /// Per-model routing strategy override.
+    /// `None` ⇒ inherit `gateway.default_routing_strategy`.
+    /// One of `priority` / `weighted` / `latency` / `cost` / `latency_cost`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_strategy: Option<String>,
+    /// Per-model affinity mode override.
+    /// `None` ⇒ inherit `gateway.default_affinity_mode`.
+    /// One of `none` / `provider` / `route`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affinity_mode: Option<String>,
+    /// Per-model affinity TTL override (seconds, 0–86400).
+    /// `None` ⇒ inherit `gateway.default_affinity_ttl_secs`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub affinity_ttl_secs: Option<i32>,
 }

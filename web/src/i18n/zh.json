@@ -86,6 +86,7 @@
     "aiGateway": "AI 网关",
     "providers": "提供商",
     "models": "模型",
+    "routeDecisions": "路由日志",
     "apiKeys": "API 密钥",
     "mcpGateway": "MCP 网关",
     "mcpServers": "MCP 服务器",
@@ -335,6 +336,18 @@
     "rotated": "已轮换",
     "gracePeriod": "过渡期"
   },
+  "routeDecisions": {
+    "title": "路由决策",
+    "subtitle": "网关刚刚做出的路由选择实时流。用于验证策略 / 黏性 / failover 行为。Redis 缓冲(24 小时,每模型 200 条)。",
+    "allModels": "全部模型",
+    "autoRefresh": "自动刷新",
+    "empty": "暂无决策日志。通过网关发一个请求,几秒内就会出现在这里。",
+    "ok": "成功",
+    "fail": "失败",
+    "affinityPrefix": "黏性",
+    "hit": "✓ 命中",
+    "attempts": "{{count}} 次尝试"
+  },
   "models": {
     "title": "模型",
     "subtitle": "客户端通过 /v1/models 能调用的模型 catalog。每个条目配置输入/输出权重，按平台基准价计算成本和加权 token 配额。",
@@ -389,7 +402,10 @@
       "provider": "提供商",
       "upstreamModel": "上游模型",
       "weight": "权重",
-      "priority": "优先级"
+      "priority": "优先级",
+      "health": "健康",
+      "healthHint": "实时熔断器状态(基于滚动窗口错误率)。健康 = 正常路由,熔断 = 暂时排除,半开 = 探测中。",
+      "p50": "EWMA 延迟"
     },
     "status": {
       "all": "全部模型",
@@ -409,10 +425,38 @@
       "displayName": "显示名称",
       "inputWeight": "输入权重",
       "outputWeight": "输出权重",
-      "active": "启用"
+      "active": "启用",
+      "routingStrategy": "路由策略",
+      "affinityMode": "会话黏性",
+      "affinityTtlSecs": "黏性 TTL (秒)",
+      "rpmCap": "RPM 上限",
+      "tpmCap": "TPM 上限"
+    },
+    "useGlobalDefault": "使用全局默认",
+    "unlimited": "不限制",
+    "routingOverrideTitle": "路由覆盖",
+    "routingOverrideHint": "针对此模型覆盖网关全局默认。留空则继承「设置 → 网关」中的配置。",
+    "strategy": {
+      "priority": "严格优先级 (仅 failover)",
+      "weighted": "加权随机",
+      "latency": "延迟优先 (自动追快)",
+      "cost": "成本优先 (优选便宜)",
+      "latency_cost": "延迟 × 成本 (综合)"
+    },
+    "affinity": {
+      "none": "无 — 每次请求重新选路",
+      "provider": "黏到 Provider (保留 prompt 缓存)",
+      "route": "黏到 Route (严格 A/B)"
+    },
+    "health": {
+      "closed": "健康",
+      "open": "熔断",
+      "half_open": "探测中"
     },
     "errors": {
-      "weightMustBePositive": "权重必须为正数。"
+      "weightMustBePositive": "权重必须为正数。",
+      "affinityTtlRange": "黏性 TTL 必须在 0 到 86400 秒之间。",
+      "capMustBePositive": "RPM/TPM 上限必须是正整数(留空表示不限制)。"
     },
     "batchImportHint": "从提供商远端 catalog 导入模型条目到已暴露模型列表。",
     "batchImportWarning": "导入后路由立即在 /v1/models 生效。只勾选你确实想暴露的模型。",
@@ -1099,6 +1143,37 @@
     "signatureDrift": "签名时间偏差（秒）",
     "nonceTtl": "Nonce 有效期（秒）",
     "cacheTtl": "缓存有效期（秒）",
+    "routingTitle": "路由策略",
+    "defaultRoutingStrategy": "默认路由策略",
+    "defaultRoutingStrategyHint": "网关在同优先级路由中如何挑选。每个模型可在「模型」页单独覆盖。",
+    "defaultAffinityMode": "默认会话黏性",
+    "defaultAffinityModeHint": "把同一用户的流量在窗口期内固定到同一 Provider(或 Route),保持 prompt 缓存命中。每个模型可单独覆盖。",
+    "defaultAffinityTtl": "默认黏性 TTL (秒)",
+    "defaultAffinityTtlHint": "黏性键的存活时间。0 = 完全关闭黏性。",
+    "latencyStrategyK": "延迟激进度 (k)",
+    "latencyStrategyKHint": "权重 ∝ 1/延迟^k。k 越大对慢路由的惩罚越激进。默认 2.0(激进)。范围 0.5–8.0。",
+    "strategy": {
+      "priority": "严格优先级 (仅 failover)",
+      "weighted": "加权随机",
+      "latency": "延迟优先 (自动追快)",
+      "cost": "成本优先 (优选便宜)",
+      "latency_cost": "延迟 × 成本 (综合)"
+    },
+    "affinity": {
+      "none": "无",
+      "provider": "黏到 Provider",
+      "route": "黏到 Route"
+    },
+    "cbTitle": "熔断器",
+    "cbEnabled": "启用熔断器",
+    "cbErrorPct": "错误率阈值 (%)",
+    "cbErrorPctHint": "滚动窗口内错误率达到此值则熔断。",
+    "cbMinSamples": "窗口内最少样本数",
+    "cbMinSamplesHint": "窗口内样本数不到此值不触发熔断 — 避免被几个偶发错误误熔断。",
+    "cbWindowSecs": "窗口长度 (秒)",
+    "cbWindowSecsHint": "计算错误率的滚动窗口大小。",
+    "cbOpenSecs": "熔断时长 (秒)",
+    "cbOpenSecsHint": "熔断后多久转入半开(探测)状态。",
     "mcpStoreTitle": "MCP 商店",
     "registryUrl": "模板仓库地址",
     "registryUrlHint": "远程 JSON 仓库，用于同步 MCP 商店模板。留空则仅使用内置模板。",

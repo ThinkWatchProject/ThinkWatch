@@ -14,14 +14,18 @@ use uuid::Uuid;
 use crate::cache::ResponseCache;
 use crate::content_filter::{Action, ContentFilter};
 use crate::cost_tracker::CostTracker;
+use crate::decision_log::{CandidateRecord, DecisionRecord};
+use crate::health::{CircuitBreakerConfig, HealthTracker, RouteHealth};
 use crate::metadata::RequestMetadata;
 use crate::model_mapping::ModelMapper;
 use crate::pii_redactor::{PiiRedactor, PiiStreamRestorer};
 use crate::providers::traits::{ChatCompletionRequest, GatewayError};
 use crate::quota::QuotaManager;
 use crate::rate_limiter::RateLimiter;
-use crate::router::{ModelRouter, RouteEntry};
+use crate::router::{AffinityMode, ModelRouter, RouteEntry};
+use crate::strategy::{self, RoutingStrategy};
 use crate::streaming::stream_to_sse_with_restorer;
+use std::str::FromStr;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::{
     self, BudgetCap, BudgetSubject, RateLimitRule, RateLimitSubject, RateMetric, Surface,
@@ -62,6 +66,11 @@ pub struct GatewayState {
     /// request (trace_id, tokens, latency, status). Wired up from the
     /// server so the gateway crate doesn't have to build its own.
     pub audit: think_watch_common::audit::AuditLogger,
+    /// Per-route rolling-window error / latency tracker. Drives the
+    /// circuit-breaker filter at selection time and the `latency`
+    /// strategy's weight calculation. Backed by Redis so all gateway
+    /// replicas share the same view. See `crate::health` for details.
+    pub health: Arc<HealthTracker>,
 }
 
 /// Identity information extracted from the auth middleware.
@@ -597,81 +606,351 @@ async fn preflight_request_limits(
 }
 
 // ---------------------------------------------------------------------------
-// Multi-route selection: failover + weighted random + session affinity
+// Multi-route selection: strategy-driven weights + circuit-breaker filter
+// + per-model session affinity (none / provider / route).
 // ---------------------------------------------------------------------------
 
-/// Check Redis for session affinity: `affinity:{user_id}:{model_id}`.
-/// Returns the cached provider_id if present and still in the given
-/// route entries, so the caller can skip weighted random selection.
+/// What the affinity layer can pin a session to.
+#[derive(Debug, Clone, Copy)]
+enum AffinityHit {
+    Provider(Uuid),
+    Route(Uuid),
+}
+
+/// Read the affinity key for `(model, mode, user)` and translate it
+/// to whichever id the mode pins on. `None` mode short-circuits.
+/// We include the mode in the cache key so flipping the mode at
+/// runtime invalidates stale entries automatically.
 async fn check_affinity(
     redis: &fred::clients::Client,
     user_id: Option<&str>,
     model: &str,
+    mode: AffinityMode,
     entries: &[&RouteEntry],
-) -> Option<Uuid> {
+) -> Option<AffinityHit> {
     use fred::interfaces::KeysInterface;
+    if matches!(mode, AffinityMode::None) {
+        return None;
+    }
     let uid = user_id?;
-    let key = format!("affinity:{uid}:{model}");
+    let key = format!("affinity:{}:{uid}:{model}", mode.as_str());
     let val: Option<String> = redis.get(&key).await.ok().flatten();
-    let pid = val.and_then(|s| Uuid::parse_str(&s).ok())?;
-    // Only use affinity if the provider is actually in the current group
-    if entries.iter().any(|e| e.provider_id == pid) {
-        Some(pid)
-    } else {
-        None
+    let id = val.and_then(|s| Uuid::parse_str(&s).ok())?;
+    match mode {
+        AffinityMode::Provider => entries
+            .iter()
+            .any(|e| e.provider_id == id)
+            .then_some(AffinityHit::Provider(id)),
+        AffinityMode::Route => entries
+            .iter()
+            .any(|e| e.route_id == id)
+            .then_some(AffinityHit::Route(id)),
+        AffinityMode::None => None,
     }
 }
 
-/// Store session affinity in Redis with a 5-minute TTL.
+/// Stamp a successful completion's affinity. TTL 0 disables affinity
+/// entirely (a runtime kill switch via `gateway.default_affinity_ttl_secs`
+/// or the per-model override).
 async fn set_affinity(
     redis: &fred::clients::Client,
     user_id: Option<&str>,
     model: &str,
-    provider_id: Uuid,
+    mode: AffinityMode,
+    entry: &RouteEntry,
+    ttl_secs: u32,
 ) {
     use fred::interfaces::KeysInterface;
+    if matches!(mode, AffinityMode::None) || ttl_secs == 0 {
+        return;
+    }
     let Some(uid) = user_id else { return };
-    let key = format!("affinity:{uid}:{model}");
+    let id = match mode {
+        AffinityMode::Provider => entry.provider_id,
+        AffinityMode::Route => entry.route_id,
+        AffinityMode::None => return,
+    };
+    let key = format!("affinity:{}:{uid}:{model}", mode.as_str());
     let _: Result<(), _> = redis
         .set::<(), _, _>(
             &key,
-            provider_id.to_string(),
-            Some(fred::types::Expiration::EX(300)),
+            id.to_string(),
+            Some(fred::types::Expiration::EX(ttl_secs as i64)),
             None,
             false,
         )
         .await;
 }
 
-/// Pick one route from a slice of entries by weighted random selection.
-/// If `affinity_provider` matches one in the slice, use that instead.
-fn pick_weighted<'a>(
-    entries: &[&'a RouteEntry],
-    affinity_provider: Option<Uuid>,
-) -> Option<&'a RouteEntry> {
-    if entries.is_empty() {
-        return None;
+/// Resolve `(strategy, affinity_mode, affinity_ttl)` for a model:
+/// per-model override falls through to gateway-wide defaults.
+async fn resolve_routing_config(
+    state: &GatewayState,
+    model: &str,
+) -> (RoutingStrategy, AffinityMode, u32) {
+    let model_cfg = state.router.load().config_for(model);
+    let strategy = match model_cfg.strategy {
+        Some(s) => s,
+        None => RoutingStrategy::from_str(&state.dynamic_config.default_routing_strategy().await)
+            .unwrap_or_default(),
+    };
+    let mode = match model_cfg.affinity_mode {
+        Some(m) => m,
+        None => AffinityMode::parse_or_default(&state.dynamic_config.default_affinity_mode().await),
+    };
+    let ttl = match model_cfg.affinity_ttl_secs {
+        Some(t) => t,
+        None => state.dynamic_config.default_affinity_ttl_secs().await as u32,
+    };
+    (strategy, mode, ttl)
+}
+
+async fn resolve_breaker_config(state: &GatewayState) -> CircuitBreakerConfig {
+    CircuitBreakerConfig {
+        enabled: state.dynamic_config.cb_enabled().await,
+        error_pct: state.dynamic_config.cb_error_pct().await,
+        min_samples: state.dynamic_config.cb_min_samples().await,
+        window_secs: state.dynamic_config.cb_window_secs().await,
+        open_secs: state.dynamic_config.cb_open_secs().await,
     }
-    // Affinity override
-    if let Some(pid) = affinity_provider
-        && let Some(entry) = entries.iter().find(|e| e.provider_id == pid)
-    {
-        return Some(entry);
+}
+
+fn make_candidate(
+    entry: &RouteEntry,
+    weight: f64,
+    health: &RouteHealth,
+    excluded_reason: Option<String>,
+) -> CandidateRecord {
+    CandidateRecord {
+        route_id: entry.route_id,
+        provider_name: entry.provider_name.clone(),
+        upstream_model: entry.upstream_model.clone(),
+        weight,
+        health_state: health.state.as_str().to_string(),
+        ewma_latency_ms: health.ewma_latency_ms,
+        excluded_reason,
     }
-    // Weighted random
-    let total_weight: u32 = entries.iter().map(|e| e.weight).sum();
-    if total_weight == 0 {
-        return entries.first().copied();
+}
+
+/// Strategy/affinity/breaker context resolved once per request and
+/// reused through the failover loop.
+pub(crate) struct SelectionCtx<'a> {
+    model_id: &'a str,
+    user_id: Option<&'a str>,
+    strategy: RoutingStrategy,
+    affinity_mode: AffinityMode,
+    affinity_ttl_secs: u32,
+    latency_k: f64,
+    breaker: CircuitBreakerConfig,
+    state: &'a GatewayState,
+}
+
+pub(crate) async fn build_selection_ctx<'a>(
+    state: &'a GatewayState,
+    model_id: &'a str,
+    user_id: Option<&'a str>,
+) -> SelectionCtx<'a> {
+    let (strategy, affinity_mode, affinity_ttl_secs) =
+        resolve_routing_config(state, model_id).await;
+    let latency_k = state.dynamic_config.latency_strategy_k().await;
+    let breaker = resolve_breaker_config(state).await;
+    SelectionCtx {
+        model_id,
+        user_id,
+        strategy,
+        affinity_mode,
+        affinity_ttl_secs,
+        latency_k,
+        breaker,
+        state,
     }
-    let mut rng = rand::rng();
-    let mut pick = rng.random_range(0..total_weight);
-    for entry in entries {
-        if pick < entry.weight {
-            return Some(entry);
+}
+
+/// One selection attempt within a priority group: snapshot health,
+/// drop circuit-broken / already-tried candidates, compute strategy
+/// weights, pick. Returns `(picked, candidate_records, affinity_hit)`.
+/// Candidate records cover every route in the group — including
+/// excluded ones — so the decision log shows operators why each
+/// route was or wasn't picked.
+async fn pick_with_strategy<'a>(
+    group: &[&'a RouteEntry],
+    tried: &[Uuid],
+    ctx: &SelectionCtx<'_>,
+) -> (Option<&'a RouteEntry>, Vec<CandidateRecord>, bool) {
+    if group.is_empty() {
+        return (None, Vec::new(), false);
+    }
+    let mut healths: Vec<RouteHealth> = Vec::with_capacity(group.len());
+    for entry in group {
+        let h = ctx
+            .state
+            .health
+            .snapshot(entry.route_id, ctx.breaker.window_secs)
+            .await;
+        healths.push(h);
+    }
+
+    // Affinity check before breaker filter — a stale affinity to a
+    // now-broken route degrades cleanly: we ignore the affinity in
+    // that case and let the strategy pick fresh.
+    let affinity = check_affinity(
+        &ctx.state.redis,
+        ctx.user_id,
+        ctx.model_id,
+        ctx.affinity_mode,
+        group,
+    )
+    .await;
+
+    let mut signals: Vec<strategy::RouteSignal> = Vec::with_capacity(group.len());
+    let mut excluded: Vec<Option<String>> = Vec::with_capacity(group.len());
+    for (i, entry) in group.iter().enumerate() {
+        let h = &healths[i];
+        let excl = if !h.state.allows_selection() {
+            Some(format!("circuit_breaker:{}", h.state.as_str()))
+        } else if tried.contains(&entry.provider_id) {
+            Some("already_tried".into())
+        } else {
+            None
+        };
+        excluded.push(excl);
+        signals.push(strategy::RouteSignal {
+            configured_weight: entry.weight,
+            ewma_latency_ms: h.ewma_latency_ms,
+            cost_per_token: entry.cost_per_token,
+        });
+    }
+
+    let weights = strategy::compute_weights(ctx.strategy, &signals, ctx.latency_k);
+
+    // If affinity points to a still-eligible candidate, use it.
+    let mut affinity_hit = false;
+    if let Some(hit) = affinity {
+        let idx_match = group.iter().enumerate().find(|(i, e)| {
+            excluded[*i].is_none()
+                && match hit {
+                    AffinityHit::Provider(pid) => e.provider_id == pid,
+                    AffinityHit::Route(rid) => e.route_id == rid,
+                }
+        });
+        if let Some((idx, entry)) = idx_match {
+            affinity_hit = true;
+            let mut records: Vec<CandidateRecord> = Vec::with_capacity(group.len());
+            for (i, e) in group.iter().enumerate() {
+                records.push(make_candidate(
+                    e,
+                    if i == idx { weights[i] } else { 0.0 },
+                    &healths[i],
+                    if i == idx {
+                        None
+                    } else {
+                        excluded[i]
+                            .clone()
+                            .or_else(|| Some("affinity_overrode".into()))
+                    },
+                ));
+            }
+            return (Some(entry), records, affinity_hit);
         }
-        pick -= entry.weight;
     }
-    entries.last().copied()
+
+    // Mask out excluded entries' weights so weighted random can't
+    // pick them.
+    let masked: Vec<f64> = weights
+        .iter()
+        .enumerate()
+        .map(|(i, w)| if excluded[i].is_some() { 0.0 } else { *w })
+        .collect();
+
+    let total: f64 = masked.iter().sum();
+    let picked_idx = if total <= 0.0 {
+        // No eligible candidate. Match the original `pick_weighted`
+        // "all zeros" fallback: first un-excluded if any.
+        (0..group.len()).find(|&i| excluded[i].is_none())
+    } else {
+        let mut rng = rand::rng();
+        let pick = rng.random_range(0.0..total);
+        let mut acc = 0.0;
+        let mut chosen = None;
+        for (i, w) in masked.iter().enumerate() {
+            acc += w;
+            if pick < acc {
+                chosen = Some(i);
+                break;
+            }
+        }
+        chosen
+    };
+
+    let mut records: Vec<CandidateRecord> = Vec::with_capacity(group.len());
+    for (i, entry) in group.iter().enumerate() {
+        records.push(make_candidate(
+            entry,
+            masked[i],
+            &healths[i],
+            excluded[i].clone(),
+        ));
+    }
+
+    let picked = picked_idx.map(|i| group[i]);
+    (picked, records, affinity_hit)
+}
+
+/// What the proxy handler needs back from a selection in order to
+/// finalize the decision log entry after the request completes.
+pub(crate) struct SelectionRecord {
+    pub picked_route_id: Uuid,
+    pub model_id: String,
+    pub strategy: RoutingStrategy,
+    pub affinity_mode: AffinityMode,
+    pub affinity_hit: bool,
+    pub attempts: u32,
+    pub candidates: Vec<CandidateRecord>,
+    pub user_hint: Option<String>,
+    pub started_at: std::time::Instant,
+    /// Per-attempt latency for the *picked* route in non-stream mode.
+    /// `None` for streaming (the stream hasn't run when this record
+    /// is built), and the caller falls back to `started_at.elapsed()`
+    /// at finalize time — which is correct for streams since there's
+    /// no failover loop inflating the e2e timer.
+    pub picked_latency_ms: Option<u32>,
+}
+
+/// Push a finalized decision log entry + record health for the picked
+/// route. Both writes are best-effort; failures are logged.
+pub(crate) async fn finalize_decision(
+    state: &GatewayState,
+    sel: SelectionRecord,
+    success: bool,
+    error_message: Option<String>,
+) {
+    let total_latency_ms = sel.started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
+    // For health, we want the picked route's *own* time, not the
+    // cumulative including prior failed attempts. Non-stream sets
+    // this explicitly when it picks a winner; stream falls back to
+    // total elapsed (which is the picked route's time anyway since
+    // streams don't loop).
+    let health_latency_ms = sel.picked_latency_ms.unwrap_or(total_latency_ms);
+    let breaker = resolve_breaker_config(state).await;
+    let _ = state
+        .health
+        .record(sel.picked_route_id, health_latency_ms, !success, breaker)
+        .await;
+    let record = DecisionRecord {
+        ts_ms: chrono::Utc::now().timestamp_millis(),
+        model_id: sel.model_id,
+        strategy: sel.strategy.as_str().to_string(),
+        affinity_mode: sel.affinity_mode.as_str().to_string(),
+        affinity_hit: sel.affinity_hit,
+        candidates: sel.candidates,
+        picked_route_id: Some(sel.picked_route_id),
+        attempts: sel.attempts,
+        total_latency_ms,
+        success,
+        error_message,
+        user_hint: sel.user_hint,
+    };
+    crate::decision_log::push(&state.redis, &record).await;
 }
 
 /// Returns true if the error is retryable.
@@ -699,27 +978,26 @@ fn is_retryable(err: &GatewayError) -> bool {
     }
 }
 
-/// Group route entries by priority and attempt each group in order.
-/// Within a priority group, use weighted random + affinity, then
-/// failover to other members of the group before advancing.
-///
-/// Returns the selected provider and the upstream model name to use.
-/// On success sets session affinity.
+/// Non-streaming selection + failover. Walks priority groups in
+/// order; within each, `pick_with_strategy` chooses one healthy route.
+/// On retryable error, advances within the group; on a fully failed
+/// group, advances to the next priority. Returns the picked route,
+/// the response, and a `SelectionRecord` so the caller can finalize
+/// the decision log after request completion.
 async fn select_route_with_failover<'a>(
     routes: &'a [RouteEntry],
-    redis: &fred::clients::Client,
-    user_id: Option<&str>,
-    model: &str,
     request: &ChatCompletionRequest,
-    is_stream: bool,
+    ctx: &SelectionCtx<'_>,
 ) -> Result<
     (
         &'a RouteEntry,
         crate::providers::traits::ChatCompletionResponse,
+        SelectionRecord,
     ),
     GatewayError,
 > {
-    // Group by priority
+    let started_at = std::time::Instant::now();
+
     let mut priority_groups: Vec<(u32, Vec<&RouteEntry>)> = Vec::new();
     for entry in routes {
         if let Some(group) = priority_groups.last_mut()
@@ -732,59 +1010,69 @@ async fn select_route_with_failover<'a>(
     }
 
     let mut last_error: Option<GatewayError> = None;
+    let mut attempts: u32 = 0;
+    let mut affinity_hit_overall = false;
+    // We capture candidate records from the first group we picked
+    // from — that's the most informative view for the operator.
+    // Lower-priority fallbacks aren't enumerated.
+    let mut last_records: Vec<CandidateRecord> = Vec::new();
 
     for (_prio, group) in &priority_groups {
-        let affinity = check_affinity(redis, user_id, model, group).await;
         let mut tried: Vec<Uuid> = Vec::new();
 
-        // Try up to group.len() times within this priority group
         for _ in 0..group.len() {
-            // Filter out already-tried providers
-            let remaining: Vec<&RouteEntry> = group
-                .iter()
-                .filter(|e| !tried.contains(&e.provider_id))
-                .copied()
-                .collect();
-            if remaining.is_empty() {
-                break;
+            attempts += 1;
+            let (picked, records, affinity_hit) = pick_with_strategy(group, &tried, ctx).await;
+            if last_records.is_empty() {
+                last_records = records;
             }
-
-            let affinity_for_pick = if tried.is_empty() { affinity } else { None };
-            let Some(entry) = pick_weighted(&remaining, affinity_for_pick) else {
-                break;
-            };
+            affinity_hit_overall = affinity_hit_overall || affinity_hit;
+            let Some(entry) = picked else { break };
             tried.push(entry.provider_id);
 
-            // Build request with upstream_model if set
             let mut req = request.clone();
             if let Some(ref upstream) = entry.upstream_model {
                 req.model = upstream.clone();
             }
 
-            let result = if is_stream {
-                // For streaming: we can't retry once streaming starts,
-                // so do a non-streaming probe. Actually for streaming we
-                // just return the entry and let the caller set up the stream.
-                // We return a dummy response — the caller will use the entry directly.
-                return Ok((
-                    entry,
-                    crate::providers::traits::ChatCompletionResponse {
-                        id: String::new(),
-                        object: "chat.completion".into(),
-                        created: 0,
-                        model: model.to_string(),
-                        choices: vec![],
-                        usage: None,
-                    },
-                ));
-            } else {
-                entry.provider.chat_completion_boxed(req).await
-            };
+            // Per-attempt clock: record latency against this route as
+            // *its* time, not "everything since the request started"
+            // (which would double-count earlier failed attempts in
+            // a failover chain and skew the latency strategy).
+            let attempt_started_at = std::time::Instant::now();
+            let result = entry.provider.chat_completion_boxed(req).await;
+            let attempt_latency_ms = attempt_started_at
+                .elapsed()
+                .as_millis()
+                .min(u32::MAX as u128) as u32;
 
             match result {
                 Ok(response) => {
-                    set_affinity(redis, user_id, model, entry.provider_id).await;
-                    return Ok((entry, response));
+                    set_affinity(
+                        &ctx.state.redis,
+                        ctx.user_id,
+                        ctx.model_id,
+                        ctx.affinity_mode,
+                        entry,
+                        ctx.affinity_ttl_secs,
+                    )
+                    .await;
+                    return Ok((
+                        entry,
+                        response,
+                        SelectionRecord {
+                            picked_route_id: entry.route_id,
+                            model_id: ctx.model_id.to_string(),
+                            strategy: ctx.strategy,
+                            affinity_mode: ctx.affinity_mode,
+                            affinity_hit: affinity_hit_overall,
+                            attempts,
+                            candidates: last_records,
+                            user_hint: ctx.user_id.map(|s| s.to_string()),
+                            started_at,
+                            picked_latency_ms: Some(attempt_latency_ms),
+                        },
+                    ));
                 }
                 Err(e) if is_retryable(&e) => {
                     tracing::warn!(
@@ -793,20 +1081,29 @@ async fn select_route_with_failover<'a>(
                         error = %e,
                         "Route failed, trying next"
                     );
-                    // Surface the failover so dashboards can alert on
-                    // "provider X is failing over → Y". Label is the
-                    // normalised provider so cardinality stays bounded
-                    // (see OBS-12).
                     metrics::counter!(
                         "gateway_provider_fallback_total",
                         "from" => crate::metrics_labels::normalize_provider_label(entry.provider.name()),
                     )
                     .increment(1);
+                    // Record the failed attempt in health so the
+                    // breaker can trip mid-failover.
+                    let _ = ctx
+                        .state
+                        .health
+                        .record(entry.route_id, attempt_latency_ms, true, ctx.breaker)
+                        .await;
                     last_error = Some(e);
                     continue;
                 }
                 Err(e) => {
-                    // Non-retryable error — fail immediately
+                    // Non-retryable — record health then bail. Sibling
+                    // providers will reject the same poison request.
+                    let _ = ctx
+                        .state
+                        .health
+                        .record(entry.route_id, attempt_latency_ms, true, ctx.breaker)
+                        .await;
                     return Err(e);
                 }
             }
@@ -814,21 +1111,21 @@ async fn select_route_with_failover<'a>(
     }
 
     Err(last_error.unwrap_or_else(|| {
-        GatewayError::ProviderError(format!("All routes failed for model: {model}"))
+        GatewayError::ProviderError(format!("All routes failed for model: {}", ctx.model_id))
     }))
 }
 
-/// Streaming variant: selects a route with affinity + failover but does
-/// NOT actually call the provider. Returns the chosen entry so the caller
-/// can set up the stream. For streaming, retry is only possible before
-/// the first chunk, so we just pick the best route.
+/// Streaming variant: pick via strategy + health filter, but don't
+/// call the provider — caller wires up the SSE stream and once the
+/// first chunk lands a retry is no longer possible. Returns the
+/// chosen entry plus a `SelectionRecord` so the streaming caller can
+/// record health + push a decision-log entry on stream completion.
 async fn select_route_for_stream<'a>(
     routes: &'a [RouteEntry],
-    redis: &fred::clients::Client,
-    user_id: Option<&str>,
-    model: &str,
-) -> Result<&'a RouteEntry, GatewayError> {
-    // Group by priority, pick from the first group with affinity support
+    ctx: &SelectionCtx<'_>,
+) -> Result<(&'a RouteEntry, SelectionRecord), GatewayError> {
+    let started_at = std::time::Instant::now();
+
     let mut priority_groups: Vec<(u32, Vec<&RouteEntry>)> = Vec::new();
     for entry in routes {
         if let Some(group) = priority_groups.last_mut()
@@ -840,15 +1137,33 @@ async fn select_route_for_stream<'a>(
         priority_groups.push((entry.priority, vec![entry]));
     }
 
-    if let Some((_prio, group)) = priority_groups.first() {
-        let affinity = check_affinity(redis, user_id, model, group).await;
-        if let Some(entry) = pick_weighted(group, affinity) {
-            return Ok(entry);
+    for (_prio, group) in &priority_groups {
+        let (picked, records, affinity_hit) = pick_with_strategy(group, &[], ctx).await;
+        if let Some(entry) = picked {
+            return Ok((
+                entry,
+                SelectionRecord {
+                    picked_route_id: entry.route_id,
+                    model_id: ctx.model_id.to_string(),
+                    strategy: ctx.strategy,
+                    affinity_mode: ctx.affinity_mode,
+                    affinity_hit,
+                    attempts: 1,
+                    candidates: records,
+                    user_hint: ctx.user_id.map(|s| s.to_string()),
+                    started_at,
+                    // Streams don't loop — finalize_decision falls
+                    // back to elapsed-from-started_at, which IS the
+                    // picked route's wall time for the streaming case.
+                    picked_latency_ms: None,
+                },
+            ));
         }
     }
 
     Err(GatewayError::ProviderError(format!(
-        "No provider found for model: {model}"
+        "No provider found for model: {}",
+        ctx.model_id
     )))
 }
 
@@ -1054,14 +1369,11 @@ pub async fn proxy_chat_completion(
         // gateway_logs row just like the non-streaming bubble above
         // — operators debugging "my SSE stream never started" would
         // otherwise find zero trace events to correlate against.
-        let entry = select_route_for_stream(
-            routes,
-            &state.redis,
-            identity.user_id.as_deref(),
-            &original_model,
-        )
-        .await
-        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
+        let sel_ctx =
+            build_selection_ctx(&state, &original_model, identity.user_id.as_deref()).await;
+        let (entry, sel_record) = select_route_for_stream(routes, &sel_ctx)
+            .await
+            .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
 
         // Replace model with upstream_model if configured
         if let Some(ref upstream) = entry.upstream_model {
@@ -1072,7 +1384,9 @@ pub async fn proxy_chat_completion(
             &state.redis,
             identity.user_id.as_deref(),
             &original_model,
-            entry.provider_id,
+            sel_ctx.affinity_mode,
+            entry,
+            sel_ctx.affinity_ttl_secs,
         )
         .await;
 
@@ -1101,6 +1415,7 @@ pub async fn proxy_chat_completion(
         // Clone request for cache write — the original is moved into the provider.
         let request_for_cache = request.clone();
         let cache_for_done = state.cache.clone();
+        let state_for_done = state.clone();
         let stream = entry.provider.stream_chat_completion(request);
         let on_done = move |result: crate::streaming::StreamResult|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
@@ -1155,6 +1470,28 @@ pub async fn proxy_chat_completion(
                     error_detail,
                 );
 
+                // Health + decision-log: Natural and ClientCancelled
+                // count as successes against the upstream (the latter
+                // is the client's choice, not the upstream's failure).
+                let stream_success = matches!(
+                    result.outcome,
+                    crate::streaming::StreamOutcome::Natural
+                        | crate::streaming::StreamOutcome::ClientCancelled
+                );
+                let stream_error_msg = match &result.outcome {
+                    crate::streaming::StreamOutcome::UpstreamError { message, .. } => {
+                        Some(message.clone())
+                    }
+                    _ => None,
+                };
+                finalize_decision(
+                    &state_for_done,
+                    sel_record,
+                    stream_success,
+                    stream_error_msg,
+                )
+                .await;
+
                 // Assemble and cache the complete response when the
                 // stream ran to natural completion (partial streams
                 // from client disconnects are NOT cached).
@@ -1189,34 +1526,30 @@ pub async fn proxy_chat_completion(
         Ok(stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response())
     } else {
         // Non-streaming: full failover with retry across priority groups
-        let (chosen_entry, mut response) = select_route_with_failover(
-            routes,
-            &state.redis,
-            identity.user_id.as_deref(),
-            &original_model,
-            &request,
-            false,
-        )
-        .await
-        .map_err(|e| {
-            // select_route_with_failover just errored across every
-            // candidate — there's no winning provider to attribute
-            // this failure to, so provider stays None.
-            emit_gateway_error_log(
-                &state.audit,
-                &metadata.request_id,
-                session_id.as_deref(),
-                identity.user_id.as_deref(),
-                identity.user_email.as_deref(),
-                identity.api_key_id.as_deref(),
-                identity.api_key_lineage_id.as_deref(),
-                &original_model,
-                None,
-                request_started_at.elapsed().as_millis() as i64,
-                &e,
-            );
-            GatewayErrorResponse::from(e)
-        })?;
+        let sel_ctx =
+            build_selection_ctx(&state, &original_model, identity.user_id.as_deref()).await;
+        let (chosen_entry, mut response, sel_record) =
+            select_route_with_failover(routes, &request, &sel_ctx)
+                .await
+                .map_err(|e| {
+                    // select_route_with_failover just errored across every
+                    // candidate — there's no winning provider to attribute
+                    // this failure to, so provider stays None.
+                    emit_gateway_error_log(
+                        &state.audit,
+                        &metadata.request_id,
+                        session_id.as_deref(),
+                        identity.user_id.as_deref(),
+                        identity.user_email.as_deref(),
+                        identity.api_key_id.as_deref(),
+                        identity.api_key_lineage_id.as_deref(),
+                        &original_model,
+                        None,
+                        request_started_at.elapsed().as_millis() as i64,
+                        &e,
+                    );
+                    GatewayErrorResponse::from(e)
+                })?;
 
         // Restore original model name in response (don't leak upstream_model)
         response.model = original_model.clone();
@@ -1287,6 +1620,8 @@ pub async fn proxy_chat_completion(
             request_started_at.elapsed().as_millis() as i64,
             200,
         );
+
+        finalize_decision(&state, sel_record, true, None).await;
 
         let mut http_response = Json(&response).into_response();
         http_response
@@ -1484,14 +1819,10 @@ pub async fn proxy_anthropic_messages(
     };
 
     if is_stream {
-        let entry = select_route_for_stream(
-            routes,
-            &state.redis,
-            identity.user_id.as_deref(),
-            &mapped_model,
-        )
-        .await
-        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
+        let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
+        let (entry, sel_record) = select_route_for_stream(routes, &sel_ctx)
+            .await
+            .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
 
         let mut stream_request = request.clone();
         if let Some(ref upstream) = entry.upstream_model {
@@ -1502,7 +1833,9 @@ pub async fn proxy_anthropic_messages(
             &state.redis,
             identity.user_id.as_deref(),
             &mapped_model,
-            entry.provider_id,
+            sel_ctx.affinity_mode,
+            entry,
+            sel_ctx.affinity_ttl_secs,
         )
         .await;
 
@@ -1524,6 +1857,7 @@ pub async fn proxy_anthropic_messages(
         let model_for_log = mapped_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
         let started = request_started_at;
+        let state_for_done = state.clone();
         let stream = entry.provider.stream_chat_completion(stream_request);
         let on_done = move |result: crate::streaming::StreamResult|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
@@ -1550,6 +1884,24 @@ pub async fn proxy_anthropic_messages(
                     started.elapsed().as_millis() as i64,
                     200,
                 );
+                let stream_success = matches!(
+                    result.outcome,
+                    crate::streaming::StreamOutcome::Natural
+                        | crate::streaming::StreamOutcome::ClientCancelled
+                );
+                let stream_error_msg = match &result.outcome {
+                    crate::streaming::StreamOutcome::UpstreamError { message, .. } => {
+                        Some(message.clone())
+                    }
+                    _ => None,
+                };
+                finalize_decision(
+                    &state_for_done,
+                    sel_record,
+                    stream_success,
+                    stream_error_msg,
+                )
+                .await;
                 let Some(u) = result.usage else {
                     return;
                 };
@@ -1576,31 +1928,26 @@ pub async fn proxy_anthropic_messages(
         }
         Ok(http_response)
     } else {
-        let (chosen_entry, mut response) = select_route_with_failover(
-            routes,
-            &state.redis,
-            identity.user_id.as_deref(),
-            &mapped_model,
-            &request,
-            false,
-        )
-        .await
-        .map_err(|e| {
-            emit_gateway_error_log(
-                &state.audit,
-                &trace_id,
-                session_id.as_deref(),
-                identity.user_id.as_deref(),
-                identity.user_email.as_deref(),
-                identity.api_key_id.as_deref(),
-                identity.api_key_lineage_id.as_deref(),
-                &mapped_model,
-                None,
-                request_started_at.elapsed().as_millis() as i64,
-                &e,
-            );
-            GatewayErrorResponse::from(e)
-        })?;
+        let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
+        let (chosen_entry, mut response, sel_record) =
+            select_route_with_failover(routes, &request, &sel_ctx)
+                .await
+                .map_err(|e| {
+                    emit_gateway_error_log(
+                        &state.audit,
+                        &trace_id,
+                        session_id.as_deref(),
+                        identity.user_id.as_deref(),
+                        identity.user_email.as_deref(),
+                        identity.api_key_id.as_deref(),
+                        identity.api_key_lineage_id.as_deref(),
+                        &mapped_model,
+                        None,
+                        request_started_at.elapsed().as_millis() as i64,
+                        &e,
+                    );
+                    GatewayErrorResponse::from(e)
+                })?;
 
         // Restore original model name
         response.model = mapped_model.clone();
@@ -1652,6 +1999,8 @@ pub async fn proxy_anthropic_messages(
             request_started_at.elapsed().as_millis() as i64,
             200,
         );
+
+        finalize_decision(&state, sel_record, true, None).await;
 
         // Convert OpenAI response back to Anthropic format
         let anthropic_response = convert_to_anthropic_response(&response);
@@ -1871,14 +2220,10 @@ pub async fn proxy_responses(
     })?;
 
     if is_stream {
-        let entry = select_route_for_stream(
-            routes,
-            &state.redis,
-            identity.user_id.as_deref(),
-            &mapped_model,
-        )
-        .await
-        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
+        let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
+        let (entry, sel_record) = select_route_for_stream(routes, &sel_ctx)
+            .await
+            .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
 
         let mut stream_request = request.clone();
         if let Some(ref upstream) = entry.upstream_model {
@@ -1889,7 +2234,9 @@ pub async fn proxy_responses(
             &state.redis,
             identity.user_id.as_deref(),
             &mapped_model,
-            entry.provider_id,
+            sel_ctx.affinity_mode,
+            entry,
+            sel_ctx.affinity_ttl_secs,
         )
         .await;
 
@@ -1911,6 +2258,7 @@ pub async fn proxy_responses(
         let model_for_log = mapped_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
         let started = request_started_at;
+        let state_for_done = state.clone();
         let stream = entry.provider.stream_chat_completion(stream_request);
         let on_done = move |result: crate::streaming::StreamResult|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
@@ -1937,6 +2285,24 @@ pub async fn proxy_responses(
                     started.elapsed().as_millis() as i64,
                     200,
                 );
+                let stream_success = matches!(
+                    result.outcome,
+                    crate::streaming::StreamOutcome::Natural
+                        | crate::streaming::StreamOutcome::ClientCancelled
+                );
+                let stream_error_msg = match &result.outcome {
+                    crate::streaming::StreamOutcome::UpstreamError { message, .. } => {
+                        Some(message.clone())
+                    }
+                    _ => None,
+                };
+                finalize_decision(
+                    &state_for_done,
+                    sel_record,
+                    stream_success,
+                    stream_error_msg,
+                )
+                .await;
                 let Some(u) = result.usage else {
                     return;
                 };
@@ -1966,31 +2332,26 @@ pub async fn proxy_responses(
         }
         Ok(http_response)
     } else {
-        let (chosen_entry, mut response) = select_route_with_failover(
-            routes,
-            &state.redis,
-            identity.user_id.as_deref(),
-            &mapped_model,
-            &request,
-            false,
-        )
-        .await
-        .map_err(|e| {
-            emit_gateway_error_log(
-                &state.audit,
-                &trace_id,
-                session_id.as_deref(),
-                identity.user_id.as_deref(),
-                identity.user_email.as_deref(),
-                identity.api_key_id.as_deref(),
-                identity.api_key_lineage_id.as_deref(),
-                &mapped_model,
-                None,
-                request_started_at.elapsed().as_millis() as i64,
-                &e,
-            );
-            GatewayErrorResponse::from(e)
-        })?;
+        let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
+        let (chosen_entry, mut response, sel_record) =
+            select_route_with_failover(routes, &request, &sel_ctx)
+                .await
+                .map_err(|e| {
+                    emit_gateway_error_log(
+                        &state.audit,
+                        &trace_id,
+                        session_id.as_deref(),
+                        identity.user_id.as_deref(),
+                        identity.user_email.as_deref(),
+                        identity.api_key_id.as_deref(),
+                        identity.api_key_lineage_id.as_deref(),
+                        &mapped_model,
+                        None,
+                        request_started_at.elapsed().as_millis() as i64,
+                        &e,
+                    );
+                    GatewayErrorResponse::from(e)
+                })?;
 
         // Restore original model name
         response.model = mapped_model.clone();
@@ -2040,6 +2401,8 @@ pub async fn proxy_responses(
             request_started_at.elapsed().as_millis() as i64,
             200,
         );
+
+        finalize_decision(&state, sel_record, true, None).await;
 
         let responses_format = convert_to_responses_format(&response);
         let mut http_response = Json(responses_format).into_response();

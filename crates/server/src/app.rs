@@ -191,6 +191,9 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         weight_cache,
         dynamic_config: state.dynamic_config.clone(),
         audit: state.audit.clone(),
+        health: Arc::new(think_watch_gateway::health::HealthTracker::new(
+            state.redis.clone(),
+        )),
     };
     let ai_routes = Router::new()
         .route(
@@ -589,6 +592,18 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         .route(
             "/api/admin/models/{model_id}/routes",
             get(handlers::models::list_model_routes).post(handlers::models::create_model_route),
+        )
+        .route(
+            "/api/admin/models/{model_id}/route-health",
+            get(handlers::route_observability::list_route_health),
+        )
+        .route(
+            "/api/admin/route-decisions",
+            get(handlers::route_observability::list_decisions),
+        )
+        .route(
+            "/api/admin/route-decisions/models",
+            get(handlers::route_observability::list_decision_models),
         )
         .route(
             "/api/admin/model-routes",
@@ -1073,18 +1088,94 @@ async fn load_providers_into_router(
         );
     }
 
+    // Load platform pricing once — combines with per-model
+    // input_weight/output_weight to give an effective $/token factor
+    // used by the `cost` and `latency_cost` strategies.
+    #[derive(sqlx::FromRow)]
+    struct PricingRow {
+        input_price_per_token: rust_decimal::Decimal,
+        output_price_per_token: rust_decimal::Decimal,
+    }
+    let pricing: Option<PricingRow> = sqlx::query_as::<_, PricingRow>(
+        "SELECT input_price_per_token, output_price_per_token FROM platform_pricing WHERE id = 1",
+    )
+    .fetch_optional(&state.db)
+    .await?;
+
+    // Load per-model weights + routing overrides. Strategy and
+    // affinity columns are nullable — `None` ⇒ use the global default
+    // from system_settings. Router holds the snapshot; the proxy
+    // resolves the fallback at request time.
+    #[derive(sqlx::FromRow)]
+    struct ModelRow {
+        model_id: String,
+        input_weight: rust_decimal::Decimal,
+        output_weight: rust_decimal::Decimal,
+        routing_strategy: Option<String>,
+        affinity_mode: Option<String>,
+        affinity_ttl_secs: Option<i32>,
+    }
+    let model_rows = sqlx::query_as::<_, ModelRow>(
+        r#"SELECT model_id, input_weight, output_weight,
+                  routing_strategy, affinity_mode, affinity_ttl_secs
+             FROM models"#,
+    )
+    .fetch_all(&state.db)
+    .await?;
+
+    use std::str::FromStr;
+    use think_watch_gateway::router::{AffinityMode, ModelRoutingConfig};
+    use think_watch_gateway::strategy::RoutingStrategy;
+    let mut cost_per_token_by_model: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
+    for m in &model_rows {
+        if let Some(p) = &pricing {
+            let in_w: f64 = m.input_weight.to_string().parse().unwrap_or(1.0);
+            let out_w: f64 = m.output_weight.to_string().parse().unwrap_or(1.0);
+            let in_p: f64 = p.input_price_per_token.to_string().parse().unwrap_or(0.0);
+            let out_p: f64 = p.output_price_per_token.to_string().parse().unwrap_or(0.0);
+            let cpt = in_w * in_p + out_w * out_p;
+            if cpt > 0.0 {
+                cost_per_token_by_model.insert(m.model_id.clone(), cpt);
+            }
+        }
+        let cfg = ModelRoutingConfig {
+            strategy: m
+                .routing_strategy
+                .as_deref()
+                .and_then(|s| RoutingStrategy::from_str(s).ok()),
+            affinity_mode: m
+                .affinity_mode
+                .as_deref()
+                .map(AffinityMode::parse_or_default),
+            affinity_ttl_secs: m
+                .affinity_ttl_secs
+                .and_then(|v| if v >= 0 { Some(v as u32) } else { None }),
+        };
+        // Skip storing the all-`None` config (saves a HashMap entry
+        // per model that's just inheriting global defaults).
+        if cfg.strategy.is_some() || cfg.affinity_mode.is_some() || cfg.affinity_ttl_secs.is_some()
+        {
+            router.set_model_config(&m.model_id, cfg);
+        }
+    }
+
     // Load all enabled routes from the model_routes table
     #[derive(sqlx::FromRow)]
     struct RouteRow {
+        id: uuid::Uuid,
         model_id: String,
         provider_id: uuid::Uuid,
         upstream_model: Option<String>,
         weight: i32,
         priority: i32,
+        rpm_cap: Option<i32>,
+        tpm_cap: Option<i32>,
     }
 
     let route_rows = sqlx::query_as::<_, RouteRow>(
-        r#"SELECT mr.model_id, mr.provider_id, mr.upstream_model, mr.weight, mr.priority
+        r#"SELECT mr.id, mr.model_id, mr.provider_id, mr.upstream_model,
+                  mr.weight, mr.priority, mr.rpm_cap, mr.tpm_cap
            FROM model_routes mr
            JOIN providers p ON p.id = mr.provider_id
            WHERE mr.enabled = true AND p.is_active = true AND p.deleted_at IS NULL
@@ -1104,10 +1195,18 @@ async fn load_providers_into_router(
                 RouteEntry {
                     provider: Arc::clone(dyn_provider),
                     provider_id: row.provider_id,
+                    route_id: row.id,
                     provider_name: provider_name.clone(),
                     upstream_model: row.upstream_model.clone(),
                     weight: row.weight as u32,
                     priority: row.priority as u32,
+                    cost_per_token: cost_per_token_by_model.get(&row.model_id).copied(),
+                    rpm_cap: row
+                        .rpm_cap
+                        .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
+                    tpm_cap: row
+                        .tpm_cap
+                        .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
                 },
             );
             providers_with_routes.insert(row.provider_id);
@@ -1125,10 +1224,17 @@ async fn load_providers_into_router(
                     RouteEntry {
                         provider: Arc::clone(dyn_provider),
                         provider_id: *provider_id,
+                        // Synthetic route — derive a stable id from
+                        // the provider so health/decision-log entries
+                        // cluster correctly across reloads.
+                        route_id: *provider_id,
                         provider_name: provider_name.clone(),
                         upstream_model: None,
                         weight: 100,
                         priority: 0,
+                        cost_per_token: None,
+                        rpm_cap: None,
+                        tpm_cap: None,
                     },
                 );
             }

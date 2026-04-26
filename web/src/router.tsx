@@ -51,6 +51,7 @@ const RegisterPage = lazyRouteComponent(() => import('@/routes/register'), 'Regi
 const ProvidersPage = lazyRouteComponent(() => import('@/routes/gateway/providers'), 'ProvidersPage');
 const ModelsPage = lazyRouteComponent(() => import('@/routes/gateway/models'), 'ModelsPage');
 const GatewaySecurityPage = lazyRouteComponent(() => import('@/routes/gateway/security'), 'GatewaySecurityPage');
+const RouteDecisionsPage = lazyRouteComponent(() => import('@/routes/gateway/route-decisions'), 'RouteDecisionsPage');
 const ApiKeysPage = lazyRouteComponent(() => import('@/routes/api-keys'), 'ApiKeysPage');
 const UnifiedLogsPage = lazyRouteComponent(() => import('@/routes/logs'), 'UnifiedLogsPage');
 const GuidePage = lazyRouteComponent(() => import('@/routes/guide'), 'GuidePage');
@@ -226,6 +227,15 @@ const modelsRoute = createRoute({
   validateSearch: (s: Record<string, unknown>) => ({
     import: typeof s.import === 'string' ? s.import : undefined,
   }),
+});
+
+const routeDecisionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/gateway/route-decisions',
+  component: gate(
+    RouteDecisionsPage as unknown as React.ComponentType,
+    '/gateway/route-decisions',
+  ),
 });
 
 const gatewaySecurityRoute = createRoute({
@@ -420,6 +430,7 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   providersRoute,
   modelsRoute,
+  routeDecisionsRoute,
   gatewaySecurityRoute,
   apiKeysRoute,
   logsRoute,

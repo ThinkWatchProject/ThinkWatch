@@ -86,6 +86,7 @@
     "aiGateway": "AI Gateway",
     "providers": "Providers",
     "models": "Models",
+    "routeDecisions": "Routing Log",
     "apiKeys": "API Keys",
     "mcpGateway": "MCP Gateway",
     "mcpServers": "MCP Servers",
@@ -335,6 +336,18 @@
     "rotated": "Rotated",
     "gracePeriod": "Grace Period"
   },
+  "routeDecisions": {
+    "title": "Routing decisions",
+    "subtitle": "Live tail of routing choices the gateway just made. Useful for verifying strategy / affinity / failover behaviour. Buffered in Redis (24h, 200 entries per model).",
+    "allModels": "All models",
+    "autoRefresh": "Auto-refresh",
+    "empty": "No decisions buffered yet. Send a request through the gateway and they will appear here within seconds.",
+    "ok": "OK",
+    "fail": "FAIL",
+    "affinityPrefix": "affinity",
+    "hit": "✓ hit",
+    "attempts": "{{count}} attempts"
+  },
   "models": {
     "title": "Models",
     "subtitle": "Exposed catalog of model IDs clients can call via /v1/models. Each entry has per-direction weights that scale the platform baseline for cost reports and weighted-token quotas.",
@@ -389,7 +402,10 @@
       "provider": "Provider",
       "upstreamModel": "Upstream Model",
       "weight": "Weight",
-      "priority": "Priority"
+      "priority": "Priority",
+      "health": "Health",
+      "healthHint": "Live circuit-breaker state from the rolling-window error rate. Closed = passing through, open = excluded from selection, half-open = probing.",
+      "p50": "EWMA latency"
     },
     "status": {
       "all": "All models",
@@ -409,10 +425,38 @@
       "displayName": "Display Name",
       "inputWeight": "Input weight",
       "outputWeight": "Output weight",
-      "active": "Active"
+      "active": "Active",
+      "routingStrategy": "Routing strategy",
+      "affinityMode": "Session affinity",
+      "affinityTtlSecs": "Affinity TTL (seconds)",
+      "rpmCap": "RPM cap",
+      "tpmCap": "TPM cap"
+    },
+    "useGlobalDefault": "Use global default",
+    "unlimited": "Unlimited",
+    "routingOverrideTitle": "Routing overrides",
+    "routingOverrideHint": "Override the gateway-wide defaults for this model. Leave blank to inherit from Settings → Gateway.",
+    "strategy": {
+      "priority": "Strict priority (failover only)",
+      "weighted": "Weighted random",
+      "latency": "Latency-aware (auto-tune to fast)",
+      "cost": "Cost-aware (cheapest first)",
+      "latency_cost": "Latency × cost (combined)"
+    },
+    "affinity": {
+      "none": "None — every request routes fresh",
+      "provider": "Sticky to provider (preserves prompt cache)",
+      "route": "Sticky to route (strict A/B)"
+    },
+    "health": {
+      "closed": "Healthy",
+      "open": "Tripped",
+      "half_open": "Probing"
     },
     "errors": {
-      "weightMustBePositive": "Weights must be positive numbers."
+      "weightMustBePositive": "Weights must be positive numbers.",
+      "affinityTtlRange": "Affinity TTL must be between 0 and 86400 seconds.",
+      "capMustBePositive": "RPM/TPM caps must be positive integers (or empty for unlimited)."
     },
     "batchImportHint": "Import model entries from a provider's remote catalog into your exposed models list.",
     "batchImportWarning": "Imported routes go live in /v1/models right away. Tick only the models you actually want exposed.",
@@ -1099,6 +1143,37 @@
     "signatureDrift": "Signature Drift (seconds)",
     "nonceTtl": "Nonce TTL (seconds)",
     "cacheTtl": "Cache TTL (seconds)",
+    "routingTitle": "Routing strategy",
+    "defaultRoutingStrategy": "Default routing strategy",
+    "defaultRoutingStrategyHint": "How the gateway picks among same-priority routes. Per-model overrides take precedence.",
+    "defaultAffinityMode": "Default session affinity",
+    "defaultAffinityModeHint": "Pin a user's traffic to the same provider (or route) for a window so prompt caches stay warm. Per-model overrides take precedence.",
+    "defaultAffinityTtl": "Default affinity TTL (seconds)",
+    "defaultAffinityTtlHint": "How long an affinity assignment lasts. 0 disables affinity entirely.",
+    "latencyStrategyK": "Latency aggressiveness (k)",
+    "latencyStrategyKHint": "Exponent in 1/latency^k. Higher = more aggressive bias toward fast routes. Default 2.0 (aggressive). Range 0.5–8.0.",
+    "strategy": {
+      "priority": "Strict priority (failover only)",
+      "weighted": "Weighted random",
+      "latency": "Latency-aware (auto-tune to fast)",
+      "cost": "Cost-aware (cheapest first)",
+      "latency_cost": "Latency × cost (combined)"
+    },
+    "affinity": {
+      "none": "None",
+      "provider": "Sticky to provider",
+      "route": "Sticky to route"
+    },
+    "cbTitle": "Circuit breaker",
+    "cbEnabled": "Enable circuit breaker",
+    "cbErrorPct": "Error rate threshold (%)",
+    "cbErrorPctHint": "Trip routes whose rolling-window error rate is at least this high.",
+    "cbMinSamples": "Min samples in window",
+    "cbMinSamplesHint": "Don't trip until the window has at least this many samples — avoids tripping on a handful of unlucky requests.",
+    "cbWindowSecs": "Window length (seconds)",
+    "cbWindowSecsHint": "Rolling window over which the error rate is computed.",
+    "cbOpenSecs": "Open duration (seconds)",
+    "cbOpenSecsHint": "How long a tripped (open) circuit stays open before transitioning to half-open (probe) state.",
     "mcpStoreTitle": "MCP Store",
     "registryUrl": "Template Registry URL",
     "registryUrlHint": "Remote JSON registry for syncing MCP store templates. Leave empty to use built-in templates only.",

@@ -78,6 +78,12 @@ const DYNAMIC_ENUMS = {
   'analyticsCosts.group.${_}': ['model', 'user', 'cost_center', 'provider'],
   'dashboard.range.${_}': ['24h', '7d', '30d'],
   'models.costPreview.${_}': ['input', 'output'],
+  // Routing strategy / affinity / circuit-breaker enums — kept in
+  // lockstep with crates/gateway/src/strategy.rs::RoutingStrategy
+  // and crates/gateway/src/router.rs::AffinityMode.
+  'models.strategy.${_}': ['priority', 'weighted', 'latency', 'cost', 'latency_cost'],
+  'models.affinity.${_}': ['none', 'provider', 'route'],
+  'models.health.${_}': ['closed', 'open', 'half_open'],
   // describeApiError in src/lib/api.ts builds `errors.byStatus.${n}` /
   // `errors.byType.${t}` off the wire. Types come from AppError in
   // crates/common/src/errors.rs — keep both arrays in sync with it.

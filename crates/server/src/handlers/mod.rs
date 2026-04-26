@@ -25,6 +25,7 @@ pub mod models;
 pub mod platform_pricing;
 pub mod providers;
 pub mod roles;
+pub mod route_observability;
 pub(crate) mod serde_util;
 pub mod setup;
 pub mod slo;

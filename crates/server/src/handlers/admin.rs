@@ -2113,6 +2113,94 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
+        // ---- Routing strategy + circuit-breaker defaults ----
+        "gateway.default_routing_strategy" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
+            if !["priority", "weighted", "latency", "cost", "latency_cost"].contains(&s) {
+                return Err(AppError::BadRequest(
+                    "default_routing_strategy must be one of: priority, weighted, latency, cost, latency_cost".into(),
+                ));
+            }
+        }
+        "gateway.default_affinity_mode" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
+            if !["none", "provider", "route"].contains(&s) {
+                return Err(AppError::BadRequest(
+                    "default_affinity_mode must be one of: none, provider, route".into(),
+                ));
+            }
+        }
+        "gateway.default_affinity_ttl_secs" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            if !(0..=86400).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "default_affinity_ttl_secs must be between 0 and 86400".into(),
+                ));
+            }
+        }
+        "gateway.latency_strategy_k" => {
+            let v = value
+                .as_f64()
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a number")))?;
+            if !(0.5..=8.0).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "latency_strategy_k must be between 0.5 and 8.0".into(),
+                ));
+            }
+        }
+        "gateway.cb_enabled" => {
+            if !value.is_boolean() {
+                return Err(AppError::BadRequest(format!("{key} must be a boolean")));
+            }
+        }
+        "gateway.cb_error_pct" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            if !(1..=100).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "cb_error_pct must be between 1 and 100".into(),
+                ));
+            }
+        }
+        "gateway.cb_min_samples" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            if !(1..=100_000).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "cb_min_samples must be between 1 and 100000".into(),
+                ));
+            }
+        }
+        "gateway.cb_window_secs" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            if !(5..=3600).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "cb_window_secs must be between 5 and 3600".into(),
+                ));
+            }
+        }
+        "gateway.cb_open_secs" => {
+            let v = value
+                .as_i64()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+            if !(1..=3600).contains(&v) {
+                return Err(AppError::BadRequest(
+                    "cb_open_secs must be between 1 and 3600".into(),
+                ));
+            }
+        }
+
         _ => {
             return Err(AppError::BadRequest(format!("Unknown setting: {key}")));
         }

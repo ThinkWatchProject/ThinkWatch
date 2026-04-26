@@ -103,6 +103,16 @@ export function SettingsPage() {
   const [cacheTtl, setCacheTtl] = useState(0);
   const [requestTimeout, setRequestTimeout] = useState(30);
   const [bodyLimit, setBodyLimit] = useState(1048576);
+  // Routing strategy + circuit-breaker tunables (gateway.* keys).
+  const [defaultRoutingStrategy, setDefaultRoutingStrategy] = useState('weighted');
+  const [defaultAffinityMode, setDefaultAffinityMode] = useState('provider');
+  const [defaultAffinityTtlSecs, setDefaultAffinityTtlSecs] = useState(300);
+  const [latencyStrategyK, setLatencyStrategyK] = useState(2.0);
+  const [cbEnabled, setCbEnabled] = useState(true);
+  const [cbErrorPct, setCbErrorPct] = useState(50);
+  const [cbMinSamples, setCbMinSamples] = useState(10);
+  const [cbWindowSecs, setCbWindowSecs] = useState(60);
+  const [cbOpenSecs, setCbOpenSecs] = useState(30);
   // Security
   const [rateLimitFailClosed, setRateLimitFailClosed] = useState(false);
   const [clientIpSource, setClientIpSource] = useState('xff');
@@ -162,6 +172,15 @@ export function SettingsPage() {
     setCacheTtl(num(getSettingValue(data, 'gateway', 'cache_ttl_secs'), 3600));
     setRequestTimeout(num(getSettingValue(data, 'gateway', 'request_timeout_secs'), 120));
     setBodyLimit(num(getSettingValue(data, 'gateway', 'body_limit_bytes'), 10485760));
+    setDefaultRoutingStrategy(str(getSettingValue(data, 'gateway', 'default_routing_strategy'), 'weighted'));
+    setDefaultAffinityMode(str(getSettingValue(data, 'gateway', 'default_affinity_mode'), 'provider'));
+    setDefaultAffinityTtlSecs(num(getSettingValue(data, 'gateway', 'default_affinity_ttl_secs'), 300));
+    setLatencyStrategyK(Number(getSettingValue(data, 'gateway', 'latency_strategy_k')) || 2.0);
+    setCbEnabled(getSettingValue(data, 'gateway', 'cb_enabled') !== false);
+    setCbErrorPct(num(getSettingValue(data, 'gateway', 'cb_error_pct'), 50));
+    setCbMinSamples(num(getSettingValue(data, 'gateway', 'cb_min_samples'), 10));
+    setCbWindowSecs(num(getSettingValue(data, 'gateway', 'cb_window_secs'), 60));
+    setCbOpenSecs(num(getSettingValue(data, 'gateway', 'cb_open_secs'), 30));
 
     setClientIpSource(str(getSettingValue(data, 'security', 'client_ip_source'), 'xff'));
     setClientIpXffPosition(str(getSettingValue(data, 'security', 'client_ip_xff_position'), 'left'));
@@ -249,6 +268,16 @@ export function SettingsPage() {
   const mcpCacheTtlSave = useFieldAutosave({ value: mcpCacheTtl, isLoaded, persist: (v) => patchOne('mcp.cache_ttl_secs', v) });
   // Gateway
   const cacheTtlSave = useFieldAutosave({ value: cacheTtl, isLoaded, persist: (v) => patchOne('gateway.cache_ttl_secs', v) });
+  // Routing strategy + circuit-breaker
+  const defaultRoutingStrategySave = useFieldAutosave({ value: defaultRoutingStrategy, isLoaded, persist: (v) => patchOne('gateway.default_routing_strategy', v), debounceMs: 0 });
+  const defaultAffinityModeSave = useFieldAutosave({ value: defaultAffinityMode, isLoaded, persist: (v) => patchOne('gateway.default_affinity_mode', v), debounceMs: 0 });
+  const defaultAffinityTtlSave = useFieldAutosave({ value: defaultAffinityTtlSecs, isLoaded, persist: (v) => patchOne('gateway.default_affinity_ttl_secs', v) });
+  const latencyStrategyKSave = useFieldAutosave({ value: latencyStrategyK, isLoaded, persist: (v) => patchOne('gateway.latency_strategy_k', v) });
+  const cbEnabledSave = useFieldAutosave({ value: cbEnabled, isLoaded, persist: (v) => patchOne('gateway.cb_enabled', v), debounceMs: 0 });
+  const cbErrorPctSave = useFieldAutosave({ value: cbErrorPct, isLoaded, persist: (v) => patchOne('gateway.cb_error_pct', v) });
+  const cbMinSamplesSave = useFieldAutosave({ value: cbMinSamples, isLoaded, persist: (v) => patchOne('gateway.cb_min_samples', v) });
+  const cbWindowSecsSave = useFieldAutosave({ value: cbWindowSecs, isLoaded, persist: (v) => patchOne('gateway.cb_window_secs', v) });
+  const cbOpenSecsSave = useFieldAutosave({ value: cbOpenSecs, isLoaded, persist: (v) => patchOne('gateway.cb_open_secs', v) });
   // API Keys
   const defaultExpirySave = useFieldAutosave({ value: defaultExpiry, isLoaded, persist: (v) => patchOne('api_keys.default_expiry_days', v) });
   const inactivityTimeoutSave = useFieldAutosave({ value: inactivityTimeout, isLoaded, persist: (v) => patchOne('api_keys.inactivity_timeout_days', v) });
@@ -664,6 +693,134 @@ export function SettingsPage() {
                   readOnly
                   hint={t('settings.requiresRestart')}
                 />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Routing strategy: gateway-wide defaults that per-model
+              configs override. Touching these flips the strategy for
+              every model that hasn't set its own. */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t('settings.routingTitle')}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="grid gap-4 sm:grid-cols-2 max-w-2xl">
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-sm">{t('settings.defaultRoutingStrategy')}</Label>
+                    <SaveIndicator state={defaultRoutingStrategySave.state} error={defaultRoutingStrategySave.error} />
+                  </div>
+                  <Select value={defaultRoutingStrategy} onValueChange={setDefaultRoutingStrategy}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="priority">{t('settings.strategy.priority')}</SelectItem>
+                      <SelectItem value="weighted">{t('settings.strategy.weighted')}</SelectItem>
+                      <SelectItem value="latency">{t('settings.strategy.latency')}</SelectItem>
+                      <SelectItem value="cost">{t('settings.strategy.cost')}</SelectItem>
+                      <SelectItem value="latency_cost">{t('settings.strategy.latency_cost')}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">{t('settings.defaultRoutingStrategyHint')}</p>
+                </div>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-sm">{t('settings.defaultAffinityMode')}</Label>
+                    <SaveIndicator state={defaultAffinityModeSave.state} error={defaultAffinityModeSave.error} />
+                  </div>
+                  <Select value={defaultAffinityMode} onValueChange={setDefaultAffinityMode}>
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="none">{t('settings.affinity.none')}</SelectItem>
+                      <SelectItem value="provider">{t('settings.affinity.provider')}</SelectItem>
+                      <SelectItem value="route">{t('settings.affinity.route')}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                  <p className="text-xs text-muted-foreground">{t('settings.defaultAffinityModeHint')}</p>
+                </div>
+                <NumberField
+                  label={t('settings.defaultAffinityTtl')}
+                  value={defaultAffinityTtlSecs}
+                  onChange={setDefaultAffinityTtlSecs}
+                  min={0}
+                  max={86400}
+                  hint={t('settings.defaultAffinityTtlHint')}
+                  indicator={<SaveIndicator state={defaultAffinityTtlSave.state} error={defaultAffinityTtlSave.error} />}
+                />
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between gap-2">
+                    <Label className="text-sm">{t('settings.latencyStrategyK')}</Label>
+                    <SaveIndicator state={latencyStrategyKSave.state} error={latencyStrategyKSave.error} />
+                  </div>
+                  <Input
+                    type="number"
+                    min={0.5}
+                    max={8}
+                    step={0.5}
+                    value={latencyStrategyK}
+                    onChange={(e) => setLatencyStrategyK(Number(e.target.value) || 0)}
+                  />
+                  <p className="text-xs text-muted-foreground">{t('settings.latencyStrategyKHint')}</p>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Circuit breaker: trip routes whose recent error rate
+              crosses the threshold so they stop receiving traffic
+              until the cooldown elapses. Disabling skips the trip
+              check entirely (routes always selectable). */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-base">{t('settings.cbTitle')}</CardTitle>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4 max-w-2xl">
+                <div className="flex items-center gap-2">
+                  <Switch checked={cbEnabled} onCheckedChange={setCbEnabled} id="cb-enabled" />
+                  <Label htmlFor="cb-enabled" className="text-sm">
+                    {t('settings.cbEnabled')}
+                  </Label>
+                  <SaveIndicator state={cbEnabledSave.state} error={cbEnabledSave.error} />
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <NumberField
+                    label={t('settings.cbErrorPct')}
+                    value={cbErrorPct}
+                    onChange={setCbErrorPct}
+                    min={1}
+                    max={100}
+                    hint={t('settings.cbErrorPctHint')}
+                    indicator={<SaveIndicator state={cbErrorPctSave.state} error={cbErrorPctSave.error} />}
+                  />
+                  <NumberField
+                    label={t('settings.cbMinSamples')}
+                    value={cbMinSamples}
+                    onChange={setCbMinSamples}
+                    min={1}
+                    max={100000}
+                    hint={t('settings.cbMinSamplesHint')}
+                    indicator={<SaveIndicator state={cbMinSamplesSave.state} error={cbMinSamplesSave.error} />}
+                  />
+                  <NumberField
+                    label={t('settings.cbWindowSecs')}
+                    value={cbWindowSecs}
+                    onChange={setCbWindowSecs}
+                    min={5}
+                    max={3600}
+                    hint={t('settings.cbWindowSecsHint')}
+                    indicator={<SaveIndicator state={cbWindowSecsSave.state} error={cbWindowSecsSave.error} />}
+                  />
+                  <NumberField
+                    label={t('settings.cbOpenSecs')}
+                    value={cbOpenSecs}
+                    onChange={setCbOpenSecs}
+                    min={1}
+                    max={3600}
+                    hint={t('settings.cbOpenSecsHint')}
+                    indicator={<SaveIndicator state={cbOpenSecsSave.state} error={cbOpenSecsSave.error} />}
+                  />
+                </div>
               </div>
             </CardContent>
           </Card>

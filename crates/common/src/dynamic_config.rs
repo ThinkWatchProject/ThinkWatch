@@ -279,12 +279,15 @@ dc_getters_bool! {
     rate_limit_fail_closed,  "security.rate_limit_fail_closed", false;
     allow_registration,      "auth.allow_registration",         false;
     oidc_enabled,            "oidc.enabled",                    false;
+    cb_enabled,              "gateway.cb_enabled",              true;
 }
 
 dc_getters_string! {
-    site_name,               "setup.site_name",                   "ThinkWatch";
-    client_ip_source,        "security.client_ip_source",         "connection";
-    client_ip_xff_position,  "security.client_ip_xff_position",   "left";
+    site_name,                "setup.site_name",                   "ThinkWatch";
+    client_ip_source,         "security.client_ip_source",         "connection";
+    client_ip_xff_position,   "security.client_ip_xff_position",   "left";
+    default_routing_strategy, "gateway.default_routing_strategy",  "weighted";
+    default_affinity_mode,    "gateway.default_affinity_mode",     "provider";
 }
 
 dc_getters_u64_from_i64! {
@@ -341,6 +344,57 @@ impl DynamicConfig {
             .await
             .unwrap_or(300);
         raw.max(5) as u64
+    }
+
+    /// Default affinity TTL for routes that don't override. Clamped
+    /// to [0, 86400]. Zero means "no affinity" — the request always
+    /// runs through the strategy.
+    pub async fn default_affinity_ttl_secs(&self) -> i64 {
+        let raw = self
+            .get_i64("gateway.default_affinity_ttl_secs")
+            .await
+            .unwrap_or(300);
+        raw.clamp(0, 86400)
+    }
+
+    /// Exponent for the `latency` strategy: higher = more aggressive
+    /// (heavier penalty on slow routes). Default 2.0 (aggressive).
+    /// Clamped to [0.5, 8.0] so a typo can't make weights collapse
+    /// into a single route or evaporate.
+    pub async fn latency_strategy_k(&self) -> f64 {
+        let raw = self.get("gateway.latency_strategy_k").await;
+        let parsed = raw
+            .as_ref()
+            .and_then(|v| {
+                v.as_f64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
+            .unwrap_or(2.0);
+        parsed.clamp(0.5, 8.0)
+    }
+
+    /// Circuit-breaker error percentage threshold (1-100).
+    pub async fn cb_error_pct(&self) -> u32 {
+        let raw = self.get_i64("gateway.cb_error_pct").await.unwrap_or(50);
+        raw.clamp(1, 100) as u32
+    }
+
+    /// Minimum sample count in the window before the breaker can trip.
+    pub async fn cb_min_samples(&self) -> u32 {
+        let raw = self.get_i64("gateway.cb_min_samples").await.unwrap_or(10);
+        raw.clamp(1, 100_000) as u32
+    }
+
+    /// Rolling-window length (seconds) for breaker error-rate.
+    pub async fn cb_window_secs(&self) -> u32 {
+        let raw = self.get_i64("gateway.cb_window_secs").await.unwrap_or(60);
+        raw.clamp(5, 3600) as u32
+    }
+
+    /// How long a tripped circuit stays open before half-open probe.
+    pub async fn cb_open_secs(&self) -> u32 {
+        let raw = self.get_i64("gateway.cb_open_secs").await.unwrap_or(30);
+        raw.clamp(1, 3600) as u32
     }
 
     /// TTL for client-facing MCP sessions (in seconds). Clamped to [60, 86400].

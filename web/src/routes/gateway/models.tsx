@@ -75,6 +75,44 @@ interface ModelRow {
   /// Joined server-side so the row can render the column without
   /// fetching per-row routes.
   providers: string[];
+  /// Per-model routing override; null/undefined ⇒ use global default.
+  routing_strategy?: RoutingStrategy | null;
+  affinity_mode?: AffinityMode | null;
+  affinity_ttl_secs?: number | null;
+}
+
+export type RoutingStrategy = 'priority' | 'weighted' | 'latency' | 'cost' | 'latency_cost';
+export type AffinityMode = 'none' | 'provider' | 'route';
+
+export const ROUTING_STRATEGIES: RoutingStrategy[] = [
+  'priority',
+  'weighted',
+  'latency',
+  'cost',
+  'latency_cost',
+];
+
+export const AFFINITY_MODES: AffinityMode[] = ['none', 'provider', 'route'];
+
+export type BreakerState = 'closed' | 'open' | 'half_open';
+
+export interface RouteHealth {
+  state: BreakerState;
+  total: number;
+  errors: number;
+  error_pct: number;
+  ewma_latency_ms?: number | null;
+}
+
+export interface RouteHealthEntry {
+  route_id: string;
+  provider_id: string;
+  provider_name: string;
+  upstream_model: string | null;
+  priority: number;
+  weight: number;
+  enabled: boolean;
+  health: RouteHealth;
 }
 
 type ModelStatus = 'active' | 'disabled' | 'unrouted';
@@ -100,6 +138,8 @@ interface RouteRow {
   weight: number;
   priority: number;
   enabled: boolean;
+  rpm_cap?: number | null;
+  tpm_cap?: number | null;
 }
 
 // `Provider` reused from provider-types so models.tsx and providers.tsx
@@ -113,6 +153,11 @@ interface ModelFormState {
   display_name: string;
   input_weight: string;
   output_weight: string;
+  /// Empty string = inherit global default. Form serializes that
+  /// to `null` on submit so the backend stores the override as NULL.
+  routing_strategy: '' | RoutingStrategy;
+  affinity_mode: '' | AffinityMode;
+  affinity_ttl_secs: string;
 }
 
 interface RouteFormState {
@@ -121,6 +166,9 @@ interface RouteFormState {
   weight: string;
   priority: string;
   enabled: boolean;
+  /// Empty string ⇒ unlimited (NULL).
+  rpm_cap: string;
+  tpm_cap: string;
 }
 
 const emptyModelForm: ModelFormState = {
@@ -128,6 +176,9 @@ const emptyModelForm: ModelFormState = {
   display_name: '',
   input_weight: '1.0',
   output_weight: '1.0',
+  routing_strategy: '',
+  affinity_mode: '',
+  affinity_ttl_secs: '',
 };
 
 const emptyRouteForm: RouteFormState = {
@@ -136,6 +187,8 @@ const emptyRouteForm: RouteFormState = {
   weight: '100',
   priority: '0',
   enabled: true,
+  rpm_cap: '',
+  tpm_cap: '',
 };
 
 /* ---------- component ---------- */
@@ -181,6 +234,11 @@ export function ModelsPage() {
   const [detailModelId, setDetailModelId] = useState<string | null>(null);
   const [routesByModel, setRoutesByModel] = useState<Record<string, RouteRow[]>>({});
   const [routesLoading, setRoutesLoading] = useState<Set<string>>(new Set());
+  /// Per-route live health (state + EWMA latency), keyed by route_id.
+  /// Only populated while the detail drawer is open and refreshed on a
+  /// 5s interval so the badge / latency column reflects what the
+  /// breaker is actually using to make selection decisions.
+  const [routeHealth, setRouteHealth] = useState<Record<string, RouteHealthEntry>>({});
 
   // Model create/edit
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -368,6 +426,36 @@ export function ModelsPage() {
     if (!routesByModel[modelId]) void fetchRoutesFor(modelId);
   };
 
+  // Poll route-health for the open model on a 5s cadence. The
+  // tracker is the same Redis-backed view the breaker reads at
+  // selection time, so the badges + EWMA column reflect what the
+  // gateway is actually doing.
+  useEffect(() => {
+    if (!detailModelId) return;
+    let cancelled = false;
+    const fetchOnce = async () => {
+      try {
+        const list = await api<RouteHealthEntry[]>(
+          `/api/admin/models/${encodeURIComponent(detailModelId)}/route-health`,
+        );
+        if (cancelled) return;
+        const m: Record<string, RouteHealthEntry> = {};
+        for (const e of list) m[e.route_id] = e;
+        setRouteHealth(m);
+      } catch {
+        // Silent — health is observability only.
+      }
+    };
+    void fetchOnce();
+    const id = setInterval(() => {
+      void fetchOnce();
+    }, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [detailModelId]);
+
   /* ---------- model CRUD ---------- */
 
   const openCreateModel = () => {
@@ -384,6 +472,10 @@ export function ModelsPage() {
       display_name: m.display_name,
       input_weight: m.input_weight,
       output_weight: m.output_weight,
+      routing_strategy: (m.routing_strategy ?? '') as ModelFormState['routing_strategy'],
+      affinity_mode: (m.affinity_mode ?? '') as ModelFormState['affinity_mode'],
+      affinity_ttl_secs:
+        m.affinity_ttl_secs == null ? '' : String(m.affinity_ttl_secs),
     });
     setModelFormError('');
     setModelDialogOpen(true);
@@ -398,10 +490,21 @@ export function ModelsPage() {
       setModelFormError(t('models.errors.weightMustBePositive'));
       return;
     }
+    // Routing overrides: empty string in the form ⇒ JSON null on the
+    // wire ⇒ "inherit global default" (PATCH semantics).
+    const ttl = modelForm.affinity_ttl_secs.trim();
+    const ttlNum = ttl ? Number(ttl) : null;
+    if (ttlNum != null && (!Number.isFinite(ttlNum) || ttlNum < 0 || ttlNum > 86400)) {
+      setModelFormError(t('models.errors.affinityTtlRange'));
+      return;
+    }
     const body = {
       display_name: modelForm.display_name.trim() || modelForm.model_id.trim(),
       input_weight: inW,
       output_weight: outW,
+      routing_strategy: modelForm.routing_strategy === '' ? null : modelForm.routing_strategy,
+      affinity_mode: modelForm.affinity_mode === '' ? null : modelForm.affinity_mode,
+      affinity_ttl_secs: ttlNum,
     };
     setModelSaving(true);
     try {
@@ -492,6 +595,8 @@ export function ModelsPage() {
       weight: String(route.weight),
       priority: String(route.priority),
       enabled: route.enabled,
+      rpm_cap: route.rpm_cap == null ? '' : String(route.rpm_cap),
+      tpm_cap: route.tpm_cap == null ? '' : String(route.tpm_cap),
     });
     setRouteFormError('');
     setRouteDialogOpen(true);
@@ -505,6 +610,20 @@ export function ModelsPage() {
       setRouteFormError(t('models.weight') + ' must be >= 0');
       return;
     }
+    // Empty cap → null (unlimited). Non-empty must be a positive integer.
+    const parseCap = (s: string): number | null | 'invalid' => {
+      const v = s.trim();
+      if (!v) return null;
+      const n = Number(v);
+      if (!Number.isFinite(n) || n <= 0) return 'invalid';
+      return Math.floor(n);
+    };
+    const rpm = parseCap(routeForm.rpm_cap);
+    const tpm = parseCap(routeForm.tpm_cap);
+    if (rpm === 'invalid' || tpm === 'invalid') {
+      setRouteFormError(t('models.errors.capMustBePositive'));
+      return;
+    }
     const upstream = routeForm.upstream_model.trim() || null;
     setRouteSaving(true);
     try {
@@ -514,6 +633,8 @@ export function ModelsPage() {
           weight,
           priority: Number(routeForm.priority),
           enabled: routeForm.enabled,
+          rpm_cap: rpm,
+          tpm_cap: tpm,
         });
         toast.success(t('models.toast.updated'));
         await fetchRoutesFor(editingRoute.model_id);
@@ -523,13 +644,21 @@ export function ModelsPage() {
           setRouteSaving(false);
           return;
         }
-        await apiPost(`/api/admin/models/${routeTargetModel.model_id}/routes`, {
-          provider_id: routeForm.provider_id,
-          upstream_model: upstream,
-          weight,
-          priority: Number(routeForm.priority),
-          enabled: routeForm.enabled,
-        });
+        // model_id may contain '/' (e.g. `deepseek/deepseek-v4-flash`),
+        // so encode before injecting into the URL or axum's router will
+        // see four path segments and 404.
+        await apiPost(
+          `/api/admin/models/${encodeURIComponent(routeTargetModel.model_id)}/routes`,
+          {
+            provider_id: routeForm.provider_id,
+            upstream_model: upstream,
+            weight,
+            priority: Number(routeForm.priority),
+            enabled: routeForm.enabled,
+            rpm_cap: rpm,
+            tpm_cap: tpm,
+          },
+        );
         toast.success(t('models.routeAdded'));
         await fetchRoutesFor(routeTargetModel.model_id);
       }
@@ -1013,6 +1142,82 @@ export function ModelsPage() {
                   />
                 </div>
               </div>
+              {/* Routing strategy + affinity overrides. Empty = inherit
+                  the global default from system_settings.gateway.*.
+                  Only useful when an operator wants to diverge from the
+                  fleet-wide policy for one model. */}
+              <div className="space-y-2 border-t pt-4">
+                <Label className="text-sm font-medium">
+                  {t('models.routingOverrideTitle')}
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  {t('models.routingOverrideHint')}
+                </p>
+              </div>
+              <div className="grid grid-cols-1 gap-3">
+                <div className="space-y-2">
+                  <Label>{t('models.field.routingStrategy')}</Label>
+                  <Select
+                    value={modelForm.routing_strategy === '' ? 'inherit' : modelForm.routing_strategy}
+                    onValueChange={(v) =>
+                      setModelForm({
+                        ...modelForm,
+                        routing_strategy: v === 'inherit' ? '' : (v as RoutingStrategy),
+                      })
+                    }
+                  >
+                    <SelectTrigger>
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="inherit">{t('models.useGlobalDefault')}</SelectItem>
+                      {ROUTING_STRATEGIES.map((s) => (
+                        <SelectItem key={s} value={s}>
+                          {t(`models.strategy.${s}`)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="space-y-2">
+                    <Label>{t('models.field.affinityMode')}</Label>
+                    <Select
+                      value={modelForm.affinity_mode === '' ? 'inherit' : modelForm.affinity_mode}
+                      onValueChange={(v) =>
+                        setModelForm({
+                          ...modelForm,
+                          affinity_mode: v === 'inherit' ? '' : (v as AffinityMode),
+                        })
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="inherit">{t('models.useGlobalDefault')}</SelectItem>
+                        {AFFINITY_MODES.map((m) => (
+                          <SelectItem key={m} value={m}>
+                            {t(`models.affinity.${m}`)}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="affinity_ttl">{t('models.field.affinityTtlSecs')}</Label>
+                    <Input
+                      id="affinity_ttl"
+                      value={modelForm.affinity_ttl_secs}
+                      onChange={(e) =>
+                        setModelForm({ ...modelForm, affinity_ttl_secs: e.target.value })
+                      }
+                      placeholder={t('models.useGlobalDefault')}
+                      inputMode="numeric"
+                    />
+                  </div>
+                </div>
+              </div>
               {modelFormError && (
                 <Alert variant="destructive">
                   <AlertCircle className="h-4 w-4" />
@@ -1173,6 +1378,31 @@ export function ModelsPage() {
                   onCheckedChange={(v) => setRouteForm({ ...routeForm, enabled: v })}
                 />
                 <Label htmlFor="route_enabled">{t('models.field.active')}</Label>
+              </div>
+              {/* Per-route capacity caps. Empty = unlimited; both
+                  enforced via the same sliding-window engine that
+                  drives api-key/user RPM/TPM, just with a route key. */}
+              <div className="grid grid-cols-2 gap-3">
+                <div className="space-y-2">
+                  <Label htmlFor="rpm_cap">{t('models.field.rpmCap')}</Label>
+                  <Input
+                    id="rpm_cap"
+                    value={routeForm.rpm_cap}
+                    onChange={(e) => setRouteForm({ ...routeForm, rpm_cap: e.target.value })}
+                    placeholder={t('models.unlimited')}
+                    inputMode="numeric"
+                  />
+                </div>
+                <div className="space-y-2">
+                  <Label htmlFor="tpm_cap">{t('models.field.tpmCap')}</Label>
+                  <Input
+                    id="tpm_cap"
+                    value={routeForm.tpm_cap}
+                    onChange={(e) => setRouteForm({ ...routeForm, tpm_cap: e.target.value })}
+                    placeholder={t('models.unlimited')}
+                    inputMode="numeric"
+                  />
+                </div>
               </div>
               {routeFormError && (
                 <Alert variant="destructive">
@@ -1614,6 +1844,15 @@ export function ModelsPage() {
                                 <th className="px-2 py-1.5 font-medium text-center">
                                   {t('models.col.active')}
                                 </th>
+                                <th
+                                  className="px-2 py-1.5 font-medium text-center"
+                                  title={t('models.col.healthHint')}
+                                >
+                                  {t('models.col.health')}
+                                </th>
+                                <th className="px-2 py-1.5 font-medium text-right">
+                                  {t('models.col.p50')}
+                                </th>
                                 <th className="w-16" />
                               </tr>
                             </thead>
@@ -1653,6 +1892,33 @@ export function ModelsPage() {
                                         {t('common.no')}
                                       </Badge>
                                     )}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-center">
+                                    {(() => {
+                                      const h = routeHealth[r.id]?.health;
+                                      const state = h?.state ?? 'closed';
+                                      const variant =
+                                        state === 'closed'
+                                          ? 'outline'
+                                          : state === 'half_open'
+                                            ? 'secondary'
+                                            : 'destructive';
+                                      return (
+                                        <Badge variant={variant} className="text-[10px]">
+                                          {t(`models.health.${state}`)}
+                                        </Badge>
+                                      );
+                                    })()}
+                                  </td>
+                                  <td className="px-2 py-1.5 text-right font-mono text-[11px] tabular-nums">
+                                    {(() => {
+                                      const ewma = routeHealth[r.id]?.health?.ewma_latency_ms;
+                                      return ewma == null ? (
+                                        <span className="text-muted-foreground">—</span>
+                                      ) : (
+                                        <span>{ewma.toFixed(0)} ms</span>
+                                      );
+                                    })()}
                                   </td>
                                   <td className="px-2 py-1.5 text-right whitespace-nowrap">
                                     <Button

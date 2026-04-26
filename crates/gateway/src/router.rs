@@ -1,4 +1,5 @@
 use crate::providers::DynAiProvider;
+use crate::strategy::RoutingStrategy;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -9,10 +10,10 @@ use uuid::Uuid;
 /// traffic-split control: two routes at the same `priority` with
 /// weight `(50, 50)` give a 1:1 split, `(90, 10)` gives a 90 / 10
 /// canary, `(0, 100)` shadows traffic off the route entirely without
-/// removing the row. The weighted-random pick happens in
-/// `pick_weighted` (see proxy.rs); both branches share the same
-/// failover-on-error behaviour, so an A/B variant that fails 5xx
-/// still falls through to its sibling instead of erroring.
+/// removing the row. Selection delegates to `strategy::compute_weights`
+/// (see proxy.rs); failover-on-error behaviour is shared across all
+/// strategies, so an A/B variant that fails 5xx still falls through
+/// to its sibling instead of erroring.
 ///
 /// To run a controlled experiment between two upstream models on
 /// the same provider, register two routes for the same `model_id`
@@ -20,6 +21,11 @@ use uuid::Uuid;
 pub struct RouteEntry {
     pub provider: Arc<dyn DynAiProvider>,
     pub provider_id: Uuid,
+    /// `model_routes.id` — stable identifier used by the health
+    /// tracker (Redis keys), the decision log, and route-mode
+    /// affinity. Each `(model_id, provider_id, upstream_model)`
+    /// triple has exactly one route_id per the unique constraint.
+    pub route_id: Uuid,
     /// Snapshot of `providers.name` at route-load time. We carry this
     /// alongside `provider_id` so the post-request `gateway_logs.provider`
     /// column gets a human-readable string without a second DB hit per
@@ -29,20 +35,76 @@ pub struct RouteEntry {
     pub upstream_model: Option<String>,
     pub weight: u32,
     pub priority: u32,
+    /// Effective $/token for this route. Computed once at router-load
+    /// time from the catalog model's `input_weight`/`output_weight`
+    /// times `platform_pricing`. Used by the `cost` and `latency_cost`
+    /// strategies. `None` ⇒ "couldn't compute" (e.g. pricing row
+    /// missing); the cost factor is treated as neutral.
+    pub cost_per_token: Option<f64>,
+    /// Per-route RPM cap (NULL in DB ⇒ None ⇒ unlimited).
+    pub rpm_cap: Option<u32>,
+    /// Per-route TPM cap.
+    pub tpm_cap: Option<u32>,
+}
+
+/// Per-model overrides for routing strategy / affinity. `None` on
+/// any field ⇒ fall through to the gateway-wide default
+/// (`gateway.default_*` in system_settings).
+#[derive(Debug, Clone, Default)]
+pub struct ModelRoutingConfig {
+    pub strategy: Option<RoutingStrategy>,
+    pub affinity_mode: Option<AffinityMode>,
+    pub affinity_ttl_secs: Option<u32>,
+}
+
+/// Affinity scope — see `proxy.rs` for the runtime semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AffinityMode {
+    /// Stateless. Strategy decides every request.
+    None,
+    /// Stick to the same provider — preserves prompt-cache hit rate
+    /// when one provider serves multiple upstream models.
+    #[default]
+    Provider,
+    /// Stick to the same `route_id` — strict A/B adherence within a
+    /// session even when the same provider has multiple routes.
+    Route,
+}
+
+impl AffinityMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Provider => "provider",
+            Self::Route => "route",
+        }
+    }
+
+    pub fn parse_or_default(s: &str) -> Self {
+        match s {
+            "none" => Self::None,
+            "route" => Self::Route,
+            _ => Self::Provider,
+        }
+    }
 }
 
 /// Routes model names to AI provider implementations with multi-provider
-/// failover and weighted traffic splitting.
+/// failover and strategy-driven traffic splitting.
 ///
 /// Each model can have multiple routes at different priority levels.
-/// Within a priority group, routes are selected by weighted random.
-/// If all routes in a group fail, the next priority group is tried.
+/// Within a priority group, routes are selected by the model's
+/// configured strategy (default: weighted random). If all routes in a
+/// group fail, the next priority group is tried.
 ///
 /// Also supports prefix-match as a fallback (e.g. `"gpt-" -> OpenAiProvider`)
 /// for providers that have no explicit model routes configured.
 pub struct ModelRouter {
     /// Exact model name -> list of routes sorted by (priority ASC, weight DESC).
     routes: HashMap<String, Vec<RouteEntry>>,
+    /// Per-model routing overrides. Lookup falls through to global
+    /// defaults (`gateway.default_*` in system_settings) when absent.
+    configs: HashMap<String, ModelRoutingConfig>,
 }
 
 impl Default for ModelRouter {
@@ -55,7 +117,38 @@ impl ModelRouter {
     pub fn new() -> Self {
         Self {
             routes: HashMap::new(),
+            configs: HashMap::new(),
         }
+    }
+
+    /// Set per-model routing config (strategy / affinity overrides).
+    /// Called once per model at router-load time, after all routes
+    /// have been registered.
+    pub fn set_model_config(&mut self, model_id: &str, cfg: ModelRoutingConfig) {
+        self.configs.insert(model_id.to_string(), cfg);
+    }
+
+    /// Look up the routing config for a model. Returns the empty
+    /// (all-`None`) config when absent — the caller fills in global
+    /// defaults from DynamicConfig at request time. Done this way so
+    /// the router doesn't have to read DynamicConfig itself, keeping
+    /// it dependency-free for unit tests.
+    pub fn config_for(&self, model_id: &str) -> ModelRoutingConfig {
+        if let Some(c) = self.configs.get(model_id) {
+            return c.clone();
+        }
+        // Symmetric with `route()`'s prefix fallback.
+        let mut best: Option<(&str, &ModelRoutingConfig)> = None;
+        for (pattern, cfg) in &self.configs {
+            if model_id.starts_with(pattern.as_str()) {
+                match best {
+                    Some((cur, _)) if pattern.len() > cur.len() => best = Some((pattern, cfg)),
+                    None => best = Some((pattern, cfg)),
+                    _ => {}
+                }
+            }
+        }
+        best.map(|(_, c)| c.clone()).unwrap_or_default()
     }
 
     /// Register a route for a given model.
@@ -153,24 +246,31 @@ mod tests {
         }
     }
 
+    /// Test helper — collapse RouteEntry construction down to fields
+    /// the tests actually assert on. New fields default to neutral
+    /// values so tests don't break each time the struct grows.
+    fn entry(name: &str, provider_id: Uuid, priority: u32) -> RouteEntry {
+        let provider: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
+            provider_name: name.into(),
+        });
+        RouteEntry {
+            provider,
+            provider_id,
+            route_id: Uuid::new_v4(),
+            provider_name: name.into(),
+            upstream_model: None,
+            weight: 100,
+            priority,
+            cost_per_token: None,
+            rpm_cap: None,
+            tpm_cap: None,
+        }
+    }
+
     #[test]
     fn exact_match() {
         let mut router = ModelRouter::new();
-        let provider: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
-            provider_name: "openai".into(),
-        });
-        router.register_route(
-            "gpt-4o",
-            RouteEntry {
-                provider,
-                provider_id: Uuid::nil(),
-                provider_name: "openai".into(),
-                upstream_model: None,
-                weight: 100,
-                priority: 0,
-            },
-        );
-
+        router.register_route("gpt-4o", entry("openai", Uuid::nil(), 0));
         let found = router.route("gpt-4o");
         assert!(found.is_some());
         assert_eq!(found.unwrap()[0].provider.name(), "openai");
@@ -179,21 +279,7 @@ mod tests {
     #[test]
     fn prefix_match() {
         let mut router = ModelRouter::new();
-        let provider: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
-            provider_name: "openai".into(),
-        });
-        router.register_route(
-            "gpt-",
-            RouteEntry {
-                provider,
-                provider_id: Uuid::nil(),
-                provider_name: "openai".into(),
-                upstream_model: None,
-                weight: 100,
-                priority: 0,
-            },
-        );
-
+        router.register_route("gpt-", entry("openai", Uuid::nil(), 0));
         let found = router.route("gpt-4o-mini");
         assert!(found.is_some());
         assert_eq!(found.unwrap()[0].provider.name(), "openai");
@@ -208,35 +294,8 @@ mod tests {
     #[test]
     fn longest_prefix_wins() {
         let mut router = ModelRouter::new();
-        let generic: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
-            provider_name: "generic".into(),
-        });
-        let specific: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
-            provider_name: "specific".into(),
-        });
-        router.register_route(
-            "gpt-",
-            RouteEntry {
-                provider: generic,
-                provider_id: Uuid::nil(),
-                provider_name: "generic".into(),
-                upstream_model: None,
-                weight: 100,
-                priority: 0,
-            },
-        );
-        router.register_route(
-            "gpt-4o",
-            RouteEntry {
-                provider: specific,
-                provider_id: Uuid::nil(),
-                provider_name: "specific".into(),
-                upstream_model: None,
-                weight: 100,
-                priority: 0,
-            },
-        );
-
+        router.register_route("gpt-", entry("generic", Uuid::nil(), 0));
+        router.register_route("gpt-4o", entry("specific", Uuid::nil(), 0));
         let found = router.route("gpt-4o-mini");
         assert!(found.is_some());
         // "gpt-4o" is a longer prefix than "gpt-" for "gpt-4o-mini"
@@ -247,20 +306,7 @@ mod tests {
     fn provider_id_lookup() {
         let mut router = ModelRouter::new();
         let openai_id = Uuid::new_v4();
-        let provider: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
-            provider_name: "openai".into(),
-        });
-        router.register_route(
-            "gpt-4o",
-            RouteEntry {
-                provider,
-                provider_id: openai_id,
-                provider_name: "openai".into(),
-                upstream_model: None,
-                weight: 100,
-                priority: 0,
-            },
-        );
+        router.register_route("gpt-4o", entry("openai", openai_id, 0));
         assert_eq!(router.provider_id_for("gpt-4o"), Some(openai_id));
         assert_eq!(router.provider_id_for("unknown"), None);
     }
@@ -268,39 +314,53 @@ mod tests {
     #[test]
     fn multiple_routes_sorted() {
         let mut router = ModelRouter::new();
-        let primary: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
-            provider_name: "primary".into(),
-        });
-        let fallback: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
-            provider_name: "fallback".into(),
-        });
-        router.register_route(
-            "gpt-4o",
-            RouteEntry {
-                provider: fallback,
-                provider_id: Uuid::nil(),
-                provider_name: "fallback".into(),
-                upstream_model: None,
-                weight: 100,
-                priority: 1,
-            },
-        );
-        router.register_route(
-            "gpt-4o",
-            RouteEntry {
-                provider: primary,
-                provider_id: Uuid::nil(),
-                provider_name: "primary".into(),
-                upstream_model: None,
-                weight: 100,
-                priority: 0,
-            },
-        );
+        router.register_route("gpt-4o", entry("fallback", Uuid::nil(), 1));
+        router.register_route("gpt-4o", entry("primary", Uuid::nil(), 0));
         router.sort_routes();
 
         let entries = router.route("gpt-4o").unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].provider.name(), "primary");
         assert_eq!(entries[1].provider.name(), "fallback");
+    }
+
+    #[test]
+    fn config_falls_back_to_prefix() {
+        let mut router = ModelRouter::new();
+        router.register_route("gpt-", entry("openai", Uuid::nil(), 0));
+        router.set_model_config(
+            "gpt-",
+            ModelRoutingConfig {
+                strategy: Some(RoutingStrategy::Latency),
+                affinity_mode: Some(AffinityMode::None),
+                affinity_ttl_secs: Some(60),
+            },
+        );
+        let cfg = router.config_for("gpt-4o-mini");
+        assert_eq!(cfg.strategy, Some(RoutingStrategy::Latency));
+        assert_eq!(cfg.affinity_mode, Some(AffinityMode::None));
+    }
+
+    #[test]
+    fn config_exact_beats_prefix() {
+        let mut router = ModelRouter::new();
+        router.set_model_config(
+            "gpt-",
+            ModelRoutingConfig {
+                strategy: Some(RoutingStrategy::Cost),
+                ..Default::default()
+            },
+        );
+        router.set_model_config(
+            "gpt-4o-mini",
+            ModelRoutingConfig {
+                strategy: Some(RoutingStrategy::Latency),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            router.config_for("gpt-4o-mini").strategy,
+            Some(RoutingStrategy::Latency)
+        );
     }
 }

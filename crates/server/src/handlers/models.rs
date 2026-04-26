@@ -177,6 +177,17 @@ pub struct CreateModelRequest {
     /// Relative output-token cost factor. Defaults to 1.0.
     #[schema(value_type = Option<f64>)]
     pub output_weight: Option<Decimal>,
+    /// Override the gateway-wide default routing strategy. NULL ⇒
+    /// inherit. One of priority/weighted/latency/cost/latency_cost.
+    #[serde(default)]
+    pub routing_strategy: Option<String>,
+    /// Override session affinity mode. NULL ⇒ inherit.
+    /// One of none/provider/route.
+    #[serde(default)]
+    pub affinity_mode: Option<String>,
+    /// Override the affinity key TTL (seconds, 0–86400). NULL ⇒ inherit.
+    #[serde(default)]
+    pub affinity_ttl_secs: Option<i32>,
 }
 
 #[utoipa::path(
@@ -212,16 +223,27 @@ pub async fn create_model(
             "weights must be greater than zero".into(),
         ));
     }
+    validate_routing_overrides(
+        req.routing_strategy.as_deref(),
+        req.affinity_mode.as_deref(),
+        req.affinity_ttl_secs,
+    )?;
 
     let model = sqlx::query_as::<_, Model>(
-        r#"INSERT INTO models (model_id, display_name, input_weight, output_weight)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, model_id, display_name, input_weight, output_weight"#,
+        r#"INSERT INTO models
+              (model_id, display_name, input_weight, output_weight,
+               routing_strategy, affinity_mode, affinity_ttl_secs)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           RETURNING id, model_id, display_name, input_weight, output_weight,
+                     routing_strategy, affinity_mode, affinity_ttl_secs"#,
     )
     .bind(&req.model_id)
     .bind(&req.display_name)
     .bind(in_w)
     .bind(out_w)
+    .bind(&req.routing_strategy)
+    .bind(&req.affinity_mode)
+    .bind(req.affinity_ttl_secs)
     .fetch_one(&state.db)
     .await?;
 
@@ -243,6 +265,50 @@ pub struct UpdateModelRequest {
     pub input_weight: Option<Decimal>,
     #[schema(value_type = Option<f64>)]
     pub output_weight: Option<Decimal>,
+    /// PATCH semantics: absent = unchanged, JSON `null` = clear (revert
+    /// to global default), string = override. One of priority /
+    /// weighted / latency / cost / latency_cost.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub routing_strategy: Option<Option<String>>,
+    /// PATCH-clearable affinity mode. One of none / provider / route.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub affinity_mode: Option<Option<String>>,
+    /// PATCH-clearable affinity TTL (0–86400 seconds).
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub affinity_ttl_secs: Option<Option<i32>>,
+}
+
+/// Validate routing-strategy override values mirror the CHECK
+/// constraints on `models`. Both create + update use this to give a
+/// 400 with a useful message instead of letting the SQL CHECK fail.
+fn validate_routing_overrides(
+    strategy: Option<&str>,
+    affinity_mode: Option<&str>,
+    affinity_ttl_secs: Option<i32>,
+) -> Result<(), AppError> {
+    if let Some(s) = strategy
+        && !["priority", "weighted", "latency", "cost", "latency_cost"].contains(&s)
+    {
+        return Err(AppError::BadRequest(
+            "routing_strategy must be one of: priority, weighted, latency, cost, latency_cost"
+                .into(),
+        ));
+    }
+    if let Some(m) = affinity_mode
+        && !["none", "provider", "route"].contains(&m)
+    {
+        return Err(AppError::BadRequest(
+            "affinity_mode must be one of: none, provider, route".into(),
+        ));
+    }
+    if let Some(t) = affinity_ttl_secs
+        && !(0..=86400).contains(&t)
+    {
+        return Err(AppError::BadRequest(
+            "affinity_ttl_secs must be between 0 and 86400".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -272,7 +338,8 @@ pub async fn update_model(
         .assert_scope_global(&state.db, "models:write")
         .await?;
     let existing = sqlx::query_as::<_, Model>(
-        r#"SELECT id, model_id, display_name, input_weight, output_weight
+        r#"SELECT id, model_id, display_name, input_weight, output_weight,
+                  routing_strategy, affinity_mode, affinity_ttl_secs
            FROM models WHERE id = $1"#,
     )
     .bind(id)
@@ -287,14 +354,37 @@ pub async fn update_model(
             "weights must be greater than zero".into(),
         ));
     }
+    // Resolve PATCH semantics for the three nullable overrides:
+    // absent ⇒ preserve existing; Some(None) ⇒ clear; Some(Some(v)) ⇒ overwrite.
+    let new_strategy: Option<String> = match &req.routing_strategy {
+        None => existing.routing_strategy.clone(),
+        Some(inner) => inner.clone(),
+    };
+    let new_affinity_mode: Option<String> = match &req.affinity_mode {
+        None => existing.affinity_mode.clone(),
+        Some(inner) => inner.clone(),
+    };
+    let new_affinity_ttl: Option<i32> = match req.affinity_ttl_secs {
+        None => existing.affinity_ttl_secs,
+        Some(inner) => inner,
+    };
+    validate_routing_overrides(
+        new_strategy.as_deref(),
+        new_affinity_mode.as_deref(),
+        new_affinity_ttl,
+    )?;
 
     let updated = sqlx::query_as::<_, Model>(
         r#"UPDATE models SET
-              display_name   = $2,
-              input_weight   = $3,
-              output_weight  = $4
+              display_name      = $2,
+              input_weight      = $3,
+              output_weight     = $4,
+              routing_strategy  = $5,
+              affinity_mode     = $6,
+              affinity_ttl_secs = $7
            WHERE id = $1
-           RETURNING id, model_id, display_name, input_weight, output_weight"#,
+           RETURNING id, model_id, display_name, input_weight, output_weight,
+                     routing_strategy, affinity_mode, affinity_ttl_secs"#,
     )
     .bind(id)
     .bind(
@@ -304,6 +394,9 @@ pub async fn update_model(
     )
     .bind(new_in_w)
     .bind(new_out_w)
+    .bind(&new_strategy)
+    .bind(&new_affinity_mode)
+    .bind(new_affinity_ttl)
     .fetch_one(&state.db)
     .await?;
 
@@ -314,6 +407,11 @@ pub async fn update_model(
             .resource_id(id.to_string())
             .detail(serde_json::json!({ "model_id": existing.model_id })),
     );
+
+    // Routing strategy / affinity overrides are baked into the
+    // ModelRouter at load time, so flipping them requires a hot-swap
+    // for the change to hit live traffic. Cheap (a single SELECT pass).
+    crate::app::rebuild_gateway_router(&state).await;
 
     Ok(Json(updated))
 }
@@ -500,6 +598,12 @@ pub struct ModelRouteRow {
     pub weight: i32,
     pub priority: i32,
     pub enabled: bool,
+    /// Per-route RPM cap. NULL = unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rpm_cap: Option<i32>,
+    /// Per-route TPM cap. NULL = unlimited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tpm_cap: Option<i32>,
 }
 
 /// GET /api/admin/models/{model_id}/routes
@@ -515,7 +619,8 @@ pub async fn list_model_routes(
 
     let rows = sqlx::query_as::<_, ModelRouteRow>(
         r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
-                  mr.upstream_model, mr.weight, mr.priority, mr.enabled
+                  mr.upstream_model, mr.weight, mr.priority, mr.enabled,
+                  mr.rpm_cap, mr.tpm_cap
            FROM model_routes mr
            JOIN providers p ON p.id = mr.provider_id
            WHERE mr.model_id = $1 AND p.deleted_at IS NULL
@@ -538,6 +643,12 @@ pub struct CreateModelRouteRequest {
     /// routes are live immediately on both manual and batch-import
     /// paths.
     pub enabled: Option<bool>,
+    /// Per-route RPM cap (must be > 0 if set).
+    #[serde(default)]
+    pub rpm_cap: Option<i32>,
+    /// Per-route TPM cap (must be > 0 if set).
+    #[serde(default)]
+    pub tpm_cap: Option<i32>,
 }
 
 /// POST /api/admin/models/{model_id}/routes
@@ -597,12 +708,24 @@ pub async fn create_model_route(
         ));
     }
 
+    if let Some(c) = req.rpm_cap
+        && c <= 0
+    {
+        return Err(AppError::BadRequest("rpm_cap must be > 0".into()));
+    }
+    if let Some(c) = req.tpm_cap
+        && c <= 0
+    {
+        return Err(AppError::BadRequest("tpm_cap must be > 0".into()));
+    }
+
     let row = sqlx::query_as::<_, ModelRouteRow>(
-        r#"INSERT INTO model_routes (model_id, provider_id, upstream_model, weight, priority, enabled)
-           VALUES ($1, $2, $3, $4, $5, $6)
+        r#"INSERT INTO model_routes
+              (model_id, provider_id, upstream_model, weight, priority, enabled, rpm_cap, tpm_cap)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id, model_id, provider_id,
                      (SELECT name FROM providers WHERE id = provider_id) AS provider_name,
-                     upstream_model, weight, priority, enabled"#,
+                     upstream_model, weight, priority, enabled, rpm_cap, tpm_cap"#,
     )
     .bind(&model_id)
     .bind(req.provider_id)
@@ -610,6 +733,8 @@ pub async fn create_model_route(
     .bind(weight)
     .bind(priority)
     .bind(req.enabled.unwrap_or(true))
+    .bind(req.rpm_cap)
+    .bind(req.tpm_cap)
     .fetch_one(&state.db)
     .await?;
 
@@ -640,6 +765,12 @@ pub struct UpdateModelRouteRequest {
     pub weight: Option<i32>,
     pub priority: Option<i32>,
     pub enabled: Option<bool>,
+    /// PATCH-clearable RPM cap. Must be > 0 if set.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub rpm_cap: Option<Option<i32>>,
+    /// PATCH-clearable TPM cap. Must be > 0 if set.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub tpm_cap: Option<Option<i32>>,
 }
 
 /// PATCH /api/admin/model-routes/{route_id}
@@ -658,16 +789,37 @@ pub async fn update_model_route(
         None => (false, None),
         Some(inner) => (true, inner.as_deref()),
     };
+    let (rpm_set, rpm_value) = match req.rpm_cap {
+        None => (false, None),
+        Some(inner) => (true, inner),
+    };
+    let (tpm_set, tpm_value) = match req.tpm_cap {
+        None => (false, None),
+        Some(inner) => (true, inner),
+    };
+    if let Some(c) = rpm_value
+        && c <= 0
+    {
+        return Err(AppError::BadRequest("rpm_cap must be > 0".into()));
+    }
+    if let Some(c) = tpm_value
+        && c <= 0
+    {
+        return Err(AppError::BadRequest("tpm_cap must be > 0".into()));
+    }
+
     let row = sqlx::query_as::<_, ModelRouteRow>(
         r#"UPDATE model_routes SET
-              upstream_model = CASE WHEN $6 THEN $2 ELSE upstream_model END,
-              weight = COALESCE($3, weight),
+              upstream_model = CASE WHEN $6  THEN $2 ELSE upstream_model END,
+              weight   = COALESCE($3, weight),
               priority = COALESCE($4, priority),
-              enabled = COALESCE($5, enabled)
+              enabled  = COALESCE($5, enabled),
+              rpm_cap  = CASE WHEN $8  THEN $7  ELSE rpm_cap  END,
+              tpm_cap  = CASE WHEN $10 THEN $9  ELSE tpm_cap  END
            WHERE id = $1
            RETURNING id, model_id, provider_id,
                      (SELECT name FROM providers WHERE id = provider_id) AS provider_name,
-                     upstream_model, weight, priority, enabled"#,
+                     upstream_model, weight, priority, enabled, rpm_cap, tpm_cap"#,
     )
     .bind(route_id)
     .bind(upstream_value)
@@ -675,6 +827,10 @@ pub async fn update_model_route(
     .bind(req.priority)
     .bind(req.enabled)
     .bind(upstream_set)
+    .bind(rpm_value)
+    .bind(rpm_set)
+    .bind(tpm_value)
+    .bind(tpm_set)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("Route not found".into()))?;
@@ -766,7 +922,8 @@ pub async fn list_all_routes(
         .await?;
         let rows = sqlx::query_as::<_, ModelRouteRow>(
             r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
-                      mr.upstream_model, mr.weight, mr.priority, mr.enabled
+                      mr.upstream_model, mr.weight, mr.priority, mr.enabled,
+                      mr.rpm_cap, mr.tpm_cap
                FROM model_routes mr
                JOIN providers p ON p.id = mr.provider_id
                WHERE p.deleted_at IS NULL
@@ -793,7 +950,8 @@ pub async fn list_all_routes(
         .await?;
         let rows = sqlx::query_as::<_, ModelRouteRow>(
             r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
-                      mr.upstream_model, mr.weight, mr.priority, mr.enabled
+                      mr.upstream_model, mr.weight, mr.priority, mr.enabled,
+                      mr.rpm_cap, mr.tpm_cap
                FROM model_routes mr
                JOIN providers p ON p.id = mr.provider_id
                WHERE p.deleted_at IS NULL
