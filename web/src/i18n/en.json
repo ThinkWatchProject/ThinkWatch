@@ -37,6 +37,8 @@
     "loading": "Loading...",
     "required": "required",
     "dismiss": "Dismiss",
+    "show": "Show",
+    "hide": "Hide",
     "noData": "No data",
     "noResults": "No results",
     "confirm": "Confirm",
@@ -284,8 +286,6 @@
     "awsAuthAkSk": "Access Key / Secret Key",
     "awsAuthImdsv2": "EC2 Instance Role (IMDSv2)",
     "awsImdsv2Hint": "Credentials are automatically obtained from the EC2 instance metadata service. Make sure the instance has an IAM role with Bedrock permissions.",
-    "bedrockUrlHint": "Enter AWS region (e.g. us-east-1)",
-    "azureUrlHint": "Enter Azure OpenAI resource endpoint",
     "testConnection": "Test Connection",
     "testing": "Testing...",
     "providerCreated": "Provider created."
@@ -363,7 +363,6 @@
     "searchPlaceholder": "Search by model ID or display name...",
     "routes": "Routes",
     "addRoute": "Add Route",
-    "weight": "Weight",
     "upstreamModelHint": "Model name sent to the provider. Leave empty to use the same name.",
     "upstreamModelInherit": "Use catalog model ID ({{modelId}})",
     "upstreamModelFreeInput": "Provider catalog unavailable — enter the upstream model name manually.",
@@ -397,8 +396,6 @@
       "active": "Active",
       "provider": "Provider",
       "upstreamModel": "Upstream Model",
-      "weight": "Weight",
-      "share": "Share",
       "health": "Health",
       "healthHint": "Live circuit-breaker state from the rolling-window error rate. Closed = passing through, open = excluded from selection, half-open = probing.",
       "p50": "EWMA latency"
@@ -434,20 +431,19 @@
     "routingOverrideHint": "Override the gateway-wide defaults for this model. Leave blank to inherit from Settings → Gateway.",
     "strategy": {
       "weighted": "Weighted random",
-      "latency": "Latency-aware (auto-tune to fast)",
-      "cost": "Cost-aware (cheapest first)",
-      "latency_cost": "Latency × cost (combined)"
+      "latency": "Latency-first",
+      "health": "Health-first",
+      "latency_health": "Combined (latency × health)"
     },
     "routing": {
       "modeAuto": "Auto",
-      "modeAutoHint": "System picks the best healthy route. Failed routes auto-skipped.",
+      "modeAutoHint": "Bias traffic by the chosen signal. The circuit breaker still skips failing routes.",
       "modeManual": "Custom ratios",
-      "modeManualHint": "You set the traffic split per route.",
+      "modeManualHint": "Drag the bar below to allocate traffic per route.",
       "autoTargetLabel": "Optimization target",
       "currentSource": "Current: {{source}}",
       "sourceModel": "this model's setting",
       "sourceGlobal": "global default",
-      "weightHint": "Higher = more traffic. Relative to other routes; the UI shows the resulting %.",
       "labelLabel": "Label",
       "labelPlaceholder": "e.g. EU-primary",
       "notesLabel": "Notes",
@@ -455,9 +451,7 @@
       "expectedCostLabel": "Expected cost",
       "expectedCostPer1m": "≈ {{amount}} {{currency}} / 1M tokens",
       "expectedCostUnknown": "—",
-      "matchAuto": "Match auto",
-      "matchAutoHint": "Copy what the system would pick if we let it.",
-      "evenSplit": "Even split",
+      "evenSplitTooltip": "Reset to even split",
       "liveStatus": "Live status",
       "errorPctLabel": "Error rate"
     },
@@ -484,6 +478,7 @@
     "batchResetSuggestions": "Auto-suggest",
     "batchModeNew": "➔ New exposed model",
     "batchModeAttach": "➔ Route on \"{{target}}\"",
+    "batchNewModelIdLabel": "Exposed model ID (defaults to upstream name)",
     "stepOf": "Step {{current}} / {{total}}",
     "detail": {
       "basics": "Basics",
@@ -1227,9 +1222,9 @@
     "latencyStrategyKHint": "Exponent in 1/latency^k. Higher = more aggressive bias toward fast routes. Default 2.0 (aggressive). Range 0.5–8.0.",
     "strategy": {
       "weighted": "Weighted random",
-      "latency": "Latency-aware (auto-tune to fast)",
-      "cost": "Cost-aware (cheapest first)",
-      "latency_cost": "Latency × cost (combined)"
+      "latency": "Latency-first",
+      "health": "Health-first",
+      "latency_health": "Combined (latency × health)"
     },
     "affinity": {
       "none": "None",
@@ -1466,7 +1461,6 @@
       "welcome": "Welcome",
       "admin": "Admin Account",
       "settings": "Settings",
-      "provider": "Provider",
       "complete": "Complete"
     },
     "admin": {
@@ -1479,29 +1473,21 @@
       "passwordMismatch": "Passwords do not match",
       "passwordTooShort": "Password must be at least 8 characters",
       "passwordComplexity": "Password must contain at least one uppercase letter, one lowercase letter, and one digit",
-      "passwordHint": "At least 8 characters with one uppercase letter, one lowercase letter, and one digit."
+      "passwordHint": "At least 8 characters with one uppercase letter, one lowercase letter, and one digit.",
+      "generatePassword": "Generate"
     },
     "settings": {
       "title": "Site Settings",
       "subtitle": "Configure your ThinkWatch instance",
       "siteName": "Site Name"
     },
-    "provider": {
-      "title": "Add First Provider",
-      "subtitle": "Connect your first AI provider (optional)",
-      "skip": "Skip for now",
-      "providerType": "Provider Type",
-      "name": "Name",
-      "displayName": "Display Name",
-      "baseUrl": "Base URL",
-      "testConnection": "Test connection"
-    },
     "complete": {
       "title": "Setup Complete!",
       "subtitle": "Your ThinkWatch instance is ready",
       "apiKeyLabel": "Your Admin API Key",
       "apiKeyWarning": "Save this key now. It will not be shown again.",
-      "goToDashboard": "Go to Dashboard"
+      "goToDashboard": "Go to Dashboard",
+      "cta": "Finish setup"
     },
     "next": "Next",
     "back": "Back"

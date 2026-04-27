@@ -583,8 +583,8 @@ export function SettingsPage() {
                     <SelectContent>
                       <SelectItem value="weighted">{t('settings.strategy.weighted')}</SelectItem>
                       <SelectItem value="latency">{t('settings.strategy.latency')}</SelectItem>
-                      <SelectItem value="cost">{t('settings.strategy.cost')}</SelectItem>
-                      <SelectItem value="latency_cost">{t('settings.strategy.latency_cost')}</SelectItem>
+                      <SelectItem value="health">{t('settings.strategy.health')}</SelectItem>
+                      <SelectItem value="latency_health">{t('settings.strategy.latency_health')}</SelectItem>
                     </SelectContent>
                   </Select>
                   <p className="text-xs text-muted-foreground">{t('settings.defaultRoutingStrategyHint')}</p>

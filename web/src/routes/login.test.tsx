@@ -27,10 +27,10 @@ describe('LoginPage', () => {
     expect(screen.getByRole('button', { name: /sign in$/i })).toBeInTheDocument()
   })
 
-  it('renders SSO button', () => {
+  it('hides SSO button when SSO is disabled', () => {
     render(<LoginPage onLogin={vi.fn()} />)
 
-    expect(screen.getByRole('button', { name: /sso/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /sso/i })).not.toBeInTheDocument()
   })
 
   it('renders register link', () => {
@@ -76,9 +76,4 @@ describe('LoginPage', () => {
     expect(screen.getByRole('button', { name: /signing in/i })).toBeDisabled()
   })
 
-  it('SSO button is disabled when SSO is not enabled', () => {
-    render(<LoginPage onLogin={vi.fn()} />)
-
-    expect(screen.getByRole('button', { name: /sso/i })).toBeDisabled()
-  })
 })

@@ -40,7 +40,6 @@ pub async fn setup_status(
 pub struct SetupInitRequest {
     pub admin: AdminSetup,
     pub site_name: Option<String>,
-    pub provider: Option<ProviderSetup>,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -50,25 +49,11 @@ pub struct AdminSetup {
     pub password: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
-pub struct ProviderSetup {
-    pub name: String,
-    pub display_name: String,
-    pub provider_type: String,
-    pub base_url: String,
-    /// Unified request headers (auth + custom + identity templates).
-    #[serde(default)]
-    pub headers: Vec<think_watch_common::dto::ProviderHeader>,
-    /// Extra config (e.g. Bedrock AWS credentials).
-    pub config: Option<serde_json::Value>,
-}
-
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SetupInitResponse {
     pub admin_id: uuid::Uuid,
     pub admin_email: String,
     pub api_key: Option<String>,
-    pub provider_id: Option<uuid::Uuid>,
     pub message: String,
 }
 
@@ -83,7 +68,7 @@ pub struct SetupInitResponse {
     tag = "Setup",
     request_body = SetupInitRequest,
     responses(
-        (status = 200, description = "Setup completed — admin user, optional provider, and initial API key created", body = SetupInitResponse),
+        (status = 200, description = "Setup completed — admin user and initial API key created", body = SetupInitResponse),
         (status = 400, description = "Invalid input or rate-limited"),
         (status = 403, description = "Setup already completed"),
         (status = 409, description = "Admin email already exists"),
@@ -190,29 +175,7 @@ pub async fn setup_initialize(
     .execute(&mut *tx)
     .await?;
 
-    // 2. Create first provider (optional)
-    let mut provider_id = None;
-    if let Some(ref provider) = req.provider {
-        let mut config_json = provider.config.clone().unwrap_or(serde_json::json!({}));
-        config_json["headers"] = serde_json::to_value(&provider.headers)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to serialize headers: {e}")))?;
-
-        let pid = sqlx::query_scalar::<_, uuid::Uuid>(
-            r#"INSERT INTO providers (name, display_name, provider_type, base_url, config_json)
-               VALUES ($1, $2, $3, $4, $5) RETURNING id"#,
-        )
-        .bind(&provider.name)
-        .bind(&provider.display_name)
-        .bind(&provider.provider_type)
-        .bind(&provider.base_url)
-        .bind(&config_json)
-        .fetch_one(&mut *tx)
-        .await?;
-
-        provider_id = Some(pid);
-    }
-
-    // 3. Generate first API key for admin user
+    // 2. Generate first API key for admin user
     let generated = api_key::generate_api_key();
     sqlx::query(
         r#"INSERT INTO api_keys (key_prefix, key_hash, name, user_id, surfaces)
@@ -226,7 +189,7 @@ pub async fn setup_initialize(
     .execute(&mut *tx)
     .await?;
 
-    // 4. Mark as initialized
+    // 3. Mark as initialized
     let site_name = req.site_name.as_deref().unwrap_or("ThinkWatch");
     sqlx::query(
         "UPDATE system_settings SET value = $1, updated_at = now() WHERE key = 'setup.initialized'",
@@ -254,7 +217,6 @@ pub async fn setup_initialize(
             .resource("system")
             .detail(serde_json::json!({
                 "admin_email": req.admin.email,
-                "provider_created": provider_id.is_some(),
             })),
     );
 
@@ -269,7 +231,6 @@ pub async fn setup_initialize(
         admin_id: admin_user.0,
         admin_email: admin_user.1,
         api_key: Some(generated.plaintext),
-        provider_id,
         message: "Setup completed successfully.".into(),
     })
     .into_response();

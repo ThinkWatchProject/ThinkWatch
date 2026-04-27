@@ -79,46 +79,6 @@ describe('SetupPage', () => {
     expect(screen.getByText('Passwords do not match')).toBeInTheDocument()
   })
 
-  it('can skip provider step', async () => {
-    const user = userEvent.setup()
-
-    const mockFetch = vi.fn().mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({
-        admin_id: '123',
-        admin_email: 'admin@test.com',
-        api_key: 'tw-test-key-123',
-        message: 'Setup complete',
-      }),
-    })
-    vi.stubGlobal('fetch', mockFetch)
-
-    render(<SetupPage />)
-
-    // Welcome -> Admin
-    await user.click(screen.getByRole('button', { name: /get started/i }))
-
-    // Fill admin form
-    await user.type(screen.getByLabelText(/email/i), 'admin@test.com')
-    await user.type(screen.getByLabelText(/display name/i), 'Admin')
-    await user.type(screen.getByLabelText(/^password\b/i), 'Password123')
-    await user.type(screen.getByLabelText(/confirm password/i), 'Password123')
-    await user.click(screen.getByRole('button', { name: /next/i }))
-
-    // Settings step -> Next
-    expect(screen.getByText('Site Settings')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /next/i }))
-
-    // Provider step -> Skip
-    expect(screen.getByText('Add First Provider')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /skip for now/i }))
-
-    // Should move to complete step
-    await waitFor(() => {
-      expect(screen.getByText('Setup Complete!')).toBeInTheDocument()
-    })
-  })
-
   it('renders complete step with API key after successful setup', async () => {
     const user = userEvent.setup()
 
@@ -135,22 +95,20 @@ describe('SetupPage', () => {
 
     render(<SetupPage />)
 
-    // Navigate through all steps
+    // Welcome -> Admin
     await user.click(screen.getByRole('button', { name: /get started/i }))
 
+    // Fill admin form -> Next
     await user.type(screen.getByLabelText(/email/i), 'admin@test.com')
     await user.type(screen.getByLabelText(/display name/i), 'Admin')
     await user.type(screen.getByLabelText(/^password\b/i), 'Password123')
     await user.type(screen.getByLabelText(/confirm password/i), 'Password123')
     await user.click(screen.getByRole('button', { name: /next/i }))
 
-    // Settings
-    await user.click(screen.getByRole('button', { name: /next/i }))
+    // Settings step is the final input step — submit completes setup.
+    expect(screen.getByText('Site Settings')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /finish setup/i }))
 
-    // Provider -> Skip
-    await user.click(screen.getByRole('button', { name: /skip for now/i }))
-
-    // Verify complete step with API key displayed
     await waitFor(() => {
       expect(screen.getByText('Setup Complete!')).toBeInTheDocument()
     })

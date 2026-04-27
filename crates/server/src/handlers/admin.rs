@@ -2553,9 +2553,9 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             let s = value
                 .as_str()
                 .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
-            if !["weighted", "latency", "cost", "latency_cost"].contains(&s) {
+            if !["weighted", "latency", "health", "latency_health"].contains(&s) {
                 return Err(AppError::BadRequest(
-                    "default_routing_strategy must be one of: weighted, latency, cost, latency_cost".into(),
+                    "default_routing_strategy must be one of: weighted, latency, health, latency_health".into(),
                 ));
             }
         }

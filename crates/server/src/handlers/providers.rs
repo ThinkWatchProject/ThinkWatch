@@ -331,21 +331,6 @@ pub async fn test_provider(
     run_provider_test(req).await
 }
 
-/// Unauthenticated route — used by the setup wizard before any user exists.
-/// Gated by an extra check that setup is not yet complete, so anonymous
-/// callers can't probe arbitrary URLs against an installed instance.
-pub async fn test_provider_unauthenticated(
-    State(state): State<AppState>,
-    Json(req): Json<TestProviderRequest>,
-) -> Result<Json<TestProviderResponse>, AppError> {
-    if state.dynamic_config.is_initialized().await {
-        return Err(AppError::Forbidden(
-            "Setup already completed — use the authenticated endpoint".into(),
-        ));
-    }
-    run_provider_test(req).await
-}
-
 pub(crate) async fn run_provider_test(
     req: TestProviderRequest,
 ) -> Result<Json<TestProviderResponse>, AppError> {

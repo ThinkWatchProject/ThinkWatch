@@ -38,11 +38,10 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
-import { InlinePercentInput } from './routing/InlinePercentInput';
 import { LatencySparkline } from './routing/LatencySparkline';
 import { RoutingModeSection } from './routing/RoutingModeSection';
 import { RoutingProjection } from './routing/RoutingProjection';
-import { TrafficBar, colorClassForRoute } from './routing/TrafficBar';
+import { TrafficBar } from './routing/TrafficBar';
 import {
   AlertCircle,
   Brain,
@@ -84,21 +83,22 @@ interface ModelRow {
   affinity_ttl_secs?: number | null;
 }
 
-export type RoutingStrategy = 'weighted' | 'latency' | 'cost' | 'latency_cost';
+export type RoutingStrategy = 'weighted' | 'latency' | 'health' | 'latency_health';
 export type AffinityMode = 'none' | 'provider' | 'route';
 
-/// Routes available globally + per-model. The wizard's two-state mode
-/// picker (auto / manual) maps "manual" to `weighted` and "auto" to
-/// the other three with a sub-picker for the optimization target.
+/// All four strategies — used by the global Settings page picker. The
+/// per-model UI splits this into "manual = weighted" vs "auto = one of
+/// the other three picked via a sub-picker".
 export const ROUTING_STRATEGIES: RoutingStrategy[] = [
   'weighted',
   'latency',
-  'cost',
-  'latency_cost',
+  'health',
+  'latency_health',
 ];
 
-/// Auto-mode options shown in the sub-picker. Order = display order.
-export const AUTO_TARGETS: RoutingStrategy[] = ['latency_cost', 'latency', 'cost'];
+/// Auto-mode targets shown in the per-model sub-picker. Order = display
+/// order. `latency_health` first because it's the global default.
+export const AUTO_TARGETS: RoutingStrategy[] = ['latency_health', 'latency', 'health'];
 
 export const AFFINITY_MODES: AffinityMode[] = ['none', 'provider', 'route'];
 
@@ -212,7 +212,6 @@ interface ModelFormState {
 interface RouteFormState {
   provider_id: string;
   upstream_model: string;
-  weight: string;
   enabled: boolean;
   /// Optional human-readable identifier — surfaced in the route table.
   label: string;
@@ -236,7 +235,6 @@ const emptyModelForm: ModelFormState = {
 const emptyRouteForm: RouteFormState = {
   provider_id: '',
   upstream_model: '',
-  weight: '100',
   enabled: true,
   label: '',
   notes: '',
@@ -286,7 +284,7 @@ export function ModelsPage() {
   // Global default routing strategy. Fetched once when first detail
   // drawer opens, used by RoutingModeSection to show admin whether the
   // model's setting differs from the global default.
-  const [globalStrategy, setGlobalStrategy] = useState<RoutingStrategy>('latency_cost');
+  const [globalStrategy, setGlobalStrategy] = useState<RoutingStrategy>('latency_health');
 
   // Detail drawer: which model_id is open, and its lazily-loaded routes.
   const [detailModelId, setDetailModelId] = useState<string | null>(null);
@@ -343,7 +341,11 @@ export function ModelsPage() {
     [],
   );
   // Per-upstream decisions made in step 2. Key = upstream name.
-  type ImportDecision = { target_model_id: string | null };
+  // `new_model_id` is consulted only when `target_model_id` is null —
+  // it lets the admin alias the exposed id (e.g. expose
+  // "deepseek/deepseek-v4-flash" as just "deepseek-v4"). Empty ⇒ use
+  // the upstream name (server falls back to it server-side too).
+  type ImportDecision = { target_model_id: string | null; new_model_id?: string };
   const [batchDecisions, setBatchDecisions] = useState<Record<string, ImportDecision>>({});
 
   /* ---------- data fetching ---------- */
@@ -416,8 +418,8 @@ export function ModelsPage() {
     void fetchPricing();
     // Pull the global default strategy once. The wizard's mode picker
     // uses it to label "this model uses the global default" vs "this
-    // model overrides". Falls back to `latency_cost` on error so the
-    // UI keeps working even if the settings endpoint is flaky.
+    // model overrides". Falls back to `latency` on error so the UI
+    // keeps working even if the settings endpoint is flaky.
     void api<{ gateway?: { entries?: { key: string; value: unknown }[] } }>(
       '/api/admin/settings',
     )
@@ -425,7 +427,10 @@ export function ModelsPage() {
         const v = data?.gateway?.entries?.find(
           (e) => e.key === 'gateway.default_routing_strategy',
         )?.value;
-        if (typeof v === 'string' && ['weighted', 'latency', 'cost', 'latency_cost'].includes(v)) {
+        if (
+          typeof v === 'string' &&
+          ['weighted', 'latency', 'health', 'latency_health'].includes(v)
+        ) {
           setGlobalStrategy(v as RoutingStrategy);
         }
       })
@@ -666,7 +671,6 @@ export function ModelsPage() {
     setRouteForm({
       provider_id: route.provider_id,
       upstream_model: route.upstream_model ?? '',
-      weight: String(route.weight),
       enabled: route.enabled,
       label: route.label ?? '',
       notes: route.notes ?? '',
@@ -680,11 +684,6 @@ export function ModelsPage() {
   const submitRoute = async (e: FormEvent) => {
     e.preventDefault();
     setRouteFormError('');
-    const weight = Number(routeForm.weight);
-    if (!Number.isFinite(weight) || weight < 0) {
-      setRouteFormError(t('models.weight') + ' must be >= 0');
-      return;
-    }
     // Empty cap → null (unlimited). Non-empty must be a positive integer.
     const parseCap = (s: string): number | null | 'invalid' => {
       const v = s.trim();
@@ -707,7 +706,6 @@ export function ModelsPage() {
       if (editingRoute) {
         await apiPatch(`/api/admin/model-routes/${editingRoute.id}`, {
           upstream_model: upstream,
-          weight,
           enabled: routeForm.enabled,
           label,
           notes,
@@ -730,7 +728,6 @@ export function ModelsPage() {
           {
             provider_id: routeForm.provider_id,
             upstream_model: upstream,
-            weight,
             enabled: routeForm.enabled,
             label,
             notes,
@@ -785,17 +782,6 @@ export function ModelsPage() {
       await fetchModels();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to update strategy');
-    }
-  };
-
-  /// Update a single route's weight (used by inline % editor).
-  /// Caller refetches via `fetchRoutesFor` after to sync the table.
-  const updateRouteWeight = async (routeId: string, modelId: string, weight: number) => {
-    try {
-      await apiPatch(`/api/admin/model-routes/${routeId}`, { weight });
-      await fetchRoutesFor(modelId);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to update weight');
     }
   };
 
@@ -942,9 +928,11 @@ export function ModelsPage() {
     try {
       const items = Array.from(batchSelected).map((upstream) => {
         const d = batchDecisions[upstream] ?? { target_model_id: null };
+        const newId = d.new_model_id?.trim();
         return {
           upstream,
           target_model_id: d.target_model_id,
+          new_model_id: d.target_model_id === null && newId ? newId : undefined,
         };
       });
       const res = await apiPost<{ created: number }>('/api/admin/model-routes/batch', {
@@ -1433,30 +1421,15 @@ export function ModelsPage() {
                   );
                 })()}
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label htmlFor="route_weight">{t('models.col.weight')}</Label>
-                  <Input
-                    id="route_weight"
-                    value={routeForm.weight}
-                    onChange={(e) => setRouteForm({ ...routeForm, weight: e.target.value })}
-                    inputMode="numeric"
-                    required
-                  />
-                  <p className="text-[11px] text-muted-foreground">
-                    {t('models.routing.weightHint')}
-                  </p>
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="route_label">{t('models.routing.labelLabel')}</Label>
-                  <Input
-                    id="route_label"
-                    value={routeForm.label}
-                    onChange={(e) => setRouteForm({ ...routeForm, label: e.target.value })}
-                    placeholder={t('models.routing.labelPlaceholder')}
-                    maxLength={64}
-                  />
-                </div>
+              <div className="space-y-2">
+                <Label htmlFor="route_label">{t('models.routing.labelLabel')}</Label>
+                <Input
+                  id="route_label"
+                  value={routeForm.label}
+                  onChange={(e) => setRouteForm({ ...routeForm, label: e.target.value })}
+                  placeholder={t('models.routing.labelPlaceholder')}
+                  maxLength={64}
+                />
               </div>
               <div className="space-y-2">
                 <Label htmlFor="route_notes">{t('models.routing.notesLabel')}</Label>
@@ -1710,6 +1683,7 @@ export function ModelsPage() {
                     const decision = batchDecisions[upstream] ?? { target_model_id: null };
                     const setDecision = (d: ImportDecision) =>
                       setBatchDecisions({ ...batchDecisions, [upstream]: d });
+                    const isNew = decision.target_model_id === null;
                     return (
                       <div key={upstream} className="p-3 space-y-2">
                         <div className="font-mono text-xs break-all">{upstream}</div>
@@ -1718,7 +1692,10 @@ export function ModelsPage() {
                             value={decision.target_model_id ?? '__new__'}
                             onValueChange={(v) => {
                               if (v === '__new__') {
-                                setDecision({ target_model_id: null });
+                                setDecision({
+                                  target_model_id: null,
+                                  new_model_id: decision.new_model_id,
+                                });
                               } else {
                                 setDecision({ target_model_id: v });
                               }
@@ -1739,6 +1716,20 @@ export function ModelsPage() {
                             </SelectContent>
                           </Select>
                         </div>
+                        {isNew && (
+                          <Input
+                            className="h-7 text-xs font-mono"
+                            placeholder={upstream}
+                            value={decision.new_model_id ?? ''}
+                            onChange={(e) =>
+                              setDecision({
+                                target_model_id: null,
+                                new_model_id: e.target.value,
+                              })
+                            }
+                            aria-label={t('models.batchNewModelIdLabel')}
+                          />
+                        )}
                       </div>
                     );
                   })}
@@ -1897,42 +1888,40 @@ export function ModelsPage() {
 
                     {/* Routes */}
                     <section className="space-y-3">
-                      <RoutingModeSection
-                        modelStrategy={
-                          (model.routing_strategy as RoutingStrategy | null) ?? null
-                        }
-                        globalStrategy={globalStrategy}
-                        disabled={!hasPermission('models:write')}
-                        onChange={(next) => updateModelStrategy(model.model_id, next)}
-                      />
-                      {/* Drag-to-redistribute traffic bar — only meaningful in
-                          manual (`weighted`) mode. Auto modes' weights are
-                          tiebreakers, so dragging would mislead. */}
-                      {(() => {
-                        const effective =
-                          (model.routing_strategy as RoutingStrategy | null) ?? globalStrategy;
-                        if (effective !== 'weighted') return null;
-                        const enabled = (routes ?? []).filter((r) => r.enabled);
-                        if (enabled.length === 0) return null;
-                        return (
-                          <TrafficBar
-                            segments={enabled.map((r) => ({
-                              id: r.id,
-                              label:
-                                r.label ??
-                                (r.upstream_model
-                                  ? r.upstream_model.split('/').pop() ?? r.upstream_model
-                                  : providerLabel(r.provider_id)),
-                              weight: r.weight,
-                              colorClass: colorClassForRoute(r.id),
-                            }))}
-                            disabled={!hasPermission('models:write')}
-                            onCommit={(updates) =>
-                              batchUpdateWeights(model.model_id, updates)
-                            }
-                          />
-                        );
-                      })()}
+                      {/* Strategy picker is meaningless when there's only one
+                          enabled upstream — nothing to balance. The bar
+                          inside the manual card uses the same gate. */}
+                      {(routes ?? []).filter((r) => r.enabled).length > 1 && (
+                        <RoutingModeSection
+                          modelStrategy={
+                            (model.routing_strategy as RoutingStrategy | null) ?? null
+                          }
+                          globalStrategy={globalStrategy}
+                          disabled={!hasPermission('models:write')}
+                          onChange={(next) => updateModelStrategy(model.model_id, next)}
+                          manualBar={(() => {
+                            const enabled = (routes ?? []).filter((r) => r.enabled);
+                            if (enabled.length === 0) return null;
+                            return (
+                              <TrafficBar
+                                segments={enabled.map((r) => ({
+                                  id: r.id,
+                                  label:
+                                    r.label ??
+                                    (r.upstream_model
+                                      ? r.upstream_model.split('/').pop() ?? r.upstream_model
+                                      : providerLabel(r.provider_id)),
+                                  weight: r.weight,
+                                }))}
+                                disabled={!hasPermission('models:write')}
+                                onCommit={(updates) =>
+                                  batchUpdateWeights(model.model_id, updates)
+                                }
+                              />
+                            );
+                          })()}
+                        />
+                      )}
                       <div className="flex items-center justify-between gap-2">
                         <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                           {t('models.routes')} ({routes?.length ?? model.route_count})
@@ -1984,9 +1973,6 @@ export function ModelsPage() {
                           <table className="w-full text-xs">
                             <thead className="border-b bg-muted/30">
                               <tr className="text-left text-muted-foreground">
-                                <th className="px-2 py-1.5 font-medium text-right">
-                                  {t('models.col.share')}
-                                </th>
                                 <th className="px-2 py-1.5 font-medium">
                                   {t('models.col.provider')}
                                 </th>
@@ -2009,38 +1995,9 @@ export function ModelsPage() {
                               </tr>
                             </thead>
                             <tbody className="divide-y">
-                              {(() => {
-                                const enabledRoutes = routes.filter((r) => r.enabled);
-                                const totalWeight = enabledRoutes.reduce(
-                                  (sum, r) => sum + r.weight,
-                                  0,
-                                );
-                                // In auto mode the weight column is a
-                                // tiebreaker, not a true ratio — disable
-                                // inline edit so admins don't think they're
-                                // setting the actual traffic split.
-                                const effective =
-                                  (model.routing_strategy as RoutingStrategy | null) ??
-                                  globalStrategy;
-                                const isManual = effective === 'weighted';
-                                return routes.map((r) => {
-                                  const pct =
-                                    r.enabled && totalWeight > 0
-                                      ? (r.weight / totalWeight) * 100
-                                      : 0;
+                              {routes.map((r) => {
                                   return (
                                     <tr key={r.id}>
-                                      <td className="px-2 py-1.5 text-right">
-                                        <InlinePercentInput
-                                          weight={r.weight}
-                                          pct={pct}
-                                          enabled={r.enabled}
-                                          disabled={!r.enabled || !isManual}
-                                          onCommit={(newWeight) =>
-                                            updateRouteWeight(r.id, r.model_id, newWeight)
-                                          }
-                                        />
-                                      </td>
                                       <td className="px-2 py-1.5">
                                         <div className="flex flex-col gap-0.5">
                                           <span>{providerLabel(r.provider_id)}</span>
@@ -2126,33 +2083,23 @@ export function ModelsPage() {
                                       </td>
                                     </tr>
                                   );
-                                });
-                              })()}
+                                })}
                             </tbody>
                           </table>
                         </div>
                       )}
-                      {/* Cost projection + match-auto / even-split. Shown
-                          whenever there are at least 2 routes — projection
-                          isn't useful for a single-route model.
-                          The `key` includes a sum of weights + enabled
-                          mask so the bar refetches its projection any
-                          time routes change shape or admin tweaks
-                          weights, without us threading a refresh token
-                          through props. */}
+                      {/* Cost projection — informational only. Use a
+                          `refreshKey` prop instead of React `key` so the
+                          component stays mounted across drags; otherwise
+                          the cost line flashes "—" between releases
+                          while the new projection is in flight. */}
                       {routes && routes.length >= 2 && (
                         <RoutingProjection
-                          key={`proj-${model.model_id}-${routes
-                            .map((r) => `${r.id}:${r.weight}:${r.enabled ? 1 : 0}`)
-                            .join('|')}`}
                           modelId={model.model_id}
                           currency={pricing?.currency ?? 'USD'}
-                          manualMode={
-                            (((model.routing_strategy as RoutingStrategy | null) ??
-                              globalStrategy) === 'weighted')
-                          }
-                          disabled={!hasPermission('models:write')}
-                          onWeightsChanged={() => fetchRoutesFor(model.model_id)}
+                          refreshKey={routes
+                            .map((r) => `${r.id}:${r.weight}:${r.enabled ? 1 : 0}`)
+                            .join('|')}
                         />
                       )}
                     </section>

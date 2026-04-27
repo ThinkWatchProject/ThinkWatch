@@ -43,6 +43,13 @@ pub struct ModelRow {
     /// every route attached to the model, ordered by weight DESC. Lets
     /// the list table show "who serves this?" without an extra fetch.
     pub providers: Vec<String>,
+    /// Per-model routing override. `None` ⇒ inherit
+    /// `gateway.default_routing_strategy`. The detail drawer reads this
+    /// to label the strategy picker — without it, refetch-after-PATCH
+    /// can't reflect the new value.
+    pub routing_strategy: Option<String>,
+    pub affinity_mode: Option<String>,
+    pub affinity_ttl_secs: Option<i32>,
 }
 
 /// `status` filter accepted by `GET /api/admin/models`:
@@ -131,7 +138,8 @@ pub async fn list_models(
                   m.input_weight, m.output_weight,
                   COALESCE(rc.route_count, 0)         AS route_count,
                   COALESCE(rc.enabled_route_count, 0) AS enabled_route_count,
-                  COALESCE(rc.providers, '{{}}'::text[]) AS providers
+                  COALESCE(rc.providers, '{{}}'::text[]) AS providers,
+                  m.routing_strategy, m.affinity_mode, m.affinity_ttl_secs
            FROM models m
            LEFT JOIN LATERAL (
              SELECT COUNT(*)                                 AS route_count,
@@ -178,7 +186,7 @@ pub struct CreateModelRequest {
     #[schema(value_type = Option<f64>)]
     pub output_weight: Option<Decimal>,
     /// Override the gateway-wide default routing strategy. NULL ⇒
-    /// inherit. One of weighted/latency/cost/latency_cost.
+    /// inherit. One of weighted/latency/health/latency_health.
     #[serde(default)]
     pub routing_strategy: Option<String>,
     /// Override session affinity mode. NULL ⇒ inherit.
@@ -270,8 +278,7 @@ pub struct UpdateModelRequest {
     #[schema(value_type = Option<f64>)]
     pub output_weight: Option<Decimal>,
     /// PATCH semantics: absent = unchanged, JSON `null` = clear (revert
-    /// to global default), string = override. One of
-    /// weighted / latency / cost / latency_cost.
+    /// to global default), string = override.
     #[serde(default, deserialize_with = "deserialize_some")]
     pub routing_strategy: Option<Option<String>>,
     /// PATCH-clearable affinity mode. One of none / provider / route.
@@ -294,10 +301,10 @@ fn validate_routing_overrides(
     affinity_ttl_secs: Option<i32>,
 ) -> Result<(), AppError> {
     if let Some(s) = strategy
-        && !["weighted", "latency", "cost", "latency_cost"].contains(&s)
+        && !["weighted", "latency", "health", "latency_health"].contains(&s)
     {
         return Err(AppError::BadRequest(
-            "routing_strategy must be one of: weighted, latency, cost, latency_cost".into(),
+            "routing_strategy must be one of: weighted, latency, health, latency_health".into(),
         ));
     }
     if let Some(m) = affinity_mode
@@ -635,6 +642,10 @@ pub async fn list_model_routes(
         .assert_scope_global(&state.db, "models:read")
         .await?;
 
+    // Order by creation time so the routes table and the traffic-share
+    // sliders stay in the same place when admins drag weights — sorting
+    // by weight DESC made rows jump around as soon as you adjusted the
+    // ratios, which the operator UI shouldn't do.
     let rows = sqlx::query_as::<_, ModelRouteRow>(
         r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
                   mr.upstream_model, mr.weight, mr.enabled,
@@ -642,7 +653,7 @@ pub async fn list_model_routes(
            FROM model_routes mr
            JOIN providers p ON p.id = mr.provider_id
            WHERE mr.model_id = $1 AND p.deleted_at IS NULL
-           ORDER BY mr.weight DESC"#,
+           ORDER BY mr.created_at, mr.id"#,
     )
     .bind(&model_id)
     .fetch_all(&state.db)
@@ -1040,13 +1051,18 @@ pub async fn list_all_routes(
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BatchImportItem {
-    /// Name as it appears in the provider's remote catalog. Always
-    /// goes into `model_routes.upstream_model` (NULL when it matches
-    /// the exposed model_id, to keep the table tidy).
+    /// Name as it appears in the provider's remote catalog. Goes into
+    /// `model_routes.upstream_model` (or NULL when it matches the
+    /// exposed model_id, to keep the table tidy).
     pub upstream: String,
     /// When set, attach a route to this existing `models.model_id`
     /// instead of creating a new catalog entry.
     pub target_model_id: Option<String>,
+    /// Used only when `target_model_id` is None — overrides the
+    /// exposed model_id of the new catalog entry. Lets the admin
+    /// expose a tidy alias (e.g. "deepseek-v4") for a verbose upstream
+    /// name. When None, the exposed id defaults to `upstream`.
+    pub new_model_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -1081,13 +1097,29 @@ pub async fn batch_create_routes(
 
     // Split the request into the two flows. Each flow is one bulk
     // INSERT via UNNEST so we stay at O(1) round trips regardless of N.
-    let mut new_ids: Vec<String> = Vec::new();
+    //
+    // For "new" items we carry both the exposed id (what clients call)
+    // and the upstream id (what the provider expects). They're equal
+    // when the admin didn't customize, in which case `upstream_model`
+    // is stored as NULL via NULLIF below.
+    let mut new_exposed: Vec<String> = Vec::new();
+    let mut new_upstreams: Vec<String> = Vec::new();
     let mut attach_targets: Vec<String> = Vec::new();
     let mut attach_upstreams: Vec<String> = Vec::new();
 
     for it in &req.items {
         match &it.target_model_id {
-            None => new_ids.push(it.upstream.clone()),
+            None => {
+                let exposed = it
+                    .new_model_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&it.upstream)
+                    .to_string();
+                new_exposed.push(exposed);
+                new_upstreams.push(it.upstream.clone());
+            }
             Some(target) => {
                 attach_targets.push(target.clone());
                 attach_upstreams.push(it.upstream.clone());
@@ -1102,28 +1134,34 @@ pub async fn batch_create_routes(
     // Catalog insert is idempotent. Route insert counts rows via the
     // RETURNING/CTE pattern so the response's `created` count reflects
     // only rows that actually landed (skipping ON CONFLICT dupes).
-    let new_inserted: i64 = if new_ids.is_empty() {
+    // `NULLIF(upstream, exposed)` keeps `upstream_model` NULL when the
+    // exposed id matches upstream — same convention as a manual route.
+    let new_inserted: i64 = if new_exposed.is_empty() {
         0
     } else {
         sqlx::query(
             r#"INSERT INTO models (model_id, display_name)
-               SELECT m, m FROM UNNEST($1::TEXT[]) AS t(m)
+               SELECT exposed, exposed
+               FROM UNNEST($1::TEXT[]) AS t(exposed)
                ON CONFLICT (model_id) DO NOTHING"#,
         )
-        .bind(&new_ids)
+        .bind(&new_exposed)
         .execute(&mut *tx)
         .await?;
 
         sqlx::query_scalar::<_, i64>(
             r#"WITH ins AS (
-                 INSERT INTO model_routes (model_id, provider_id, weight)
-                 SELECT m, $2, 100 FROM UNNEST($1::TEXT[]) AS t(m)
+                 INSERT INTO model_routes
+                     (model_id, provider_id, upstream_model, weight)
+                 SELECT exposed, $3, NULLIF(upstream, exposed), 100
+                 FROM UNNEST($1::TEXT[], $2::TEXT[]) AS t(exposed, upstream)
                  ON CONFLICT (model_id, provider_id, upstream_model) DO NOTHING
                  RETURNING 1
                )
                SELECT COUNT(*) FROM ins"#,
         )
-        .bind(&new_ids)
+        .bind(&new_exposed)
+        .bind(&new_upstreams)
         .bind(req.provider_id)
         .fetch_one(&mut *tx)
         .await?
@@ -1166,7 +1204,7 @@ pub async fn batch_create_routes(
             .resource("model_routes")
             .detail(serde_json::json!({
                 "provider_id": req.provider_id,
-                "new": new_ids.len(),
+                "new": new_exposed.len(),
                 "attach": attach_targets.len(),
                 "created": created,
             })),
@@ -1339,7 +1377,7 @@ pub struct RoutingProjectionResponse {
     /// strategy + current weights.
     pub current: RoutingProjectionView,
     /// What the gateway would do if the strategy were the global
-    /// default (typically `latency_cost`). Used by "Match auto".
+    /// default (typically `latency`). Used by "Match auto".
     pub auto: RoutingProjectionView,
 }
 
@@ -1404,10 +1442,17 @@ pub async fn get_routing_projection(
         let signals: Vec<RouteSignal> = entries
             .iter()
             .zip(health_snapshots.iter())
-            .map(|(e, h)| RouteSignal {
-                configured_weight: e.weight,
-                ewma_latency_ms: h.ewma_latency_ms,
-                cost_per_token: e.cost_per_token,
+            .map(|(e, h)| {
+                let success_rate = if h.total > 0 {
+                    Some((1.0 - h.error_pct / 100.0).clamp(0.0, 1.0))
+                } else {
+                    None
+                };
+                RouteSignal {
+                    configured_weight: e.weight,
+                    ewma_latency_ms: h.ewma_latency_ms,
+                    success_rate,
+                }
             })
             .collect();
         let weights = compute_weights(strategy, &signals, latency_k);

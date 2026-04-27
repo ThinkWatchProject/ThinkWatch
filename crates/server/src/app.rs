@@ -381,10 +381,6 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/setup/initialize",
             post(handlers::setup::setup_initialize),
         )
-        .route(
-            "/api/setup/test-provider",
-            post(handlers::providers::test_provider_unauthenticated),
-        )
         // Dashboard live WebSocket — auth is performed by atomically
         // consuming a single-use ticket that the client minted via
         // POST /api/dashboard/ws-ticket (which IS authenticated). The
@@ -1118,7 +1114,7 @@ async fn load_providers_into_router(
 
     // Load platform pricing once — combines with per-model
     // input_weight/output_weight to give an effective $/token factor
-    // used by the `cost` and `latency_cost` strategies.
+    // surfaced in admin projection views (cost preview, expected cost).
     #[derive(sqlx::FromRow)]
     struct PricingRow {
         input_price_per_token: rust_decimal::Decimal,

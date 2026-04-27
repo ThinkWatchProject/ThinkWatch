@@ -1,3 +1,4 @@
+import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Label } from '@/components/ui/label';
 import {
@@ -8,10 +9,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Sparkles, SlidersHorizontal } from 'lucide-react';
-import {
-  AUTO_TARGETS,
-  type RoutingStrategy,
-} from '../models';
+import { AUTO_TARGETS, type RoutingStrategy } from '../models';
 
 interface Props {
   /// Per-model override. `null` = inherit global default.
@@ -23,27 +21,24 @@ interface Props {
   /// Fired when admin picks a new strategy. `null` = clear override
   /// (inherit global). Caller persists via PATCH /api/admin/models/{id}.
   onChange: (next: RoutingStrategy | null) => void;
+  /// When in manual mode, the caller's TrafficBar (+ reset action) is
+  /// rendered inside the manual card body. Pulling it inside keeps the
+  /// "you're in manual, here's where you set ratios" frame self-contained.
+  manualBar?: ReactNode;
 }
 
-/// The "auto / manual" mode picker that sits at the top of a model's
-/// route list. Mode = derived from `modelStrategy` (or `globalStrategy`
-/// if model has no override): "manual" iff `weighted`, else "auto" with
-/// the strategy as the optimization target.
+/// Top-of-routes picker. Auto vs manual:
+///   * Auto  ⇒ one of latency / health / latency_health (sub-picker below)
+///   * Manual ⇒ operator-set ratios via the embedded TrafficBar
 ///
-/// Two state transitions admin can make:
-///  - Toggle to manual ⇒ persist `weighted`
-///  - Toggle to auto ⇒ persist a default auto strategy (`latency_cost`)
-///  - Within auto, change target ⇒ persist that target
-///
-/// Picking a strategy that matches the global default still stores the
-/// override (so admin's intent doesn't silently track a global change).
-/// We surface "current source" so they can tell whether they're seeing
-/// inherited behaviour or their own pick.
+/// Switching to auto from manual seeds with `latency_health` (the
+/// global default). Switching to manual seeds with `weighted`.
 export function RoutingModeSection({
   modelStrategy,
   globalStrategy,
   disabled,
   onChange,
+  manualBar,
 }: Props) {
   const { t } = useTranslation();
 
@@ -53,14 +48,10 @@ export function RoutingModeSection({
     ? t('models.routing.sourceModel')
     : t('models.routing.sourceGlobal');
 
-  const setMode = (mode: 'auto' | 'manual') => {
-    if (mode === 'manual') {
-      onChange('weighted');
-    } else {
-      // Default auto target = latency_cost. Admin can change it via
-      // the sub-picker below.
-      onChange('latency_cost');
-    }
+  const handleAutoCardClick = () => {
+    // Already in auto — no-op (the sub-picker handles target changes).
+    if (!isManual) return;
+    onChange('latency_health');
   };
 
   return (
@@ -69,7 +60,7 @@ export function RoutingModeSection({
         <button
           type="button"
           disabled={disabled}
-          onClick={() => setMode('auto')}
+          onClick={handleAutoCardClick}
           className={`flex items-start gap-2 rounded border p-3 text-left transition ${
             !isManual
               ? 'border-primary bg-primary/10'
@@ -93,7 +84,10 @@ export function RoutingModeSection({
         <button
           type="button"
           disabled={disabled}
-          onClick={() => setMode('manual')}
+          onClick={() => {
+            if (isManual) return;
+            onChange('weighted');
+          }}
           className={`flex items-start gap-2 rounded border p-3 text-left transition ${
             isManual
               ? 'border-primary bg-primary/10'
@@ -138,6 +132,7 @@ export function RoutingModeSection({
           </Select>
         </div>
       )}
+      {isManual && manualBar && <div>{manualBar}</div>}
       <div className="text-[11px] text-muted-foreground">
         {t('models.routing.currentSource', { source: sourceLabel })}
         {' · '}

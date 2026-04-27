@@ -286,7 +286,7 @@ dc_getters_string! {
     site_name,                "setup.site_name",                   "ThinkWatch";
     client_ip_source,         "security.client_ip_source",         "connection";
     client_ip_xff_position,   "security.client_ip_xff_position",   "left";
-    default_routing_strategy, "gateway.default_routing_strategy",  "latency_cost";
+    default_routing_strategy, "gateway.default_routing_strategy",  "latency_health";
     default_affinity_mode,    "gateway.default_affinity_mode",     "provider";
 }
 
@@ -599,9 +599,9 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
             let s = value
                 .as_str()
                 .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
-            if !["weighted", "latency", "cost", "latency_cost"].contains(&s) {
+            if !["weighted", "latency", "health", "latency_health"].contains(&s) {
                 anyhow::bail!(
-                    "{key}: must be one of \"weighted\", \"latency\", \"cost\", \"latency_cost\""
+                    "{key}: must be one of \"weighted\", \"latency\", \"health\", \"latency_health\""
                 );
             }
         }

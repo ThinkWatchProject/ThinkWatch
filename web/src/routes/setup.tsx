@@ -19,28 +19,18 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select';
-import { Check, Copy, Globe, ArrowRight, ArrowLeft, AlertTriangle, AlertCircle, Plus, X } from 'lucide-react';
+import { Check, Copy, Globe, ArrowRight, ArrowLeft, AlertTriangle, AlertCircle, Eye, EyeOff, Wand2 } from 'lucide-react';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { API_BASE, registerKeyPair } from '@/lib/api';
 
-const STEPS = ['welcome', 'admin', 'settings', 'provider', 'complete'] as const;
+const STEPS = ['welcome', 'admin', 'settings', 'complete'] as const;
 type Step = (typeof STEPS)[number];
-
-const PROVIDER_TYPES = [
-  { value: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com' },
-  { value: 'anthropic', label: 'Anthropic', baseUrl: 'https://api.anthropic.com' },
-  { value: 'google', label: 'Google Gemini', baseUrl: 'https://generativelanguage.googleapis.com' },
-  { value: 'azure_openai', label: 'Azure OpenAI', baseUrl: '' },
-  { value: 'bedrock', label: 'AWS Bedrock', baseUrl: 'us-east-1' },
-  { value: 'custom', label: 'Custom (OpenAI-compatible)', baseUrl: '' },
-];
 
 interface SetupResult {
   admin_id: string;
   admin_email: string;
   api_key?: string;
-  provider_id?: string;
   message: string;
 }
 
@@ -109,26 +99,10 @@ export function SetupPage() {
   const [displayName, setDisplayName] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [passwordRevealed, setPasswordRevealed] = useState(false);
 
   // Settings form
   const [siteName, setSiteName] = useState('ThinkWatch');
-
-  // Provider form
-  const [providerType, setProviderType] = useState('');
-  const [providerName, setProviderName] = useState('');
-  const [providerDisplayName, setProviderDisplayName] = useState('');
-  const [providerBaseUrl, setProviderBaseUrl] = useState('');
-  const [providerHeaders, setProviderHeaders] = useState<[string, string][]>([]);
-  // Bedrock-specific
-  const [awsAccessKeyId, setAwsAccessKeyId] = useState('');
-  const [awsSecretKey, setAwsSecretKey] = useState('');
-  // Provider connection test state
-  const [providerTesting, setProviderTesting] = useState(false);
-  const [providerTestResult, setProviderTestResult] = useState<{
-    success: boolean;
-    message: string;
-    latency_ms: number;
-  } | null>(null);
 
   const [adminErrors, setAdminErrors] = useState<Record<string, string>>({});
   // Per-field touched state. `validateAdmin` always rebuilds the full
@@ -160,6 +134,38 @@ export function SetupPage() {
   const markAdminTouched = (field: string) => {
     setAdminTouched((prev) => (prev[field] ? prev : { ...prev, [field]: true }));
     validateAdmin();
+  };
+
+  // Generates a 16-char password that always satisfies the complexity
+  // rules (≥1 upper, ≥1 lower, ≥1 digit). Reveals it inline so the
+  // operator can copy it before continuing — generated → masked again
+  // would be a footgun since they have no record of what was set.
+  const handleGeneratePassword = () => {
+    const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+    const lower = 'abcdefghijkmnopqrstuvwxyz';
+    const digit = '23456789';
+    const symbol = '!@#$%^&*-_=+';
+    const all = upper + lower + digit + symbol;
+    const rand = (alphabet: string) => {
+      const buf = new Uint32Array(1);
+      crypto.getRandomValues(buf);
+      return alphabet[buf[0] % alphabet.length];
+    };
+    // Seed with one of each required class, then fill out and shuffle so
+    // the required chars aren't always at fixed positions.
+    const chars = [rand(upper), rand(lower), rand(digit), rand(symbol)];
+    while (chars.length < 16) chars.push(rand(all));
+    for (let i = chars.length - 1; i > 0; i--) {
+      const buf = new Uint32Array(1);
+      crypto.getRandomValues(buf);
+      const j = buf[0] % (i + 1);
+      [chars[i], chars[j]] = [chars[j], chars[i]];
+    }
+    const generated = chars.join('');
+    setPassword(generated);
+    setConfirmPassword(generated);
+    setPasswordRevealed(true);
+    setAdminTouched((prev) => ({ ...prev, password: true, confirmPassword: true }));
   };
 
   // Keep `adminErrors` in sync with the live form values. Without this,
@@ -200,62 +206,7 @@ export function SetupPage() {
     }
   };
 
-  const handleTestProvider = async () => {
-    setProviderTesting(true);
-    setProviderTestResult(null);
-    try {
-      const res = await fetch(`${API_BASE}/api/setup/test-provider`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider_type: providerType,
-          base_url: providerBaseUrl,
-          headers: providerHeaders.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok) {
-        setProviderTestResult({
-          success: false,
-          message: data.error?.message || `HTTP ${res.status}`,
-          latency_ms: 0,
-        });
-      } else {
-        setProviderTestResult(data);
-      }
-    } catch (err) {
-      setProviderTestResult({
-        success: false,
-        message: err instanceof Error ? err.message : 'Network error',
-        latency_ms: 0,
-      });
-    } finally {
-      setProviderTesting(false);
-    }
-  };
-
-  const handleProviderTypeChange = (value: string | null) => {
-    if (value === null) return;
-    setProviderType(value);
-    setProviderTestResult(null); // reset test status when type changes
-    const found = PROVIDER_TYPES.find((pt) => pt.value === value);
-    if (found) {
-      setProviderBaseUrl(found.baseUrl);
-      if (!providerName) setProviderName(value);
-      if (!providerDisplayName) setProviderDisplayName(found.label);
-    }
-    // Auto-populate default auth headers for the selected type
-    const defaults: Record<string, [string, string][]> = {
-      openai: [['Authorization', 'Bearer ']],
-      anthropic: [['x-api-key', ''], ['anthropic-version', '2023-06-01']],
-      google: [['x-goog-api-key', '']],
-      azure_openai: [['api-key', '']],
-      bedrock: [], // Bedrock uses SigV4 signing, not HTTP auth headers
-    };
-    setProviderHeaders(defaults[value] ?? []);
-  };
-
-  const handleSubmit = async (skipProvider = false) => {
+  const handleSubmit = async () => {
     setSubmitting(true);
     setError('');
 
@@ -264,18 +215,6 @@ export function SetupPage() {
     };
     if (siteName && siteName !== 'ThinkWatch') {
       body.site_name = siteName;
-    }
-    if (!skipProvider && providerType && providerName && providerBaseUrl) {
-      body.provider = {
-        name: providerName,
-        display_name: providerDisplayName || providerName,
-        provider_type: providerType,
-        base_url: providerBaseUrl,
-        headers: providerHeaders.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
-        ...(providerType === 'bedrock' && awsAccessKeyId ? {
-          config: { aws_access_key_id: awsAccessKeyId, aws_secret_access_key: awsSecretKey },
-        } : {}),
-      };
     }
 
     try {
@@ -395,19 +334,42 @@ export function SetupPage() {
           )}
         </div>
         <div className="space-y-2">
-          <Label htmlFor="setup-password">
-            {t('setup.admin.password')} <RequiredMark />
-          </Label>
-          <Input
-            id="setup-password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            onBlur={() => markAdminTouched('password')}
-            required
-            aria-required="true"
-            aria-invalid={adminTouched.password && !!adminErrors.password}
-          />
+          <div className="flex items-center justify-between">
+            <Label htmlFor="setup-password">
+              {t('setup.admin.password')} <RequiredMark />
+            </Label>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              onClick={handleGeneratePassword}
+            >
+              <Wand2 className="mr-1 h-3 w-3" />
+              {t('setup.admin.generatePassword')}
+            </Button>
+          </div>
+          <div className="relative">
+            <Input
+              id="setup-password"
+              type={passwordRevealed ? 'text' : 'password'}
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              onBlur={() => markAdminTouched('password')}
+              required
+              aria-required="true"
+              aria-invalid={adminTouched.password && !!adminErrors.password}
+              className="pr-9"
+            />
+            <button
+              type="button"
+              onClick={() => setPasswordRevealed((v) => !v)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label={passwordRevealed ? t('common.hide') : t('common.show')}
+            >
+              {passwordRevealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
           <p className="text-xs text-muted-foreground">
             {t('setup.admin.passwordHint')}
           </p>
@@ -452,135 +414,6 @@ export function SetupPage() {
             onChange={(e) => setSiteName(e.target.value)}
           />
         </div>
-      </CardContent>
-    </>
-  );
-
-  const renderProvider = () => (
-    <>
-      <CardHeader className="text-center">
-        <CardTitle>{t('setup.provider.title')}</CardTitle>
-        <CardDescription>{t('setup.provider.subtitle')}</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div className="space-y-2">
-          <Label>{t('setup.provider.providerType')}</Label>
-          <Select value={providerType} onValueChange={handleProviderTypeChange}>
-            <SelectTrigger>
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {PROVIDER_TYPES.map((pt) => (
-                <SelectItem key={pt.value} value={pt.value}>
-                  {pt.label}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-        </div>
-        {providerType && (
-          <>
-            <div className="space-y-2">
-              <Label htmlFor="setup-provider-name">{t('setup.provider.name')}</Label>
-              <Input
-                id="setup-provider-name"
-                value={providerName}
-                onChange={(e) => setProviderName(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="setup-provider-display-name">{t('setup.provider.displayName')}</Label>
-              <Input
-                id="setup-provider-display-name"
-                value={providerDisplayName}
-                onChange={(e) => setProviderDisplayName(e.target.value)}
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="setup-provider-base-url">{t('setup.provider.baseUrl')}</Label>
-              <Input
-                id="setup-provider-base-url"
-                value={providerBaseUrl}
-                onChange={(e) => setProviderBaseUrl(e.target.value)}
-                placeholder={
-                  providerType === 'azure_openai' ? 'https://your-resource.openai.azure.com' :
-                  providerType === 'bedrock' ? 'us-east-1' :
-                  providerType === 'anthropic' ? 'https://api.anthropic.com' :
-                  providerType === 'google' ? 'https://generativelanguage.googleapis.com' :
-                  'https://api.openai.com'
-                }
-              />
-              {providerType === 'bedrock' && (
-                <p className="text-xs text-muted-foreground">{t('providers.bedrockUrlHint', 'Enter AWS region (e.g. us-east-1)')}</p>
-              )}
-              {providerType === 'azure_openai' && (
-                <p className="text-xs text-muted-foreground">{t('providers.azureUrlHint', 'Enter Azure OpenAI resource endpoint')}</p>
-              )}
-            </div>
-            {providerType === 'bedrock' && (
-              <>
-                <div className="space-y-2">
-                  <Label htmlFor="setup-ak">Access Key ID</Label>
-                  <Input id="setup-ak" value={awsAccessKeyId} onChange={(e) => setAwsAccessKeyId(e.target.value)} placeholder="AKIA..." />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="setup-sk">Secret Access Key</Label>
-                  <Input id="setup-sk" value={awsSecretKey} onChange={(e) => setAwsSecretKey(e.target.value)} placeholder="wJalr..." />
-                </div>
-                <p className="text-xs text-muted-foreground">{t('providers.awsImdsv2Hint')}</p>
-              </>
-            )}
-            <div className="space-y-2">
-              <Label>{t('providers.headers')}</Label>
-              <p className="text-xs text-muted-foreground">{t('providers.headersDesc')}</p>
-              {providerHeaders.map(([k, v], i) => (
-                <div key={i} className="flex gap-2 items-center">
-                  <Input className="flex-1" placeholder="Header-Name" value={k}
-                    onChange={(e) => { const next = [...providerHeaders]; next[i] = [e.target.value, v]; setProviderHeaders(next); }} />
-                  <Input className="flex-1" type={/key|secret|token|auth/i.test(k) ? 'password' : 'text'}
-                    placeholder={t('mcpServers.headerValuePlaceholder')} value={v}
-                    onChange={(e) => { const next = [...providerHeaders]; next[i] = [k, e.target.value]; setProviderHeaders(next); }} />
-                  <Button type="button" variant="ghost" size="icon-sm" onClick={() => setProviderHeaders(providerHeaders.filter((_, j) => j !== i))}>
-                    <X className="h-3 w-3" />
-                  </Button>
-                </div>
-              ))}
-              <Button type="button" variant="outline" size="sm" onClick={() => setProviderHeaders([...providerHeaders, ['', '']])}>
-                <Plus className="mr-1 h-3 w-3" />{t('providers.addHeader')}
-              </Button>
-            </div>
-
-            {/* Test connection */}
-            <div className="space-y-2 pt-2 border-t">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={providerTesting || !providerBaseUrl}
-                onClick={handleTestProvider}
-              >
-                {providerTesting ? t('common.loading') : t('setup.provider.testConnection')}
-              </Button>
-              {providerTestResult && (
-                <Alert variant={providerTestResult.success ? 'default' : 'destructive'}>
-                  {providerTestResult.success ? (
-                    <Check className="h-4 w-4" />
-                  ) : (
-                    <AlertCircle className="h-4 w-4" />
-                  )}
-                  <AlertDescription>
-                    {providerTestResult.message}
-                    {providerTestResult.latency_ms > 0 && (
-                      <span className="text-xs text-muted-foreground ml-2">
-                        ({providerTestResult.latency_ms}ms)
-                      </span>
-                    )}
-                  </AlertDescription>
-                </Alert>
-              )}
-            </div>
-          </>
-        )}
       </CardContent>
     </>
   );
@@ -634,8 +467,6 @@ export function SetupPage() {
         return renderAdmin();
       case 'settings':
         return renderSettings();
-      case 'provider':
-        return renderProvider();
       case 'complete':
         return renderComplete();
     }
@@ -643,9 +474,9 @@ export function SetupPage() {
 
   const handleFormSubmit = (e: FormEvent) => {
     e.preventDefault();
-    if (step === 'provider') {
-      handleSubmit(false);
-    } else if (step !== 'complete' && step !== 'welcome') {
+    if (step === 'settings') {
+      handleSubmit();
+    } else if (step === 'admin') {
       goNext();
     }
   };
@@ -683,9 +514,8 @@ export function SetupPage() {
   }, []);
 
   const showBack = step !== 'welcome' && step !== 'complete';
-  const showNext = step === 'admin' || step === 'settings';
-  const showSubmit = step === 'provider';
-  const showSkip = step === 'provider';
+  const showNext = step === 'admin';
+  const showSubmit = step === 'settings';
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
@@ -702,7 +532,7 @@ export function SetupPage() {
               </div>
             )}
             {renderStepContent()}
-            {(showBack || showNext || showSubmit || showSkip) && (
+            {(showBack || showNext || showSubmit) && (
               <div className="flex items-center justify-between px-6 pb-6 pt-2">
                 <div>
                   {showBack && (
@@ -713,16 +543,6 @@ export function SetupPage() {
                   )}
                 </div>
                 <div className="flex gap-2">
-                  {showSkip && (
-                    <Button
-                      type="button"
-                      variant="outline"
-                      onClick={() => handleSubmit(true)}
-                      disabled={submitting}
-                    >
-                      {t('setup.provider.skip')}
-                    </Button>
-                  )}
                   {showNext && (
                     <Button data-primary-action type="submit">
                       {t('setup.next')}
@@ -731,7 +551,8 @@ export function SetupPage() {
                   )}
                   {showSubmit && (
                     <Button data-primary-action type="submit" disabled={submitting}>
-                      {submitting ? t('common.loading') : t('setup.next')}
+                      {submitting ? t('common.loading') : t('setup.complete.cta')}
+                      <ArrowRight className="ml-2 h-4 w-4" />
                     </Button>
                   )}
                 </div>

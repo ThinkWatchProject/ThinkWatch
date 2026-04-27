@@ -35,7 +35,7 @@ use crate::handlers::{
         CreateRoleRequest, PermissionDef, RoleHistoryResponse, RoleMember, RoleMembersResponse,
         RoleResponse, RolesListResponse, UpdateRoleRequest,
     },
-    setup::{AdminSetup, ProviderSetup, SetupInitRequest, SetupInitResponse, SetupStatusResponse},
+    setup::{AdminSetup, SetupInitRequest, SetupInitResponse, SetupStatusResponse},
     teams::{
         AddMemberRequest, CreateTeamRequest, Team, TeamMemberRow, TeamWithCount, UpdateTeamRequest,
     },
@@ -212,7 +212,7 @@ use crate::handlers::{
             ForceRevokeRequest,
             PolicyScopeResponse,
             // Setup
-            AdminSetup, ProviderSetup, SetupInitRequest, SetupInitResponse, SetupStatusResponse,
+            AdminSetup, SetupInitRequest, SetupInitResponse, SetupStatusResponse,
             // Teams
             Team, TeamWithCount, CreateTeamRequest, UpdateTeamRequest, TeamMemberRow, AddMemberRequest,
             // Roles

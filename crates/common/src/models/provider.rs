@@ -29,7 +29,7 @@ pub struct Model {
     pub output_weight: Decimal,
     /// Per-model routing strategy override.
     /// `None` ⇒ inherit `gateway.default_routing_strategy`.
-    /// One of `weighted` / `latency` / `cost` / `latency_cost`.
+    /// One of `weighted` / `latency` / `health` / `latency_health`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_strategy: Option<String>,
     /// Per-model affinity mode override.

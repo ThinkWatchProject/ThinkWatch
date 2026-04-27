@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Slider as SliderPrimitive } from 'radix-ui';
+import { Scale } from 'lucide-react';
 
 interface Segment {
   id: string;
@@ -6,174 +9,141 @@ interface Segment {
   label: string;
   /// Stored weight (integer). Caller pre-filters to enabled-only routes.
   weight: number;
-  /// Tailwind background color classes — caller assigns deterministically
-  /// so the same route always gets the same hue.
-  colorClass: string;
 }
 
 interface Props {
   segments: Segment[];
-  /// Disable drag handles when admin lacks write permission or the
-  /// model is in auto mode.
+  /// Disable drag handles when admin lacks write permission.
   disabled?: boolean;
   /// Fired on pointer release with the new weight set. Caller persists
   /// via `PATCH /api/admin/model-routes/batch-weights`.
   onCommit: (updates: { id: string; weight: number }[]) => void;
 }
 
-/// Horizontal bar split into segments by weight. Each segment-segment
-/// boundary is a draggable handle: dragging right grows the left
-/// segment's weight at the right segment's expense (zero-sum within
-/// the pair). On pointer release we commit the final weights.
+/// One row per route, each row a Radix slider. Dragging one slider
+/// grows (or shrinks) that route; the delta is redistributed across
+/// **all other** routes proportionally to their weights at drag-start.
+/// Snapshotting at drag-start means motion stays linear even when
+/// neighbours approach zero.
 ///
-/// Why pair-only? Multi-segment redistribute is conceptually nice but
-/// hard to make intuitive: dragging segment 2's right edge "should"
-/// affect segment 3, not segment 4. Pair-only matches the visual
-/// "I'm dragging this boundary" mental model and is what the AWS / GCP
-/// load-balancer admin UIs do.
+/// Smooth at 60fps via local draft state; commits to the parent on
+/// pointer release so we don't spam PATCH requests during drag.
 export function TrafficBar({ segments, disabled, onCommit }: Props) {
-  // Local copy so dragging is smooth (we re-render at 60fps without
-  // round-tripping through the parent). Synced from props on each
-  // non-dragging update.
-  const [draftWeights, setDraftWeights] = useState<number[]>(
-    segments.map((s) => s.weight),
-  );
-  const draggingRef = useRef(false);
+  const { t } = useTranslation();
+
+  const [draft, setDraft] = useState<number[]>(segments.map((s) => s.weight));
+  const dragSnapshot = useRef<{ index: number; weights: number[] } | null>(null);
 
   useEffect(() => {
-    if (!draggingRef.current) {
-      setDraftWeights(segments.map((s) => s.weight));
+    if (!dragSnapshot.current) {
+      setDraft(segments.map((s) => s.weight));
     }
   }, [segments]);
 
-  const containerRef = useRef<HTMLDivElement>(null);
-  const total = draftWeights.reduce((a, b) => a + b, 0) || 1;
+  const total = draft.reduce((a, b) => a + b, 0) || 1;
 
-  const startDrag = useCallback(
-    (boundaryIndex: number) => (e: React.PointerEvent) => {
-      if (disabled) return;
-      e.preventDefault();
-      const container = containerRef.current;
-      if (!container) return;
-      draggingRef.current = true;
-      // Capture pointer so we keep getting move events even if the
-      // cursor leaves the bar (browser default).
-      (e.target as HTMLElement).setPointerCapture(e.pointerId);
+  const handleValueChange = (segmentIndex: number, [newPct]: number[]) => {
+    if (
+      !dragSnapshot.current ||
+      dragSnapshot.current.index !== segmentIndex
+    ) {
+      dragSnapshot.current = { index: segmentIndex, weights: [...draft] };
+    }
+    const initial = dragSnapshot.current.weights;
+    const initialTotal = initial.reduce((a, b) => a + b, 0) || 1;
+    const newK = Math.max(0, Math.min(initialTotal, (newPct / 100) * initialTotal));
+    const oldK = initial[segmentIndex];
+    const delta = newK - oldK;
 
-      const rect = container.getBoundingClientRect();
-      const initial = [...draftWeights];
-      const pairTotal = initial[boundaryIndex] + initial[boundaryIndex + 1];
+    const next = [...initial];
+    next[segmentIndex] = newK;
 
-      const onMove = (ev: PointerEvent) => {
-        const x = ev.clientX - rect.left;
-        const beforePx = initial
-          .slice(0, boundaryIndex)
-          .reduce((sum, w) => sum + (w / total) * rect.width, 0);
-        const pairPx = (pairTotal / total) * rect.width;
-        if (pairPx <= 0) return;
-        // Drag distance into the pair, normalized 0..1.
-        const t = Math.max(0, Math.min(1, (x - beforePx) / pairPx));
-        const newLeft = Math.round(pairTotal * t);
-        const newRight = pairTotal - newLeft;
-        const next = [...initial];
-        next[boundaryIndex] = newLeft;
-        next[boundaryIndex + 1] = newRight;
-        setDraftWeights(next);
-      };
+    const sumOthers = initial
+      .map((w, i) => (i === segmentIndex ? 0 : w))
+      .reduce((a, b) => a + b, 0);
+    for (let i = 0; i < initial.length; i++) {
+      if (i === segmentIndex) continue;
+      if (sumOthers > 0) {
+        next[i] = initial[i] - delta * (initial[i] / sumOthers);
+      } else {
+        const denom = initial.length - 1 || 1;
+        next[i] = -delta / denom;
+      }
+      if (next[i] < 0) next[i] = 0;
+    }
+    setDraft(next.map((w) => Math.round(w)));
+  };
 
-      const onUp = () => {
-        window.removeEventListener('pointermove', onMove);
-        window.removeEventListener('pointerup', onUp);
-        window.removeEventListener('pointercancel', onUp);
-        draggingRef.current = false;
-        // Read fresh state via the setter form so we commit the latest
-        // weights even if React batched a final move event.
-        setDraftWeights((latest) => {
-          // Diff against props so we only PATCH segments that moved.
-          const updates = segments
-            .map((s, i) => ({ id: s.id, weight: latest[i] }))
-            .filter((u, i) => u.weight !== segments[i].weight);
-          if (updates.length > 0) onCommit(updates);
-          return latest;
-        });
-      };
+  const handleValueCommit = () => {
+    dragSnapshot.current = null;
+    setDraft((latest) => {
+      const updates = segments
+        .map((s, i) => ({ id: s.id, weight: latest[i] }))
+        .filter((u, i) => u.weight !== segments[i].weight);
+      if (updates.length > 0) onCommit(updates);
+      return latest;
+    });
+  };
 
-      window.addEventListener('pointermove', onMove);
-      window.addEventListener('pointerup', onUp);
-      window.addEventListener('pointercancel', onUp);
-    },
-    [disabled, draftWeights, segments, total, onCommit],
-  );
+  const resetToEvenSplit = () => {
+    if (disabled || segments.length < 2) return;
+    const updates = segments
+      .map((s) => ({ id: s.id, weight: 100 }))
+      .filter((u, i) => u.weight !== segments[i].weight);
+    if (updates.length > 0) onCommit(updates);
+  };
 
   if (segments.length === 0) return null;
-  if (segments.length === 1) {
-    return (
-      <div className="h-7 rounded-md border overflow-hidden flex">
-        <div
-          className={`${segments[0].colorClass} text-[11px] text-white flex items-center justify-center font-medium`}
-          style={{ width: '100%' }}
-          title={`${segments[0].label} (100%)`}
-        >
-          <span className="truncate px-2">{segments[0].label} 100%</span>
-        </div>
-      </div>
-    );
-  }
 
   return (
-    <div
-      ref={containerRef}
-      className={`relative h-7 rounded-md border overflow-hidden flex select-none ${
-        disabled ? 'opacity-60' : ''
-      }`}
-    >
+    <div className="space-y-2">
       {segments.map((s, i) => {
-        const w = draftWeights[i] ?? s.weight;
+        const w = draft[i] ?? s.weight;
         const pct = (w / total) * 100;
+        const single = segments.length === 1;
         return (
-          <div
-            key={s.id}
-            className={`${s.colorClass} text-[11px] text-white flex items-center justify-center font-medium relative`}
-            style={{ width: `${pct}%` }}
-            title={`${s.label} (${pct.toFixed(0)}%)`}
-          >
-            <span className="truncate px-2">
-              {pct >= 12 ? `${s.label} ${pct.toFixed(0)}%` : `${pct.toFixed(0)}%`}
-            </span>
-            {i < segments.length - 1 && !disabled && (
-              <div
-                onPointerDown={startDrag(i)}
-                className="absolute right-0 top-0 h-full w-2 -mr-1 cursor-col-resize z-10 hover:bg-white/30"
-                role="separator"
-                aria-label="Resize"
-              />
-            )}
+          <div key={s.id} className="flex items-center gap-3">
+            <div
+              className="text-[11px] font-mono truncate w-32 shrink-0"
+              title={s.label}
+            >
+              {s.label}
+            </div>
+            <SliderPrimitive.Root
+              value={[Math.round(pct)]}
+              min={0}
+              max={100}
+              step={1}
+              disabled={disabled || single}
+              onValueChange={(v) => handleValueChange(i, v)}
+              onValueCommit={handleValueCommit}
+              className="relative flex flex-1 items-center select-none touch-none data-[disabled]:opacity-50"
+              aria-label={s.label}
+            >
+              <SliderPrimitive.Track className="bg-muted relative grow overflow-hidden rounded-full h-1.5">
+                <SliderPrimitive.Range className="bg-foreground absolute h-full" />
+              </SliderPrimitive.Track>
+              <SliderPrimitive.Thumb className="border-foreground/30 bg-background block size-4 shrink-0 rounded-full border shadow-sm hover:ring-2 hover:ring-foreground/20 focus-visible:ring-2 focus-visible:ring-foreground/40 focus-visible:outline-hidden disabled:pointer-events-none" />
+            </SliderPrimitive.Root>
+            <div className="text-xs font-mono tabular-nums w-10 text-right shrink-0">
+              {pct.toFixed(0)}%
+            </div>
           </div>
         );
       })}
+      {!disabled && segments.length > 1 && (
+        <div className="flex justify-end">
+          <button
+            type="button"
+            onClick={resetToEvenSplit}
+            className="text-muted-foreground hover:text-foreground text-[11px] inline-flex items-center gap-1"
+            title={t('models.routing.evenSplitTooltip')}
+          >
+            <Scale className="h-3 w-3" />
+            {t('models.routing.evenSplitTooltip')}
+          </button>
+        </div>
+      )}
     </div>
   );
-}
-
-/// Stable color picker for routes. Same route_id always gets the same
-/// Tailwind class so the bar visualization stays familiar across reloads.
-const PALETTE = [
-  'bg-emerald-600',
-  'bg-sky-600',
-  'bg-violet-600',
-  'bg-amber-600',
-  'bg-rose-600',
-  'bg-teal-600',
-  'bg-indigo-600',
-  'bg-orange-600',
-];
-
-export function colorClassForRoute(routeId: string): string {
-  // Tiny FNV-1a-ish hash, deterministic, no deps.
-  let h = 2166136261;
-  for (let i = 0; i < routeId.length; i++) {
-    h ^= routeId.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return PALETTE[Math.abs(h) % PALETTE.length];
 }

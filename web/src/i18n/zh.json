@@ -37,6 +37,8 @@
     "loading": "加载中...",
     "required": "必填",
     "dismiss": "关闭",
+    "show": "显示",
+    "hide": "隐藏",
     "noData": "暂无数据",
     "noResults": "无匹配结果",
     "confirm": "确认",
@@ -284,8 +286,6 @@
     "awsAuthAkSk": "Access Key / Secret Key",
     "awsAuthImdsv2": "EC2 实例角色 (IMDSv2)",
     "awsImdsv2Hint": "凭证将自动从 EC2 实例元数据服务获取。请确保实例绑定了具有 Bedrock 权限的 IAM 角色。",
-    "bedrockUrlHint": "输入 AWS 区域（如 us-east-1）",
-    "azureUrlHint": "输入 Azure OpenAI 资源端点",
     "testConnection": "测试连接",
     "testing": "测试中...",
     "providerCreated": "提供商已创建。"
@@ -363,7 +363,6 @@
     "searchPlaceholder": "按模型 ID 或显示名搜索...",
     "routes": "路由",
     "addRoute": "添加路由",
-    "weight": "权重",
     "upstreamModelHint": "发送给供应商的模型名。留空则使用相同名称。",
     "upstreamModelInherit": "沿用 catalog 模型 ID ({{modelId}})",
     "upstreamModelFreeInput": "无法获取供应商 catalog — 请手动输入上游模型名。",
@@ -397,8 +396,6 @@
       "active": "启用",
       "provider": "提供商",
       "upstreamModel": "上游模型",
-      "weight": "权重",
-      "share": "比例",
       "health": "健康",
       "healthHint": "实时熔断器状态(基于滚动窗口错误率)。健康 = 正常路由,熔断 = 暂时排除,半开 = 探测中。",
       "p50": "EWMA 延迟"
@@ -434,20 +431,19 @@
     "routingOverrideHint": "针对此模型覆盖网关全局默认。留空则继承「设置 → 网关」中的配置。",
     "strategy": {
       "weighted": "加权随机",
-      "latency": "延迟优先 (自动追快)",
-      "cost": "成本优先 (优选便宜)",
-      "latency_cost": "延迟 × 成本 (综合)"
+      "latency": "延迟优先",
+      "health": "健康度优先",
+      "latency_health": "综合 (延迟 × 健康度)"
     },
     "routing": {
       "modeAuto": "自动",
-      "modeAutoHint": "系统自动选最优健康路由,失败自动跳过。",
+      "modeAutoHint": "按所选信号自动倾斜流量,失败的路由由熔断器跳过。",
       "modeManual": "自定义比例",
-      "modeManualHint": "你来分配每条路由的流量比例。",
+      "modeManualHint": "拖动下方流量条分配每条路由的比例。",
       "autoTargetLabel": "优化目标",
       "currentSource": "当前: {{source}}",
       "sourceModel": "此模型自身设置",
       "sourceGlobal": "全局默认",
-      "weightHint": "数字越大流量越多。相对其它路由,UI 会换算成百分比。",
       "labelLabel": "标签",
       "labelPlaceholder": "如 EU-primary",
       "notesLabel": "备注",
@@ -455,9 +451,7 @@
       "expectedCostLabel": "预计成本",
       "expectedCostPer1m": "≈ {{amount}} {{currency}} / 1M tokens",
       "expectedCostUnknown": "—",
-      "matchAuto": "同步自动",
-      "matchAutoHint": "复制如果切到自动模式时系统会得出的分配。",
-      "evenSplit": "均分",
+      "evenSplitTooltip": "重置为均分",
       "liveStatus": "实时状态",
       "errorPctLabel": "错误率"
     },
@@ -484,6 +478,7 @@
     "batchResetSuggestions": "重新推荐",
     "batchModeNew": "➔ 新建暴露模型",
     "batchModeAttach": "➔ 作为 「{{target}}」 的路由",
+    "batchNewModelIdLabel": "暴露的模型 ID（留空则使用上游名）",
     "stepOf": "第 {{current}} / {{total}} 步",
     "detail": {
       "basics": "基本信息",
@@ -1227,9 +1222,9 @@
     "latencyStrategyKHint": "权重 ∝ 1/延迟^k。k 越大对慢路由的惩罚越激进。默认 2.0(激进)。范围 0.5–8.0。",
     "strategy": {
       "weighted": "加权随机",
-      "latency": "延迟优先 (自动追快)",
-      "cost": "成本优先 (优选便宜)",
-      "latency_cost": "延迟 × 成本 (综合)"
+      "latency": "延迟优先",
+      "health": "健康度优先",
+      "latency_health": "综合 (延迟 × 健康度)"
     },
     "affinity": {
       "none": "无",
@@ -1466,7 +1461,6 @@
       "welcome": "欢迎",
       "admin": "管理员账户",
       "settings": "基本设置",
-      "provider": "AI 供应商",
       "complete": "完成"
     },
     "admin": {
@@ -1479,29 +1473,21 @@
       "passwordMismatch": "两次密码不一致",
       "passwordTooShort": "密码至少 8 个字符",
       "passwordComplexity": "密码必须包含至少一个大写字母、一个小写字母和一个数字",
-      "passwordHint": "至少 8 个字符，包含大写字母、小写字母和数字。"
+      "passwordHint": "至少 8 个字符，包含大写字母、小写字母和数字。",
+      "generatePassword": "生成"
     },
     "settings": {
       "title": "站点设置",
       "subtitle": "配置您的 ThinkWatch 实例",
       "siteName": "站点名称"
     },
-    "provider": {
-      "title": "添加首个供应商",
-      "subtitle": "连接您的第一个 AI 供应商（可选）",
-      "skip": "暂时跳过",
-      "providerType": "供应商类型",
-      "name": "名称",
-      "displayName": "显示名称",
-      "baseUrl": "Base URL",
-      "testConnection": "测试连接"
-    },
     "complete": {
       "title": "配置完成！",
       "subtitle": "您的 ThinkWatch 实例已就绪",
       "apiKeyLabel": "管理员 API Key",
       "apiKeyWarning": "请立即保存此密钥，它将不会再次显示。",
-      "goToDashboard": "进入控制台"
+      "goToDashboard": "进入控制台",
+      "cta": "完成配置"
     },
     "next": "下一步",
     "back": "上一步"

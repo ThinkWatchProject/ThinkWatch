@@ -814,10 +814,15 @@ async fn pick_with_strategy<'a>(
             None
         };
         excluded.push(excl);
+        let success_rate = if h.total > 0 {
+            Some((1.0 - h.error_pct / 100.0).clamp(0.0, 1.0))
+        } else {
+            None
+        };
         signals.push(strategy::RouteSignal {
             configured_weight: entry.weight,
             ewma_latency_ms: h.ewma_latency_ms,
-            cost_per_token: entry.cost_per_token,
+            success_rate,
         });
     }
 

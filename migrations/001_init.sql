@@ -323,14 +323,14 @@ CREATE TABLE models (
     output_weight     DECIMAL(8, 4) NOT NULL DEFAULT 1.0 CHECK (output_weight > 0),
     -- Per-model overrides. NULL ⇒ "fall through to gateway.default_*".
     -- Strategy semantics — see crates/gateway/src/strategy.rs:
-    --   weighted     — operator-set weight = traffic ratio (manual mode)
-    --   latency      — weight ∝ 1/latency_ms^k (EWMA), k from
-    --                  gateway.latency_strategy_k
-    --   cost         — weight ∝ 1/effective_cost_per_token
-    --   latency_cost — combined latency × cost score (default)
+    --   weighted       — operator-set weight = traffic ratio (manual)
+    --   latency        — w ∝ 1/latency_ms^k (EWMA from health.rs)
+    --   health         — w ∝ success_rate^k (1 − error_pct/100)
+    --   latency_health — combined latency × health (default)
+    -- All `^k` use gateway.latency_strategy_k.
     routing_strategy  TEXT
         CHECK (routing_strategy IS NULL OR routing_strategy IN
-              ('weighted', 'latency', 'cost', 'latency_cost')),
+              ('weighted', 'latency', 'health', 'latency_health')),
     -- Affinity modes — see crates/gateway/src/proxy.rs:
     --   none      — stateless; strategy decides every request
     --   provider  — sticky to provider_id (preserves prompt-cache)
@@ -374,9 +374,10 @@ CREATE TABLE model_routes (
     upstream_model  VARCHAR(255),
     -- Traffic weight; meaning depends on the model's routing strategy.
     -- Under `weighted` it's a direct ratio; under the auto strategies
-    -- (latency / cost / latency_cost) it's a multiplicative bias on
-    -- the strategy-derived score. Failover is handled implicitly by
-    -- the circuit breaker — there is no priority tier.
+    -- it's a multiplicative bias on the strategy-derived score (so an
+    -- operator can still skew 2:1 toward Provider A even with health
+    -- /latency tuning). Failover is handled implicitly by the circuit
+    -- breaker — there is no priority tier.
     weight          INTEGER NOT NULL DEFAULT 100 CHECK (weight >= 0),
     -- Optional human-readable identifiers shown in the admin UI
     -- (e.g. "EU-primary", "GPU-cluster-A"). Pure metadata.
@@ -805,8 +806,8 @@ INSERT INTO system_settings (key, value, category, description) VALUES
 -- Gateway routing + circuit-breaker tunables. Editable in the admin
 -- UI without a deploy.
 INSERT INTO system_settings (key, value, category, description) VALUES
-    ('gateway.default_routing_strategy', '"latency_cost"', 'gateway',
-     'Default routing strategy for models that do not override (weighted/latency/cost/latency_cost)'),
+    ('gateway.default_routing_strategy', '"latency_health"', 'gateway',
+     'Default routing strategy for models that do not override (weighted/latency/health/latency_health)'),
     ('gateway.default_affinity_mode',    '"provider"', 'gateway',
      'Default session affinity mode (none/provider/route)'),
     ('gateway.default_affinity_ttl_secs','300',        'gateway',

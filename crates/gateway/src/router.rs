@@ -354,7 +354,7 @@ mod tests {
         router.set_model_config(
             "gpt-",
             ModelRoutingConfig {
-                strategy: Some(RoutingStrategy::Cost),
+                strategy: Some(RoutingStrategy::Weighted),
                 ..Default::default()
             },
         );

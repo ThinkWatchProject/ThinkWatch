@@ -4,42 +4,31 @@
 //! candidate routes, produce N weights, then weighted-random." The
 //! variants only differ in *how* the weights are derived:
 //!
-//!   * `Weighted`     — use the operator-set `weight` column directly
-//!     (admin owns the ratios; default for "manual mode" in the UI)
-//!   * `Latency`      — `w ∝ 1/latency_ms^k` (autotune to the fast)
-//!   * `Cost`         — `w ∝ 1/effective_cost_per_token`
-//!   * `LatencyCost`  — combined `(1/latency^k) × (1/cost)` (default
-//!     for "auto mode" — most balanced behaviour out of the box)
+//!   * `Weighted`      — operator-set `weight` column directly (manual)
+//!   * `Latency`       — `w ∝ 1/latency_ms^k` (autotune to the fast)
+//!   * `Health`        — `w ∝ success_rate^k` (favour low error rates)
+//!   * `LatencyHealth` — `(1/latency^k) × success_rate^k` (combined)
 //!
-//! Per-route observed latency comes from the rolling-window EWMA in
-//! `health.rs`. Per-route cost is computed once at router-load time
-//! (function of `models.input/output_weight × platform_pricing`).
-//!
-//! Failover is not this module's concern: the proxy filters the
-//! candidate set down to "enabled, circuit-closed, under cap" routes
-//! before asking `compute_weights` for weights, picks one, and on
-//! retryable error tries another from the remaining healthy set.
-//! There used to be a `Priority` strategy that did strict ordered
-//! failover via a separate `model_routes.priority` column; both went
-//! away in the v2 redesign because the circuit breaker covers the
-//! same use-case without the extra mental model.
+//! Per-route latency / success rate come from the rolling-window
+//! tracker in `health.rs`. The circuit breaker is a *separate* hard
+//! gate: routes in `Open` are excluded from the candidate set entirely
+//! before this module runs, so strategy weights only modulate routes
+//! that are already in-flight-eligible.
 
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoutingStrategy {
-    /// Operator-set weight column = traffic ratios. The "manual mode"
-    /// of the wizard.
+    /// Operator-set weight column = traffic ratios. Manual mode of the wizard.
     Weighted,
     /// Auto-tune to fastest. Weight ∝ 1/EWMA_latency^k.
     Latency,
-    /// Cheapest first. Weight ∝ 1/cost_per_token.
-    Cost,
-    /// Combined latency + cost. Weight ∝ (1/latency^k) × (1/cost).
-    /// Default global strategy after v2 — closest to "do the right
+    /// Auto-tune to healthiest. Weight ∝ success_rate^k.
+    Health,
+    /// Combined latency × health. Default — closest to "do the right
     /// thing" with zero configuration.
     #[default]
-    LatencyCost,
+    LatencyHealth,
 }
 
 impl RoutingStrategy {
@@ -47,8 +36,8 @@ impl RoutingStrategy {
         match self {
             Self::Weighted => "weighted",
             Self::Latency => "latency",
-            Self::Cost => "cost",
-            Self::LatencyCost => "latency_cost",
+            Self::Health => "health",
+            Self::LatencyHealth => "latency_health",
         }
     }
 }
@@ -59,8 +48,8 @@ impl FromStr for RoutingStrategy {
         match s {
             "weighted" => Ok(Self::Weighted),
             "latency" => Ok(Self::Latency),
-            "cost" => Ok(Self::Cost),
-            "latency_cost" => Ok(Self::LatencyCost),
+            "health" => Ok(Self::Health),
+            "latency_health" => Ok(Self::LatencyHealth),
             _ => Err(()),
         }
     }
@@ -71,27 +60,24 @@ impl FromStr for RoutingStrategy {
 #[derive(Debug, Clone, Copy)]
 pub struct RouteSignal {
     /// Operator-configured `weight` from `model_routes`. Used by
-    /// `Weighted` directly, and as a multiplicative override on the
-    /// auto-tune variants (so an operator can still bias 2:1 toward
-    /// Provider A even with a `latency` strategy).
+    /// `Weighted` directly, and as a multiplicative bias on the
+    /// auto-tune variants (so an operator can still skew 2:1 toward
+    /// Provider A even with auto strategies).
     pub configured_weight: u32,
-    /// Recent EWMA latency in ms. `None` means "no samples yet" —
-    /// auto-tune strategies fall back to a neutral weight.
+    /// Recent EWMA latency in ms. `None` ⇒ "no samples yet" — the
+    /// latency factor falls back to a neutral weight so a fresh route
+    /// isn't starved before observations accumulate.
     pub ewma_latency_ms: Option<f64>,
-    /// Effective $/token, summed input + output. `None` is treated
-    /// as "unknown cost" — `Cost` / `LatencyCost` skip the cost factor.
-    pub cost_per_token: Option<f64>,
+    /// Recent success rate in [0, 1]. `None` ⇒ "no samples yet" — the
+    /// health factor falls back to neutral (1.0).
+    pub success_rate: Option<f64>,
 }
 
 /// Compute a weight per candidate. Output length matches input length.
 /// Weights are non-negative; the caller passes them straight to a
 /// weighted-random walk. All zeros ⇒ caller falls back to "first
 /// candidate" — matches the original `pick_weighted` behaviour.
-pub fn compute_weights(
-    strategy: RoutingStrategy,
-    signals: &[RouteSignal],
-    latency_k: f64,
-) -> Vec<f64> {
+pub fn compute_weights(strategy: RoutingStrategy, signals: &[RouteSignal], k: f64) -> Vec<f64> {
     if signals.is_empty() {
         return Vec::new();
     }
@@ -101,19 +87,19 @@ pub fn compute_weights(
 
         RoutingStrategy::Latency => signals
             .iter()
-            .map(|s| latency_factor(s.ewma_latency_ms, latency_k) * s.configured_weight as f64)
+            .map(|s| latency_factor(s.ewma_latency_ms, k) * s.configured_weight as f64)
             .collect(),
 
-        RoutingStrategy::Cost => signals
+        RoutingStrategy::Health => signals
             .iter()
-            .map(|s| cost_factor(s.cost_per_token) * s.configured_weight as f64)
+            .map(|s| health_factor(s.success_rate, k) * s.configured_weight as f64)
             .collect(),
 
-        RoutingStrategy::LatencyCost => signals
+        RoutingStrategy::LatencyHealth => signals
             .iter()
             .map(|s| {
-                latency_factor(s.ewma_latency_ms, latency_k)
-                    * cost_factor(s.cost_per_token)
+                latency_factor(s.ewma_latency_ms, k)
+                    * health_factor(s.success_rate, k)
                     * s.configured_weight as f64
             })
             .collect(),
@@ -127,21 +113,23 @@ fn latency_factor(ewma_ms: Option<f64>, k: f64) -> f64 {
     1.0 / ms.powf(k)
 }
 
-/// `1 / cost` with an unmeasured fallback of 1.0 (neutral).
-fn cost_factor(cost: Option<f64>) -> f64 {
-    let c = cost.unwrap_or(1.0).max(1e-12);
-    1.0 / c
+/// `success_rate^k`. Unmeasured ⇒ 1.0 (neutral, favours new routes
+/// while they accumulate samples instead of starving them on the
+/// pessimistic assumption that no data = bad).
+fn health_factor(success_rate: Option<f64>, k: f64) -> f64 {
+    let r = success_rate.unwrap_or(1.0).clamp(0.0, 1.0);
+    r.powf(k)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn sig(w: u32, lat: Option<f64>, cost: Option<f64>) -> RouteSignal {
+    fn sig(w: u32, lat: Option<f64>, sr: Option<f64>) -> RouteSignal {
         RouteSignal {
             configured_weight: w,
             ewma_latency_ms: lat,
-            cost_per_token: cost,
+            success_rate: sr,
         }
     }
 
@@ -161,7 +149,6 @@ mod tests {
 
     #[test]
     fn latency_strategy_favors_fast_at_k_2() {
-        // Aggressive (k=2): 100ms vs 200ms → 4× preference.
         let w = compute_weights(
             RoutingStrategy::Latency,
             &[sig(100, Some(100.0), None), sig(100, Some(200.0), None)],
@@ -171,61 +158,55 @@ mod tests {
     }
 
     #[test]
-    fn latency_strategy_more_aggressive_at_higher_k() {
-        // k=4 → 16× preference for the route at half latency.
-        let w = compute_weights(
-            RoutingStrategy::Latency,
-            &[sig(100, Some(100.0), None), sig(100, Some(200.0), None)],
-            4.0,
-        );
-        assert!(approx_eq(w[0] / w[1], 16.0));
-    }
-
-    #[test]
     fn latency_unknown_falls_back_to_neutral() {
         let w = compute_weights(
             RoutingStrategy::Latency,
             &[sig(100, None, None), sig(100, Some(100.0), None)],
             2.0,
         );
-        // Unmeasured route gets 1/1^2 = 1 vs measured 1/100^2 = 0.0001.
-        // Neutral fallback intentionally biases toward the new route
-        // until samples accumulate.
         assert!(w[0] > w[1]);
     }
 
     #[test]
-    fn cost_strategy_favors_cheap() {
+    fn health_strategy_favors_healthy() {
+        // 100% vs 50% success at k=2 → 1.0 vs 0.25 = 4× preference.
         let w = compute_weights(
-            RoutingStrategy::Cost,
-            &[
-                sig(100, None, Some(0.000001)),
-                sig(100, None, Some(0.000005)),
-            ],
+            RoutingStrategy::Health,
+            &[sig(100, None, Some(1.0)), sig(100, None, Some(0.5))],
             2.0,
         );
-        assert!(approx_eq(w[0] / w[1], 5.0));
+        assert!(approx_eq(w[0] / w[1], 4.0));
     }
 
     #[test]
-    fn latency_cost_combines_both() {
-        // Faster (50 vs 100 → 4× at k=2) and cheaper (1e-6 vs 2e-6
-        // → 2×). Combined → 8× preference.
+    fn health_unknown_falls_back_to_neutral() {
+        // No samples shouldn't starve the route; falls back to 1.0.
         let w = compute_weights(
-            RoutingStrategy::LatencyCost,
+            RoutingStrategy::Health,
+            &[sig(100, None, None), sig(100, None, Some(0.9))],
+            2.0,
+        );
+        assert!(w[0] > w[1]);
+    }
+
+    #[test]
+    fn latency_health_combines_both() {
+        // Faster (50 vs 100 → 4× at k=2) and healthier (1.0 vs 0.5
+        // → 4× at k=2). Combined → 16× preference.
+        let w = compute_weights(
+            RoutingStrategy::LatencyHealth,
             &[
-                sig(100, Some(50.0), Some(1e-6)),
-                sig(100, Some(100.0), Some(2e-6)),
+                sig(100, Some(50.0), Some(1.0)),
+                sig(100, Some(100.0), Some(0.5)),
             ],
             2.0,
         );
-        assert!(approx_eq(w[0] / w[1], 8.0));
+        assert!(approx_eq(w[0] / w[1], 16.0));
     }
 
     #[test]
     fn configured_weight_modulates_auto_strategies() {
         // Same latency, but operator gave route 0 twice the weight.
-        // Latency strategy still respects that bias.
         let w = compute_weights(
             RoutingStrategy::Latency,
             &[sig(200, Some(100.0), None), sig(100, Some(100.0), None)],
@@ -244,22 +225,17 @@ mod tests {
         for s in [
             RoutingStrategy::Weighted,
             RoutingStrategy::Latency,
-            RoutingStrategy::Cost,
-            RoutingStrategy::LatencyCost,
+            RoutingStrategy::Health,
+            RoutingStrategy::LatencyHealth,
         ] {
             assert_eq!(s.as_str().parse::<RoutingStrategy>().unwrap(), s);
         }
     }
 
     #[test]
-    fn priority_value_no_longer_parses() {
-        // Removed in v2 — admins who had this set get migrated to
-        // latency_cost via 003_routing_v2.sql.
-        assert!("priority".parse::<RoutingStrategy>().is_err());
-    }
-
-    #[test]
     fn parse_strategy_unknown_errors() {
         assert!("garbage".parse::<RoutingStrategy>().is_err());
+        assert!("cost".parse::<RoutingStrategy>().is_err());
+        assert!("latency_cost".parse::<RoutingStrategy>().is_err());
     }
 }
