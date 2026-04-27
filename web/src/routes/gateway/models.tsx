@@ -38,11 +38,14 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
+import { InlinePercentInput } from './routing/InlinePercentInput';
+import { LatencySparkline } from './routing/LatencySparkline';
+import { RoutingModeSection } from './routing/RoutingModeSection';
+import { RoutingProjection } from './routing/RoutingProjection';
+import { TrafficBar, colorClassForRoute } from './routing/TrafficBar';
 import {
   AlertCircle,
   Brain,
-  ChevronDown,
-  ChevronUp,
   Loader2,
   Pencil,
   Plus,
@@ -71,7 +74,7 @@ interface ModelRow {
   output_weight: string;
   route_count: number;
   enabled_route_count: number;
-  /// Provider display names attached to this model, in priority order.
+  /// Provider display names attached to this model, ordered by weight DESC.
   /// Joined server-side so the row can render the column without
   /// fetching per-row routes.
   providers: string[];
@@ -81,16 +84,21 @@ interface ModelRow {
   affinity_ttl_secs?: number | null;
 }
 
-export type RoutingStrategy = 'priority' | 'weighted' | 'latency' | 'cost' | 'latency_cost';
+export type RoutingStrategy = 'weighted' | 'latency' | 'cost' | 'latency_cost';
 export type AffinityMode = 'none' | 'provider' | 'route';
 
+/// Routes available globally + per-model. The wizard's two-state mode
+/// picker (auto / manual) maps "manual" to `weighted` and "auto" to
+/// the other three with a sub-picker for the optimization target.
 export const ROUTING_STRATEGIES: RoutingStrategy[] = [
-  'priority',
   'weighted',
   'latency',
   'cost',
   'latency_cost',
 ];
+
+/// Auto-mode options shown in the sub-picker. Order = display order.
+export const AUTO_TARGETS: RoutingStrategy[] = ['latency_cost', 'latency', 'cost'];
 
 export const AFFINITY_MODES: AffinityMode[] = ['none', 'provider', 'route'];
 
@@ -109,7 +117,6 @@ export interface RouteHealthEntry {
   provider_id: string;
   provider_name: string;
   upstream_model: string | null;
-  priority: number;
   weight: number;
   enabled: boolean;
   health: RouteHealth;
@@ -136,10 +143,52 @@ interface RouteRow {
   provider_name: string;
   upstream_model: string | null;
   weight: number;
-  priority: number;
   enabled: boolean;
+  /// Optional human-readable identifier shown in the route table
+  /// (e.g. "EU-primary"). Null when admin hasn't set one.
+  label?: string | null;
+  /// Free-form admin note. Surfaced only in the edit dialog.
+  notes?: string | null;
   rpm_cap?: number | null;
   tpm_cap?: number | null;
+}
+
+/// Per-route entry returned by GET /api/admin/models/{id}/routing-projection.
+/// Combines the stored config (weight, label) with live signals (latency,
+/// cost) and the strategy-derived expected traffic share.
+export interface RoutingProjectionEntry {
+  route_id: string;
+  provider_name: string;
+  upstream_model: string | null;
+  label: string | null;
+  weight: number;
+  expected_pct: number;
+  cost_per_token: number | null;
+  ewma_latency_ms: number | null;
+  healthy: boolean;
+}
+
+export interface RoutingProjectionView {
+  strategy: RoutingStrategy;
+  entries: RoutingProjectionEntry[];
+  expected_cost_per_1m_tokens: number | null;
+}
+
+export interface RoutingProjectionResponse {
+  current: RoutingProjectionView;
+  auto: RoutingProjectionView;
+}
+
+export interface RouteHistoryBucket {
+  ts: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  requests: number;
+  errors: number;
+}
+
+export interface RouteHistoryResponse {
+  buckets: RouteHistoryBucket[];
 }
 
 // `Provider` reused from provider-types so models.tsx and providers.tsx
@@ -164,8 +213,11 @@ interface RouteFormState {
   provider_id: string;
   upstream_model: string;
   weight: string;
-  priority: string;
   enabled: boolean;
+  /// Optional human-readable identifier — surfaced in the route table.
+  label: string;
+  /// Free-form admin note. Empty = none.
+  notes: string;
   /// Empty string ⇒ unlimited (NULL).
   rpm_cap: string;
   tpm_cap: string;
@@ -185,8 +237,9 @@ const emptyRouteForm: RouteFormState = {
   provider_id: '',
   upstream_model: '',
   weight: '100',
-  priority: '0',
   enabled: true,
+  label: '',
+  notes: '',
   rpm_cap: '',
   tpm_cap: '',
 };
@@ -229,6 +282,11 @@ export function ModelsPage() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
+
+  // Global default routing strategy. Fetched once when first detail
+  // drawer opens, used by RoutingModeSection to show admin whether the
+  // model's setting differs from the global default.
+  const [globalStrategy, setGlobalStrategy] = useState<RoutingStrategy>('latency_cost');
 
   // Detail drawer: which model_id is open, and its lazily-loaded routes.
   const [detailModelId, setDetailModelId] = useState<string | null>(null);
@@ -285,7 +343,7 @@ export function ModelsPage() {
     [],
   );
   // Per-upstream decisions made in step 2. Key = upstream name.
-  type ImportDecision = { target_model_id: string | null; priority: number };
+  type ImportDecision = { target_model_id: string | null };
   const [batchDecisions, setBatchDecisions] = useState<Record<string, ImportDecision>>({});
 
   /* ---------- data fetching ---------- */
@@ -356,6 +414,22 @@ export function ModelsPage() {
   useEffect(() => {
     void fetchProviders();
     void fetchPricing();
+    // Pull the global default strategy once. The wizard's mode picker
+    // uses it to label "this model uses the global default" vs "this
+    // model overrides". Falls back to `latency_cost` on error so the
+    // UI keeps working even if the settings endpoint is flaky.
+    void api<{ gateway?: { entries?: { key: string; value: unknown }[] } }>(
+      '/api/admin/settings',
+    )
+      .then((data) => {
+        const v = data?.gateway?.entries?.find(
+          (e) => e.key === 'gateway.default_routing_strategy',
+        )?.value;
+        if (typeof v === 'string' && ['weighted', 'latency', 'cost', 'latency_cost'].includes(v)) {
+          setGlobalStrategy(v as RoutingStrategy);
+        }
+      })
+      .catch(() => undefined);
   }, [fetchProviders, fetchPricing]);
 
   useEffect(() => {
@@ -593,8 +667,9 @@ export function ModelsPage() {
       provider_id: route.provider_id,
       upstream_model: route.upstream_model ?? '',
       weight: String(route.weight),
-      priority: String(route.priority),
       enabled: route.enabled,
+      label: route.label ?? '',
+      notes: route.notes ?? '',
       rpm_cap: route.rpm_cap == null ? '' : String(route.rpm_cap),
       tpm_cap: route.tpm_cap == null ? '' : String(route.tpm_cap),
     });
@@ -627,12 +702,15 @@ export function ModelsPage() {
     const upstream = routeForm.upstream_model.trim() || null;
     setRouteSaving(true);
     try {
+      const label = routeForm.label.trim() || null;
+      const notes = routeForm.notes.trim() || null;
       if (editingRoute) {
         await apiPatch(`/api/admin/model-routes/${editingRoute.id}`, {
           upstream_model: upstream,
           weight,
-          priority: Number(routeForm.priority),
           enabled: routeForm.enabled,
+          label,
+          notes,
           rpm_cap: rpm,
           tpm_cap: tpm,
         });
@@ -653,8 +731,9 @@ export function ModelsPage() {
             provider_id: routeForm.provider_id,
             upstream_model: upstream,
             weight,
-            priority: Number(routeForm.priority),
             enabled: routeForm.enabled,
+            label,
+            notes,
             rpm_cap: rpm,
             tpm_cap: tpm,
           },
@@ -694,37 +773,48 @@ export function ModelsPage() {
     }
   };
 
-  /// Move a route up/down in the priority list inside the drawer.
-  ///
-  /// Rules:
-  ///   * Different priority than neighbor → swap priorities. Both
-  ///     routes PATCH in parallel; one fetch afterwards refreshes
-  ///     the cached list the drawer reads.
-  ///   * Same priority (same load-balance bucket) → swap is a no-op,
-  ///     so instead bump the moving route's priority by 1 in the
-  ///     chosen direction. Clamped to 0.
-  const moveRoute = async (modelId: string, index: number, dir: 'up' | 'down') => {
-    const list = routesByModel[modelId];
-    if (!list) return;
-    const neighbor = dir === 'up' ? list[index - 1] : list[index + 1];
-    if (!neighbor) return;
-    const current = list[index];
+  /// Persist the model's routing-strategy override. `null` clears the
+  /// override (model falls back to global default).
+  const updateModelStrategy = async (modelId: string, strategy: RoutingStrategy | null) => {
+    const m = models.find((x) => x.model_id === modelId);
+    if (!m) return;
     try {
-      if (current.priority === neighbor.priority) {
-        const newPri =
-          dir === 'up' ? Math.max(0, current.priority - 1) : current.priority + 1;
-        await apiPatch(`/api/admin/model-routes/${current.id}`, { priority: newPri });
-      } else {
-        await Promise.all([
-          apiPatch(`/api/admin/model-routes/${current.id}`, { priority: neighbor.priority }),
-          apiPatch(`/api/admin/model-routes/${neighbor.id}`, { priority: current.priority }),
-        ]);
-      }
-      await fetchRoutesFor(modelId);
+      await apiPatch(`/api/admin/models/${m.id}`, { routing_strategy: strategy });
+      // Refresh the model row so the cached `routing_strategy` field
+      // reflects the new value next time the drawer opens.
+      await fetchModels();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to reorder');
+      toast.error(err instanceof Error ? err.message : 'Failed to update strategy');
     }
   };
+
+  /// Update a single route's weight (used by inline % editor).
+  /// Caller refetches via `fetchRoutesFor` after to sync the table.
+  const updateRouteWeight = async (routeId: string, modelId: string, weight: number) => {
+    try {
+      await apiPatch(`/api/admin/model-routes/${routeId}`, { weight });
+      await fetchRoutesFor(modelId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update weight');
+    }
+  };
+
+  /// Batch-update many route weights in one transaction. Used by the
+  /// TrafficBar drag handle (release) and the [Even split] / [Match
+  /// auto] convenience buttons inside RoutingProjection.
+  const batchUpdateWeights = async (
+    modelId: string,
+    updates: { id: string; weight: number }[],
+  ) => {
+    if (updates.length === 0) return;
+    try {
+      await apiPatch('/api/admin/model-routes/batch-weights', { updates });
+      await fetchRoutesFor(modelId);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to update weights');
+    }
+  };
+
 
   const confirmDeleteRoute = async () => {
     if (!deleteRoute) return;
@@ -767,12 +857,12 @@ export function ModelsPage() {
     catalog: { model_id: string }[],
   ): ImportDecision => {
     const exact = catalog.find((c) => c.model_id === upstream);
-    if (exact) return { target_model_id: exact.model_id, priority: 1 };
+    if (exact) return { target_model_id: exact.model_id };
     const partial = catalog.find(
       (c) => upstream.includes(c.model_id) || c.model_id.includes(upstream),
     );
-    if (partial) return { target_model_id: partial.model_id, priority: 1 };
-    return { target_model_id: null, priority: 0 };
+    if (partial) return { target_model_id: partial.model_id };
+    return { target_model_id: null };
   };
 
   const goToStep2 = () => {
@@ -851,11 +941,10 @@ export function ModelsPage() {
     setBatchSaving(true);
     try {
       const items = Array.from(batchSelected).map((upstream) => {
-        const d = batchDecisions[upstream] ?? { target_model_id: null, priority: 0 };
+        const d = batchDecisions[upstream] ?? { target_model_id: null };
         return {
           upstream,
           target_model_id: d.target_model_id,
-          priority: d.priority,
         };
       });
       const res = await apiPost<{ created: number }>('/api/admin/model-routes/batch', {
@@ -1354,22 +1443,29 @@ export function ModelsPage() {
                     inputMode="numeric"
                     required
                   />
+                  <p className="text-[11px] text-muted-foreground">
+                    {t('models.routing.weightHint')}
+                  </p>
                 </div>
                 <div className="space-y-2">
-                  <Label>{t('models.col.priority')}</Label>
-                  <Select
-                    value={routeForm.priority}
-                    onValueChange={(v) => setRouteForm({ ...routeForm, priority: v })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="0">{t('models.primary')}</SelectItem>
-                      <SelectItem value="1">{t('models.fallback')}</SelectItem>
-                    </SelectContent>
-                  </Select>
+                  <Label htmlFor="route_label">{t('models.routing.labelLabel')}</Label>
+                  <Input
+                    id="route_label"
+                    value={routeForm.label}
+                    onChange={(e) => setRouteForm({ ...routeForm, label: e.target.value })}
+                    placeholder={t('models.routing.labelPlaceholder')}
+                    maxLength={64}
+                  />
                 </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="route_notes">{t('models.routing.notesLabel')}</Label>
+                <Input
+                  id="route_notes"
+                  value={routeForm.notes}
+                  onChange={(e) => setRouteForm({ ...routeForm, notes: e.target.value })}
+                  placeholder={t('models.routing.notesPlaceholder')}
+                />
               </div>
               <div className="flex items-center gap-2">
                 <Switch
@@ -1404,6 +1500,48 @@ export function ModelsPage() {
                   />
                 </div>
               </div>
+              {/* Live status — read-only signals for the route under
+                  edit. Only shown when editing (we have a route_id +
+                  health snapshot) — the add-flow can't show this yet. */}
+              {editingRoute && (
+                <div className="rounded-md border bg-muted/20 p-3 space-y-1.5 text-xs">
+                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+                    {t('models.routing.liveStatus')}
+                  </div>
+                  <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-0.5">
+                    <dt className="text-muted-foreground">
+                      {t('models.col.health')}
+                    </dt>
+                    <dd>
+                      {(() => {
+                        const state =
+                          routeHealth[editingRoute.id]?.health?.state ?? 'closed';
+                        return t(`models.health.${state}`);
+                      })()}
+                    </dd>
+                    <dt className="text-muted-foreground">
+                      {t('models.col.p50')}
+                    </dt>
+                    <dd className="font-mono">
+                      {(() => {
+                        const ewma =
+                          routeHealth[editingRoute.id]?.health?.ewma_latency_ms;
+                        return ewma == null ? '—' : `${ewma.toFixed(0)} ms`;
+                      })()}
+                    </dd>
+                    <dt className="text-muted-foreground">
+                      {t('models.routing.errorPctLabel')}
+                    </dt>
+                    <dd className="font-mono">
+                      {(() => {
+                        const h = routeHealth[editingRoute.id]?.health;
+                        if (!h || h.total === 0) return '—';
+                        return `${h.error_pct.toFixed(1)}% (${h.errors}/${h.total})`;
+                      })()}
+                    </dd>
+                  </dl>
+                </div>
+              )}
               {routeFormError && (
                 <Alert variant="destructive">
                   <AlertCircle className="h-4 w-4" />
@@ -1546,7 +1684,7 @@ export function ModelsPage() {
                   size="sm"
                   onClick={() => {
                     const next = { ...batchDecisions };
-                    for (const u of batchSelected) next[u] = { target_model_id: null, priority: 0 };
+                    for (const u of batchSelected) next[u] = { target_model_id: null };
                     setBatchDecisions(next);
                   }}
                 >
@@ -1569,10 +1707,7 @@ export function ModelsPage() {
                 {Array.from(batchSelected)
                   .sort()
                   .map((upstream) => {
-                    const decision = batchDecisions[upstream] ?? {
-                      target_model_id: null,
-                      priority: 0,
-                    };
+                    const decision = batchDecisions[upstream] ?? { target_model_id: null };
                     const setDecision = (d: ImportDecision) =>
                       setBatchDecisions({ ...batchDecisions, [upstream]: d });
                     return (
@@ -1583,12 +1718,9 @@ export function ModelsPage() {
                             value={decision.target_model_id ?? '__new__'}
                             onValueChange={(v) => {
                               if (v === '__new__') {
-                                setDecision({ target_model_id: null, priority: 0 });
+                                setDecision({ target_model_id: null });
                               } else {
-                                setDecision({
-                                  target_model_id: v,
-                                  priority: decision.priority === 0 ? 1 : decision.priority,
-                                });
+                                setDecision({ target_model_id: v });
                               }
                             }}
                           >
@@ -1606,22 +1738,6 @@ export function ModelsPage() {
                               ))}
                             </SelectContent>
                           </Select>
-                          {decision.target_model_id && (
-                            <Select
-                              value={String(decision.priority)}
-                              onValueChange={(v) =>
-                                setDecision({ ...decision, priority: Number(v) })
-                              }
-                            >
-                              <SelectTrigger className="h-7 text-xs w-28">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent>
-                                <SelectItem value="0">{t('models.primary')}</SelectItem>
-                                <SelectItem value="1">{t('models.fallback')}</SelectItem>
-                              </SelectContent>
-                            </Select>
-                          )}
                         </div>
                       </div>
                     );
@@ -1780,7 +1896,43 @@ export function ModelsPage() {
                     </section>
 
                     {/* Routes */}
-                    <section className="space-y-2">
+                    <section className="space-y-3">
+                      <RoutingModeSection
+                        modelStrategy={
+                          (model.routing_strategy as RoutingStrategy | null) ?? null
+                        }
+                        globalStrategy={globalStrategy}
+                        disabled={!hasPermission('models:write')}
+                        onChange={(next) => updateModelStrategy(model.model_id, next)}
+                      />
+                      {/* Drag-to-redistribute traffic bar — only meaningful in
+                          manual (`weighted`) mode. Auto modes' weights are
+                          tiebreakers, so dragging would mislead. */}
+                      {(() => {
+                        const effective =
+                          (model.routing_strategy as RoutingStrategy | null) ?? globalStrategy;
+                        if (effective !== 'weighted') return null;
+                        const enabled = (routes ?? []).filter((r) => r.enabled);
+                        if (enabled.length === 0) return null;
+                        return (
+                          <TrafficBar
+                            segments={enabled.map((r) => ({
+                              id: r.id,
+                              label:
+                                r.label ??
+                                (r.upstream_model
+                                  ? r.upstream_model.split('/').pop() ?? r.upstream_model
+                                  : providerLabel(r.provider_id)),
+                              weight: r.weight,
+                              colorClass: colorClassForRoute(r.id),
+                            }))}
+                            disabled={!hasPermission('models:write')}
+                            onCommit={(updates) =>
+                              batchUpdateWeights(model.model_id, updates)
+                            }
+                          />
+                        );
+                      })()}
                       <div className="flex items-center justify-between gap-2">
                         <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                           {t('models.routes')} ({routes?.length ?? model.route_count})
@@ -1832,14 +1984,14 @@ export function ModelsPage() {
                           <table className="w-full text-xs">
                             <thead className="border-b bg-muted/30">
                               <tr className="text-left text-muted-foreground">
+                                <th className="px-2 py-1.5 font-medium text-right">
+                                  {t('models.col.share')}
+                                </th>
                                 <th className="px-2 py-1.5 font-medium">
                                   {t('models.col.provider')}
                                 </th>
                                 <th className="px-2 py-1.5 font-medium">
                                   {t('models.col.upstreamModel')}
-                                </th>
-                                <th className="px-2 py-1.5 font-medium">
-                                  {t('models.col.priority')}
                                 </th>
                                 <th className="px-2 py-1.5 font-medium text-center">
                                   {t('models.col.active')}
@@ -1857,112 +2009,151 @@ export function ModelsPage() {
                               </tr>
                             </thead>
                             <tbody className="divide-y">
-                              {routes.map((r, idx) => (
-                                <tr key={r.id}>
-                                  <td className="px-2 py-1.5">
-                                    {providerLabel(r.provider_id)}
-                                  </td>
-                                  <td
-                                    className="px-2 py-1.5 font-mono text-[11px] max-w-[180px] truncate"
-                                    title={r.upstream_model ?? model.model_id}
-                                  >
-                                    {r.upstream_model ?? (
-                                      <span className="italic text-muted-foreground">
-                                        {model.model_id}
-                                      </span>
-                                    )}
-                                  </td>
-                                  <td className="px-2 py-1.5">
-                                    <Badge
-                                      variant={r.priority === 0 ? 'default' : 'secondary'}
-                                      className="text-[10px]"
-                                    >
-                                      {r.priority === 0
-                                        ? t('models.primary')
-                                        : `${t('models.fallback')} (P${r.priority})`}
-                                    </Badge>
-                                  </td>
-                                  <td className="px-2 py-1.5 text-center">
-                                    {r.enabled ? (
-                                      <Badge variant="default" className="text-[10px]">
-                                        {t('common.yes')}
-                                      </Badge>
-                                    ) : (
-                                      <Badge variant="outline" className="text-[10px]">
-                                        {t('common.no')}
-                                      </Badge>
-                                    )}
-                                  </td>
-                                  <td className="px-2 py-1.5 text-center">
-                                    {(() => {
-                                      const h = routeHealth[r.id]?.health;
-                                      const state = h?.state ?? 'closed';
-                                      const variant =
-                                        state === 'closed'
-                                          ? 'outline'
-                                          : state === 'half_open'
-                                            ? 'secondary'
-                                            : 'destructive';
-                                      return (
-                                        <Badge variant={variant} className="text-[10px]">
-                                          {t(`models.health.${state}`)}
-                                        </Badge>
-                                      );
-                                    })()}
-                                  </td>
-                                  <td className="px-2 py-1.5 text-right font-mono text-[11px] tabular-nums">
-                                    {(() => {
-                                      const ewma = routeHealth[r.id]?.health?.ewma_latency_ms;
-                                      return ewma == null ? (
-                                        <span className="text-muted-foreground">—</span>
-                                      ) : (
-                                        <span>{ewma.toFixed(0)} ms</span>
-                                      );
-                                    })()}
-                                  </td>
-                                  <td className="px-2 py-1.5 text-right whitespace-nowrap">
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-6 w-6"
-                                      disabled={idx === 0}
-                                      onClick={() => moveRoute(r.model_id, idx, 'up')}
-                                      aria-label={t('models.moveUp')}
-                                    >
-                                      <ChevronUp className="h-3.5 w-3.5" />
-                                    </Button>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-6 w-6"
-                                      disabled={idx === routes.length - 1}
-                                      onClick={() => moveRoute(r.model_id, idx, 'down')}
-                                      aria-label={t('models.moveDown')}
-                                    >
-                                      <ChevronDown className="h-3.5 w-3.5" />
-                                    </Button>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-7 w-7"
-                                      onClick={() => openEditRoute(r)}
-                                    >
-                                      <Pencil className="h-3.5 w-3.5" />
-                                    </Button>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-7 w-7"
-                                      onClick={() => setDeleteRoute(r)}
-                                    >
-                                      <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                                    </Button>
-                                  </td>
-                                </tr>
-                              ))}
+                              {(() => {
+                                const enabledRoutes = routes.filter((r) => r.enabled);
+                                const totalWeight = enabledRoutes.reduce(
+                                  (sum, r) => sum + r.weight,
+                                  0,
+                                );
+                                // In auto mode the weight column is a
+                                // tiebreaker, not a true ratio — disable
+                                // inline edit so admins don't think they're
+                                // setting the actual traffic split.
+                                const effective =
+                                  (model.routing_strategy as RoutingStrategy | null) ??
+                                  globalStrategy;
+                                const isManual = effective === 'weighted';
+                                return routes.map((r) => {
+                                  const pct =
+                                    r.enabled && totalWeight > 0
+                                      ? (r.weight / totalWeight) * 100
+                                      : 0;
+                                  return (
+                                    <tr key={r.id}>
+                                      <td className="px-2 py-1.5 text-right">
+                                        <InlinePercentInput
+                                          weight={r.weight}
+                                          pct={pct}
+                                          enabled={r.enabled}
+                                          disabled={!r.enabled || !isManual}
+                                          onCommit={(newWeight) =>
+                                            updateRouteWeight(r.id, r.model_id, newWeight)
+                                          }
+                                        />
+                                      </td>
+                                      <td className="px-2 py-1.5">
+                                        <div className="flex flex-col gap-0.5">
+                                          <span>{providerLabel(r.provider_id)}</span>
+                                          {r.label && (
+                                            <span className="text-[10px] text-muted-foreground italic">
+                                              {r.label}
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                      <td
+                                        className="px-2 py-1.5 font-mono text-[11px] max-w-[180px] truncate"
+                                        title={r.upstream_model ?? model.model_id}
+                                      >
+                                        {r.upstream_model ?? (
+                                          <span className="italic text-muted-foreground">
+                                            {model.model_id}
+                                          </span>
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-center">
+                                        {r.enabled ? (
+                                          <Badge variant="default" className="text-[10px]">
+                                            {t('common.yes')}
+                                          </Badge>
+                                        ) : (
+                                          <Badge variant="outline" className="text-[10px]">
+                                            {t('common.no')}
+                                          </Badge>
+                                        )}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-center">
+                                        {(() => {
+                                          const h = routeHealth[r.id]?.health;
+                                          const state = h?.state ?? 'closed';
+                                          const variant =
+                                            state === 'closed'
+                                              ? 'outline'
+                                              : state === 'half_open'
+                                                ? 'secondary'
+                                                : 'destructive';
+                                          return (
+                                            <Badge variant={variant} className="text-[10px]">
+                                              {t(`models.health.${state}`)}
+                                            </Badge>
+                                          );
+                                        })()}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right font-mono text-[11px] tabular-nums">
+                                        <div className="flex items-center justify-end gap-1.5">
+                                          <LatencySparkline
+                                            modelId={r.model_id}
+                                            routeId={r.id}
+                                          />
+                                          {(() => {
+                                            const ewma =
+                                              routeHealth[r.id]?.health?.ewma_latency_ms;
+                                            return ewma == null ? (
+                                              <span className="text-muted-foreground">—</span>
+                                            ) : (
+                                              <span>{ewma.toFixed(0)} ms</span>
+                                            );
+                                          })()}
+                                        </div>
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right whitespace-nowrap">
+                                        <Button
+                                          variant="ghost"
+                                          size="icon"
+                                          className="h-7 w-7"
+                                          onClick={() => openEditRoute(r)}
+                                        >
+                                          <Pencil className="h-3.5 w-3.5" />
+                                        </Button>
+                                        <Button
+                                          variant="ghost"
+                                          size="icon"
+                                          className="h-7 w-7"
+                                          onClick={() => setDeleteRoute(r)}
+                                        >
+                                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
+                                        </Button>
+                                      </td>
+                                    </tr>
+                                  );
+                                });
+                              })()}
                             </tbody>
                           </table>
                         </div>
+                      )}
+                      {/* Cost projection + match-auto / even-split. Shown
+                          whenever there are at least 2 routes — projection
+                          isn't useful for a single-route model.
+                          The `key` includes a sum of weights + enabled
+                          mask so the bar refetches its projection any
+                          time routes change shape or admin tweaks
+                          weights, without us threading a refresh token
+                          through props. */}
+                      {routes && routes.length >= 2 && (
+                        <RoutingProjection
+                          key={`proj-${model.model_id}-${routes
+                            .map((r) => `${r.id}:${r.weight}:${r.enabled ? 1 : 0}`)
+                            .join('|')}`}
+                          modelId={model.model_id}
+                          currency={pricing?.currency ?? 'USD'}
+                          manualMode={
+                            (((model.routing_strategy as RoutingStrategy | null) ??
+                              globalStrategy) === 'weighted')
+                          }
+                          disabled={!hasPermission('models:write')}
+                          onWeightsChanged={() => fetchRoutesFor(model.model_id)}
+                        />
                       )}
                     </section>
 

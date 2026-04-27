@@ -594,6 +594,14 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             get(handlers::models::list_model_routes).post(handlers::models::create_model_route),
         )
         .route(
+            "/api/admin/models/{model_id}/routing-projection",
+            get(handlers::models::get_routing_projection),
+        )
+        .route(
+            "/api/admin/models/{model_id}/route-history",
+            get(handlers::models::get_route_history),
+        )
+        .route(
             "/api/admin/models/{model_id}/route-health",
             get(handlers::route_observability::list_route_health),
         )
@@ -620,6 +628,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         .route(
             "/api/admin/model-routes/batch-update",
             post(handlers::models::batch_update_routes),
+        )
+        .route(
+            "/api/admin/model-routes/batch-weights",
+            patch(handlers::models::batch_update_route_weights),
         )
         .route(
             "/api/admin/model-routes/{route_id}",
@@ -1184,18 +1196,18 @@ async fn load_providers_into_router(
         provider_id: uuid::Uuid,
         upstream_model: Option<String>,
         weight: i32,
-        priority: i32,
+        label: Option<String>,
         rpm_cap: Option<i32>,
         tpm_cap: Option<i32>,
     }
 
     let route_rows = sqlx::query_as::<_, RouteRow>(
         r#"SELECT mr.id, mr.model_id, mr.provider_id, mr.upstream_model,
-                  mr.weight, mr.priority, mr.rpm_cap, mr.tpm_cap
+                  mr.weight, mr.label, mr.rpm_cap, mr.tpm_cap
            FROM model_routes mr
            JOIN providers p ON p.id = mr.provider_id
            WHERE mr.enabled = true AND p.is_active = true AND p.deleted_at IS NULL
-           ORDER BY mr.model_id, mr.priority ASC, mr.weight DESC"#,
+           ORDER BY mr.model_id, mr.weight DESC"#,
     )
     .fetch_all(&state.db)
     .await?;
@@ -1215,7 +1227,7 @@ async fn load_providers_into_router(
                     provider_name: provider_name.clone(),
                     upstream_model: row.upstream_model.clone(),
                     weight: row.weight as u32,
-                    priority: row.priority as u32,
+                    label: row.label.clone(),
                     cost_per_token: cost_per_token_by_model.get(&row.model_id).copied(),
                     rpm_cap: row
                         .rpm_cap
@@ -1247,7 +1259,7 @@ async fn load_providers_into_router(
                         provider_name: provider_name.clone(),
                         upstream_model: None,
                         weight: 100,
-                        priority: 0,
+                        label: None,
                         cost_per_token: None,
                         rpm_cap: None,
                         tpm_cap: None,
@@ -1264,7 +1276,7 @@ async fn load_providers_into_router(
         }
     }
 
-    // Sort all routes by (priority ASC, weight DESC)
+    // Sort all routes by weight DESC for deterministic ordering.
     router.sort_routes();
 
     tracing::info!(

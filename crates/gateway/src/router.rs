@@ -4,20 +4,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// A single route entry mapping a model to a provider with weight/priority.
+/// A single route entry mapping a model to a provider.
 ///
-/// `weight` doubles as both the load-balancing knob and the A/B
-/// traffic-split control: two routes at the same `priority` with
-/// weight `(50, 50)` give a 1:1 split, `(90, 10)` gives a 90 / 10
-/// canary, `(0, 100)` shadows traffic off the route entirely without
-/// removing the row. Selection delegates to `strategy::compute_weights`
-/// (see proxy.rs); failover-on-error behaviour is shared across all
-/// strategies, so an A/B variant that fails 5xx still falls through
-/// to its sibling instead of erroring.
+/// `weight` is both the load-balancing knob and the A/B traffic-split
+/// control under the `weighted` strategy: two routes with weights
+/// `(50, 50)` give a 1:1 split, `(90, 10)` is a 90/10 canary, `(0, 100)`
+/// shadows traffic off without removing the row. Under the auto
+/// strategies (`latency`, `cost`, `latency_cost`) the operator weight
+/// becomes a multiplicative bias on the strategy-derived score.
 ///
-/// To run a controlled experiment between two upstream models on
-/// the same provider, register two routes for the same `model_id`
-/// with different `upstream_model` values and the desired weights.
+/// All routes for a model are peers — there is no priority tier.
+/// Failover happens implicitly: the proxy filters out unhealthy
+/// (circuit-open) and capped-out routes before applying the strategy,
+/// so a degraded upstream stops getting traffic without admin
+/// intervention. To run an A/B between two upstream model names on the
+/// same provider, register two routes with different `upstream_model`
+/// values and the desired weights.
 pub struct RouteEntry {
     pub provider: Arc<dyn DynAiProvider>,
     pub provider_id: Uuid,
@@ -34,7 +36,11 @@ pub struct RouteEntry {
     pub provider_name: String,
     pub upstream_model: Option<String>,
     pub weight: u32,
-    pub priority: u32,
+    /// Optional human-readable identifier. Surfaced in the admin UI
+    /// for routes whose `provider_name + upstream_model` alone aren't
+    /// distinctive enough (e.g. "EU-primary", "GPU-cluster-A"). Pure
+    /// metadata — the runtime ignores it.
+    pub label: Option<String>,
     /// Effective $/token for this route. Computed once at router-load
     /// time from the catalog model's `input_weight`/`output_weight`
     /// times `platform_pricing`. Used by the `cost` and `latency_cost`
@@ -89,18 +95,22 @@ impl AffinityMode {
     }
 }
 
-/// Routes model names to AI provider implementations with multi-provider
-/// failover and strategy-driven traffic splitting.
+/// Routes model names to AI provider implementations with strategy-
+/// driven traffic splitting and circuit-breaker-driven failover.
 ///
-/// Each model can have multiple routes at different priority levels.
-/// Within a priority group, routes are selected by the model's
-/// configured strategy (default: weighted random). If all routes in a
-/// group fail, the next priority group is tried.
+/// All routes for a model are peers; there is no priority tier.
+/// Selection: the proxy prunes the candidate set down to enabled,
+/// circuit-closed, under-cap routes, then applies the model's
+/// strategy (defaulting to `gateway.default_routing_strategy`) to pick
+/// one. On retryable error the proxy advances to another candidate
+/// from the same set.
 ///
 /// Also supports prefix-match as a fallback (e.g. `"gpt-" -> OpenAiProvider`)
 /// for providers that have no explicit model routes configured.
 pub struct ModelRouter {
-    /// Exact model name -> list of routes sorted by (priority ASC, weight DESC).
+    /// Exact model name -> list of routes, sorted by weight DESC for
+    /// deterministic candidate ordering (helps test stability and
+    /// makes the decision log easier to scan).
     routes: HashMap<String, Vec<RouteEntry>>,
     /// Per-model routing overrides. Lookup falls through to global
     /// defaults (`gateway.default_*` in system_settings) when absent.
@@ -159,20 +169,18 @@ impl ModelRouter {
             .push(entry);
     }
 
-    /// Sort all route vecs by (priority ASC, weight DESC). Call once after
-    /// all routes have been registered.
+    /// Sort all route vecs by weight DESC. Call once after all routes
+    /// have been registered. Order doesn't affect correctness (every
+    /// strategy weighs candidates explicitly), just determinism in
+    /// tests and decision-log readability.
     pub fn sort_routes(&mut self) {
         for entries in self.routes.values_mut() {
-            entries.sort_by(|a, b| {
-                a.priority
-                    .cmp(&b.priority)
-                    .then_with(|| b.weight.cmp(&a.weight))
-            });
+            entries.sort_by_key(|e| std::cmp::Reverse(e.weight));
         }
     }
 
     /// Look up all routes for a model (exact match then prefix fallback).
-    /// Returns routes sorted by priority ASC, weight DESC.
+    /// Returns routes sorted by weight DESC.
     pub fn route(&self, model: &str) -> Option<&Vec<RouteEntry>> {
         // Exact match.
         if let Some(entries) = self.routes.get(model)
@@ -249,7 +257,7 @@ mod tests {
     /// Test helper — collapse RouteEntry construction down to fields
     /// the tests actually assert on. New fields default to neutral
     /// values so tests don't break each time the struct grows.
-    fn entry(name: &str, provider_id: Uuid, priority: u32) -> RouteEntry {
+    fn entry(name: &str, provider_id: Uuid, weight: u32) -> RouteEntry {
         let provider: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
             provider_name: name.into(),
         });
@@ -259,8 +267,8 @@ mod tests {
             route_id: Uuid::new_v4(),
             provider_name: name.into(),
             upstream_model: None,
-            weight: 100,
-            priority,
+            weight,
+            label: None,
             cost_per_token: None,
             rpm_cap: None,
             tpm_cap: None,
@@ -270,7 +278,7 @@ mod tests {
     #[test]
     fn exact_match() {
         let mut router = ModelRouter::new();
-        router.register_route("gpt-4o", entry("openai", Uuid::nil(), 0));
+        router.register_route("gpt-4o", entry("openai", Uuid::nil(), 100));
         let found = router.route("gpt-4o");
         assert!(found.is_some());
         assert_eq!(found.unwrap()[0].provider.name(), "openai");
@@ -279,7 +287,7 @@ mod tests {
     #[test]
     fn prefix_match() {
         let mut router = ModelRouter::new();
-        router.register_route("gpt-", entry("openai", Uuid::nil(), 0));
+        router.register_route("gpt-", entry("openai", Uuid::nil(), 100));
         let found = router.route("gpt-4o-mini");
         assert!(found.is_some());
         assert_eq!(found.unwrap()[0].provider.name(), "openai");
@@ -294,8 +302,8 @@ mod tests {
     #[test]
     fn longest_prefix_wins() {
         let mut router = ModelRouter::new();
-        router.register_route("gpt-", entry("generic", Uuid::nil(), 0));
-        router.register_route("gpt-4o", entry("specific", Uuid::nil(), 0));
+        router.register_route("gpt-", entry("generic", Uuid::nil(), 100));
+        router.register_route("gpt-4o", entry("specific", Uuid::nil(), 100));
         let found = router.route("gpt-4o-mini");
         assert!(found.is_some());
         // "gpt-4o" is a longer prefix than "gpt-" for "gpt-4o-mini"
@@ -306,22 +314,21 @@ mod tests {
     fn provider_id_lookup() {
         let mut router = ModelRouter::new();
         let openai_id = Uuid::new_v4();
-        router.register_route("gpt-4o", entry("openai", openai_id, 0));
+        router.register_route("gpt-4o", entry("openai", openai_id, 100));
         assert_eq!(router.provider_id_for("gpt-4o"), Some(openai_id));
         assert_eq!(router.provider_id_for("unknown"), None);
     }
 
     #[test]
-    fn multiple_routes_sorted() {
+    fn routes_sorted_by_weight_desc() {
         let mut router = ModelRouter::new();
-        router.register_route("gpt-4o", entry("fallback", Uuid::nil(), 1));
-        router.register_route("gpt-4o", entry("primary", Uuid::nil(), 0));
+        router.register_route("gpt-4o", entry("light", Uuid::nil(), 30));
+        router.register_route("gpt-4o", entry("heavy", Uuid::nil(), 70));
         router.sort_routes();
-
         let entries = router.route("gpt-4o").unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].provider.name(), "primary");
-        assert_eq!(entries[1].provider.name(), "fallback");
+        assert_eq!(entries[0].provider.name(), "heavy");
+        assert_eq!(entries[1].provider.name(), "light");
     }
 
     #[test]

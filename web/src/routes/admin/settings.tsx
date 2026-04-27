@@ -581,7 +581,6 @@ export function SettingsPage() {
                   <Select value={defaultRoutingStrategy} onValueChange={setDefaultRoutingStrategy}>
                     <SelectTrigger><SelectValue /></SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="priority">{t('settings.strategy.priority')}</SelectItem>
                       <SelectItem value="weighted">{t('settings.strategy.weighted')}</SelectItem>
                       <SelectItem value="latency">{t('settings.strategy.latency')}</SelectItem>
                       <SelectItem value="cost">{t('settings.strategy.cost')}</SelectItem>

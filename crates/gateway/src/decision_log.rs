@@ -42,8 +42,9 @@ pub struct DecisionRecord {
     pub strategy: String,
     pub affinity_mode: String,
     pub affinity_hit: bool,
-    /// Routes considered at the highest priority group reached.
-    /// Lower-priority fallbacks aren't enumerated.
+    /// Routes considered for this selection. All routes for the model
+    /// are peers (no priority tier in v2), so the list covers every
+    /// candidate, including those filtered out by health / cap.
     pub candidates: Vec<CandidateRecord>,
     pub picked_route_id: Option<Uuid>,
     /// 1 = first try succeeded; >1 = failover.

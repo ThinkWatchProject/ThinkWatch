@@ -286,7 +286,7 @@ dc_getters_string! {
     site_name,                "setup.site_name",                   "ThinkWatch";
     client_ip_source,         "security.client_ip_source",         "connection";
     client_ip_xff_position,   "security.client_ip_xff_position",   "left";
-    default_routing_strategy, "gateway.default_routing_strategy",  "weighted";
+    default_routing_strategy, "gateway.default_routing_strategy",  "latency_cost";
     default_affinity_mode,    "gateway.default_affinity_mode",     "provider";
 }
 
@@ -589,6 +589,20 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("{key}: expected an integer"))?;
             if !(1..=20).contains(&n) {
                 anyhow::bail!("{key}: must be between 1 and 20");
+            }
+        }
+
+        // Gateway routing strategy — explicitly enumerated so a typo
+        // doesn't bake in at PATCH time and only show up later when
+        // the router fails to parse the value.
+        "gateway.default_routing_strategy" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("{key}: expected a string"))?;
+            if !["weighted", "latency", "cost", "latency_cost"].contains(&s) {
+                anyhow::bail!(
+                    "{key}: must be one of \"weighted\", \"latency\", \"cost\", \"latency_cost\""
+                );
             }
         }
 

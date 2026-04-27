@@ -6,14 +6,13 @@
 -- admin UI without a deploy.
 --
 -- Strategy semantics — see crates/gateway/src/strategy.rs:
---   priority      — strict failover; same-priority groups only ever
---                   try the first candidate (others kick in on err)
---   weighted      — within each priority group, weighted random by
---                   the per-route `weight` column (historical default)
+--   weighted      — operator-set `weight` column = traffic ratios
+--                   (the wizard's "manual mode")
 --   latency       — weight ∝ 1/latency_ms^k (EWMA), k from
 --                   gateway.latency_strategy_k
 --   cost          — weight ∝ 1/effective_cost_per_token
---   latency_cost  — combined latency × cost score
+--   latency_cost  — combined latency × cost score (default — closest
+--                   to "do the right thing" with zero configuration)
 --
 -- Affinity modes — see crates/gateway/src/proxy.rs:
 --   none      — stateless selection per request
@@ -31,9 +30,12 @@ ALTER TABLE models
     ADD COLUMN routing_strategy   TEXT,
     ADD COLUMN affinity_mode      TEXT,
     ADD COLUMN affinity_ttl_secs  INT,
+    -- Free-form admin tags. Surfaced as chip badges in the model
+    -- detail UI; ignored at the routing layer.
+    ADD COLUMN tags               TEXT[],
     ADD CONSTRAINT models_routing_strategy_chk
         CHECK (routing_strategy IS NULL OR routing_strategy IN
-              ('priority', 'weighted', 'latency', 'cost', 'latency_cost')),
+              ('weighted', 'latency', 'cost', 'latency_cost')),
     ADD CONSTRAINT models_affinity_mode_chk
         CHECK (affinity_mode IS NULL OR affinity_mode IN ('none', 'provider', 'route')),
     ADD CONSTRAINT models_affinity_ttl_chk
@@ -53,8 +55,8 @@ ALTER TABLE model_routes
 -- CONFLICT keeps re-runs of the init script harmless on upgraded
 -- deployments where an operator may have edited values already.
 INSERT INTO system_settings (key, value, category, description) VALUES
-    ('gateway.default_routing_strategy', '"weighted"', 'gateway',
-     'Default routing strategy for models that do not override (priority/weighted/latency/cost/latency_cost)'),
+    ('gateway.default_routing_strategy', '"latency_cost"', 'gateway',
+     'Default routing strategy for models that do not override (weighted/latency/cost/latency_cost)'),
     ('gateway.default_affinity_mode',    '"provider"', 'gateway',
      'Default session affinity mode (none/provider/route)'),
     ('gateway.default_affinity_ttl_secs','300',        'gateway',

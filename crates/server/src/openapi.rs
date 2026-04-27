@@ -25,7 +25,11 @@ use crate::handlers::{
     mcp_logs::{McpLogEntry, McpLogsResponse},
     mcp_servers::UpdateMcpServerRequest,
     mcp_tools::{McpToolListResponse, McpToolRow},
-    models::{CreateModelRequest, ModelRow, UpdateModelRequest},
+    models::{
+        BatchWeightUpdate, BatchWeightsRequest, CreateModelRequest, ModelRow, RouteHistoryBucket,
+        RouteHistoryResponse, RoutingProjectionEntry, RoutingProjectionResponse,
+        RoutingProjectionView, UpdateModelRequest,
+    },
     providers::{TestProviderRequest, TestProviderResponse, UpdateProviderRequest},
     roles::{
         CreateRoleRequest, PermissionDef, RoleHistoryResponse, RoleMember, RoleMembersResponse,
@@ -146,6 +150,9 @@ use crate::handlers::{
         crate::handlers::models::create_model,
         crate::handlers::models::update_model,
         crate::handlers::models::delete_model,
+        crate::handlers::models::batch_update_route_weights,
+        crate::handlers::models::get_routing_projection,
+        crate::handlers::models::get_route_history,
         // Rate Limits & Budgets
         crate::handlers::limits::list_rules,
         crate::handlers::limits::upsert_rule,
@@ -215,6 +222,9 @@ use crate::handlers::{
             UpdateProviderRequest, TestProviderRequest, TestProviderResponse,
             // Models
             ModelRow, CreateModelRequest, UpdateModelRequest,
+            BatchWeightUpdate, BatchWeightsRequest,
+            RoutingProjectionEntry, RoutingProjectionView, RoutingProjectionResponse,
+            RouteHistoryBucket, RouteHistoryResponse,
             // Limits
             RuleRow, RuleListResponse, UpsertRuleRequest, RuleUsage,
             CapRow, CapListResponse, UpsertCapRequest, CapUsage, UsageResponse,

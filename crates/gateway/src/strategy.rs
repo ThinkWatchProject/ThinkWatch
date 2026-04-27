@@ -4,45 +4,47 @@
 //! candidate routes, produce N weights, then weighted-random." The
 //! variants only differ in *how* the weights are derived:
 //!
-//!   * `Priority`     — first candidate wins (no randomization within group)
 //!   * `Weighted`     — use the operator-set `weight` column directly
+//!     (admin owns the ratios; default for "manual mode" in the UI)
 //!   * `Latency`      — `w ∝ 1/latency_ms^k` (autotune to the fast)
 //!   * `Cost`         — `w ∝ 1/effective_cost_per_token`
-//!   * `LatencyCost`  — combined `(1/latency^k) × (1/cost)`
+//!   * `LatencyCost`  — combined `(1/latency^k) × (1/cost)` (default
+//!     for "auto mode" — most balanced behaviour out of the box)
 //!
 //! Per-route observed latency comes from the rolling-window EWMA in
 //! `health.rs`. Per-route cost is computed once at router-load time
 //! (function of `models.input/output_weight × platform_pricing`).
 //!
-//! Failover is not this module's concern. The proxy first prunes the
-//! candidate set (excluding circuit-broken / capped-out routes), then
-//! asks `compute_weights` for the weights of what remains, picks one,
-//! and on retryable error advances to the next candidate within the
-//! same priority group before moving down to the next priority.
+//! Failover is not this module's concern: the proxy filters the
+//! candidate set down to "enabled, circuit-closed, under cap" routes
+//! before asking `compute_weights` for weights, picks one, and on
+//! retryable error tries another from the remaining healthy set.
+//! There used to be a `Priority` strategy that did strict ordered
+//! failover via a separate `model_routes.priority` column; both went
+//! away in the v2 redesign because the circuit breaker covers the
+//! same use-case without the extra mental model.
 
 use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoutingStrategy {
-    /// Strict failover. Same-priority groups only ever try the first
-    /// candidate (others kick in on retryable error).
-    Priority,
-    /// Historical default: weighted random by the operator-set
-    /// `weight` column. Matches pre-strategy behaviour.
-    #[default]
+    /// Operator-set weight column = traffic ratios. The "manual mode"
+    /// of the wizard.
     Weighted,
     /// Auto-tune to fastest. Weight ∝ 1/EWMA_latency^k.
     Latency,
     /// Cheapest first. Weight ∝ 1/cost_per_token.
     Cost,
     /// Combined latency + cost. Weight ∝ (1/latency^k) × (1/cost).
+    /// Default global strategy after v2 — closest to "do the right
+    /// thing" with zero configuration.
+    #[default]
     LatencyCost,
 }
 
 impl RoutingStrategy {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Priority => "priority",
             Self::Weighted => "weighted",
             Self::Latency => "latency",
             Self::Cost => "cost",
@@ -55,7 +57,6 @@ impl FromStr for RoutingStrategy {
     type Err = ();
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "priority" => Ok(Self::Priority),
             "weighted" => Ok(Self::Weighted),
             "latency" => Ok(Self::Latency),
             "cost" => Ok(Self::Cost),
@@ -96,16 +97,6 @@ pub fn compute_weights(
     }
 
     match strategy {
-        // Strict order: 1.0 for the first, 0 for the rest. The caller
-        // filters broken candidates *before* invoking us, so "first"
-        // already means "first healthy". The proxy's failover loop
-        // still tries [1..] if [0] errors, regardless of weight.
-        RoutingStrategy::Priority => {
-            let mut w = vec![0.0; signals.len()];
-            w[0] = 1.0;
-            w
-        }
-
         RoutingStrategy::Weighted => signals.iter().map(|s| s.configured_weight as f64).collect(),
 
         RoutingStrategy::Latency => signals
@@ -156,17 +147,6 @@ mod tests {
 
     fn approx_eq(a: f64, b: f64) -> bool {
         (a - b).abs() < 1e-9
-    }
-
-    #[test]
-    fn priority_picks_first_only() {
-        let w = compute_weights(
-            RoutingStrategy::Priority,
-            &[sig(50, None, None), sig(50, None, None)],
-            2.0,
-        );
-        assert!(approx_eq(w[0], 1.0));
-        assert!(approx_eq(w[1], 0.0));
     }
 
     #[test]
@@ -262,7 +242,6 @@ mod tests {
     #[test]
     fn parse_strategy_round_trip() {
         for s in [
-            RoutingStrategy::Priority,
             RoutingStrategy::Weighted,
             RoutingStrategy::Latency,
             RoutingStrategy::Cost,
@@ -270,6 +249,13 @@ mod tests {
         ] {
             assert_eq!(s.as_str().parse::<RoutingStrategy>().unwrap(), s);
         }
+    }
+
+    #[test]
+    fn priority_value_no_longer_parses() {
+        // Removed in v2 — admins who had this set get migrated to
+        // latency_cost via 003_routing_v2.sql.
+        assert!("priority".parse::<RoutingStrategy>().is_err());
     }
 
     #[test]

@@ -40,7 +40,7 @@ pub struct ModelRow {
     pub route_count: i64,
     pub enabled_route_count: i64,
     /// Provider display names (or `name` if display_name is null) for
-    /// every route attached to the model, ordered by priority. Lets
+    /// every route attached to the model, ordered by weight DESC. Lets
     /// the list table show "who serves this?" without an extra fetch.
     pub providers: Vec<String>,
 }
@@ -137,7 +137,7 @@ pub async fn list_models(
              SELECT COUNT(*)                                 AS route_count,
                     COUNT(*) FILTER (WHERE mr.enabled = true) AS enabled_route_count,
                     array_agg(COALESCE(p.display_name, p.name)
-                              ORDER BY mr.priority, p.name) AS providers
+                              ORDER BY mr.weight DESC, p.name) AS providers
              FROM model_routes mr
              JOIN providers p ON p.id = mr.provider_id AND p.deleted_at IS NULL
              WHERE mr.model_id = m.model_id
@@ -178,7 +178,7 @@ pub struct CreateModelRequest {
     #[schema(value_type = Option<f64>)]
     pub output_weight: Option<Decimal>,
     /// Override the gateway-wide default routing strategy. NULL ⇒
-    /// inherit. One of priority/weighted/latency/cost/latency_cost.
+    /// inherit. One of weighted/latency/cost/latency_cost.
     #[serde(default)]
     pub routing_strategy: Option<String>,
     /// Override session affinity mode. NULL ⇒ inherit.
@@ -188,6 +188,9 @@ pub struct CreateModelRequest {
     /// Override the affinity key TTL (seconds, 0–86400). NULL ⇒ inherit.
     #[serde(default)]
     pub affinity_ttl_secs: Option<i32>,
+    /// Free-form admin tags. NULL = no tags.
+    #[serde(default)]
+    pub tags: Option<Vec<String>>,
 }
 
 #[utoipa::path(
@@ -232,10 +235,10 @@ pub async fn create_model(
     let model = sqlx::query_as::<_, Model>(
         r#"INSERT INTO models
               (model_id, display_name, input_weight, output_weight,
-               routing_strategy, affinity_mode, affinity_ttl_secs)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
+               routing_strategy, affinity_mode, affinity_ttl_secs, tags)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id, model_id, display_name, input_weight, output_weight,
-                     routing_strategy, affinity_mode, affinity_ttl_secs"#,
+                     routing_strategy, affinity_mode, affinity_ttl_secs, tags"#,
     )
     .bind(&req.model_id)
     .bind(&req.display_name)
@@ -244,6 +247,7 @@ pub async fn create_model(
     .bind(&req.routing_strategy)
     .bind(&req.affinity_mode)
     .bind(req.affinity_ttl_secs)
+    .bind(req.tags.as_deref())
     .fetch_one(&state.db)
     .await?;
 
@@ -266,7 +270,7 @@ pub struct UpdateModelRequest {
     #[schema(value_type = Option<f64>)]
     pub output_weight: Option<Decimal>,
     /// PATCH semantics: absent = unchanged, JSON `null` = clear (revert
-    /// to global default), string = override. One of priority /
+    /// to global default), string = override. One of
     /// weighted / latency / cost / latency_cost.
     #[serde(default, deserialize_with = "deserialize_some")]
     pub routing_strategy: Option<Option<String>>,
@@ -276,6 +280,9 @@ pub struct UpdateModelRequest {
     /// PATCH-clearable affinity TTL (0–86400 seconds).
     #[serde(default, deserialize_with = "deserialize_some")]
     pub affinity_ttl_secs: Option<Option<i32>>,
+    /// PATCH-clearable tags. JSON `null` = clear all tags.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub tags: Option<Option<Vec<String>>>,
 }
 
 /// Validate routing-strategy override values mirror the CHECK
@@ -287,11 +294,10 @@ fn validate_routing_overrides(
     affinity_ttl_secs: Option<i32>,
 ) -> Result<(), AppError> {
     if let Some(s) = strategy
-        && !["priority", "weighted", "latency", "cost", "latency_cost"].contains(&s)
+        && !["weighted", "latency", "cost", "latency_cost"].contains(&s)
     {
         return Err(AppError::BadRequest(
-            "routing_strategy must be one of: priority, weighted, latency, cost, latency_cost"
-                .into(),
+            "routing_strategy must be one of: weighted, latency, cost, latency_cost".into(),
         ));
     }
     if let Some(m) = affinity_mode
@@ -339,7 +345,7 @@ pub async fn update_model(
         .await?;
     let existing = sqlx::query_as::<_, Model>(
         r#"SELECT id, model_id, display_name, input_weight, output_weight,
-                  routing_strategy, affinity_mode, affinity_ttl_secs
+                  routing_strategy, affinity_mode, affinity_ttl_secs, tags
            FROM models WHERE id = $1"#,
     )
     .bind(id)
@@ -354,7 +360,7 @@ pub async fn update_model(
             "weights must be greater than zero".into(),
         ));
     }
-    // Resolve PATCH semantics for the three nullable overrides:
+    // Resolve PATCH semantics for the nullable overrides:
     // absent ⇒ preserve existing; Some(None) ⇒ clear; Some(Some(v)) ⇒ overwrite.
     let new_strategy: Option<String> = match &req.routing_strategy {
         None => existing.routing_strategy.clone(),
@@ -367,6 +373,10 @@ pub async fn update_model(
     let new_affinity_ttl: Option<i32> = match req.affinity_ttl_secs {
         None => existing.affinity_ttl_secs,
         Some(inner) => inner,
+    };
+    let new_tags: Option<Vec<String>> = match &req.tags {
+        None => existing.tags.clone(),
+        Some(inner) => inner.clone(),
     };
     validate_routing_overrides(
         new_strategy.as_deref(),
@@ -381,10 +391,11 @@ pub async fn update_model(
               output_weight     = $4,
               routing_strategy  = $5,
               affinity_mode     = $6,
-              affinity_ttl_secs = $7
+              affinity_ttl_secs = $7,
+              tags              = $8
            WHERE id = $1
            RETURNING id, model_id, display_name, input_weight, output_weight,
-                     routing_strategy, affinity_mode, affinity_ttl_secs"#,
+                     routing_strategy, affinity_mode, affinity_ttl_secs, tags"#,
     )
     .bind(id)
     .bind(
@@ -397,6 +408,7 @@ pub async fn update_model(
     .bind(&new_strategy)
     .bind(&new_affinity_mode)
     .bind(new_affinity_ttl)
+    .bind(new_tags.as_deref())
     .fetch_one(&state.db)
     .await?;
 
@@ -596,8 +608,14 @@ pub struct ModelRouteRow {
     pub provider_name: String,
     pub upstream_model: Option<String>,
     pub weight: i32,
-    pub priority: i32,
     pub enabled: bool,
+    /// Optional human-readable identifier (e.g. "EU-primary"). Pure
+    /// metadata for the admin UI; ignored by the routing layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    /// Free-form note. Surfaced in the edit dialog only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
     /// Per-route RPM cap. NULL = unlimited.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rpm_cap: Option<i32>,
@@ -619,12 +637,12 @@ pub async fn list_model_routes(
 
     let rows = sqlx::query_as::<_, ModelRouteRow>(
         r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
-                  mr.upstream_model, mr.weight, mr.priority, mr.enabled,
-                  mr.rpm_cap, mr.tpm_cap
+                  mr.upstream_model, mr.weight, mr.enabled,
+                  mr.label, mr.notes, mr.rpm_cap, mr.tpm_cap
            FROM model_routes mr
            JOIN providers p ON p.id = mr.provider_id
            WHERE mr.model_id = $1 AND p.deleted_at IS NULL
-           ORDER BY mr.priority ASC, mr.weight DESC"#,
+           ORDER BY mr.weight DESC"#,
     )
     .bind(&model_id)
     .fetch_all(&state.db)
@@ -638,11 +656,16 @@ pub struct CreateModelRouteRequest {
     pub provider_id: Uuid,
     pub upstream_model: Option<String>,
     pub weight: Option<i32>,
-    pub priority: Option<i32>,
     /// Optional — falls back to the column default (`TRUE`). New
     /// routes are live immediately on both manual and batch-import
     /// paths.
     pub enabled: Option<bool>,
+    /// Optional human-readable identifier. NULL or empty = no label.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Optional admin note (free text).
+    #[serde(default)]
+    pub notes: Option<String>,
     /// Per-route RPM cap (must be > 0 if set).
     #[serde(default)]
     pub rpm_cap: Option<i32>,
@@ -684,7 +707,6 @@ pub async fn create_model_route(
     }
 
     let weight = req.weight.unwrap_or(100);
-    let priority = req.priority.unwrap_or(0);
 
     // Check for existing route to give a friendly error instead of 500.
     // Uniqueness is on (model_id, provider_id, upstream_model), so the
@@ -721,18 +743,21 @@ pub async fn create_model_route(
 
     let row = sqlx::query_as::<_, ModelRouteRow>(
         r#"INSERT INTO model_routes
-              (model_id, provider_id, upstream_model, weight, priority, enabled, rpm_cap, tpm_cap)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+              (model_id, provider_id, upstream_model, weight, enabled,
+               label, notes, rpm_cap, tpm_cap)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING id, model_id, provider_id,
                      (SELECT name FROM providers WHERE id = provider_id) AS provider_name,
-                     upstream_model, weight, priority, enabled, rpm_cap, tpm_cap"#,
+                     upstream_model, weight, enabled,
+                     label, notes, rpm_cap, tpm_cap"#,
     )
     .bind(&model_id)
     .bind(req.provider_id)
     .bind(&req.upstream_model)
     .bind(weight)
-    .bind(priority)
     .bind(req.enabled.unwrap_or(true))
+    .bind(req.label.as_deref().filter(|s| !s.is_empty()))
+    .bind(req.notes.as_deref().filter(|s| !s.is_empty()))
     .bind(req.rpm_cap)
     .bind(req.tpm_cap)
     .fetch_one(&state.db)
@@ -763,8 +788,13 @@ pub struct UpdateModelRouteRequest {
     #[schema(value_type = Option<String>)]
     pub upstream_model: Option<Option<String>>,
     pub weight: Option<i32>,
-    pub priority: Option<i32>,
     pub enabled: Option<bool>,
+    /// PATCH-clearable label.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub label: Option<Option<String>>,
+    /// PATCH-clearable note.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    pub notes: Option<Option<String>>,
     /// PATCH-clearable RPM cap. Must be > 0 if set.
     #[serde(default, deserialize_with = "deserialize_some")]
     pub rpm_cap: Option<Option<i32>>,
@@ -789,6 +819,14 @@ pub async fn update_model_route(
         None => (false, None),
         Some(inner) => (true, inner.as_deref()),
     };
+    let (label_set, label_value) = match &req.label {
+        None => (false, None),
+        Some(inner) => (true, inner.as_deref().filter(|s| !s.is_empty())),
+    };
+    let (notes_set, notes_value) = match &req.notes {
+        None => (false, None),
+        Some(inner) => (true, inner.as_deref().filter(|s| !s.is_empty())),
+    };
     let (rpm_set, rpm_value) = match req.rpm_cap {
         None => (false, None),
         Some(inner) => (true, inner),
@@ -810,23 +848,28 @@ pub async fn update_model_route(
 
     let row = sqlx::query_as::<_, ModelRouteRow>(
         r#"UPDATE model_routes SET
-              upstream_model = CASE WHEN $6  THEN $2 ELSE upstream_model END,
+              upstream_model = CASE WHEN $5  THEN $2  ELSE upstream_model END,
               weight   = COALESCE($3, weight),
-              priority = COALESCE($4, priority),
-              enabled  = COALESCE($5, enabled),
-              rpm_cap  = CASE WHEN $8  THEN $7  ELSE rpm_cap  END,
-              tpm_cap  = CASE WHEN $10 THEN $9  ELSE tpm_cap  END
+              enabled  = COALESCE($4, enabled),
+              label    = CASE WHEN $7  THEN $6  ELSE label    END,
+              notes    = CASE WHEN $9  THEN $8  ELSE notes    END,
+              rpm_cap  = CASE WHEN $11 THEN $10 ELSE rpm_cap  END,
+              tpm_cap  = CASE WHEN $13 THEN $12 ELSE tpm_cap  END
            WHERE id = $1
            RETURNING id, model_id, provider_id,
                      (SELECT name FROM providers WHERE id = provider_id) AS provider_name,
-                     upstream_model, weight, priority, enabled, rpm_cap, tpm_cap"#,
+                     upstream_model, weight, enabled,
+                     label, notes, rpm_cap, tpm_cap"#,
     )
     .bind(route_id)
     .bind(upstream_value)
     .bind(req.weight)
-    .bind(req.priority)
     .bind(req.enabled)
     .bind(upstream_set)
+    .bind(label_value)
+    .bind(label_set)
+    .bind(notes_value)
+    .bind(notes_set)
     .bind(rpm_value)
     .bind(rpm_set)
     .bind(tpm_value)
@@ -922,12 +965,12 @@ pub async fn list_all_routes(
         .await?;
         let rows = sqlx::query_as::<_, ModelRouteRow>(
             r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
-                      mr.upstream_model, mr.weight, mr.priority, mr.enabled,
-                      mr.rpm_cap, mr.tpm_cap
+                      mr.upstream_model, mr.weight, mr.enabled,
+                      mr.label, mr.notes, mr.rpm_cap, mr.tpm_cap
                FROM model_routes mr
                JOIN providers p ON p.id = mr.provider_id
                WHERE p.deleted_at IS NULL
-               ORDER BY mr.model_id, mr.priority, mr.weight DESC
+               ORDER BY mr.model_id, mr.weight DESC
                LIMIT $1 OFFSET $2"#,
         )
         .bind(page_size)
@@ -950,14 +993,14 @@ pub async fn list_all_routes(
         .await?;
         let rows = sqlx::query_as::<_, ModelRouteRow>(
             r#"SELECT mr.id, mr.model_id, mr.provider_id, p.name AS provider_name,
-                      mr.upstream_model, mr.weight, mr.priority, mr.enabled,
-                      mr.rpm_cap, mr.tpm_cap
+                      mr.upstream_model, mr.weight, mr.enabled,
+                      mr.label, mr.notes, mr.rpm_cap, mr.tpm_cap
                FROM model_routes mr
                JOIN providers p ON p.id = mr.provider_id
                WHERE p.deleted_at IS NULL
                  AND ($1 = '' OR mr.model_id ILIKE $2 OR p.name ILIKE $2)
                  AND ($3::UUID IS NULL OR mr.provider_id = $3)
-               ORDER BY mr.model_id, mr.priority, mr.weight DESC
+               ORDER BY mr.model_id, mr.weight DESC
                LIMIT $4 OFFSET $5"#,
         )
         .bind(search)
@@ -1004,10 +1047,6 @@ pub struct BatchImportItem {
     /// When set, attach a route to this existing `models.model_id`
     /// instead of creating a new catalog entry.
     pub target_model_id: Option<String>,
-    /// Route priority. Defaults to 0 for `new`, 1 for `attach`
-    /// (sensible guess: a brand-new exposed model is primary, while
-    /// attaching to an already-served model is usually fallback).
-    pub priority: Option<i32>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -1045,7 +1084,6 @@ pub async fn batch_create_routes(
     let mut new_ids: Vec<String> = Vec::new();
     let mut attach_targets: Vec<String> = Vec::new();
     let mut attach_upstreams: Vec<String> = Vec::new();
-    let mut attach_priorities: Vec<i32> = Vec::new();
 
     for it in &req.items {
         match &it.target_model_id {
@@ -1053,7 +1091,6 @@ pub async fn batch_create_routes(
             Some(target) => {
                 attach_targets.push(target.clone());
                 attach_upstreams.push(it.upstream.clone());
-                attach_priorities.push(it.priority.unwrap_or(1));
             }
         }
     }
@@ -1079,8 +1116,8 @@ pub async fn batch_create_routes(
 
         sqlx::query_scalar::<_, i64>(
             r#"WITH ins AS (
-                 INSERT INTO model_routes (model_id, provider_id, weight, priority)
-                 SELECT m, $2, 100, 0 FROM UNNEST($1::TEXT[]) AS t(m)
+                 INSERT INTO model_routes (model_id, provider_id, weight)
+                 SELECT m, $2, 100 FROM UNNEST($1::TEXT[]) AS t(m)
                  ON CONFLICT (model_id, provider_id, upstream_model) DO NOTHING
                  RETURNING 1
                )
@@ -1103,10 +1140,10 @@ pub async fn batch_create_routes(
         sqlx::query_scalar::<_, i64>(
             r#"WITH ins AS (
                  INSERT INTO model_routes
-                     (model_id, provider_id, upstream_model, weight, priority)
-                 SELECT t.target, $4, t.upstream, 100, t.pri
-                 FROM UNNEST($1::TEXT[], $2::TEXT[], $3::INT[])
-                   AS t(target, upstream, pri)
+                     (model_id, provider_id, upstream_model, weight)
+                 SELECT t.target, $3, t.upstream, 100
+                 FROM UNNEST($1::TEXT[], $2::TEXT[])
+                   AS t(target, upstream)
                  WHERE EXISTS (SELECT 1 FROM models m WHERE m.model_id = t.target)
                  ON CONFLICT (model_id, provider_id, upstream_model) DO NOTHING
                  RETURNING 1
@@ -1115,7 +1152,6 @@ pub async fn batch_create_routes(
         )
         .bind(&attach_targets)
         .bind(&attach_upstreams)
-        .bind(&attach_priorities)
         .bind(req.provider_id)
         .fetch_one(&mut *tx)
         .await?
@@ -1191,6 +1227,353 @@ pub async fn batch_delete_routes(
     crate::app::rebuild_gateway_router(&state).await;
 
     Ok(Json(serde_json::json!({ "deleted": deleted })))
+}
+
+// ---------------------------------------------------------------------------
+// Batch weights update — used by the wizard's drag-to-redistribute bar and
+// the [均分] / [同步自动] convenience buttons. One transaction, one rebuild.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BatchWeightUpdate {
+    pub id: Uuid,
+    pub weight: i32,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BatchWeightsRequest {
+    pub updates: Vec<BatchWeightUpdate>,
+}
+
+/// PATCH /api/admin/model-routes/batch-weights
+#[utoipa::path(
+    patch,
+    path = "/api/admin/model-routes/batch-weights",
+    tag = "Models",
+    security(("bearer_token" = [])),
+    request_body = BatchWeightsRequest,
+    responses(
+        (status = 200, description = "Weights updated"),
+        (status = 400, description = "Bad request"),
+        (status = 403, description = "Forbidden"),
+    )
+)]
+pub async fn batch_update_route_weights(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<BatchWeightsRequest>,
+) -> Result<Json<Value>, AppError> {
+    auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
+
+    if req.updates.is_empty() {
+        return Err(AppError::BadRequest("updates is empty".into()));
+    }
+    if req.updates.iter().any(|u| u.weight < 0) {
+        return Err(AppError::BadRequest("weight must be >= 0".into()));
+    }
+
+    // One transaction so partial failures roll back — admins shouldn't
+    // see "1/3 of my drag landed".
+    let mut tx = state.db.begin().await?;
+    let mut updated = 0i64;
+    for u in &req.updates {
+        let result = sqlx::query("UPDATE model_routes SET weight = $1 WHERE id = $2")
+            .bind(u.weight)
+            .bind(u.id)
+            .execute(&mut *tx)
+            .await?;
+        updated += result.rows_affected() as i64;
+    }
+    tx.commit().await?;
+
+    state.audit.log(
+        auth_user
+            .audit("model_routes.batch_weights_updated")
+            .resource("model_routes")
+            .detail(serde_json::json!({
+                "count": req.updates.len(),
+                "updated": updated,
+            })),
+    );
+
+    crate::app::rebuild_gateway_router(&state).await;
+
+    Ok(Json(serde_json::json!({ "updated": updated })))
+}
+
+// ---------------------------------------------------------------------------
+// Routing projection — "if this model's strategy is X and these are the
+// candidates, here's the expected traffic split + cost." Used by the
+// wizard for the "expected cost / 1M tokens" line and the "Match auto"
+// convenience button.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RoutingProjectionEntry {
+    pub route_id: Uuid,
+    pub provider_name: String,
+    pub upstream_model: Option<String>,
+    pub label: Option<String>,
+    pub weight: i32,
+    pub expected_pct: f64,
+    pub cost_per_token: Option<f64>,
+    pub ewma_latency_ms: Option<f64>,
+    pub healthy: bool,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RoutingProjectionView {
+    pub strategy: String,
+    pub entries: Vec<RoutingProjectionEntry>,
+    /// Traffic-weighted cost per 1M tokens under this projection
+    /// (sum of `expected_pct * cost_per_token * 1_000_000`).
+    pub expected_cost_per_1m_tokens: Option<f64>,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RoutingProjectionResponse {
+    /// What the gateway will actually do given the model's stored
+    /// strategy + current weights.
+    pub current: RoutingProjectionView,
+    /// What the gateway would do if the strategy were the global
+    /// default (typically `latency_cost`). Used by "Match auto".
+    pub auto: RoutingProjectionView,
+}
+
+/// GET /api/admin/models/{model_id}/routing-projection
+#[utoipa::path(
+    get,
+    path = "/api/admin/models/{model_id}/routing-projection",
+    tag = "Models",
+    security(("bearer_token" = [])),
+    params(("model_id" = String, Path, description = "Model ID")),
+    responses(
+        (status = 200, description = "Projection", body = RoutingProjectionResponse),
+        (status = 403, description = "Forbidden"),
+        (status = 404, description = "No routes for model"),
+    )
+)]
+pub async fn get_routing_projection(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(model_id): Path<String>,
+) -> Result<Json<RoutingProjectionResponse>, AppError> {
+    auth_user.require_permission("models:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:read")
+        .await?;
+
+    let router = state.gateway_router.load();
+    // Note: `RouteEntry` isn't Clone (it owns an Arc<dyn Provider>), so
+    // we can't `.cloned()` the Vec — we work with refs while the guard
+    // is alive, capturing only the projection inputs we need.
+    let entries_opt = router.route(&model_id);
+    let Some(entries) = entries_opt else {
+        return Err(AppError::NotFound("No routes registered for model".into()));
+    };
+    if entries.is_empty() {
+        return Err(AppError::NotFound("No routes registered for model".into()));
+    }
+    let model_cfg = router.config_for(&model_id);
+
+    // Snapshot health for each route. HealthTracker is a thin
+    // Redis-backed facade — cheap to construct ad hoc.
+    let health = think_watch_gateway::health::HealthTracker::new(state.redis.clone());
+    let cb_window = state.dynamic_config.cb_window_secs().await;
+    let mut health_snapshots = Vec::with_capacity(entries.len());
+    for e in entries.iter() {
+        let h = health.snapshot(e.route_id, cb_window).await;
+        health_snapshots.push(h);
+    }
+
+    // Resolve current strategy (model override → global default).
+    let global_default = state.dynamic_config.default_routing_strategy().await;
+    use std::str::FromStr;
+    use think_watch_gateway::strategy::{RouteSignal, RoutingStrategy, compute_weights};
+    let current_strategy = model_cfg
+        .strategy
+        .unwrap_or_else(|| RoutingStrategy::from_str(&global_default).unwrap_or_default());
+    let auto_strategy = RoutingStrategy::from_str(&global_default).unwrap_or_default();
+
+    let latency_k = state.dynamic_config.latency_strategy_k().await;
+
+    let project = |strategy: RoutingStrategy| -> RoutingProjectionView {
+        let signals: Vec<RouteSignal> = entries
+            .iter()
+            .zip(health_snapshots.iter())
+            .map(|(e, h)| RouteSignal {
+                configured_weight: e.weight,
+                ewma_latency_ms: h.ewma_latency_ms,
+                cost_per_token: e.cost_per_token,
+            })
+            .collect();
+        let weights = compute_weights(strategy, &signals, latency_k);
+        let total: f64 = weights.iter().sum();
+        let mut total_cost = 0.0_f64;
+        let mut have_cost = false;
+        let mut entries_out = Vec::with_capacity(entries.len());
+        for ((e, h), w) in entries
+            .iter()
+            .zip(health_snapshots.iter())
+            .zip(weights.iter())
+        {
+            let pct = if total > 0.0 { w / total } else { 0.0 };
+            if let Some(c) = e.cost_per_token {
+                total_cost += c * pct;
+                have_cost = true;
+            }
+            entries_out.push(RoutingProjectionEntry {
+                route_id: e.route_id,
+                provider_name: e.provider_name.clone(),
+                upstream_model: e.upstream_model.clone(),
+                label: e.label.clone(),
+                weight: e.weight as i32,
+                expected_pct: pct * 100.0,
+                cost_per_token: e.cost_per_token,
+                ewma_latency_ms: h.ewma_latency_ms,
+                healthy: matches!(
+                    h.state,
+                    think_watch_gateway::health::BreakerState::Closed
+                        | think_watch_gateway::health::BreakerState::HalfOpen
+                ),
+            });
+        }
+        RoutingProjectionView {
+            strategy: strategy.as_str().to_string(),
+            entries: entries_out,
+            expected_cost_per_1m_tokens: if have_cost {
+                Some(total_cost * 1_000_000.0)
+            } else {
+                None
+            },
+        }
+    };
+
+    Ok(Json(RoutingProjectionResponse {
+        current: project(current_strategy),
+        auto: project(auto_strategy),
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// Per-route history — feeds the wizard's inline latency sparkline.
+// 60 one-minute buckets out of ClickHouse.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RouteHistoryBucket {
+    /// Bucket start, unix seconds.
+    pub ts: i64,
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub requests: u64,
+    pub errors: u64,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RouteHistoryResponse {
+    pub buckets: Vec<RouteHistoryBucket>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RouteHistoryQuery {
+    pub route_id: Uuid,
+    /// Window length in seconds (default 3600 = 1 hour).
+    pub window: Option<i64>,
+}
+
+/// GET /api/admin/models/{model_id}/route-history?route_id=X&window=3600
+#[utoipa::path(
+    get,
+    path = "/api/admin/models/{model_id}/route-history",
+    tag = "Models",
+    security(("bearer_token" = [])),
+    params(
+        ("model_id" = String, Path, description = "Model ID"),
+        ("route_id" = uuid::Uuid, Query, description = "Specific route to query"),
+        ("window" = Option<i64>, Query, description = "Window in seconds (default 3600)"),
+    ),
+    responses(
+        (status = 200, description = "Per-minute history", body = RouteHistoryResponse),
+        (status = 403, description = "Forbidden"),
+        (status = 503, description = "ClickHouse not configured"),
+    )
+)]
+pub async fn get_route_history(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(_model_id): Path<String>,
+    Query(q): Query<RouteHistoryQuery>,
+) -> Result<Json<RouteHistoryResponse>, AppError> {
+    auth_user.require_permission("models:read")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:read")
+        .await?;
+
+    let Some(ch) = state.clickhouse.as_ref() else {
+        // No CH attached (dev w/o opt-in) — return an empty history
+        // rather than 503 so the sparkline just renders blank.
+        return Ok(Json(RouteHistoryResponse {
+            buckets: Vec::new(),
+        }));
+    };
+
+    let window = q.window.unwrap_or(3600).clamp(60, 86400);
+    let now = chrono::Utc::now().timestamp();
+    let from = now - window;
+
+    // Aggregate latency per minute. The actual table name + column
+    // names match those used by `gateway_logs` writes; if the query
+    // fails (table not yet provisioned, CH down), we fall back to an
+    // empty response — the sparkline is a hint, not load-bearing.
+    let sql = format!(
+        r#"SELECT toUnixTimestamp(toStartOfMinute(toDateTime(ts))) AS bucket_ts,
+                  quantile(0.50)(latency_ms)        AS p50,
+                  quantile(0.95)(latency_ms)        AS p95,
+                  count()                            AS requests,
+                  countIf(error_class != '')         AS errors
+           FROM gateway_logs
+           WHERE route_id = '{}'
+             AND ts >= toDateTime({})
+           GROUP BY bucket_ts
+           ORDER BY bucket_ts"#,
+        q.route_id, from
+    );
+
+    #[derive(Debug, clickhouse::Row, serde::Deserialize)]
+    struct Row {
+        bucket_ts: i64,
+        p50: f64,
+        p95: f64,
+        requests: u64,
+        errors: u64,
+    }
+
+    let rows: Vec<Row> = match ch.query(&sql).fetch_all::<Row>().await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("route-history CH query failed (returning empty): {e}");
+            return Ok(Json(RouteHistoryResponse {
+                buckets: Vec::new(),
+            }));
+        }
+    };
+
+    let buckets = rows
+        .into_iter()
+        .map(|r| RouteHistoryBucket {
+            ts: r.bucket_ts,
+            p50_ms: if r.p50.is_finite() { Some(r.p50) } else { None },
+            p95_ms: if r.p95.is_finite() { Some(r.p95) } else { None },
+            requests: r.requests,
+            errors: r.errors,
+        })
+        .collect();
+
+    Ok(Json(RouteHistoryResponse { buckets }))
 }
 
 /// POST /api/admin/model-routes/batch-update — flips `enabled` for many routes.

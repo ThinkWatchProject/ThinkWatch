@@ -21,7 +21,6 @@ pub struct RouteHealthEntry {
     pub provider_id: Uuid,
     pub provider_name: String,
     pub upstream_model: Option<String>,
-    pub priority: i32,
     pub weight: i32,
     pub enabled: bool,
     /// Health snapshot (`closed`/`open`/`half_open` + counts + EWMA).
@@ -52,18 +51,17 @@ pub async fn list_route_health(
         provider_id: Uuid,
         provider_name: String,
         upstream_model: Option<String>,
-        priority: i32,
         weight: i32,
         enabled: bool,
     }
     let rows: Vec<Row> = sqlx::query_as(
         r#"SELECT mr.id AS route_id, mr.provider_id,
                   p.name AS provider_name,
-                  mr.upstream_model, mr.priority, mr.weight, mr.enabled
+                  mr.upstream_model, mr.weight, mr.enabled
              FROM model_routes mr
              JOIN providers p ON p.id = mr.provider_id
             WHERE mr.model_id = $1 AND p.deleted_at IS NULL
-            ORDER BY mr.priority ASC, mr.weight DESC"#,
+            ORDER BY mr.weight DESC"#,
     )
     .bind(&model_id)
     .fetch_all(&state.db)
@@ -87,7 +85,6 @@ pub async fn list_route_health(
             provider_id: r.provider_id,
             provider_name: r.provider_name,
             upstream_model: r.upstream_model,
-            priority: r.priority,
             weight: r.weight,
             enabled: r.enabled,
         })

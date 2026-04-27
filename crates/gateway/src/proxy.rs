@@ -766,12 +766,12 @@ pub(crate) async fn build_selection_ctx<'a>(
     }
 }
 
-/// One selection attempt within a priority group: snapshot health,
+/// One selection attempt over the candidate set: snapshot health,
 /// drop circuit-broken / already-tried candidates, compute strategy
 /// weights, pick. Returns `(picked, candidate_records, affinity_hit)`.
-/// Candidate records cover every route in the group — including
-/// excluded ones — so the decision log shows operators why each
-/// route was or wasn't picked.
+/// Candidate records cover every route in the set — including excluded
+/// ones — so the decision log shows operators why each route was or
+/// wasn't picked.
 async fn pick_with_strategy<'a>(
     group: &[&'a RouteEntry],
     tried: &[Uuid],
@@ -978,12 +978,10 @@ fn is_retryable(err: &GatewayError) -> bool {
     }
 }
 
-/// Non-streaming selection + failover. Walks priority groups in
-/// order; within each, `pick_with_strategy` chooses one healthy route.
-/// On retryable error, advances within the group; on a fully failed
-/// group, advances to the next priority. Returns the picked route,
-/// the response, and a `SelectionRecord` so the caller can finalize
-/// the decision log after request completion.
+/// Non-streaming selection + failover. All routes are peers (no
+/// priority tier in v2): `pick_with_strategy` picks one healthy
+/// candidate, the proxy calls it, and on retryable error tries
+/// another candidate from the remaining set until exhausted.
 async fn select_route_with_failover<'a>(
     routes: &'a [RouteEntry],
     request: &ChatCompletionRequest,
@@ -997,115 +995,98 @@ async fn select_route_with_failover<'a>(
     GatewayError,
 > {
     let started_at = std::time::Instant::now();
-
-    let mut priority_groups: Vec<(u32, Vec<&RouteEntry>)> = Vec::new();
-    for entry in routes {
-        if let Some(group) = priority_groups.last_mut()
-            && group.0 == entry.priority
-        {
-            group.1.push(entry);
-            continue;
-        }
-        priority_groups.push((entry.priority, vec![entry]));
-    }
+    let candidates: Vec<&RouteEntry> = routes.iter().collect();
 
     let mut last_error: Option<GatewayError> = None;
-    let mut attempts: u32 = 0;
     let mut affinity_hit_overall = false;
-    // We capture candidate records from the first group we picked
-    // from — that's the most informative view for the operator.
-    // Lower-priority fallbacks aren't enumerated.
     let mut last_records: Vec<CandidateRecord> = Vec::new();
+    let mut tried: Vec<Uuid> = Vec::new();
 
-    for (_prio, group) in &priority_groups {
-        let mut tried: Vec<Uuid> = Vec::new();
+    for attempt_idx in 0..candidates.len() {
+        let attempts = (attempt_idx + 1) as u32;
+        let (picked, records, affinity_hit) = pick_with_strategy(&candidates, &tried, ctx).await;
+        if last_records.is_empty() {
+            last_records = records;
+        }
+        affinity_hit_overall = affinity_hit_overall || affinity_hit;
+        let Some(entry) = picked else { break };
+        tried.push(entry.provider_id);
 
-        for _ in 0..group.len() {
-            attempts += 1;
-            let (picked, records, affinity_hit) = pick_with_strategy(group, &tried, ctx).await;
-            if last_records.is_empty() {
-                last_records = records;
+        let mut req = request.clone();
+        if let Some(ref upstream) = entry.upstream_model {
+            req.model = upstream.clone();
+        }
+
+        // Per-attempt clock: record latency against this route as
+        // *its* time, not "everything since the request started"
+        // (which would double-count earlier failed attempts in
+        // a failover chain and skew the latency strategy).
+        let attempt_started_at = std::time::Instant::now();
+        let result = entry.provider.chat_completion_boxed(req).await;
+        let attempt_latency_ms = attempt_started_at
+            .elapsed()
+            .as_millis()
+            .min(u32::MAX as u128) as u32;
+
+        match result {
+            Ok(response) => {
+                set_affinity(
+                    &ctx.state.redis,
+                    ctx.user_id,
+                    ctx.model_id,
+                    ctx.affinity_mode,
+                    entry,
+                    ctx.affinity_ttl_secs,
+                )
+                .await;
+                return Ok((
+                    entry,
+                    response,
+                    SelectionRecord {
+                        picked_route_id: entry.route_id,
+                        model_id: ctx.model_id.to_string(),
+                        strategy: ctx.strategy,
+                        affinity_mode: ctx.affinity_mode,
+                        affinity_hit: affinity_hit_overall,
+                        attempts,
+                        candidates: last_records,
+                        user_hint: ctx.user_id.map(|s| s.to_string()),
+                        started_at,
+                        picked_latency_ms: Some(attempt_latency_ms),
+                    },
+                ));
             }
-            affinity_hit_overall = affinity_hit_overall || affinity_hit;
-            let Some(entry) = picked else { break };
-            tried.push(entry.provider_id);
-
-            let mut req = request.clone();
-            if let Some(ref upstream) = entry.upstream_model {
-                req.model = upstream.clone();
-            }
-
-            // Per-attempt clock: record latency against this route as
-            // *its* time, not "everything since the request started"
-            // (which would double-count earlier failed attempts in
-            // a failover chain and skew the latency strategy).
-            let attempt_started_at = std::time::Instant::now();
-            let result = entry.provider.chat_completion_boxed(req).await;
-            let attempt_latency_ms = attempt_started_at
-                .elapsed()
-                .as_millis()
-                .min(u32::MAX as u128) as u32;
-
-            match result {
-                Ok(response) => {
-                    set_affinity(
-                        &ctx.state.redis,
-                        ctx.user_id,
-                        ctx.model_id,
-                        ctx.affinity_mode,
-                        entry,
-                        ctx.affinity_ttl_secs,
-                    )
+            Err(e) if is_retryable(&e) => {
+                tracing::warn!(
+                    provider = %entry.provider.name(),
+                    provider_id = %entry.provider_id,
+                    error = %e,
+                    "Route failed, trying next"
+                );
+                metrics::counter!(
+                    "gateway_provider_fallback_total",
+                    "from" => crate::metrics_labels::normalize_provider_label(entry.provider.name()),
+                )
+                .increment(1);
+                // Record the failed attempt in health so the
+                // breaker can trip mid-failover.
+                let _ = ctx
+                    .state
+                    .health
+                    .record(entry.route_id, attempt_latency_ms, true, ctx.breaker)
                     .await;
-                    return Ok((
-                        entry,
-                        response,
-                        SelectionRecord {
-                            picked_route_id: entry.route_id,
-                            model_id: ctx.model_id.to_string(),
-                            strategy: ctx.strategy,
-                            affinity_mode: ctx.affinity_mode,
-                            affinity_hit: affinity_hit_overall,
-                            attempts,
-                            candidates: last_records,
-                            user_hint: ctx.user_id.map(|s| s.to_string()),
-                            started_at,
-                            picked_latency_ms: Some(attempt_latency_ms),
-                        },
-                    ));
-                }
-                Err(e) if is_retryable(&e) => {
-                    tracing::warn!(
-                        provider = %entry.provider.name(),
-                        provider_id = %entry.provider_id,
-                        error = %e,
-                        "Route failed, trying next"
-                    );
-                    metrics::counter!(
-                        "gateway_provider_fallback_total",
-                        "from" => crate::metrics_labels::normalize_provider_label(entry.provider.name()),
-                    )
-                    .increment(1);
-                    // Record the failed attempt in health so the
-                    // breaker can trip mid-failover.
-                    let _ = ctx
-                        .state
-                        .health
-                        .record(entry.route_id, attempt_latency_ms, true, ctx.breaker)
-                        .await;
-                    last_error = Some(e);
-                    continue;
-                }
-                Err(e) => {
-                    // Non-retryable — record health then bail. Sibling
-                    // providers will reject the same poison request.
-                    let _ = ctx
-                        .state
-                        .health
-                        .record(entry.route_id, attempt_latency_ms, true, ctx.breaker)
-                        .await;
-                    return Err(e);
-                }
+                last_error = Some(e);
+                continue;
+            }
+            Err(e) => {
+                // Non-retryable — record health then bail. Sibling
+                // providers will reject the same poison request.
+                let _ = ctx
+                    .state
+                    .health
+                    .record(entry.route_id, attempt_latency_ms, true, ctx.breaker)
+                    .await;
+                return Err(e);
             }
         }
     }
@@ -1125,40 +1106,28 @@ async fn select_route_for_stream<'a>(
     ctx: &SelectionCtx<'_>,
 ) -> Result<(&'a RouteEntry, SelectionRecord), GatewayError> {
     let started_at = std::time::Instant::now();
+    let candidates: Vec<&RouteEntry> = routes.iter().collect();
 
-    let mut priority_groups: Vec<(u32, Vec<&RouteEntry>)> = Vec::new();
-    for entry in routes {
-        if let Some(group) = priority_groups.last_mut()
-            && group.0 == entry.priority
-        {
-            group.1.push(entry);
-            continue;
-        }
-        priority_groups.push((entry.priority, vec![entry]));
-    }
-
-    for (_prio, group) in &priority_groups {
-        let (picked, records, affinity_hit) = pick_with_strategy(group, &[], ctx).await;
-        if let Some(entry) = picked {
-            return Ok((
-                entry,
-                SelectionRecord {
-                    picked_route_id: entry.route_id,
-                    model_id: ctx.model_id.to_string(),
-                    strategy: ctx.strategy,
-                    affinity_mode: ctx.affinity_mode,
-                    affinity_hit,
-                    attempts: 1,
-                    candidates: records,
-                    user_hint: ctx.user_id.map(|s| s.to_string()),
-                    started_at,
-                    // Streams don't loop — finalize_decision falls
-                    // back to elapsed-from-started_at, which IS the
-                    // picked route's wall time for the streaming case.
-                    picked_latency_ms: None,
-                },
-            ));
-        }
+    let (picked, records, affinity_hit) = pick_with_strategy(&candidates, &[], ctx).await;
+    if let Some(entry) = picked {
+        return Ok((
+            entry,
+            SelectionRecord {
+                picked_route_id: entry.route_id,
+                model_id: ctx.model_id.to_string(),
+                strategy: ctx.strategy,
+                affinity_mode: ctx.affinity_mode,
+                affinity_hit,
+                attempts: 1,
+                candidates: records,
+                user_hint: ctx.user_id.map(|s| s.to_string()),
+                started_at,
+                // Streams don't loop — finalize_decision falls
+                // back to elapsed-from-started_at, which IS the
+                // picked route's wall time for the streaming case.
+                picked_latency_ms: None,
+            },
+        ));
     }
 
     Err(GatewayError::ProviderError(format!(
@@ -1525,7 +1494,7 @@ pub async fn proxy_chat_completion(
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
         Ok(stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response())
     } else {
-        // Non-streaming: full failover with retry across priority groups
+        // Non-streaming: full failover with retry across healthy candidates
         let sel_ctx =
             build_selection_ctx(&state, &original_model, identity.user_id.as_deref()).await;
         let (chosen_entry, mut response, sel_record) =

@@ -351,10 +351,16 @@ CREATE TABLE model_routes (
     provider_id     UUID NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
     -- Upstream model name sent to the provider (NULL = same as model_id)
     upstream_model  VARCHAR(255),
-    -- Traffic weight (same priority group: weighted random selection)
+    -- Traffic weight; meaning depends on the model's routing strategy.
+    -- Under `weighted` it's a direct ratio; under the auto strategies
+    -- (latency / cost / latency_cost) it's a multiplicative bias on
+    -- the strategy-derived score. Failover is handled implicitly by
+    -- the circuit breaker — there is no priority tier.
     weight          INTEGER NOT NULL DEFAULT 100 CHECK (weight >= 0),
-    -- Failover priority (0 = primary, 1 = first fallback, etc.)
-    priority        INTEGER NOT NULL DEFAULT 0 CHECK (priority >= 0),
+    -- Optional human-readable identifiers shown in the admin UI
+    -- (e.g. "EU-primary", "GPU-cluster-A"). Pure metadata.
+    label           VARCHAR(64),
+    notes           TEXT,
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE NULLS NOT DISTINCT (model_id, provider_id, upstream_model)

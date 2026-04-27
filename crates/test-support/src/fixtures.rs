@@ -161,14 +161,12 @@ pub async fn create_provider(
     .context("INSERT providers")
 }
 
-/// Register a model + an explicit route. `priority` 0 = primary,
-/// higher numbers fail over after lower ones; `weight` controls
-/// weighted random selection inside a priority group.
+/// Register a model + an explicit route. `weight` controls weighted
+/// random selection across all healthy routes for the model.
 pub async fn create_model_route(
     db: &PgPool,
     provider_id: Uuid,
     model_id: &str,
-    priority: i32,
     weight: i32,
 ) -> Result<()> {
     sqlx::query(
@@ -181,13 +179,12 @@ pub async fn create_model_route(
     .await
     .context("INSERT models")?;
     sqlx::query(
-        r#"INSERT INTO model_routes (model_id, provider_id, upstream_model, weight, priority, enabled)
-           VALUES ($1, $2, NULL, $3, $4, true)"#,
+        r#"INSERT INTO model_routes (model_id, provider_id, upstream_model, weight, enabled)
+           VALUES ($1, $2, NULL, $3, true)"#,
     )
     .bind(model_id)
     .bind(provider_id)
     .bind(weight)
-    .bind(priority)
     .execute(db)
     .await
     .context("INSERT model_routes")?;

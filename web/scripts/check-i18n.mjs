@@ -81,7 +81,7 @@ const DYNAMIC_ENUMS = {
   // Routing strategy / affinity / circuit-breaker enums — kept in
   // lockstep with crates/gateway/src/strategy.rs::RoutingStrategy
   // and crates/gateway/src/router.rs::AffinityMode.
-  'models.strategy.${_}': ['priority', 'weighted', 'latency', 'cost', 'latency_cost'],
+  'models.strategy.${_}': ['weighted', 'latency', 'cost', 'latency_cost'],
   'models.affinity.${_}': ['none', 'provider', 'route'],
   'models.health.${_}': ['closed', 'open', 'half_open'],
   // describeApiError in src/lib/api.ts builds `errors.byStatus.${n}` /
