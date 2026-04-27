@@ -316,12 +316,33 @@ CREATE INDEX idx_providers_not_deleted ON providers(created_at) WHERE deleted_at
 -- `output_weight` scale the platform-wide baseline (`platform_pricing`)
 -- for both cost reporting and weighted-token quota accounting.
 CREATE TABLE models (
-    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    model_id       VARCHAR(255) NOT NULL UNIQUE,
-    display_name   VARCHAR(255) NOT NULL,
-    input_weight   DECIMAL(8, 4) NOT NULL DEFAULT 1.0 CHECK (input_weight  > 0),
-    output_weight  DECIMAL(8, 4) NOT NULL DEFAULT 1.0 CHECK (output_weight > 0),
-    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    model_id          VARCHAR(255) NOT NULL UNIQUE,
+    display_name      VARCHAR(255) NOT NULL,
+    input_weight      DECIMAL(8, 4) NOT NULL DEFAULT 1.0 CHECK (input_weight  > 0),
+    output_weight     DECIMAL(8, 4) NOT NULL DEFAULT 1.0 CHECK (output_weight > 0),
+    -- Per-model overrides. NULL ⇒ "fall through to gateway.default_*".
+    -- Strategy semantics — see crates/gateway/src/strategy.rs:
+    --   weighted     — operator-set weight = traffic ratio (manual mode)
+    --   latency      — weight ∝ 1/latency_ms^k (EWMA), k from
+    --                  gateway.latency_strategy_k
+    --   cost         — weight ∝ 1/effective_cost_per_token
+    --   latency_cost — combined latency × cost score (default)
+    routing_strategy  TEXT
+        CHECK (routing_strategy IS NULL OR routing_strategy IN
+              ('weighted', 'latency', 'cost', 'latency_cost')),
+    -- Affinity modes — see crates/gateway/src/proxy.rs:
+    --   none      — stateless; strategy decides every request
+    --   provider  — sticky to provider_id (preserves prompt-cache)
+    --   route     — sticky to a specific route_id (strict A/B)
+    affinity_mode     TEXT
+        CHECK (affinity_mode IS NULL OR affinity_mode IN ('none', 'provider', 'route')),
+    affinity_ttl_secs INT
+        CHECK (affinity_ttl_secs IS NULL OR affinity_ttl_secs BETWEEN 0 AND 86400),
+    -- Free-form admin tags. Surfaced as chip badges in the model
+    -- detail UI; ignored at the routing layer.
+    tags              TEXT[],
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Platform-wide per-token pricing baseline. Single-row singleton
@@ -361,6 +382,11 @@ CREATE TABLE model_routes (
     -- (e.g. "EU-primary", "GPU-cluster-A"). Pure metadata.
     label           VARCHAR(64),
     notes           TEXT,
+    -- Per-route capacity caps. NULL = unlimited. Enforced in the
+    -- gateway selection path: routes at cap are filtered out the
+    -- same way circuit-broken routes are.
+    rpm_cap         INTEGER CHECK (rpm_cap IS NULL OR rpm_cap > 0),
+    tpm_cap         INTEGER CHECK (tpm_cap IS NULL OR tpm_cap > 0),
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE NULLS NOT DISTINCT (model_id, provider_id, upstream_model)
@@ -775,3 +801,26 @@ INSERT INTO mcp_store_templates (slug, name, description, category, tags, endpoi
 -- MCP Store
 INSERT INTO system_settings (key, value, category, description) VALUES
 ('mcp_store.registry_url', '"https://thinkwat.ch/registry/mcp-templates.json"', 'mcp_store', 'Remote registry URL for syncing MCP store templates');
+
+-- Gateway routing + circuit-breaker tunables. Editable in the admin
+-- UI without a deploy.
+INSERT INTO system_settings (key, value, category, description) VALUES
+    ('gateway.default_routing_strategy', '"latency_cost"', 'gateway',
+     'Default routing strategy for models that do not override (weighted/latency/cost/latency_cost)'),
+    ('gateway.default_affinity_mode',    '"provider"', 'gateway',
+     'Default session affinity mode (none/provider/route)'),
+    ('gateway.default_affinity_ttl_secs','300',        'gateway',
+     'Default affinity key TTL in seconds (0-86400)'),
+    ('gateway.latency_strategy_k',       '2.0',        'gateway',
+     'Exponent for the latency-strategy weighting (higher = more aggressive). Default 2.0 (aggressive).'),
+    ('gateway.cb_enabled',               'true',       'gateway',
+     'Enable circuit-breaker: routes exceeding the error threshold are temporarily excluded from selection'),
+    ('gateway.cb_error_pct',             '50',         'gateway',
+     'Circuit-breaker error rate threshold (percent, 1-100). Routes above this rate trip open'),
+    ('gateway.cb_min_samples',           '10',         'gateway',
+     'Minimum sample count in the rolling window before the circuit-breaker can trip (avoids tripping on a handful of errors)'),
+    ('gateway.cb_window_secs',           '60',         'gateway',
+     'Rolling window length in seconds for circuit-breaker error-rate computation'),
+    ('gateway.cb_open_secs',             '30',         'gateway',
+     'How long a tripped (open) circuit stays open before transitioning to half-open (probe) state')
+ON CONFLICT (key) DO NOTHING;
