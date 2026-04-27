@@ -8,6 +8,7 @@ pub mod handlers;
 pub mod init;
 pub mod mcp_runtime;
 pub mod middleware;
+pub mod oidc_helpers;
 pub mod openapi;
 pub mod services;
 pub mod tasks;

@@ -130,55 +130,18 @@ fn audit_config(config: &AppConfig) -> AuditConfig {
 }
 
 async fn build_oidc(config: &AppConfig, dc: &DynamicConfig) -> Option<OidcManager> {
-    if !dc.oidc_enabled().await {
-        return None;
-    }
-    let issuer = dc.oidc_issuer_url().await.unwrap_or_default();
-    let client_id = dc.oidc_client_id().await.unwrap_or_default();
-    let secret_enc = dc.oidc_client_secret_encrypted().await.unwrap_or_default();
-    let redirect = dc.oidc_redirect_url().await.unwrap_or_else(|| {
-        format!(
-            "http://{}:{}/api/auth/sso/callback",
-            config.server_host, config.console_port
-        )
-    });
-
-    let encryption_key =
-        match think_watch_common::crypto::parse_encryption_key(&config.encryption_key) {
-            Ok(k) => k,
-            Err(e) => {
-                tracing::error!("Failed to parse encryption key for OIDC: {e}");
-                return None;
-            }
-        };
-
-    let client_secret = if secret_enc.is_empty() {
-        String::new()
-    } else {
-        match hex::decode(&secret_enc)
-            .map_err(|e| format!("hex decode: {e}"))
-            .and_then(|bytes| {
-                think_watch_common::crypto::decrypt(&bytes, &encryption_key)
-                    .map_err(|e| format!("decrypt: {e}"))
-            })
-            .and_then(|plain| String::from_utf8(plain).map_err(|e| format!("utf8: {e}")))
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("Failed to decrypt OIDC client secret at startup: {e}");
-                String::new()
-            }
+    let oidc_config = match crate::oidc_helpers::active_config(dc, config).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
+        Err(e) => {
+            tracing::error!("Failed to assemble OIDC config at startup: {e}");
+            return None;
         }
     };
-
-    if issuer.is_empty() || client_id.is_empty() || client_secret.is_empty() {
-        return None;
-    }
-
-    match OidcManager::discover(&issuer, &client_id, &client_secret, &redirect).await {
+    match OidcManager::discover(&oidc_config).await {
         Ok(mgr) => Some(mgr),
         Err(e) => {
-            tracing::error!(issuer = %issuer, "OIDC discovery failed; SSO disabled: {e}");
+            tracing::error!(issuer = %oidc_config.issuer_url, "OIDC discovery failed; SSO disabled: {e}");
             None
         }
     }

@@ -103,7 +103,12 @@ use crate::handlers::{
         // Settings
         crate::handlers::admin::get_system_settings,
         crate::handlers::admin::get_oidc_settings,
-        crate::handlers::admin::update_oidc_settings,
+        crate::handlers::admin::toggle_oidc_active,
+        crate::handlers::admin::update_oidc_draft,
+        crate::handlers::admin::delete_oidc_draft,
+        crate::handlers::admin::discover_oidc_draft,
+        crate::handlers::admin::start_oidc_test_login,
+        crate::handlers::admin::activate_oidc_draft,
         crate::handlers::admin::get_audit_settings,
         crate::handlers::admin::get_all_settings,
         crate::handlers::admin::get_settings_by_category,
@@ -236,6 +241,14 @@ use crate::handlers::{
             CreateForwarderRequest, UpdateForwarderRequest, TestResult,
             // Settings
             UpdateSettingsRequest,
+            // OIDC wizard
+            crate::handlers::admin::OidcSettingsResponse,
+            crate::handlers::admin::OidcActiveSnapshot,
+            crate::handlers::admin::OidcDraftSnapshot,
+            crate::handlers::admin::OidcTestResult,
+            crate::handlers::admin::UpdateOidcDraftRequest,
+            crate::handlers::admin::StartOidcTestLoginResponse,
+            crate::handlers::admin::DisableOidcRequest,
             // Admin users (quorum companion)
             SuperAdminIds,
         )

@@ -17,12 +17,58 @@ export interface SystemInfo {
   public_port: number;
 }
 
-export interface OidcConfig {
+/// Response of GET /api/admin/settings/oidc — bundles everything
+/// the wizard needs in one round-trip.
+export interface OidcSettings {
+  active: OidcActiveSnapshot;
+  draft: OidcDraftSnapshot | null;
+  test_result: OidcTestResult | null;
+  default_redirect_url: string;
+}
+
+export interface OidcActiveSnapshot {
+  enabled: boolean;
+  /// True when the active config was successfully discovered at
+  /// startup. `enabled && configured` is the live-SSO predicate.
+  configured: boolean;
   issuer_url: string | null;
   client_id: string | null;
   redirect_url: string | null;
-  enabled: boolean;
-  has_secret?: boolean;
+  has_secret: boolean;
+  email_claim: string;
+  name_claim: string;
+  provider_preset: string | null;
+}
+
+export interface OidcDraftSnapshot {
+  provider_preset: string | null;
+  issuer_url: string | null;
+  client_id: string | null;
+  redirect_url: string | null;
+  has_secret: boolean;
+  email_claim: string | null;
+  name_claim: string | null;
+}
+
+export interface OidcTestResult {
+  passed: boolean;
+  /// Unix epoch seconds.
+  at: number;
+  error: string | null;
+  claims_preview: {
+    subject: string;
+    email: string | null;
+    name: string | null;
+    issuer: string;
+  } | null;
+}
+
+export interface OidcDiscoveryMetadata {
+  issuer: string;
+  authorization_endpoint: string;
+  token_endpoint: string;
+  userinfo_endpoint?: string;
+  jwks_uri?: string;
 }
 
 export interface AuditConfig {

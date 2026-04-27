@@ -328,6 +328,40 @@ impl DynamicConfig {
         self.get_string("oidc.redirect_url").await
     }
 
+    /// JWT claim that carries the user's email. Defaults to `email` —
+    /// some providers (notably Microsoft Entra without the `email`
+    /// scope) put the address in `preferred_username` instead, so this
+    /// is admin-overridable.
+    pub async fn oidc_email_claim(&self) -> String {
+        self.get_string("oidc.email_claim")
+            .await
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "email".to_string())
+    }
+
+    /// JWT claim that carries the display name. Defaults to `name`.
+    pub async fn oidc_name_claim(&self) -> String {
+        self.get_string("oidc.name_claim")
+            .await
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "name".to_string())
+    }
+
+    /// Provider preset that produced the active config (informational
+    /// only — used by the wizard to show which catalog entry was
+    /// picked). Not used by login flow.
+    pub async fn oidc_provider_preset(&self) -> Option<String> {
+        self.get_string("oidc.provider_preset").await
+    }
+
+    /// Returns the entire OIDC draft (work-in-progress config) blob, or
+    /// `None` if nothing is being drafted. Storing the draft as one
+    /// JSONB row keeps the active config strictly separated and lets
+    /// the wizard upsert atomically.
+    pub async fn oidc_draft(&self) -> Option<Value> {
+        self.get("oidc.draft").await
+    }
+
     /// Role name to assign to newly registered / SSO users.
     /// Empty or absent means no role (0 permissions).
     pub async fn default_role(&self) -> Option<String> {

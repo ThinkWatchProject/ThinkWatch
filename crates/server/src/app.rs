@@ -719,7 +719,23 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         )
         .route(
             "/api/admin/settings/oidc",
-            get(handlers::admin::get_oidc_settings).patch(handlers::admin::update_oidc_settings),
+            get(handlers::admin::get_oidc_settings).patch(handlers::admin::toggle_oidc_active),
+        )
+        .route(
+            "/api/admin/settings/oidc/draft",
+            patch(handlers::admin::update_oidc_draft).delete(handlers::admin::delete_oidc_draft),
+        )
+        .route(
+            "/api/admin/settings/oidc/discover",
+            post(handlers::admin::discover_oidc_draft),
+        )
+        .route(
+            "/api/admin/settings/oidc/test-login",
+            post(handlers::admin::start_oidc_test_login),
+        )
+        .route(
+            "/api/admin/settings/oidc/activate",
+            post(handlers::admin::activate_oidc_draft),
         )
         .route(
             "/api/admin/settings/audit",

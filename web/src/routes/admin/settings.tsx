@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
@@ -18,15 +17,13 @@ import {
 import { Settings, Shield, Key, Database, Lock, AlertCircle, MemoryStick, Search } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
-import { api, apiPatch, hasPermission } from '@/lib/api';
-import { toast } from 'sonner';
+import { api, apiPatch } from '@/lib/api';
 // Types, value-coercion helpers, and the small NumberField input
 // live in the `settings/` sibling directory.
 import {
   type AuditConfig,
   getSettingValue,
   num,
-  type OidcConfig,
   type SettingEntry,
   str,
   type SystemInfo,
@@ -34,6 +31,7 @@ import {
 import { NumberField } from './settings/NumberField';
 import { useFieldAutosave } from './settings/useFieldAutosave';
 import { SaveIndicator } from './settings/SaveIndicator';
+import { OidcWizardCard } from './settings/oidc/OidcWizardCard';
 
 // One PATCH per field, keyed by the backend's dotted setting id. The
 // server treats the body as a merge so sending a one-key object is the
@@ -69,16 +67,12 @@ export function SettingsPage() {
   // Read-only state from dedicated endpoints
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
   const [health, setHealth] = useState<{ postgres: boolean; redis: boolean; clickhouse: boolean } | null>(null);
-  const [, setOidcConfig] = useState<OidcConfig | null>(null);
   const [auditConfig, setAuditConfig] = useState<AuditConfig | null>(null);
 
   // Editable settings from GET /api/admin/settings
   const [_allSettings, setAllSettings] = useState<Record<string, SettingEntry[]>>({});
 
   const [loading, setLoading] = useState(true);
-  // OIDC keeps explicit group save because secret handling is write-only
-  // and issuer changes trigger provider re-discovery on the server.
-  const [oidcSaving, setOidcSaving] = useState(false);
 
   // --- Editable form state ---
   // General
@@ -136,19 +130,6 @@ export function SettingsPage() {
   const [perfDashboardWsIoSecs, setPerfDashboardWsIoSecs] = useState(5);
   const [perfDashboardWsTickSecs, setPerfDashboardWsTickSecs] = useState(4);
   const [perfDashboardWsMaxPerUser, setPerfDashboardWsMaxPerUser] = useState(4);
-  // OIDC
-  const [oidcEnabled, setOidcEnabled] = useState(false);
-  const [oidcIssuerUrl, setOidcIssuerUrl] = useState('');
-  const [oidcClientId, setOidcClientId] = useState('');
-  // Snapshot of the value the server initially returned (masked form
-  // like `abcd...wxyz`). On save we only re-send client_id when the
-  // input has actually changed — otherwise the masked sentinel would
-  // get round-tripped back as the new client_id and silently corrupt
-  // the OIDC config.
-  const [oidcClientIdLoaded, setOidcClientIdLoaded] = useState('');
-  const [oidcClientSecret, setOidcClientSecret] = useState('');
-  const [oidcRedirectUrl, setOidcRedirectUrl] = useState('');
-  const [oidcHasSecret, setOidcHasSecret] = useState(false);
 
   // ---------------------------------------------------------------------------
   // Load
@@ -209,25 +190,15 @@ export function SettingsPage() {
   useEffect(() => {
     Promise.all([
       api<SystemInfo>('/api/admin/settings/system').catch(() => null),
-      api<OidcConfig>('/api/admin/settings/oidc').catch(() => null),
       api<AuditConfig>('/api/admin/settings/audit').catch(() => null),
       api<Record<string, SettingEntry[]>>('/api/admin/settings').catch(() => ({})),
       api<{ postgres: boolean; redis: boolean; clickhouse: boolean }>('/api/health').catch(() => null),
       api<{ items: { id: string; name: string }[] }>('/api/admin/roles').catch(() => ({ items: [] })),
     ])
-      .then(([sys, oidc, audit, settings, hp, rolesData]) => {
+      .then(([sys, audit, settings, hp, rolesData]) => {
         if (rolesData) setAvailableRoles(rolesData.items);
         setSystemInfo(sys);
         setHealth(hp);
-        setOidcConfig(oidc);
-        if (oidc) {
-          setOidcEnabled(oidc.enabled);
-          setOidcIssuerUrl(oidc.issuer_url ?? '');
-          setOidcClientId(oidc.client_id ?? '');
-          setOidcClientIdLoaded(oidc.client_id ?? '');
-          setOidcRedirectUrl(oidc.redirect_url ?? '');
-          setOidcHasSecret(oidc.has_secret ?? false);
-        }
         setAuditConfig(audit);
         const s = settings ?? {};
         setAllSettings(s);
@@ -297,41 +268,6 @@ export function SettingsPage() {
   const perfDashboardWsTickSave = useFieldAutosave({ value: perfDashboardWsTickSecs, isLoaded, persist: (v) => patchOne('perf.dashboard_ws_tick_secs', v) });
   const perfDashboardWsMaxPerUserSave = useFieldAutosave({ value: perfDashboardWsMaxPerUser, isLoaded, persist: (v) => patchOne('perf.dashboard_ws_max_per_user', v) });
 
-  // ---------------------------------------------------------------------------
-  // OIDC group save — dedicated endpoint because the server runs discovery
-  // and write-only secret handling on submit. Can't safely autosave per
-  // keystroke, so the OIDC card keeps its own button.
-  // ---------------------------------------------------------------------------
-
-  const handleOidcSave = async () => {
-    setOidcSaving(true);
-    try {
-      // Only re-send `client_id` when the user actually edited the
-      // input — otherwise the masked sentinel returned on read would
-      // get round-tripped back and overwrite the real value.
-      const clientIdChanged = oidcClientId !== oidcClientIdLoaded;
-      await apiPatch('/api/admin/settings/oidc', {
-        enabled: oidcEnabled,
-        issuer_url: oidcIssuerUrl,
-        ...(clientIdChanged ? { client_id: oidcClientId } : {}),
-        client_secret: oidcClientSecret || undefined,
-        redirect_url: oidcRedirectUrl,
-      });
-      setOidcClientSecret('');
-      const updated = await api<OidcConfig>('/api/admin/settings/oidc').catch(() => null);
-      if (updated) {
-        setOidcConfig(updated);
-        setOidcClientId(updated.client_id ?? '');
-        setOidcClientIdLoaded(updated.client_id ?? '');
-        setOidcHasSecret(updated.has_secret ?? false);
-      }
-      toast.success(t('settings.saved'));
-    } catch (err) {
-      toast.error(`${t('settings.saveError')}: ${err instanceof Error ? err.message : 'Unknown error'}`);
-    } finally {
-      setOidcSaving(false);
-    }
-  };
 
   // ---------------------------------------------------------------------------
   // Render
@@ -583,76 +519,7 @@ export function SettingsPage() {
               </CardContent>
             </Card>
 
-            {/* OIDC / SSO — explicit group save. Secret is write-only and
-                issuer changes re-discover the provider on submit, so
-                inline autosave per keystroke is not appropriate. */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base">{t('settingsPage.oidcTitle')}</CardTitle>
-              </CardHeader>
-              <CardContent>
-                {loading ? (
-                  <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
-                ) : (
-                  <div className="space-y-4 max-w-lg">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <Label className="text-sm">Enable SSO</Label>
-                        <p className="text-xs text-muted-foreground mt-0.5">Allow users to log in via OIDC provider</p>
-                      </div>
-                      <Switch checked={oidcEnabled} onCheckedChange={setOidcEnabled} />
-                    </div>
-                    <Separator />
-                    <div className="space-y-1">
-                      <Label className="text-sm">{t('settingsPage.issuerUrl')}</Label>
-                      <Input
-                        value={oidcIssuerUrl}
-                        onChange={(e) => setOidcIssuerUrl(e.target.value)}
-                        placeholder="https://auth.example.com"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-sm">{t('settingsPage.clientId')}</Label>
-                      <Input
-                        value={oidcClientId}
-                        onChange={(e) => setOidcClientId(e.target.value)}
-                        placeholder="your-client-id"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-sm">{t('settings.oidc.clientSecret')}</Label>
-                      <Input
-                        type="password"
-                        value={oidcClientSecret}
-                        onChange={(e) => setOidcClientSecret(e.target.value)}
-                        placeholder={oidcHasSecret ? t('settings.oidc.secretKeepPlaceholder') : t('settings.oidc.secretEnterPlaceholder')}
-                      />
-                      {oidcHasSecret && (
-                        <p className="text-xs text-muted-foreground">{t('settings.oidc.secretConfiguredHint')}</p>
-                      )}
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-sm">{t('settings.oidc.redirectUrl')}</Label>
-                      <Input
-                        value={oidcRedirectUrl}
-                        onChange={(e) => setOidcRedirectUrl(e.target.value)}
-                        placeholder="https://thinkwatch.example.com/api/auth/sso/callback"
-                      />
-                      <p className="text-xs text-muted-foreground">{t('settings.oidc.redirectUrlHint')}</p>
-                    </div>
-                    <div className="flex justify-end pt-2">
-                      <Button
-                        size="sm"
-                        onClick={handleOidcSave}
-                        disabled={oidcSaving || !hasPermission('settings:write')}
-                      >
-                        {oidcSaving ? t('common.saving') : t('settings.oidc.save')}
-                      </Button>
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+            <OidcWizardCard />
           </div>
         </TabsContent>
 
@@ -1160,19 +1027,17 @@ export function SettingsPage() {
 /* ---------- Platform pricing card ---------- */
 
 // The baseline `$/token` that Models use as `cost = baseline × weight × tokens`.
-// Self-contained: own fetch, own save, own dirty-flag. Lives under the
-// gateway tab because costs are an AI-Gateway concern.
+// Self-contained: own fetch, own autosave. Lives under the gateway tab
+// because costs are an AI-Gateway concern.
 function PlatformPricingCard() {
   const { t } = useTranslation();
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   // Edit in $/1M tokens because 0.0000025 is unreadable — multiply
   // by 1e6 on load and divide by 1e6 on save.
   const [inputPerM, setInputPerM] = useState('');
   const [outputPerM, setOutputPerM] = useState('');
   const [currency, setCurrency] = useState('USD');
-  const [initial, setInitial] = useState({ input: '', output: '', currency: 'USD' });
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -1183,12 +1048,9 @@ function PlatformPricingCard() {
         output_price_per_token: string;
         currency: string;
       }>('/api/admin/platform-pricing');
-      const i = (Number(p.input_price_per_token) * 1_000_000).toString();
-      const o = (Number(p.output_price_per_token) * 1_000_000).toString();
-      setInputPerM(i);
-      setOutputPerM(o);
+      setInputPerM((Number(p.input_price_per_token) * 1_000_000).toString());
+      setOutputPerM((Number(p.output_price_per_token) * 1_000_000).toString());
       setCurrency(p.currency);
-      setInitial({ input: i, output: o, currency: p.currency });
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load pricing');
     } finally {
@@ -1200,35 +1062,26 @@ function PlatformPricingCard() {
     void reload();
   }, [reload]);
 
-  const dirty =
-    inputPerM !== initial.input ||
-    outputPerM !== initial.output ||
-    currency !== initial.currency;
-
-  const save = async () => {
-    setSaving(true);
-    setError('');
-    try {
-      const i = Number(inputPerM);
-      const o = Number(outputPerM);
-      if (!Number.isFinite(i) || !Number.isFinite(o) || i < 0 || o < 0) {
-        setError(t('settingsPage.platformPricing.invalid'));
-        setSaving(false);
-        return;
-      }
-      await apiPatch('/api/admin/platform-pricing', {
-        input_price_per_token: i / 1_000_000,
-        output_price_per_token: o / 1_000_000,
-        currency,
-      });
-      toast.success(t('settingsPage.platformPricing.saved'));
-      await reload();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to save');
-    } finally {
-      setSaving(false);
+  // Endpoint takes the full payload, so each field's autosave PATCHes
+  // the whole thing using the latest state. Per-field SaveIndicator
+  // gives the user the same inline-feedback as the rest of the page.
+  const persistAll = useCallback(async () => {
+    const i = Number(inputPerM);
+    const o = Number(outputPerM);
+    if (!Number.isFinite(i) || !Number.isFinite(o) || i < 0 || o < 0) {
+      throw new Error(t('settingsPage.platformPricing.invalid'));
     }
-  };
+    await apiPatch('/api/admin/platform-pricing', {
+      input_price_per_token: i / 1_000_000,
+      output_price_per_token: o / 1_000_000,
+      currency,
+    });
+  }, [inputPerM, outputPerM, currency, t]);
+
+  const isLoaded = !loading;
+  const inputSave = useFieldAutosave({ value: inputPerM, isLoaded, persist: persistAll });
+  const outputSave = useFieldAutosave({ value: outputPerM, isLoaded, persist: persistAll });
+  const currencySave = useFieldAutosave({ value: currency, isLoaded, persist: persistAll, debounceMs: 0 });
 
   return (
     <Card>
@@ -1250,55 +1103,52 @@ function PlatformPricingCard() {
         {loading ? (
           <p className="text-xs italic text-muted-foreground">{t('common.loading')}</p>
         ) : (
-          <>
-            <div className="grid gap-4 sm:grid-cols-3 max-w-2xl">
-              <div className="space-y-1.5">
+          <div className="grid gap-4 sm:grid-cols-3 max-w-2xl">
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
                 <Label htmlFor="pp_input">
                   {t('settingsPage.platformPricing.inputPerM')}
                 </Label>
-                <Input
-                  id="pp_input"
-                  value={inputPerM}
-                  onChange={(e) => setInputPerM(e.target.value)}
-                  inputMode="decimal"
-                  placeholder="2.0"
-                />
+                <SaveIndicator state={inputSave.state} error={inputSave.error} />
               </div>
-              <div className="space-y-1.5">
+              <Input
+                id="pp_input"
+                value={inputPerM}
+                onChange={(e) => setInputPerM(e.target.value)}
+                inputMode="decimal"
+                placeholder="2.0"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
                 <Label htmlFor="pp_output">
                   {t('settingsPage.platformPricing.outputPerM')}
                 </Label>
-                <Input
-                  id="pp_output"
-                  value={outputPerM}
-                  onChange={(e) => setOutputPerM(e.target.value)}
-                  inputMode="decimal"
-                  placeholder="8.0"
-                />
+                <SaveIndicator state={outputSave.state} error={outputSave.error} />
               </div>
-              <div className="space-y-1.5">
+              <Input
+                id="pp_output"
+                value={outputPerM}
+                onChange={(e) => setOutputPerM(e.target.value)}
+                inputMode="decimal"
+                placeholder="8.0"
+              />
+            </div>
+            <div className="space-y-1.5">
+              <div className="flex items-center justify-between gap-2">
                 <Label htmlFor="pp_currency">
                   {t('settingsPage.platformPricing.currency')}
                 </Label>
-                <Input
-                  id="pp_currency"
-                  value={currency}
-                  onChange={(e) => setCurrency(e.target.value.toUpperCase())}
-                  maxLength={3}
-                />
+                <SaveIndicator state={currencySave.state} error={currencySave.error} />
               </div>
+              <Input
+                id="pp_currency"
+                value={currency}
+                onChange={(e) => setCurrency(e.target.value.toUpperCase())}
+                maxLength={3}
+              />
             </div>
-            <div>
-              <Button
-                type="button"
-                size="sm"
-                disabled={!dirty || saving}
-                onClick={save}
-              >
-                {saving ? t('common.saving') : t('common.save')}
-              </Button>
-            </div>
-          </>
+          </div>
         )}
       </CardContent>
     </Card>
