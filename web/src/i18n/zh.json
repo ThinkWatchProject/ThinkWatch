@@ -481,8 +481,7 @@
     "batchNewModelIdLabel": "暴露的模型 ID（留空则使用上游名）",
     "stepOf": "第 {{current}} / {{total}} 步",
     "detail": {
-      "basics": "基本信息",
-      "danger": "危险操作"
+      "basics": "基本信息"
     },
     "cleanupAction": "删除所有未路由 ({{count}})",
     "cleanupTitle": "删除未路由模型",

@@ -481,8 +481,7 @@
     "batchNewModelIdLabel": "Exposed model ID (defaults to upstream name)",
     "stepOf": "Step {{current}} / {{total}}",
     "detail": {
-      "basics": "Basics",
-      "danger": "Danger zone"
+      "basics": "Basics"
     },
     "cleanupAction": "Delete all unrouted ({{count}})",
     "cleanupTitle": "Delete unrouted models",

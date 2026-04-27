@@ -786,18 +786,33 @@ export function ModelsPage() {
   };
 
   /// Batch-update many route weights in one transaction. Used by the
-  /// TrafficBar drag handle (release) and the [Even split] / [Match
-  /// auto] convenience buttons inside RoutingProjection.
+  /// TrafficBar drag handle on release and the "even split" reset.
+  ///
+  /// Optimistic — we update `routesByModel` immediately so the UI
+  /// reflects the dropped position with zero round-trip flicker, then
+  /// fire the PATCH. Refetch only on failure to roll back to the
+  /// authoritative state (rare; toast tells the admin what happened).
   const batchUpdateWeights = async (
     modelId: string,
     updates: { id: string; weight: number }[],
   ) => {
     if (updates.length === 0) return;
+    setRoutesByModel((m) => {
+      const list = m[modelId];
+      if (!list) return m;
+      const byId = new Map(updates.map((u) => [u.id, u.weight]));
+      return {
+        ...m,
+        [modelId]: list.map((r) =>
+          byId.has(r.id) ? { ...r, weight: byId.get(r.id)! } : r,
+        ),
+      };
+    });
     try {
       await apiPatch('/api/admin/model-routes/batch-weights', { updates });
-      await fetchRoutesFor(modelId);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to update weights');
+      void fetchRoutesFor(modelId);
     }
   };
 
@@ -1808,7 +1823,7 @@ export function ModelsPage() {
         loading={bulkDeleting}
       />
 
-      {/* Model detail drawer — right-side Sheet with basics + routes + danger. */}
+      {/* Model detail drawer — right-side Sheet with basics + routes. */}
       <Sheet
         open={detailModelId !== null}
         onOpenChange={(o) => {
@@ -1848,15 +1863,29 @@ export function ModelsPage() {
                         <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                           {t('models.detail.basics')}
                         </Label>
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="h-7 text-xs"
-                          onClick={() => openEditModel(model)}
-                        >
-                          <Pencil className="mr-1 h-3 w-3" />
-                          {t('common.edit')}
-                        </Button>
+                        <div className="flex items-center gap-1">
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-xs"
+                            onClick={() => openEditModel(model)}
+                          >
+                            <Pencil className="mr-1 h-3 w-3" />
+                            {t('common.edit')}
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="h-7 text-xs text-destructive hover:text-destructive"
+                            onClick={() => {
+                              setDetailModelId(null);
+                              setDeleteModel(model);
+                            }}
+                          >
+                            <Trash2 className="mr-1 h-3 w-3" />
+                            {t('common.delete')}
+                          </Button>
+                        </div>
                       </div>
                       <div className="grid grid-cols-2 gap-2 text-xs">
                         <div>
@@ -2102,27 +2131,6 @@ export function ModelsPage() {
                             .join('|')}
                         />
                       )}
-                    </section>
-
-                    {/* Danger zone */}
-                    <section className="space-y-2 rounded-md border border-destructive/30 p-3">
-                      <Label className="text-xs font-semibold uppercase tracking-wider text-destructive">
-                        {t('models.detail.danger')}
-                      </Label>
-                      <p className="text-[11px] text-muted-foreground">
-                        {t('models.deleteConfirm')}
-                      </p>
-                      <Button
-                        variant="destructive"
-                        size="sm"
-                        onClick={() => {
-                          setDetailModelId(null);
-                          setDeleteModel(model);
-                        }}
-                      >
-                        <Trash2 className="mr-1 h-3.5 w-3.5" />
-                        {t('models.deleteTitle')}
-                      </Button>
                     </section>
                   </div>
                 </>
