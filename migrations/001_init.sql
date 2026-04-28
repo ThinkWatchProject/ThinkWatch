@@ -342,6 +342,12 @@ CREATE TABLE models (
     -- Free-form admin tags. Surfaced as chip badges in the model
     -- detail UI; ignored at the routing layer.
     tags              TEXT[],
+    -- Model-level kill switch. FALSE ⇒ all routes for this model are
+    -- skipped at router-bootstrap time (the gateway behaves as if no
+    -- routes exist for the model_id). Per-route `enabled` toggles are
+    -- preserved across model disable/re-enable, so flipping this back
+    -- on restores the previous traffic split exactly.
+    enabled           BOOLEAN NOT NULL DEFAULT TRUE,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -364,14 +370,16 @@ INSERT INTO platform_pricing (id) VALUES (1)
 -- Routes map models to providers with traffic splitting + failover.
 -- A single (model_id, provider_id) pair may have multiple routes
 -- distinguished by upstream_model — e.g. one catalog entry served by
--- two different upstream models from the same aggregator. NULLS NOT
--- DISTINCT prevents two NULL upstreams from sneaking past the unique.
+-- two different upstream models from the same aggregator.
 CREATE TABLE model_routes (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_id        VARCHAR(255) NOT NULL REFERENCES models(model_id) ON DELETE CASCADE,
     provider_id     UUID NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
-    -- Upstream model name sent to the provider (NULL = same as model_id)
-    upstream_model  VARCHAR(255),
+    -- Upstream model name sent to the provider. Defaults to model_id
+    -- (the exposed name) when the admin doesn't override; aggregator
+    -- routes set it to the provider's catalog name (e.g. exposing
+    -- "gpt-4o" via OpenRouter where the upstream is "openai/gpt-4o").
+    upstream_model  VARCHAR(255) NOT NULL,
     -- Traffic weight; meaning depends on the model's routing strategy.
     -- Under `weighted` it's a direct ratio; under the auto strategies
     -- it's a multiplicative bias on the strategy-derived score (so an
@@ -390,7 +398,7 @@ CREATE TABLE model_routes (
     tpm_cap         INTEGER CHECK (tpm_cap IS NULL OR tpm_cap > 0),
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE NULLS NOT DISTINCT (model_id, provider_id, upstream_model)
+    UNIQUE (model_id, provider_id, upstream_model)
 );
 
 CREATE INDEX idx_model_routes_model ON model_routes(model_id);

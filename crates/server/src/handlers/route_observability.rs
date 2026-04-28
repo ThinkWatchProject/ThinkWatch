@@ -20,7 +20,7 @@ pub struct RouteHealthEntry {
     pub route_id: Uuid,
     pub provider_id: Uuid,
     pub provider_name: String,
-    pub upstream_model: Option<String>,
+    pub upstream_model: String,
     pub weight: i32,
     pub enabled: bool,
     /// Health snapshot (`closed`/`open`/`half_open` + counts + EWMA).
@@ -50,7 +50,7 @@ pub async fn list_route_health(
         route_id: Uuid,
         provider_id: Uuid,
         provider_name: String,
-        upstream_model: Option<String>,
+        upstream_model: String,
         weight: i32,
         enabled: bool,
     }

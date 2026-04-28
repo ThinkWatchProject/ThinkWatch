@@ -45,4 +45,13 @@ pub struct Model {
     /// ignored by the routing layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<String>>,
+    /// Model-level kill switch. FALSE ⇒ all routes skipped at
+    /// router-bootstrap time; route-level `enabled` flags are
+    /// untouched so toggling back restores the prior split.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }

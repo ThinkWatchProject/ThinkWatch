@@ -180,7 +180,7 @@ pub async fn create_model_route(
     .context("INSERT models")?;
     sqlx::query(
         r#"INSERT INTO model_routes (model_id, provider_id, upstream_model, weight, enabled)
-           VALUES ($1, $2, NULL, $3, true)"#,
+           VALUES ($1, $2, $1, $3, true)"#,
     )
     .bind(model_id)
     .bind(provider_id)
@@ -204,8 +204,8 @@ pub async fn create_model_and_route(db: &PgPool, provider_id: Uuid, model_id: &s
     .await
     .context("INSERT models")?;
     sqlx::query(
-        r#"INSERT INTO model_routes (model_id, provider_id, upstream_model, weight, priority, enabled)
-           VALUES ($1, $2, NULL, 100, 0, true)"#,
+        r#"INSERT INTO model_routes (model_id, provider_id, upstream_model, weight, enabled)
+           VALUES ($1, $2, $1, 100, true)"#,
     )
     .bind(model_id)
     .bind(provider_id)

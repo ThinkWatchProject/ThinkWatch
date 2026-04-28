@@ -27,8 +27,7 @@ use crate::handlers::{
     mcp_tools::{McpToolListResponse, McpToolRow},
     models::{
         BatchWeightUpdate, BatchWeightsRequest, CreateModelRequest, ModelRow, RouteHistoryBucket,
-        RouteHistoryResponse, RoutingProjectionEntry, RoutingProjectionResponse,
-        RoutingProjectionView, UpdateModelRequest,
+        RouteHistoryResponse, UpdateModelRequest,
     },
     providers::{TestProviderRequest, TestProviderResponse, UpdateProviderRequest},
     roles::{
@@ -151,7 +150,6 @@ use crate::handlers::{
         crate::handlers::models::update_model,
         crate::handlers::models::delete_model,
         crate::handlers::models::batch_update_route_weights,
-        crate::handlers::models::get_routing_projection,
         crate::handlers::models::get_route_history,
         // Rate Limits & Budgets
         crate::handlers::limits::list_rules,
@@ -223,7 +221,6 @@ use crate::handlers::{
             // Models
             ModelRow, CreateModelRequest, UpdateModelRequest,
             BatchWeightUpdate, BatchWeightsRequest,
-            RoutingProjectionEntry, RoutingProjectionView, RoutingProjectionResponse,
             RouteHistoryBucket, RouteHistoryResponse,
             // Limits
             RuleRow, RuleListResponse, UpsertRuleRequest, RuleUsage,

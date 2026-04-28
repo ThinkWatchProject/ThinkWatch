@@ -39,6 +39,11 @@ pub struct ModelRow {
     pub output_weight: Decimal,
     pub route_count: i64,
     pub enabled_route_count: i64,
+    /// Model-level kill switch. FALSE ⇒ all routes are skipped at
+    /// router-bootstrap (gateway behaves as if the model has no routes).
+    /// Independent of per-route `enabled` so flipping back restores the
+    /// previous traffic split exactly.
+    pub enabled: bool,
     /// Provider display names (or `name` if display_name is null) for
     /// every route attached to the model, ordered by weight DESC. Lets
     /// the list table show "who serves this?" without an extra fetch.
@@ -106,8 +111,9 @@ pub async fn list_models(
 
     // Unified query with `$1='' OR ...` to combine optional search +
     // status filter. `status_filter`:
-    //   'active'    — enabled_route_count > 0
-    //   'disabled'  — route_count > 0 AND enabled_route_count = 0
+    //   'active'    — m.enabled = true AND enabled_route_count > 0
+    //   'disabled'  — m.enabled = false, OR
+    //                 (m.enabled = true AND route_count > 0 AND enabled_route_count = 0)
     //   'unrouted'  — route_count = 0
     //   otherwise   — no filter
     //
@@ -115,8 +121,10 @@ pub async fn list_models(
     // subquery so the filter happens on the joined shape; PG rewrites
     // this to a HashAggregate over `model_routes`.
     let status_filter_sql = match status {
-        "active" => "AND rc.enabled_route_count > 0",
-        "disabled" => "AND rc.route_count > 0 AND rc.enabled_route_count = 0",
+        "active" => "AND m.enabled = true AND rc.enabled_route_count > 0",
+        "disabled" => {
+            "AND (m.enabled = false OR (rc.route_count > 0 AND rc.enabled_route_count = 0))"
+        }
         "unrouted" => "AND rc.route_count = 0",
         _ => "",
     };
@@ -138,6 +146,7 @@ pub async fn list_models(
                   m.input_weight, m.output_weight,
                   COALESCE(rc.route_count, 0)         AS route_count,
                   COALESCE(rc.enabled_route_count, 0) AS enabled_route_count,
+                  m.enabled,
                   COALESCE(rc.providers, '{{}}'::text[]) AS providers,
                   m.routing_strategy, m.affinity_mode, m.affinity_ttl_secs
            FROM models m
@@ -246,7 +255,7 @@ pub async fn create_model(
                routing_strategy, affinity_mode, affinity_ttl_secs, tags)
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            RETURNING id, model_id, display_name, input_weight, output_weight,
-                     routing_strategy, affinity_mode, affinity_ttl_secs, tags"#,
+                     routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled"#,
     )
     .bind(&req.model_id)
     .bind(&req.display_name)
@@ -290,6 +299,8 @@ pub struct UpdateModelRequest {
     /// PATCH-clearable tags. JSON `null` = clear all tags.
     #[serde(default, deserialize_with = "deserialize_some")]
     pub tags: Option<Option<Vec<String>>>,
+    /// Model-level kill switch. Absent = unchanged.
+    pub enabled: Option<bool>,
 }
 
 /// Validate routing-strategy override values mirror the CHECK
@@ -352,7 +363,7 @@ pub async fn update_model(
         .await?;
     let existing = sqlx::query_as::<_, Model>(
         r#"SELECT id, model_id, display_name, input_weight, output_weight,
-                  routing_strategy, affinity_mode, affinity_ttl_secs, tags
+                  routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled
            FROM models WHERE id = $1"#,
     )
     .bind(id)
@@ -399,10 +410,11 @@ pub async fn update_model(
               routing_strategy  = $5,
               affinity_mode     = $6,
               affinity_ttl_secs = $7,
-              tags              = $8
+              tags              = $8,
+              enabled           = $9
            WHERE id = $1
            RETURNING id, model_id, display_name, input_weight, output_weight,
-                     routing_strategy, affinity_mode, affinity_ttl_secs, tags"#,
+                     routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled"#,
     )
     .bind(id)
     .bind(
@@ -416,6 +428,7 @@ pub async fn update_model(
     .bind(&new_affinity_mode)
     .bind(new_affinity_ttl)
     .bind(new_tags.as_deref())
+    .bind(req.enabled.unwrap_or(existing.enabled))
     .fetch_one(&state.db)
     .await?;
 
@@ -604,6 +617,63 @@ pub async fn bulk_delete_models(
 }
 
 // ---------------------------------------------------------------------------
+// Bulk flip the model-level kill switch on a set of catalog entries
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct BulkSetEnabledModelsRequest {
+    pub ids: Vec<Uuid>,
+    pub enabled: bool,
+}
+
+/// `POST /api/admin/models/bulk-set-enabled` — flip the `enabled` flag
+/// on each catalog entry. The route-level `enabled` bits are left
+/// alone, so re-enabling restores the previous traffic split exactly
+/// (model-level kill switch is orthogonal to per-route load mgmt).
+pub async fn bulk_set_enabled_models(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<BulkSetEnabledModelsRequest>,
+) -> Result<Json<Value>, AppError> {
+    auth_user.require_permission("models:write")?;
+    auth_user
+        .assert_scope_global(&state.db, "models:write")
+        .await?;
+
+    if req.ids.is_empty() {
+        return Err(AppError::BadRequest("ids is empty".into()));
+    }
+
+    let result = sqlx::query(
+        r#"UPDATE models
+              SET enabled = $2
+            WHERE id = ANY($1)
+              AND enabled IS DISTINCT FROM $2"#,
+    )
+    .bind(&req.ids)
+    .bind(req.enabled)
+    .execute(&state.db)
+    .await?;
+
+    let updated = result.rows_affected() as i64;
+
+    state.audit.log(
+        auth_user
+            .audit("models.bulk_set_enabled")
+            .resource("models")
+            .detail(serde_json::json!({
+                "requested": req.ids.len(),
+                "updated": updated,
+                "enabled": req.enabled,
+            })),
+    );
+
+    crate::app::rebuild_gateway_router(&state).await;
+
+    Ok(Json(serde_json::json!({ "updated": updated })))
+}
+
+// ---------------------------------------------------------------------------
 // Model Routes CRUD
 // ---------------------------------------------------------------------------
 
@@ -613,7 +683,7 @@ pub struct ModelRouteRow {
     pub model_id: String,
     pub provider_id: Uuid,
     pub provider_name: String,
-    pub upstream_model: Option<String>,
+    pub upstream_model: String,
     pub weight: i32,
     pub enabled: bool,
     /// Optional human-readable identifier (e.g. "EU-primary"). Pure
@@ -665,6 +735,8 @@ pub async fn list_model_routes(
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateModelRouteRequest {
     pub provider_id: Uuid,
+    /// Upstream model name sent to the provider. Optional on the wire —
+    /// when absent or empty the server fills it with `model_id`.
     pub upstream_model: Option<String>,
     pub weight: Option<i32>,
     /// Optional — falls back to the column default (`TRUE`). New
@@ -718,21 +790,27 @@ pub async fn create_model_route(
     }
 
     let weight = req.weight.unwrap_or(100);
+    let upstream_model = req
+        .upstream_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&model_id)
+        .to_string();
 
     // Check for existing route to give a friendly error instead of 500.
     // Uniqueness is on (model_id, provider_id, upstream_model), so the
     // dup check has to match — same provider with a different upstream
-    // is a legal second route. `IS NOT DISTINCT FROM` mirrors the
-    // schema's `UNIQUE NULLS NOT DISTINCT` semantics for NULL upstream.
+    // is a legal second route.
     let existing: Option<Uuid> = sqlx::query_scalar(
         r#"SELECT id FROM model_routes
            WHERE model_id = $1
              AND provider_id = $2
-             AND upstream_model IS NOT DISTINCT FROM $3"#,
+             AND upstream_model = $3"#,
     )
     .bind(&model_id)
     .bind(req.provider_id)
-    .bind(&req.upstream_model)
+    .bind(&upstream_model)
     .fetch_optional(&state.db)
     .await?;
     if existing.is_some() {
@@ -764,7 +842,7 @@ pub async fn create_model_route(
     )
     .bind(&model_id)
     .bind(req.provider_id)
-    .bind(&req.upstream_model)
+    .bind(&upstream_model)
     .bind(weight)
     .bind(req.enabled.unwrap_or(true))
     .bind(req.label.as_deref().filter(|s| !s.is_empty()))
@@ -792,12 +870,9 @@ pub async fn create_model_route(
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateModelRouteRequest {
-    /// PATCH semantics: absent = unchanged, JSON `null` = clear (the
-    /// route falls back to using `model_id` as the upstream identifier),
-    /// JSON string = explicit override.
-    #[serde(default, deserialize_with = "deserialize_some")]
-    #[schema(value_type = Option<String>)]
-    pub upstream_model: Option<Option<String>>,
+    /// PATCH semantics: absent = unchanged, JSON string = new value.
+    /// Cannot be cleared — the column is NOT NULL.
+    pub upstream_model: Option<String>,
     pub weight: Option<i32>,
     pub enabled: Option<bool>,
     /// PATCH-clearable label.
@@ -826,10 +901,16 @@ pub async fn update_model_route(
         .assert_scope_global(&state.db, "models:write")
         .await?;
 
-    let (upstream_set, upstream_value) = match &req.upstream_model {
-        None => (false, None),
-        Some(inner) => (true, inner.as_deref()),
-    };
+    let upstream_value = req
+        .upstream_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if req.upstream_model.is_some() && upstream_value.is_none() {
+        return Err(AppError::BadRequest(
+            "upstream_model cannot be empty".into(),
+        ));
+    }
     let (label_set, label_value) = match &req.label {
         None => (false, None),
         Some(inner) => (true, inner.as_deref().filter(|s| !s.is_empty())),
@@ -859,13 +940,13 @@ pub async fn update_model_route(
 
     let row = sqlx::query_as::<_, ModelRouteRow>(
         r#"UPDATE model_routes SET
-              upstream_model = CASE WHEN $5  THEN $2  ELSE upstream_model END,
+              upstream_model = COALESCE($2, upstream_model),
               weight   = COALESCE($3, weight),
               enabled  = COALESCE($4, enabled),
-              label    = CASE WHEN $7  THEN $6  ELSE label    END,
-              notes    = CASE WHEN $9  THEN $8  ELSE notes    END,
-              rpm_cap  = CASE WHEN $11 THEN $10 ELSE rpm_cap  END,
-              tpm_cap  = CASE WHEN $13 THEN $12 ELSE tpm_cap  END
+              label    = CASE WHEN $6  THEN $5  ELSE label    END,
+              notes    = CASE WHEN $8  THEN $7  ELSE notes    END,
+              rpm_cap  = CASE WHEN $10 THEN $9  ELSE rpm_cap  END,
+              tpm_cap  = CASE WHEN $12 THEN $11 ELSE tpm_cap  END
            WHERE id = $1
            RETURNING id, model_id, provider_id,
                      (SELECT name FROM providers WHERE id = provider_id) AS provider_name,
@@ -876,7 +957,6 @@ pub async fn update_model_route(
     .bind(upstream_value)
     .bind(req.weight)
     .bind(req.enabled)
-    .bind(upstream_set)
     .bind(label_value)
     .bind(label_set)
     .bind(notes_value)
@@ -1034,10 +1114,10 @@ pub async fn list_all_routes(
 // item whether each one should:
 //
 //   * `new`     — become a new exposed catalog entry (`models` row) with
-//                 a route to the provider (upstream_model = same name)
-//   * `attach`  — become a new route on an existing exposed model,
-//                 optionally renaming (upstream_model = the remote name,
-//                 model_id = whatever the admin already exposes)
+//                 a route to the provider (upstream_model = exposed id)
+//   * `attach`  — become a new route on an existing exposed model
+//                 (upstream_model = the remote name, model_id = whatever
+//                 the admin already exposes)
 //
 // The second mode is the aggregator case: OpenRouter exposes
 // `openai/gpt-4o`, but you already expose `gpt-4o` via direct OpenAI.
@@ -1052,8 +1132,7 @@ pub async fn list_all_routes(
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BatchImportItem {
     /// Name as it appears in the provider's remote catalog. Goes into
-    /// `model_routes.upstream_model` (or NULL when it matches the
-    /// exposed model_id, to keep the table tidy).
+    /// `model_routes.upstream_model`.
     pub upstream: String,
     /// When set, attach a route to this existing `models.model_id`
     /// instead of creating a new catalog entry.
@@ -1100,8 +1179,7 @@ pub async fn batch_create_routes(
     //
     // For "new" items we carry both the exposed id (what clients call)
     // and the upstream id (what the provider expects). They're equal
-    // when the admin didn't customize, in which case `upstream_model`
-    // is stored as NULL via NULLIF below.
+    // when the admin didn't customize.
     let mut new_exposed: Vec<String> = Vec::new();
     let mut new_upstreams: Vec<String> = Vec::new();
     let mut attach_targets: Vec<String> = Vec::new();
@@ -1134,8 +1212,6 @@ pub async fn batch_create_routes(
     // Catalog insert is idempotent. Route insert counts rows via the
     // RETURNING/CTE pattern so the response's `created` count reflects
     // only rows that actually landed (skipping ON CONFLICT dupes).
-    // `NULLIF(upstream, exposed)` keeps `upstream_model` NULL when the
-    // exposed id matches upstream — same convention as a manual route.
     let new_inserted: i64 = if new_exposed.is_empty() {
         0
     } else {
@@ -1153,7 +1229,7 @@ pub async fn batch_create_routes(
             r#"WITH ins AS (
                  INSERT INTO model_routes
                      (model_id, provider_id, upstream_model, weight)
-                 SELECT exposed, $3, NULLIF(upstream, exposed), 100
+                 SELECT exposed, $3, upstream, 100
                  FROM UNNEST($1::TEXT[], $2::TEXT[]) AS t(exposed, upstream)
                  ON CONFLICT (model_id, provider_id, upstream_model) DO NOTHING
                  RETURNING 1
@@ -1340,167 +1416,6 @@ pub async fn batch_update_route_weights(
     crate::app::rebuild_gateway_router(&state).await;
 
     Ok(Json(serde_json::json!({ "updated": updated })))
-}
-
-// ---------------------------------------------------------------------------
-// Routing projection — "if this model's strategy is X and these are the
-// candidates, here's the expected traffic split + cost." Used by the
-// wizard for the "expected cost / 1M tokens" line and the "Match auto"
-// convenience button.
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct RoutingProjectionEntry {
-    pub route_id: Uuid,
-    pub provider_name: String,
-    pub upstream_model: Option<String>,
-    pub label: Option<String>,
-    pub weight: i32,
-    pub expected_pct: f64,
-    pub cost_per_token: Option<f64>,
-    pub ewma_latency_ms: Option<f64>,
-    pub healthy: bool,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct RoutingProjectionView {
-    pub strategy: String,
-    pub entries: Vec<RoutingProjectionEntry>,
-    /// Traffic-weighted cost per 1M tokens under this projection
-    /// (sum of `expected_pct * cost_per_token * 1_000_000`).
-    pub expected_cost_per_1m_tokens: Option<f64>,
-}
-
-#[derive(Debug, Serialize, utoipa::ToSchema)]
-pub struct RoutingProjectionResponse {
-    /// What the gateway will actually do given the model's stored
-    /// strategy + current weights.
-    pub current: RoutingProjectionView,
-    /// What the gateway would do if the strategy were the global
-    /// default (typically `latency`). Used by "Match auto".
-    pub auto: RoutingProjectionView,
-}
-
-/// GET /api/admin/models/{model_id}/routing-projection
-#[utoipa::path(
-    get,
-    path = "/api/admin/models/{model_id}/routing-projection",
-    tag = "Models",
-    security(("bearer_token" = [])),
-    params(("model_id" = String, Path, description = "Model ID")),
-    responses(
-        (status = 200, description = "Projection", body = RoutingProjectionResponse),
-        (status = 403, description = "Forbidden"),
-        (status = 404, description = "No routes for model"),
-    )
-)]
-pub async fn get_routing_projection(
-    auth_user: AuthUser,
-    State(state): State<AppState>,
-    Path(model_id): Path<String>,
-) -> Result<Json<RoutingProjectionResponse>, AppError> {
-    auth_user.require_permission("models:read")?;
-    auth_user
-        .assert_scope_global(&state.db, "models:read")
-        .await?;
-
-    let router = state.gateway_router.load();
-    // Note: `RouteEntry` isn't Clone (it owns an Arc<dyn Provider>), so
-    // we can't `.cloned()` the Vec — we work with refs while the guard
-    // is alive, capturing only the projection inputs we need.
-    let entries_opt = router.route(&model_id);
-    let Some(entries) = entries_opt else {
-        return Err(AppError::NotFound("No routes registered for model".into()));
-    };
-    if entries.is_empty() {
-        return Err(AppError::NotFound("No routes registered for model".into()));
-    }
-    let model_cfg = router.config_for(&model_id);
-
-    // Snapshot health for each route. HealthTracker is a thin
-    // Redis-backed facade — cheap to construct ad hoc.
-    let health = think_watch_gateway::health::HealthTracker::new(state.redis.clone());
-    let cb_window = state.dynamic_config.cb_window_secs().await;
-    let mut health_snapshots = Vec::with_capacity(entries.len());
-    for e in entries.iter() {
-        let h = health.snapshot(e.route_id, cb_window).await;
-        health_snapshots.push(h);
-    }
-
-    // Resolve current strategy (model override → global default).
-    let global_default = state.dynamic_config.default_routing_strategy().await;
-    use std::str::FromStr;
-    use think_watch_gateway::strategy::{RouteSignal, RoutingStrategy, compute_weights};
-    let current_strategy = model_cfg
-        .strategy
-        .unwrap_or_else(|| RoutingStrategy::from_str(&global_default).unwrap_or_default());
-    let auto_strategy = RoutingStrategy::from_str(&global_default).unwrap_or_default();
-
-    let latency_k = state.dynamic_config.latency_strategy_k().await;
-
-    let project = |strategy: RoutingStrategy| -> RoutingProjectionView {
-        let signals: Vec<RouteSignal> = entries
-            .iter()
-            .zip(health_snapshots.iter())
-            .map(|(e, h)| {
-                let success_rate = if h.total > 0 {
-                    Some((1.0 - h.error_pct / 100.0).clamp(0.0, 1.0))
-                } else {
-                    None
-                };
-                RouteSignal {
-                    configured_weight: e.weight,
-                    ewma_latency_ms: h.ewma_latency_ms,
-                    success_rate,
-                }
-            })
-            .collect();
-        let weights = compute_weights(strategy, &signals, latency_k);
-        let total: f64 = weights.iter().sum();
-        let mut total_cost = 0.0_f64;
-        let mut have_cost = false;
-        let mut entries_out = Vec::with_capacity(entries.len());
-        for ((e, h), w) in entries
-            .iter()
-            .zip(health_snapshots.iter())
-            .zip(weights.iter())
-        {
-            let pct = if total > 0.0 { w / total } else { 0.0 };
-            if let Some(c) = e.cost_per_token {
-                total_cost += c * pct;
-                have_cost = true;
-            }
-            entries_out.push(RoutingProjectionEntry {
-                route_id: e.route_id,
-                provider_name: e.provider_name.clone(),
-                upstream_model: e.upstream_model.clone(),
-                label: e.label.clone(),
-                weight: e.weight as i32,
-                expected_pct: pct * 100.0,
-                cost_per_token: e.cost_per_token,
-                ewma_latency_ms: h.ewma_latency_ms,
-                healthy: matches!(
-                    h.state,
-                    think_watch_gateway::health::BreakerState::Closed
-                        | think_watch_gateway::health::BreakerState::HalfOpen
-                ),
-            });
-        }
-        RoutingProjectionView {
-            strategy: strategy.as_str().to_string(),
-            entries: entries_out,
-            expected_cost_per_1m_tokens: if have_cost {
-                Some(total_cost * 1_000_000.0)
-            } else {
-                None
-            },
-        }
-    };
-
-    Ok(Json(RoutingProjectionResponse {
-        current: project(current_strategy),
-        auto: project(auto_strategy),
-    }))
 }
 
 // ---------------------------------------------------------------------------

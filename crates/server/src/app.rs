@@ -578,6 +578,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             post(handlers::models::bulk_delete_models),
         )
         .route(
+            "/api/admin/models/bulk-set-enabled",
+            post(handlers::models::bulk_set_enabled_models),
+        )
+        .route(
             "/api/admin/models/ids",
             get(handlers::models::list_model_ids),
         )
@@ -588,10 +592,6 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         .route(
             "/api/admin/models/{model_id}/routes",
             get(handlers::models::list_model_routes).post(handlers::models::create_model_route),
-        )
-        .route(
-            "/api/admin/models/{model_id}/routing-projection",
-            get(handlers::models::get_routing_projection),
         )
         .route(
             "/api/admin/models/{model_id}/route-history",
@@ -1112,36 +1112,19 @@ async fn load_providers_into_router(
         );
     }
 
-    // Load platform pricing once — combines with per-model
-    // input_weight/output_weight to give an effective $/token factor
-    // surfaced in admin projection views (cost preview, expected cost).
-    #[derive(sqlx::FromRow)]
-    struct PricingRow {
-        input_price_per_token: rust_decimal::Decimal,
-        output_price_per_token: rust_decimal::Decimal,
-    }
-    let pricing: Option<PricingRow> = sqlx::query_as::<_, PricingRow>(
-        "SELECT input_price_per_token, output_price_per_token FROM platform_pricing WHERE id = 1",
-    )
-    .fetch_optional(&state.db)
-    .await?;
-
-    // Load per-model weights + routing overrides. Strategy and
-    // affinity columns are nullable — `None` ⇒ use the global default
-    // from system_settings. Router holds the snapshot; the proxy
-    // resolves the fallback at request time.
+    // Load per-model routing overrides. Strategy and affinity columns
+    // are nullable — `None` ⇒ use the global default from
+    // system_settings. Router holds the snapshot; the proxy resolves
+    // the fallback at request time.
     #[derive(sqlx::FromRow)]
     struct ModelRow {
         model_id: String,
-        input_weight: rust_decimal::Decimal,
-        output_weight: rust_decimal::Decimal,
         routing_strategy: Option<String>,
         affinity_mode: Option<String>,
         affinity_ttl_secs: Option<i32>,
     }
     let model_rows = sqlx::query_as::<_, ModelRow>(
-        r#"SELECT model_id, input_weight, output_weight,
-                  routing_strategy, affinity_mode, affinity_ttl_secs
+        r#"SELECT model_id, routing_strategy, affinity_mode, affinity_ttl_secs
              FROM models"#,
     )
     .fetch_all(&state.db)
@@ -1150,19 +1133,7 @@ async fn load_providers_into_router(
     use std::str::FromStr;
     use think_watch_gateway::router::{AffinityMode, ModelRoutingConfig};
     use think_watch_gateway::strategy::RoutingStrategy;
-    let mut cost_per_token_by_model: std::collections::HashMap<String, f64> =
-        std::collections::HashMap::new();
     for m in &model_rows {
-        if let Some(p) = &pricing {
-            let in_w: f64 = m.input_weight.to_string().parse().unwrap_or(1.0);
-            let out_w: f64 = m.output_weight.to_string().parse().unwrap_or(1.0);
-            let in_p: f64 = p.input_price_per_token.to_string().parse().unwrap_or(0.0);
-            let out_p: f64 = p.output_price_per_token.to_string().parse().unwrap_or(0.0);
-            let cpt = in_w * in_p + out_w * out_p;
-            if cpt > 0.0 {
-                cost_per_token_by_model.insert(m.model_id.clone(), cpt);
-            }
-        }
         let cfg = ModelRoutingConfig {
             strategy: m
                 .routing_strategy
@@ -1190,7 +1161,7 @@ async fn load_providers_into_router(
         id: uuid::Uuid,
         model_id: String,
         provider_id: uuid::Uuid,
-        upstream_model: Option<String>,
+        upstream_model: String,
         weight: i32,
         label: Option<String>,
         rpm_cap: Option<i32>,
@@ -1202,7 +1173,11 @@ async fn load_providers_into_router(
                   mr.weight, mr.label, mr.rpm_cap, mr.tpm_cap
            FROM model_routes mr
            JOIN providers p ON p.id = mr.provider_id
-           WHERE mr.enabled = true AND p.is_active = true AND p.deleted_at IS NULL
+           JOIN models    m ON m.model_id = mr.model_id
+           WHERE mr.enabled = true
+             AND m.enabled = true
+             AND p.is_active = true
+             AND p.deleted_at IS NULL
            ORDER BY mr.model_id, mr.weight DESC"#,
     )
     .fetch_all(&state.db)
@@ -1221,10 +1196,9 @@ async fn load_providers_into_router(
                     provider_id: row.provider_id,
                     route_id: row.id,
                     provider_name: provider_name.clone(),
-                    upstream_model: row.upstream_model.clone(),
+                    upstream_model: Some(row.upstream_model.clone()),
                     weight: row.weight as u32,
                     label: row.label.clone(),
-                    cost_per_token: cost_per_token_by_model.get(&row.model_id).copied(),
                     rpm_cap: row
                         .rpm_cap
                         .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
@@ -1256,7 +1230,6 @@ async fn load_providers_into_router(
                         upstream_model: None,
                         weight: 100,
                         label: None,
-                        cost_per_token: None,
                         rpm_cap: None,
                         tpm_cap: None,
                     },

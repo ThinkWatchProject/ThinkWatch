@@ -40,7 +40,6 @@ import {
 } from '@/components/ui/sheet';
 import { LatencySparkline } from './routing/LatencySparkline';
 import { RoutingModeSection } from './routing/RoutingModeSection';
-import { RoutingProjection } from './routing/RoutingProjection';
 import { TrafficBar } from './routing/TrafficBar';
 import {
   AlertCircle,
@@ -73,6 +72,9 @@ interface ModelRow {
   output_weight: string;
   route_count: number;
   enabled_route_count: number;
+  /// Model-level kill switch. FALSE ⇒ all routes are skipped at the
+  /// gateway regardless of per-route `enabled` state.
+  enabled: boolean;
   /// Provider display names attached to this model, ordered by weight DESC.
   /// Joined server-side so the row can render the column without
   /// fetching per-row routes.
@@ -116,7 +118,7 @@ export interface RouteHealthEntry {
   route_id: string;
   provider_id: string;
   provider_name: string;
-  upstream_model: string | null;
+  upstream_model: string;
   weight: number;
   enabled: boolean;
   health: RouteHealth;
@@ -126,7 +128,7 @@ type ModelStatus = 'active' | 'disabled' | 'unrouted';
 
 function modelStatus(m: ModelRow): ModelStatus {
   if (m.route_count === 0) return 'unrouted';
-  if (m.enabled_route_count === 0) return 'disabled';
+  if (!m.enabled || m.enabled_route_count === 0) return 'disabled';
   return 'active';
 }
 
@@ -141,7 +143,7 @@ interface RouteRow {
   model_id: string;
   provider_id: string;
   provider_name: string;
-  upstream_model: string | null;
+  upstream_model: string;
   weight: number;
   enabled: boolean;
   /// Optional human-readable identifier shown in the route table
@@ -151,32 +153,6 @@ interface RouteRow {
   notes?: string | null;
   rpm_cap?: number | null;
   tpm_cap?: number | null;
-}
-
-/// Per-route entry returned by GET /api/admin/models/{id}/routing-projection.
-/// Combines the stored config (weight, label) with live signals (latency,
-/// cost) and the strategy-derived expected traffic share.
-export interface RoutingProjectionEntry {
-  route_id: string;
-  provider_name: string;
-  upstream_model: string | null;
-  label: string | null;
-  weight: number;
-  expected_pct: number;
-  cost_per_token: number | null;
-  ewma_latency_ms: number | null;
-  healthy: boolean;
-}
-
-export interface RoutingProjectionView {
-  strategy: RoutingStrategy;
-  entries: RoutingProjectionEntry[];
-  expected_cost_per_1m_tokens: number | null;
-}
-
-export interface RoutingProjectionResponse {
-  current: RoutingProjectionView;
-  auto: RoutingProjectionView;
 }
 
 export interface RouteHistoryBucket {
@@ -318,7 +294,6 @@ export function ModelsPage() {
   // empty (provider has no /models endpoint, fall back to free input).
   const [routeRemoteCache, setRouteRemoteCache] = useState<Record<string, string[] | null>>({});
   const [routeRemoteLoading, setRouteRemoteLoading] = useState(false);
-  const [routeRemoteError, setRouteRemoteError] = useState('');
 
   // Batch import — two-step dialog.
   //
@@ -484,16 +459,14 @@ export function ModelsPage() {
     if (!pid) return;
     if (routeRemoteCache[pid] !== undefined) return;
     setRouteRemoteLoading(true);
-    setRouteRemoteError('');
     void api<string[]>(`/api/admin/providers/${pid}/remote-models`)
       .then((rows) => {
         setRouteRemoteCache((c) => ({ ...c, [pid]: rows }));
       })
-      .catch((err) => {
+      .catch(() => {
         // Provider with no /models endpoint, or temporary fetch
         // failure — leave cache empty and fall back to free input.
         setRouteRemoteCache((c) => ({ ...c, [pid]: null }));
-        setRouteRemoteError(err instanceof Error ? err.message : 'Failed to load');
       })
       .finally(() => setRouteRemoteLoading(false));
   }, [routeDialogOpen, routeForm.provider_id, routeRemoteCache]);
@@ -625,6 +598,25 @@ export function ModelsPage() {
     }
   };
 
+  const bulkSetEnabled = async (enabled: boolean) => {
+    if (selectedIds.size === 0) return;
+    try {
+      const res = await apiPost<{ updated: number }>(
+        '/api/admin/models/bulk-set-enabled',
+        { ids: Array.from(selectedIds), enabled },
+      );
+      toast.success(
+        enabled
+          ? t('models.batchEnabled', { count: res.updated })
+          : t('models.batchDisabled', { count: res.updated }),
+      );
+      setSelectedIds(new Set());
+      await fetchModels();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed');
+    }
+  };
+
   const confirmBulkDelete = async () => {
     if (selectedIds.size === 0) return;
     setBulkDeleting(true);
@@ -649,6 +641,7 @@ export function ModelsPage() {
       await apiDelete(`/api/admin/models/${deleteModel.id}`);
       toast.success(t('models.toast.deleted'));
       setDeleteModel(null);
+      setDetailModelId(null);
       await fetchModels();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to delete');
@@ -660,7 +653,7 @@ export function ModelsPage() {
   const openAddRoute = (model: ModelRow) => {
     setRouteTargetModel(model);
     setEditingRoute(null);
-    setRouteForm(emptyRouteForm);
+    setRouteForm({ ...emptyRouteForm, upstream_model: model.model_id });
     setRouteFormError('');
     setRouteDialogOpen(true);
   };
@@ -670,7 +663,7 @@ export function ModelsPage() {
     setEditingRoute(route);
     setRouteForm({
       provider_id: route.provider_id,
-      upstream_model: route.upstream_model ?? '',
+      upstream_model: route.upstream_model,
       enabled: route.enabled,
       label: route.label ?? '',
       notes: route.notes ?? '',
@@ -698,7 +691,11 @@ export function ModelsPage() {
       setRouteFormError(t('models.errors.capMustBePositive'));
       return;
     }
-    const upstream = routeForm.upstream_model.trim() || null;
+    const upstream = routeForm.upstream_model.trim();
+    if (!upstream) {
+      setRouteFormError(t('models.col.upstreamModel') + ' is required');
+      return;
+    }
     setRouteSaving(true);
     try {
       const label = routeForm.label.trim() || null;
@@ -900,7 +897,7 @@ export function ModelsPage() {
       const seen = new Set<string>();
       for (const r of existing.items) {
         seen.add(r.model_id);
-        if (r.upstream_model) seen.add(r.upstream_model);
+        seen.add(r.upstream_model);
       }
       setExistingModelIds(seen);
     } catch (err) {
@@ -1070,16 +1067,33 @@ export function ModelsPage() {
           </SelectContent>
         </Select>
         {selectedIds.size > 0 && (
-          <Button
-            variant="destructive"
-            size="sm"
-            className="ml-auto"
-            onClick={() => setBulkDeleteOpen(true)}
-            disabled={!hasPermission('models:write')}
-          >
-            <Trash2 className="mr-1 h-3.5 w-3.5" />
-            {t('models.bulkDeleteAction', { count: selectedIds.size })}
-          </Button>
+          <div className="ml-auto flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => bulkSetEnabled(true)}
+              disabled={!hasPermission('models:write')}
+            >
+              {t('models.bulkEnableAction', { count: selectedIds.size })}
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => bulkSetEnabled(false)}
+              disabled={!hasPermission('models:write')}
+            >
+              {t('models.bulkDisableAction', { count: selectedIds.size })}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => setBulkDeleteOpen(true)}
+              disabled={!hasPermission('models:write')}
+            >
+              <Trash2 className="mr-1 h-3.5 w-3.5" />
+              {t('models.bulkDeleteAction', { count: selectedIds.size })}
+            </Button>
+          </div>
         )}
         {selectedIds.size === 0 && statusFilter === 'unrouted' && totalModels > 0 && (
           <Button
@@ -1378,33 +1392,19 @@ export function ModelsPage() {
                       </div>
                     );
                   }
-                  // Fetched a usable list → searchable select with an
-                  // explicit "(use catalog model_id)" option for the
-                  // NULL-upstream case.
+                  // Fetched a usable list → searchable select.
                   if (remote && remote.length > 0) {
-                    const INHERIT = '__inherit__';
                     return (
                       <Select
-                        value={routeForm.upstream_model || INHERIT}
+                        value={routeForm.upstream_model}
                         onValueChange={(v) =>
-                          setRouteForm({
-                            ...routeForm,
-                            upstream_model: v === INHERIT ? '' : v,
-                          })
+                          setRouteForm({ ...routeForm, upstream_model: v })
                         }
                       >
                         <SelectTrigger id="route_upstream">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
-                          <SelectItem value={INHERIT}>
-                            <span className="italic text-muted-foreground">
-                              {t('models.upstreamModelInherit', {
-                                modelId:
-                                  editingRoute?.model_id ?? routeTargetModel?.model_id ?? '',
-                              })}
-                            </span>
-                          </SelectItem>
                           {remote.map((m) => (
                             <SelectItem key={m} value={m}>
                               <span className="font-mono text-xs">{m}</span>
@@ -1418,21 +1418,14 @@ export function ModelsPage() {
                   // — fall back to free input so the user is never
                   // blocked from saving a custom upstream name.
                   return (
-                    <>
-                      <Input
-                        id="route_upstream"
-                        value={routeForm.upstream_model}
-                        onChange={(e) =>
-                          setRouteForm({ ...routeForm, upstream_model: e.target.value })
-                        }
-                        placeholder={t('models.upstreamModelHint')}
-                      />
-                      {pid && routeRemoteError && (
-                        <p className="text-[11px] text-muted-foreground">
-                          {t('models.upstreamModelFreeInput')}
-                        </p>
-                      )}
-                    </>
+                    <Input
+                      id="route_upstream"
+                      value={routeForm.upstream_model}
+                      onChange={(e) =>
+                        setRouteForm({ ...routeForm, upstream_model: e.target.value })
+                      }
+                      placeholder={t('models.upstreamModelHint')}
+                    />
                   );
                 })()}
               </div>
@@ -1877,10 +1870,7 @@ export function ModelsPage() {
                             variant="outline"
                             size="sm"
                             className="h-7 text-xs text-destructive hover:text-destructive"
-                            onClick={() => {
-                              setDetailModelId(null);
-                              setDeleteModel(model);
-                            }}
+                            onClick={() => setDeleteModel(model)}
                           >
                             <Trash2 className="mr-1 h-3 w-3" />
                             {t('common.delete')}
@@ -1937,9 +1927,7 @@ export function ModelsPage() {
                                   id: r.id,
                                   label:
                                     r.label ??
-                                    (r.upstream_model
-                                      ? r.upstream_model.split('/').pop() ?? r.upstream_model
-                                      : providerLabel(r.provider_id)),
+                                    (r.upstream_model.split('/').pop() ?? r.upstream_model),
                                   weight: r.weight,
                                 }))}
                                 disabled={!hasPermission('models:write')}
@@ -2039,13 +2027,9 @@ export function ModelsPage() {
                                       </td>
                                       <td
                                         className="px-2 py-1.5 font-mono text-[11px] max-w-[180px] truncate"
-                                        title={r.upstream_model ?? model.model_id}
+                                        title={r.upstream_model}
                                       >
-                                        {r.upstream_model ?? (
-                                          <span className="italic text-muted-foreground">
-                                            {model.model_id}
-                                          </span>
-                                        )}
+                                        {r.upstream_model}
                                       </td>
                                       <td className="px-2 py-1.5 text-center">
                                         {r.enabled ? (
@@ -2116,20 +2100,6 @@ export function ModelsPage() {
                             </tbody>
                           </table>
                         </div>
-                      )}
-                      {/* Cost projection — informational only. Use a
-                          `refreshKey` prop instead of React `key` so the
-                          component stays mounted across drags; otherwise
-                          the cost line flashes "—" between releases
-                          while the new projection is in flight. */}
-                      {routes && routes.length >= 2 && (
-                        <RoutingProjection
-                          modelId={model.model_id}
-                          currency={pricing?.currency ?? 'USD'}
-                          refreshKey={routes
-                            .map((r) => `${r.id}:${r.weight}:${r.enabled ? 1 : 0}`)
-                            .join('|')}
-                        />
                       )}
                     </section>
                   </div>

@@ -34,6 +34,11 @@ pub struct RouteEntry {
     /// request, and the value survives provider deletion (where the
     /// foreign key flips to NULL but the log row stays legible).
     pub provider_name: String,
+    /// Upstream model name to send to the provider. `Some(name)` for
+    /// every DB-backed route (the column is NOT NULL). `None` only
+    /// occurs on the synthetic prefix-fallback routes the bootstrap
+    /// installs for providers with zero configured routes — there the
+    /// runtime forwards whatever model the client requested.
     pub upstream_model: Option<String>,
     pub weight: u32,
     /// Optional human-readable identifier. Surfaced in the admin UI
@@ -41,12 +46,6 @@ pub struct RouteEntry {
     /// distinctive enough (e.g. "EU-primary", "GPU-cluster-A"). Pure
     /// metadata — the runtime ignores it.
     pub label: Option<String>,
-    /// Effective $/token for this route. Computed once at router-load
-    /// time from the catalog model's `input_weight`/`output_weight`
-    /// times `platform_pricing`. Used by the `cost` and `latency_cost`
-    /// strategies. `None` ⇒ "couldn't compute" (e.g. pricing row
-    /// missing); the cost factor is treated as neutral.
-    pub cost_per_token: Option<f64>,
     /// Per-route RPM cap (NULL in DB ⇒ None ⇒ unlimited).
     pub rpm_cap: Option<u32>,
     /// Per-route TPM cap.
@@ -269,7 +268,6 @@ mod tests {
             upstream_model: None,
             weight,
             label: None,
-            cost_per_token: None,
             rpm_cap: None,
             tpm_cap: None,
         }
