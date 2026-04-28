@@ -381,16 +381,27 @@ export function SetupPage() {
           <Label htmlFor="setup-confirm-password">
             {t('setup.admin.confirmPassword')} <RequiredMark />
           </Label>
-          <Input
-            id="setup-confirm-password"
-            type="password"
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            onBlur={() => markAdminTouched('confirmPassword')}
-            required
-            aria-required="true"
-            aria-invalid={adminTouched.confirmPassword && !!adminErrors.confirmPassword}
-          />
+          <div className="relative">
+            <Input
+              id="setup-confirm-password"
+              type={passwordRevealed ? 'text' : 'password'}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              onBlur={() => markAdminTouched('confirmPassword')}
+              required
+              aria-required="true"
+              aria-invalid={adminTouched.confirmPassword && !!adminErrors.confirmPassword}
+              className="pr-9"
+            />
+            <button
+              type="button"
+              onClick={() => setPasswordRevealed((v) => !v)}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+              aria-label={passwordRevealed ? t('common.hide') : t('common.show')}
+            >
+              {passwordRevealed ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
           {adminTouched.confirmPassword && adminErrors.confirmPassword && (
             <p className="text-xs text-destructive">{adminErrors.confirmPassword}</p>
           )}
