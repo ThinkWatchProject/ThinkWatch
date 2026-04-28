@@ -6,7 +6,7 @@ Always run `make precommit` before committing. It mirrors the CI pipeline exactl
 
 ```
 cargo check --workspace
-cargo test --workspace
+cargo test --workspace --lib --bins --tests
 cargo clippy --workspace -- -D warnings
 cargo fmt --all -- --check
 cd web && pnpm check:i18n

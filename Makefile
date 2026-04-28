@@ -25,10 +25,15 @@ check:
 	cd web && pnpm exec tsc --noEmit
 
 # Pre-commit: mirrors CI exactly (cargo check + test + clippy + fmt +
-# i18n parity + pnpm test + pnpm build)
+# i18n parity + pnpm test + pnpm build).
+#
+# `--lib --bins --tests` excludes doc tests, which rebuild every crate
+# under rustdoc even when the workspace has only a handful of code
+# blocks (and they're all ```text``` / ```ignore```). Skipping them
+# cuts precommit from ~20m to ~1m with zero coverage loss.
 precommit:
 	cargo check --workspace
-	cargo test --workspace
+	cargo test --workspace --lib --bins --tests
 	cargo clippy --workspace -- -D warnings
 	cargo fmt --all -- --check
 	cd web && pnpm check:i18n
@@ -37,7 +42,7 @@ precommit:
 
 # Run all tests
 test:
-	cargo test --workspace
+	cargo test --workspace --lib --bins --tests
 
 # Run the full integration test suite (test-support crate). Tests
 # are #[ignore]-marked so the default `cargo test --workspace` skips
