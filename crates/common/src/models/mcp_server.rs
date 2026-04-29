@@ -27,6 +27,13 @@ pub struct McpServer {
     #[serde(skip_serializing)]
     pub oauth_client_secret_encrypted: Option<Vec<u8>>,
     pub oauth_scopes: Vec<String>,
+    /// Userinfo endpoint hit after the OAuth callback to populate
+    /// `mcp_user_credentials.upstream_subject`. Best-effort: the
+    /// resolver tries JWT-decode first (no network), falls back to
+    /// `GET {oauth_userinfo_endpoint}` with the access_token, walks
+    /// the JSON for the first non-empty subject-like field, and
+    /// gives up silently if both paths fail.
+    pub oauth_userinfo_endpoint: Option<String>,
     /// `true` ⇒ users may paste their own static token (PAT / API key)
     /// in the per-user connections UI as an alternative (or sole) way
     /// to authenticate.

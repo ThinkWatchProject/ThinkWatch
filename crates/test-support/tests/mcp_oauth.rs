@@ -23,7 +23,7 @@
 use serde_json::Value;
 use think_watch_test_support::prelude::*;
 use wiremock::matchers::{method, path};
-use wiremock::{Mock, MockServer, ResponseTemplate};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 /// Wiremock fake of an MCP server. Responds to JSON-RPC `tools/list`
 /// with one tool (`echo`) and to `tools/call` with a small `result`.
@@ -257,6 +257,138 @@ async fn static_token_round_trips_to_upstream_as_bearer() {
     let body: Value = serde_json::from_slice(&with_bearer.body).unwrap();
     assert_eq!(body["method"], "tools/call");
     assert_eq!(body["params"]["name"], "echo");
+}
+
+/// Wiremock fake of an OAuth provider's `/token` and `/userinfo`
+/// endpoints. Reuses one MockServer for both routes — that's how
+/// real OIDC providers tend to ship them anyway.
+async fn oauth_provider() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "live-access-token",
+            "refresh_token": "live-refresh-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "read",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/userinfo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "preferred_username": "octocat",
+            "email": "octocat@example.com",
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn oauth_callback_populates_upstream_subject_via_userinfo() {
+    let app = TestApp::spawn().await;
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let upstream_mcp = mcp_upstream().await;
+    let provider = oauth_provider().await;
+
+    // Build server with OAuth client config pointing at the wiremock
+    // provider, including the userinfo URL the resolver will hit
+    // after a successful token exchange.
+    let enc_key = think_watch_common::crypto::parse_encryption_key(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
+    .unwrap();
+    let client_secret_encrypted =
+        think_watch_common::crypto::encrypt(b"shh-its-a-secret", &enc_key).unwrap();
+    let server_id = fixtures::create_mcp_server_with(
+        &app.db,
+        &unique_name("oauth-userinfo"),
+        "uinfo",
+        &format!("{}/mcp", upstream_mcp.uri()),
+        fixtures::McpServerOpts {
+            allow_static_token: false,
+            oauth_issuer: Some(provider.uri()),
+            oauth_authorization_endpoint: Some(format!("{}/authorize", provider.uri())),
+            oauth_token_endpoint: Some(format!("{}/token", provider.uri())),
+            oauth_userinfo_endpoint: Some(format!("{}/userinfo", provider.uri())),
+            oauth_client_id: Some("test-client".into()),
+            oauth_client_secret_encrypted: Some(client_secret_encrypted),
+            oauth_scopes: vec!["read".into()],
+        },
+    )
+    .await
+    .unwrap();
+
+    let con = app.console_client();
+    login(&con, &admin).await;
+
+    // Kick off authorize. Response carries the URL the user's browser
+    // would follow next — we extract the state token from it so we
+    // can drive the callback ourselves.
+    let auth_resp = con
+        .post(
+            &format!("/api/mcp/connections/{server_id}/authorize"),
+            json!({"account_label": "work"}),
+        )
+        .await
+        .unwrap();
+    auth_resp.assert_ok();
+    let authorize_url = auth_resp.json::<Value>().unwrap()["authorize_url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let parsed = url::Url::parse(&authorize_url).unwrap();
+    let state_token = parsed
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.into_owned())
+        .expect("authorize_url missing state param");
+
+    // Drive the callback. The wiremock provider will return a token,
+    // and the resolver will GET /userinfo with that token.
+    let cb = con
+        .get(&format!(
+            "/api/mcp/oauth/callback?code=fake-code&state={state_token}"
+        ))
+        .await
+        .unwrap();
+    // Callback returns 307 redirect to /connections#connected=...
+    assert!(
+        cb.status.is_redirection(),
+        "expected redirect, got {}",
+        cb.status
+    );
+
+    // Userinfo round-trip should have happened with the access_token.
+    let received = provider.received_requests().await.unwrap();
+    received
+        .iter()
+        .find(|r: &&Request| {
+            r.url.path() == "/userinfo"
+                && r.headers.get("Authorization").and_then(|v| v.to_str().ok())
+                    == Some("Bearer live-access-token")
+        })
+        .expect("userinfo wasn't called with the freshly-issued access_token");
+
+    // The credential row should now carry upstream_subject from the
+    // /userinfo response (preferred_username = "octocat").
+    let conns: Value = con
+        .get("/api/mcp/connections")
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let entry = conns
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["server_id"].as_str() == Some(&server_id.to_string()))
+        .unwrap();
+    assert_eq!(entry["accounts"].as_array().unwrap().len(), 1);
+    assert_eq!(entry["accounts"][0]["upstream_subject"], "octocat");
 }
 
 #[ignore = "integration test — run via `make test-it`"]

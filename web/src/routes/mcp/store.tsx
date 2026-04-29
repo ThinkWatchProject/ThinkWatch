@@ -31,6 +31,7 @@ interface StoreTemplate {
   endpoint_template: string | null;
   oauth_issuer: string | null;
   oauth_token_endpoint: string | null;
+  oauth_userinfo_endpoint: string | null;
   allow_static_token: boolean;
   static_token_help_url: string | null;
   auth_instructions: string | null;

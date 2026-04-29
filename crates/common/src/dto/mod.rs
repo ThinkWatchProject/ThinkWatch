@@ -236,6 +236,9 @@ pub struct CreateMcpServerRequest {
     pub oauth_authorization_endpoint: Option<String>,
     pub oauth_token_endpoint: Option<String>,
     pub oauth_revocation_endpoint: Option<String>,
+    /// Userinfo endpoint hit after the OAuth callback to populate
+    /// `mcp_user_credentials.upstream_subject`.
+    pub oauth_userinfo_endpoint: Option<String>,
     pub oauth_client_id: Option<String>,
     /// Plaintext on the wire; encrypted at rest by the handler before
     /// it lands in `oauth_client_secret_encrypted`.

@@ -299,6 +299,7 @@ pub struct McpServerOpts {
     pub oauth_issuer: Option<String>,
     pub oauth_authorization_endpoint: Option<String>,
     pub oauth_token_endpoint: Option<String>,
+    pub oauth_userinfo_endpoint: Option<String>,
     pub oauth_client_id: Option<String>,
     /// Already-encrypted client_secret. Tests that need OAuth roll
     /// this themselves (`crypto::encrypt(secret, encryption_key)`)
@@ -320,11 +321,12 @@ pub async fn create_mcp_server_with(
         r#"INSERT INTO mcp_servers (
                id, name, namespace_prefix, endpoint_url, transport_type, status,
                oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
+               oauth_userinfo_endpoint,
                oauth_client_id, oauth_client_secret_encrypted, oauth_scopes,
                allow_static_token
            )
            VALUES ($1, $2, $3, $4, 'streamable_http', 'active',
-                   $5, $6, $7, $8, $9, $10, $11)"#,
+                   $5, $6, $7, $8, $9, $10, $11, $12)"#,
     )
     .bind(id)
     .bind(name)
@@ -333,6 +335,7 @@ pub async fn create_mcp_server_with(
     .bind(&opts.oauth_issuer)
     .bind(&opts.oauth_authorization_endpoint)
     .bind(&opts.oauth_token_endpoint)
+    .bind(&opts.oauth_userinfo_endpoint)
     .bind(&opts.oauth_client_id)
     .bind(&opts.oauth_client_secret_encrypted)
     .bind(&opts.oauth_scopes)

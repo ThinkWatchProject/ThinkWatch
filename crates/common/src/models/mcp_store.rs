@@ -22,6 +22,9 @@ pub struct McpStoreTemplate {
     pub oauth_authorization_endpoint: Option<String>,
     pub oauth_token_endpoint: Option<String>,
     pub oauth_revocation_endpoint: Option<String>,
+    /// Userinfo endpoint copied onto the new server row at install
+    /// time. See [`crate::models::McpServer::oauth_userinfo_endpoint`].
+    pub oauth_userinfo_endpoint: Option<String>,
     pub oauth_default_scopes: Vec<String>,
     /// `true` ⇒ users can paste their own PAT / API key. Mirrored onto
     /// `mcp_servers.allow_static_token` at install time.

@@ -47,6 +47,7 @@ interface McpServer {
   oauth_authorization_endpoint: string | null;
   oauth_token_endpoint: string | null;
   oauth_revocation_endpoint: string | null;
+  oauth_userinfo_endpoint: string | null;
   oauth_client_id: string | null;
   oauth_scopes: string[];
   allow_static_token: boolean;
@@ -64,6 +65,7 @@ interface OAuthFields {
   authorizationEndpoint: string;
   tokenEndpoint: string;
   revocationEndpoint: string;
+  userinfoEndpoint: string;
   clientId: string;
   clientSecret: string;
   scopes: string;
@@ -74,6 +76,7 @@ const emptyOAuth = (): OAuthFields => ({
   authorizationEndpoint: '',
   tokenEndpoint: '',
   revocationEndpoint: '',
+  userinfoEndpoint: '',
   clientId: '',
   clientSecret: '',
   scopes: '',
@@ -85,6 +88,7 @@ function oauthFromServer(s: McpServer): OAuthFields {
     authorizationEndpoint: s.oauth_authorization_endpoint ?? '',
     tokenEndpoint: s.oauth_token_endpoint ?? '',
     revocationEndpoint: s.oauth_revocation_endpoint ?? '',
+    userinfoEndpoint: s.oauth_userinfo_endpoint ?? '',
     clientId: s.oauth_client_id ?? '',
     clientSecret: '',
     scopes: (s.oauth_scopes ?? []).join(' '),
@@ -100,6 +104,7 @@ function oauthPayload(f: OAuthFields, includeSecret: boolean) {
     oauth_authorization_endpoint: f.authorizationEndpoint || null,
     oauth_token_endpoint: f.tokenEndpoint || null,
     oauth_revocation_endpoint: f.revocationEndpoint || null,
+    oauth_userinfo_endpoint: f.userinfoEndpoint || null,
     oauth_client_id: f.clientId || null,
     oauth_scopes: scopes,
     ...(includeSecret ? { oauth_client_secret: f.clientSecret } : {}),
@@ -728,6 +733,7 @@ function OAuthFieldset({
         authorization_endpoint?: string;
         token_endpoint?: string;
         revocation_endpoint?: string;
+        userinfo_endpoint?: string;
         scopes_supported?: string[];
       }>('/api/admin/mcp/oauth-discover', { issuer: values.issuer.trim() });
       // Fill only the fields the upstream actually advertised — leave
@@ -739,6 +745,7 @@ function OAuthFieldset({
         tokenEndpoint: meta.token_endpoint || values.tokenEndpoint,
         revocationEndpoint:
           meta.revocation_endpoint || values.revocationEndpoint,
+        userinfoEndpoint: meta.userinfo_endpoint || values.userinfoEndpoint,
         scopes:
           values.scopes ||
           (meta.scopes_supported ? meta.scopes_supported.join(' ') : ''),
@@ -813,6 +820,21 @@ function OAuthFieldset({
             onChange={(e) => onChange({ ...values, revocationEndpoint: e.target.value })}
           />
         </div>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">Userinfo endpoint</Label>
+        <Input
+          value={values.userinfoEndpoint}
+          onChange={(e) => onChange({ ...values, userinfoEndpoint: e.target.value })}
+          placeholder="https://api.github.com/user"
+        />
+        <p className="text-xs text-muted-foreground">
+          Hit after login to populate the user's display label
+          (`@octocat`, `user@example.com`). Auto-tries JWT decode first,
+          then GETs this URL with their access token. Skip if the
+          access_token is a JWT (Auth0 / Keycloak / Okta / Google) —
+          the field is read out of the token itself.
+        </p>
       </div>
       <div className="space-y-1">
         <Label className="text-xs">Scopes (space separated)</Label>

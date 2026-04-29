@@ -454,6 +454,23 @@ pub async fn oauth_callback(
         })
         .unwrap_or_else(|| server.oauth_scopes.clone());
 
+    // Resolve `upstream_subject` for the UI's "@octocat" / "user@example.com"
+    // label. Three-tier best-effort:
+    //   1. Decode the access_token as a JWT and read sub-like fields
+    //      (free for Auth0 / Keycloak / Okta / Azure AD / Google).
+    //   2. Else GET the configured userinfo_endpoint with the access
+    //      token and walk the JSON for the first non-empty
+    //      subject-like field (covers GitHub, Notion, Slack, Jira,
+    //      Cloudflare, Discord — see `mcp_store_templates` seed).
+    //   3. Else give up — the UI falls back to `account_label`.
+    // Failures here never fail the auth itself.
+    let upstream_subject = resolve_upstream_subject(
+        state.http_client.load().as_ref(),
+        &token.access_token,
+        server.oauth_userinfo_endpoint.as_deref(),
+    )
+    .await;
+
     // First credential for (server, user) wins is_default; subsequent
     // ones land non-default so the user keeps their existing routing.
     upsert_credential(
@@ -466,10 +483,7 @@ pub async fn oauth_callback(
         refresh_encrypted.as_deref(),
         expires_at,
         &scopes,
-        // upstream_subject not parsed in v1 — would require a second
-        // userinfo round-trip. Surfaced as `null` until then; the UI
-        // falls back to `account_label` in that case.
-        None,
+        upstream_subject.as_deref(),
     )
     .await?;
 
@@ -680,6 +694,148 @@ pub async fn paste_static_token(
 }
 
 // ---------------------------------------------------------------------------
+// upstream_subject resolution (Tier 1 JWT → Tier 2 userinfo → fallback NULL)
+// ---------------------------------------------------------------------------
+
+/// Field names the resolver searches for, in priority order. The list
+/// covers OIDC standard claims first, then the conventions every major
+/// non-OIDC public OAuth provider has converged on:
+///
+/// - `sub` / `preferred_username` / `email`: OIDC standard claims.
+/// - `accountId`: Atlassian (Jira, Confluence) `/me` response.
+/// - `login`: GitHub `/user` response.
+/// - `username` / `name`: Slack `users.identity`, Discord `/users/@me`.
+/// - `id`: Notion `/v1/users/me`, Cloudflare `/user`, generic JSON:API.
+///
+/// `email` is the last resort because some providers stuff the *user's
+/// own* email at top-level (good signal) but others embed an *org*
+/// email under a different node (bad signal); putting it last means
+/// the more specific `id`-flavoured fields win when both are present.
+const SUBJECT_KEYS: &[&str] = &[
+    "preferred_username",
+    "sub",
+    "accountId",
+    "login",
+    "username",
+    "name",
+    "id",
+    "email",
+];
+
+/// JSON node names the resolver descends into when no top-level key
+/// matches. Matches the shape Slack returns (`{ "user": { ... } }`)
+/// and the JSON:API convention (`{ "data": { ... } }`). Limited to
+/// ONE level of recursion so we don't accidentally surface a nested
+/// org / team identifier as the user's identity.
+const NESTED_WRAPPERS: &[&str] = &["user", "data", "account", "results"];
+
+/// Best-effort upstream-identity resolution. Never errors — failures
+/// fall through to `None` and the column stays NULL.
+pub(crate) async fn resolve_upstream_subject(
+    http: &reqwest::Client,
+    access_token: &str,
+    userinfo_endpoint: Option<&str>,
+) -> Option<String> {
+    if let Some(s) = subject_from_jwt(access_token) {
+        return Some(s);
+    }
+    let endpoint = userinfo_endpoint?;
+    let body = match http
+        .get(endpoint)
+        .bearer_auth(access_token)
+        .header("Accept", "application/json")
+        .send()
+        .await
+    {
+        Ok(r) if r.status().is_success() => r.json::<serde_json::Value>().await.ok()?,
+        Ok(r) => {
+            tracing::debug!(
+                endpoint = %endpoint,
+                status = %r.status(),
+                "userinfo endpoint returned non-success — leaving upstream_subject NULL"
+            );
+            return None;
+        }
+        Err(e) => {
+            tracing::debug!(
+                endpoint = %endpoint,
+                error = %e,
+                "userinfo fetch failed — leaving upstream_subject NULL"
+            );
+            return None;
+        }
+    };
+    extract_subject_from_json(&body)
+}
+
+/// Try to read a subject claim out of the access_token's JWT payload.
+/// Returns `None` for opaque tokens (anything that isn't 3 dot-
+/// separated base64url segments whose middle segment decodes to a
+/// JSON object).
+fn subject_from_jwt(access_token: &str) -> Option<String> {
+    let parts: Vec<&str> = access_token.split('.').collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let payload_bytes = data_encoding::BASE64URL_NOPAD
+        .decode(parts[1].as_bytes())
+        // Some encoders include padding even though RFC 7515 forbids
+        // it. Trim and retry before giving up.
+        .or_else(|_| data_encoding::BASE64URL.decode(parts[1].trim_end_matches('=').as_bytes()))
+        .ok()?;
+    let payload: serde_json::Value = serde_json::from_slice(&payload_bytes).ok()?;
+    extract_subject_from_json(&payload)
+}
+
+/// Walk a JSON object looking for the first non-empty subject-like
+/// field, preferring top-level keys over nested wrappers and
+/// preferring more-specific names (`preferred_username`) over less
+/// (`email`).
+fn extract_subject_from_json(v: &serde_json::Value) -> Option<String> {
+    let obj = v.as_object()?;
+    // Pass 1: prefer top-level matches in priority order.
+    for key in SUBJECT_KEYS {
+        if let Some(s) = obj.get(*key).and_then(stringify_subject) {
+            return Some(s);
+        }
+    }
+    // Pass 2: descend into a recognised wrapper. Only one level — we
+    // don't want to surface a deeply-nested team/org identifier as
+    // the user's identity.
+    for wrapper in NESTED_WRAPPERS {
+        let Some(inner_v) = obj.get(*wrapper) else {
+            continue;
+        };
+        // `results` (JSON:API) wraps an array; take the first element.
+        let inner = match inner_v {
+            serde_json::Value::Array(items) => items.first()?,
+            other => other,
+        };
+        let Some(inner_obj) = inner.as_object() else {
+            continue;
+        };
+        for key in SUBJECT_KEYS {
+            if let Some(s) = inner_obj.get(*key).and_then(stringify_subject) {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// Coerce a JSON value into the string we'd display to the user.
+/// Strings pass through unchanged; integers (some upstreams return
+/// `id` as a number) get stringified; everything else is rejected so
+/// we never paint `null` / `false` / `[]` into the UI.
+fn stringify_subject(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // POST /api/admin/mcp/oauth-discover — RFC 8414 metadata fetch
 // ---------------------------------------------------------------------------
 
@@ -693,6 +849,7 @@ pub struct DiscoverResponse {
     pub authorization_endpoint: Option<String>,
     pub token_endpoint: Option<String>,
     pub revocation_endpoint: Option<String>,
+    pub userinfo_endpoint: Option<String>,
     pub scopes_supported: Vec<String>,
 }
 
@@ -769,6 +926,7 @@ fn parse_oauth_metadata(body: &serde_json::Value) -> DiscoverResponse {
         authorization_endpoint: s(body, "authorization_endpoint"),
         token_endpoint: s(body, "token_endpoint"),
         revocation_endpoint: s(body, "revocation_endpoint"),
+        userinfo_endpoint: s(body, "userinfo_endpoint"),
         scopes_supported,
     }
 }
@@ -914,5 +1072,155 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_eq!(a, state_binding(&key, "state1", "verifier1"));
+    }
+
+    // -------- subject_from_jwt -------------------------------------------
+
+    fn jwt_with_payload(payload: &serde_json::Value) -> String {
+        let header = data_encoding::BASE64URL_NOPAD.encode(b"{\"alg\":\"none\"}");
+        let body =
+            data_encoding::BASE64URL_NOPAD.encode(serde_json::to_vec(payload).unwrap().as_slice());
+        format!("{header}.{body}.signature")
+    }
+
+    #[test]
+    fn jwt_subject_prefers_preferred_username_over_sub() {
+        // Auth0 / Keycloak conventionally include both. The
+        // human-readable `preferred_username` makes a better label
+        // than the opaque `sub` UUID.
+        let token = jwt_with_payload(&serde_json::json!({
+            "sub": "auth0|abc123",
+            "preferred_username": "octocat",
+            "email": "octocat@example.com",
+        }));
+        assert_eq!(subject_from_jwt(&token).as_deref(), Some("octocat"));
+    }
+
+    #[test]
+    fn jwt_subject_falls_back_through_priority_chain() {
+        let only_sub = jwt_with_payload(&serde_json::json!({"sub": "google|987"}));
+        assert_eq!(subject_from_jwt(&only_sub).as_deref(), Some("google|987"));
+
+        let only_email = jwt_with_payload(&serde_json::json!({"email": "u@x.com"}));
+        assert_eq!(subject_from_jwt(&only_email).as_deref(), Some("u@x.com"));
+    }
+
+    #[test]
+    fn jwt_subject_returns_none_for_opaque_token() {
+        // GitHub PATs and Notion tokens are opaque random strings —
+        // they're not 3 dot-separated segments, so the JWT path bails
+        // and the userinfo fallback takes over.
+        assert_eq!(subject_from_jwt("ghp_aaaaaaaaaaaaaaaa"), None);
+        assert_eq!(subject_from_jwt(""), None);
+        assert_eq!(subject_from_jwt("not.a.valid.jwt.with.5.parts"), None);
+    }
+
+    #[test]
+    fn jwt_subject_returns_none_when_payload_isnt_object() {
+        // Bytes that decode to something that isn't a JSON object
+        // (corrupt, encrypted JWE, etc.) — refuse to guess.
+        let header = data_encoding::BASE64URL_NOPAD.encode(b"{}");
+        let body = data_encoding::BASE64URL_NOPAD.encode(b"\"not an object\"");
+        let token = format!("{header}.{body}.signature");
+        assert_eq!(subject_from_jwt(&token), None);
+    }
+
+    // -------- extract_subject_from_json ----------------------------------
+
+    #[test]
+    fn extract_subject_handles_github_user_shape() {
+        // GET https://api.github.com/user
+        let body = serde_json::json!({
+            "login": "octocat",
+            "id": 583231,
+            "name": "The Octocat",
+            "email": null,
+        });
+        assert_eq!(extract_subject_from_json(&body).as_deref(), Some("octocat"));
+    }
+
+    #[test]
+    fn extract_subject_handles_atlassian_me_shape() {
+        // GET https://api.atlassian.com/me — accountId beats name.
+        let body = serde_json::json!({
+            "accountId": "5b10ac8d82e05b22cc7d4ef5",
+            "email": "alice@acme.com",
+            "name": "Alice",
+        });
+        assert_eq!(
+            extract_subject_from_json(&body).as_deref(),
+            Some("5b10ac8d82e05b22cc7d4ef5")
+        );
+    }
+
+    #[test]
+    fn extract_subject_descends_into_user_wrapper() {
+        // Slack users.identity wraps the user object. We prefer
+        // `name` (the human display name) over `id` (the opaque
+        // `U0G9QF9C6`) — for THIS user looking at THEIR own
+        // connections, the display name is more readable and
+        // sufficient to disambiguate accounts.
+        let body = serde_json::json!({
+            "ok": true,
+            "user": {
+                "id": "U0G9QF9C6",
+                "name": "Bob",
+            },
+            "team": {"id": "T0G9PQBBK"},
+        });
+        assert_eq!(extract_subject_from_json(&body).as_deref(), Some("Bob"));
+    }
+
+    #[test]
+    fn extract_subject_descends_into_user_wrapper_when_only_id() {
+        // If the upstream's user wrapper omits `name` we still pull
+        // out the opaque `id` — anything beats falling back to the
+        // user-supplied account_label.
+        let body = serde_json::json!({
+            "ok": true,
+            "user": {"id": "U0G9QF9C6"},
+        });
+        assert_eq!(
+            extract_subject_from_json(&body).as_deref(),
+            Some("U0G9QF9C6")
+        );
+    }
+
+    #[test]
+    fn extract_subject_stringifies_numeric_id() {
+        // Notion / JSON:API style: id can be a number or a string.
+        let body = serde_json::json!({"id": 42});
+        assert_eq!(extract_subject_from_json(&body).as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn extract_subject_skips_empty_and_null() {
+        let body = serde_json::json!({
+            "sub": "",
+            "preferred_username": null,
+            "id": "the-id",
+        });
+        assert_eq!(extract_subject_from_json(&body).as_deref(), Some("the-id"));
+    }
+
+    #[test]
+    fn extract_subject_returns_none_for_bare_array() {
+        // Defensive: an unwrapped array at the top isn't the response
+        // shape we expect, refuse to guess at indices.
+        let body = serde_json::json!([{"id": "x"}]);
+        assert_eq!(extract_subject_from_json(&body), None);
+    }
+
+    #[test]
+    fn extract_subject_unwraps_results_array() {
+        // JSON:API convention: `{ "results": [{ ... }] }`. Take the
+        // first element.
+        let body = serde_json::json!({
+            "results": [{"id": "first-user"}, {"id": "second-user"}],
+        });
+        assert_eq!(
+            extract_subject_from_json(&body).as_deref(),
+            Some("first-user")
+        );
     }
 }

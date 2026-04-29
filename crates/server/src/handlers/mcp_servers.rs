@@ -249,11 +249,12 @@ pub async fn create_server(
         r#"INSERT INTO mcp_servers (
                name, namespace_prefix, description, endpoint_url, transport_type,
                oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
-               oauth_revocation_endpoint, oauth_client_id, oauth_client_secret_encrypted,
+               oauth_revocation_endpoint, oauth_userinfo_endpoint,
+               oauth_client_id, oauth_client_secret_encrypted,
                oauth_scopes, allow_static_token, static_token_help_url,
                config_json
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
            RETURNING *"#,
     )
     .bind(&req.name)
@@ -265,6 +266,7 @@ pub async fn create_server(
     .bind(&req.oauth_authorization_endpoint)
     .bind(&req.oauth_token_endpoint)
     .bind(&req.oauth_revocation_endpoint)
+    .bind(&req.oauth_userinfo_endpoint)
     .bind(&req.oauth_client_id)
     .bind(&oauth_client_secret_encrypted)
     .bind(&oauth_scopes)
@@ -381,6 +383,9 @@ pub struct UpdateMcpServerRequest {
     pub oauth_revocation_endpoint: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_some")]
     #[schema(value_type = Option<String>)]
+    pub oauth_userinfo_endpoint: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
     pub oauth_client_id: Option<Option<String>>,
     /// Plaintext client secret; sending an empty string clears it.
     /// Encrypted at rest before persisting.
@@ -458,6 +463,10 @@ pub async fn update_server(
         None => existing.oauth_revocation_endpoint.as_deref(),
         Some(inner) => inner.as_deref(),
     };
+    let oauth_userinfo_endpoint: Option<&str> = match &req.oauth_userinfo_endpoint {
+        None => existing.oauth_userinfo_endpoint.as_deref(),
+        Some(inner) => inner.as_deref(),
+    };
     let oauth_client_id: Option<&str> = match &req.oauth_client_id {
         None => existing.oauth_client_id.as_deref(),
         Some(inner) => inner.as_deref(),
@@ -523,9 +532,10 @@ pub async fn update_server(
               transport_type = $6,
               oauth_issuer = $7, oauth_authorization_endpoint = $8,
               oauth_token_endpoint = $9, oauth_revocation_endpoint = $10,
-              oauth_client_id = $11, oauth_client_secret_encrypted = $12,
-              oauth_scopes = $13, allow_static_token = $14, static_token_help_url = $15,
-              config_json = $16
+              oauth_userinfo_endpoint = $11,
+              oauth_client_id = $12, oauth_client_secret_encrypted = $13,
+              oauth_scopes = $14, allow_static_token = $15, static_token_help_url = $16,
+              config_json = $17
            WHERE id = $1 RETURNING *"#,
     )
     .bind(id)
@@ -538,6 +548,7 @@ pub async fn update_server(
     .bind(oauth_authorization_endpoint)
     .bind(oauth_token_endpoint)
     .bind(oauth_revocation_endpoint)
+    .bind(oauth_userinfo_endpoint)
     .bind(oauth_client_id)
     .bind(&oauth_client_secret_encrypted)
     .bind(&oauth_scopes)

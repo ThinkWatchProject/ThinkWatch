@@ -345,6 +345,7 @@ struct RegistryTemplate {
     oauth_authorization_endpoint: Option<String>,
     oauth_token_endpoint: Option<String>,
     oauth_revocation_endpoint: Option<String>,
+    oauth_userinfo_endpoint: Option<String>,
     oauth_default_scopes: Option<Vec<String>>,
     allow_static_token: Option<bool>,
     static_token_help_url: Option<String>,
@@ -418,12 +419,13 @@ pub async fn sync_registry(
             r#"INSERT INTO mcp_store_templates
                (slug, name, description, category, tags, endpoint_template,
                 oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
-                oauth_revocation_endpoint, oauth_default_scopes,
+                oauth_revocation_endpoint, oauth_userinfo_endpoint,
+                oauth_default_scopes,
                 allow_static_token, static_token_help_url,
                 auth_instructions, deploy_type,
                 deploy_command, deploy_docs_url, homepage_url, repo_url, featured, updated_at)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                       $16, $17, $18, $19, $20, now())
+                       $16, $17, $18, $19, $20, $21, now())
                ON CONFLICT (slug) DO UPDATE SET
                  name = EXCLUDED.name,
                  description = EXCLUDED.description,
@@ -434,6 +436,7 @@ pub async fn sync_registry(
                  oauth_authorization_endpoint = EXCLUDED.oauth_authorization_endpoint,
                  oauth_token_endpoint = EXCLUDED.oauth_token_endpoint,
                  oauth_revocation_endpoint = EXCLUDED.oauth_revocation_endpoint,
+                 oauth_userinfo_endpoint = EXCLUDED.oauth_userinfo_endpoint,
                  oauth_default_scopes = EXCLUDED.oauth_default_scopes,
                  allow_static_token = EXCLUDED.allow_static_token,
                  static_token_help_url = EXCLUDED.static_token_help_url,
@@ -456,6 +459,7 @@ pub async fn sync_registry(
         .bind(&t.oauth_authorization_endpoint)
         .bind(&t.oauth_token_endpoint)
         .bind(&t.oauth_revocation_endpoint)
+        .bind(&t.oauth_userinfo_endpoint)
         .bind(t.oauth_default_scopes.as_deref().unwrap_or(&[]))
         .bind(t.allow_static_token.unwrap_or(false))
         .bind(&t.static_token_help_url)
@@ -575,11 +579,11 @@ pub async fn install_template_into_db(
         r#"INSERT INTO mcp_servers (
                name, namespace_prefix, description, endpoint_url, transport_type,
                oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
-               oauth_revocation_endpoint, oauth_scopes,
+               oauth_revocation_endpoint, oauth_userinfo_endpoint, oauth_scopes,
                allow_static_token, static_token_help_url,
                config_json
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
            RETURNING *"#,
     )
     .bind(&resolved_name)
@@ -591,6 +595,7 @@ pub async fn install_template_into_db(
     .bind(&template.oauth_authorization_endpoint)
     .bind(&template.oauth_token_endpoint)
     .bind(&template.oauth_revocation_endpoint)
+    .bind(&template.oauth_userinfo_endpoint)
     .bind(&template.oauth_default_scopes)
     .bind(template.allow_static_token)
     .bind(&template.static_token_help_url)

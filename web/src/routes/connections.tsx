@@ -393,7 +393,21 @@ function ServerCard({
               >
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <span className="font-medium">{a.account_label}</span>
+                    {/* Upstream identity goes first when we have it
+                        (e.g. `@octocat`, `user@example.com`) so users
+                        can tell their accounts apart at a glance.
+                        Falls back to the user-supplied account_label
+                        when the upstream gave us nothing usable. */}
+                    {a.upstream_subject ? (
+                      <>
+                        <span className="font-medium">{a.upstream_subject}</span>
+                        <span className="text-xs text-muted-foreground">
+                          ({a.account_label})
+                        </span>
+                      </>
+                    ) : (
+                      <span className="font-medium">{a.account_label}</span>
+                    )}
                     {a.is_default && (
                       <Badge variant="secondary" className="text-xs">
                         {t('connections.default')}
@@ -404,7 +418,6 @@ function ServerCard({
                     </Badge>
                   </div>
                   <div className="text-xs text-muted-foreground space-x-2">
-                    {a.upstream_subject && <span>{a.upstream_subject}</span>}
                     {a.scopes.length > 0 && (
                       <span className="font-mono">{a.scopes.join(' ')}</span>
                     )}
