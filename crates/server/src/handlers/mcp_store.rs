@@ -3,7 +3,6 @@ use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use think_watch_common::crypto;
 use think_watch_common::errors::AppError;
 use think_watch_common::models::{McpServer, McpStoreTemplate};
 
@@ -37,7 +36,6 @@ pub struct CategoryCount {
 #[derive(Debug, Deserialize)]
 pub struct InstallTemplateRequest {
     pub endpoint_url: Option<String>,
-    pub auth_secret: Option<String>,
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
     /// Optional overrides for name + namespace_prefix. Frontend pre-resolves
     /// collisions and passes the already-deconflicted values; backend still
@@ -181,55 +179,32 @@ pub async fn install_template(
     }
 
     // Verify the endpoint actually responds to JSON-RPC tools/list before
-    // we persist anything. Keeps broken installs from cluttering the
-    // server list and replaces the old manual "test connection" step in
-    // the install dialog.
+    // we persist anything. Anonymous probe — for OAuth / static-token
+    // upstreams the call may fail with 401, in which case the operator
+    // can still proceed (the per-user auth happens after install when
+    // a user authorizes via /connections).
     let http = state.http_client.load();
-    let probe = super::mcp_shared::probe_mcp_endpoint(
-        &http,
-        &endpoint_url,
-        template.auth_type.as_deref(),
-        req.auth_secret.as_deref(),
-        req.custom_headers.as_ref(),
-    )
-    .await;
-    if !probe.success {
+    let probe =
+        super::mcp_shared::probe_mcp_endpoint(&http, &endpoint_url, req.custom_headers.as_ref())
+            .await;
+    let probe_failed_with_auth =
+        probe.message.starts_with("HTTP 401") || probe.message.starts_with("HTTP 403");
+    if !probe.success && !probe_failed_with_auth {
         return Err(AppError::BadRequest(format!(
             "Connection test failed: {}",
             probe.message
         )));
     }
 
-    // Auto-detect transport type for hosted endpoints
+    // Auto-detect transport type for hosted endpoints. Anonymous probe.
     let transport_type = {
-        let auth_hdr = super::mcp_shared::build_auth_probe_header(
-            template.auth_type.as_deref(),
-            req.auth_secret.as_deref(),
-        );
-        let auth_ref = auth_hdr.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
         let http_detect = state.http_client.load();
-        match think_watch_mcp_gateway::detect::detect_transport(
-            &http_detect,
-            &endpoint_url,
-            auth_ref,
-        )
-        .await
+        match think_watch_mcp_gateway::detect::detect_transport(&http_detect, &endpoint_url, None)
+            .await
         {
             Ok(detected) => detected.as_str().to_owned(),
             Err(_) => "streamable_http".to_owned(),
         }
-    };
-
-    // Encrypt auth secret if provided
-    let auth_encrypted = if let Some(ref secret) = req.auth_secret {
-        let key = crypto::parse_encryption_key(&state.config.encryption_key)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))?;
-        Some(
-            crypto::encrypt(secret.as_bytes(), &key)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption failed: {e}")))?,
-        )
-    } else {
-        None
     };
 
     // Build config_json
@@ -251,7 +226,6 @@ pub async fn install_template(
         &slug,
         &endpoint_url,
         &transport_type,
-        auth_encrypted.as_deref(),
         config_json,
         req.name.as_deref(),
         req.namespace_prefix.as_deref(),
@@ -281,7 +255,7 @@ pub async fn install_template(
         let server_id = server.id;
         let db_for_err = state.db.clone();
         tokio::spawn(async move {
-            match crate::mcp_runtime::discover_and_persist_tools(&db, &http, &server, &key).await {
+            match crate::mcp_runtime::discover_and_persist_tools(&db, &http, &server).await {
                 Ok(n) => {
                     tracing::info!(
                         mcp_server = %server.name,
@@ -367,7 +341,13 @@ struct RegistryTemplate {
     category: Option<String>,
     tags: Option<Vec<String>>,
     endpoint_template: Option<String>,
-    auth_type: Option<String>,
+    oauth_issuer: Option<String>,
+    oauth_authorization_endpoint: Option<String>,
+    oauth_token_endpoint: Option<String>,
+    oauth_revocation_endpoint: Option<String>,
+    oauth_default_scopes: Option<Vec<String>>,
+    allow_static_token: Option<bool>,
+    static_token_help_url: Option<String>,
     auth_instructions: Option<serde_json::Value>,
     deploy_type: Option<String>,
     deploy_command: Option<String>,
@@ -437,16 +417,26 @@ pub async fn sync_registry(
         sqlx::query(
             r#"INSERT INTO mcp_store_templates
                (slug, name, description, category, tags, endpoint_template,
-                auth_type, auth_instructions, deploy_type,
+                oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
+                oauth_revocation_endpoint, oauth_default_scopes,
+                allow_static_token, static_token_help_url,
+                auth_instructions, deploy_type,
                 deploy_command, deploy_docs_url, homepage_url, repo_url, featured, updated_at)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                       $16, $17, $18, $19, $20, now())
                ON CONFLICT (slug) DO UPDATE SET
                  name = EXCLUDED.name,
                  description = EXCLUDED.description,
                  category = EXCLUDED.category,
                  tags = EXCLUDED.tags,
                  endpoint_template = EXCLUDED.endpoint_template,
-                 auth_type = EXCLUDED.auth_type,
+                 oauth_issuer = EXCLUDED.oauth_issuer,
+                 oauth_authorization_endpoint = EXCLUDED.oauth_authorization_endpoint,
+                 oauth_token_endpoint = EXCLUDED.oauth_token_endpoint,
+                 oauth_revocation_endpoint = EXCLUDED.oauth_revocation_endpoint,
+                 oauth_default_scopes = EXCLUDED.oauth_default_scopes,
+                 allow_static_token = EXCLUDED.allow_static_token,
+                 static_token_help_url = EXCLUDED.static_token_help_url,
                  auth_instructions = EXCLUDED.auth_instructions,
                  deploy_type = EXCLUDED.deploy_type,
                  deploy_command = EXCLUDED.deploy_command,
@@ -462,7 +452,13 @@ pub async fn sync_registry(
         .bind(&t.category)
         .bind(t.tags.as_deref().unwrap_or(&[]))
         .bind(&t.endpoint_template)
-        .bind(&t.auth_type)
+        .bind(&t.oauth_issuer)
+        .bind(&t.oauth_authorization_endpoint)
+        .bind(&t.oauth_token_endpoint)
+        .bind(&t.oauth_revocation_endpoint)
+        .bind(t.oauth_default_scopes.as_deref().unwrap_or(&[]))
+        .bind(t.allow_static_token.unwrap_or(false))
+        .bind(&t.static_token_help_url)
         .bind(
             t.auth_instructions
                 .as_ref()
@@ -532,7 +528,6 @@ pub async fn install_template_into_db(
     slug_for_error: &str,
     endpoint_url: &str,
     transport_type: &str,
-    auth_encrypted: Option<&[u8]>,
     config_json: serde_json::Value,
     name_override: Option<&str>,
     prefix_override: Option<&str>,
@@ -573,17 +568,32 @@ pub async fn install_template_into_db(
     let (resolved_name, resolved_prefix) =
         resolve_server_collisions(&mut tx, base_name, base_prefix).await?;
 
+    // Copy the template's per-user auth shape onto the new server row.
+    // OAuth client credentials still need to be filled in by the admin
+    // afterwards (templates can ship endpoint URLs but not secrets).
     let server = sqlx::query_as::<_, McpServer>(
-        r#"INSERT INTO mcp_servers (name, namespace_prefix, description, endpoint_url, transport_type, auth_type, auth_secret_encrypted, config_json)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
+        r#"INSERT INTO mcp_servers (
+               name, namespace_prefix, description, endpoint_url, transport_type,
+               oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
+               oauth_revocation_endpoint, oauth_scopes,
+               allow_static_token, static_token_help_url,
+               config_json
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+           RETURNING *"#,
     )
     .bind(&resolved_name)
     .bind(&resolved_prefix)
     .bind(&template.description)
     .bind(endpoint_url)
     .bind(transport_type)
-    .bind(&template.auth_type)
-    .bind(auth_encrypted)
+    .bind(&template.oauth_issuer)
+    .bind(&template.oauth_authorization_endpoint)
+    .bind(&template.oauth_token_endpoint)
+    .bind(&template.oauth_revocation_endpoint)
+    .bind(&template.oauth_default_scopes)
+    .bind(template.allow_static_token)
+    .bind(&template.static_token_help_url)
     .bind(&config_json)
     .fetch_one(&mut *tx)
     .await?;

@@ -17,19 +17,17 @@ pub struct CallerIdentity {
 
 /// A single connection to an upstream MCP server.
 ///
-/// Intentionally **stateless** with respect to sessions — the upstream
-/// `Mcp-Session-Id` is managed per-user by [`crate::session::SessionManager`]
-/// and passed into [`ConnectionPool::send_request`] on every call.  This
-/// makes it safe to share one connection across all users hitting the
-/// same upstream server.
+/// Intentionally **stateless** with respect to per-user credentials —
+/// the proxy resolves which `Authorization` header to attach via
+/// [`crate::user_token::UserTokenResolver`] and passes the resolved
+/// header into [`ConnectionPool::send_request`] per-call. The
+/// connection only holds the bits that don't vary per caller (the
+/// HTTP client, endpoint URL, and template-bearing custom headers).
 #[derive(Debug, Clone)]
 pub struct McpConnection {
     pub server_id: Uuid,
     pub endpoint_url: String,
     client: Client,
-    /// `(header name, header value)` to attach to every upstream request.
-    /// Resolved at connection creation from `RegisteredServer.auth_header`.
-    auth_header: Option<(String, String)>,
     /// Custom headers with optional template variables (`{{user_id}}`,
     /// `{{user_email}}`), resolved per-request.
     custom_headers: Vec<(String, String)>,
@@ -41,7 +39,6 @@ impl McpConnection {
             server_id: server.id,
             endpoint_url: server.endpoint_url.clone(),
             client,
-            auth_header: server.auth_header.clone(),
             custom_headers: server.custom_headers.clone(),
         }
     }
@@ -122,10 +119,17 @@ impl ConnectionPool {
     /// sent back.  The caller is responsible for persisting the returned
     /// session ID (typically via [`crate::session::SessionManager`]) and
     /// passing it back on the next call.
+    ///
+    /// `auth_header` is the `(name, value)` pair the proxy resolved for
+    /// this specific caller — typically `("Authorization", "Bearer …")`
+    /// from `UserTokenResolver`. `None` means the upstream is anonymous
+    /// (no Authorization header at all).
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_request(
         &self,
         conn: &McpConnection,
         request: &JsonRpcRequest,
+        auth_header: Option<(&str, &str)>,
         caller: Option<&CallerIdentity>,
         upstream_session_id: Option<&str>,
         trace_id: Option<&str>,
@@ -136,9 +140,9 @@ impl ConnectionPool {
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream");
 
-        // Attach upstream auth header if the server has one configured.
-        if let Some((name, value)) = &conn.auth_header {
-            builder = builder.header(name.as_str(), value.as_str());
+        // Attach the per-call resolved auth header (if any).
+        if let Some((name, value)) = auth_header {
+            builder = builder.header(name, value);
         }
 
         // Forward the gateway-side trace id so the upstream MCP server

@@ -11,20 +11,20 @@ use super::serde_util::deserialize_some;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
+// `probe_mcp_endpoint`, `McpProbeOutcome`, `McpToolSummary`, and
+// `normalize_namespace_prefix` live in `super::mcp_shared` so
+// `mcp_store` (and any future caller) can reach them without
+// reaching across handlers.
+pub use super::mcp_shared::{McpToolSummary, normalize_namespace_prefix, probe_mcp_endpoint};
+
 // ---------------------------------------------------------------------------
-// Test MCP server connection — probe via JSON-RPC tools/list without persisting
+// Test MCP server connection — anonymous probe via JSON-RPC tools/list
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct TestMcpServerRequest {
     pub endpoint_url: String,
-    pub auth_type: Option<String>,
-    pub auth_secret: Option<String>,
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
-    /// If provided and `auth_secret` is empty, fall back to the stored
-    /// encrypted secret from this server (used when editing a server
-    /// without re-entering the credential).
-    pub server_id: Option<Uuid>,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -37,15 +37,6 @@ pub struct TestMcpServerResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<McpToolSummary>>,
 }
-
-// `probe_mcp_endpoint`, `McpProbeOutcome`, `McpToolSummary`,
-// `normalize_namespace_prefix`, and `build_auth_probe_header` moved
-// to `super::mcp_shared` so mcp_store no longer reaches across
-// handlers. Re-export them so existing in-module callers still work;
-// new callers should import from `super::mcp_shared` directly.
-pub use super::mcp_shared::{
-    McpToolSummary, build_auth_probe_header, normalize_namespace_prefix, probe_mcp_endpoint,
-};
 
 #[utoipa::path(
     post,
@@ -86,44 +77,8 @@ pub async fn test_mcp_server(
         think_watch_common::validation::validate_custom_headers(headers)?;
     }
 
-    // Resolve the auth secret: prefer the one in the request, fall back to
-    // the server's stored encrypted secret when `server_id` is supplied.
-    let resolved_secret: Option<String> = if let Some(ref s) = req.auth_secret
-        && !s.is_empty()
-    {
-        Some(s.clone())
-    } else if let Some(sid) = req.server_id {
-        let stored: Option<Vec<u8>> =
-            sqlx::query_scalar("SELECT auth_secret_encrypted FROM mcp_servers WHERE id = $1")
-                .bind(sid)
-                .fetch_optional(&state.db)
-                .await?
-                .flatten();
-        match stored {
-            Some(bytes) => {
-                let key =
-                    crypto::parse_encryption_key(&state.config.encryption_key).map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}"))
-                    })?;
-                crypto::decrypt(&bytes, &key)
-                    .ok()
-                    .and_then(|b| String::from_utf8(b).ok())
-            }
-            None => None,
-        }
-    } else {
-        None
-    };
-
     let http = state.http_client.load();
-    let outcome = probe_mcp_endpoint(
-        &http,
-        &req.endpoint_url,
-        req.auth_type.as_deref(),
-        resolved_secret.as_deref(),
-        req.custom_headers.as_ref(),
-    )
-    .await;
+    let outcome = probe_mcp_endpoint(&http, &req.endpoint_url, req.custom_headers.as_ref()).await;
 
     let tools_count = if outcome.success {
         Some(outcome.tools.len())
@@ -208,6 +163,22 @@ pub async fn list_servers(
     Ok(Json(servers))
 }
 
+/// Encrypt the OAuth client_secret with the configured AES-GCM key.
+/// Returns Ok(None) if no secret was provided.
+fn encrypt_client_secret(
+    plain: Option<&str>,
+    encryption_key: &str,
+) -> Result<Option<Vec<u8>>, AppError> {
+    let Some(secret) = plain.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let key = crypto::parse_encryption_key(encryption_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))?;
+    let bytes = crypto::encrypt(secret.as_bytes(), &key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption failed: {e}")))?;
+    Ok(Some(bytes))
+}
+
 #[utoipa::path(
     post,
     path = "/api/mcp/servers",
@@ -245,29 +216,24 @@ pub async fn create_server(
     // SSRF prevention: validate endpoint_url
     think_watch_common::validation::validate_url(&req.endpoint_url)?;
 
-    let auth_encrypted = if let Some(ref secret) = req.auth_secret {
-        let key = crypto::parse_encryption_key(&state.config.encryption_key)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))?;
-        Some(
-            crypto::encrypt(secret.as_bytes(), &key)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption failed: {e}")))?,
-        )
-    } else {
-        None
-    };
+    // Encrypt the OAuth client_secret if one was supplied.
+    let oauth_client_secret_encrypted = encrypt_client_secret(
+        req.oauth_client_secret.as_deref(),
+        &state.config.encryption_key,
+    )?;
 
-    // Auto-detect transport type if not explicitly specified
+    // Auto-detect transport type if not explicitly specified. The
+    // detector probes anonymously — upstreams that gate detection
+    // behind auth will fall back to streamable_http, which is the
+    // default for MCP servers.
     let transport_type = if let Some(ref tt) = req.transport_type {
         tt.clone()
     } else {
-        let auth_hdr =
-            build_auth_probe_header(req.auth_type.as_deref(), req.auth_secret.as_deref());
-        let auth_ref = auth_hdr.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
         let http_detect = state.http_client.load();
         match think_watch_mcp_gateway::detect::detect_transport(
             &http_detect,
             &req.endpoint_url,
-            auth_ref,
+            None,
         )
         .await
         {
@@ -276,17 +242,34 @@ pub async fn create_server(
         }
     };
 
+    let allow_static_token = req.allow_static_token.unwrap_or(false);
+    let oauth_scopes = req.oauth_scopes.unwrap_or_default();
+
     let server = sqlx::query_as::<_, McpServer>(
-        r#"INSERT INTO mcp_servers (name, namespace_prefix, description, endpoint_url, transport_type, auth_type, auth_secret_encrypted, config_json)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *"#,
+        r#"INSERT INTO mcp_servers (
+               name, namespace_prefix, description, endpoint_url, transport_type,
+               oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
+               oauth_revocation_endpoint, oauth_client_id, oauth_client_secret_encrypted,
+               oauth_scopes, allow_static_token, static_token_help_url,
+               config_json
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           RETURNING *"#,
     )
     .bind(&req.name)
     .bind(&namespace_prefix)
     .bind(&req.description)
     .bind(&req.endpoint_url)
     .bind(&transport_type)
-    .bind(&req.auth_type)
-    .bind(&auth_encrypted)
+    .bind(&req.oauth_issuer)
+    .bind(&req.oauth_authorization_endpoint)
+    .bind(&req.oauth_token_endpoint)
+    .bind(&req.oauth_revocation_endpoint)
+    .bind(&req.oauth_client_id)
+    .bind(&oauth_client_secret_encrypted)
+    .bind(&oauth_scopes)
+    .bind(allow_static_token)
+    .bind(&req.static_token_help_url)
     .bind({
         let mut config = serde_json::json!({});
         if let Some(ref headers) = req.custom_headers {
@@ -325,13 +308,10 @@ pub async fn create_server(
         let http = (**state.http_client.load()).clone();
         let registry = state.mcp_registry.clone();
         let server = server.clone();
-        // R4.2: capture the latest discovery error onto mcp_servers.last_error
-        // so the admin UI can surface it without needing log access. The
-        // task is fire-and-forget but its outcome is now persisted.
         let server_id = server.id;
         let db_for_err = state.db.clone();
         tokio::spawn(async move {
-            match crate::mcp_runtime::discover_and_persist_tools(&db, &http, &server, &key).await {
+            match crate::mcp_runtime::discover_and_persist_tools(&db, &http, &server).await {
                 Ok(n) => {
                     tracing::info!(
                         mcp_server = %server.name,
@@ -385,12 +365,31 @@ pub struct UpdateMcpServerRequest {
     #[schema(value_type = Option<String>)]
     pub description: Option<Option<String>>,
     pub endpoint_url: Option<String>,
-    /// Same PATCH semantics as `description`. Sending `null` clears
-    /// the auth requirement so the server can be probed unauthenticated.
+    /// PATCH semantics: absent = unchanged, JSON `null` = clear,
+    /// JSON string = replace.
     #[serde(default, deserialize_with = "deserialize_some")]
     #[schema(value_type = Option<String>)]
-    pub auth_type: Option<Option<String>>,
-    pub auth_secret: Option<String>,
+    pub oauth_issuer: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub oauth_authorization_endpoint: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub oauth_token_endpoint: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub oauth_revocation_endpoint: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub oauth_client_id: Option<Option<String>>,
+    /// Plaintext client secret; sending an empty string clears it.
+    /// Encrypted at rest before persisting.
+    pub oauth_client_secret: Option<String>,
+    pub oauth_scopes: Option<Vec<String>>,
+    pub allow_static_token: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub static_token_help_url: Option<Option<String>>,
     /// Custom HTTP headers forwarded when connecting to this MCP server.
     /// Values may contain `{{user_id}}` / `{{user_email}}` template variables.
     pub custom_headers: Option<std::collections::HashMap<String, String>>,
@@ -433,7 +432,8 @@ pub async fn update_server(
         .ok_or(AppError::NotFound("MCP Server not found".into()))?;
 
     let name = req.name.as_deref().unwrap_or(&existing.name);
-    // None = field absent (preserve), Some(None) = clear, Some(Some) = set.
+    // PATCH semantics for nullable strings: None = absent (preserve),
+    // Some(None) = JSON null (clear), Some(Some(s)) = replace.
     let description: Option<&str> = match &req.description {
         None => existing.description.as_deref(),
         Some(inner) => inner.as_deref(),
@@ -442,13 +442,39 @@ pub async fn update_server(
         .endpoint_url
         .as_deref()
         .unwrap_or(&existing.endpoint_url);
-    let auth_type: Option<&str> = match &req.auth_type {
-        None => existing.auth_type.as_deref(),
+    let oauth_issuer: Option<&str> = match &req.oauth_issuer {
+        None => existing.oauth_issuer.as_deref(),
         Some(inner) => inner.as_deref(),
     };
+    let oauth_authorization_endpoint: Option<&str> = match &req.oauth_authorization_endpoint {
+        None => existing.oauth_authorization_endpoint.as_deref(),
+        Some(inner) => inner.as_deref(),
+    };
+    let oauth_token_endpoint: Option<&str> = match &req.oauth_token_endpoint {
+        None => existing.oauth_token_endpoint.as_deref(),
+        Some(inner) => inner.as_deref(),
+    };
+    let oauth_revocation_endpoint: Option<&str> = match &req.oauth_revocation_endpoint {
+        None => existing.oauth_revocation_endpoint.as_deref(),
+        Some(inner) => inner.as_deref(),
+    };
+    let oauth_client_id: Option<&str> = match &req.oauth_client_id {
+        None => existing.oauth_client_id.as_deref(),
+        Some(inner) => inner.as_deref(),
+    };
+    let static_token_help_url: Option<&str> = match &req.static_token_help_url {
+        None => existing.static_token_help_url.as_deref(),
+        Some(inner) => inner.as_deref(),
+    };
+    let allow_static_token = req
+        .allow_static_token
+        .unwrap_or(existing.allow_static_token);
+    let oauth_scopes = req
+        .oauth_scopes
+        .clone()
+        .unwrap_or_else(|| existing.oauth_scopes.clone());
 
     // Resolve new namespace_prefix: explicit override > existing value.
-    // Validated only when the caller provided one (otherwise keep existing).
     let namespace_prefix = match req.namespace_prefix.as_deref() {
         Some(p) if !p.is_empty() => normalize_namespace_prefix(Some(p), name)?,
         _ => existing.namespace_prefix.clone(),
@@ -459,20 +485,11 @@ pub async fn update_server(
     }
 
     // Auto-detect transport type when endpoint changes; otherwise the
-    // value the server is already storing stays. There's no manual
-    // override path — if detection picks the wrong transport for an
-    // unusual server, the right fix is to land detector logic, not to
-    // expose a settings knob.
+    // value the server is already storing stays.
     let transport_type = if req.endpoint_url.is_some() {
-        let auth_hdr = build_auth_probe_header(auth_type, req.auth_secret.as_deref());
-        let auth_ref = auth_hdr.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
         let http_detect = state.http_client.load();
-        match think_watch_mcp_gateway::detect::detect_transport(
-            &http_detect,
-            endpoint_url,
-            auth_ref,
-        )
-        .await
+        match think_watch_mcp_gateway::detect::detect_transport(&http_detect, endpoint_url, None)
+            .await
         {
             Ok(detected) => detected.as_str().to_owned(),
             Err(_) => existing.transport_type.clone(),
@@ -481,20 +498,12 @@ pub async fn update_server(
         existing.transport_type.clone()
     };
 
-    // Encrypt new auth secret if provided
-    let auth_encrypted = if let Some(ref secret) = req.auth_secret {
-        if secret.is_empty() {
-            None
-        } else {
-            let key = crypto::parse_encryption_key(&state.config.encryption_key)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))?;
-            Some(
-                crypto::encrypt(secret.as_bytes(), &key)
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("Encryption failed: {e}")))?,
-            )
-        }
-    } else {
-        existing.auth_secret_encrypted.clone()
+    // Encrypt the OAuth client_secret iff the caller supplied one;
+    // empty string ⇒ clear, absent ⇒ keep existing.
+    let oauth_client_secret_encrypted = match req.oauth_client_secret.as_deref() {
+        Some("") => None,
+        Some(s) => encrypt_client_secret(Some(s), &state.config.encryption_key)?,
+        None => existing.oauth_client_secret_encrypted.clone(),
     };
 
     // Merge custom_headers + cache_ttl into existing config_json
@@ -509,8 +518,14 @@ pub async fn update_server(
     }
 
     let updated = sqlx::query_as::<_, McpServer>(
-        r#"UPDATE mcp_servers SET name = $2, namespace_prefix = $3, description = $4, endpoint_url = $5,
-           transport_type = $6, auth_type = $7, auth_secret_encrypted = $8, config_json = $9
+        r#"UPDATE mcp_servers SET
+              name = $2, namespace_prefix = $3, description = $4, endpoint_url = $5,
+              transport_type = $6,
+              oauth_issuer = $7, oauth_authorization_endpoint = $8,
+              oauth_token_endpoint = $9, oauth_revocation_endpoint = $10,
+              oauth_client_id = $11, oauth_client_secret_encrypted = $12,
+              oauth_scopes = $13, allow_static_token = $14, static_token_help_url = $15,
+              config_json = $16
            WHERE id = $1 RETURNING *"#,
     )
     .bind(id)
@@ -519,8 +534,15 @@ pub async fn update_server(
     .bind(description)
     .bind(endpoint_url)
     .bind(transport_type)
-    .bind(auth_type)
-    .bind(&auth_encrypted)
+    .bind(oauth_issuer)
+    .bind(oauth_authorization_endpoint)
+    .bind(oauth_token_endpoint)
+    .bind(oauth_revocation_endpoint)
+    .bind(oauth_client_id)
+    .bind(&oauth_client_secret_encrypted)
+    .bind(&oauth_scopes)
+    .bind(allow_static_token)
+    .bind(static_token_help_url)
     .bind(&config_json)
     .fetch_one(&state.db)
     .await
@@ -665,7 +687,3 @@ fn map_mcp_server_unique_violation(e: sqlx::Error) -> AppError {
     }
     AppError::from(e)
 }
-
-// `normalize_namespace_prefix` and `build_auth_probe_header` moved
-// to `super::mcp_shared` — see the re-export near the top of this
-// file.

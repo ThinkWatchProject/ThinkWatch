@@ -151,17 +151,17 @@ INSERT INTO rbac_roles (name, description, is_system, policy_document) VALUES
 ('admin',
  'Administrative access. Manages providers, MCP servers, API keys, and users.',
  TRUE,
- '{"Version":"2024-01-01","Statement":[{"Sid":"AdminAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","api_keys:delete","api_keys:admin","providers:read","providers:create","providers:update","providers:delete","providers:rotate_key","models:read","models:write","mcp_servers:read","mcp_servers:create","mcp_servers:update","mcp_servers:delete","users:read","users:create","users:update","teams:read","teams:create","teams:update","teams:delete","team_members:write","team:read","team:write","sessions:revoke","roles:read","roles:create","roles:update","roles:delete","analytics:read_all","audit_logs:read_all","logs:read_all","log_forwarders:read","log_forwarders:write","webhooks:read","webhooks:write","content_filter:read","content_filter:write","pii_redactor:read","pii_redactor:write","rate_limits:read","rate_limits:write","settings:read","settings:write"],"Resource":"*"}]}'
+ '{"Version":"2024-01-01","Statement":[{"Sid":"AdminAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","api_keys:delete","api_keys:admin","providers:read","providers:create","providers:update","providers:delete","providers:rotate_key","models:read","models:write","mcp_servers:read","mcp_servers:create","mcp_servers:update","mcp_servers:delete","users:read","users:create","users:update","teams:read","teams:create","teams:update","teams:delete","team_members:write","team:read","team:write","sessions:revoke","roles:read","roles:create","roles:update","roles:delete","analytics:read_all","audit_logs:read_all","logs:read_all","log_forwarders:read","log_forwarders:write","webhooks:read","webhooks:write","content_filter:read","content_filter:write","pii_redactor:read","pii_redactor:write","rate_limits:read","rate_limits:write","settings:read","settings:write"],"Resource":"*"}]}'
 ),
 ('team_manager',
  'Team-level management. Manages members, API keys, and rate limits for the team it''s assigned to. Intended to be granted with scope_kind = team.',
  TRUE,
- '{"Version":"2024-01-01","Statement":[{"Sid":"TeamManagement","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","providers:read","models:read","mcp_servers:read","users:read","users:update","team_members:write","team:read","team:write","analytics:read_team","audit_logs:read_team","logs:read_team","rate_limits:read","rate_limits:write"],"Resource":"*"}]}'
+ '{"Version":"2024-01-01","Statement":[{"Sid":"TeamManagement","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","api_keys:rotate","providers:read","models:read","mcp_servers:read","users:read","users:update","team_members:write","team:read","team:write","analytics:read_team","audit_logs:read_team","logs:read_team","rate_limits:read","rate_limits:write"],"Resource":"*"}]}'
 ),
 ('developer',
  'Standard developer. Uses the gateway, manages own API keys, sees own usage.',
  TRUE,
- '{"Version":"2024-01-01","Statement":[{"Sid":"DeveloperAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","api_keys:read","api_keys:create","api_keys:update","providers:read","models:read","mcp_servers:read","analytics:read_own","audit_logs:read_own","logs:read_own"],"Resource":"*"}]}'
+ '{"Version":"2024-01-01","Statement":[{"Sid":"DeveloperAccess","Effect":"Allow","Action":["ai_gateway:use","mcp_gateway:use","mcp:connect","api_keys:read","api_keys:create","api_keys:update","providers:read","models:read","mcp_servers:read","analytics:read_own","audit_logs:read_own","logs:read_own"],"Resource":"*"}]}'
 ),
 ('viewer',
  'Read-only access. Can browse providers and analytics but not modify anything.',
@@ -209,6 +209,12 @@ CREATE TABLE api_keys (
     -- role_merged.allowed_mcp_tools) — the key can only narrow what
     -- the bearer's roles already grant.
     allowed_mcp_tools       TEXT[],
+    -- Per-server account override for MCP per-user credentials. JSON
+    -- map of `{ "<mcp_server_uuid>": "<account_label>" }`. When this
+    -- key calls an MCP tool the gateway uses the override (instead of
+    -- the user's `is_default` credential) to pick which connected
+    -- account's token to inject upstream. Empty `{}` ⇒ always default.
+    mcp_account_overrides   JSONB NOT NULL DEFAULT '{}',
     -- Rate limits and budget caps live in `rate_limit_rules` /
     -- `budget_caps` (subject_kind = 'api_key_lineage', subject_id =
     -- this row's `lineage_id`) so they survive rotation — every
@@ -418,8 +424,31 @@ CREATE TABLE mcp_servers (
     description           TEXT,
     endpoint_url          VARCHAR(512) NOT NULL,
     transport_type        VARCHAR(50)  NOT NULL DEFAULT 'streamable_http',
-    auth_type             VARCHAR(50),
-    auth_secret_encrypted BYTEA,
+    -- ----- per-user OAuth config -------------------------------------------
+    -- Filled when the upstream supports OAuth. The gateway acts as the
+    -- OAuth client; per-user access/refresh tokens land in
+    -- `mcp_user_credentials`. NULL => OAuth not available for this server.
+    oauth_issuer                  VARCHAR(512),
+    oauth_authorization_endpoint  VARCHAR(512),
+    oauth_token_endpoint          VARCHAR(512),
+    oauth_revocation_endpoint     VARCHAR(512),
+    oauth_client_id               TEXT,
+    oauth_client_secret_encrypted BYTEA,
+    oauth_scopes                  TEXT[] NOT NULL DEFAULT '{}',
+    -- ----- per-user static tokens (PAT / API key) -------------------------
+    -- TRUE ⇒ users may paste their own token in /connections; FALSE ⇒ only
+    -- OAuth is offered (or the upstream doesn't need auth at all).
+    allow_static_token            BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Optional link shown next to the "paste token" UI so the user knows
+    -- where to generate one.
+    static_token_help_url         VARCHAR(512),
+    -- ----- tool catalog cache ---------------------------------------------
+    -- Snapshot from the most recent admin / probe-time tools/list call,
+    -- shown to users that haven't authorized yet so the catalog isn't
+    -- silently empty. Per-user calls hit the upstream live with the
+    -- caller's token and bypass this cache.
+    cached_tools_jsonb    JSONB,
+    cached_tools_at       TIMESTAMPTZ,
     status                VARCHAR(50) NOT NULL DEFAULT 'pending',
     health_check_interval INTEGER DEFAULT 60,
     last_health_check     TIMESTAMPTZ,
@@ -427,6 +456,40 @@ CREATE TABLE mcp_servers (
     config_json           JSONB DEFAULT '{}',
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Per-user upstream credentials. One row per (server, user, label) so
+-- a single user can connect a "work" GitHub and a "personal" GitHub to
+-- the same server. `is_default` picks the credential when the calling
+-- API key has no `mcp_account_overrides` entry for the server.
+CREATE TABLE mcp_user_credentials (
+    mcp_server_id            UUID NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+    user_id                  UUID NOT NULL REFERENCES users(id)       ON DELETE CASCADE,
+    account_label            TEXT NOT NULL,
+    credential_type          TEXT NOT NULL
+        CHECK (credential_type IN ('oauth_authcode', 'static_token')),
+    is_default               BOOLEAN NOT NULL DEFAULT FALSE,
+    access_token_encrypted   BYTEA NOT NULL,
+    refresh_token_encrypted  BYTEA,
+    -- NULL ⇒ never expires (typical for static_token / PAT). For
+    -- oauth_authcode this is set from the upstream's token response.
+    expires_at               TIMESTAMPTZ,
+    scopes                   TEXT[] NOT NULL DEFAULT '{}',
+    -- Whatever the upstream calls "the connected identity" — surfaced in
+    -- the UI as "@octocat" / "user@example.com" so users can tell their
+    -- accounts apart at a glance. For OAuth we read this from `userinfo`
+    -- on callback; for static tokens it stays NULL.
+    upstream_subject         TEXT,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (mcp_server_id, user_id, account_label)
+);
+
+-- One default credential per (server, user). Partial unique index so
+-- non-default rows aren't constrained.
+CREATE UNIQUE INDEX uq_mcp_user_credentials_default
+    ON mcp_user_credentials(mcp_server_id, user_id) WHERE is_default;
+CREATE INDEX idx_mcp_user_credentials_user
+    ON mcp_user_credentials(user_id);
 
 CREATE TABLE mcp_tools (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -757,7 +820,19 @@ CREATE TABLE mcp_store_templates (
     category            VARCHAR(100),
     tags                TEXT[] DEFAULT ARRAY[]::TEXT[],
     endpoint_template   VARCHAR(512),
-    auth_type           VARCHAR(50),
+    -- Per-user auth shape for the upstream described by this template.
+    -- Mirrors the columns on `mcp_servers` so installation is a
+    -- straight copy. Both can coexist (e.g. GitHub MCP supports OAuth
+    -- AND PATs); both can be empty (anonymous service).
+    oauth_issuer                  VARCHAR(512),
+    oauth_authorization_endpoint  VARCHAR(512),
+    oauth_token_endpoint          VARCHAR(512),
+    oauth_revocation_endpoint     VARCHAR(512),
+    oauth_default_scopes          TEXT[] NOT NULL DEFAULT '{}',
+    allow_static_token            BOOLEAN NOT NULL DEFAULT FALSE,
+    static_token_help_url         VARCHAR(512),
+    -- Free-form text shown in the install / connect dialogs to point
+    -- the user at where to generate a token / set up an OAuth app.
     auth_instructions   TEXT,
     deploy_type         VARCHAR(50) DEFAULT 'hosted',
     deploy_command      TEXT,
@@ -781,31 +856,42 @@ CREATE TABLE mcp_store_installs (
     UNIQUE(server_id)
 );
 
--- Seed: built-in MCP store templates
-INSERT INTO mcp_store_templates (slug, name, description, category, tags, endpoint_template, auth_type, auth_instructions, deploy_type, featured) VALUES
-('github',     'GitHub',       'Manage repositories, issues, pull requests, and code search',        'developer',      '{"git","code","vcs"}',        'https://api.githubcopilot.com/mcp/',  'bearer', 'Go to GitHub → Settings → Developer settings → Personal access tokens → Generate new token', 'hosted', true),
-('gitlab',     'GitLab',       'Manage projects, merge requests, and CI/CD pipelines',               'developer',      '{"git","code","cicd"}',       '',                             'bearer', 'Go to GitLab → Preferences → Access Tokens → Create personal access token',                  'manual', false),
-('linear',     'Linear',       'Project management — issues, projects, and cycles',                  'developer',      '{"project","agile"}',         'https://mcp.linear.app/sse',  'bearer', 'Go to Linear → Settings → API → Create personal API key',                                     'hosted', false),
-('sentry',     'Sentry',       'Error tracking and performance monitoring',                          'developer',      '{"monitoring","errors"}',     '',                             'bearer', 'Go to Sentry → Settings → Auth Tokens → Create new token',                                    'manual', false),
-('postgresql', 'PostgreSQL',   'Query databases, browse schemas, and manage tables',                 'database',       '{"sql","relational"}',        '',                             'none',   'Deploy the PostgreSQL MCP server with your connection string',                                 'docker', true),
-('mysql',      'MySQL',        'Query databases, browse schemas, and manage tables',                 'database',       '{"sql","relational"}',        '',                             'none',   'Deploy the MySQL MCP server with your connection string',                                      'docker', false),
-('redis',      'Redis',        'Key-value operations, pub/sub, and data inspection',                 'database',       '{"cache","nosql"}',           '',                             'none',   'Deploy the Redis MCP server pointing to your Redis instance',                                  'docker', false),
-('mongodb',    'MongoDB',      'Document operations, aggregation, and collection management',        'database',       '{"nosql","document"}',        '',                             'none',   'Deploy the MongoDB MCP server with your connection URI',                                       'docker', false),
-('slack',      'Slack',        'Send messages, manage channels, and search workspace',               'communication',  '{"chat","messaging"}',        '',                            'bearer', 'Go to Slack → Apps → Create App → OAuth & Permissions → Install to workspace → Copy bot token. Deploy locally: npx -y @anthropic-ai/mcp-server-slack', 'docker', true),
-('discord',    'Discord',      'Send messages, manage channels, and moderate servers',               'communication',  '{"chat","gaming"}',           '',                             'bearer', 'Go to Discord Developer Portal → Applications → Bot → Copy token',                             'manual', false),
-('aws',        'AWS',          'Manage S3 buckets, Lambda functions, EC2 instances, and more',       'cloud',          '{"infrastructure","devops"}', '',                             'api_key','Configure with AWS Access Key ID and Secret Access Key',                                       'docker', false),
-('cloudflare', 'Cloudflare',   'Manage DNS records, Workers, and edge configuration',                'cloud',          '{"cdn","dns","edge"}',        'https://mcp.cloudflare.com',  'bearer', 'Go to Cloudflare → My Profile → API Tokens → Create Token',                                   'hosted', false),
-('filesystem', 'Filesystem',   'Read and write local files, browse directories',                     'utility',        '{"files","local"}',           '',                             'none',   'Deploy locally — grants access to the configured directory',                                   'docker', false),
-('web-search', 'Web Search',   'Search the web and fetch page content',                             'utility',        '{"search","web"}',            '',                             'api_key','Requires a search API key (Google, Bing, or Brave)',                                           'docker', true),
-('puppeteer',  'Puppeteer',    'Browser automation — navigate, screenshot, and extract data',        'utility',        '{"browser","scraping"}',      '',                             'none',   'Deploy the Puppeteer MCP server with a headless Chrome instance',                              'docker', false),
-('microsoft-docs', 'Microsoft Docs', 'Search and browse Microsoft Learn documentation',                'knowledge',      '{"docs","microsoft","azure"}','https://learn.microsoft.com/api/mcp', 'none', NULL,                                                                                    'hosted', false),
-('aws-docs',   'AWS Documentation', 'Search and browse AWS service documentation',                    'knowledge',      '{"docs","aws","cloud"}',      'https://knowledge-mcp.global.api.aws', 'none', NULL,                                                                                 'hosted', false),
-('mdn-web-docs','MDN Web Docs', 'Search MDN for HTML, CSS, JavaScript, and Web API references',       'knowledge',      '{"docs","web","frontend"}',   '',                             'none',   NULL,                                                                                           'docker', false),
-('wikipedia',  'Wikipedia',    'Search and read Wikipedia articles in any language',                   'knowledge',      '{"docs","encyclopedia"}',     '',                             'none',   NULL,                                                                                           'docker', false),
-('arxiv',      'arXiv',        'Search and read academic papers from arXiv',                          'knowledge',      '{"docs","research","papers"}','',                             'none',   NULL,                                                                                           'docker', false),
-('notion',     'Notion',       'Read and write Notion pages, databases, and blocks',                  'productivity',   '{"notes","wiki","docs"}',     'https://mcp.notion.com/sse',  'bearer', 'Go to Notion → Settings → My connections → Create new integration',                            'hosted', false),
-('google-drive','Google Drive', 'Search, read, and manage files in Google Drive',                     'productivity',   '{"files","google","storage"}','',                             'bearer', 'Create a Google Cloud OAuth2 credential and authorize Drive access',                            'manual', false),
-('jira',       'Jira',         'Manage Jira issues, sprints, and project boards',                     'developer',      '{"project","agile","atlassian"}','',                          'bearer', 'Go to Atlassian → Account settings → Security → API tokens → Create token',                    'manual', false);
+-- Seed: built-in MCP store templates.
+-- Auth shape semantics:
+--   * upstream supports OAuth → fill `oauth_*`. Admin still needs to
+--     paste a `client_id` / `client_secret` once on install (these
+--     are app-level, not user-level).
+--   * upstream accepts PAT / API key → set `allow_static_token=TRUE`
+--     and surface the help URL via `static_token_help_url`.
+--   * anonymous service (databases, public docs APIs) → both empty.
+INSERT INTO mcp_store_templates
+    (slug, name, description, category, tags, endpoint_template,
+     allow_static_token, static_token_help_url, auth_instructions,
+     deploy_type, featured)
+VALUES
+('github',         'GitHub',           'Manage repositories, issues, pull requests, and code search', 'developer',     '{"git","code","vcs"}',           'https://api.githubcopilot.com/mcp/',                            TRUE,  'https://github.com/settings/tokens',                            'Personal access token (classic) or fine-grained PAT.',                                                  'hosted', true),
+('gitlab',         'GitLab',           'Manage projects, merge requests, and CI/CD pipelines',        'developer',     '{"git","code","cicd"}',          '',                                                              TRUE,  'https://gitlab.com/-/profile/personal_access_tokens',           'Create a personal access token in GitLab.',                                                              'manual', false),
+('linear',         'Linear',           'Project management — issues, projects, and cycles',           'developer',     '{"project","agile"}',            'https://mcp.linear.app/sse',                                    TRUE,  'https://linear.app/settings/api',                               'Create a personal API key in Linear.',                                                                   'hosted', false),
+('sentry',         'Sentry',           'Error tracking and performance monitoring',                   'developer',     '{"monitoring","errors"}',        '',                                                              TRUE,  'https://sentry.io/settings/account/api/auth-tokens/',           'Create an auth token in Sentry.',                                                                        'manual', false),
+('postgresql',     'PostgreSQL',       'Query databases, browse schemas, and manage tables',          'database',      '{"sql","relational"}',           '',                                                              FALSE, NULL,                                                            'Deploy the PostgreSQL MCP server with your connection string.',                                          'docker', true),
+('mysql',          'MySQL',            'Query databases, browse schemas, and manage tables',          'database',      '{"sql","relational"}',           '',                                                              FALSE, NULL,                                                            'Deploy the MySQL MCP server with your connection string.',                                               'docker', false),
+('redis',          'Redis',            'Key-value operations, pub/sub, and data inspection',          'database',     '{"cache","nosql"}',               '',                                                              FALSE, NULL,                                                            'Deploy the Redis MCP server pointing at your instance.',                                                 'docker', false),
+('mongodb',        'MongoDB',          'Document operations, aggregation, and collection management','database',      '{"nosql","document"}',           '',                                                              FALSE, NULL,                                                            'Deploy the MongoDB MCP server with your connection URI.',                                                'docker', false),
+('slack',          'Slack',            'Send messages, manage channels, and search workspace',       'communication', '{"chat","messaging"}',           '',                                                              TRUE,  'https://api.slack.com/apps',                                    'Create a Slack app, enable bot scopes, install to workspace, and copy the bot token.',                  'docker', true),
+('discord',        'Discord',          'Send messages, manage channels, and moderate servers',       'communication', '{"chat","gaming"}',              '',                                                              TRUE,  'https://discord.com/developers/applications',                   'Create an application + bot in the Discord Developer Portal and copy the bot token.',                   'manual', false),
+('aws',            'AWS',              'Manage S3 buckets, Lambda functions, EC2 instances, and more','cloud',         '{"infrastructure","devops"}',    '',                                                              TRUE,  'https://console.aws.amazon.com/iam/home#/security_credentials', 'Provide an AWS access-key pair (or assume-role token) for the MCP server.',                              'docker', false),
+('cloudflare',     'Cloudflare',       'Manage DNS records, Workers, and edge configuration',         'cloud',         '{"cdn","dns","edge"}',           'https://mcp.cloudflare.com',                                    TRUE,  'https://dash.cloudflare.com/profile/api-tokens',                'Create an API token in Cloudflare.',                                                                     'hosted', false),
+('filesystem',     'Filesystem',       'Read and write local files, browse directories',              'utility',       '{"files","local"}',              '',                                                              FALSE, NULL,                                                            'Deploys locally — grants access to the configured directory.',                                           'docker', false),
+('web-search',     'Web Search',       'Search the web and fetch page content',                       'utility',       '{"search","web"}',               '',                                                              TRUE,  NULL,                                                            'Requires a search API key (Google, Bing, or Brave).',                                                    'docker', true),
+('puppeteer',      'Puppeteer',        'Browser automation — navigate, screenshot, and extract data','utility',       '{"browser","scraping"}',         '',                                                              FALSE, NULL,                                                            'Deploy the Puppeteer MCP server with a headless Chrome instance.',                                       'docker', false),
+('microsoft-docs', 'Microsoft Docs',   'Search and browse Microsoft Learn documentation',             'knowledge',     '{"docs","microsoft","azure"}',   'https://learn.microsoft.com/api/mcp',                           FALSE, NULL,                                                            NULL,                                                                                                     'hosted', false),
+('aws-docs',       'AWS Documentation','Search and browse AWS service documentation',                  'knowledge',     '{"docs","aws","cloud"}',         'https://knowledge-mcp.global.api.aws',                          FALSE, NULL,                                                            NULL,                                                                                                     'hosted', false),
+('mdn-web-docs',   'MDN Web Docs',     'Search MDN for HTML, CSS, JavaScript, and Web API references','knowledge',     '{"docs","web","frontend"}',      '',                                                              FALSE, NULL,                                                            NULL,                                                                                                     'docker', false),
+('wikipedia',      'Wikipedia',        'Search and read Wikipedia articles in any language',          'knowledge',     '{"docs","encyclopedia"}',        '',                                                              FALSE, NULL,                                                            NULL,                                                                                                     'docker', false),
+('arxiv',          'arXiv',            'Search and read academic papers from arXiv',                  'knowledge',     '{"docs","research","papers"}',   '',                                                              FALSE, NULL,                                                            NULL,                                                                                                     'docker', false),
+('notion',         'Notion',           'Read and write Notion pages, databases, and blocks',          'productivity',  '{"notes","wiki","docs"}',        'https://mcp.notion.com/sse',                                    TRUE,  'https://www.notion.so/my-integrations',                         'Create an internal integration in Notion and copy its token.',                                           'hosted', false),
+('google-drive',   'Google Drive',     'Search, read, and manage files in Google Drive',              'productivity',  '{"files","google","storage"}',   '',                                                              TRUE,  'https://console.cloud.google.com/apis/credentials',             'Create a Google Cloud OAuth2 credential and authorize Drive access.',                                    'manual', false),
+('jira',           'Jira',             'Manage Jira issues, sprints, and project boards',             'developer',     '{"project","agile","atlassian"}','',                                                              TRUE,  'https://id.atlassian.com/manage-profile/security/api-tokens',   'Create an API token at id.atlassian.com.',                                                               'manual', false);
 
 -- MCP Store
 INSERT INTO system_settings (key, value, category, description) VALUES

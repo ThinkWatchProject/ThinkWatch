@@ -240,6 +240,13 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
 
     let session_manager =
         SessionManager::with_redis(state.redis.clone(), state.dynamic_config.clone());
+    let crypto_key = think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
+        .map_err(|e| anyhow::anyhow!("invalid ENCRYPTION_KEY: {e}"))?;
+    let user_tokens = think_watch_mcp_gateway::user_token::UserTokenResolver::new(
+        state.db.clone(),
+        crypto_key,
+        (**state.http_client.load()).clone(),
+    );
     let mut mcp_proxy = McpProxy::new(
         registry,
         pool,
@@ -248,6 +255,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         state.redis.clone(),
         state.dynamic_config.clone(),
         state.audit.clone(),
+        user_tokens,
     );
     // Wire the shared CB registry into the proxy so per-server breakers
     // are visible to the dashboard handler.

@@ -12,6 +12,7 @@ use crate::circuit_breaker::McpCircuitBreakers;
 use crate::pool::ConnectionPool;
 use crate::registry::Registry;
 use crate::session::SessionManager;
+use crate::user_token::{ResolverCaller, ResolverError, UserTokenResolver};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -48,6 +49,12 @@ pub const INVALID_REQUEST: i32 = -32600;
 pub const METHOD_NOT_FOUND: i32 = -32601;
 pub const INVALID_PARAMS: i32 = -32602;
 pub const INTERNAL_ERROR: i32 = -32603;
+/// ThinkWatch-specific: the calling user (or the calling API key's
+/// chosen account label) has no upstream credential for the requested
+/// MCP server. The `data` field carries `server_id` and an optional
+/// `authorize_url`. Outside the JSON-RPC reserved range (-32768 …
+/// -32000) so it can't collide with anything the spec assigns later.
+pub const NEEDS_USER_CREDENTIALS: i32 = -32050;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -118,6 +125,10 @@ pub struct RequestContext<'a> {
     pub surface_constraints: &'a SurfaceConstraints,
     pub allowed_mcp_tools: Option<&'a [String]>,
     pub trace_id: &'a str,
+    /// Per-server MCP account override JSON from the calling API key
+    /// — `{ "<server_uuid>": "<account_label>" }`. Empty `{}` ⇒ the
+    /// resolver always picks the user's `is_default` credential.
+    pub mcp_account_overrides: &'a serde_json::Value,
 }
 
 // ---------------------------------------------------------------------------
@@ -153,9 +164,14 @@ pub struct McpProxy {
     /// with trace_id so the /api/admin/trace view can correlate it
     /// with the AI-gateway row that triggered the call.
     pub audit: think_watch_common::audit::AuditLogger,
+    /// Per-user upstream credential resolver — picks (and refreshes)
+    /// the OAuth / static-token credential for the calling user-account
+    /// pair before each `tools/call` reaches the upstream.
+    pub user_tokens: UserTokenResolver,
 }
 
 impl McpProxy {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: Registry,
         pool: ConnectionPool,
@@ -164,6 +180,7 @@ impl McpProxy {
         redis: fred::clients::Client,
         dynamic_config: std::sync::Arc<think_watch_common::dynamic_config::DynamicConfig>,
         audit: think_watch_common::audit::AuditLogger,
+        user_tokens: UserTokenResolver,
     ) -> Self {
         let cache = McpResponseCache::new(redis.clone());
         Self {
@@ -176,6 +193,7 @@ impl McpProxy {
             redis,
             dynamic_config,
             audit,
+            user_tokens,
         }
     }
 
@@ -461,11 +479,68 @@ impl McpProxy {
         let server_name = server.name.clone();
         let tool_name = original_tool_name.to_string();
 
+        // Resolve the per-user upstream credential. Errors here mean
+        // the user (or this API key's chosen account label) hasn't
+        // connected yet — surface NEEDS_USER_CREDENTIALS so the console
+        // can guide them to /connections instead of 500-ing.
+        let resolver_caller = ResolverCaller {
+            user_id,
+            mcp_account_overrides: ctx.mcp_account_overrides.clone(),
+        };
+        let auth_header = match self
+            .user_tokens
+            .resolve(
+                server_id,
+                &resolver_caller,
+                server.oauth_cfg.as_ref(),
+                server.allow_static_token,
+            )
+            .await
+        {
+            Ok(opt) => opt,
+            Err(ResolverError::NeedsUserCredentials {
+                server_id,
+                authorize_url,
+            }) => {
+                return JsonRpcResponse {
+                    jsonrpc: "2.0".to_owned(),
+                    id: request.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: NEEDS_USER_CREDENTIALS,
+                        message: format!(
+                            "User has not connected an account for MCP server '{server_name}'. \
+                             Open the console and authorize before calling this tool."
+                        ),
+                        data: Some(serde_json::json!({
+                            "kind": "needs_user_credentials",
+                            "server_id": server_id.to_string(),
+                            "authorize_url": authorize_url,
+                        })),
+                    }),
+                };
+            }
+            Err(e) => {
+                tracing::error!(
+                    server_id = %server_id,
+                    error = %e,
+                    "user-token resolver failed"
+                );
+                return err_response(
+                    request.id.clone(),
+                    INTERNAL_ERROR,
+                    format!("Credential resolver failed: {e}"),
+                );
+            }
+        };
+        let auth_ref = auth_header.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
+
         let response = match self
             .pool
             .send_request(
                 &conn,
                 &upstream_request,
+                auth_ref,
                 Some(&caller),
                 upstream_sid.as_deref(),
                 Some(&call_trace_id),

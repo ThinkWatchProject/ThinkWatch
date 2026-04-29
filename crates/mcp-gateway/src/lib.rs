@@ -8,3 +8,4 @@ pub mod proxy;
 pub mod registry;
 pub mod session;
 pub mod transport;
+pub mod user_token;

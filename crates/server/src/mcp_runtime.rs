@@ -1,10 +1,15 @@
-//! MCP gateway runtime — startup loaders, tool discovery, auth resolution,
-//! and the periodic health-check loop.
+//! MCP gateway runtime — startup loaders, tool discovery, and the
+//! periodic health-check loop.
 //!
 //! Extracted from `app.rs` so that file stays focused on the Axum router
 //! wiring. Everything in here works against the shared `AppState`'s MCP
 //! sub-fields (`mcp_registry`, `mcp_pool`, `mcp_circuit_breakers`,
 //! `http_client`, `db`, `config`).
+//!
+//! Per-user credentials are NOT resolved here — that's the proxy's job
+//! at request time via [`think_watch_mcp_gateway::user_token`]. Probes
+//! and health checks make anonymous calls; if a server requires auth
+//! they will surface as warnings until a user authorizes.
 
 use sqlx::PgPool;
 
@@ -42,77 +47,19 @@ fn parse_server_status(s: &str) -> think_watch_mcp_gateway::registry::ServerStat
 }
 
 // ---------------------------------------------------------------------------
-// Auth header resolution
-// ---------------------------------------------------------------------------
-
-/// Decrypt the `auth_secret_encrypted` column for an MCP server and shape it
-/// into a `(header_name, header_value)` tuple based on `auth_type`.
-///
-/// Supported `auth_type`:
-/// - `bearer`     → `Authorization: Bearer <secret>`
-/// - `api_key`    → `X-API-Key: <secret>`
-/// - `header`     → secret is `name:value` literal
-///
-/// Returns `Ok(None)` when the server has no auth configured. Returns `Err`
-/// only if decryption itself fails (so the caller can decide whether to
-/// abort registration or proceed with a missing header).
-pub fn resolve_mcp_auth_header(
-    server: &think_watch_common::models::McpServer,
-    encryption_key: &str,
-) -> anyhow::Result<Option<(String, String)>> {
-    let (Some(auth_type), Some(encrypted)) = (
-        server.auth_type.as_deref(),
-        server.auth_secret_encrypted.as_ref(),
-    ) else {
-        return Ok(None);
-    };
-
-    let key = think_watch_common::crypto::parse_encryption_key(encryption_key)
-        .map_err(|e| anyhow::anyhow!("invalid encryption key: {e}"))?;
-    let secret_bytes = think_watch_common::crypto::decrypt(encrypted, &key)
-        .map_err(|e| anyhow::anyhow!("failed to decrypt auth secret: {e}"))?;
-    let secret = String::from_utf8(secret_bytes)
-        .map_err(|e| anyhow::anyhow!("auth secret is not valid UTF-8: {e}"))?;
-
-    Ok(match auth_type {
-        "bearer" => Some(("Authorization".to_string(), format!("Bearer {secret}"))),
-        "api_key" => Some(("X-API-Key".to_string(), secret)),
-        "header" => {
-            // `name:value` literal — split on the first `:`.
-            if let Some((name, value)) = secret.split_once(':') {
-                Some((name.trim().to_string(), value.trim().to_string()))
-            } else {
-                tracing::warn!(
-                    mcp_server = %server.name,
-                    "auth_type=header expected `name:value`, ignoring"
-                );
-                None
-            }
-        }
-        other => {
-            tracing::warn!(
-                mcp_server = %server.name,
-                auth_type = other,
-                "unknown MCP auth_type, no header attached"
-            );
-            None
-        }
-    })
-}
-
-// ---------------------------------------------------------------------------
 // RegisteredServer construction
 // ---------------------------------------------------------------------------
 
-/// Build a `RegisteredServer` from a Postgres `mcp_servers` row, including
-/// its previously discovered tools and decrypted auth header. Reused by the
-/// startup loader and the CRUD sync paths.
+/// Build a `RegisteredServer` from a Postgres `mcp_servers` row. Decrypts
+/// the OAuth `client_secret` once so the per-request hot path stays free
+/// of crypto. Reused by the startup loader and the CRUD sync paths.
 pub async fn build_registered_server(
     db: &PgPool,
     server: &think_watch_common::models::McpServer,
     encryption_key: &str,
 ) -> anyhow::Result<think_watch_mcp_gateway::registry::RegisteredServer> {
     use think_watch_mcp_gateway::registry::{McpToolInfo, RegisteredServer};
+    use think_watch_mcp_gateway::user_token::OAuthClientCfg;
 
     let tool_rows = sqlx::query_as::<_, think_watch_common::models::McpTool>(
         "SELECT * FROM mcp_tools WHERE server_id = $1 AND is_active = true",
@@ -130,18 +77,36 @@ pub async fn build_registered_server(
         })
         .collect();
 
-    // Resolve auth — log and continue if the secret can't be decrypted, so a
-    // single broken row doesn't take down the gateway.
-    let auth_header = match resolve_mcp_auth_header(server, encryption_key) {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::error!(
-                mcp_server = %server.name,
-                error = %e,
-                "Failed to resolve MCP auth header — proceeding without auth"
-            );
-            None
+    // Resolve the OAuth client config when present. A row qualifies as
+    // OAuth-capable when it has BOTH the token endpoint and a client
+    // id+secret pair — anything missing is treated as "OAuth not
+    // configured" (the resolver will then either fall through to
+    // static-token mode or surface NeedsUserCredentials).
+    let oauth_cfg = match (
+        server.oauth_token_endpoint.as_deref(),
+        server.oauth_client_id.as_deref(),
+        server.oauth_client_secret_encrypted.as_ref(),
+    ) {
+        (Some(token_endpoint), Some(client_id), Some(encrypted)) => {
+            match decrypt_client_secret(encrypted, encryption_key) {
+                Ok(client_secret) => Some(OAuthClientCfg {
+                    token_endpoint: token_endpoint.to_string(),
+                    authorization_endpoint: server.oauth_authorization_endpoint.clone(),
+                    client_id: client_id.to_string(),
+                    client_secret,
+                    scopes: server.oauth_scopes.clone(),
+                }),
+                Err(e) => {
+                    tracing::error!(
+                        mcp_server = %server.name,
+                        error = %e,
+                        "Failed to decrypt MCP OAuth client_secret — skipping OAuth registration"
+                    );
+                    None
+                }
+            }
         }
+        _ => None,
     };
 
     // Parse custom headers from config_json.custom_headers (key→value map)
@@ -178,11 +143,20 @@ pub async fn build_registered_server(
         tools,
         status: parse_server_status(&server.status),
         last_health_check: server.last_health_check,
-        auth_header,
+        oauth_cfg,
+        allow_static_token: server.allow_static_token,
         custom_headers,
         cache_ttl_secs,
         forwards_user_identity,
     })
+}
+
+fn decrypt_client_secret(encrypted: &[u8], encryption_key: &str) -> anyhow::Result<String> {
+    let key = think_watch_common::crypto::parse_encryption_key(encryption_key)
+        .map_err(|e| anyhow::anyhow!("invalid encryption key: {e}"))?;
+    let bytes = think_watch_common::crypto::decrypt(encrypted, &key)
+        .map_err(|e| anyhow::anyhow!("failed to decrypt client_secret: {e}"))?;
+    String::from_utf8(bytes).map_err(|e| anyhow::anyhow!("client_secret is not valid UTF-8: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -206,16 +180,14 @@ struct McpToolsListResult {
 /// upsert into the `mcp_tools` table (deactivating ones that disappeared),
 /// and update the server's `status` + `last_health_check` columns.
 ///
-/// Returns the number of tools discovered. Used by:
-/// - the startup loader (best effort, non-blocking),
-/// - the create/update CRUD handlers (so adding a server in the UI also
-///   discovers its tools immediately),
-/// - the on-demand `discover_tools` admin handler.
+/// Probes are anonymous — they don't carry per-user credentials. For
+/// upstreams that gate `tools/list` behind auth this will fail, the
+/// server is marked disconnected, and the cached tool catalog stays
+/// whatever the most recent successful probe produced.
 pub async fn discover_and_persist_tools(
     db: &PgPool,
     http: &reqwest::Client,
     server: &think_watch_common::models::McpServer,
-    encryption_key: &str,
 ) -> anyhow::Result<usize> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -224,17 +196,13 @@ pub async fn discover_and_persist_tools(
         "params": {}
     });
 
-    let mut req = http
+    let resp = http
         .post(&server.endpoint_url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
-        .json(&body);
-
-    if let Some((name, value)) = resolve_mcp_auth_header(server, encryption_key)? {
-        req = req.header(name, value);
-    }
-
-    let resp = req.send().await?;
+        .json(&body)
+        .send()
+        .await?;
     if !resp.status().is_success() {
         // Mark the server disconnected and bail.
         let _ = sqlx::query(
@@ -278,6 +246,16 @@ pub async fn discover_and_persist_tools(
         .execute(&mut *tx)
         .await?;
 
+    // Snapshot the discovered list into mcp_servers.cached_tools_jsonb
+    // so users that haven't authorized yet still see the catalog.
+    let cached_tools_jsonb = serde_json::json!({
+        "tools": parsed.tools.iter().map(|t| serde_json::json!({
+            "name": t.name,
+            "description": t.description,
+            "inputSchema": t.input_schema,
+        })).collect::<Vec<_>>(),
+    });
+
     for tool in &parsed.tools {
         sqlx::query(
             r#"INSERT INTO mcp_tools (server_id, tool_name, description, input_schema, is_active, discovered_at)
@@ -294,9 +272,11 @@ pub async fn discover_and_persist_tools(
     }
 
     sqlx::query(
-        "UPDATE mcp_servers SET status = 'connected', last_health_check = now() WHERE id = $1",
+        "UPDATE mcp_servers SET status = 'connected', last_health_check = now(),
+            cached_tools_jsonb = $2, cached_tools_at = now() WHERE id = $1",
     )
     .bind(server.id)
+    .bind(&cached_tools_jsonb)
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -360,7 +340,7 @@ pub async fn load_mcp_servers_into_registry(
         let http = (**state.http_client.load()).clone();
         let registry = registry.clone();
         tokio::spawn(async move {
-            match discover_and_persist_tools(&db, &http, &server, &key).await {
+            match discover_and_persist_tools(&db, &http, &server).await {
                 Ok(n) => {
                     tracing::info!(
                         mcp_server = %server.name,

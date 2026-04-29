@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+use crate::user_token::OAuthClientCfg;
+
 /// Information about a single tool exposed by an MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpToolInfo {
@@ -45,12 +47,16 @@ pub struct RegisteredServer {
     pub tools: Vec<McpToolInfo>,
     pub status: ServerStatus,
     pub last_health_check: Option<DateTime<Utc>>,
-    /// Optional `(header name, header value)` to attach to every upstream
-    /// request. Resolved once at registration time from the encrypted
-    /// `auth_secret` column. Skipped from serialization to avoid leaking
-    /// the secret through any debug/log surface.
+    /// OAuth client configuration when the upstream supports OAuth.
+    /// Decrypted once at server-load time so the request hot path
+    /// doesn't pay per-call crypto. Skipped from serialization to
+    /// avoid leaking the client_secret through any debug surface.
     #[serde(skip)]
-    pub auth_header: Option<(String, String)>,
+    pub oauth_cfg: Option<OAuthClientCfg>,
+    /// Whether users may paste their own static PAT / API key in
+    /// `/connections` for this server.
+    #[serde(skip)]
+    pub allow_static_token: bool,
     /// Custom headers attached to every upstream request. Values may
     /// contain `{{user_id}}` and `{{user_email}}` template variables
     /// which are resolved per-request from the caller's identity.
@@ -214,7 +220,8 @@ mod tests {
                 .collect(),
             status: ServerStatus::Connected,
             last_health_check: None,
-            auth_header: None,
+            oauth_cfg: None,
+            allow_static_token: false,
             custom_headers: Vec::new(),
             cache_ttl_secs: None,
             forwards_user_identity: false,

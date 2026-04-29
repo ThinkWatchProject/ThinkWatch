@@ -221,8 +221,23 @@ pub struct CreateMcpServerRequest {
     pub description: Option<String>,
     pub endpoint_url: String,
     pub transport_type: Option<String>,
-    pub auth_type: Option<String>,
-    pub auth_secret: Option<String>,
+    /// OAuth client config (per-user `oauth_authcode` mode). All fields
+    /// optional individually but `oauth_issuer` + `oauth_client_id` +
+    /// the plaintext `oauth_client_secret` must move together — the
+    /// handler validates the combination.
+    pub oauth_issuer: Option<String>,
+    pub oauth_authorization_endpoint: Option<String>,
+    pub oauth_token_endpoint: Option<String>,
+    pub oauth_revocation_endpoint: Option<String>,
+    pub oauth_client_id: Option<String>,
+    /// Plaintext on the wire; encrypted at rest by the handler before
+    /// it lands in `oauth_client_secret_encrypted`.
+    pub oauth_client_secret: Option<String>,
+    pub oauth_scopes: Option<Vec<String>>,
+    /// Allow users to paste their own static PAT / API key.
+    pub allow_static_token: Option<bool>,
+    /// Optional link to where the user generates the token.
+    pub static_token_help_url: Option<String>,
     /// Custom HTTP headers forwarded when connecting to this MCP server.
     /// Values may contain `{{user_id}}` and `{{user_email}}` template
     /// variables which are resolved per-request from the caller's identity.

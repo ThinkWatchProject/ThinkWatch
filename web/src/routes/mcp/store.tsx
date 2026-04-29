@@ -3,7 +3,6 @@ import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { AuthBadge } from '@/components/ui/auth-badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import {
@@ -14,7 +13,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import { Search, Download, CheckCircle2, Plus, Trash2, Loader2, Star, RefreshCw } from 'lucide-react';
+import { Search, Download, CheckCircle2, Plus, Trash2, Loader2, Star, RefreshCw, Globe, Lock, KeyRound } from 'lucide-react';
 import { api, apiPost, hasPermission } from '@/lib/api';
 import { slugifyPrefix, resolveCollision, sanitizePrefixInput } from '@/lib/prefix-utils';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -30,7 +29,10 @@ interface StoreTemplate {
   category: string | null;
   tags: string[];
   endpoint_template: string | null;
-  auth_type: string | null;
+  oauth_issuer: string | null;
+  oauth_token_endpoint: string | null;
+  allow_static_token: boolean;
+  static_token_help_url: string | null;
   auth_instructions: string | null;
   deploy_type: string | null;
   deploy_command: string | null;
@@ -68,7 +70,6 @@ export function McpStorePage() {
   // Install dialog state
   const [installTemplate, setInstallTemplate] = useState<StoreTemplate | null>(null);
   const [endpointUrl, setEndpointUrl] = useState('');
-  const [authSecret, setAuthSecret] = useState('');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
   const [serverName, setServerName] = useState('');
   const [serverPrefix, setServerPrefix] = useState('');
@@ -125,7 +126,6 @@ export function McpStorePage() {
   const openInstallDialog = (tmpl: StoreTemplate) => {
     setInstallTemplate(tmpl);
     setEndpointUrl(tmpl.endpoint_template ?? '');
-    setAuthSecret('');
     setCustomHeaders([]);
     setServerName(tmpl.name);
     setServerPrefix(tmpl.slug.replace(/-/g, '_'));
@@ -158,7 +158,6 @@ export function McpStorePage() {
         name: resolvedInstall?.name ?? serverName,
         namespace_prefix: resolvedInstall?.prefix ?? serverPrefix,
         endpoint_url: endpointUrl || undefined,
-        auth_secret: authSecret || undefined,
         custom_headers:
           customHeaders.length > 0
             ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
@@ -385,11 +384,7 @@ export function McpStorePage() {
             {installTemplate?.auth_instructions && (
               <div className="rounded-md border bg-muted/50 p-3 text-sm">
                 <p className="mb-1 font-medium">
-                  {isHosted
-                    ? installTemplate?.auth_type !== 'none'
-                      ? t('mcpStore.authSecret')
-                      : ''
-                    : t('mcpStore.deployInstructions')}
+                  {isHosted ? t('mcpStore.authInstructions') : t('mcpStore.deployInstructions')}
                 </p>
                 <p className="text-muted-foreground whitespace-pre-wrap">
                   {i18nText(installTemplate.auth_instructions, i18n.language)}
@@ -410,23 +405,14 @@ export function McpStorePage() {
               </div>
             )}
 
-            {/* Auth secret — shown when auth_type is bearer or api_key */}
-            {installTemplate?.auth_type &&
-              installTemplate.auth_type !== 'none' && (
-                <div className="space-y-1.5">
-                  <Label>{t('mcpStore.authSecret')}</Label>
-                  <Input
-                    type="password"
-                    value={authSecret}
-                    onChange={(e) => setAuthSecret(e.target.value)}
-                    placeholder={
-                      installTemplate.auth_type === 'bearer'
-                        ? 'Bearer token'
-                        : 'API key'
-                    }
-                  />
-                </div>
-              )}
+            {/* Note about per-user credentials */}
+            {(installTemplate?.oauth_issuer || installTemplate?.allow_static_token) && (
+              <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+                After install, each user authorizes their own account at
+                <code className="mx-1 rounded bg-muted px-1">/connections</code>
+                — admins don't paste a shared token here.
+              </div>
+            )}
 
             {/* Custom headers */}
             <div className="space-y-2">
@@ -491,6 +477,36 @@ export function McpStorePage() {
   );
 }
 
+function TemplateAuthBadge({
+  template,
+  t,
+}: {
+  template: StoreTemplate;
+  t: (key: string) => string;
+}) {
+  const hasOauth = !!template.oauth_issuer;
+  const hasStatic = template.allow_static_token;
+  if (hasOauth) {
+    return (
+      <Badge variant="outline" className="gap-1">
+        <Lock className="h-3 w-3" /> OAuth
+      </Badge>
+    );
+  }
+  if (hasStatic) {
+    return (
+      <Badge variant="outline" className="gap-1">
+        <KeyRound className="h-3 w-3" /> {t('mcpStore.staticToken')}
+      </Badge>
+    );
+  }
+  return (
+    <Badge variant="outline" className="gap-1">
+      <Globe className="h-3 w-3" /> {t('mcpStore.noAuth')}
+    </Badge>
+  );
+}
+
 function TemplateCard({
   template,
   onInstall,
@@ -531,11 +547,7 @@ function TemplateCard({
         </p>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <AuthBadge
-              authType={template.auth_type}
-              requiredLabel={t('mcpStore.authRequired')}
-              noneLabel={t('mcpStore.noAuth')}
-            />
+            <TemplateAuthBadge template={template} t={t} />
             <span className="text-xs text-muted-foreground">
               {template.install_count} installs
             </span>

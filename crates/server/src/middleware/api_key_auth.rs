@@ -243,6 +243,7 @@ pub fn require_api_key(
                     user_roles,
                     surface_constraints: surface_constraints.clone(),
                     allowed_mcp_tools: merged_mcp_tools.clone(),
+                    mcp_account_overrides: row.mcp_account_overrides.clone(),
                 };
                 request.extensions_mut().insert(mcp_identity);
             }

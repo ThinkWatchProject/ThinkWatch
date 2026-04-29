@@ -46,10 +46,11 @@ impl HealthChecker {
 
         let conn = self.pool.get_or_create(server).await;
         let start = tokio::time::Instant::now();
-        // Health checks are system-level — no user session, no caller identity.
+        // Health checks are system-level — no user session, no caller
+        // identity, no auth header (anonymous probe).
         let result = self
             .pool
-            .send_request(&conn, &request, None, None, None)
+            .send_request(&conn, &request, None, None, None, None)
             .await;
         let elapsed = start.elapsed();
 

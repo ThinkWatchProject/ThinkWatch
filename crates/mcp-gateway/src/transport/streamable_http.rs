@@ -44,6 +44,10 @@ pub struct McpRequestIdentity {
     pub surface_constraints: think_watch_common::limits::SurfaceConstraints,
     /// MCP tool access patterns from role union. `None` = unrestricted.
     pub allowed_mcp_tools: Option<Vec<String>>,
+    /// Per-server account-label override map carried by the calling
+    /// API key (`api_keys.mcp_account_overrides`). The pool resolver
+    /// consults this before falling back to the user's default credential.
+    pub mcp_account_overrides: serde_json::Value,
 }
 
 /// Header name used to carry the MCP session identifier.
@@ -110,6 +114,7 @@ pub async fn handle_post(
         surface_constraints: &identity.surface_constraints,
         allowed_mcp_tools: identity.allowed_mcp_tools.as_deref(),
         trace_id: &trace_id,
+        mcp_account_overrides: &identity.mcp_account_overrides,
     };
     let response = state.proxy.handle_request(&ctx, request).await;
 

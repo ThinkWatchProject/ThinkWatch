@@ -22,6 +22,14 @@ pub struct ApiKey {
     /// (`github__*`). The middleware intersects this with the bearer's
     /// role-granted `allowed_mcp_tools` at request time.
     pub allowed_mcp_tools: Option<Vec<String>>,
+    /// Per-server MCP account override map: `{ "<server_uuid>":
+    /// "<account_label>" }`. When this key calls an MCP tool the
+    /// gateway resolves the upstream credential by looking up the
+    /// `(server_id, user_id, account_label)` row in
+    /// `mcp_user_credentials` instead of falling through to the user's
+    /// `is_default` credential. Empty `{}` ⇒ always default.
+    #[serde(default)]
+    pub mcp_account_overrides: serde_json::Value,
     // Rate limits and budget caps are stored in `rate_limit_rules` /
     // `budget_caps` (subject_kind = 'api_key_lineage', subject_id =
     // lineage_id) so they survive rotation across all generations.

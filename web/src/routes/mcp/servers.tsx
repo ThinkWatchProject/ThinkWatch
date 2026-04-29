@@ -6,7 +6,7 @@ import { StatusIndicator } from '@/components/ui/status-indicator';
 import { TransportBadge } from '@/components/ui/transport-badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogContent,
@@ -43,13 +43,67 @@ interface McpServer {
   description: string | null;
   endpoint_url: string;
   transport_type: string;
-  auth_type: string | null;
+  oauth_issuer: string | null;
+  oauth_authorization_endpoint: string | null;
+  oauth_token_endpoint: string | null;
+  oauth_revocation_endpoint: string | null;
+  oauth_client_id: string | null;
+  oauth_scopes: string[];
+  allow_static_token: boolean;
+  static_token_help_url: string | null;
   status: string;
   last_health_check: string | null;
   tools_count: number;
   call_count: number;
   config_json?: { custom_headers?: Record<string, string>; cache_ttl_secs?: number };
   created_at: string;
+}
+
+interface OAuthFields {
+  issuer: string;
+  authorizationEndpoint: string;
+  tokenEndpoint: string;
+  revocationEndpoint: string;
+  clientId: string;
+  clientSecret: string;
+  scopes: string;
+}
+
+const emptyOAuth = (): OAuthFields => ({
+  issuer: '',
+  authorizationEndpoint: '',
+  tokenEndpoint: '',
+  revocationEndpoint: '',
+  clientId: '',
+  clientSecret: '',
+  scopes: '',
+});
+
+function oauthFromServer(s: McpServer): OAuthFields {
+  return {
+    issuer: s.oauth_issuer ?? '',
+    authorizationEndpoint: s.oauth_authorization_endpoint ?? '',
+    tokenEndpoint: s.oauth_token_endpoint ?? '',
+    revocationEndpoint: s.oauth_revocation_endpoint ?? '',
+    clientId: s.oauth_client_id ?? '',
+    clientSecret: '',
+    scopes: (s.oauth_scopes ?? []).join(' '),
+  };
+}
+
+function oauthPayload(f: OAuthFields, includeSecret: boolean) {
+  const scopes = f.scopes.trim()
+    ? f.scopes.split(/\s+/).filter(Boolean)
+    : [];
+  return {
+    oauth_issuer: f.issuer || null,
+    oauth_authorization_endpoint: f.authorizationEndpoint || null,
+    oauth_token_endpoint: f.tokenEndpoint || null,
+    oauth_revocation_endpoint: f.revocationEndpoint || null,
+    oauth_client_id: f.clientId || null,
+    oauth_scopes: scopes,
+    ...(includeSecret ? { oauth_client_secret: f.clientSecret } : {}),
+  };
 }
 
 export function McpServersPage() {
@@ -64,13 +118,12 @@ export function McpServersPage() {
 
   const [name, setName] = useState('');
   const [namespacePrefix, setNamespacePrefix] = useState('');
-  // When true, stop auto-deriving `namespacePrefix` from `name` — the user
-  // has taken manual control of the prefix field.
   const [prefixManuallyEdited, setPrefixManuallyEdited] = useState(false);
   const [description, setDescription] = useState('');
   const [endpointUrl, setEndpointUrl] = useState('');
-  const [authType, setAuthType] = useState('none');
-  const [authSecret, setAuthSecret] = useState('');
+  const [oauth, setOauth] = useState<OAuthFields>(emptyOAuth());
+  const [allowStaticToken, setAllowStaticToken] = useState(false);
+  const [staticTokenHelpUrl, setStaticTokenHelpUrl] = useState('');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
   const [cacheTtl, setCacheTtl] = useState('');
 
@@ -81,15 +134,15 @@ export function McpServersPage() {
   const [editDescription, setEditDescription] = useState('');
   const [editEndpointUrl, setEditEndpointUrl] = useState('');
   const [editNamespacePrefix, setEditNamespacePrefix] = useState('');
-  const [editAuthType, setEditAuthType] = useState('none');
-  const [editAuthSecret, setEditAuthSecret] = useState('');
+  const [editOauth, setEditOauth] = useState<OAuthFields>(emptyOAuth());
+  const [editAllowStaticToken, setEditAllowStaticToken] = useState(false);
+  const [editStaticTokenHelpUrl, setEditStaticTokenHelpUrl] = useState('');
   const [editCustomHeaders, setEditCustomHeaders] = useState<[string, string][]>([]);
   const [editCacheTtl, setEditCacheTtl] = useState('');
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState('');
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
 
-  // Test connection state
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{
     success: boolean; message: string; latency_ms?: number;
@@ -102,8 +155,6 @@ export function McpServersPage() {
     try {
       const res = await apiPost<typeof testResult>('/api/mcp/servers/test', {
         endpoint_url: endpointUrl,
-        auth_type: authType,
-        auth_secret: authSecret || undefined,
         custom_headers: customHeaders.length > 0
           ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
           : null,
@@ -134,9 +185,6 @@ export function McpServersPage() {
     return () => controller.abort();
   }, []);
 
-  // Live preview of the name/prefix that will actually be written to the DB.
-  // Resolves collisions against already-registered servers by appending
-  // `#2`, `_2`, etc. — mirrors the backend's `resolve_server_collisions`.
   const taken = useMemo(() => ({
     names: new Set(servers.map((s) => s.name)),
     prefixes: new Set(servers.map((s) => s.namespace_prefix)),
@@ -157,8 +205,9 @@ export function McpServersPage() {
     setPrefixManuallyEdited(false);
     setDescription('');
     setEndpointUrl('');
-    setAuthType('none');
-    setAuthSecret('');
+    setOauth(emptyOAuth());
+    setAllowStaticToken(false);
+    setStaticTokenHelpUrl('');
     setCustomHeaders([]);
     setCacheTtl('');
     setFormError('');
@@ -170,7 +219,6 @@ export function McpServersPage() {
     setFormError('');
     setSubmitting(true);
     try {
-      // Test connection first — refuse to save if we can't list tools
       const headers = customHeaders.length > 0
         ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
         : null;
@@ -178,8 +226,6 @@ export function McpServersPage() {
         '/api/mcp/servers/test',
         {
           endpoint_url: endpointUrl,
-          auth_type: authType,
-          auth_secret: authSecret || undefined,
           custom_headers: headers,
         },
       );
@@ -194,8 +240,9 @@ export function McpServersPage() {
         namespace_prefix: resolved?.prefix ?? (namespacePrefix || undefined),
         description,
         endpoint_url: endpointUrl,
-        auth_type: authType,
-        auth_secret: authSecret || undefined,
+        ...oauthPayload(oauth, true),
+        allow_static_token: allowStaticToken,
+        static_token_help_url: staticTokenHelpUrl || null,
         custom_headers: headers,
         cache_ttl_secs: cacheTtl ? Number(cacheTtl) : undefined,
       });
@@ -241,8 +288,9 @@ export function McpServersPage() {
     setEditDescription(s.description ?? '');
     setEditEndpointUrl(s.endpoint_url);
     setEditNamespacePrefix(s.namespace_prefix ?? '');
-    setEditAuthType(s.auth_type ?? 'none');
-    setEditAuthSecret('');
+    setEditOauth(oauthFromServer(s));
+    setEditAllowStaticToken(s.allow_static_token);
+    setEditStaticTokenHelpUrl(s.static_token_help_url ?? '');
     setEditError('');
     const existing = s.config_json?.custom_headers ?? {};
     setEditCustomHeaders(Object.entries(existing));
@@ -259,19 +307,11 @@ export function McpServersPage() {
         ? Object.fromEntries(editCustomHeaders.filter(([k]) => k.trim()))
         : {};
 
-      // Test connection first — refuse to save if we can't list tools
       const test = await apiPost<{ success: boolean; message: string }>(
         '/api/mcp/servers/test',
         {
           endpoint_url: editEndpointUrl,
-          auth_type: editAuthType,
-          // If user didn't re-enter the secret, the backend will keep the
-          // existing one during save. But test needs a value to actually
-          // probe auth, so only pass when provided.
-          auth_secret: editAuthSecret || undefined,
           custom_headers: headers,
-          // Fall back to stored credentials when the secret field is empty
-          server_id: editServer.id,
         },
       );
       if (!test.success) {
@@ -279,13 +319,18 @@ export function McpServersPage() {
         return;
       }
 
+      // Only include oauth_client_secret in PATCH when the user typed a
+      // new one — empty string means "no change", explicit clear is via
+      // the "Clear" button (sends empty string).
+      const includeSecret = editOauth.clientSecret.length > 0;
       await apiPatch(`/api/mcp/servers/${editServer.id}`, {
         name: editName,
         namespace_prefix: editNamespacePrefix || undefined,
         description: editDescription,
         endpoint_url: editEndpointUrl,
-        auth_type: editAuthType,
-        auth_secret: editAuthSecret || undefined,
+        ...oauthPayload(editOauth, includeSecret),
+        allow_static_token: editAllowStaticToken,
+        static_token_help_url: editStaticTokenHelpUrl || null,
         custom_headers: headers,
         cache_ttl_secs: editCacheTtl ? Number(editCacheTtl) : undefined,
       });
@@ -313,7 +358,7 @@ export function McpServersPage() {
               {t('mcpServers.registerServer')}
             </Button>
           </DialogTrigger>
-          <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
+          <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
             <DialogHeader>
               <DialogTitle>{t('mcpServers.dialogTitle')}</DialogTitle>
               <DialogDescription>{t('mcpServers.dialogDescription')}</DialogDescription>
@@ -360,21 +405,29 @@ export function McpServersPage() {
                 <Label htmlFor="mcp-url">{t('mcpServers.endpointUrl')}</Label>
                 <Input id="mcp-url" value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} placeholder="http://localhost:8081/mcp" required />
               </div>
-              <div className="space-y-2">
-                <Label>{t('mcpServers.authType')}</Label>
-                <Select value={authType} onValueChange={(v) => { if (v) setAuthType(v); }}>
-                  <SelectTrigger><SelectValue /></SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="none">None</SelectItem>
-                    <SelectItem value="bearer">Bearer Token</SelectItem>
-                    <SelectItem value="api_key">API Key</SelectItem>
-                  </SelectContent>
-                </Select>
+              {/* OAuth client config — leave blank for upstreams that
+                  don't speak OAuth. End users provide their own
+                  per-account credentials at /connections. */}
+              <OAuthFieldset values={oauth} onChange={setOauth} />
+              <div className="flex items-center gap-2">
+                <Checkbox
+                  id="allow-static-token"
+                  checked={allowStaticToken}
+                  onCheckedChange={(v) => setAllowStaticToken(v === true)}
+                />
+                <Label htmlFor="allow-static-token" className="cursor-pointer">
+                  Allow users to paste their own static token (PAT / API key)
+                </Label>
               </div>
-              {authType !== 'none' && (
+              {allowStaticToken && (
                 <div className="space-y-2">
-                  <Label htmlFor="mcp-secret">{t('mcpServers.authSecret')}</Label>
-                  <Input id="mcp-secret" type="password" value={authSecret} onChange={(e) => setAuthSecret(e.target.value)} placeholder="Secret or token" required />
+                  <Label htmlFor="static-help">Help URL (where users get their token)</Label>
+                  <Input
+                    id="static-help"
+                    value={staticTokenHelpUrl}
+                    onChange={(e) => setStaticTokenHelpUrl(e.target.value)}
+                    placeholder="https://github.com/settings/tokens"
+                  />
                 </div>
               )}
               <div className="space-y-2">
@@ -428,10 +481,6 @@ export function McpServersPage() {
                   {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
                   {testing ? t('providers.testing') : t('providers.testConnection')}
                 </Button>
-                {/* Submit is gated on a successful test-connection so the
-                    admin always sees the tool list before a server is
-                    persisted — avoids the "registered then discovered
-                    it's broken" footgun we hit in the earlier session. */}
                 <Button
                   type="submit"
                   disabled={submitting || !testResult?.success}
@@ -560,7 +609,6 @@ export function McpServersPage() {
         </div>
       </Card>
 
-      {/* Edit MCP Server Dialog */}
       <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
         <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
@@ -597,21 +645,25 @@ export function McpServersPage() {
               <Label htmlFor="edit-mcp-url">{t('mcpServers.endpointUrl')}</Label>
               <Input id="edit-mcp-url" value={editEndpointUrl} onChange={(e) => setEditEndpointUrl(e.target.value)} />
             </div>
-            <div className="space-y-2">
-              <Label>{t('mcpServers.authType')}</Label>
-              <Select value={editAuthType} onValueChange={(v) => { if (v) setEditAuthType(v); }}>
-                <SelectTrigger><SelectValue /></SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="none">None</SelectItem>
-                  <SelectItem value="bearer">Bearer Token</SelectItem>
-                  <SelectItem value="api_key">API Key</SelectItem>
-                </SelectContent>
-              </Select>
+            <OAuthFieldset values={editOauth} onChange={setEditOauth} secretPlaceholder="Leave empty to keep current" />
+            <div className="flex items-center gap-2">
+              <Checkbox
+                id="edit-allow-static"
+                checked={editAllowStaticToken}
+                onCheckedChange={(v) => setEditAllowStaticToken(v === true)}
+              />
+              <Label htmlFor="edit-allow-static" className="cursor-pointer">
+                Allow users to paste their own static token (PAT / API key)
+              </Label>
             </div>
-            {editAuthType !== 'none' && (
+            {editAllowStaticToken && (
               <div className="space-y-2">
-                <Label>{t('mcpServers.authSecret')}</Label>
-                <Input type="password" value={editAuthSecret} onChange={(e) => setEditAuthSecret(e.target.value)} placeholder="Leave empty to keep current" />
+                <Label htmlFor="edit-static-help">Help URL</Label>
+                <Input
+                  id="edit-static-help"
+                  value={editStaticTokenHelpUrl}
+                  onChange={(e) => setEditStaticTokenHelpUrl(e.target.value)}
+                />
               </div>
             )}
             <div className="space-y-2">
@@ -651,6 +703,79 @@ export function McpServersPage() {
         confirmLabel={t('common.delete')}
         onConfirm={() => { if (deleteTargetId) handleDelete(deleteTargetId); }}
       />
+    </div>
+  );
+}
+
+function OAuthFieldset({
+  values,
+  onChange,
+  secretPlaceholder,
+}: {
+  values: OAuthFields;
+  onChange: (next: OAuthFields) => void;
+  secretPlaceholder?: string;
+}) {
+  return (
+    <div className="space-y-2 rounded-md border p-3">
+      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+        OAuth (optional — for upstreams that support OAuth)
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        <div className="space-y-1">
+          <Label className="text-xs">Issuer</Label>
+          <Input
+            value={values.issuer}
+            onChange={(e) => onChange({ ...values, issuer: e.target.value })}
+            placeholder="https://github.com"
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Client ID</Label>
+          <Input
+            value={values.clientId}
+            onChange={(e) => onChange({ ...values, clientId: e.target.value })}
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Authorization endpoint</Label>
+          <Input
+            value={values.authorizationEndpoint}
+            onChange={(e) => onChange({ ...values, authorizationEndpoint: e.target.value })}
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Client secret</Label>
+          <Input
+            type="password"
+            value={values.clientSecret}
+            onChange={(e) => onChange({ ...values, clientSecret: e.target.value })}
+            placeholder={secretPlaceholder}
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Token endpoint</Label>
+          <Input
+            value={values.tokenEndpoint}
+            onChange={(e) => onChange({ ...values, tokenEndpoint: e.target.value })}
+          />
+        </div>
+        <div className="space-y-1">
+          <Label className="text-xs">Revocation endpoint</Label>
+          <Input
+            value={values.revocationEndpoint}
+            onChange={(e) => onChange({ ...values, revocationEndpoint: e.target.value })}
+          />
+        </div>
+      </div>
+      <div className="space-y-1">
+        <Label className="text-xs">Scopes (space separated)</Label>
+        <Input
+          value={values.scopes}
+          onChange={(e) => onChange({ ...values, scopes: e.target.value })}
+          placeholder="repo read:user"
+        />
+      </div>
     </div>
   );
 }

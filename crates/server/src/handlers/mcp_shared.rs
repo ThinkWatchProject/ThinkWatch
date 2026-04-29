@@ -1,17 +1,14 @@
 //! Cross-handler MCP utilities.
 //!
-//! `probe_mcp_endpoint` (one-shot tools/list probe), namespace-prefix
-//! normalisation, and auth-header shaping are called from every handler
-//! that touches an MCP server: `mcp_servers` (CRUD + connectivity test),
-//! `mcp_store` (install-from-template pre-flight), and future service-
-//! layer callers. Previously they lived inside `mcp_servers.rs` and the
-//! store handler reached in via `super::mcp_servers::*`, which coupled
-//! the two handlers and made either file risky to split independently.
+//! `probe_mcp_endpoint` (one-shot tools/list probe) and namespace-prefix
+//! normalisation. Called from every handler that touches an MCP server
+//! catalog: `mcp_servers` (CRUD + connectivity test) and `mcp_store`
+//! (install-from-template pre-flight).
 //!
-//! Splitting the utilities out here removes the cross-handler reach and
-//! anchors them as "MCP plumbing" rather than part of either handler's
-//! public surface. The Rust error enum stays `AppError` because callers
-//! need to propagate through axum responses.
+//! Probes are **anonymous** — they don't carry user credentials. Auth
+//! validation for upstreams that require a Bearer token / PAT happens
+//! when an end user authorizes through `/connections`. The admin "Test"
+//! button verifies endpoint reachability + JSON-RPC compliance only.
 
 use think_watch_common::errors::AppError;
 
@@ -37,8 +34,6 @@ pub struct McpProbeOutcome {
 pub async fn probe_mcp_endpoint(
     http: &reqwest::Client,
     endpoint_url: &str,
-    auth_type: Option<&str>,
-    auth_secret: Option<&str>,
     custom_headers: Option<&std::collections::HashMap<String, String>>,
 ) -> McpProbeOutcome {
     let body = serde_json::json!({
@@ -53,10 +48,6 @@ pub async fn probe_mcp_endpoint(
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
         .json(&body);
-
-    if let Some((name, value)) = build_auth_probe_header(auth_type, auth_secret) {
-        builder = builder.header(name, value);
-    }
 
     if let Some(headers) = custom_headers {
         for (k, v) in headers {
@@ -207,17 +198,4 @@ pub fn normalize_namespace_prefix(
         ));
     }
     Ok(derived)
-}
-
-/// Build an `(header_name, header_value)` pair for auth probes.
-pub fn build_auth_probe_header(
-    auth_type: Option<&str>,
-    auth_secret: Option<&str>,
-) -> Option<(String, String)> {
-    let secret = auth_secret.filter(|s| !s.is_empty())?;
-    match auth_type? {
-        "bearer" => Some(("Authorization".to_owned(), format!("Bearer {secret}"))),
-        "api_key" => Some(("X-API-Key".to_owned(), secret.to_owned())),
-        _ => None,
-    }
 }
