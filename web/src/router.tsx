@@ -57,6 +57,7 @@ const GuidePage = lazyRouteComponent(() => import('@/routes/guide'), 'GuidePage'
 const McpServersPage = lazyRouteComponent(() => import('@/routes/mcp/servers'), 'McpServersPage');
 const McpToolsPage = lazyRouteComponent(() => import('@/routes/mcp/tools'), 'McpToolsPage');
 const McpStorePage = lazyRouteComponent(() => import('@/routes/mcp/store'), 'McpStorePage');
+const ConnectionsPage = lazyRouteComponent(() => import('@/routes/connections'), 'ConnectionsPage');
 const UsagePage = lazyRouteComponent(() => import('@/routes/analytics/usage'), 'UsagePage');
 const CostsPage = lazyRouteComponent(() => import('@/routes/analytics/costs'), 'CostsPage');
 const UsersPage = lazyRouteComponent(() => import('@/routes/admin/users'), 'UsersPage');
@@ -283,6 +284,12 @@ const mcpStoreRoute = createRoute({
   component: gate(McpStorePage as unknown as React.ComponentType, '/mcp/store'),
 });
 
+const connectionsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/connections',
+  component: gate(ConnectionsPage as unknown as React.ComponentType, '/connections'),
+});
+
 const usageRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/analytics/usage',
@@ -427,6 +434,7 @@ const routeTree = rootRoute.addChildren([
   mcpServersRoute,
   mcpToolsRoute,
   mcpStoreRoute,
+  connectionsRoute,
   usageRoute,
   costsRoute,
   usersRoute,

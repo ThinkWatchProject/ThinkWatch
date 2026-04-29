@@ -33,6 +33,7 @@ const exactBreadcrumbs: Record<string, CrumbEntry> = {
   '/mcp/servers': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.mcpServers' },
   '/mcp/tools': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.tools' },
   '/mcp/store': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.mcpStore' },
+  '/connections': { sectionKey: 'nav.mcpGateway', pageKey: 'nav.connections' },
   '/analytics/usage': { sectionKey: 'nav.analytics', pageKey: 'nav.usage' },
   '/analytics/costs': { sectionKey: 'nav.analytics', pageKey: 'nav.costs' },
   '/logs': { sectionKey: 'nav.logs', pageKey: 'nav.logExplorer' },

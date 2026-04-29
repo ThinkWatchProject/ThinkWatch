@@ -1,7 +1,7 @@
 use axum::{
     Router,
     http::{HeaderValue, Method, header},
-    routing::{delete, get, patch, post},
+    routing::{delete, get, patch, post, put},
 };
 use fred::clients::Client;
 use sqlx::PgPool;
@@ -375,6 +375,14 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         .route("/api/auth/sso/authorize", get(handlers::sso::sso_authorize))
         .route("/api/auth/sso/callback", get(handlers::sso::sso_callback))
         .route("/api/auth/sso/status", get(handlers::health::sso_status))
+        // MCP OAuth callback — public because the upstream OAuth
+        // provider redirects the user's browser here without a
+        // ThinkWatch session cookie. Authentication is via the
+        // single-use Redis state token, which carries the user_id.
+        .route(
+            "/api/mcp/oauth/callback",
+            get(handlers::mcp_oauth::oauth_callback),
+        )
         // Public client-error sink — frontend ErrorBoundary posts here
         // when a render crashes. Auth-free because a logged-out user
         // hitting a buggy login page should still produce a server-
@@ -463,6 +471,30 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         .route(
             "/api/keys/{id}/rotate",
             post(handlers::api_keys::rotate_key),
+        )
+        // Per-user MCP credential management — listing connections,
+        // starting OAuth, revoking, switching default, pasting PATs.
+        // All gated by the `mcp:connect` permission inside each
+        // handler.
+        .route(
+            "/api/mcp/connections",
+            get(handlers::mcp_oauth::list_connections),
+        )
+        .route(
+            "/api/mcp/connections/{server_id}/authorize",
+            post(handlers::mcp_oauth::start_authorize),
+        )
+        .route(
+            "/api/mcp/connections/{server_id}/{account_label}",
+            delete(handlers::mcp_oauth::revoke_connection),
+        )
+        .route(
+            "/api/mcp/connections/{server_id}/{account_label}/default",
+            put(handlers::mcp_oauth::set_default_connection),
+        )
+        .route(
+            "/api/mcp/connections/{server_id}/{account_label}/static-token",
+            put(handlers::mcp_oauth::paste_static_token),
         )
         // NOTE: `/api/admin/keys/{id}/force-revoke` lives in
         // `admin_routes` further down — keep this comment so a

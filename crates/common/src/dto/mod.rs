@@ -174,6 +174,13 @@ pub struct CreateApiKeyRequest {
     /// = unrestricted; must be a subset of the caller's
     /// role-granted `allowed_mcp_tools` (enforced by the handler).
     pub allowed_mcp_tools: Option<Vec<String>>,
+    /// Per-server account-label override map:
+    /// `{ "<mcp_server_uuid>": "<account_label>" }`. Optional —
+    /// missing or empty means "use the user's default account".
+    /// Validated by the handler against the user's existing
+    /// `mcp_user_credentials` rows.
+    #[serde(default)]
+    pub mcp_account_overrides: Option<serde_json::Value>,
     pub expires_in_days: Option<i32>,
     /// Optional cost-center / project tag for analytics attribution.
     /// Free-form up to 64 chars; the admin UI autocompletes from the

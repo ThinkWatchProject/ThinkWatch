@@ -168,6 +168,58 @@ async fn validate_allowlists_within_role(
     Ok(())
 }
 
+/// Validate the optional `mcp_account_overrides` map on key
+/// create/update: every (server_id, account_label) it points at must
+/// exist in `mcp_user_credentials` for the calling user. Returns the
+/// canonicalized JSON value (object or `{}`) ready to bind.
+async fn validate_mcp_account_overrides(
+    pool: &sqlx::PgPool,
+    user_id: Uuid,
+    overrides: Option<&serde_json::Value>,
+) -> Result<serde_json::Value, AppError> {
+    let Some(v) = overrides else {
+        return Ok(serde_json::json!({}));
+    };
+    let map = match v {
+        serde_json::Value::Object(m) => m,
+        serde_json::Value::Null => return Ok(serde_json::json!({})),
+        _ => {
+            return Err(AppError::BadRequest(
+                "mcp_account_overrides must be a JSON object".into(),
+            ));
+        }
+    };
+    if map.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    for (server_id_str, label_val) in map {
+        let server_id = Uuid::parse_str(server_id_str).map_err(|_| {
+            AppError::BadRequest(format!(
+                "mcp_account_overrides key '{server_id_str}' is not a UUID"
+            ))
+        })?;
+        let label = label_val.as_str().ok_or_else(|| {
+            AppError::BadRequest("mcp_account_overrides values must be strings".into())
+        })?;
+        let exists: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM mcp_user_credentials
+              WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3",
+        )
+        .bind(server_id)
+        .bind(user_id)
+        .bind(label)
+        .fetch_optional(pool)
+        .await?;
+        if exists.is_none() {
+            return Err(AppError::BadRequest(format!(
+                "mcp_account_overrides points at '{label}' for server {server_id_str}, \
+                 but you have no credential with that label"
+            )));
+        }
+    }
+    Ok(serde_json::Value::Object(map.clone()))
+}
+
 /// GET /api/keys
 ///
 /// Result set is the union of:
@@ -321,6 +373,12 @@ pub async fn create_key(
         .map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
 
     let cost_center = validate_cost_center(req.cost_center.as_deref())?;
+    let mcp_account_overrides = validate_mcp_account_overrides(
+        &state.db,
+        auth_user.claims.sub,
+        req.mcp_account_overrides.as_ref(),
+    )
+    .await?;
 
     // Pre-mint the row's id so we can bind it to BOTH `id` and
     // `lineage_id`. A brand-new key is its own lineage root —
@@ -332,8 +390,8 @@ pub async fn create_key(
     let id = uuid::Uuid::new_v4();
     let row = sqlx::query_as::<_, ApiKey>(
         r#"INSERT INTO api_keys (id, lineage_id, key_prefix, key_hash, name, user_id, surfaces,
-                allowed_models, allowed_mcp_tools, expires_at, cost_center)
-           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING *"#,
+                allowed_models, allowed_mcp_tools, mcp_account_overrides, expires_at, cost_center)
+           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *"#,
     )
     .bind(id)
     .bind(&generated.prefix)
@@ -343,6 +401,7 @@ pub async fn create_key(
     .bind(&surfaces)
     .bind(&req.allowed_models)
     .bind(&req.allowed_mcp_tools)
+    .bind(&mcp_account_overrides)
     .bind(expires_at)
     .bind(cost_center.as_deref())
     .fetch_one(&state.db)
@@ -549,6 +608,15 @@ pub struct UpdateKeyRequest {
     /// Free-form cost-center / project tag. `Some("")` clears the tag;
     /// `None` leaves it untouched.
     pub cost_center: Option<String>,
+    /// PATCH semantics for the per-server account override map:
+    ///   - field absent → leave unchanged
+    ///   - empty `{}`   → drop all overrides
+    ///   - object       → replace entirely
+    /// Validated against the key owner's existing
+    /// `mcp_user_credentials` rows.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<serde_json::Value>)]
+    pub mcp_account_overrides: Option<Option<serde_json::Value>>,
 }
 
 /// PATCH /api/keys/{id} — update key settings.
@@ -647,6 +715,28 @@ pub async fn update_key(
         Some(inner) => (true, inner.as_deref()),
     };
 
+    // mcp_account_overrides PATCH:
+    //  * None              → leave unchanged
+    //  * Some(None)        → JSON null in the request → drop overrides ({})
+    //  * Some(Some(value)) → validate + replace entirely
+    let (overrides_set, overrides_value) = match &req.mcp_account_overrides {
+        None => (false, serde_json::json!({})),
+        Some(None) => (true, serde_json::json!({})),
+        Some(Some(v)) => {
+            let owner = key
+                .user_id
+                .ok_or_else(|| {
+                    AppError::BadRequest(
+                        "service-account keys cannot use mcp_account_overrides".into(),
+                    )
+                })?;
+            (
+                true,
+                validate_mcp_account_overrides(&state.db, owner, Some(v)).await?,
+            )
+        }
+    };
+
     let updated = sqlx::query_as::<_, ApiKey>(
         r#"UPDATE api_keys SET
             allowed_models = CASE WHEN $11 THEN $1 ELSE allowed_models END,
@@ -656,6 +746,7 @@ pub async fn update_key(
             rotation_period_days = COALESCE($4, rotation_period_days),
             inactivity_timeout_days = COALESCE($5, inactivity_timeout_days),
             cost_center = CASE WHEN $7 THEN $6 ELSE cost_center END,
+            mcp_account_overrides = CASE WHEN $13 THEN $14 ELSE mcp_account_overrides END,
             last_expiry_warning_days = CASE WHEN $9 THEN NULL
                                             ELSE last_expiry_warning_days END
            WHERE id = $8 RETURNING *"#,
@@ -672,6 +763,8 @@ pub async fn update_key(
     .bind(mcp_tools_value)
     .bind(models_set)
     .bind(mcp_tools_set)
+    .bind(overrides_set)
+    .bind(&overrides_value)
     .fetch_one(&state.db)
     .await?;
 

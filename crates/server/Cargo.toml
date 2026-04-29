@@ -42,6 +42,7 @@ p256 = { workspace = true }
 ecdsa = { workspace = true }
 rand = { workspace = true }
 data-encoding = { workspace = true }
+serde_urlencoded = "0.7"
 subtle = { workspace = true }
 url = { workspace = true }
 metrics = { workspace = true }

@@ -16,6 +16,7 @@ pub mod limits;
 pub mod limits_bulk;
 pub mod log_forwarders;
 pub mod mcp_logs;
+pub mod mcp_oauth;
 pub mod mcp_servers;
 pub(crate) mod mcp_shared;
 pub mod mcp_store;

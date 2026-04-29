@@ -15,6 +15,7 @@ import {
 import {
   LayoutDashboard,
   Plug,
+  Plug2,
   BrainCircuit,
   Key,
   ScrollText,
@@ -78,6 +79,7 @@ const navGroups: NavGroup[] = [
       { titleKey: 'nav.mcpServers', icon: Server, href: '/mcp/servers' },
       { titleKey: 'nav.tools', icon: Wrench, href: '/mcp/tools' },
       { titleKey: 'nav.mcpStore', icon: Store, href: '/mcp/store' },
+      { titleKey: 'nav.connections', icon: Plug2, href: '/connections' },
     ],
   },
   {

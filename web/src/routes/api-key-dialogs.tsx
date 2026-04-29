@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,7 +14,7 @@ import {
 } from '@/components/ui/dialog';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Copy, Check, AlertCircle } from 'lucide-react';
-import { apiPost, apiPatch, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPatch, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import {
   ScopeDropdown,
@@ -39,6 +39,9 @@ export interface ApiKey {
   surfaces: Surface[];
   allowed_models: string[] | null;
   allowed_mcp_tools: string[] | null;
+  /// Per-MCP-server account-label override map. Empty `{}` ⇒ the
+  /// gateway always picks the user's default credential.
+  mcp_account_overrides?: Record<string, string>;
   expires_at: string | null;
   is_active: boolean;
   last_used_at: string | null;
@@ -340,6 +343,7 @@ export function EditApiKeyDialog({
   const [editRotationPeriod, setEditRotationPeriod] = useState('');
   const [editInactivityTimeout, setEditInactivityTimeout] = useState('');
   const [editCostCenter, setEditCostCenter] = useState('');
+  const [editMcpOverrides, setEditMcpOverrides] = useState<Record<string, string>>({});
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editError, setEditError] = useState('');
 
@@ -362,6 +366,7 @@ export function EditApiKeyDialog({
     setEditRotationPeriod(apiKey.rotation_period_days?.toString() ?? '');
     setEditInactivityTimeout(apiKey.inactivity_timeout_days?.toString() ?? '');
     setEditCostCenter(apiKey.cost_center ?? '');
+    setEditMcpOverrides(apiKey.mcp_account_overrides ?? {});
     setEditError('');
   }
 
@@ -393,6 +398,12 @@ export function EditApiKeyDialog({
         mcpEnabled && editSelectedMcpTools && editSelectedMcpTools.size > 0
           ? Array.from(editSelectedMcpTools)
           : null;
+      // Strip empty-string entries so the backend's "missing label"
+      // validator doesn't reject them — empty just means "no override
+      // for that server".
+      const overrides = Object.fromEntries(
+        Object.entries(editMcpOverrides).filter(([, label]) => label.trim().length > 0),
+      );
       await apiPatch(`/api/keys/${apiKey.id}`, {
         allowed_models: allowedModels,
         allowed_mcp_tools: allowedMcpTools,
@@ -401,6 +412,7 @@ export function EditApiKeyDialog({
         rotation_period_days: editRotationPeriod ? parseInt(editRotationPeriod, 10) : null,
         inactivity_timeout_days: editInactivityTimeout ? parseInt(editInactivityTimeout, 10) : null,
         cost_center: editCostCenter.trim(),
+        mcp_account_overrides: overrides,
       });
       if (editCostCenter.trim()) {
         onCostCenterAdded(editCostCenter.trim());
@@ -499,6 +511,11 @@ export function EditApiKeyDialog({
             </datalist>
             <p className="text-xs text-muted-foreground">{t('apiKeys.costCenterHint')}</p>
           </div>
+          <McpAccountOverridesField
+            value={editMcpOverrides}
+            onChange={setEditMcpOverrides}
+            visible={editSurfaces.includes('mcp_gateway')}
+          />
           <DialogFooter>
             <Button type="submit" disabled={editSubmitting}>
               {editSubmitting ? t('common.loading') : t('common.save')}
@@ -507,6 +524,96 @@ export function EditApiKeyDialog({
         </form>
       </DialogContent>
     </Dialog>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// McpAccountOverridesField — per-server account-label dropdown row
+// ---------------------------------------------------------------------------
+
+interface McpConnAccount {
+  account_label: string;
+  is_default: boolean;
+}
+interface McpServerConn {
+  server_id: string;
+  server_name: string;
+  accounts: McpConnAccount[];
+}
+
+function McpAccountOverridesField({
+  value,
+  onChange,
+  visible,
+}: {
+  value: Record<string, string>;
+  onChange: (v: Record<string, string>) => void;
+  visible: boolean;
+}) {
+  const { t } = useTranslation();
+  const [conns, setConns] = useState<McpServerConn[] | null>(null);
+
+  useEffect(() => {
+    if (!visible) return;
+    let cancelled = false;
+    api<McpServerConn[]>('/api/mcp/connections')
+      .then((data) => {
+        if (!cancelled) setConns(data);
+      })
+      .catch(() => {
+        if (!cancelled) setConns([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [visible]);
+
+  if (!visible) return null;
+  if (conns === null) {
+    return (
+      <p className="text-xs text-muted-foreground">{t('common.loading')}</p>
+    );
+  }
+  // Only servers where the user has at least 2 accounts give us a real
+  // choice — single-account servers always pick the default. Skip them
+  // to keep the form short.
+  const choosable = conns.filter((c) => c.accounts.length >= 2);
+  if (choosable.length === 0) {
+    return null;
+  }
+  return (
+    <div className="space-y-2">
+      <Label>{t('apiKeys.mcpOverrides')}</Label>
+      <p className="text-xs text-muted-foreground">{t('apiKeys.mcpOverridesHint')}</p>
+      <div className="space-y-2 rounded-md border p-3">
+        {choosable.map((c) => (
+          <div key={c.server_id} className="flex items-center justify-between gap-2">
+            <span className="text-sm font-medium">{c.server_name}</span>
+            <select
+              className="h-8 rounded-md border bg-background px-2 text-sm"
+              value={value[c.server_id] ?? ''}
+              onChange={(e) => {
+                const next = { ...value };
+                if (e.target.value) {
+                  next[c.server_id] = e.target.value;
+                } else {
+                  delete next[c.server_id];
+                }
+                onChange(next);
+              }}
+            >
+              <option value="">{t('apiKeys.useDefaultAccount')}</option>
+              {c.accounts.map((a) => (
+                <option key={a.account_label} value={a.account_label}>
+                  {a.account_label}
+                  {a.is_default ? ` (${t('connections.default')})` : ''}
+                </option>
+              ))}
+            </select>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

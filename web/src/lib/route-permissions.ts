@@ -21,6 +21,7 @@ export const ROUTE_PERMISSIONS: Record<string, string | undefined> = {
   '/api-keys': undefined,
   '/guide': undefined,
   '/profile': undefined,
+  '/connections': 'mcp:connect',
 
   // --- AI Gateway ---
   '/gateway/providers': 'providers:read',

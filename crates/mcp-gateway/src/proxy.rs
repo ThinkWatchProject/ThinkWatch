@@ -208,7 +208,7 @@ impl McpProxy {
     ) -> JsonRpcResponse {
         match request.method.as_str() {
             "initialize" => self.handle_initialize(request).await,
-            "tools/list" => self.handle_tools_list(ctx.allowed_mcp_tools, request).await,
+            "tools/list" => self.handle_tools_list(ctx, request).await,
             "tools/call" => self.handle_tools_call(ctx, request).await,
             _ => err_response(
                 request.id,
@@ -245,22 +245,64 @@ impl McpProxy {
 
     async fn handle_tools_list(
         &self,
-        allowed_mcp_tools: Option<&[String]>,
+        ctx: &RequestContext<'_>,
         request: JsonRpcRequest,
     ) -> JsonRpcResponse {
-        let all_tools = self.registry.get_all_tools(None).await;
+        // Pre-compute the set of server_ids this user already has a
+        // credential for so the per-tool annotation step doesn't run
+        // a SELECT per registered tool.
+        let connected_server_ids: std::collections::HashSet<Uuid> = sqlx::query_scalar(
+            "SELECT DISTINCT mcp_server_id FROM mcp_user_credentials WHERE user_id = $1",
+        )
+        .bind(ctx.user_id)
+        .fetch_all(&self.db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
 
-        let tools: Vec<serde_json::Value> = all_tools
-            .into_iter()
-            .filter(|(name, _)| is_tool_allowed(allowed_mcp_tools, name))
-            .map(|(namespaced_name, info)| {
-                serde_json::json!({
-                    "name": namespaced_name,
-                    "description": info.description.unwrap_or_default(),
-                    "inputSchema": info.input_schema.unwrap_or(serde_json::json!({"type": "object"})),
-                })
-            })
-            .collect();
+        let servers = self.registry.list().await;
+        let mut tools: Vec<serde_json::Value> = Vec::new();
+        for server in servers {
+            let server_needs_auth = server.oauth_cfg.is_some() || server.allow_static_token;
+            let user_connected = connected_server_ids.contains(&server.id);
+            // The tool is "blocked" when the server gates per-user auth
+            // and this user hasn't connected an account yet. Surface
+            // it anyway with `_meta.requires_user_auth = true` so the
+            // calling client (and our own /connections UI) can prompt.
+            let requires_user_auth = server_needs_auth && !user_connected;
+
+            for tool in &server.tools {
+                let namespaced = format!(
+                    "{}{}{}",
+                    server.namespace_prefix,
+                    crate::registry::NAMESPACE_SEPARATOR,
+                    tool.name,
+                );
+                if !is_tool_allowed(ctx.allowed_mcp_tools, &namespaced) {
+                    continue;
+                }
+                let mut entry = serde_json::json!({
+                    "name": namespaced,
+                    "description": tool.description.clone().unwrap_or_default(),
+                    "inputSchema": tool.input_schema.clone()
+                        .unwrap_or(serde_json::json!({"type": "object"})),
+                });
+                if requires_user_auth
+                    && let Some(obj) = entry.as_object_mut()
+                {
+                    obj.insert(
+                        "_meta".to_string(),
+                        serde_json::json!({
+                            "requires_user_auth": true,
+                            "server_id": server.id.to_string(),
+                            "server_name": server.name,
+                        }),
+                    );
+                }
+                tools.push(entry);
+            }
+        }
 
         ok_response(request.id, serde_json::json!({ "tools": tools }))
     }
