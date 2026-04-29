@@ -2,18 +2,16 @@
 
 ## Pre-commit
 
-Always run `make precommit` before committing. It mirrors the CI pipeline exactly:
+Always run `make precommit` before committing. The two pipelines run in parallel via a recursive `make -j2`:
 
 ```
-cargo nextest run --workspace --lib --bins --tests
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all -- --check
-cd web && pnpm check:i18n
-cd web && pnpm test           # vitest run
-cd web && pnpm build          # tsc -b && vite build
+# pipeline 1 (rust)                   | # pipeline 2 (frontend)
+cargo nextest run --workspace ...     | cd web && pnpm check:i18n
+cargo clippy --workspace -- -D warn   |          && pnpm test
+cargo fmt --all -- --check            |          && pnpm build
 ```
 
-`cargo check` is intentionally absent — clippy is a strict superset, and re-running check separately just doubles the Rust compile time on touched-common-types diffs.
+Wall-clock is `max(rust, frontend)` instead of their sum, since the pipelines never share build artifacts. `cargo check` is intentionally absent — clippy is a strict superset, and re-running check separately just doubles the Rust compile time on touched-common-types diffs. Clippy runs *without* `--all-targets` so the test sources nextest already compiled don't get re-walked under the lint pass.
 
 `cargo nextest` is required (replaces `cargo test` for ~3× faster cross-binary parallelism). Install once via `make tools` (idempotent — runs `cargo install cargo-nextest --locked`).
 

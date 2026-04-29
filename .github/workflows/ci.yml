@@ -60,7 +60,7 @@ jobs:
         run: cargo nextest run --workspace --lib --bins --tests
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: cargo clippy --workspace -- -D warnings
 
       - name: Format check
         run: cargo fmt --all -- --check

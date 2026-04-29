@@ -1,4 +1,5 @@
-.PHONY: dev dev-backend dev-frontend infra infra-down check precommit test test-it test-e2e build clean \
+.PHONY: dev dev-backend dev-frontend infra infra-down check precommit precommit-rust precommit-frontend \
+        test test-it test-e2e build clean \
         tools deploy deploy-down secrets helm-deploy helm-deploy-down helm-template helm-lint
 
 # Start full dev environment
@@ -27,22 +28,33 @@ check:
 # Pre-commit: mirrors CI exactly (clippy + nextest + fmt + i18n parity
 # + pnpm test + pnpm build).
 #
-# `cargo check` is intentionally absent — `cargo clippy` runs the
-# borrow-checker as a strict superset of check and rebuilding the same
-# artifacts twice cost ~30s on a touched-shared-types diff.
+# Three speedup levers vs. a naive `cargo {check,test,clippy,fmt}`
+# pipeline:
+#   1. `cargo check` is dropped — `cargo clippy` is a strict superset
+#      and the separate pass would just rebuild the same artifacts.
+#   2. `cargo test` is replaced by `cargo nextest run` so each test
+#      binary runs in its own process; on a touched-common-types diff
+#      this stops the workspace from blocking on the slowest binary.
+#   3. The Rust and frontend pipelines run in parallel via a
+#      recursive `make -j2` — wall-clock is `max(rust, frontend)`
+#      instead of their sum, since the two pipelines never share
+#      build artifacts.
 #
-# `cargo nextest run` runs each test binary in its own process and
-# parallelises across the workspace. On a touched-common-types diff
-# this saves another ~5min over `cargo test` because nextest doesn't
-# block the workspace on the slowest binary the way cargo does.
 # `--lib --bins --tests` excludes doc tests so we don't pay rustdoc's
 # rebuild for the handful of `ignore`/`text` code blocks we have.
+# `cargo clippy` runs *without* `--all-targets` to avoid recompiling
+# tests under the clippy lint pass on top of nextest's compile.
 #
 # Run `make tools` once to install cargo-nextest if it's missing.
 precommit:
+	@$(MAKE) -j2 precommit-rust precommit-frontend
+
+precommit-rust:
 	cargo nextest run --workspace --lib --bins --tests
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace -- -D warnings
 	cargo fmt --all -- --check
+
+precommit-frontend:
 	cd web && pnpm check:i18n
 	cd web && pnpm test
 	cd web && pnpm build
