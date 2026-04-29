@@ -1,5 +1,5 @@
 .PHONY: dev dev-backend dev-frontend infra infra-down check precommit test test-it test-e2e build clean \
-        deploy deploy-down secrets helm-deploy helm-deploy-down helm-template helm-lint
+        tools deploy deploy-down secrets helm-deploy helm-deploy-down helm-template helm-lint
 
 # Start full dev environment
 dev: infra dev-backend dev-frontend
@@ -24,25 +24,38 @@ check:
 	cargo check --workspace
 	cd web && pnpm exec tsc --noEmit
 
-# Pre-commit: mirrors CI exactly (cargo check + test + clippy + fmt +
-# i18n parity + pnpm test + pnpm build).
+# Pre-commit: mirrors CI exactly (clippy + nextest + fmt + i18n parity
+# + pnpm test + pnpm build).
 #
-# `--lib --bins --tests` excludes doc tests, which rebuild every crate
-# under rustdoc even when the workspace has only a handful of code
-# blocks (and they're all ```text``` / ```ignore```). Skipping them
-# cuts precommit from ~20m to ~1m with zero coverage loss.
+# `cargo check` is intentionally absent — `cargo clippy` runs the
+# borrow-checker as a strict superset of check and rebuilding the same
+# artifacts twice cost ~30s on a touched-shared-types diff.
+#
+# `cargo nextest run` runs each test binary in its own process and
+# parallelises across the workspace. On a touched-common-types diff
+# this saves another ~5min over `cargo test` because nextest doesn't
+# block the workspace on the slowest binary the way cargo does.
+# `--lib --bins --tests` excludes doc tests so we don't pay rustdoc's
+# rebuild for the handful of `ignore`/`text` code blocks we have.
+#
+# Run `make tools` once to install cargo-nextest if it's missing.
 precommit:
-	cargo check --workspace
-	cargo test --workspace --lib --bins --tests
-	cargo clippy --workspace -- -D warnings
+	cargo nextest run --workspace --lib --bins --tests
+	cargo clippy --workspace --all-targets -- -D warnings
 	cargo fmt --all -- --check
 	cd web && pnpm check:i18n
 	cd web && pnpm test
 	cd web && pnpm build
 
-# Run all tests
+# Run all tests (same pattern as precommit's test step).
 test:
-	cargo test --workspace --lib --bins --tests
+	cargo nextest run --workspace --lib --bins --tests
+
+# Install dev tools that precommit + CI assume are available locally.
+# Idempotent: cargo install is a no-op when the binary is already
+# present at the same version.
+tools:
+	cargo install cargo-nextest --locked
 
 # Run the full integration test suite (test-support crate). Tests
 # are #[ignore]-marked so the default `cargo test --workspace` skips

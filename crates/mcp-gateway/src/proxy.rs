@@ -288,9 +288,7 @@ impl McpProxy {
                     "inputSchema": tool.input_schema.clone()
                         .unwrap_or(serde_json::json!({"type": "object"})),
                 });
-                if requires_user_auth
-                    && let Some(obj) = entry.as_object_mut()
-                {
+                if requires_user_auth && let Some(obj) = entry.as_object_mut() {
                     obj.insert(
                         "_meta".to_string(),
                         serde_json::json!({

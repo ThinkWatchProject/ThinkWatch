@@ -237,6 +237,10 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
     // fresh AND mirrors the result back to `mcp_servers.status` so the
     // admin UI sees real liveness without a manual probe.
     crate::mcp_runtime::spawn_mcp_health_loop(state.clone(), registry.clone(), pool.clone());
+    // Daily catalog refresh — keeps `cached_tools_jsonb` from drifting
+    // away from upstream reality. Independent of the health loop so
+    // tool-discovery failures don't pollute health status.
+    crate::mcp_runtime::spawn_mcp_catalog_refresh_loop(state.clone(), registry.clone());
 
     let session_manager =
         SessionManager::with_redis(state.redis.clone(), state.dynamic_config.clone());
@@ -726,6 +730,15 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         .route(
             "/api/admin/mcp-store/sync",
             post(handlers::mcp_store::sync_registry),
+        )
+        // RFC 8414 / OIDC discovery proxy. Browsers can't fetch
+        // .well-known directly because most upstreams don't allow
+        // CORS to their metadata endpoint, so the admin form calls
+        // this from the backend instead. Permission-checked inside
+        // the handler.
+        .route(
+            "/api/admin/mcp/oauth-discover",
+            post(handlers::mcp_oauth::oauth_discover),
         )
         .route(
             "/api/admin/users",

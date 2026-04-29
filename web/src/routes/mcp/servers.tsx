@@ -716,11 +716,57 @@ function OAuthFieldset({
   onChange: (next: OAuthFields) => void;
   secretPlaceholder?: string;
 }) {
+  const [discovering, setDiscovering] = useState(false);
+  const handleDiscover = async () => {
+    if (!values.issuer.trim()) {
+      toast.error('Set issuer first');
+      return;
+    }
+    setDiscovering(true);
+    try {
+      const meta = await apiPost<{
+        authorization_endpoint?: string;
+        token_endpoint?: string;
+        revocation_endpoint?: string;
+        scopes_supported?: string[];
+      }>('/api/admin/mcp/oauth-discover', { issuer: values.issuer.trim() });
+      // Fill only the fields the upstream actually advertised — leave
+      // anything the user already typed alone otherwise.
+      onChange({
+        ...values,
+        authorizationEndpoint:
+          meta.authorization_endpoint || values.authorizationEndpoint,
+        tokenEndpoint: meta.token_endpoint || values.tokenEndpoint,
+        revocationEndpoint:
+          meta.revocation_endpoint || values.revocationEndpoint,
+        scopes:
+          values.scopes ||
+          (meta.scopes_supported ? meta.scopes_supported.join(' ') : ''),
+      });
+      toast.success('Discovered OAuth metadata');
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Discovery failed');
+    } finally {
+      setDiscovering(false);
+    }
+  };
   return (
     <div className="space-y-2 rounded-md border p-3">
-      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        OAuth (optional — for upstreams that support OAuth)
-      </p>
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+          OAuth (optional — for upstreams that support OAuth)
+        </p>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={discovering || !values.issuer}
+          onClick={handleDiscover}
+        >
+          {discovering ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+          {discovering ? ' Discovering…' : 'Discover from issuer'}
+        </Button>
+      </div>
       <div className="grid grid-cols-2 gap-2">
         <div className="space-y-1">
           <Label className="text-xs">Issuer</Label>

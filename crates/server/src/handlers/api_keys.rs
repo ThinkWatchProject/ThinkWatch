@@ -612,6 +612,7 @@ pub struct UpdateKeyRequest {
     ///   - field absent → leave unchanged
     ///   - empty `{}`   → drop all overrides
     ///   - object       → replace entirely
+    ///
     /// Validated against the key owner's existing
     /// `mcp_user_credentials` rows.
     #[serde(default, deserialize_with = "deserialize_some")]
@@ -723,13 +724,9 @@ pub async fn update_key(
         None => (false, serde_json::json!({})),
         Some(None) => (true, serde_json::json!({})),
         Some(Some(v)) => {
-            let owner = key
-                .user_id
-                .ok_or_else(|| {
-                    AppError::BadRequest(
-                        "service-account keys cannot use mcp_account_overrides".into(),
-                    )
-                })?;
+            let owner = key.user_id.ok_or_else(|| {
+                AppError::BadRequest("service-account keys cannot use mcp_account_overrides".into())
+            })?;
             (
                 true,
                 validate_mcp_account_overrides(&state.db, owner, Some(v)).await?,

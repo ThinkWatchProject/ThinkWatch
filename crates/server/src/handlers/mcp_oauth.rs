@@ -18,12 +18,12 @@
 //!      credentials. Tokens are AES-GCM encrypted before they touch the
 //!      DB.
 
+use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum::Json;
 use chrono::{DateTime, Utc};
 use data_encoding::BASE64URL_NOPAD;
-use hmac::{digest::KeyInit, Hmac, Mac};
+use hmac::{Hmac, Mac, digest::KeyInit};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -245,7 +245,9 @@ pub async fn start_authorize(
         .oauth_authorization_endpoint
         .as_deref()
         .ok_or_else(|| {
-            AppError::BadRequest("This server has no OAuth authorization endpoint configured".into())
+            AppError::BadRequest(
+                "This server has no OAuth authorization endpoint configured".into(),
+            )
         })?;
     let token_endpoint_present = server.oauth_token_endpoint.is_some();
     let client_id = server
@@ -354,12 +356,13 @@ pub async fn oauth_callback(
 
     // Atomic retrieve + delete enforces single-use.
     let redis_key = format!("{OAUTH_STATE_PREFIX}{state_token}");
-    let stored: Option<String> =
-        fred::interfaces::KeysInterface::getdel(&state.redis, &redis_key)
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
+    let stored: Option<String> = fred::interfaces::KeysInterface::getdel(&state.redis, &redis_key)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
     let stored = stored.ok_or_else(|| {
-        AppError::BadRequest("Invalid or expired OAuth state — please retry from /connections".into())
+        AppError::BadRequest(
+            "Invalid or expired OAuth state — please retry from /connections".into(),
+        )
     })?;
 
     let blob: McpOauthState = serde_json::from_str(&stored)
@@ -677,6 +680,100 @@ pub async fn paste_static_token(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/admin/mcp/oauth-discover — RFC 8414 metadata fetch
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub struct DiscoverRequest {
+    pub issuer: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DiscoverResponse {
+    pub authorization_endpoint: Option<String>,
+    pub token_endpoint: Option<String>,
+    pub revocation_endpoint: Option<String>,
+    pub scopes_supported: Vec<String>,
+}
+
+/// Fetch OAuth metadata from `{issuer}/.well-known/oauth-authorization-server`
+/// (RFC 8414) so the admin form can autofill the endpoint inputs without
+/// the operator hand-copying URLs from the upstream's docs.
+///
+/// Falls back to `/.well-known/openid-configuration` for OIDC-style
+/// providers that publish their metadata under that path instead.
+/// Returns whatever fields the upstream advertised — the admin UI
+/// merges them into the form, so partial responses are fine.
+pub async fn oauth_discover(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<DiscoverRequest>,
+) -> Result<Json<DiscoverResponse>, AppError> {
+    auth_user.require_permission("mcp_servers:create")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:create")
+        .await?;
+    if req.issuer.is_empty() {
+        return Err(AppError::BadRequest("issuer is required".into()));
+    }
+    think_watch_common::validation::validate_url(&req.issuer)?;
+
+    let issuer = req.issuer.trim_end_matches('/');
+    let candidates = [
+        format!("{issuer}/.well-known/oauth-authorization-server"),
+        format!("{issuer}/.well-known/openid-configuration"),
+    ];
+
+    let http = state.http_client.load();
+    let mut last_err: Option<String> = None;
+    for url in &candidates {
+        match http.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let body: serde_json::Value = match resp.json().await {
+                    Ok(v) => v,
+                    Err(e) => {
+                        last_err = Some(format!("{url}: {e}"));
+                        continue;
+                    }
+                };
+                return Ok(Json(parse_oauth_metadata(&body)));
+            }
+            Ok(resp) => {
+                last_err = Some(format!("{url}: HTTP {}", resp.status()));
+            }
+            Err(e) => {
+                last_err = Some(format!("{url}: {e}"));
+            }
+        }
+    }
+    Err(AppError::BadRequest(format!(
+        "Discovery failed at all known well-known paths. Last error: {}",
+        last_err.unwrap_or_else(|| "unknown".into())
+    )))
+}
+
+fn parse_oauth_metadata(body: &serde_json::Value) -> DiscoverResponse {
+    fn s(v: &serde_json::Value, k: &str) -> Option<String> {
+        v.get(k).and_then(|x| x.as_str()).map(|s| s.to_string())
+    }
+    let scopes_supported = body
+        .get("scopes_supported")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    DiscoverResponse {
+        authorization_endpoint: s(body, "authorization_endpoint"),
+        token_endpoint: s(body, "token_endpoint"),
+        revocation_endpoint: s(body, "revocation_endpoint"),
+        scopes_supported,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
@@ -794,7 +891,10 @@ mod tests {
         // verifier length so the upstream's sanity checks pass.
         let t = random_token().unwrap();
         assert_eq!(t.len(), 43);
-        assert!(t.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'));
+        assert!(
+            t.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        );
     }
 
     #[test]

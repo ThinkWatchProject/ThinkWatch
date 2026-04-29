@@ -5,20 +5,23 @@
 Always run `make precommit` before committing. It mirrors the CI pipeline exactly:
 
 ```
-cargo check --workspace
-cargo test --workspace --lib --bins --tests
-cargo clippy --workspace -- -D warnings
+cargo nextest run --workspace --lib --bins --tests
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
 cd web && pnpm check:i18n
 cd web && pnpm test           # vitest run
 cd web && pnpm build          # tsc -b && vite build
 ```
 
+`cargo check` is intentionally absent — clippy is a strict superset, and re-running check separately just doubles the Rust compile time on touched-common-types diffs.
+
+`cargo nextest` is required (replaces `cargo test` for ~3× faster cross-binary parallelism). Install once via `make tools` (idempotent — runs `cargo install cargo-nextest --locked`).
+
 **Do NOT use `tsc --noEmit` alone** as the frontend check. `tsc -b` (inside `pnpm build`) is stricter and catches unused imports (TS6133) that `--noEmit` misses.
 
 ## Integration tests
 
-Cross-cutting integration tests live in `crates/test-support/tests/`. They boot the full server in-process against a fresh per-test Postgres database and a dedicated Redis logical DB (1 by default). Each test fn carries `#[ignore]` so `cargo test --workspace` skips them — `make test-it` opts in.
+Cross-cutting integration tests live in `crates/test-support/tests/`. They boot the full server in-process against a fresh per-test Postgres database and a dedicated Redis logical DB (1 by default). Each test fn carries `#[ignore]` so `cargo nextest run --workspace` skips them — `make test-it` opts in.
 
 Required infra: `make infra` (Postgres + Redis). Tests run serially via `--test-threads=1` because they share the Redis instance.
 

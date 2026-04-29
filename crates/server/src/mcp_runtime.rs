@@ -434,6 +434,78 @@ pub fn spawn_mcp_health_loop(
     });
 }
 
+/// Background catalog-refresh loop. Re-runs `discover_and_persist_tools`
+/// against every connected MCP server once every 24 hours so the
+/// `cached_tools_jsonb` snapshot — which is what users that haven't
+/// authorized yet see in `tools/list` — doesn't drift from the
+/// upstream's actual catalog over time.
+///
+/// Anonymous probe (no per-user token) — for upstreams that gate
+/// `tools/list` behind authentication this naturally fails and the
+/// existing snapshot is preserved.
+pub fn spawn_mcp_catalog_refresh_loop(
+    state: AppState,
+    registry: think_watch_mcp_gateway::registry::Registry,
+) {
+    const CATALOG_REFRESH_INTERVAL_SECS: u64 = 24 * 60 * 60;
+    tokio::spawn(async move {
+        // Stagger the first run so it doesn't pile on top of the
+        // startup discovery burst initiated by `load_mcp_servers_into_registry`.
+        tokio::time::sleep(std::time::Duration::from_secs(
+            CATALOG_REFRESH_INTERVAL_SECS,
+        ))
+        .await;
+        loop {
+            let servers = match sqlx::query_as::<_, think_watch_common::models::McpServer>(
+                "SELECT * FROM mcp_servers",
+            )
+            .fetch_all(&state.db)
+            .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::warn!("catalog refresh: failed to list servers: {e}");
+                    tokio::time::sleep(std::time::Duration::from_secs(
+                        CATALOG_REFRESH_INTERVAL_SECS,
+                    ))
+                    .await;
+                    continue;
+                }
+            };
+            let key = state.config.encryption_key.clone();
+            for server in &servers {
+                let http = (**state.http_client.load()).clone();
+                match discover_and_persist_tools(&state.db, &http, server).await {
+                    Ok(n) => {
+                        tracing::info!(
+                            mcp_server = %server.name,
+                            tools = n,
+                            "MCP catalog refresh succeeded"
+                        );
+                        if let Ok(updated) = build_registered_server(&state.db, server, &key).await
+                        {
+                            registry.register(updated).await;
+                        }
+                    }
+                    Err(e) => {
+                        // Log only — failing here is normal for OAuth-only
+                        // upstreams that reject anonymous tools/list.
+                        tracing::debug!(
+                            mcp_server = %server.name,
+                            error = %e,
+                            "MCP catalog refresh failed (cached snapshot retained)"
+                        );
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(
+                CATALOG_REFRESH_INTERVAL_SECS,
+            ))
+            .await;
+        }
+    });
+}
+
 /// Extract JSON from an SSE response body by scanning `data:` lines.
 pub fn parse_sse_json(text: &str) -> anyhow::Result<serde_json::Value> {
     let mut data_buf = String::new();
