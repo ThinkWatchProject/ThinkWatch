@@ -280,15 +280,63 @@ pub async fn create_mcp_server(
     namespace_prefix: &str,
     endpoint_url: &str,
 ) -> Result<Uuid> {
+    create_mcp_server_with(
+        db,
+        name,
+        namespace_prefix,
+        endpoint_url,
+        McpServerOpts::default(),
+    )
+    .await
+}
+
+/// Knobs for [`create_mcp_server_with`]. Default = anonymous server,
+/// no per-user auth, so existing call sites of `create_mcp_server`
+/// keep their behaviour.
+#[derive(Default, Debug, Clone)]
+pub struct McpServerOpts {
+    pub allow_static_token: bool,
+    pub oauth_issuer: Option<String>,
+    pub oauth_authorization_endpoint: Option<String>,
+    pub oauth_token_endpoint: Option<String>,
+    pub oauth_client_id: Option<String>,
+    /// Already-encrypted client_secret. Tests that need OAuth roll
+    /// this themselves (`crypto::encrypt(secret, encryption_key)`)
+    /// rather than handing us plaintext, so the fixture stays
+    /// agnostic of how the key is sourced.
+    pub oauth_client_secret_encrypted: Option<Vec<u8>>,
+    pub oauth_scopes: Vec<String>,
+}
+
+pub async fn create_mcp_server_with(
+    db: &PgPool,
+    name: &str,
+    namespace_prefix: &str,
+    endpoint_url: &str,
+    opts: McpServerOpts,
+) -> Result<Uuid> {
     let id = Uuid::new_v4();
     sqlx::query(
-        r#"INSERT INTO mcp_servers (id, name, namespace_prefix, endpoint_url, transport_type, status)
-           VALUES ($1, $2, $3, $4, 'streamable_http', 'active')"#,
+        r#"INSERT INTO mcp_servers (
+               id, name, namespace_prefix, endpoint_url, transport_type, status,
+               oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
+               oauth_client_id, oauth_client_secret_encrypted, oauth_scopes,
+               allow_static_token
+           )
+           VALUES ($1, $2, $3, $4, 'streamable_http', 'active',
+                   $5, $6, $7, $8, $9, $10, $11)"#,
     )
     .bind(id)
     .bind(name)
     .bind(namespace_prefix)
     .bind(endpoint_url)
+    .bind(&opts.oauth_issuer)
+    .bind(&opts.oauth_authorization_endpoint)
+    .bind(&opts.oauth_token_endpoint)
+    .bind(&opts.oauth_client_id)
+    .bind(&opts.oauth_client_secret_encrypted)
+    .bind(&opts.oauth_scopes)
+    .bind(opts.allow_static_token)
     .execute(db)
     .await
     .context("INSERT mcp_servers")?;
