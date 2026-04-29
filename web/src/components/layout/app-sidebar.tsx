@@ -33,7 +33,6 @@ import {
   GitBranch,
   Filter,
   Store,
-  Activity,
 } from 'lucide-react';
 import { useNavigate, useLocation } from '@tanstack/react-router';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
@@ -70,7 +69,6 @@ const navGroups: NavGroup[] = [
     items: [
       { titleKey: 'nav.providers', icon: Plug, href: '/gateway/providers' },
       { titleKey: 'nav.models', icon: BrainCircuit, href: '/gateway/models' },
-      { titleKey: 'nav.routeDecisions', icon: Activity, href: '/gateway/route-decisions' },
       { titleKey: 'nav.contentSecurity', icon: Filter, href: '/gateway/security' },
     ],
   },

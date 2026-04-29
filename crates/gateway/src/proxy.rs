@@ -14,7 +14,6 @@ use uuid::Uuid;
 use crate::cache::ResponseCache;
 use crate::content_filter::{Action, ContentFilter};
 use crate::cost_tracker::CostTracker;
-use crate::decision_log::{CandidateRecord, DecisionRecord};
 use crate::health::{CircuitBreakerConfig, HealthTracker, RouteHealth};
 use crate::metadata::RequestMetadata;
 use crate::model_mapping::ModelMapper;
@@ -368,6 +367,7 @@ fn emit_gateway_log_with_extra(
     api_key_lineage_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
+    upstream_model: Option<&str>,
     prompt_tokens: u32,
     completion_tokens: u32,
     cost_usd: Decimal,
@@ -378,6 +378,7 @@ fn emit_gateway_log_with_extra(
     let mut detail = serde_json::json!({
         "model_id": model_id,
         "provider": provider,
+        "upstream_model": upstream_model,
         "input_tokens": prompt_tokens as i64,
         "output_tokens": completion_tokens as i64,
         "cost_usd": cost_usd.to_string(),
@@ -429,6 +430,7 @@ fn emit_gateway_log(
     api_key_lineage_id: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
+    upstream_model: Option<&str>,
     prompt_tokens: u32,
     completion_tokens: u32,
     cost_usd: Decimal,
@@ -440,6 +442,7 @@ fn emit_gateway_log(
         .detail(serde_json::json!({
             "model_id": model_id,
             "provider": provider,
+            "upstream_model": upstream_model,
             "input_tokens": prompt_tokens as i64,
             "output_tokens": completion_tokens as i64,
             "cost_usd": cost_usd.to_string(),
@@ -715,23 +718,6 @@ async fn resolve_breaker_config(state: &GatewayState) -> CircuitBreakerConfig {
     }
 }
 
-fn make_candidate(
-    entry: &RouteEntry,
-    weight: f64,
-    health: &RouteHealth,
-    excluded_reason: Option<String>,
-) -> CandidateRecord {
-    CandidateRecord {
-        route_id: entry.route_id,
-        provider_name: entry.provider_name.clone(),
-        upstream_model: entry.upstream_model.clone(),
-        weight,
-        health_state: health.state.as_str().to_string(),
-        ewma_latency_ms: health.ewma_latency_ms,
-        excluded_reason,
-    }
-}
-
 /// Strategy/affinity/breaker context resolved once per request and
 /// reused through the failover loop.
 pub(crate) struct SelectionCtx<'a> {
@@ -768,17 +754,14 @@ pub(crate) async fn build_selection_ctx<'a>(
 
 /// One selection attempt over the candidate set: snapshot health,
 /// drop circuit-broken / already-tried candidates, compute strategy
-/// weights, pick. Returns `(picked, candidate_records, affinity_hit)`.
-/// Candidate records cover every route in the set — including excluded
-/// ones — so the decision log shows operators why each route was or
-/// wasn't picked.
+/// weights, pick.
 async fn pick_with_strategy<'a>(
     group: &[&'a RouteEntry],
     tried: &[Uuid],
     ctx: &SelectionCtx<'_>,
-) -> (Option<&'a RouteEntry>, Vec<CandidateRecord>, bool) {
+) -> Option<&'a RouteEntry> {
     if group.is_empty() {
-        return (None, Vec::new(), false);
+        return None;
     }
     let mut healths: Vec<RouteHealth> = Vec::with_capacity(group.len());
     for entry in group {
@@ -803,16 +786,10 @@ async fn pick_with_strategy<'a>(
     .await;
 
     let mut signals: Vec<strategy::RouteSignal> = Vec::with_capacity(group.len());
-    let mut excluded: Vec<Option<String>> = Vec::with_capacity(group.len());
+    let mut excluded: Vec<bool> = Vec::with_capacity(group.len());
     for (i, entry) in group.iter().enumerate() {
         let h = &healths[i];
-        let excl = if !h.state.allows_selection() {
-            Some(format!("circuit_breaker:{}", h.state.as_str()))
-        } else if tried.contains(&entry.provider_id) {
-            Some("already_tried".into())
-        } else {
-            None
-        };
+        let excl = !h.state.allows_selection() || tried.contains(&entry.provider_id);
         excluded.push(excl);
         let success_rate = if h.total > 0 {
             Some((1.0 - h.error_pct / 100.0).clamp(0.0, 1.0))
@@ -829,33 +806,16 @@ async fn pick_with_strategy<'a>(
     let weights = strategy::compute_weights(ctx.strategy, &signals, ctx.latency_k);
 
     // If affinity points to a still-eligible candidate, use it.
-    let mut affinity_hit = false;
     if let Some(hit) = affinity {
         let idx_match = group.iter().enumerate().find(|(i, e)| {
-            excluded[*i].is_none()
+            !excluded[*i]
                 && match hit {
                     AffinityHit::Provider(pid) => e.provider_id == pid,
                     AffinityHit::Route(rid) => e.route_id == rid,
                 }
         });
-        if let Some((idx, entry)) = idx_match {
-            affinity_hit = true;
-            let mut records: Vec<CandidateRecord> = Vec::with_capacity(group.len());
-            for (i, e) in group.iter().enumerate() {
-                records.push(make_candidate(
-                    e,
-                    if i == idx { weights[i] } else { 0.0 },
-                    &healths[i],
-                    if i == idx {
-                        None
-                    } else {
-                        excluded[i]
-                            .clone()
-                            .or_else(|| Some("affinity_overrode".into()))
-                    },
-                ));
-            }
-            return (Some(entry), records, affinity_hit);
+        if let Some((_, entry)) = idx_match {
+            return Some(entry);
         }
     }
 
@@ -864,14 +824,14 @@ async fn pick_with_strategy<'a>(
     let masked: Vec<f64> = weights
         .iter()
         .enumerate()
-        .map(|(i, w)| if excluded[i].is_some() { 0.0 } else { *w })
+        .map(|(i, w)| if excluded[i] { 0.0 } else { *w })
         .collect();
 
     let total: f64 = masked.iter().sum();
     let picked_idx = if total <= 0.0 {
         // No eligible candidate. Match the original `pick_weighted`
         // "all zeros" fallback: first un-excluded if any.
-        (0..group.len()).find(|&i| excluded[i].is_none())
+        (0..group.len()).find(|&i| !excluded[i])
     } else {
         let mut rng = rand::rng();
         let pick = rng.random_range(0.0..total);
@@ -887,31 +847,13 @@ async fn pick_with_strategy<'a>(
         chosen
     };
 
-    let mut records: Vec<CandidateRecord> = Vec::with_capacity(group.len());
-    for (i, entry) in group.iter().enumerate() {
-        records.push(make_candidate(
-            entry,
-            masked[i],
-            &healths[i],
-            excluded[i].clone(),
-        ));
-    }
-
-    let picked = picked_idx.map(|i| group[i]);
-    (picked, records, affinity_hit)
+    picked_idx.map(|i| group[i])
 }
 
 /// What the proxy handler needs back from a selection in order to
-/// finalize the decision log entry after the request completes.
+/// record health for the picked route after the request completes.
 pub(crate) struct SelectionRecord {
     pub picked_route_id: Uuid,
-    pub model_id: String,
-    pub strategy: RoutingStrategy,
-    pub affinity_mode: AffinityMode,
-    pub affinity_hit: bool,
-    pub attempts: u32,
-    pub candidates: Vec<CandidateRecord>,
-    pub user_hint: Option<String>,
     pub started_at: std::time::Instant,
     /// Per-attempt latency for the *picked* route in non-stream mode.
     /// `None` for streaming (the stream hasn't run when this record
@@ -921,14 +863,9 @@ pub(crate) struct SelectionRecord {
     pub picked_latency_ms: Option<u32>,
 }
 
-/// Push a finalized decision log entry + record health for the picked
-/// route. Both writes are best-effort; failures are logged.
-pub(crate) async fn finalize_decision(
-    state: &GatewayState,
-    sel: SelectionRecord,
-    success: bool,
-    error_message: Option<String>,
-) {
+/// Record health for the picked route once the request finishes.
+/// Best-effort; failures are logged.
+pub(crate) async fn finalize_health(state: &GatewayState, sel: SelectionRecord, success: bool) {
     let total_latency_ms = sel.started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
     // For health, we want the picked route's *own* time, not the
     // cumulative including prior failed attempts. Non-stream sets
@@ -941,21 +878,6 @@ pub(crate) async fn finalize_decision(
         .health
         .record(sel.picked_route_id, health_latency_ms, !success, breaker)
         .await;
-    let record = DecisionRecord {
-        ts_ms: chrono::Utc::now().timestamp_millis(),
-        model_id: sel.model_id,
-        strategy: sel.strategy.as_str().to_string(),
-        affinity_mode: sel.affinity_mode.as_str().to_string(),
-        affinity_hit: sel.affinity_hit,
-        candidates: sel.candidates,
-        picked_route_id: Some(sel.picked_route_id),
-        attempts: sel.attempts,
-        total_latency_ms,
-        success,
-        error_message,
-        user_hint: sel.user_hint,
-    };
-    crate::decision_log::push(&state.redis, &record).await;
 }
 
 /// Returns true if the error is retryable.
@@ -1003,18 +925,12 @@ async fn select_route_with_failover<'a>(
     let candidates: Vec<&RouteEntry> = routes.iter().collect();
 
     let mut last_error: Option<GatewayError> = None;
-    let mut affinity_hit_overall = false;
-    let mut last_records: Vec<CandidateRecord> = Vec::new();
     let mut tried: Vec<Uuid> = Vec::new();
 
-    for attempt_idx in 0..candidates.len() {
-        let attempts = (attempt_idx + 1) as u32;
-        let (picked, records, affinity_hit) = pick_with_strategy(&candidates, &tried, ctx).await;
-        if last_records.is_empty() {
-            last_records = records;
-        }
-        affinity_hit_overall = affinity_hit_overall || affinity_hit;
-        let Some(entry) = picked else { break };
+    for _ in 0..candidates.len() {
+        let Some(entry) = pick_with_strategy(&candidates, &tried, ctx).await else {
+            break;
+        };
         tried.push(entry.provider_id);
 
         let mut req = request.clone();
@@ -1049,13 +965,6 @@ async fn select_route_with_failover<'a>(
                     response,
                     SelectionRecord {
                         picked_route_id: entry.route_id,
-                        model_id: ctx.model_id.to_string(),
-                        strategy: ctx.strategy,
-                        affinity_mode: ctx.affinity_mode,
-                        affinity_hit: affinity_hit_overall,
-                        attempts,
-                        candidates: last_records,
-                        user_hint: ctx.user_id.map(|s| s.to_string()),
                         started_at,
                         picked_latency_ms: Some(attempt_latency_ms),
                     },
@@ -1105,7 +1014,7 @@ async fn select_route_with_failover<'a>(
 /// call the provider — caller wires up the SSE stream and once the
 /// first chunk lands a retry is no longer possible. Returns the
 /// chosen entry plus a `SelectionRecord` so the streaming caller can
-/// record health + push a decision-log entry on stream completion.
+/// record health on stream completion.
 async fn select_route_for_stream<'a>(
     routes: &'a [RouteEntry],
     ctx: &SelectionCtx<'_>,
@@ -1113,21 +1022,13 @@ async fn select_route_for_stream<'a>(
     let started_at = std::time::Instant::now();
     let candidates: Vec<&RouteEntry> = routes.iter().collect();
 
-    let (picked, records, affinity_hit) = pick_with_strategy(&candidates, &[], ctx).await;
-    if let Some(entry) = picked {
+    if let Some(entry) = pick_with_strategy(&candidates, &[], ctx).await {
         return Ok((
             entry,
             SelectionRecord {
                 picked_route_id: entry.route_id,
-                model_id: ctx.model_id.to_string(),
-                strategy: ctx.strategy,
-                affinity_mode: ctx.affinity_mode,
-                affinity_hit,
-                attempts: 1,
-                candidates: records,
-                user_hint: ctx.user_id.map(|s| s.to_string()),
                 started_at,
-                // Streams don't loop — finalize_decision falls
+                // Streams don't loop — finalize_health falls
                 // back to elapsed-from-started_at, which IS the
                 // picked route's wall time for the streaming case.
                 picked_latency_ms: None,
@@ -1385,6 +1286,7 @@ pub async fn proxy_chat_completion(
         let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
         let model_for_log = original_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
+        let upstream_model_for_done = entry.upstream_model.clone();
         let started = request_started_at;
         // Clone request for cache write — the original is moved into the provider.
         let request_for_cache = request.clone();
@@ -1436,6 +1338,7 @@ pub async fn proxy_chat_completion(
                     api_key_lineage_id_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
+                    upstream_model_for_done.as_deref(),
                     pt,
                     ct,
                     cost,
@@ -1444,27 +1347,15 @@ pub async fn proxy_chat_completion(
                     error_detail,
                 );
 
-                // Health + decision-log: Natural and ClientCancelled
-                // count as successes against the upstream (the latter
-                // is the client's choice, not the upstream's failure).
+                // Health: Natural and ClientCancelled count as
+                // successes against the upstream (the latter is the
+                // client's choice, not the upstream's failure).
                 let stream_success = matches!(
                     result.outcome,
                     crate::streaming::StreamOutcome::Natural
                         | crate::streaming::StreamOutcome::ClientCancelled
                 );
-                let stream_error_msg = match &result.outcome {
-                    crate::streaming::StreamOutcome::UpstreamError { message, .. } => {
-                        Some(message.clone())
-                    }
-                    _ => None,
-                };
-                finalize_decision(
-                    &state_for_done,
-                    sel_record,
-                    stream_success,
-                    stream_error_msg,
-                )
-                .await;
+                finalize_health(&state_for_done, sel_record, stream_success).await;
 
                 // Assemble and cache the complete response when the
                 // stream ran to natural completion (partial streams
@@ -1588,6 +1479,7 @@ pub async fn proxy_chat_completion(
             identity.api_key_lineage_id.as_deref(),
             &original_model,
             Some(chosen_entry.provider_name.as_str()),
+            chosen_entry.upstream_model.as_deref(),
             prompt_tokens,
             completion_tokens,
             cost_usd,
@@ -1595,7 +1487,7 @@ pub async fn proxy_chat_completion(
             200,
         );
 
-        finalize_decision(&state, sel_record, true, None).await;
+        finalize_health(&state, sel_record, true).await;
 
         let mut http_response = Json(&response).into_response();
         http_response
@@ -1830,6 +1722,7 @@ pub async fn proxy_anthropic_messages(
         let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
         let model_for_log = mapped_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
+        let upstream_model_for_done = entry.upstream_model.clone();
         let started = request_started_at;
         let state_for_done = state.clone();
         let stream = entry.provider.stream_chat_completion(stream_request);
@@ -1852,6 +1745,7 @@ pub async fn proxy_anthropic_messages(
                     api_key_lineage_id_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
+                    upstream_model_for_done.as_deref(),
                     pt,
                     ct,
                     cost,
@@ -1863,19 +1757,7 @@ pub async fn proxy_anthropic_messages(
                     crate::streaming::StreamOutcome::Natural
                         | crate::streaming::StreamOutcome::ClientCancelled
                 );
-                let stream_error_msg = match &result.outcome {
-                    crate::streaming::StreamOutcome::UpstreamError { message, .. } => {
-                        Some(message.clone())
-                    }
-                    _ => None,
-                };
-                finalize_decision(
-                    &state_for_done,
-                    sel_record,
-                    stream_success,
-                    stream_error_msg,
-                )
-                .await;
+                finalize_health(&state_for_done, sel_record, stream_success).await;
                 let Some(u) = result.usage else {
                     return;
                 };
@@ -1967,6 +1849,7 @@ pub async fn proxy_anthropic_messages(
             identity.api_key_lineage_id.as_deref(),
             &mapped_model,
             Some(chosen_entry.provider_name.as_str()),
+            chosen_entry.upstream_model.as_deref(),
             pt,
             ct,
             cost,
@@ -1974,7 +1857,7 @@ pub async fn proxy_anthropic_messages(
             200,
         );
 
-        finalize_decision(&state, sel_record, true, None).await;
+        finalize_health(&state, sel_record, true).await;
 
         // Convert OpenAI response back to Anthropic format
         let anthropic_response = convert_to_anthropic_response(&response);
@@ -2231,6 +2114,7 @@ pub async fn proxy_responses(
         let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
         let model_for_log = mapped_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
+        let upstream_model_for_done = entry.upstream_model.clone();
         let started = request_started_at;
         let state_for_done = state.clone();
         let stream = entry.provider.stream_chat_completion(stream_request);
@@ -2253,6 +2137,7 @@ pub async fn proxy_responses(
                     api_key_lineage_id_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
+                    upstream_model_for_done.as_deref(),
                     pt,
                     ct,
                     cost,
@@ -2264,19 +2149,7 @@ pub async fn proxy_responses(
                     crate::streaming::StreamOutcome::Natural
                         | crate::streaming::StreamOutcome::ClientCancelled
                 );
-                let stream_error_msg = match &result.outcome {
-                    crate::streaming::StreamOutcome::UpstreamError { message, .. } => {
-                        Some(message.clone())
-                    }
-                    _ => None,
-                };
-                finalize_decision(
-                    &state_for_done,
-                    sel_record,
-                    stream_success,
-                    stream_error_msg,
-                )
-                .await;
+                finalize_health(&state_for_done, sel_record, stream_success).await;
                 let Some(u) = result.usage else {
                     return;
                 };
@@ -2369,6 +2242,7 @@ pub async fn proxy_responses(
             identity.api_key_lineage_id.as_deref(),
             &mapped_model,
             Some(chosen_entry.provider_name.as_str()),
+            chosen_entry.upstream_model.as_deref(),
             pt,
             ct,
             cost,
@@ -2376,7 +2250,7 @@ pub async fn proxy_responses(
             200,
         );
 
-        finalize_decision(&state, sel_record, true, None).await;
+        finalize_health(&state, sel_record, true).await;
 
         let responses_format = convert_to_responses_format(&response);
         let mut http_response = Json(responses_format).into_response();

@@ -17,6 +17,7 @@ pub struct GatewayLogsQuery {
     pub q: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    pub upstream_model: Option<String>,
     pub user_id: Option<String>,
     /// `?api_key_id=X` is rotation-transparent: the backend resolves
     /// X to its lineage and filters on `api_key_lineage_id`, so the
@@ -45,6 +46,7 @@ pub struct GatewayLogEntry {
     pub api_key_id: Option<String>,
     pub model_id: Option<String>,
     pub provider: Option<String>,
+    pub upstream_model: Option<String>,
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     #[schema(value_type = Option<String>)]
@@ -66,6 +68,7 @@ struct GatewayLogRow {
     api_key_id: Option<String>,
     model_id: Option<String>,
     provider: Option<String>,
+    upstream_model: Option<String>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     cost_usd: Option<i64>,
@@ -119,6 +122,10 @@ pub async fn list_gateway_logs(
     }
     if let Some(ref v) = params.provider {
         conditions.push("provider = ?".to_string());
+        bind_values.push(v.clone());
+    }
+    if let Some(ref v) = params.upstream_model {
+        conditions.push("upstream_model = ?".to_string());
         bind_values.push(v.clone());
     }
     if let Some(ref v) = params.user_id {
@@ -187,6 +194,7 @@ pub async fn list_gateway_logs(
         &[
             ("model", "model_id", ExcludeMode::Equals),
             ("provider", "provider", ExcludeMode::Equals),
+            ("upstream_model", "upstream_model", ExcludeMode::Equals),
             ("user_id", "user_id", ExcludeMode::Equals),
             ("api_key_id", "api_key_id", ExcludeMode::Equals),
             ("status_code", "status_code", ExcludeMode::Equals),
@@ -221,7 +229,8 @@ pub async fn list_gateway_logs(
 
     // Data query
     let data_sql = format!(
-        "SELECT id, user_id, api_key_id, model_id, provider, input_tokens, output_tokens, \
+        "SELECT id, user_id, api_key_id, model_id, provider, upstream_model, \
+         input_tokens, output_tokens, \
          cost_usd, latency_ms, status_code, ip_address, \
          toString(created_at) as created_at \
          FROM gateway_logs {where_clause} ORDER BY {order_by} LIMIT {limit} OFFSET {offset}"
@@ -243,6 +252,7 @@ pub async fn list_gateway_logs(
             api_key_id: r.api_key_id,
             model_id: r.model_id,
             provider: r.provider,
+            upstream_model: r.upstream_model,
             input_tokens: r.input_tokens,
             output_tokens: r.output_tokens,
             cost_usd: r.cost_usd.map(decode_i64),

@@ -156,6 +156,10 @@ struct ChGatewayRow {
     api_key_lineage_id: Option<String>,
     model_id: Option<String>,
     provider: Option<String>,
+    // Upstream model actually sent to the provider — distinct from
+    // `model_id` (the abstract id the client requested). Same column
+    // ordering as `gateway_logs.upstream_model` in 01_init.sql.
+    upstream_model: Option<String>,
     input_tokens: Option<i64>,
     output_tokens: Option<i64>,
     // Raw ClickHouse encoding of `Decimal(18, 10)` — the value is
@@ -1651,6 +1655,7 @@ async fn flush_gateway(
             api_key_lineage_id: entry.api_key_lineage_id,
             model_id: detail_field(&entry.detail, "model_id"),
             provider: detail_field(&entry.detail, "provider"),
+            upstream_model: detail_field(&entry.detail, "upstream_model"),
             input_tokens: detail_field(&entry.detail, "input_tokens"),
             output_tokens: detail_field(&entry.detail, "output_tokens"),
             cost_usd: detail_cost_usd(&entry.detail),

@@ -602,14 +602,6 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             get(handlers::route_observability::list_route_health),
         )
         .route(
-            "/api/admin/route-decisions",
-            get(handlers::route_observability::list_decisions),
-        )
-        .route(
-            "/api/admin/route-decisions/models",
-            get(handlers::route_observability::list_decision_models),
-        )
-        .route(
             "/api/admin/model-routes",
             get(handlers::models::list_all_routes),
         )
@@ -1223,8 +1215,8 @@ async fn load_providers_into_router(
                         provider: Arc::clone(dyn_provider),
                         provider_id: *provider_id,
                         // Synthetic route — derive a stable id from
-                        // the provider so health/decision-log entries
-                        // cluster correctly across reloads.
+                        // the provider so health entries cluster
+                        // correctly across reloads.
                         route_id: *provider_id,
                         provider_name: provider_name.clone(),
                         upstream_model: None,

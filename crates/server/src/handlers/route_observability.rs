@@ -1,16 +1,14 @@
-//! Routing observability — live health snapshot per route + a tail
-//! of recent routing decisions. Both are read-only and Redis-backed
-//! (see `crates/gateway/src/{health,decision_log}.rs`).
+//! Routing observability — live health snapshot per route. Read-only
+//! and Redis-backed (see `crates/gateway/src/health.rs`).
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, State},
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use think_watch_common::errors::AppError;
-use think_watch_gateway::decision_log::DecisionRecord;
 use think_watch_gateway::health::RouteHealth;
 use uuid::Uuid;
 
@@ -91,78 +89,4 @@ pub async fn list_route_health(
         .collect();
 
     Ok(Json(entries))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct DecisionsQuery {
-    /// Filter to one model. When absent, returns the union across all
-    /// models that currently have buffered decisions, capped at `limit`.
-    pub model_id: Option<String>,
-    /// 1-200, default 50. Each model bucket holds at most 200 entries
-    /// so this is also the per-bucket ceiling when `model_id` is set.
-    pub limit: Option<i64>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DecisionsResponse {
-    pub items: Vec<DecisionRecord>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct DecisionsModelsResponse {
-    /// Model_ids with buffered decisions. Used to populate the UI's
-    /// filter dropdown.
-    pub items: Vec<String>,
-}
-
-/// `GET /api/admin/route-decisions?model_id=&limit=`
-///
-/// Read-only tail of routing decisions for live debugging. Redis-only
-/// — capped at 200 per model, 24h TTL.
-pub async fn list_decisions(
-    auth_user: AuthUser,
-    State(state): State<AppState>,
-    Query(q): Query<DecisionsQuery>,
-) -> Result<Json<DecisionsResponse>, AppError> {
-    auth_user.require_permission("models:read")?;
-    auth_user
-        .assert_scope_global(&state.db, "models:read")
-        .await?;
-
-    let limit = q.limit.unwrap_or(50).clamp(1, 200);
-
-    let items = if let Some(m) = q.model_id.as_deref() {
-        think_watch_gateway::decision_log::recent(&state.redis, m, limit).await
-    } else {
-        // Union across all models with buffered decisions. Each
-        // bucket is small so this is bounded; the merged list is then
-        // sorted by timestamp and trimmed.
-        let models = think_watch_gateway::decision_log::list_models(&state.redis).await;
-        let per_model = (limit / models.len().max(1) as i64).max(10);
-        let mut merged: Vec<DecisionRecord> = Vec::new();
-        for m in models {
-            let mut rs =
-                think_watch_gateway::decision_log::recent(&state.redis, &m, per_model).await;
-            merged.append(&mut rs);
-        }
-        merged.sort_by_key(|d| std::cmp::Reverse(d.ts_ms));
-        merged.truncate(limit as usize);
-        merged
-    };
-
-    Ok(Json(DecisionsResponse { items }))
-}
-
-/// `GET /api/admin/route-decisions/models` — model filter dropdown.
-pub async fn list_decision_models(
-    auth_user: AuthUser,
-    State(state): State<AppState>,
-) -> Result<Json<DecisionsModelsResponse>, AppError> {
-    auth_user.require_permission("models:read")?;
-    auth_user
-        .assert_scope_global(&state.db, "models:read")
-        .await?;
-
-    let items = think_watch_gateway::decision_log::list_models(&state.redis).await;
-    Ok(Json(DecisionsModelsResponse { items }))
 }

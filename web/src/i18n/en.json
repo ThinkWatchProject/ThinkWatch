@@ -88,7 +88,6 @@
     "aiGateway": "AI Gateway",
     "providers": "Providers",
     "models": "Models",
-    "routeDecisions": "Routing Log",
     "apiKeys": "API Keys",
     "mcpGateway": "MCP Gateway",
     "mcpServers": "MCP Servers",
@@ -335,18 +334,6 @@
     "expired": "Expired",
     "rotated": "Rotated",
     "gracePeriod": "Grace Period"
-  },
-  "routeDecisions": {
-    "title": "Routing decisions",
-    "subtitle": "Live tail of routing choices the gateway just made. Useful for verifying strategy / affinity / failover behaviour. Buffered in Redis (24h, 200 entries per model).",
-    "allModels": "All models",
-    "autoRefresh": "Auto-refresh",
-    "empty": "No decisions buffered yet. Send a request through the gateway and they will appear here within seconds.",
-    "ok": "OK",
-    "fail": "FAIL",
-    "affinityPrefix": "affinity",
-    "hit": "✓ hit",
-    "attempts": "{{count}} attempts"
   },
   "models": {
     "title": "Models",

@@ -125,6 +125,11 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     api_key_lineage_id LowCardinality(Nullable(String)),
     model_id         LowCardinality(Nullable(String)),
     provider         LowCardinality(Nullable(String)),
+    -- Upstream model name actually sent to the provider (e.g.
+    -- "gpt-4-turbo-2024-04-09"). Distinct from `model_id`, which is
+    -- the abstract id the client requested. NULL on synthetic
+    -- prefix-fallback routes that pass the client's model through.
+    upstream_model   LowCardinality(Nullable(String)),
     input_tokens     Nullable(Int64)   CODEC(Delta, ZSTD(1)),
     output_tokens    Nullable(Int64)   CODEC(Delta, ZSTD(1)),
     -- cost_usd stored as Decimal(18, 10): precision 18 total digits,
@@ -154,8 +159,9 @@ CREATE TABLE IF NOT EXISTS gateway_logs (
     INDEX idx_user_id    user_id     TYPE bloom_filter GRANULARITY 4,
     INDEX idx_user_email user_email  TYPE bloom_filter GRANULARITY 4,
     INDEX idx_api_key    api_key_id  TYPE bloom_filter GRANULARITY 4,
-    INDEX idx_model      model_id    TYPE set(200)     GRANULARITY 2,
-    INDEX idx_provider   provider    TYPE set(50)      GRANULARITY 2,
+    INDEX idx_model      model_id        TYPE set(200)     GRANULARITY 2,
+    INDEX idx_provider   provider        TYPE set(50)      GRANULARITY 2,
+    INDEX idx_upstream   upstream_model  TYPE set(200)     GRANULARITY 2,
     INDEX idx_status     status_code TYPE set(50)      GRANULARITY 2,
     INDEX idx_trace      trace_id    TYPE bloom_filter GRANULARITY 4,
     INDEX idx_session    session_id  TYPE bloom_filter GRANULARITY 4,
@@ -172,6 +178,8 @@ ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS user_email LowCardinality(Null
 ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloom_filter GRANULARITY 4;
 ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS session_id LowCardinality(Nullable(String)) AFTER trace_id;
 ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_session session_id TYPE bloom_filter GRANULARITY 4;
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS upstream_model LowCardinality(Nullable(String)) AFTER provider;
+ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_upstream upstream_model TYPE set(200) GRANULARITY 2;
 
 ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_cost (
     SELECT * ORDER BY cost_usd, created_at

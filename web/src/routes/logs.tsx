@@ -153,6 +153,7 @@ function getColumns(cat: LogCategory): ColDef[] {
         { key: 'created_at', label: 'Time' },
         { key: 'model_id', label: 'Model', mono: true, filterKey: 'model' },
         { key: 'provider', label: 'Provider', filterKey: 'provider' },
+        { key: 'upstream_model', label: 'Upstream', mono: true, filterKey: 'upstream_model' },
         { key: 'input_tokens', label: 'In', align: 'right' },
         { key: 'output_tokens', label: 'Out', align: 'right' },
         { key: 'cost_usd', label: 'Cost', align: 'right', render: (v) => `$${parseFloat(String(v || 0)).toFixed(4)}` },
@@ -237,7 +238,7 @@ function defaultToLocal(): string {
 // "Highlight" fields rendered above the raw JSON in the per-row expansion.
 // Order matters; the first listed fields show first.
 const DETAIL_HIGHLIGHTS: Record<LogCategory, string[]> = {
-  gateway: ['model_id', 'provider', 'input_tokens', 'output_tokens', 'cost_usd', 'latency_ms', 'status_code', 'user_id', 'api_key_id', 'ip_address'],
+  gateway: ['model_id', 'provider', 'upstream_model', 'input_tokens', 'output_tokens', 'cost_usd', 'latency_ms', 'status_code', 'user_id', 'api_key_id', 'ip_address'],
   mcp: ['tool_name', 'server_name', 'duration_ms', 'status', 'error_message', 'user_id', 'ip_address'],
   audit: ['action', 'resource', 'resource_id', 'user_email', 'user_id', 'ip_address', 'user_agent'],
   access: ['method', 'path', 'status_code', 'latency_ms', 'port', 'user_id', 'ip_address', 'user_agent'],
@@ -526,7 +527,7 @@ export function UnifiedLogsPage() {
   const timeKey = getTimeKey(category);
 
   const placeholders: Record<LogCategory, string> = {
-    gateway: 'model:gpt-4o status_code:200 provider:openai  (or just: gpt-4o)',
+    gateway: 'model:gpt-4o provider:openai upstream_model:gpt-4o-2024-08-06 status_code:200  (or just: gpt-4o)',
     mcp: 'tool_name:search status:error  (or just: search)',
     audit: 'action:provider.created resource:provider user_id:xxx',
     access: 'method:POST path:/api/admin status_code:500  (or just: /admin)',
