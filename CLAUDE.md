@@ -15,6 +15,8 @@ Wall-clock is `max(rust, frontend)` instead of their sum, since the pipelines ne
 
 `cargo nextest` is required (replaces `cargo test` for ~3× faster cross-binary parallelism). Install once via `make tools` (idempotent — runs `cargo install cargo-nextest --locked`).
 
+The Rust pipeline runs `nextest --no-run` over `--lib --bins --tests` (so a syntax error in an `#[ignore]`-marked integration test still fails the build), then runs `nextest` over `--lib --bins` only. Every test in `crates/test-support/tests/` is `#[ignore]`-marked and only runs via `make test-it`; launching those 40+ binaries during precommit does nothing but pay macOS Sequoia 26.x's per-binary dyld provenance scan (~25-36s each on first launch). Skipping them brings precommit's test phase from minutes to seconds on macOS.
+
 **Do NOT use `tsc --noEmit` alone** as the frontend check. `tsc -b` (inside `pnpm build`) is stricter and catches unused imports (TS6133) that `--noEmit` misses.
 
 ## Integration tests

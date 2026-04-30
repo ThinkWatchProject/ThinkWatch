@@ -28,8 +28,7 @@ check:
 # Pre-commit: mirrors CI exactly (clippy + nextest + fmt + i18n parity
 # + pnpm test + pnpm build).
 #
-# Three speedup levers vs. a naive `cargo {check,test,clippy,fmt}`
-# pipeline:
+# Speedup levers vs. a naive `cargo {check,test,clippy,fmt}` pipeline:
 #   1. `cargo check` is dropped — `cargo clippy` is a strict superset
 #      and the separate pass would just rebuild the same artifacts.
 #   2. `cargo test` is replaced by `cargo nextest run` so each test
@@ -39,9 +38,14 @@ check:
 #      recursive `make -j2` — wall-clock is `max(rust, frontend)`
 #      instead of their sum, since the two pipelines never share
 #      build artifacts.
+#   4. `--tests --no-run` compiles the integration test binaries (so a
+#      typo in an #[ignore]-marked test still fails the build), but
+#      only `--lib --bins` are *executed*. Every test in
+#      `crates/test-support/tests/` is `#[ignore]`-marked (run via
+#      `make test-it`) — launching those 40+ binaries during precommit
+#      does nothing but pay macOS Sequoia's per-binary dyld provenance
+#      scan (~25-36s each on first launch of a freshly-linked binary).
 #
-# `--lib --bins --tests` excludes doc tests so we don't pay rustdoc's
-# rebuild for the handful of `ignore`/`text` code blocks we have.
 # `cargo clippy` runs *without* `--all-targets` to avoid recompiling
 # tests under the clippy lint pass on top of nextest's compile.
 #
@@ -50,7 +54,8 @@ precommit:
 	@$(MAKE) -j2 precommit-rust precommit-frontend
 
 precommit-rust:
-	cargo nextest run --workspace --lib --bins --tests
+	cargo nextest run --workspace --lib --bins --tests --no-run
+	cargo nextest run --workspace --lib --bins
 	cargo clippy --workspace -- -D warnings
 	cargo fmt --all -- --check
 
@@ -59,9 +64,10 @@ precommit-frontend:
 	cd web && pnpm test
 	cd web && pnpm build
 
-# Run all tests (same pattern as precommit's test step).
+# Run unit tests (same pattern as precommit's test step). Integration
+# tests live in crates/test-support/tests/ and run via `make test-it`.
 test:
-	cargo nextest run --workspace --lib --bins --tests
+	cargo nextest run --workspace --lib --bins
 
 # Install dev tools that precommit + CI assume are available locally.
 # Idempotent: cargo install is a no-op when the binary is already
