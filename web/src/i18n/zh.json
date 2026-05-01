@@ -187,7 +187,12 @@
     "saveToken": "保存 Token",
     "authorize": "前往授权",
     "connectedToast": "已连接。后续工具调用会使用该账号。",
-    "connectFailed": "授权失败"
+    "connectFailed": "授权失败",
+    "test": "测试连接",
+    "testFailed": "测试失败",
+    "toolsLabel": "个工具",
+    "showTools": "查看工具",
+    "hideTools": "收起工具"
   },
   "auth": {
     "signIn": "登录",

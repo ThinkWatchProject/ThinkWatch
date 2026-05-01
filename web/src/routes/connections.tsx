@@ -16,7 +16,20 @@ import {
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { api, apiPost, apiDelete } from '@/lib/api';
-import { Plug, KeyRound, RefreshCw, Trash2, Plus, ExternalLink, CheckCircle2 } from 'lucide-react';
+import { cn } from '@/lib/utils';
+import {
+  Plug,
+  KeyRound,
+  RefreshCw,
+  Trash2,
+  Plus,
+  ExternalLink,
+  CheckCircle2,
+  Activity,
+  Loader2,
+  ChevronDown,
+  ChevronRight,
+} from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
 
@@ -333,6 +346,14 @@ export function ConnectionsPage() {
   );
 }
 
+interface TestResult {
+  success: boolean;
+  message: string;
+  latency_ms: number;
+  tools_count?: number;
+  tools?: { name: string; description?: string }[];
+}
+
 function ServerCard({
   server,
   onAddOauth,
@@ -349,6 +370,37 @@ function ServerCard({
   t: (key: string, options?: Record<string, unknown>) => string;
 }) {
   const empty = server.accounts.length === 0;
+  // Test state is per-account_label and lives inside the card — the
+  // parent page never needs to read it, and keeping it local avoids
+  // threading another callback through ServerCard's interface.
+  const [testing, setTesting] = useState<string | null>(null);
+  const [results, setResults] = useState<Record<string, TestResult>>({});
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  const handleTest = async (label: string) => {
+    setTesting(label);
+    try {
+      const res = await apiPost<TestResult>(
+        `/api/mcp/connections/${server.server_id}/${encodeURIComponent(label)}/test`,
+        {},
+      );
+      setResults((prev) => ({ ...prev, [label]: res }));
+      // Reset the disclosure so a fresh result starts collapsed —
+      // the user can decide whether to drill in.
+      setExpanded((prev) => ({ ...prev, [label]: false }));
+    } catch (err) {
+      setResults((prev) => ({
+        ...prev,
+        [label]: {
+          success: false,
+          message: err instanceof Error ? err.message : t('connections.testFailed'),
+          latency_ms: 0,
+        },
+      }));
+    } finally {
+      setTesting(null);
+    }
+  };
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 pb-3">
@@ -386,76 +438,150 @@ function ServerCard({
           </p>
         ) : (
           <ul className="divide-y">
-            {server.accounts.map((a) => (
-              <li
-                key={a.account_label}
-                className="flex items-center justify-between gap-3 py-2"
-              >
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
-                    {/* Upstream identity goes first when we have it
-                        (e.g. `@octocat`, `user@example.com`) so users
-                        can tell their accounts apart at a glance.
-                        Falls back to the user-supplied account_label
-                        when the upstream gave us nothing usable. */}
-                    {a.upstream_subject ? (
-                      <>
-                        <span className="font-medium">{a.upstream_subject}</span>
-                        <span className="text-xs text-muted-foreground">
-                          ({a.account_label})
-                        </span>
-                      </>
-                    ) : (
-                      <span className="font-medium">{a.account_label}</span>
-                    )}
-                    {a.is_default && (
-                      <Badge variant="secondary" className="text-xs">
-                        {t('connections.default')}
-                      </Badge>
-                    )}
-                    <Badge variant="outline" className="text-xs">
-                      {a.credential_type === 'oauth_authcode' ? 'OAuth' : 'Token'}
-                    </Badge>
+            {server.accounts.map((a) => {
+              const result = results[a.account_label];
+              const isTesting = testing === a.account_label;
+              const isExpanded = expanded[a.account_label] ?? false;
+              return (
+                <li key={a.account_label} className="py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2">
+                        {/* Upstream identity goes first when we have it
+                            (e.g. `@octocat`, `user@example.com`) so users
+                            can tell their accounts apart at a glance.
+                            Falls back to the user-supplied account_label
+                            when the upstream gave us nothing usable. */}
+                        {a.upstream_subject ? (
+                          <>
+                            <span className="font-medium">{a.upstream_subject}</span>
+                            <span className="text-xs text-muted-foreground">
+                              ({a.account_label})
+                            </span>
+                          </>
+                        ) : (
+                          <span className="font-medium">{a.account_label}</span>
+                        )}
+                        {a.is_default && (
+                          <Badge variant="secondary" className="text-xs">
+                            {t('connections.default')}
+                          </Badge>
+                        )}
+                        <Badge variant="outline" className="text-xs">
+                          {a.credential_type === 'oauth_authcode' ? 'OAuth' : 'Token'}
+                        </Badge>
+                      </div>
+                      <div className="text-xs text-muted-foreground space-x-2">
+                        {a.scopes.length > 0 && (
+                          <span className="font-mono">{a.scopes.join(' ')}</span>
+                        )}
+                        {a.expires_at && (
+                          <span>
+                            {t('connections.expiresAt', {
+                              when: format(new Date(a.expires_at), 'yyyy-MM-dd HH:mm'),
+                            })}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                    <div className="flex shrink-0 gap-1">
+                      {!a.is_default && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onSetDefault(a.account_label)}
+                        >
+                          {t('connections.setDefault')}
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => handleTest(a.account_label)}
+                        disabled={isTesting}
+                        title={t('connections.test')}
+                      >
+                        {isTesting ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Activity className="h-3 w-3" />
+                        )}
+                      </Button>
+                      {a.credential_type === 'oauth_authcode' && (
+                        <Button size="sm" variant="ghost" onClick={onAddOauth}>
+                          <RefreshCw className="h-3 w-3" />
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        onClick={() => onRevoke(a.account_label)}
+                        title={t('connections.revoke')}
+                      >
+                        <Trash2 className="h-3 w-3 text-destructive" />
+                      </Button>
+                    </div>
                   </div>
-                  <div className="text-xs text-muted-foreground space-x-2">
-                    {a.scopes.length > 0 && (
-                      <span className="font-mono">{a.scopes.join(' ')}</span>
-                    )}
-                    {a.expires_at && (
-                      <span>
-                        {t('connections.expiresAt', {
-                          when: format(new Date(a.expires_at), 'yyyy-MM-dd HH:mm'),
-                        })}
-                      </span>
-                    )}
-                  </div>
-                </div>
-                <div className="flex shrink-0 gap-1">
-                  {!a.is_default && (
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      onClick={() => onSetDefault(a.account_label)}
+                  {result && (
+                    <div
+                      className={cn(
+                        'mt-2 rounded-md border px-2.5 py-1.5 text-xs',
+                        result.success
+                          ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-700 dark:text-emerald-400'
+                          : 'border-destructive/30 bg-destructive/5 text-destructive',
+                      )}
                     >
-                      {t('connections.setDefault')}
-                    </Button>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate">
+                          {result.success ? '✓' : '✗'} {result.message}
+                          {result.success && (
+                            <span className="ml-2 font-mono text-muted-foreground">
+                              {result.latency_ms}ms · {result.tools_count} {t('connections.toolsLabel')}
+                            </span>
+                          )}
+                        </span>
+                        {result.success && result.tools && result.tools.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpanded((prev) => ({
+                                ...prev,
+                                [a.account_label]: !prev[a.account_label],
+                              }))
+                            }
+                            className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground"
+                          >
+                            {isExpanded ? (
+                              <>
+                                <ChevronDown className="h-3 w-3" />
+                                {t('connections.hideTools')}
+                              </>
+                            ) : (
+                              <>
+                                <ChevronRight className="h-3 w-3" />
+                                {t('connections.showTools')}
+                              </>
+                            )}
+                          </button>
+                        )}
+                      </div>
+                      {isExpanded && result.tools && (
+                        <ul className="mt-2 max-h-48 space-y-0.5 overflow-y-auto border-t pt-1.5 font-mono text-[11px] text-muted-foreground">
+                          {result.tools.map((tool) => (
+                            <li key={tool.name} className="truncate">
+                              <span className="text-foreground">{tool.name}</span>
+                              {tool.description && (
+                                <span className="ml-2 opacity-70">— {tool.description}</span>
+                              )}
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
                   )}
-                  {a.credential_type === 'oauth_authcode' && (
-                    <Button size="sm" variant="ghost" onClick={onAddOauth}>
-                      <RefreshCw className="h-3 w-3" />
-                    </Button>
-                  )}
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => onRevoke(a.account_label)}
-                    title={t('connections.revoke')}
-                  >
-                    <Trash2 className="h-3 w-3 text-destructive" />
-                  </Button>
-                </div>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         )}
       </CardContent>

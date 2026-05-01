@@ -694,6 +694,137 @@ pub async fn paste_static_token(
 }
 
 // ---------------------------------------------------------------------------
+// POST /api/mcp/connections/{server_id}/{account_label}/test
+// ---------------------------------------------------------------------------
+//
+// User-driven probe that exercises the *caller's* credential — the
+// admin-side `/api/mcp/servers/{id}/discover` is anonymous and cannot
+// validate OAuth-gated upstreams. This endpoint is read-only: it never
+// updates `mcp_servers.status`, `cached_tools_jsonb`, or `last_error`
+// so that one user's bad token can't pollute the admin view.
+
+pub async fn test_connection(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path((server_id, account_label)): Path<(Uuid, String)>,
+) -> Result<Json<super::mcp_servers::TestMcpServerResponse>, AppError> {
+    use super::mcp_servers::TestMcpServerResponse;
+    use think_watch_mcp_gateway::user_token::{ResolverCaller, ResolverError};
+
+    auth_user.require_permission("mcp:connect")?;
+    super::test_rate_limit::check_test_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        auth_user.claims.iat,
+        "mcp_user_test",
+    )
+    .await?;
+
+    let server = load_server(&state, server_id).await?;
+
+    // Confirm the credential exists before probing — saves a misleading
+    // `NeedsUserCredentials` result for an account_label the user
+    // never created (typo in the URL, stale UI cache, etc.).
+    let exists: Option<i32> = sqlx::query_scalar(
+        r#"SELECT 1 FROM mcp_user_credentials
+            WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3"#,
+    )
+    .bind(server_id)
+    .bind(auth_user.claims.sub)
+    .bind(&account_label)
+    .fetch_optional(&state.db)
+    .await?;
+    if exists.is_none() {
+        return Err(AppError::NotFound("Connection not found".into()));
+    }
+
+    let oauth_cfg = crate::mcp_runtime::build_oauth_cfg(&server, &state.config.encryption_key);
+
+    // Pin the resolver to this exact account_label via the same override
+    // map the gateway hot-path uses. Avoids exposing `fetch_row` and
+    // keeps a single code path for credential selection.
+    let caller = ResolverCaller {
+        user_id: auth_user.claims.sub,
+        mcp_account_overrides: serde_json::json!({
+            server_id.to_string(): account_label,
+        }),
+    };
+
+    let header = match state
+        .user_token_resolver
+        .resolve(
+            server_id,
+            &caller,
+            oauth_cfg.as_ref(),
+            server.allow_static_token,
+        )
+        .await
+    {
+        Ok(opt) => opt,
+        Err(ResolverError::NeedsUserCredentials { .. }) => {
+            return Ok(Json(TestMcpServerResponse {
+                success: false,
+                message: "Credential is missing — re-authorize this account.".into(),
+                latency_ms: 0,
+                tools_count: None,
+                tools: None,
+            }));
+        }
+        Err(ResolverError::RefreshFailed { message, .. }) => {
+            return Ok(Json(TestMcpServerResponse {
+                success: false,
+                message: format!("OAuth refresh failed: {message}. Re-authorize this account."),
+                latency_ms: 0,
+                tools_count: None,
+                tools: None,
+            }));
+        }
+        Err(e) => return Err(AppError::Internal(anyhow::anyhow!(e))),
+    };
+
+    let mut headers_map = std::collections::HashMap::new();
+    if let Some((name, value)) = header {
+        headers_map.insert(name, value);
+    }
+    let http = state.http_client.load();
+    let outcome = super::mcp_servers::probe_mcp_endpoint(
+        &http,
+        &server.endpoint_url,
+        if headers_map.is_empty() {
+            None
+        } else {
+            Some(&headers_map)
+        },
+    )
+    .await;
+
+    state.audit.log(
+        AuditEntry::new("mcp.connection.tested")
+            .user_id(auth_user.claims.sub)
+            .resource("mcp_server")
+            .resource_id(server_id.to_string())
+            .detail(serde_json::json!({
+                "account_label": account_label,
+                "success": outcome.success,
+                "tools_count": outcome.tools.len(),
+            })),
+    );
+
+    let (tools_count, tools) = if outcome.success {
+        (Some(outcome.tools.len()), Some(outcome.tools))
+    } else {
+        (None, None)
+    };
+    Ok(Json(TestMcpServerResponse {
+        success: outcome.success,
+        message: outcome.message,
+        latency_ms: outcome.latency_ms,
+        tools_count,
+        tools,
+    }))
+}
+
+// ---------------------------------------------------------------------------
 // upstream_subject resolution (Tier 1 JWT → Tier 2 userinfo → fallback NULL)
 // ---------------------------------------------------------------------------
 

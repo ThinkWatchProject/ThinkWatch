@@ -187,7 +187,12 @@
     "saveToken": "Save token",
     "authorize": "Continue to provider",
     "connectedToast": "Connected. Your future tool calls will use this account.",
-    "connectFailed": "Authorization failed"
+    "connectFailed": "Authorization failed",
+    "test": "Test connection",
+    "testFailed": "Test failed",
+    "toolsLabel": "tools",
+    "showTools": "Show tools",
+    "hideTools": "Hide tools"
   },
   "auth": {
     "signIn": "Sign in",

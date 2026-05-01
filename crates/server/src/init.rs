@@ -96,6 +96,18 @@ pub async fn init_state(
         think_watch_gateway::router::ModelRouter::new(),
     ));
 
+    let crypto_key = think_watch_common::crypto::parse_encryption_key(&config.encryption_key)
+        .map_err(|e| anyhow::anyhow!("invalid ENCRYPTION_KEY: {e}"))?;
+    let init_http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(init_http_secs))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let user_token_resolver = think_watch_mcp_gateway::user_token::UserTokenResolver::new(
+        pool.clone(),
+        crypto_key,
+        init_http_client.clone(),
+    );
+
     let state = AppState {
         db: pool,
         redis,
@@ -113,13 +125,9 @@ pub async fn init_state(
         mcp_pool: Arc::new(arc_swap::ArcSwap::from_pointee(
             think_watch_mcp_gateway::pool::ConnectionPool::with_timeout(init_mcp_pool_secs),
         )),
-        http_client: Arc::new(arc_swap::ArcSwap::from_pointee(
-            reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(init_http_secs))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new()),
-        )),
+        http_client: Arc::new(arc_swap::ArcSwap::from_pointee(init_http_client)),
         gateway_router,
+        user_token_resolver,
     };
 
     Ok(state)

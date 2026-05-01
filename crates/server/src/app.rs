@@ -69,6 +69,11 @@ pub struct AppState {
     /// Gateway model router. Wrapped in `ArcSwap` so route changes
     /// (provider/model CRUD, sync) take effect without restart.
     pub gateway_router: Arc<arc_swap::ArcSwap<ModelRouter>>,
+    /// Per-user MCP credential resolver. Shared with `McpProxy` so a
+    /// single instance handles request-time credential lookup, OAuth
+    /// refresh coalescing, and the console-driven "Test connection"
+    /// probe.
+    pub user_token_resolver: think_watch_mcp_gateway::user_token::UserTokenResolver,
 }
 
 /// Build a `ContentFilter` from the current `system_settings` value.
@@ -244,13 +249,6 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
 
     let session_manager =
         SessionManager::with_redis(state.redis.clone(), state.dynamic_config.clone());
-    let crypto_key = think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
-        .map_err(|e| anyhow::anyhow!("invalid ENCRYPTION_KEY: {e}"))?;
-    let user_tokens = think_watch_mcp_gateway::user_token::UserTokenResolver::new(
-        state.db.clone(),
-        crypto_key,
-        (**state.http_client.load()).clone(),
-    );
     let mut mcp_proxy = McpProxy::new(
         registry,
         pool,
@@ -259,7 +257,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         state.redis.clone(),
         state.dynamic_config.clone(),
         state.audit.clone(),
-        user_tokens,
+        state.user_token_resolver.clone(),
     );
     // Wire the shared CB registry into the proxy so per-server breakers
     // are visible to the dashboard handler.
@@ -499,6 +497,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         .route(
             "/api/mcp/connections/{server_id}/{account_label}/static-token",
             put(handlers::mcp_oauth::paste_static_token),
+        )
+        .route(
+            "/api/mcp/connections/{server_id}/{account_label}/test",
+            post(handlers::mcp_oauth::test_connection),
         )
         // NOTE: `/api/admin/keys/{id}/force-revoke` lives in
         // `admin_routes` further down — keep this comment so a

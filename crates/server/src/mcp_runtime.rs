@@ -59,7 +59,6 @@ pub async fn build_registered_server(
     encryption_key: &str,
 ) -> anyhow::Result<think_watch_mcp_gateway::registry::RegisteredServer> {
     use think_watch_mcp_gateway::registry::{McpToolInfo, RegisteredServer};
-    use think_watch_mcp_gateway::user_token::OAuthClientCfg;
 
     let tool_rows = sqlx::query_as::<_, think_watch_common::models::McpTool>(
         "SELECT * FROM mcp_tools WHERE server_id = $1 AND is_active = true",
@@ -77,37 +76,7 @@ pub async fn build_registered_server(
         })
         .collect();
 
-    // Resolve the OAuth client config when present. A row qualifies as
-    // OAuth-capable when it has BOTH the token endpoint and a client
-    // id+secret pair — anything missing is treated as "OAuth not
-    // configured" (the resolver will then either fall through to
-    // static-token mode or surface NeedsUserCredentials).
-    let oauth_cfg = match (
-        server.oauth_token_endpoint.as_deref(),
-        server.oauth_client_id.as_deref(),
-        server.oauth_client_secret_encrypted.as_ref(),
-    ) {
-        (Some(token_endpoint), Some(client_id), Some(encrypted)) => {
-            match decrypt_client_secret(encrypted, encryption_key) {
-                Ok(client_secret) => Some(OAuthClientCfg {
-                    token_endpoint: token_endpoint.to_string(),
-                    authorization_endpoint: server.oauth_authorization_endpoint.clone(),
-                    client_id: client_id.to_string(),
-                    client_secret,
-                    scopes: server.oauth_scopes.clone(),
-                }),
-                Err(e) => {
-                    tracing::error!(
-                        mcp_server = %server.name,
-                        error = %e,
-                        "Failed to decrypt MCP OAuth client_secret — skipping OAuth registration"
-                    );
-                    None
-                }
-            }
-        }
-        _ => None,
-    };
+    let oauth_cfg = build_oauth_cfg(server, encryption_key);
 
     // Parse custom headers from config_json.custom_headers (key→value map)
     // Values may contain {{user_id}} / {{user_email}} template variables.
@@ -149,6 +118,44 @@ pub async fn build_registered_server(
         cache_ttl_secs,
         forwards_user_identity,
     })
+}
+
+/// Resolve the upstream OAuth client config from a server row. Returns
+/// `None` when any of (token_endpoint, client_id, client_secret) is
+/// missing OR when the secret fails to decrypt. The resolver treats
+/// `None` as "no OAuth" and falls through to the static-token path or
+/// surfaces `NeedsUserCredentials`.
+pub fn build_oauth_cfg(
+    server: &think_watch_common::models::McpServer,
+    encryption_key: &str,
+) -> Option<think_watch_mcp_gateway::user_token::OAuthClientCfg> {
+    use think_watch_mcp_gateway::user_token::OAuthClientCfg;
+    match (
+        server.oauth_token_endpoint.as_deref(),
+        server.oauth_client_id.as_deref(),
+        server.oauth_client_secret_encrypted.as_ref(),
+    ) {
+        (Some(token_endpoint), Some(client_id), Some(encrypted)) => {
+            match decrypt_client_secret(encrypted, encryption_key) {
+                Ok(client_secret) => Some(OAuthClientCfg {
+                    token_endpoint: token_endpoint.to_string(),
+                    authorization_endpoint: server.oauth_authorization_endpoint.clone(),
+                    client_id: client_id.to_string(),
+                    client_secret,
+                    scopes: server.oauth_scopes.clone(),
+                }),
+                Err(e) => {
+                    tracing::error!(
+                        mcp_server = %server.name,
+                        error = %e,
+                        "Failed to decrypt MCP OAuth client_secret"
+                    );
+                    None
+                }
+            }
+        }
+        _ => None,
+    }
 }
 
 fn decrypt_client_secret(encrypted: &[u8], encryption_key: &str) -> anyhow::Result<String> {

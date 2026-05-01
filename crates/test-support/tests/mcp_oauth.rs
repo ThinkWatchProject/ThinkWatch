@@ -442,3 +442,144 @@ async fn tool_call_without_credential_returns_needs_user_credentials() {
     assert_eq!(err["data"]["kind"], "needs_user_credentials");
     assert_eq!(err["data"]["server_id"], server_id.to_string());
 }
+
+// ---------------------------------------------------------------------------
+// POST /api/mcp/connections/{server_id}/{account_label}/test
+// ---------------------------------------------------------------------------
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn test_connection_with_static_token_returns_tools_preview() {
+    let app = TestApp::spawn().await;
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let upstream = mcp_upstream().await;
+    let server_id = seed_static_server(&app, &upstream.uri(), "tprev").await;
+
+    let con = app.console_client();
+    login(&con, &admin).await;
+
+    // Paste a token, then probe.
+    con.put(
+        &format!("/api/mcp/connections/{server_id}/work/static-token"),
+        json!({"token": "live-secret"}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    let resp = con
+        .post(
+            &format!("/api/mcp/connections/{server_id}/work/test"),
+            json!({}),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+
+    let body: Value = resp.json().unwrap();
+    assert_eq!(body["success"], true);
+    assert_eq!(body["tools_count"], 1);
+    let tools = body["tools"].as_array().expect("tools array");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["name"], "echo");
+
+    // The probe must have carried the user's token — confirms we
+    // didn't fall through to the anonymous path.
+    let received = upstream.received_requests().await.unwrap();
+    let with_bearer = received.iter().find(|r| {
+        r.headers.get("Authorization").and_then(|v| v.to_str().ok()) == Some("Bearer live-secret")
+    });
+    assert!(
+        with_bearer.is_some(),
+        "upstream never saw the user's bearer token during the probe"
+    );
+
+    // Read-only contract: server-level columns must NOT be touched
+    // by a user-driven test (admin's `status` view stays clean even
+    // if a user's credential is bad).
+    let row: (Option<chrono::DateTime<chrono::Utc>>, Option<Value>) = sqlx::query_as(
+        "SELECT last_health_check, cached_tools_jsonb FROM mcp_servers WHERE id = $1",
+    )
+    .bind(server_id)
+    .fetch_one(&app.db)
+    .await
+    .unwrap();
+    assert!(
+        row.0.is_none() && row.1.is_none(),
+        "test_connection must not write last_health_check / cached_tools_jsonb"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn test_connection_unknown_account_label_returns_404() {
+    let app = TestApp::spawn().await;
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let upstream = mcp_upstream().await;
+    let server_id = seed_static_server(&app, &upstream.uri(), "tnone").await;
+
+    let con = app.console_client();
+    login(&con, &admin).await;
+
+    let resp = con
+        .post(
+            &format!("/api/mcp/connections/{server_id}/never-pasted/test"),
+            json!({}),
+        )
+        .await
+        .unwrap();
+    resp.assert_status(404);
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn test_connection_returns_failure_when_upstream_rejects_token() {
+    // Stand up a custom upstream that 401s on `tools/list` so we can
+    // exercise the unhappy path without touching the resolver — the
+    // credential decrypts fine, the upstream just doesn't accept it.
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(ResponseTemplate::new(401).set_body_string("unauthorized"))
+        .mount(&upstream)
+        .await;
+
+    let app = TestApp::spawn().await;
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let server_id = seed_static_server(&app, &upstream.uri(), "trej").await;
+
+    let con = app.console_client();
+    login(&con, &admin).await;
+    con.put(
+        &format!("/api/mcp/connections/{server_id}/work/static-token"),
+        json!({"token": "stale-token"}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    let resp = con
+        .post(
+            &format!("/api/mcp/connections/{server_id}/work/test"),
+            json!({}),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+
+    let body: Value = resp.json().unwrap();
+    assert_eq!(body["success"], false);
+    assert!(body.get("tools").is_none() || body["tools"].is_null());
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("401")
+            || body["message"]
+                .as_str()
+                .unwrap_or("")
+                .contains("unauthorized"),
+        "expected message to surface the 401 — got {body:?}"
+    );
+}
