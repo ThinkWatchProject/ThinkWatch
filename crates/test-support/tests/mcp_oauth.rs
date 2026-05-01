@@ -13,12 +13,12 @@
 //! 127.0.0.1).
 //!
 //! The OAuth Authorization Code path is covered by unit tests in
-//! `crates/server/src/handlers/mcp_oauth.rs` (PKCE digest against
-//! the RFC 7636 test vector, HMAC binding sensitivity, fragment
-//! encoder). Driving the full code-exchange roundtrip would need
-//! a second wiremock standing in for the upstream's authorize page
-//! + token endpoint on top of the upstream MCP itself — out of scope
-//! for this PR.
+//! `crates/server/src/handlers/mcp_oauth.rs` (PKCE digest against the
+//! RFC 7636 test vector, HMAC binding sensitivity, fragment encoder).
+//! Driving the full code-exchange roundtrip would need a second
+//! wiremock standing in for the upstream's authorize page + token
+//! endpoint on top of the upstream MCP itself — out of scope for
+//! this PR.
 
 use serde_json::Value;
 use think_watch_test_support::prelude::*;

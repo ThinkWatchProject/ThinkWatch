@@ -1,5 +1,5 @@
 .PHONY: dev dev-backend dev-frontend infra infra-down check precommit precommit-rust precommit-frontend \
-        test test-it test-e2e build clean \
+        precommit-strict test test-it test-e2e build clean \
         tools deploy deploy-down secrets helm-deploy helm-deploy-down helm-template helm-lint
 
 # Start full dev environment
@@ -25,39 +25,42 @@ check:
 	cargo check --workspace
 	cd web && pnpm exec tsc --noEmit
 
-# Pre-commit: mirrors CI exactly (clippy + nextest + fmt + i18n parity
-# + pnpm test + pnpm build).
+# Pre-commit: clippy + unit tests + fmt. Integration-test *linking*
+# (`nextest --no-run --tests`) is deferred to `make precommit-strict`
+# / CI — that step only catches link errors (extern symbols etc.),
+# which are rare, while costing ~80s for the 40+ test binaries on
+# macOS Sequoia's per-binary dyld provenance scan.
 #
-# Speedup levers vs. a naive `cargo {check,test,clippy,fmt}` pipeline:
-#   1. `cargo check` is dropped — `cargo clippy` is a strict superset
-#      and the separate pass would just rebuild the same artifacts.
+# Speedup levers:
+#   1. `cargo check` is dropped — `cargo clippy` is a strict superset.
 #   2. `cargo test` is replaced by `cargo nextest run` so each test
 #      binary runs in its own process; on a touched-common-types diff
 #      this stops the workspace from blocking on the slowest binary.
-#   3. The Rust and frontend pipelines run in parallel via a
-#      recursive `make -j2` — wall-clock is `max(rust, frontend)`
-#      instead of their sum, since the two pipelines never share
-#      build artifacts.
-#   4. `--tests --no-run` compiles the integration test binaries (so a
-#      typo in an #[ignore]-marked test still fails the build), but
-#      only `--lib --bins` are *executed*. Every test in
-#      `crates/test-support/tests/` is `#[ignore]`-marked (run via
-#      `make test-it`) — launching those 40+ binaries during precommit
-#      does nothing but pay macOS Sequoia's per-binary dyld provenance
-#      scan (~25-36s each on first launch of a freshly-linked binary).
-#
-# `cargo clippy` runs *without* `--all-targets` to avoid recompiling
-# tests under the clippy lint pass on top of nextest's compile.
+#   3. The Rust and frontend pipelines run in parallel via a recursive
+#      `make -j2` — wall-clock is `max(rust, frontend)` instead of sum.
+#   4. **VSCode rust-analyzer must use a separate `target/` subtree** —
+#      see `.vscode/settings.json` (`rust-analyzer.cargo.targetDir = true`).
+#      Without that setting, RA's `cargo check` holds `target/debug/.cargo-lock`
+#      and any terminal cargo blocks idle on it; symptom is `time` showing
+#      `real >> user+sys` (we observed 1109s real / 22s CPU before the fix).
 #
 # Run `make tools` once to install cargo-nextest if it's missing.
 precommit:
 	@$(MAKE) -j2 precommit-rust precommit-frontend
 
 precommit-rust:
-	cargo nextest run --workspace --lib --bins --tests --no-run
+	cargo clippy --workspace --lib --bins -- -D warnings
+	cargo clippy --workspace --tests -- -D warnings
 	cargo nextest run --workspace --lib --bins
-	cargo clippy --workspace -- -D warnings
 	cargo fmt --all -- --check
+
+# Stricter precommit — also LINKS the integration test binaries to
+# catch the rare link-time errors (missing extern symbols, ABI drift).
+# ~+80s on top of `precommit`. Use before pushing changes to a `pub`
+# API consumed by `crates/test-support/tests/` if you don't want CI
+# to bounce them.
+precommit-strict: precommit
+	cargo nextest run --workspace --tests --no-run
 
 precommit-frontend:
 	cd web && pnpm check:i18n

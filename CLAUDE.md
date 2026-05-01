@@ -5,17 +5,20 @@
 Always run `make precommit` before committing. The two pipelines run in parallel via a recursive `make -j2`:
 
 ```
-# pipeline 1 (rust)                   | # pipeline 2 (frontend)
-cargo nextest run --workspace ...     | cd web && pnpm check:i18n
-cargo clippy --workspace -- -D warn   |          && pnpm test
-cargo fmt --all -- --check            |          && pnpm build
+# pipeline 1 (rust)                            | # pipeline 2 (frontend)
+cargo clippy --workspace --lib --bins ...      | cd web && pnpm check:i18n
+cargo clippy --workspace --tests ...           |          && pnpm test
+cargo nextest run --workspace --lib --bins     |          && pnpm build
+cargo fmt --all -- --check                     |
 ```
 
-Wall-clock is `max(rust, frontend)` instead of their sum, since the pipelines never share build artifacts. `cargo check` is intentionally absent — clippy is a strict superset, and re-running check separately just doubles the Rust compile time on touched-common-types diffs. Clippy runs *without* `--all-targets` so the test sources nextest already compiled don't get re-walked under the lint pass.
+Integration tests are type-checked (`clippy --tests`) but **not linked** at precommit. Linking 40+ test binaries pays the macOS Sequoia dyld provenance scan (~80s) just to catch the rare missing-symbol error — `make precommit-strict` adds `nextest --tests --no-run` for that case. CI runs the full integration suite.
 
-`cargo nextest` is required (replaces `cargo test` for ~3× faster cross-binary parallelism). Install once via `make tools` (idempotent — runs `cargo install cargo-nextest --locked`).
+Wall-clock is `max(rust, frontend)` instead of their sum. `cargo check` is intentionally absent — clippy is a strict superset.
 
-The Rust pipeline runs `nextest --no-run` over `--lib --bins --tests` (so a syntax error in an `#[ignore]`-marked integration test still fails the build), then runs `nextest` over `--lib --bins` only. Every test in `crates/test-support/tests/` is `#[ignore]`-marked and only runs via `make test-it`; launching those 40+ binaries during precommit does nothing but pay macOS Sequoia 26.x's per-binary dyld provenance scan (~25-36s each on first launch). Skipping them brings precommit's test phase from minutes to seconds on macOS.
+**rust-analyzer MUST use a separate `target/` subtree** — see `.vscode/settings.json` (`rust-analyzer.cargo.targetDir = true`). Without this, RA's continuous `cargo check` holds `target/debug/.cargo-lock` and any terminal cargo blocks idle on it; the symptom is `time` reporting `real ≫ user+sys` (we observed 1109s wall / 22s CPU before isolating). Reload VSCode after editing the file.
+
+`cargo nextest` is required for `make test` / `make test-it` (cross-binary parallelism). Install once via `make tools` (idempotent — runs `cargo install cargo-nextest --locked`).
 
 **Do NOT use `tsc --noEmit` alone** as the frontend check. `tsc -b` (inside `pnpm build`) is stricter and catches unused imports (TS6133) that `--noEmit` misses.
 
