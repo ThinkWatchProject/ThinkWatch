@@ -1,9 +1,29 @@
-.PHONY: dev dev-backend dev-frontend infra infra-down check precommit precommit-rust precommit-frontend \
+.PHONY: dev dev-backend dev-frontend dev-stop dev-restart dev-status dev-logs \
+        infra infra-down check precommit precommit-rust precommit-frontend \
         precommit-strict test test-it test-e2e build clean \
         tools deploy deploy-down secrets helm-deploy helm-deploy-down helm-template helm-lint
 
-# Start full dev environment
+# ---- Dev process management ----
+# Backend / frontend are launched detached so `make dev` returns
+# immediately. PID + log files under .dev-run/ drive stop / restart /
+# status / logs. Infra (docker compose) is managed by `infra` /
+# `infra-down` and intentionally NOT touched by `dev-stop`.
+DEV_RUN_DIR  := .dev-run
+BACKEND_PID  := $(DEV_RUN_DIR)/backend.pid
+FRONTEND_PID := $(DEV_RUN_DIR)/frontend.pid
+BACKEND_LOG  := $(DEV_RUN_DIR)/backend.log
+FRONTEND_LOG := $(DEV_RUN_DIR)/frontend.log
+
+# Start full dev environment (infra + backend + frontend), all detached.
 dev: infra dev-backend dev-frontend
+	@echo ""
+	@echo "  backend  → :3000 (gateway) / :3001 (console)   log: $(BACKEND_LOG)"
+	@echo "  frontend → :5173                               log: $(FRONTEND_LOG)"
+	@echo "  status:  make dev-status     logs:    make dev-logs"
+	@echo "  stop:    make dev-stop       restart: make dev-restart"
+
+$(DEV_RUN_DIR):
+	@mkdir -p $(DEV_RUN_DIR)
 
 # Start infrastructure (PG, Redis, ClickHouse, Zitadel)
 infra:
@@ -12,13 +32,81 @@ infra:
 infra-down:
 	docker compose -f deploy/docker-compose.dev.yml --env-file .env down
 
-# Start backend (gateway :3000 + console :3001)
-dev-backend:
-	cargo run -p think-watch-server
+# Start backend (gateway :3000 + console :3001) detached.
+# Two-layer guard: PID file + live `kill -0`, then a port-occupancy
+# fallback for the cases where the pidfile was wiped or another
+# terminal launched `cargo run` directly.
+dev-backend: | $(DEV_RUN_DIR)
+	@if [ -f $(BACKEND_PID) ] && kill -0 $$(cat $(BACKEND_PID)) 2>/dev/null; then \
+		echo "→ backend already running (pid $$(cat $(BACKEND_PID)))"; \
+	elif lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -qE ':(3000|3001)[ )]'; then \
+		echo "✗ backend port 3000/3001 already in use (no managed pidfile)"; \
+		echo "  inspect: lsof -nP -iTCP:3000 -iTCP:3001 -sTCP:LISTEN"; \
+		echo "  if it's a managed run with a stale pidfile, run: make dev-stop"; \
+		exit 1; \
+	else \
+		echo "→ starting backend (cargo run -p think-watch-server)"; \
+		nohup cargo run -p think-watch-server >$(BACKEND_LOG) 2>&1 & echo $$! >$(BACKEND_PID); \
+		echo "  pid $$(cat $(BACKEND_PID)) — tail -f $(BACKEND_LOG)"; \
+	fi
 
-# Start frontend dev server (:5173)
-dev-frontend:
-	cd web && pnpm dev
+# Start frontend dev server (:5173) detached.
+dev-frontend: | $(DEV_RUN_DIR)
+	@if [ -f $(FRONTEND_PID) ] && kill -0 $$(cat $(FRONTEND_PID)) 2>/dev/null; then \
+		echo "→ frontend already running (pid $$(cat $(FRONTEND_PID)))"; \
+	elif lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | grep -qE ':5173[ )]'; then \
+		echo "✗ frontend port 5173 already in use (no managed pidfile)"; \
+		echo "  inspect: lsof -nP -iTCP:5173 -sTCP:LISTEN"; \
+		echo "  if it's a managed run with a stale pidfile, run: make dev-stop"; \
+		exit 1; \
+	else \
+		echo "→ starting frontend (pnpm dev)"; \
+		cd web && nohup pnpm dev >../$(FRONTEND_LOG) 2>&1 & echo $$! >$(FRONTEND_PID); \
+		echo "  pid $$(cat $(FRONTEND_PID)) — tail -f $(FRONTEND_LOG)"; \
+	fi
+
+# Stop background backend + frontend (leaves infra/docker running).
+# `cargo run` / `pnpm dev` spawn children (the server binary, vite),
+# so we SIGTERM the children first, then the recorded pid, and SIGKILL
+# anything that hasn't exited after 5s.
+dev-stop:
+	@for name in backend frontend; do \
+		pidfile=$(DEV_RUN_DIR)/$$name.pid; \
+		[ -f $$pidfile ] || continue; \
+		pid=$$(cat $$pidfile); \
+		if kill -0 $$pid 2>/dev/null; then \
+			echo "→ stopping $$name (pid $$pid)"; \
+			pkill -TERM -P $$pid 2>/dev/null || true; \
+			kill  -TERM    $$pid 2>/dev/null || true; \
+			for _ in 1 2 3 4 5; do \
+				kill -0 $$pid 2>/dev/null || break; \
+				sleep 1; \
+			done; \
+			pkill -KILL -P $$pid 2>/dev/null || true; \
+			kill  -KILL    $$pid 2>/dev/null || true; \
+		else \
+			echo "→ $$name not running (stale pidfile)"; \
+		fi; \
+		rm -f $$pidfile; \
+	done
+
+# Stop then start backend + frontend. Infra is left alone.
+dev-restart: dev-stop dev
+
+dev-status:
+	@for name in backend frontend; do \
+		pidfile=$(DEV_RUN_DIR)/$$name.pid; \
+		if [ -f $$pidfile ] && kill -0 $$(cat $$pidfile) 2>/dev/null; then \
+			printf "  %-9s running  (pid %s)\n" $$name $$(cat $$pidfile); \
+		else \
+			printf "  %-9s stopped\n" $$name; \
+		fi; \
+	done
+
+# Tail both backend + frontend logs (Ctrl-C to detach; processes keep running).
+dev-logs:
+	@touch $(BACKEND_LOG) $(FRONTEND_LOG)
+	@tail -n 50 -F $(BACKEND_LOG) $(FRONTEND_LOG)
 
 # Quick compile check
 check:

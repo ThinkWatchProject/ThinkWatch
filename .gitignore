@@ -29,3 +29,6 @@ Thumbs.db
 deploy/clickhouse/users.d/default-user.xml
 deploy/data/
 
+# Local dev process state (pid + log files from `make dev`)
+/.dev-run/
+
