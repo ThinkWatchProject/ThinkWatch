@@ -24,8 +24,18 @@ pub struct McpToolSummary {
 
 /// Result of a one-shot JSON-RPC `tools/list` probe. Never persists
 /// anything — returned straight back to the caller.
+///
+/// `success` means HTTP 2xx with a valid `result.tools` array.
+/// `requires_auth` means HTTP 401/403 — the server is reachable but the
+/// anonymous probe wasn't allowed to enumerate tools. Callers that probe
+/// anonymously (admin "test" button, store install pre-flight) typically
+/// treat `requires_auth` as a soft success — per-user auth happens later
+/// at /connections. Callers that probe with real credentials
+/// (`mcp_oauth::test_connection`) treat it as failure: the user's token
+/// was rejected.
 pub struct McpProbeOutcome {
     pub success: bool,
+    pub requires_auth: bool,
     pub message: String,
     pub latency_ms: u64,
     pub tools: Vec<McpToolSummary>,
@@ -64,6 +74,7 @@ pub async fn probe_mcp_endpoint(
         Err(e) => {
             return McpProbeOutcome {
                 success: false,
+                requires_auth: false,
                 message: format!("Request failed: {e}"),
                 latency_ms,
                 tools: vec![],
@@ -71,10 +82,23 @@ pub async fn probe_mcp_endpoint(
         }
     };
 
-    if !resp.status().is_success() {
+    let status = resp.status();
+    if !status.is_success() {
+        // 401/403 from an anonymous probe is the *expected* response for
+        // OAuth- or static-token-gated MCPs — the server is alive, the
+        // probe just wasn't allowed in. Surface as a soft outcome so
+        // anonymous callers can still proceed.
+        let requires_auth =
+            status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN;
+        let message = if requires_auth {
+            format!("Reachable — requires user auth (HTTP {})", status.as_u16())
+        } else {
+            format!("HTTP {status}")
+        };
         return McpProbeOutcome {
             success: false,
-            message: format!("HTTP {}", resp.status()),
+            requires_auth,
+            message,
             latency_ms,
             tools: vec![],
         };
@@ -141,6 +165,7 @@ pub async fn probe_mcp_endpoint(
     if tools.is_empty() && result_field.is_none() {
         return McpProbeOutcome {
             success: false,
+            requires_auth: false,
             message: "Invalid response: missing `result` field".into(),
             latency_ms,
             tools: vec![],
@@ -150,6 +175,7 @@ pub async fn probe_mcp_endpoint(
     let count = tools.len();
     McpProbeOutcome {
         success: true,
+        requires_auth: false,
         message: format!("Connected — {count} tools available"),
         latency_ms,
         tools,
@@ -198,4 +224,109 @@ pub fn normalize_namespace_prefix(
         ));
     }
     Ok(derived)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn probe(server: &MockServer) -> McpProbeOutcome {
+        probe_mcp_endpoint(
+            &reqwest::Client::new(),
+            &format!("{}/mcp", server.uri()),
+            None,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn probe_succeeds_on_2xx_with_tools() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "tools": [{ "name": "echo", "description": "Echo input" }] }
+            })))
+            .mount(&server)
+            .await;
+
+        let outcome = probe(&server).await;
+        assert!(outcome.success);
+        assert!(!outcome.requires_auth);
+        assert_eq!(outcome.tools.len(), 1);
+        assert_eq!(outcome.tools[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn probe_treats_401_as_requires_auth_not_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(401))
+            .mount(&server)
+            .await;
+
+        let outcome = probe(&server).await;
+        // Anonymous probe shouldn't claim success — but `requires_auth`
+        // tells the caller this is reachable, just gated.
+        assert!(!outcome.success);
+        assert!(outcome.requires_auth);
+        assert!(
+            outcome.message.contains("requires user auth"),
+            "msg={}",
+            outcome.message
+        );
+        assert!(outcome.tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn probe_treats_403_as_requires_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&server)
+            .await;
+
+        let outcome = probe(&server).await;
+        assert!(!outcome.success);
+        assert!(outcome.requires_auth);
+    }
+
+    #[tokio::test]
+    async fn probe_treats_500_as_hard_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let outcome = probe(&server).await;
+        assert!(!outcome.success);
+        assert!(!outcome.requires_auth);
+        assert!(outcome.message.starts_with("HTTP 500"));
+    }
+
+    #[tokio::test]
+    async fn probe_fails_on_2xx_with_missing_result_field() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/mcp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": { "code": -32601, "message": "Method not found" }
+            })))
+            .mount(&server)
+            .await;
+
+        let outcome = probe(&server).await;
+        assert!(!outcome.success);
+        assert!(!outcome.requires_auth);
+    }
 }

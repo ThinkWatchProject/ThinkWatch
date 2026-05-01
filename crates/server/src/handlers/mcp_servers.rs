@@ -30,6 +30,11 @@ pub struct TestMcpServerRequest {
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct TestMcpServerResponse {
     pub success: bool,
+    /// True when the server responded with 401/403 — reachable, but the
+    /// anonymous probe wasn't permitted to enumerate tools. The admin
+    /// "test" button treats this as a soft success since per-user auth
+    /// happens later when an end user connects via /connections.
+    pub requires_auth: bool,
     pub message: String,
     pub latency_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -90,8 +95,14 @@ pub async fn test_mcp_server(
     } else {
         None
     };
+    // Anonymous probe: 401/403 is the *expected* response for OAuth /
+    // static-token MCPs — surface as success so the wizard's Save isn't
+    // blocked. The frontend uses `requires_auth` to render an explanatory
+    // banner ("auth will be validated on first connection").
+    let success = outcome.success || outcome.requires_auth;
     Ok(Json(TestMcpServerResponse {
-        success: outcome.success,
+        success,
+        requires_auth: outcome.requires_auth,
         message: outcome.message,
         latency_ms: outcome.latency_ms,
         tools_count,

@@ -764,6 +764,7 @@ pub async fn test_connection(
         Err(ResolverError::NeedsUserCredentials { .. }) => {
             return Ok(Json(TestMcpServerResponse {
                 success: false,
+                requires_auth: false,
                 message: "Credential is missing — re-authorize this account.".into(),
                 latency_ms: 0,
                 tools_count: None,
@@ -773,6 +774,7 @@ pub async fn test_connection(
         Err(ResolverError::RefreshFailed { message, .. }) => {
             return Ok(Json(TestMcpServerResponse {
                 success: false,
+                requires_auth: false,
                 message: format!("OAuth refresh failed: {message}. Re-authorize this account."),
                 latency_ms: 0,
                 tools_count: None,
@@ -815,8 +817,13 @@ pub async fn test_connection(
     } else {
         (None, None)
     };
+    // This caller probes with the user's *real* credential, so a 401/403
+    // means the user's token was rejected — that's a genuine failure,
+    // not a "needs auth" soft-success. Pass `outcome.success` straight
+    // through; surface `requires_auth` purely for telemetry.
     Ok(Json(TestMcpServerResponse {
         success: outcome.success,
+        requires_auth: outcome.requires_auth,
         message: outcome.message,
         latency_ms: outcome.latency_ms,
         tools_count,

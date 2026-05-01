@@ -187,9 +187,7 @@ pub async fn install_template(
     let probe =
         super::mcp_shared::probe_mcp_endpoint(&http, &endpoint_url, req.custom_headers.as_ref())
             .await;
-    let probe_failed_with_auth =
-        probe.message.starts_with("HTTP 401") || probe.message.starts_with("HTTP 403");
-    if !probe.success && !probe_failed_with_auth {
+    if !probe.success && !probe.requires_auth {
         return Err(AppError::BadRequest(format!(
             "Connection test failed: {}",
             probe.message
