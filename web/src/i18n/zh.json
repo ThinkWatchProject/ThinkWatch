@@ -66,6 +66,7 @@
     "remove": "移除",
     "previous": "上一步",
     "next": "下一步",
+    "back": "返回",
     "items": "条记录",
     "rowsPerPage": "每页行数",
     "pageOf": "第 {{page}} / {{total}} 页",
@@ -129,13 +130,13 @@
     "install": "安装",
     "customHeaders": "自定义请求头",
     "headerName": "请求头名称",
-    "headerValue": "值",
     "installAgain": "再次安装",
     "installAgainHint": "已安装。可以再装一份（适用于多实例场景）。",
     "installAgainWarning": "此模板已安装。将创建一份新副本，名称和前缀会自动加数字后缀。",
     "installedTooltip": "已安装",
     "installing": "安装中...",
     "installSuccess": "MCP 服务器安装成功",
+    "installOauthFollowUp": "请到新服务器的设置中填写 OAuth client_id 和 secret，用户才能连接。",
     "installTitle": "安装 {{name}}",
     "endpointUrl": "端点地址",
     "authInstructions": "认证说明",
@@ -581,14 +582,79 @@
     "dialogDescription": "连接新的 MCP 服务器到网关。",
     "registering": "注册中...",
     "transport": "传输",
+    "authMode": "认证",
     "editServer": "编辑 MCP 服务器",
     "editDescription": "更新 MCP 服务器设置。",
+    "edit": {
+      "modeImmutableHint": "认证模式不可改；如需切换请删除后重建。"
+    },
     "testFailedBlocking": "连接测试失败：{{msg}}。请修复后重试。",
     "mustTestFirst": "请先点击\"测试连接\"并确认服务器返回工具列表。",
     "namespacePrefix": "命名空间前缀",
     "namespacePrefixPlaceholder": "例如 github（留空自动生成）",
     "namespacePrefixHint": "工具暴露为 <前缀>__<工具名>。仅支持小写字母、数字和下划线，最多 32 字符。",
-    "willBeStoredAs": "将保存为："
+    "willBeStoredAs": "将保存为：",
+    "oauth": {
+      "sectionLabel": "OAuth（可选 — 仅当上游支持 OAuth 时填写）",
+      "issuer": "Issuer",
+      "clientId": "Client ID",
+      "clientSecret": "Client secret",
+      "authEndpoint": "Authorization endpoint",
+      "tokenEndpoint": "Token endpoint",
+      "revocationEndpoint": "Revocation endpoint",
+      "userinfoEndpoint": "Userinfo endpoint",
+      "userinfoHint": "用户登录后调用此地址获取展示名（如 `@octocat`、`user@example.com`）。会优先尝试 JWT 解码，失败时再用 access_token 请求该 URL。若 access_token 本身是 JWT（Auth0 / Keycloak / Okta / Google），可以留空。",
+      "scopes": "Scopes（空格分隔）",
+      "advanced": "高级（端点、Scopes）",
+      "discoverFromIssuer": "从 Issuer 发现",
+      "discovering": " 发现中…",
+      "discoverSuccess": "已发现 OAuth 元数据",
+      "discoverFailed": "发现失败",
+      "setIssuerFirst": "请先填写 Issuer",
+      "secretKeepCurrent": "留空保留原值"
+    },
+    "wizard": {
+      "step1Title": "认证模式",
+      "step2Title": "连接信息",
+      "step3Title": "测试并保存",
+      "step1Hint": "选择此 MCP 服务器如何对终端用户进行认证。",
+      "lookingForKnown": "想找已知 MCP？",
+      "browseStore": "去 MCP 商店 →",
+      "allowStaticFallback": "允许用户粘贴自己的静态令牌（PAT / API key）",
+      "staticHelpUrl": "帮助链接（用户从哪获取 token）",
+      "staticHelpUrlHint": "在 /connections 页面展示给用户，告诉他们去哪签发自己的 token。",
+      "advancedSection": "高级（缓存 TTL、自定义请求头）",
+      "advancedSectionTtlOnly": "高级（缓存 TTL）",
+      "toolsDiscovered": "个工具",
+      "testAndSave": "下一步：测试连接",
+      "testing": "正在测试连接…",
+      "retryTest": "重试",
+      "requiresAuthTitle": "服务器可达 — 需要认证",
+      "requiresAuthHint": "上游对匿名探测返回了 401/403，这对 OAuth / 静态令牌 MCP 来说是预期行为 — 每个用户首次从 /connections 连接时才会验证其认证。",
+      "modes": {
+        "oauth": {
+          "title": "OAuth 登录",
+          "description": "用户用 GitHub / Google / 公司 SSO 登录后才能调用工具。"
+        },
+        "static": {
+          "title": "静态令牌（PAT / API key）",
+          "description": "每个用户在 /connections 粘贴一次自己的 token。"
+        },
+        "headers": {
+          "title": "自定义请求头",
+          "description": "通过 service-to-service 请求头（X-User-Id、X-API-Key）转发用户身份。"
+        },
+        "public": {
+          "title": "公开（无认证）",
+          "description": "上游服务器无需认证 — 任何登录控制台的用户都能调用其工具。"
+        }
+      },
+      "errors": {
+        "nameRequired": "请填写名称。",
+        "endpointRequired": "请填写端点 URL。",
+        "issuerRequired": "OAuth 模式必须填写 Issuer。"
+      }
+    }
   },
   "mcpTools": {
     "title": "MCP 工具",

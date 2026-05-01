@@ -13,11 +13,14 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import { Search, Download, CheckCircle2, Plus, Trash2, Loader2, Star, RefreshCw, Globe, Lock, KeyRound } from 'lucide-react';
+import { Search, Download, CheckCircle2, Loader2, Star, RefreshCw, Globe, Lock, KeyRound } from 'lucide-react';
 import { api, apiPost, hasPermission } from '@/lib/api';
 import { slugifyPrefix, resolveCollision, sanitizePrefixInput } from '@/lib/prefix-utils';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
+import { HeaderEditor } from '@/components/header-editor';
+import { AuthModeBadge } from '@/components/mcp/auth-mode-badge';
+import { deriveAuthMode } from '@/components/mcp/auth-mode-utils';
 
 interface StoreTemplate {
   id: string;
@@ -165,6 +168,11 @@ export function McpStorePage() {
             : undefined,
       });
       toast.success(t('mcpStore.installSuccess'));
+      // OAuth templates ship endpoint URLs but not client_id/secret —
+      // remind the operator to fill those in before users can authorize.
+      if (installTemplate.oauth_issuer) {
+        toast.info(t('mcpStore.installOauthFollowUp'), { duration: 8000 });
+      }
       setInstallTemplate(null);
       // Refresh store listing + existing-server snapshot so the just-installed
       // template shows the "installed" badge and future collision previews
@@ -179,12 +187,6 @@ export function McpStorePage() {
       setInstalling(false);
     }
   };
-
-  const addHeader = () => setCustomHeaders((h) => [...h, ['', '']]);
-  const removeHeader = (i: number) =>
-    setCustomHeaders((h) => h.filter((_, idx) => idx !== i));
-  const updateHeader = (i: number, field: 0 | 1, value: string) =>
-    setCustomHeaders((h) => h.map((pair, idx) => (idx === i ? (field === 0 ? [value, pair[1]] : [pair[0], value]) as [string, string] : pair)));
 
   const isHosted = installTemplate?.deploy_type === 'hosted';
   const needsEndpoint = !isHosted || !installTemplate?.endpoint_template;
@@ -332,8 +334,13 @@ export function McpStorePage() {
       >
         <DialogContent className="max-w-lg">
           <DialogHeader>
-            <DialogTitle>
-              {t('mcpStore.installTitle', { name: installTemplate?.name })}
+            <DialogTitle className="flex items-center gap-2">
+              <span className="truncate">
+                {t('mcpStore.installTitle', { name: installTemplate?.name })}
+              </span>
+              {installTemplate && (
+                <AuthModeBadge mode={deriveAuthMode(installTemplate)} />
+              )}
             </DialogTitle>
             <DialogDescription>
               {i18nText(installTemplate?.description, i18n.language)}
@@ -415,42 +422,17 @@ export function McpStorePage() {
               </div>
             )}
 
-            {/* Custom headers */}
             <div className="space-y-2">
-              <div className="flex items-center justify-between">
-                <Label className="text-sm">{t('mcpStore.customHeaders')}</Label>
-                <Button type="button" variant="ghost" size="sm" onClick={addHeader}>
-                  <Plus className="mr-1 h-3 w-3" /> {t('common.add')}
-                </Button>
-              </div>
-              {customHeaders.map(([k, v], i) => (
-                <div key={i} className="flex items-center gap-2">
-                  <Input
-                    placeholder={t('mcpStore.headerName')}
-                    aria-label={t('mcpStore.headerName')}
-                    value={k}
-                    onChange={(e) => updateHeader(i, 0, e.target.value)}
-                    className="flex-1"
-                  />
-                  <Input
-                    placeholder={t('mcpStore.headerValue')}
-                    aria-label={t('mcpStore.headerValue')}
-                    value={v}
-                    onChange={(e) => updateHeader(i, 1, e.target.value)}
-                    className="flex-1"
-                  />
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon"
-                    aria-label={t('common.remove')}
-                    title={t('common.remove')}
-                    onClick={() => removeHeader(i)}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </Button>
-                </div>
-              ))}
+              <Label className="text-sm">{t('mcpStore.customHeaders')}</Label>
+              <HeaderEditor
+                headers={customHeaders}
+                onChange={setCustomHeaders}
+                keyPlaceholder={t('mcpStore.headerName')}
+                presets={[
+                  { label: t('mcpServers.presetUserId'), header: ['X-User-Id', '{{user_id}}'] },
+                  { label: t('mcpServers.presetUserEmail'), header: ['X-User-Email', '{{user_email}}'] },
+                ]}
+              />
             </div>
 
             <DialogFooter>

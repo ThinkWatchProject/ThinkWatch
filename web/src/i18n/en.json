@@ -66,6 +66,7 @@
     "remove": "Remove",
     "previous": "Previous",
     "next": "Next",
+    "back": "Back",
     "items": "items",
     "rowsPerPage": "Rows per page",
     "pageOf": "Page {{page}} of {{total}}",
@@ -129,13 +130,13 @@
     "install": "Install",
     "customHeaders": "Custom Headers",
     "headerName": "Header name",
-    "headerValue": "Value",
     "installAgain": "Install Again",
     "installAgainHint": "Already installed. Install another copy (useful for multiple instances).",
     "installAgainWarning": "This template is already installed. A new copy will be created with a numeric suffix on the name and prefix.",
     "installedTooltip": "Already installed",
     "installing": "Installing...",
     "installSuccess": "MCP server installed successfully",
+    "installOauthFollowUp": "Now add the OAuth client_id and secret in the new server's settings before users can connect.",
     "installTitle": "Install {{name}}",
     "endpointUrl": "Endpoint URL",
     "authInstructions": "Auth Instructions",
@@ -581,14 +582,79 @@
     "dialogDescription": "Connect a new MCP server to the gateway.",
     "registering": "Registering...",
     "transport": "Transport",
+    "authMode": "Auth",
     "editServer": "Edit MCP Server",
     "editDescription": "Update MCP server settings.",
+    "edit": {
+      "modeImmutableHint": "Auth mode is fixed; delete + recreate to change."
+    },
     "testFailedBlocking": "Connection test failed: {{msg}}. Fix the issue and try again.",
     "mustTestFirst": "Run Test Connection first and confirm the server responds with a tool list.",
     "namespacePrefix": "Namespace Prefix",
     "namespacePrefixPlaceholder": "e.g. github (auto-derived if empty)",
     "namespacePrefixHint": "Tools are exposed as <prefix>__<tool_name>. Lowercase letters, digits, underscores only. Max 32 chars.",
-    "willBeStoredAs": "Will be stored as:"
+    "willBeStoredAs": "Will be stored as:",
+    "oauth": {
+      "sectionLabel": "OAuth (optional — for upstreams that support OAuth)",
+      "issuer": "Issuer",
+      "clientId": "Client ID",
+      "clientSecret": "Client secret",
+      "authEndpoint": "Authorization endpoint",
+      "tokenEndpoint": "Token endpoint",
+      "revocationEndpoint": "Revocation endpoint",
+      "userinfoEndpoint": "Userinfo endpoint",
+      "userinfoHint": "Hit after login to populate the user's display label (`@octocat`, `user@example.com`). Auto-tries JWT decode first, then GETs this URL with their access token. Skip if the access_token is a JWT (Auth0 / Keycloak / Okta / Google) — the field is read out of the token itself.",
+      "scopes": "Scopes (space separated)",
+      "advanced": "Advanced (endpoints, scopes)",
+      "discoverFromIssuer": "Discover from issuer",
+      "discovering": " Discovering…",
+      "discoverSuccess": "Discovered OAuth metadata",
+      "discoverFailed": "Discovery failed",
+      "setIssuerFirst": "Set issuer first",
+      "secretKeepCurrent": "Leave empty to keep current"
+    },
+    "wizard": {
+      "step1Title": "Auth mode",
+      "step2Title": "Connect",
+      "step3Title": "Test & save",
+      "step1Hint": "Choose how this MCP server authenticates end users.",
+      "lookingForKnown": "Looking for a known MCP?",
+      "browseStore": "Browse the store →",
+      "allowStaticFallback": "Allow users to paste their own static token (PAT / API key)",
+      "staticHelpUrl": "Help URL (where users get their token)",
+      "staticHelpUrlHint": "Shown to users on /connections so they know where to issue their token.",
+      "advancedSection": "Advanced (cache TTL, custom headers)",
+      "advancedSectionTtlOnly": "Advanced (cache TTL)",
+      "toolsDiscovered": "tools discovered",
+      "testAndSave": "Next: test connection",
+      "testing": "Testing connection…",
+      "retryTest": "Retry test",
+      "requiresAuthTitle": "Reachable — auth required",
+      "requiresAuthHint": "The upstream returned 401/403 to the anonymous probe. That's expected for OAuth / static-token MCPs — per-user auth will be validated when each user connects from /connections.",
+      "modes": {
+        "oauth": {
+          "title": "OAuth login",
+          "description": "Users sign in with GitHub / Google / company SSO before invoking tools."
+        },
+        "static": {
+          "title": "Static token (PAT / API key)",
+          "description": "Each user pastes their own personal access token once on /connections."
+        },
+        "headers": {
+          "title": "Custom request headers",
+          "description": "Forward user identity via service-to-service headers (X-User-Id, X-API-Key)."
+        },
+        "public": {
+          "title": "Public (no auth)",
+          "description": "The upstream server has no auth — any signed-in console user can invoke its tools."
+        }
+      },
+      "errors": {
+        "nameRequired": "Name is required.",
+        "endpointRequired": "Endpoint URL is required.",
+        "issuerRequired": "OAuth issuer is required for OAuth mode."
+      }
+    }
   },
   "mcpTools": {
     "title": "MCP Tools",

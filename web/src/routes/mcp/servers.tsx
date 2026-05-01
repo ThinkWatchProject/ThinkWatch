@@ -1,19 +1,15 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { StatusIndicator } from '@/components/ui/status-indicator';
 import { TransportBadge } from '@/components/ui/transport-badge';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
-import { Checkbox } from '@/components/ui/checkbox';
 import {
   Dialog,
   DialogContent,
   DialogHeader,
   DialogTitle,
   DialogDescription,
-  DialogFooter,
   DialogTrigger,
 } from '@/components/ui/dialog';
 import {
@@ -24,17 +20,18 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, Trash2, Pencil, Server, AlertCircle, Zap, Loader2, CheckCircle2, XCircle, RefreshCw } from 'lucide-react';
-import { HeaderEditor } from '@/components/header-editor';
+import { Plus, Trash2, Pencil, Server, AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
-import { slugifyPrefix, resolveCollision, sanitizePrefixInput } from '@/lib/prefix-utils';
-import { ScrollArea } from '@/components/ui/scroll-area';
+import { api, apiPost, apiDelete, hasPermission } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { DataTablePagination } from '@/components/data-table-pagination';
 import { useClientPagination } from '@/hooks/use-client-pagination';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
+import { ServerWizard } from '@/components/mcp/server-wizard';
+import { ServerEditForm } from '@/components/mcp/server-edit-form';
+import { AuthModeBadge } from '@/components/mcp/auth-mode-badge';
+import { deriveAuthMode } from '@/components/mcp/auth-mode-utils';
 
 interface McpServer {
   id: string;
@@ -60,57 +57,6 @@ interface McpServer {
   created_at: string;
 }
 
-interface OAuthFields {
-  issuer: string;
-  authorizationEndpoint: string;
-  tokenEndpoint: string;
-  revocationEndpoint: string;
-  userinfoEndpoint: string;
-  clientId: string;
-  clientSecret: string;
-  scopes: string;
-}
-
-const emptyOAuth = (): OAuthFields => ({
-  issuer: '',
-  authorizationEndpoint: '',
-  tokenEndpoint: '',
-  revocationEndpoint: '',
-  userinfoEndpoint: '',
-  clientId: '',
-  clientSecret: '',
-  scopes: '',
-});
-
-function oauthFromServer(s: McpServer): OAuthFields {
-  return {
-    issuer: s.oauth_issuer ?? '',
-    authorizationEndpoint: s.oauth_authorization_endpoint ?? '',
-    tokenEndpoint: s.oauth_token_endpoint ?? '',
-    revocationEndpoint: s.oauth_revocation_endpoint ?? '',
-    userinfoEndpoint: s.oauth_userinfo_endpoint ?? '',
-    clientId: s.oauth_client_id ?? '',
-    clientSecret: '',
-    scopes: (s.oauth_scopes ?? []).join(' '),
-  };
-}
-
-function oauthPayload(f: OAuthFields, includeSecret: boolean) {
-  const scopes = f.scopes.trim()
-    ? f.scopes.split(/\s+/).filter(Boolean)
-    : [];
-  return {
-    oauth_issuer: f.issuer || null,
-    oauth_authorization_endpoint: f.authorizationEndpoint || null,
-    oauth_token_endpoint: f.tokenEndpoint || null,
-    oauth_revocation_endpoint: f.revocationEndpoint || null,
-    oauth_userinfo_endpoint: f.userinfoEndpoint || null,
-    oauth_client_id: f.clientId || null,
-    oauth_scopes: scopes,
-    ...(includeSecret ? { oauth_client_secret: f.clientSecret } : {}),
-  };
-}
-
 export function McpServersPage() {
   const { t } = useTranslation();
   const [servers, setServers] = useState<McpServer[]>([]);
@@ -118,59 +64,10 @@ export function McpServersPage() {
   const pager = useClientPagination(servers, 20);
   const [error, setError] = useState('');
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [formError, setFormError] = useState('');
-  const [submitting, setSubmitting] = useState(false);
 
-  const [name, setName] = useState('');
-  const [namespacePrefix, setNamespacePrefix] = useState('');
-  const [prefixManuallyEdited, setPrefixManuallyEdited] = useState(false);
-  const [description, setDescription] = useState('');
-  const [endpointUrl, setEndpointUrl] = useState('');
-  const [oauth, setOauth] = useState<OAuthFields>(emptyOAuth());
-  const [allowStaticToken, setAllowStaticToken] = useState(false);
-  const [staticTokenHelpUrl, setStaticTokenHelpUrl] = useState('');
-  const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
-  const [cacheTtl, setCacheTtl] = useState('');
-
-  // Edit state
-  const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editServer, setEditServer] = useState<McpServer | null>(null);
-  const [editName, setEditName] = useState('');
-  const [editDescription, setEditDescription] = useState('');
-  const [editEndpointUrl, setEditEndpointUrl] = useState('');
-  const [editNamespacePrefix, setEditNamespacePrefix] = useState('');
-  const [editOauth, setEditOauth] = useState<OAuthFields>(emptyOAuth());
-  const [editAllowStaticToken, setEditAllowStaticToken] = useState(false);
-  const [editStaticTokenHelpUrl, setEditStaticTokenHelpUrl] = useState('');
-  const [editCustomHeaders, setEditCustomHeaders] = useState<[string, string][]>([]);
-  const [editCacheTtl, setEditCacheTtl] = useState('');
-  const [editSaving, setEditSaving] = useState(false);
-  const [editError, setEditError] = useState('');
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
-
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<{
-    success: boolean; message: string; latency_ms?: number;
-    tools_count?: number; tools?: { name: string; description?: string }[];
-  } | null>(null);
-
-  const handleTestConnection = async () => {
-    setTesting(true);
-    setTestResult(null);
-    try {
-      const res = await apiPost<typeof testResult>('/api/mcp/servers/test', {
-        endpoint_url: endpointUrl,
-        custom_headers: customHeaders.length > 0
-          ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
-          : null,
-      });
-      setTestResult(res);
-    } catch (err) {
-      setTestResult({ success: false, message: err instanceof Error ? err.message : 'Connection failed' });
-    } finally {
-      setTesting(false);
-    }
-  };
+  const [discoveringId, setDiscoveringId] = useState<string | null>(null);
 
   const fetchServers = async (signal?: AbortSignal) => {
     try {
@@ -195,72 +92,6 @@ export function McpServersPage() {
     prefixes: new Set(servers.map((s) => s.namespace_prefix)),
   }), [servers]);
 
-  const resolved = useMemo(() => {
-    if (!name.trim()) return null;
-    const basePrefix = prefixManuallyEdited && namespacePrefix
-      ? namespacePrefix
-      : slugifyPrefix(name);
-    if (!basePrefix) return null;
-    return resolveCollision(name.trim(), basePrefix, taken.names, taken.prefixes);
-  }, [name, namespacePrefix, prefixManuallyEdited, taken]);
-
-  const resetForm = () => {
-    setName('');
-    setNamespacePrefix('');
-    setPrefixManuallyEdited(false);
-    setDescription('');
-    setEndpointUrl('');
-    setOauth(emptyOAuth());
-    setAllowStaticToken(false);
-    setStaticTokenHelpUrl('');
-    setCustomHeaders([]);
-    setCacheTtl('');
-    setFormError('');
-    setTestResult(null);
-  };
-
-  const handleCreate = async (e: FormEvent) => {
-    e.preventDefault();
-    setFormError('');
-    setSubmitting(true);
-    try {
-      const headers = customHeaders.length > 0
-        ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
-        : null;
-      const test = await apiPost<{ success: boolean; message: string; tools_count?: number }>(
-        '/api/mcp/servers/test',
-        {
-          endpoint_url: endpointUrl,
-          custom_headers: headers,
-        },
-      );
-      setTestResult(test);
-      if (!test.success) {
-        setFormError(t('mcpServers.testFailedBlocking', { msg: test.message }));
-        return;
-      }
-
-      await apiPost('/api/mcp/servers', {
-        name: resolved?.name ?? name,
-        namespace_prefix: resolved?.prefix ?? (namespacePrefix || undefined),
-        description,
-        endpoint_url: endpointUrl,
-        ...oauthPayload(oauth, true),
-        allow_static_token: allowStaticToken,
-        static_token_help_url: staticTokenHelpUrl || null,
-        custom_headers: headers,
-        cache_ttl_secs: cacheTtl ? Number(cacheTtl) : undefined,
-      });
-      setDialogOpen(false);
-      resetForm();
-      await fetchServers();
-    } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Failed to register server');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
   const handleDelete = async (id: string) => {
     try {
       await apiDelete(`/api/mcp/servers/${id}`);
@@ -272,8 +103,6 @@ export function McpServersPage() {
     }
   };
 
-  const [discoveringId, setDiscoveringId] = useState<string | null>(null);
-
   const handleDiscover = async (id: string) => {
     setDiscoveringId(id);
     try {
@@ -284,68 +113,6 @@ export function McpServersPage() {
       toast.error(err instanceof Error ? err.message : 'Failed to discover tools');
     } finally {
       setDiscoveringId(null);
-    }
-  };
-
-  const openEditDialog = (s: McpServer) => {
-    setEditServer(s);
-    setEditName(s.name);
-    setEditDescription(s.description ?? '');
-    setEditEndpointUrl(s.endpoint_url);
-    setEditNamespacePrefix(s.namespace_prefix ?? '');
-    setEditOauth(oauthFromServer(s));
-    setEditAllowStaticToken(s.allow_static_token);
-    setEditStaticTokenHelpUrl(s.static_token_help_url ?? '');
-    setEditError('');
-    const existing = s.config_json?.custom_headers ?? {};
-    setEditCustomHeaders(Object.entries(existing));
-    setEditCacheTtl(s.config_json?.cache_ttl_secs != null ? String(s.config_json.cache_ttl_secs) : '');
-    setEditDialogOpen(true);
-  };
-
-  const handleEdit = async () => {
-    if (!editServer) return;
-    setEditError('');
-    setEditSaving(true);
-    try {
-      const headers = editCustomHeaders.length > 0
-        ? Object.fromEntries(editCustomHeaders.filter(([k]) => k.trim()))
-        : {};
-
-      const test = await apiPost<{ success: boolean; message: string }>(
-        '/api/mcp/servers/test',
-        {
-          endpoint_url: editEndpointUrl,
-          custom_headers: headers,
-        },
-      );
-      if (!test.success) {
-        setEditError(t('mcpServers.testFailedBlocking', { msg: test.message }));
-        return;
-      }
-
-      // Only include oauth_client_secret in PATCH when the user typed a
-      // new one — empty string means "no change", explicit clear is via
-      // the "Clear" button (sends empty string).
-      const includeSecret = editOauth.clientSecret.length > 0;
-      await apiPatch(`/api/mcp/servers/${editServer.id}`, {
-        name: editName,
-        namespace_prefix: editNamespacePrefix || undefined,
-        description: editDescription,
-        endpoint_url: editEndpointUrl,
-        ...oauthPayload(editOauth, includeSecret),
-        allow_static_token: editAllowStaticToken,
-        static_token_help_url: editStaticTokenHelpUrl || null,
-        custom_headers: headers,
-        cache_ttl_secs: editCacheTtl ? Number(editCacheTtl) : undefined,
-      });
-      setEditDialogOpen(false);
-      setEditServer(null);
-      await fetchServers();
-    } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Failed to update server');
-    } finally {
-      setEditSaving(false);
     }
   };
 
@@ -368,133 +135,16 @@ export function McpServersPage() {
               <DialogTitle>{t('mcpServers.dialogTitle')}</DialogTitle>
               <DialogDescription>{t('mcpServers.dialogDescription')}</DialogDescription>
             </DialogHeader>
-            <form onSubmit={handleCreate} className="space-y-4">
-              {formError && (
-                <Alert variant="destructive">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>{formError}</AlertDescription>
-                </Alert>
-              )}
-              <div className="space-y-2">
-                <Label htmlFor="mcp-name">{t('common.name')}</Label>
-                <Input id="mcp-name" value={name} onChange={(e) => setName(e.target.value)} placeholder="my-mcp-server" required />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="mcp-prefix">{t('mcpServers.namespacePrefix')}</Label>
-                <Input
-                  id="mcp-prefix"
-                  value={prefixManuallyEdited ? namespacePrefix : (resolved?.prefix ?? slugifyPrefix(name))}
-                  onChange={(e) => {
-                    setPrefixManuallyEdited(true);
-                    setNamespacePrefix(sanitizePrefixInput(e.target.value));
-                  }}
-                  placeholder={t('mcpServers.namespacePrefixPlaceholder')}
-                  pattern="[a-z0-9_]{1,32}"
-                  maxLength={32}
-                />
-                {resolved && (
-                  <p className="text-xs text-muted-foreground">
-                    {t('mcpServers.willBeStoredAs')}{' '}
-                    <code className="rounded bg-muted px-1 font-mono">{resolved.name}</code>
-                    {' / '}
-                    <code className="rounded bg-muted px-1 font-mono">{resolved.prefix}</code>
-                  </p>
-                )}
-                <p className="text-xs text-muted-foreground">{t('mcpServers.namespacePrefixHint')}</p>
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="mcp-desc">{t('common.description')}</Label>
-                <Input id="mcp-desc" value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Code analysis tools" />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="mcp-url">{t('mcpServers.endpointUrl')}</Label>
-                <Input id="mcp-url" value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} placeholder="http://localhost:8081/mcp" required />
-              </div>
-              {/* OAuth client config — leave blank for upstreams that
-                  don't speak OAuth. End users provide their own
-                  per-account credentials at /connections. */}
-              <OAuthFieldset values={oauth} onChange={setOauth} />
-              <div className="flex items-center gap-2">
-                <Checkbox
-                  id="allow-static-token"
-                  checked={allowStaticToken}
-                  onCheckedChange={(v) => setAllowStaticToken(v === true)}
-                />
-                <Label htmlFor="allow-static-token" className="cursor-pointer">
-                  Allow users to paste their own static token (PAT / API key)
-                </Label>
-              </div>
-              {allowStaticToken && (
-                <div className="space-y-2">
-                  <Label htmlFor="static-help">Help URL (where users get their token)</Label>
-                  <Input
-                    id="static-help"
-                    value={staticTokenHelpUrl}
-                    onChange={(e) => setStaticTokenHelpUrl(e.target.value)}
-                    placeholder="https://github.com/settings/tokens"
-                  />
-                </div>
-              )}
-              <div className="space-y-2">
-                <Label>{t('mcpServers.cacheTtlLabel')}</Label>
-                <p className="text-xs text-muted-foreground">{t('mcpServers.cacheTtlHint')}</p>
-                <Input type="number" min={0} step={60} placeholder={t('mcpServers.cacheTtlPlaceholder')} value={cacheTtl} onChange={(e) => setCacheTtl(e.target.value)} />
-              </div>
-              <div className="space-y-2">
-                <Label>{t('providers.customHeaders')}</Label>
-                <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
-                <HeaderEditor
-                  headers={customHeaders}
-                  onChange={setCustomHeaders}
-                  keyPlaceholder="X-Custom-Header"
-                  presets={[
-                    { label: t('mcpServers.presetUserId'), header: ['X-User-Id', '{{user_id}}'] },
-                    { label: t('mcpServers.presetUserEmail'), header: ['X-User-Email', '{{user_email}}'] },
-                  ]}
-                />
-              </div>
-              {testResult && (
-                <div className="space-y-2">
-                  <Alert variant={testResult.success ? 'default' : 'destructive'}>
-                    {testResult.success ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
-                    <AlertDescription>
-                      {testResult.message}
-                      {testResult.latency_ms != null && ` (${testResult.latency_ms}ms)`}
-                    </AlertDescription>
-                  </Alert>
-                  {testResult.tools && testResult.tools.length > 0 && (
-                    <ScrollArea className="h-32 rounded-md border p-2">
-                      <ul className="space-y-1 text-xs">
-                        {testResult.tools.map((tool) => (
-                          <li key={tool.name} className="flex items-baseline gap-2">
-                            <code className="font-medium">{tool.name}</code>
-                            {tool.description && <span className="text-muted-foreground truncate">{tool.description}</span>}
-                          </li>
-                        ))}
-                      </ul>
-                    </ScrollArea>
-                  )}
-                </div>
-              )}
-              <DialogFooter>
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={testing || !endpointUrl}
-                  onClick={handleTestConnection}
-                >
-                  {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
-                  {testing ? t('providers.testing') : t('providers.testConnection')}
-                </Button>
-                <Button
-                  type="submit"
-                  disabled={submitting || !testResult?.success}
-                  title={!testResult?.success ? t('mcpServers.mustTestFirst') : undefined}
-                >
-                  {submitting ? t('mcpServers.registering') : t('mcpServers.registerServer')}
-                </Button>
-              </DialogFooter>
-            </form>
+            {dialogOpen && (
+              <ServerWizard
+                taken={taken}
+                onCancel={() => setDialogOpen(false)}
+                onSuccess={() => {
+                  setDialogOpen(false);
+                  void fetchServers();
+                }}
+              />
+            )}
           </DialogContent>
         </Dialog>
       </div>
@@ -533,6 +183,7 @@ export function McpServersPage() {
                 <TableRow>
                   <TableHead>{t('common.name')}</TableHead>
                   <TableHead>{t('mcpServers.endpointUrl')}</TableHead>
+                  <TableHead className="w-12">{t('mcpServers.authMode')}</TableHead>
                   <TableHead>{t('mcpServers.transport')}</TableHead>
                   <TableHead>{t('common.status')}</TableHead>
                   <TableHead>{t('mcpServers.lastHealthCheck')}</TableHead>
@@ -546,6 +197,9 @@ export function McpServersPage() {
                   <TableRow key={s.id}>
                     <TableCell className="font-medium">{s.name}</TableCell>
                     <TableCell className="font-mono text-xs">{s.endpoint_url}</TableCell>
+                    <TableCell>
+                      <AuthModeBadge mode={deriveAuthMode(s)} compact />
+                    </TableCell>
                     <TableCell>
                       <TransportBadge transport={s.transport_type} />
                     </TableCell>
@@ -569,7 +223,7 @@ export function McpServersPage() {
                         <Button
                           variant="ghost"
                           size="icon-sm"
-                          onClick={() => openEditDialog(s)}
+                          onClick={() => setEditServer(s)}
                           title={t('common.edit')}
                           disabled={!hasPermission('mcp_servers:update')}
                         >
@@ -614,88 +268,22 @@ export function McpServersPage() {
         </div>
       </Card>
 
-      <Dialog open={editDialogOpen} onOpenChange={setEditDialogOpen}>
+      <Dialog open={editServer !== null} onOpenChange={(open) => { if (!open) setEditServer(null); }}>
         <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('mcpServers.editServer')}</DialogTitle>
             <DialogDescription>{t('mcpServers.editDescription')}</DialogDescription>
           </DialogHeader>
-          <div className="space-y-4">
-            {editError && (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription>{editError}</AlertDescription>
-              </Alert>
-            )}
-            <div className="space-y-2">
-              <Label htmlFor="edit-mcp-name">{t('common.name')}</Label>
-              <Input id="edit-mcp-name" value={editName} onChange={(e) => setEditName(e.target.value)} />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-mcp-prefix">{t('mcpServers.namespacePrefix')}</Label>
-              <Input
-                id="edit-mcp-prefix"
-                value={editNamespacePrefix}
-                onChange={(e) => setEditNamespacePrefix(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, '_'))}
-                pattern="[a-z0-9_]{1,32}"
-                maxLength={32}
-              />
-              <p className="text-xs text-muted-foreground">{t('mcpServers.namespacePrefixHint')}</p>
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-mcp-desc">{t('common.description')}</Label>
-              <Input id="edit-mcp-desc" value={editDescription} onChange={(e) => setEditDescription(e.target.value)} />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="edit-mcp-url">{t('mcpServers.endpointUrl')}</Label>
-              <Input id="edit-mcp-url" value={editEndpointUrl} onChange={(e) => setEditEndpointUrl(e.target.value)} />
-            </div>
-            <OAuthFieldset values={editOauth} onChange={setEditOauth} secretPlaceholder="Leave empty to keep current" />
-            <div className="flex items-center gap-2">
-              <Checkbox
-                id="edit-allow-static"
-                checked={editAllowStaticToken}
-                onCheckedChange={(v) => setEditAllowStaticToken(v === true)}
-              />
-              <Label htmlFor="edit-allow-static" className="cursor-pointer">
-                Allow users to paste their own static token (PAT / API key)
-              </Label>
-            </div>
-            {editAllowStaticToken && (
-              <div className="space-y-2">
-                <Label htmlFor="edit-static-help">Help URL</Label>
-                <Input
-                  id="edit-static-help"
-                  value={editStaticTokenHelpUrl}
-                  onChange={(e) => setEditStaticTokenHelpUrl(e.target.value)}
-                />
-              </div>
-            )}
-            <div className="space-y-2">
-              <Label>{t('mcpServers.cacheTtlLabel')}</Label>
-              <p className="text-xs text-muted-foreground">{t('mcpServers.cacheTtlHint')}</p>
-              <Input type="number" min={0} step={60} placeholder={t('mcpServers.cacheTtlPlaceholder')} value={editCacheTtl} onChange={(e) => setEditCacheTtl(e.target.value)} />
-            </div>
-            <div className="space-y-2">
-              <Label>{t('providers.customHeaders')}</Label>
-              <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
-              <HeaderEditor
-                headers={editCustomHeaders}
-                onChange={setEditCustomHeaders}
-                keyPlaceholder="X-Custom-Header"
-                presets={[
-                  { label: t('mcpServers.presetUserId'), header: ['X-User-Id', '{{user_id}}'] },
-                  { label: t('mcpServers.presetUserEmail'), header: ['X-User-Email', '{{user_email}}'] },
-                ]}
-              />
-            </div>
-          </div>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setEditDialogOpen(false)}>{t('common.cancel')}</Button>
-            <Button onClick={handleEdit} disabled={editSaving}>
-              {editSaving ? t('common.loading') : t('common.save')}
-            </Button>
-          </DialogFooter>
+          {editServer && (
+            <ServerEditForm
+              server={editServer}
+              onCancel={() => setEditServer(null)}
+              onSaved={() => {
+                setEditServer(null);
+                void fetchServers();
+              }}
+            />
+          )}
         </DialogContent>
       </Dialog>
 
@@ -708,142 +296,6 @@ export function McpServersPage() {
         confirmLabel={t('common.delete')}
         onConfirm={() => { if (deleteTargetId) handleDelete(deleteTargetId); }}
       />
-    </div>
-  );
-}
-
-function OAuthFieldset({
-  values,
-  onChange,
-  secretPlaceholder,
-}: {
-  values: OAuthFields;
-  onChange: (next: OAuthFields) => void;
-  secretPlaceholder?: string;
-}) {
-  const [discovering, setDiscovering] = useState(false);
-  const handleDiscover = async () => {
-    if (!values.issuer.trim()) {
-      toast.error('Set issuer first');
-      return;
-    }
-    setDiscovering(true);
-    try {
-      const meta = await apiPost<{
-        authorization_endpoint?: string;
-        token_endpoint?: string;
-        revocation_endpoint?: string;
-        userinfo_endpoint?: string;
-        scopes_supported?: string[];
-      }>('/api/admin/mcp/oauth-discover', { issuer: values.issuer.trim() });
-      // Fill only the fields the upstream actually advertised — leave
-      // anything the user already typed alone otherwise.
-      onChange({
-        ...values,
-        authorizationEndpoint:
-          meta.authorization_endpoint || values.authorizationEndpoint,
-        tokenEndpoint: meta.token_endpoint || values.tokenEndpoint,
-        revocationEndpoint:
-          meta.revocation_endpoint || values.revocationEndpoint,
-        userinfoEndpoint: meta.userinfo_endpoint || values.userinfoEndpoint,
-        scopes:
-          values.scopes ||
-          (meta.scopes_supported ? meta.scopes_supported.join(' ') : ''),
-      });
-      toast.success('Discovered OAuth metadata');
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Discovery failed');
-    } finally {
-      setDiscovering(false);
-    }
-  };
-  return (
-    <div className="space-y-2 rounded-md border p-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-          OAuth (optional — for upstreams that support OAuth)
-        </p>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={discovering || !values.issuer}
-          onClick={handleDiscover}
-        >
-          {discovering ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-          {discovering ? ' Discovering…' : 'Discover from issuer'}
-        </Button>
-      </div>
-      <div className="grid grid-cols-2 gap-2">
-        <div className="space-y-1">
-          <Label className="text-xs">Issuer</Label>
-          <Input
-            value={values.issuer}
-            onChange={(e) => onChange({ ...values, issuer: e.target.value })}
-            placeholder="https://github.com"
-          />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">Client ID</Label>
-          <Input
-            value={values.clientId}
-            onChange={(e) => onChange({ ...values, clientId: e.target.value })}
-          />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">Authorization endpoint</Label>
-          <Input
-            value={values.authorizationEndpoint}
-            onChange={(e) => onChange({ ...values, authorizationEndpoint: e.target.value })}
-          />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">Client secret</Label>
-          <Input
-            type="password"
-            value={values.clientSecret}
-            onChange={(e) => onChange({ ...values, clientSecret: e.target.value })}
-            placeholder={secretPlaceholder}
-          />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">Token endpoint</Label>
-          <Input
-            value={values.tokenEndpoint}
-            onChange={(e) => onChange({ ...values, tokenEndpoint: e.target.value })}
-          />
-        </div>
-        <div className="space-y-1">
-          <Label className="text-xs">Revocation endpoint</Label>
-          <Input
-            value={values.revocationEndpoint}
-            onChange={(e) => onChange({ ...values, revocationEndpoint: e.target.value })}
-          />
-        </div>
-      </div>
-      <div className="space-y-1">
-        <Label className="text-xs">Userinfo endpoint</Label>
-        <Input
-          value={values.userinfoEndpoint}
-          onChange={(e) => onChange({ ...values, userinfoEndpoint: e.target.value })}
-          placeholder="https://api.github.com/user"
-        />
-        <p className="text-xs text-muted-foreground">
-          Hit after login to populate the user's display label
-          (`@octocat`, `user@example.com`). Auto-tries JWT decode first,
-          then GETs this URL with their access token. Skip if the
-          access_token is a JWT (Auth0 / Keycloak / Okta / Google) —
-          the field is read out of the token itself.
-        </p>
-      </div>
-      <div className="space-y-1">
-        <Label className="text-xs">Scopes (space separated)</Label>
-        <Input
-          value={values.scopes}
-          onChange={(e) => onChange({ ...values, scopes: e.target.value })}
-          placeholder="repo read:user"
-        />
-      </div>
     </div>
   );
 }

@@ -60,6 +60,8 @@ const DYNAMIC_ENUMS = {
     'developer', 'database', 'communication', 'cloud',
     'utility', 'knowledge', 'productivity',
   ],
+  'mcpServers.wizard.modes.${_}.title': ['public', 'oauth', 'static', 'headers'],
+  'mcpServers.wizard.modes.${_}.description': ['public', 'oauth', 'static', 'headers'],
   'setup.steps.${_}': ['welcome', 'admin', 'settings', 'complete'],
   'unifiedLogs.${_}': ['audit', 'gateway', 'mcp', 'access', 'app'],
   'unifiedLogs.${_}Desc': ['audit', 'gateway', 'mcp', 'access', 'app'],
