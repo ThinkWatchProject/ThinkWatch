@@ -871,6 +871,17 @@ pub async fn rotate_key(
     if !old_key.is_active {
         return Err(AppError::BadRequest("Cannot rotate an inactive key".into()));
     }
+    // A rotated key keeps `is_active = true` during the grace window
+    // so existing clients can finish hot-swapping. Re-rotating it
+    // would orphan the second-generation key (chain becomes gen1 →
+    // gen2 → gen3 with gen2 leaving rotated_from_id pointing at the
+    // wrong row) and silently extend gen1's grace period via the
+    // UPDATE below. Block both effects here.
+    if old_key.disabled_reason.as_deref() == Some("rotated") {
+        return Err(AppError::BadRequest(
+            "Key is already rotated and inside its grace period — rotate the new key instead, or revoke this one to short-circuit the grace window".into(),
+        ));
+    }
 
     let grace_hours = state
         .dynamic_config

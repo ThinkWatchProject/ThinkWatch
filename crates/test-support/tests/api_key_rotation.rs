@@ -363,3 +363,64 @@ async fn gateway_logs_filter_by_api_key_id_rolls_up_history_after_rotation() {
         items[0]
     );
 }
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn rotating_an_already_rotated_key_returns_400() {
+    // A rotated key keeps `is_active = true` during the grace window
+    // (so existing clients can finish hot-swapping). The original
+    // `is_active`-only guard let users hit the rotate endpoint a
+    // second time on the same row, orphaning gen-2 in the chain
+    // (gen-1 → gen-3 with rotated_from_id pointing at gen-1, while
+    // gen-2 sits between them) and silently extending gen-1's grace
+    // period. Both effects are now blocked by checking
+    // `disabled_reason = 'rotated'` explicitly.
+    let app = TestApp::spawn().await;
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let con = app.console_client();
+    con.post(
+        "/api/auth/login",
+        json!({"email": admin.user.email, "password": admin.plaintext_password}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    let create: Value = con
+        .post(
+            "/api/keys",
+            json!({"name": "Re-rotate Guard", "surfaces": ["ai_gateway"]}),
+        )
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let id = create["id"].as_str().unwrap().to_string();
+
+    // First rotation succeeds.
+    con.post_empty(&format!("/api/keys/{id}/rotate"))
+        .await
+        .unwrap()
+        .assert_ok();
+
+    // Second rotation on the SAME (now-rotated) row must 400 — the
+    // grace-period guard short-circuits before any DB writes happen.
+    con.post_empty(&format!("/api/keys/{id}/rotate"))
+        .await
+        .unwrap()
+        .assert_status(400);
+
+    // Side-effect contract: the second attempt must NOT have created
+    // a third row in the lineage. Exactly two rows: the original (now
+    // disabled_reason='rotated') and the new key.
+    let count: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM api_keys WHERE deleted_at IS NULL AND name = $1")
+            .bind("Re-rotate Guard")
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert_eq!(
+        count.0, 2,
+        "blocked re-rotation must not insert a third generation"
+    );
+}

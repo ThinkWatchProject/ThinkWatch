@@ -474,27 +474,27 @@ export function ApiKeysPage() {
                         >
                           <Pencil className="h-4 w-4" />
                         </Button>
+                        {k.is_active && k.disabled_reason !== 'rotated' && (
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => openRotateDialog(k)}
+                            title={t('apiKeys.rotate')}
+                            aria-label={t('apiKeys.rotate')}
+                          >
+                            <RotateCw className="h-4 w-4" />
+                          </Button>
+                        )}
                         {k.is_active && (
-                          <>
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              onClick={() => openRotateDialog(k)}
-                              title={t('apiKeys.rotate')}
-                              aria-label={t('apiKeys.rotate')}
-                            >
-                              <RotateCw className="h-4 w-4" />
-                            </Button>
-                            <Button
-                              variant="ghost"
-                              size="icon-sm"
-                              onClick={() => setRevokeTargetId(k.id)}
-                              title={t('common.revoke')}
-                              aria-label={t('common.revoke')}
-                            >
-                              <Ban className="h-4 w-4" />
-                            </Button>
-                          </>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => setRevokeTargetId(k.id)}
+                            title={t('common.revoke')}
+                            aria-label={t('common.revoke')}
+                          >
+                            <Ban className="h-4 w-4" />
+                          </Button>
                         )}
                       </div>
                     </TableCell>
