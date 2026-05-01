@@ -8,9 +8,7 @@ use super::serde_util::deserialize_some;
 
 use think_watch_auth::{api_key, rbac};
 use think_watch_common::audit::AuditEntry;
-use think_watch_common::dto::{
-    CreateApiKeyRequest, CreateApiKeyResponse, PaginatedResponse, PaginationParams,
-};
+use think_watch_common::dto::{CreateApiKeyRequest, CreateApiKeyResponse, PaginatedResponse};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::ApiKey;
 
@@ -220,12 +218,43 @@ async fn validate_mcp_account_overrides(
     Ok(serde_json::Value::Object(map.clone()))
 }
 
+/// Query params for `GET /api/keys`. Wraps the standard pagination
+/// shape and adds the `archived` flag that flips the list between
+/// "live keys" and "the audit-window view of revoked keys".
+#[derive(Debug, Deserialize)]
+pub struct ListKeysParams {
+    pub page: Option<u32>,
+    pub per_page: Option<u32>,
+    /// `false` (default): only live keys (`deleted_at IS NULL`).
+    /// `true`: only revoke-archived keys (`deleted_at IS NOT NULL`
+    /// AND `disabled_reason` is a revoke variant). Soft-deleted rows
+    /// from user / admin deletion are excluded — those are a
+    /// different concern and shouldn't surface as "revoked" in the UI.
+    #[serde(default)]
+    pub archived: bool,
+}
+
+impl ListKeysParams {
+    fn per_page(&self) -> u32 {
+        self.per_page.unwrap_or(20).min(100)
+    }
+    fn offset(&self) -> u32 {
+        let page = self.page.unwrap_or(1).max(1);
+        (page - 1) * self.per_page()
+    }
+}
+
 /// GET /api/keys
 ///
 /// Result set is the union of:
 ///   - the caller's own keys (always, when they hold `api_keys:read`)
 ///   - everyone's keys, when the caller has `api_keys:read` at
 ///     global scope (super_admin / admin case)
+///
+/// Revoked keys are soft-deleted at revoke time so they vanish from
+/// the default list immediately. Pass `?archived=true` to get the
+/// audit-window view of revoked rows that haven't yet been hard-
+/// deleted by the data-retention sweep (currently 30 days).
 #[utoipa::path(
     get,
     path = "/api/keys",
@@ -233,6 +262,7 @@ async fn validate_mcp_account_overrides(
     params(
         ("page" = Option<u32>, Query, description = "Page number (1-based, default 1)"),
         ("per_page" = Option<u32>, Query, description = "Items per page (max 100, default 20)"),
+        ("archived" = Option<bool>, Query, description = "When true, return revoke-archived keys instead of live keys"),
     ),
     responses(
         (status = 200, description = "Paginated list of API keys visible to the caller"),
@@ -242,11 +272,11 @@ async fn validate_mcp_account_overrides(
 pub async fn list_keys(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    Query(pagination): Query<PaginationParams>,
+    Query(params): Query<ListKeysParams>,
 ) -> Result<Json<PaginatedResponse<ApiKey>>, AppError> {
     auth_user.require_permission("api_keys:read")?;
-    let per_page = pagination.per_page();
-    let offset = pagination.offset();
+    let per_page = params.per_page();
+    let offset = params.offset();
     let caller_id = auth_user.claims.sub;
     // Cross-tenant visibility requires the dedicated admin perm.
     // Holding `api_keys:read` at global scope is no longer enough
@@ -254,31 +284,46 @@ pub async fn list_keys(
     // every key in the system.
     let global = caller_is_admin_tier(&auth_user);
 
+    // Two view modes:
+    //   live:     deleted_at IS NULL                      (default)
+    //   archived: deleted_at IS NOT NULL AND revoke variant
+    // The archived predicate excludes user_deleted / account_deleted
+    // soft-deletes — those are cascades from a user wipe, not
+    // intentional key revocations, and shouldn't appear in a
+    // "revoked keys" tab.
+    let visibility_clause = if params.archived {
+        "deleted_at IS NOT NULL \
+         AND (disabled_reason = 'revoked' OR disabled_reason LIKE 'force_revoked:%')"
+    } else {
+        "deleted_at IS NULL"
+    };
+
     let (total, keys): (i64, Vec<ApiKey>) = if global {
-        let total: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM api_keys WHERE deleted_at IS NULL")
-                .fetch_one(&state.db)
-                .await?;
-        let keys = sqlx::query_as::<_, ApiKey>(
-            "SELECT * FROM api_keys WHERE deleted_at IS NULL \
-             ORDER BY created_at DESC LIMIT $1 OFFSET $2",
-        )
+        let total: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM api_keys WHERE {visibility_clause}"
+        ))
+        .fetch_one(&state.db)
+        .await?;
+        let keys = sqlx::query_as::<_, ApiKey>(&format!(
+            "SELECT * FROM api_keys WHERE {visibility_clause} \
+             ORDER BY created_at DESC LIMIT $1 OFFSET $2"
+        ))
         .bind(per_page as i64)
         .bind(offset as i64)
         .fetch_all(&state.db)
         .await?;
         (total, keys)
     } else {
-        let total: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM api_keys WHERE deleted_at IS NULL AND user_id = $1",
-        )
+        let total: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM api_keys WHERE {visibility_clause} AND user_id = $1"
+        ))
         .bind(caller_id)
         .fetch_one(&state.db)
         .await?;
-        let keys = sqlx::query_as::<_, ApiKey>(
-            "SELECT * FROM api_keys WHERE deleted_at IS NULL AND user_id = $1 \
-             ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-        )
+        let keys = sqlx::query_as::<_, ApiKey>(&format!(
+            "SELECT * FROM api_keys WHERE {visibility_clause} AND user_id = $1 \
+             ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+        ))
         .bind(caller_id)
         .bind(per_page as i64)
         .bind(offset as i64)
@@ -290,7 +335,7 @@ pub async fn list_keys(
     Ok(Json(PaginatedResponse {
         data: keys,
         total,
-        page: pagination.page.unwrap_or(1).max(1),
+        page: params.page.unwrap_or(1).max(1),
         per_page,
     }))
 }
@@ -473,9 +518,14 @@ pub async fn revoke_key(
     // key that is either is_active=true OR still inside its rotation
     // grace window, so an is_active=false alone leaves a rotated key
     // usable until grace expires.
+    //
+    // Setting `deleted_at = now()` archives the row immediately — it
+    // disappears from the default list view and is hard-deleted by
+    // the retention sweep ~30 days later. The `?archived=true` view
+    // surfaces it in the meantime for audit / oh-shit lookups.
     let result = sqlx::query(
         "UPDATE api_keys SET is_active = false, grace_period_ends_at = NULL, \
-                disabled_reason = 'revoked' \
+                disabled_reason = 'revoked', deleted_at = now() \
           WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
@@ -555,7 +605,7 @@ pub async fn force_revoke_key(
     );
     let result = sqlx::query(
         "UPDATE api_keys SET is_active = false, grace_period_ends_at = NULL, \
-                disabled_reason = $1 \
+                disabled_reason = $1, deleted_at = now() \
           WHERE id = $2 AND deleted_at IS NULL",
     )
     .bind(&disabled_reason)

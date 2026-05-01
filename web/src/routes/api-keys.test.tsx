@@ -82,10 +82,12 @@ describe('ApiKeysPage', () => {
   })
 
   it('shows status badges for active and expired keys', async () => {
+    // Revoked keys live in the "Revoked" tab now (deleted_at is set
+    // at revoke time, default list filters them out), so the default
+    // view fixture only has the live-key statuses.
     mockKeysFetch([
       makeKey({ id: 'key-1', name: 'active-key', disabled_reason: null, is_active: true }),
       makeKey({ id: 'key-2', name: 'expired-key', disabled_reason: 'expired', is_active: false }),
-      makeKey({ id: 'key-3', name: 'revoked-key', disabled_reason: 'revoked', is_active: false }),
     ])
 
     render(<ApiKeysPage />)
@@ -96,7 +98,6 @@ describe('ApiKeysPage', () => {
 
     expect(screen.getByText('Active')).toBeInTheDocument()
     expect(screen.getByText('Expired')).toBeInTheDocument()
-    expect(screen.getByText('Revoked')).toBeInTheDocument()
   })
 
   it('shows expiry warning for keys expiring soon', async () => {

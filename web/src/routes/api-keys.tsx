@@ -211,9 +211,14 @@ export function ApiKeysPage() {
   // Data fetching
   // ---------------------------------------------------------------------------
 
-  const fetchKeys = async () => {
+  // The "Revoked" tab needs the archived view from the server — those
+  // rows have `deleted_at IS NOT NULL` and the default list endpoint
+  // hides them. Other tabs filter client-side off the live result set.
+  const fetchKeys = async (mode: 'live' | 'archived' = 'live') => {
     try {
-      const res = await api<PaginatedResponse<ApiKey>>('/api/keys');
+      const url =
+        mode === 'archived' ? '/api/keys?archived=true' : '/api/keys';
+      const res = await api<PaginatedResponse<ApiKey>>(url);
       setKeys(res.data);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load API keys');
@@ -222,8 +227,16 @@ export function ApiKeysPage() {
     }
   };
 
+  // Keys re-fetch on tab change because the "Revoked" tab pulls from
+  // the archived view (different server-side filter), not the same
+  // result set with a client-side mask.
   useEffect(() => {
-    fetchKeys();
+    setLoading(true);
+    fetchKeys(tab === 'revoked' ? 'archived' : 'live');
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tab]);
+
+  useEffect(() => {
     api<string[]>('/api/keys/cost-centers')
       .then(setCostCenterOptions)
       .catch(() => setCostCenterOptions([]));
@@ -383,6 +396,7 @@ export function ApiKeysPage() {
           <TabsList>
             <TabsTrigger value="all">{t('common.total')}</TabsTrigger>
             <TabsTrigger value="expiring">{t('apiKeys.expiringSoon')}</TabsTrigger>
+            <TabsTrigger value="revoked">{t('apiKeys.revoked')}</TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
@@ -407,7 +421,7 @@ export function ApiKeysPage() {
             <div className="flex h-full flex-col items-center justify-center text-center">
               <KeyRound className="h-10 w-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground">
-                {tab === 'expiring' ? t('common.noData') : t('apiKeys.noKeys')}
+                {tab === 'all' ? t('apiKeys.noKeys') : t('common.noData')}
               </p>
               {tab === 'all' && (
                 <>

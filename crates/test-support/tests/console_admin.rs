@@ -87,21 +87,35 @@ async fn api_keys_create_list_get_rotate_revoke_cycle() {
         "rotation must mint a new plaintext"
     );
 
-    // Revoke (delete) — sets is_active=false but does NOT set
-    // deleted_at, so the row remains visible.
+    // Revoke (delete) — sets is_active=false AND deleted_at=now(),
+    // so the row vanishes from the default list and direct GET 404s.
+    // The audit-window view (`?archived=true`) still surfaces it
+    // until the retention sweep hard-deletes it ~30 days later.
     con.delete(&format!("/api/keys/{id}"))
         .await
         .unwrap()
         .assert_ok();
 
-    let after: Value = con
-        .get(&format!("/api/keys/{id}"))
+    con.get(&format!("/api/keys/{id}"))
+        .await
+        .unwrap()
+        .assert_status(404);
+
+    // Archived view should contain exactly this revoked key.
+    let archived: Value = con
+        .get("/api/keys?archived=true")
         .await
         .unwrap()
         .json()
         .unwrap();
-    assert_eq!(after["is_active"], json!(false));
-    assert_eq!(after["disabled_reason"].as_str(), Some("revoked"));
+    let row = archived["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["id"].as_str() == Some(&id))
+        .expect("revoked key must appear under archived=true");
+    assert_eq!(row["is_active"], json!(false));
+    assert_eq!(row["disabled_reason"].as_str(), Some("revoked"));
 }
 
 #[ignore = "integration test — run via `make test-it`"]

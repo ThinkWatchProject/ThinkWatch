@@ -7,6 +7,7 @@
 //! min / 24 h sleep.
 
 use chrono::{Duration, Utc};
+use serde_json::Value;
 use think_watch_server::tasks::{api_key_lifecycle, data_retention};
 use think_watch_test_support::prelude::*;
 
@@ -104,6 +105,110 @@ async fn data_retention_purges_soft_deleted_users_past_window() {
     assert!(
         still_there.is_none(),
         "soft-deleted user past window must be hard-deleted"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn revoking_an_api_key_archives_then_retention_hard_deletes() {
+    // End-to-end lifecycle: DELETE /api/keys/{id} immediately archives
+    // the row (deleted_at = now()), the default list endpoint hides it,
+    // the `?archived=true` view surfaces it for the audit window, then
+    // data_retention hard-deletes once that row is older than the
+    // 30-day SOFT_DELETE_RETENTION_DAYS bound.
+    let app = TestApp::spawn().await;
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+
+    let con = app.console_client();
+    con.post(
+        "/api/auth/login",
+        json!({"email": admin.user.email, "password": admin.plaintext_password}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    let create: Value = con
+        .post(
+            "/api/keys",
+            json!({"name": "to-be-revoked", "surfaces": ["ai_gateway"]}),
+        )
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let id = create["id"].as_str().unwrap().to_string();
+
+    // Revoke.
+    con.delete(&format!("/api/keys/{id}"))
+        .await
+        .unwrap()
+        .assert_ok();
+
+    // 1) Default list excludes it — archived rows are gone.
+    let live: Value = con.get("/api/keys").await.unwrap().json().unwrap();
+    assert!(
+        !live["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["id"].as_str() == Some(&id)),
+        "revoked key must not appear in the live list"
+    );
+
+    // 2) Archived view surfaces it with disabled_reason='revoked'.
+    let archived: Value = con
+        .get("/api/keys?archived=true")
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let row = archived["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["id"].as_str() == Some(&id))
+        .expect("archived view must include the revoked key");
+    assert_eq!(row["disabled_reason"].as_str(), Some("revoked"));
+
+    // 3) Backdate deleted_at past the retention window and run the
+    //    sweep — the row should be physically gone afterwards.
+    sqlx::query("UPDATE api_keys SET deleted_at = $1 WHERE id = $2")
+        .bind(Utc::now() - Duration::days(40))
+        .bind(uuid::Uuid::parse_str(&id).unwrap())
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    data_retention::run_retention_cleanup(&app.db, &app.state.dynamic_config, &app.state.audit)
+        .await
+        .unwrap();
+
+    let still_there: Option<uuid::Uuid> =
+        sqlx::query_scalar("SELECT id FROM api_keys WHERE id = $1")
+            .bind(uuid::Uuid::parse_str(&id).unwrap())
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+    assert!(
+        still_there.is_none(),
+        "revoked key past retention window must be hard-deleted"
+    );
+
+    // 4) Archived view is now empty for that id.
+    let archived_after: Value = con
+        .get("/api/keys?archived=true")
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert!(
+        !archived_after["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|k| k["id"].as_str() == Some(&id)),
+        "hard-deleted key must vanish from archived view too"
     );
 }
 
