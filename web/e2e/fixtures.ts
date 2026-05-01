@@ -48,15 +48,18 @@ async function ensureInitialised(request: APIRequestContext) {
 }
 
 async function loginAdmin(page: Page) {
-  await page.goto('/login');
+  await page.goto('/');
   await page.getByLabel(/Email/i).fill(ADMIN_EMAIL);
   await page.getByLabel(/Password/i).fill(ADMIN_PASSWORD);
   await page.getByRole('button', { name: 'Sign in', exact: true }).click();
-  // Frontend redirects off /login on success.
+  // The SPA doesn't navigate the URL on login — it just swaps the
+  // rendered tree from <LoginPage> to <AppShell>. Wait for the shell
+  // (sidebar nav) to appear; that's the post-login signal.
   try {
-    await page.waitForURL((u) => !u.pathname.startsWith('/login'), {
-      timeout: 15_000,
-    });
+    await page
+      .getByRole('button', { name: /Toggle Sidebar/i })
+      .first()
+      .waitFor({ state: 'visible', timeout: 15_000 });
   } catch (e) {
     throw new Error(
       `Login failed for ${ADMIN_EMAIL} — set PW_ADMIN_EMAIL and PW_ADMIN_PASSWORD to match your dev DB.\n` +
