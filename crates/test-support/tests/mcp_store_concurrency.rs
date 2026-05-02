@@ -66,6 +66,8 @@ async fn parallel_installs_same_template_keep_count_in_sync() {
                 json!({}),
                 None,
                 None,
+                None,
+                None,
                 installer,
             )
             .await
@@ -147,6 +149,8 @@ async fn parallel_installs_across_templates_with_colliding_names_serialise() {
             json!({}),
             None,
             None,
+            None,
+            None,
             installer,
         )
         .await
@@ -159,6 +163,8 @@ async fn parallel_installs_across_templates_with_colliding_names_serialise() {
             "https://example.com/mcp",
             "streamable_http",
             json!({}),
+            None,
+            None,
             None,
             None,
             installer,
@@ -191,6 +197,8 @@ async fn install_into_deleted_template_returns_404() {
         "https://example.com/mcp",
         "streamable_http",
         json!({}),
+        None,
+        None,
         None,
         None,
         admin.user.id,

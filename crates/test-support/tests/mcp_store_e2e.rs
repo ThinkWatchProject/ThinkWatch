@@ -241,6 +241,8 @@ async fn install_template_lifecycle_increments_then_decrements_install_count() {
         json!({}),
         None,
         None,
+        None,
+        None,
         admin.user.id,
     )
     .await
@@ -305,6 +307,8 @@ async fn install_template_lifecycle_increments_then_decrements_install_count() {
         json!({}),
         None,
         None,
+        None,
+        None,
         admin.user.id,
     )
     .await
@@ -355,6 +359,8 @@ async fn double_install_of_same_template_auto_suffixes_name() {
         json!({}),
         None,
         None,
+        None,
+        None,
         admin.user.id,
     )
     .await
@@ -366,6 +372,8 @@ async fn double_install_of_same_template_auto_suffixes_name() {
         "https://example.com/mcp",
         "streamable_http",
         json!({}),
+        None,
+        None,
         None,
         None,
         admin.user.id,

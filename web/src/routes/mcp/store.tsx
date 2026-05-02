@@ -77,6 +77,12 @@ export function McpStorePage() {
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
   const [serverName, setServerName] = useState('');
   const [serverPrefix, setServerPrefix] = useState('');
+  // OAuth client_id / client_secret captured at install time for
+  // templates that ship with `oauth_issuer`. The template provides
+  // the issuer + endpoints (public info), the admin provides their
+  // own app credentials so the server is usable immediately.
+  const [oauthClientId, setOauthClientId] = useState('');
+  const [oauthClientSecret, setOauthClientSecret] = useState('');
   // Whether the user has manually edited the prefix — if so, we stop
   // auto-regenerating it from the server name.
   const [prefixManuallyEdited, setPrefixManuallyEdited] = useState(false);
@@ -134,6 +140,8 @@ export function McpStorePage() {
     setServerName(tmpl.name);
     setServerPrefix(tmpl.slug.replace(/-/g, '_'));
     setPrefixManuallyEdited(false);
+    setOauthClientId('');
+    setOauthClientSecret('');
   };
 
   // Live preview: what will `name` and `namespace_prefix` actually look like
@@ -158,6 +166,7 @@ export function McpStorePage() {
     if (!installTemplate) return;
     setInstalling(true);
     try {
+      const isOauthTemplate = !!installTemplate.oauth_issuer;
       await apiPost(`/api/mcp/store/${installTemplate.slug}/install`, {
         name: resolvedInstall?.name ?? serverName,
         namespace_prefix: resolvedInstall?.prefix ?? serverPrefix,
@@ -166,13 +175,13 @@ export function McpStorePage() {
           customHeaders.length > 0
             ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
             : undefined,
+        // Credentials are only meaningful for OAuth-templates; the
+        // backend ignores them otherwise but we keep the wire payload
+        // tight by skipping the keys entirely.
+        oauth_client_id: isOauthTemplate ? (oauthClientId || undefined) : undefined,
+        oauth_client_secret: isOauthTemplate ? (oauthClientSecret || undefined) : undefined,
       });
       toast.success(t('mcpStore.installSuccess'));
-      // OAuth templates ship endpoint URLs but not client_id/secret —
-      // remind the operator to fill those in before users can authorize.
-      if (installTemplate.oauth_issuer) {
-        toast.info(t('mcpStore.installOauthFollowUp'), { duration: 8000 });
-      }
       setInstallTemplate(null);
       // Refresh store listing + existing-server snapshot so the just-installed
       // template shows the "installed" badge and future collision previews
@@ -419,6 +428,44 @@ export function McpStorePage() {
                 After install, each user authorizes their own account at
                 <code className="mx-1 rounded bg-muted px-1">/connections</code>
                 — admins don't paste a shared token here.
+              </div>
+            )}
+
+            {/* OAuth client credentials — only for OAuth templates.
+                The template provides issuer + endpoints; admins paste
+                their own OAuth app's client_id/secret so the server is
+                usable end-to-end without a follow-up edit. */}
+            {installTemplate?.oauth_issuer && (
+              <div className="space-y-2 rounded-md border p-3">
+                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  {t('mcpStore.oauthCredentialsTitle')}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t('mcpStore.oauthCredentialsHint', { issuer: installTemplate.oauth_issuer })}
+                </p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-1">
+                    <Label htmlFor="install-oauth-client-id" className="text-xs">
+                      {t('mcpServers.oauth.clientId')}
+                    </Label>
+                    <Input
+                      id="install-oauth-client-id"
+                      value={oauthClientId}
+                      onChange={(e) => setOauthClientId(e.target.value)}
+                    />
+                  </div>
+                  <div className="space-y-1">
+                    <Label htmlFor="install-oauth-client-secret" className="text-xs">
+                      {t('mcpServers.oauth.clientSecret')}
+                    </Label>
+                    <Input
+                      id="install-oauth-client-secret"
+                      type="password"
+                      value={oauthClientSecret}
+                      onChange={(e) => setOauthClientSecret(e.target.value)}
+                    />
+                  </div>
+                </div>
               </div>
             )}
 

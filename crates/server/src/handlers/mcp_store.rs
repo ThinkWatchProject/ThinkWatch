@@ -42,6 +42,13 @@ pub struct InstallTemplateRequest {
     /// validates uniqueness so concurrent installs stay safe.
     pub name: Option<String>,
     pub namespace_prefix: Option<String>,
+    /// OAuth client_id / client_secret captured at install time for
+    /// templates that ship with `oauth_issuer`. Templates can publish
+    /// the issuer + endpoints (public information) but never secrets,
+    /// so admins paste their own app credentials here. Ignored when
+    /// the template has no `oauth_issuer`.
+    pub oauth_client_id: Option<String>,
+    pub oauth_client_secret: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -215,6 +222,15 @@ pub async fn install_template(
         config
     };
 
+    // Encrypt the OAuth client_secret if one was supplied — admins
+    // paste their own app credentials for templates that ship with
+    // `oauth_issuer`. The plaintext never crosses into the helper or
+    // the DB; only encrypted bytes leave this scope.
+    let oauth_client_secret_encrypted = super::mcp_servers::encrypt_client_secret(
+        req.oauth_client_secret.as_deref(),
+        &state.config.encryption_key,
+    )?;
+
     // c–e. Server creation, install record, and counter bump go
     // through the shared `install_template_into_db` helper so the
     // exact same TX shape is exercised by the integration suite.
@@ -227,6 +243,8 @@ pub async fn install_template(
         config_json,
         req.name.as_deref(),
         req.namespace_prefix.as_deref(),
+        req.oauth_client_id.as_deref(),
+        oauth_client_secret_encrypted.as_deref(),
         auth_user.claims.sub,
     )
     .await?;
@@ -533,6 +551,12 @@ pub async fn install_template_into_db(
     config_json: serde_json::Value,
     name_override: Option<&str>,
     prefix_override: Option<&str>,
+    // Admin-supplied OAuth client_id for templates that ship with an
+    // `oauth_issuer`. Ignored if the template has no issuer.
+    oauth_client_id: Option<&str>,
+    // AES-GCM ciphertext of the client_secret. Encryption happens in
+    // the public handler; the helper handles only opaque bytes.
+    oauth_client_secret_encrypted: Option<&[u8]>,
     installed_by: Uuid,
 ) -> Result<McpServer, AppError> {
     let mut tx = db.begin().await?;
@@ -571,17 +595,22 @@ pub async fn install_template_into_db(
         resolve_server_collisions(&mut tx, base_name, base_prefix).await?;
 
     // Copy the template's per-user auth shape onto the new server row.
-    // OAuth client credentials still need to be filled in by the admin
-    // afterwards (templates can ship endpoint URLs but not secrets).
+    // OAuth client_id / client_secret are admin-supplied (templates
+    // ship the issuer + endpoints but never secrets) and only mean
+    // anything for templates that have an `oauth_issuer` — for
+    // public / static-token templates we bind None regardless of
+    // what the request happened to carry.
+    let stash_creds = template.oauth_issuer.is_some();
     let server = sqlx::query_as::<_, McpServer>(
         r#"INSERT INTO mcp_servers (
                name, namespace_prefix, description, endpoint_url, transport_type,
                oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
                oauth_revocation_endpoint, oauth_userinfo_endpoint, oauth_scopes,
+               oauth_client_id, oauth_client_secret_encrypted,
                allow_static_token, static_token_help_url,
                config_json
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
            RETURNING *"#,
     )
     .bind(&resolved_name)
@@ -595,6 +624,12 @@ pub async fn install_template_into_db(
     .bind(&template.oauth_revocation_endpoint)
     .bind(&template.oauth_userinfo_endpoint)
     .bind(&template.oauth_default_scopes)
+    .bind(if stash_creds { oauth_client_id } else { None })
+    .bind(if stash_creds {
+        oauth_client_secret_encrypted
+    } else {
+        None
+    })
     .bind(template.allow_static_token)
     .bind(&template.static_token_help_url)
     .bind(&config_json)

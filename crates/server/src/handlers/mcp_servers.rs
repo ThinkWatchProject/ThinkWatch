@@ -176,7 +176,10 @@ pub async fn list_servers(
 
 /// Encrypt the OAuth client_secret with the configured AES-GCM key.
 /// Returns Ok(None) if no secret was provided.
-fn encrypt_client_secret(
+///
+/// Pub so `mcp_store::install_template` can reuse the same encryption
+/// path when admins supply credentials at install time.
+pub fn encrypt_client_secret(
     plain: Option<&str>,
     encryption_key: &str,
 ) -> Result<Option<Vec<u8>>, AppError> {
