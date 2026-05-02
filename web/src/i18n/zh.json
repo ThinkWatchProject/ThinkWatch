@@ -139,6 +139,7 @@
     "installTitle": "安装 {{name}}",
     "oauthCredentialsTitle": "OAuth 客户端凭证",
     "oauthCredentialsHint": "来自你在 {{issuer}} 上的 OAuth 应用。模板提供 issuer 与端点；你提供 client_id 和 secret。",
+    "advancedSection": "高级（自定义请求头）",
     "endpointUrl": "端点地址",
     "authInstructions": "认证说明",
     "deployInstructions": "部署说明",

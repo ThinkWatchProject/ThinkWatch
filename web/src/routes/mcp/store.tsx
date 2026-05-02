@@ -13,14 +13,20 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import { Search, Download, CheckCircle2, Loader2, Star, RefreshCw, Globe, Lock, KeyRound } from 'lucide-react';
+import { Search, Download, CheckCircle2, ChevronDown, Loader2, Star, RefreshCw, Globe, Lock, KeyRound, Zap } from 'lucide-react';
 import { api, apiPost, hasPermission } from '@/lib/api';
 import { slugifyPrefix, resolveCollision, sanitizePrefixInput } from '@/lib/prefix-utils';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible';
 import { HeaderEditor } from '@/components/header-editor';
 import { AuthModeBadge } from '@/components/mcp/auth-mode-badge';
 import { deriveAuthMode } from '@/components/mcp/auth-mode-utils';
+import { McpTestPanel, type McpTestResult } from '@/components/mcp/test-panel';
 
 interface StoreTemplate {
   id: string;
@@ -83,6 +89,10 @@ export function McpStorePage() {
   // own app credentials so the server is usable immediately.
   const [oauthClientId, setOauthClientId] = useState('');
   const [oauthClientSecret, setOauthClientSecret] = useState('');
+  // Connection test state — gates the Install button so admins don't
+  // commit a misconfigured server. Mirrors the wizard's Step 3 flow.
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<McpTestResult | null>(null);
   // Whether the user has manually edited the prefix — if so, we stop
   // auto-regenerating it from the server name.
   const [prefixManuallyEdited, setPrefixManuallyEdited] = useState(false);
@@ -142,6 +152,31 @@ export function McpStorePage() {
     setPrefixManuallyEdited(false);
     setOauthClientId('');
     setOauthClientSecret('');
+    setTestResult(null);
+    setTesting(false);
+  };
+
+  const handleTestConnection = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const headers =
+        customHeaders.length > 0
+          ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
+          : null;
+      const res = await apiPost<McpTestResult>('/api/mcp/servers/test', {
+        endpoint_url: endpointUrl,
+        custom_headers: headers,
+      });
+      setTestResult(res);
+    } catch (err) {
+      setTestResult({
+        success: false,
+        message: err instanceof Error ? err.message : 'Connection failed',
+      });
+    } finally {
+      setTesting(false);
+    }
   };
 
   // Live preview: what will `name` and `namespace_prefix` actually look like
@@ -397,6 +432,25 @@ export function McpStorePage() {
               </p>
             )}
 
+            {/* Endpoint URL — shown for non-hosted or when no template
+                endpoint. Endpoint is the most "configuration-y" field
+                so it sits right after name/prefix. */}
+            {needsEndpoint && (
+              <div className="space-y-1.5">
+                <Label>{t('mcpStore.endpointUrl')}</Label>
+                <Input
+                  value={endpointUrl}
+                  onChange={(e) => {
+                    setEndpointUrl(e.target.value);
+                    // Endpoint changed → previous test result is stale.
+                    setTestResult(null);
+                  }}
+                  placeholder="https://..."
+                  required
+                />
+              </div>
+            )}
+
             {/* Auth / deploy instructions */}
             {installTemplate?.auth_instructions && (
               <div className="rounded-md border bg-muted/50 p-3 text-sm">
@@ -409,32 +463,9 @@ export function McpStorePage() {
               </div>
             )}
 
-            {/* Endpoint URL — shown for non-hosted or when no template endpoint */}
-            {needsEndpoint && (
-              <div className="space-y-1.5">
-                <Label>{t('mcpStore.endpointUrl')}</Label>
-                <Input
-                  value={endpointUrl}
-                  onChange={(e) => setEndpointUrl(e.target.value)}
-                  placeholder="https://..."
-                  required
-                />
-              </div>
-            )}
-
-            {/* Note about per-user credentials */}
-            {(installTemplate?.oauth_issuer || installTemplate?.allow_static_token) && (
-              <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-                After install, each user authorizes their own account at
-                <code className="mx-1 rounded bg-muted px-1">/connections</code>
-                — admins don't paste a shared token here.
-              </div>
-            )}
-
-            {/* OAuth client credentials — only for OAuth templates.
-                The template provides issuer + endpoints; admins paste
-                their own OAuth app's client_id/secret so the server is
-                usable end-to-end without a follow-up edit. */}
+            {/* OAuth client credentials — admin action, sits next to
+                the endpoint config so all the install-time inputs are
+                grouped together before the per-user note. */}
             {installTemplate?.oauth_issuer && (
               <div className="space-y-2 rounded-md border p-3">
                 <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -469,23 +500,65 @@ export function McpStorePage() {
               </div>
             )}
 
-            <div className="space-y-2">
-              <Label className="text-sm">{t('mcpStore.customHeaders')}</Label>
-              <HeaderEditor
-                headers={customHeaders}
-                onChange={setCustomHeaders}
-                keyPlaceholder={t('mcpStore.headerName')}
-                presets={[
-                  { label: t('mcpServers.presetUserId'), header: ['X-User-Id', '{{user_id}}'] },
-                  { label: t('mcpServers.presetUserEmail'), header: ['X-User-Email', '{{user_email}}'] },
-                ]}
-              />
-            </div>
+            {/* Note about per-user credentials — comes AFTER admin
+                inputs because it describes a *user* step, not an
+                admin one. Reading order matches who-acts-when. */}
+            {(installTemplate?.oauth_issuer || installTemplate?.allow_static_token) && (
+              <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
+                After install, each user authorizes their own account at
+                <code className="mx-1 rounded bg-muted px-1">/connections</code>
+                — admins don't paste a shared token here.
+              </div>
+            )}
+
+            {/* Connection test — gates Install. Same UX as the /servers
+                wizard's Step 3 so admins get the same "X tools
+                discovered" preview before committing. */}
+            {testResult && <McpTestPanel testing={testing} result={testResult} />}
+
+            {/* Advanced: cache TTL is set globally for the store flow,
+                so this section currently only carries custom headers.
+                Hidden by default — most templates don't need them. */}
+            <Collapsible className="space-y-2">
+              <CollapsibleTrigger className="group flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+                <ChevronDown className="h-3 w-3 transition-transform group-data-[state=open]:rotate-180" />
+                {t('mcpStore.advancedSection')}
+              </CollapsibleTrigger>
+              <CollapsibleContent className="space-y-2 pt-2">
+                <Label className="text-sm">{t('mcpStore.customHeaders')}</Label>
+                <HeaderEditor
+                  headers={customHeaders}
+                  onChange={(h) => {
+                    setCustomHeaders(h);
+                    setTestResult(null);
+                  }}
+                  keyPlaceholder={t('mcpStore.headerName')}
+                  presets={[
+                    { label: t('mcpServers.presetUserId'), header: ['X-User-Id', '{{user_id}}'] },
+                    { label: t('mcpServers.presetUserEmail'), header: ['X-User-Email', '{{user_email}}'] },
+                  ]}
+                />
+              </CollapsibleContent>
+            </Collapsible>
 
             <DialogFooter>
               <Button
+                type="button"
+                variant="outline"
+                disabled={testing || !endpointUrl}
+                onClick={handleTestConnection}
+              >
+                {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
+                {testing ? t('providers.testing') : t('providers.testConnection')}
+              </Button>
+              <Button
                 type="submit"
-                disabled={installing}
+                disabled={installing || !(testResult?.success || testResult?.requires_auth)}
+                title={
+                  !(testResult?.success || testResult?.requires_auth)
+                    ? t('mcpServers.mustTestFirst')
+                    : undefined
+                }
               >
                 {installing ? (
                   <>
