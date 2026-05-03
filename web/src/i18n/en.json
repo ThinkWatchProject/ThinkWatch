@@ -140,6 +140,7 @@
     "oauthCredentialsTitle": "OAuth client credentials",
     "oauthCredentialsHint": "From your OAuth app on {{issuer}}. Templates ship the issuer + endpoints; you supply the client_id and secret.",
     "advancedSection": "Advanced (custom headers)",
+    "installBlockedByTestFailure": "Connection test failed. Fix the error or clear the test result before installing.",
     "endpointUrl": "Endpoint URL",
     "authInstructions": "Auth Instructions",
     "deployInstructions": "Deployment Instructions",

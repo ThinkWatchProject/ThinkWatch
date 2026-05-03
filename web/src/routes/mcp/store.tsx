@@ -553,10 +553,25 @@ export function McpStorePage() {
               </Button>
               <Button
                 type="submit"
-                disabled={installing || !(testResult?.success || testResult?.requires_auth)}
+                // Store templates ship with curated URLs and the
+                // backend's `install_template` runs its own probe, so
+                // the Test button is an optional *preview* (it shows
+                // the tool list before commit) rather than a gate.
+                // Only block Install when the user explicitly tested
+                // and got a hard failure — at that point we know the
+                // install would fail too, so saving them the click is
+                // friendlier than letting the backend reject.
+                disabled={
+                  installing
+                  || (testResult != null
+                      && !testResult.success
+                      && !testResult.requires_auth)
+                }
                 title={
-                  !(testResult?.success || testResult?.requires_auth)
-                    ? t('mcpServers.mustTestFirst')
+                  testResult != null
+                  && !testResult.success
+                  && !testResult.requires_auth
+                    ? t('mcpStore.installBlockedByTestFailure')
                     : undefined
                 }
               >
