@@ -93,12 +93,24 @@ export function McpTestPanel({ testing, result, onRetry }: McpTestPanelProps) {
       </div>
       {result.tools && result.tools.length > 0 && (
         <ScrollArea className="h-40 rounded-md border p-2">
-          <ul className="space-y-1 text-xs">
+          <ul className="space-y-2 text-xs">
             {result.tools.map((tool) => (
-              <li key={tool.name} className="flex items-baseline gap-2">
-                <code className="font-medium">{tool.name}</code>
+              // Stacked layout: name on its own line so long names
+              // (e.g. AWS' `aws___get_regional_availability`) aren't
+              // forced to share row width with the description.
+              // Description is line-clamped to 2 lines — descriptions
+              // commonly run multi-paragraph + embedded markdown
+              // headers and would otherwise blow out the dialog.
+              // `min-w-0` on the <li> contains the flex item to the
+              // ScrollArea's width so `truncate`/`line-clamp` can take
+              // effect (without it, flex children grow to content
+              // width and the truncation never fires).
+              <li key={tool.name} className="space-y-0.5 min-w-0">
+                <code className="block font-medium truncate">{tool.name}</code>
                 {tool.description && (
-                  <span className="text-muted-foreground truncate">{tool.description}</span>
+                  <p className="text-muted-foreground line-clamp-2 break-words">
+                    {tool.description}
+                  </p>
                 )}
               </li>
             ))}
