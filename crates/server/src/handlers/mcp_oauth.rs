@@ -150,6 +150,11 @@ pub struct ConnectionAccount {
 pub struct ServerConnections {
     pub server_id: Uuid,
     pub server_name: String,
+    /// Optional human-friendly label admin set on this server (e.g.
+    /// "Linear (Acme prod)" when two installs of the same template
+    /// would otherwise look identical to users). Frontend renders
+    /// this when set, falling back to `server_name`.
+    pub display_label: Option<String>,
     pub namespace_prefix: String,
     /// Whether this server has an OAuth client registered (admin
     /// has filled `oauth_*`). Drives the "Connect via OAuth" button.
@@ -219,6 +224,7 @@ pub async fn list_connections(
         out.push(ServerConnections {
             server_id: s.id,
             server_name: s.name,
+            display_label: s.display_label,
             namespace_prefix: s.namespace_prefix,
             oauth_capable,
             allow_static_token: s.allow_static_token,

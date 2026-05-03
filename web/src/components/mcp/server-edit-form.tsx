@@ -23,6 +23,7 @@ export interface McpServerForEdit {
   id: string;
   name: string;
   namespace_prefix: string;
+  display_label: string | null;
   description: string | null;
   endpoint_url: string;
   oauth_issuer: string | null;
@@ -52,6 +53,7 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
   const [mode, setMode] = useState<AuthMode>(() => deriveAuthMode(server));
 
   const [name, setName] = useState(server.name);
+  const [displayLabel, setDisplayLabel] = useState(server.display_label ?? '');
   const [namespacePrefix, setNamespacePrefix] = useState(server.namespace_prefix ?? '');
   const [description, setDescription] = useState(server.description ?? '');
   const [endpointUrl, setEndpointUrl] = useState(server.endpoint_url);
@@ -73,6 +75,7 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
   useEffect(() => {
     setMode(deriveAuthMode(server));
     setName(server.name);
+    setDisplayLabel(server.display_label ?? '');
     setNamespacePrefix(server.namespace_prefix ?? '');
     setDescription(server.description ?? '');
     setEndpointUrl(server.endpoint_url);
@@ -117,6 +120,7 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
       const includeSecret = oauth.clientSecret.length > 0;
       await apiPatch(`/api/mcp/servers/${server.id}`, {
         name,
+        display_label: displayLabel.trim() === '' ? null : displayLabel.trim(),
         namespace_prefix: namespacePrefix || undefined,
         description,
         endpoint_url: endpointUrl,
@@ -157,6 +161,17 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
           value={name}
           onChange={(e) => setName(e.target.value)}
         />
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="edit-mcp-display-label">{t('mcpServers.displayLabel')}</Label>
+        <Input
+          id="edit-mcp-display-label"
+          value={displayLabel}
+          onChange={(e) => setDisplayLabel(e.target.value)}
+          placeholder={t('mcpServers.displayLabelPlaceholder')}
+          maxLength={120}
+        />
+        <p className="text-xs text-muted-foreground">{t('mcpServers.displayLabelHint')}</p>
       </div>
       <div className="space-y-2">
         <Label htmlFor="edit-mcp-prefix">{t('mcpServers.namespacePrefix')}</Label>

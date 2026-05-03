@@ -8,6 +8,11 @@ pub struct McpServer {
     pub id: Uuid,
     pub name: String,
     pub namespace_prefix: String,
+    /// Human-friendly label shown to end users (e.g. "Linear (Acme prod)"
+    /// when two installs of the same template would otherwise be
+    /// indistinguishable as `linear` / `linear_2`). NULL ⇒ frontend
+    /// falls back to `name`.
+    pub display_label: Option<String>,
     pub description: Option<String>,
     pub endpoint_url: String,
     pub transport_type: String,

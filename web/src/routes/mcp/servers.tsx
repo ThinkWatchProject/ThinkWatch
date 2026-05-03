@@ -37,6 +37,7 @@ interface McpServer {
   id: string;
   name: string;
   namespace_prefix: string;
+  display_label: string | null;
   description: string | null;
   endpoint_url: string;
   transport_type: string;
@@ -195,7 +196,22 @@ export function McpServersPage() {
               <TableBody>
                 {pager.paginated.map((s) => (
                   <TableRow key={s.id}>
-                    <TableCell className="font-medium">{s.name}</TableCell>
+                    <TableCell className="font-medium">
+                      {s.display_label ? (
+                        // When the operator has set a display_label,
+                        // show that prominently with the system name
+                        // dimmed underneath — they're often different
+                        // when two installs share a template.
+                        <div className="flex flex-col">
+                          <span>{s.display_label}</span>
+                          <span className="text-xs font-normal text-muted-foreground">
+                            {s.name}
+                          </span>
+                        </div>
+                      ) : (
+                        s.name
+                      )}
+                    </TableCell>
                     <TableCell className="font-mono text-xs">{s.endpoint_url}</TableCell>
                     <TableCell>
                       <AuthModeBadge mode={deriveAuthMode(s)} compact />

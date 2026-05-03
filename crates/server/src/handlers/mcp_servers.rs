@@ -375,6 +375,13 @@ pub async fn create_server(
 pub struct UpdateMcpServerRequest {
     pub name: Option<String>,
     pub namespace_prefix: Option<String>,
+    /// Human-friendly label shown to end users on /connections and in
+    /// the tool catalog. Falls back to `name` when NULL. PATCH
+    /// semantics: absent = unchanged, JSON `null` = clear, JSON
+    /// string = replace.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<String>)]
+    pub display_label: Option<Option<String>>,
     /// PATCH semantics: absent = unchanged, JSON `null` = clear,
     /// JSON string = replace.
     #[serde(default, deserialize_with = "deserialize_some")]
@@ -453,6 +460,10 @@ pub async fn update_server(
     let name = req.name.as_deref().unwrap_or(&existing.name);
     // PATCH semantics for nullable strings: None = absent (preserve),
     // Some(None) = JSON null (clear), Some(Some(s)) = replace.
+    let display_label: Option<&str> = match &req.display_label {
+        None => existing.display_label.as_deref(),
+        Some(inner) => inner.as_deref(),
+    };
     let description: Option<&str> = match &req.description {
         None => existing.description.as_deref(),
         Some(inner) => inner.as_deref(),
@@ -542,19 +553,21 @@ pub async fn update_server(
 
     let updated = sqlx::query_as::<_, McpServer>(
         r#"UPDATE mcp_servers SET
-              name = $2, namespace_prefix = $3, description = $4, endpoint_url = $5,
-              transport_type = $6,
-              oauth_issuer = $7, oauth_authorization_endpoint = $8,
-              oauth_token_endpoint = $9, oauth_revocation_endpoint = $10,
-              oauth_userinfo_endpoint = $11,
-              oauth_client_id = $12, oauth_client_secret_encrypted = $13,
-              oauth_scopes = $14, allow_static_token = $15, static_token_help_url = $16,
-              config_json = $17
+              name = $2, namespace_prefix = $3, display_label = $4,
+              description = $5, endpoint_url = $6,
+              transport_type = $7,
+              oauth_issuer = $8, oauth_authorization_endpoint = $9,
+              oauth_token_endpoint = $10, oauth_revocation_endpoint = $11,
+              oauth_userinfo_endpoint = $12,
+              oauth_client_id = $13, oauth_client_secret_encrypted = $14,
+              oauth_scopes = $15, allow_static_token = $16, static_token_help_url = $17,
+              config_json = $18
            WHERE id = $1 RETURNING *"#,
     )
     .bind(id)
     .bind(name)
     .bind(&namespace_prefix)
+    .bind(display_label)
     .bind(description)
     .bind(endpoint_url)
     .bind(transport_type)

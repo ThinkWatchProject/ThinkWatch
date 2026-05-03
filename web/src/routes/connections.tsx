@@ -47,11 +47,22 @@ interface ConnectionAccount {
 interface ServerConnections {
   server_id: string;
   server_name: string;
+  /** Optional human-friendly label set by the admin. Falls back to
+   *  `server_name` when null — useful when two installs of the same
+   *  template would otherwise look identical here. */
+  display_label?: string | null;
   namespace_prefix: string;
   oauth_capable: boolean;
   allow_static_token: boolean;
   static_token_help_url: string | null;
   accounts: ConnectionAccount[];
+}
+
+/** Pick the user-facing name for a server. */
+function serverDisplay(s: ServerConnections): string {
+  return s.display_label && s.display_label.trim() !== ''
+    ? s.display_label
+    : s.server_name;
 }
 
 export function ConnectionsPage() {
@@ -299,8 +310,8 @@ export function ConnectionsPage() {
           <DialogHeader>
             <DialogTitle>
               {addMode === 'oauth'
-                ? t('connections.connectOauth', { name: addTarget?.server_name ?? '' })
-                : t('connections.pasteToken', { name: addTarget?.server_name ?? '' })}
+                ? t('connections.connectOauth', { name: addTarget ? serverDisplay(addTarget) : '' })
+                : t('connections.pasteToken', { name: addTarget ? serverDisplay(addTarget) : '' })}
             </DialogTitle>
             <DialogDescription>
               {addMode === 'oauth'
@@ -444,7 +455,14 @@ function ServerCard({
     <Card>
       <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 pb-3">
         <div>
-          <CardTitle className="text-base">{server.server_name}</CardTitle>
+          <CardTitle className="text-base">
+            {serverDisplay(server)}
+            {server.display_label && server.display_label !== server.server_name && (
+              <span className="ml-2 text-xs font-normal text-muted-foreground">
+                {server.server_name}
+              </span>
+            )}
+          </CardTitle>
           <p className="text-xs text-muted-foreground font-mono">{server.namespace_prefix}__</p>
         </div>
         <div className="flex gap-2">
