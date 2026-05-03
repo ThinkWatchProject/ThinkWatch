@@ -407,15 +407,30 @@ pub async fn sync_registry(
     }
 
     let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(5))
         .build()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("HTTP client error: {e}")))?;
 
-    let resp = client
-        .get(&url)
-        .send()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Failed to fetch registry: {e}")))?;
+    // Hard wall-clock cap on top of the per-request timeout so a slow body
+    // stream can't keep the Axum worker hung past 8s.
+    let resp = match tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        client.get(&url).send(),
+    )
+    .await
+    {
+        Ok(Ok(r)) => r,
+        Ok(Err(e)) => {
+            return Err(AppError::BadRequest(format!(
+                "Failed to fetch registry: {e}"
+            )));
+        }
+        Err(_) => {
+            return Err(AppError::BadRequest(
+                "Registry sync timed out — the registry URL may be unreachable.".into(),
+            ));
+        }
+    };
 
     if !resp.status().is_success() {
         return Err(AppError::BadRequest(format!(
@@ -525,10 +540,15 @@ pub async fn sync_registry(
     ))
 }
 
-/// Process-wide advisory-lock key for the install path. Any 64-bit
-/// constant works; the literal spells "mcpStore" in ASCII so a DBA
-/// glancing at `pg_locks` can tell what's holding the row.
-const INSTALL_LOCK_KEY: i64 = 0x6D637053746F7265;
+/// Process-wide advisory-lock key for `install_template_into_db`. The
+/// literal spells "mcpStore" in ASCII so a DBA glancing at `pg_locks`
+/// can tell what's holding it. Any new advisory lock added elsewhere
+/// in the codebase MUST use a distinct constant — collisions silently
+/// serialize unrelated work and can deadlock under concurrent load.
+///
+/// Reserved advisory lock keys (keep this list current):
+///   * `MCP_STORE_INSTALL_LOCK_KEY` (here): install_template serialization
+const MCP_STORE_INSTALL_LOCK_KEY: i64 = 0x6D637053746F7265;
 
 /// Persist a store-template install in one transaction:
 /// 1. acquire a process-wide advisory lock so concurrent installs
@@ -567,7 +587,7 @@ pub async fn install_template_into_db(
     // serializes installs of the *same* template, leaving a race
     // when two different templates' default names collide.
     sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(INSTALL_LOCK_KEY)
+        .bind(MCP_STORE_INSTALL_LOCK_KEY)
         .execute(&mut *tx)
         .await?;
 

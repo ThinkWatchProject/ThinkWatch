@@ -1,5 +1,6 @@
 use fred::clients::Client;
 use fred::interfaces::KeysInterface;
+use fred::types::scan::ScanType;
 use uuid::Uuid;
 use xxhash_rust::xxh3::xxh3_128;
 
@@ -31,18 +32,31 @@ pub struct CallerScope<'a> {
 
 /// Redis-based exact-match cache for MCP tool call responses.
 ///
-/// Cache keys are semantic: `server_id + caller (optional) + method +
-/// params`, where the caller dimension is included only when the
-/// upstream server forwards caller identity (see [`CallerScope`] +
-/// [`crate::registry::ServerCacheScope`]).
+/// Cache keys are structured for **prefix-based invalidation**:
 ///
-/// - **Global lane** (no caller dimension): one entry shared across
-///   every user. Safe for public MCPs and for services authed by a
-///   fixed shared header (e.g. `X-API-Key: <secret>`).
-/// - **Per-caller lane** (caller dimension mixed in): one entry per
+/// ```text
+/// mcp_cache:<server_hex>:<user_part>:<label_part>:<request_hash>
+/// ```
+///
+/// where `<user_part>` is the user UUID (simple hex) or `_` for the
+/// shared global lane, and `<label_part>` is hex-encoded
+/// `account_label` or `_` when the caller didn't route to a named
+/// credential. Each segment is hex-only so `:` can never appear inside
+/// a segment, making `SCAN MATCH mcp_cache:<server>:<user>:*:*` safe.
+///
+/// Lanes:
+/// - **Global lane** (`_:_`): one entry shared across every user. Safe
+///   for public MCPs and fixed-header service-to-service auth.
+/// - **Per-caller lane** (`<user>:<label>`): one entry per
 ///   `(user_id, account_label?)`. Required for OAuth, static token,
 ///   and `{{user_id}}`-templated headers — the upstream sees the
 ///   caller's own credential and may return different data per user.
+///
+/// [`McpResponseCache::invalidate_user_lane`] uses the prefix-able
+/// shape to wipe a single user's cached responses for one server when
+/// their credential rotates / is revoked. Without that hook, post-
+/// rotation upstream calls would tunnel through pre-rotation cache
+/// entries until TTL expired.
 #[derive(Clone)]
 pub struct McpResponseCache {
     redis: Client,
@@ -55,42 +69,31 @@ impl McpResponseCache {
 
     /// Build a deterministic cache key.
     ///
-    /// The caller dimension is mixed in only when `caller` is `Some`.
-    /// Within a per-caller lane, two requests from the same user but
-    /// with different `account_label`s land in distinct entries — that
-    /// matters for users who have multiple credentials per server
-    /// (e.g. personal + work GitHub).
+    /// See the type-level doc for the key shape and rationale.
     pub fn cache_key(
         server_id: &Uuid,
         caller: Option<CallerScope<'_>>,
         request: &JsonRpcRequest,
     ) -> String {
-        let params_json = request
-            .params
-            .as_ref()
-            .map(|p| serde_json::to_string(p).unwrap_or_default())
-            .unwrap_or_default();
+        let server_part = server_id.simple().to_string();
+        let (user_part, label_part) = caller_key_parts(caller);
 
-        let mut input = Vec::with_capacity(256);
-        input.extend_from_slice(server_id.as_bytes());
-        if let Some(c) = caller {
+        // Hash method + params separately so the request component is
+        // a fixed-width hex segment regardless of payload size.
+        let req_hash = {
+            let params_json = request
+                .params
+                .as_ref()
+                .map(|p| serde_json::to_string(p).unwrap_or_default())
+                .unwrap_or_default();
+            let mut input = Vec::with_capacity(64 + params_json.len());
+            input.extend_from_slice(request.method.as_bytes());
             input.push(b':');
-            input.extend_from_slice(c.user_id.as_bytes());
-            // Mix `account_label` into the hash so personal vs work
-            // credentials can't collide. We always emit a separator
-            // even for `None` so a label "" can't collide with absent.
-            input.push(b'|');
-            if let Some(label) = c.account_label {
-                input.extend_from_slice(label.as_bytes());
-            }
-        }
-        input.push(b':');
-        input.extend_from_slice(request.method.as_bytes());
-        input.push(b':');
-        input.extend_from_slice(params_json.as_bytes());
+            input.extend_from_slice(params_json.as_bytes());
+            format!("{:032x}", xxh3_128(&input))
+        };
 
-        let hash = xxh3_128(&input);
-        format!("{KEY_PREFIX}{hash:032x}")
+        format!("{KEY_PREFIX}{server_part}:{user_part}:{label_part}:{req_hash}")
     }
 
     /// Look up a cached response.
@@ -174,6 +177,88 @@ impl McpResponseCache {
                 metrics::counter!("mcp_cache_store_error_total", "scope" => scope_label)
                     .increment(1);
             }
+        }
+    }
+
+    /// Wipe every cached response for `(server_id, user_id)` across all
+    /// `account_label` lanes (including the no-label `_` lane).
+    ///
+    /// Called by the credential lifecycle: any time a user's OAuth
+    /// token is refreshed, replaced, or revoked, OR when an admin
+    /// rotates the upstream client credentials, the cached responses
+    /// became stale (they reflect the old upstream identity). Without
+    /// this hook, the response cache acts as a tunnel from the old
+    /// epoch into the new one until TTL elapses — a real cross-epoch
+    /// data-leak window.
+    ///
+    /// Implementation: SCAN with `mcp_cache:<server>:<user>:*:*`,
+    /// DEL the matching keys in batches. `SCAN` is non-blocking on
+    /// the Redis side and safe to run concurrently with normal traffic.
+    /// Conservative on coverage — also clears `<user>:_` (the "no
+    /// label" lane) so a refresh of a user's *default* credential
+    /// invalidates entries cached when no override was passed at
+    /// request time.
+    pub async fn invalidate_user_lane(&self, server_id: &Uuid, user_id: &Uuid) {
+        let pattern = format!("{KEY_PREFIX}{}:{}:*", server_id.simple(), user_id.simple());
+        let mut cursor: String = "0".to_string();
+        let mut deleted: usize = 0;
+        loop {
+            let page: Result<(String, Vec<String>), _> = self
+                .redis
+                .scan_page(
+                    cursor.clone(),
+                    pattern.clone(),
+                    Some(256),
+                    Some(ScanType::String),
+                )
+                .await;
+            let (next, keys) = match page {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(
+                        server = %server_id, user = %user_id, error = %e,
+                        "MCP cache invalidate: SCAN failed; some stale entries may persist"
+                    );
+                    return;
+                }
+            };
+            if !keys.is_empty() {
+                let n: Result<u64, _> = self.redis.del(keys.clone()).await;
+                match n {
+                    Ok(n) => deleted += n as usize,
+                    Err(e) => tracing::warn!(error = %e, "MCP cache invalidate: DEL failed"),
+                }
+            }
+            if next == "0" {
+                break;
+            }
+            cursor = next;
+        }
+        if deleted > 0 {
+            tracing::info!(
+                server = %server_id,
+                user = %user_id,
+                deleted,
+                "MCP cache invalidated user lane"
+            );
+        }
+        metrics::counter!("mcp_cache_invalidate_total").increment(deleted as u64);
+    }
+}
+
+/// Render `caller` as `(user_part, label_part)` segments for the cache
+/// key. `_` is the placeholder for "absent dimension"; real values are
+/// hex-encoded so `_` can never appear inside an encoded segment.
+fn caller_key_parts(caller: Option<CallerScope<'_>>) -> (String, String) {
+    match caller {
+        None => ("_".to_string(), "_".to_string()),
+        Some(c) => {
+            let user_part = c.user_id.simple().to_string();
+            let label_part = match c.account_label {
+                None | Some("") => "_".to_string(),
+                Some(s) => hex::encode(s.as_bytes()),
+            };
+            (user_part, label_part)
         }
     }
 }
@@ -261,9 +346,8 @@ mod tests {
 
     #[test]
     fn same_user_different_account_label_produces_different_keys() {
-        // Multi-account case: same user, two GitHub credentials
-        // (personal vs work). Keys must differ so cross-account
-        // responses can't collide.
+        // Multi-account: two GitHub credentials (personal vs work).
+        // Keys must differ so cross-account responses can't collide.
         let sid = Uuid::new_v4();
         let uid = Uuid::new_v4();
         let req = make_request("tools/call", "list_repos");
@@ -275,16 +359,53 @@ mod tests {
 
     #[test]
     fn account_label_empty_string_collapses_to_none() {
-        // `Some("")` is a degenerate label — practically equivalent to
-        // "default credential" / `None`. We don't pretend they're
-        // distinct because no real API key config would emit `""`,
-        // and pretending requires extra sentinel bytes for no benefit.
         let sid = Uuid::new_v4();
         let uid = Uuid::new_v4();
         let req = make_request("tools/call", "query");
         let none_label = McpResponseCache::cache_key(&sid, Some(caller(&uid, None)), &req);
         let empty_label = McpResponseCache::cache_key(&sid, Some(caller(&uid, Some(""))), &req);
         assert_eq!(none_label, empty_label);
+    }
+
+    #[test]
+    fn key_shape_is_prefix_extractable() {
+        // The whole point of the redesign: invalidation can SCAN by a
+        // server-+-user prefix. Verify the prefix is recognisable.
+        let sid = Uuid::new_v4();
+        let uid = Uuid::new_v4();
+        let req = make_request("tools/call", "x");
+        let key = McpResponseCache::cache_key(&sid, Some(caller(&uid, Some("work"))), &req);
+        let expected_prefix = format!("mcp_cache:{}:{}:", sid.simple(), uid.simple());
+        assert!(
+            key.starts_with(&expected_prefix),
+            "key {key} does not start with {expected_prefix}"
+        );
+    }
+
+    #[test]
+    fn label_with_colon_does_not_collide_with_a_different_label() {
+        // Hex encoding of the label means raw `:` can't appear in the
+        // segment, so "a:b" and "ab" or "a" + ":b" stay distinct.
+        let sid = Uuid::new_v4();
+        let uid = Uuid::new_v4();
+        let req = make_request("tools/call", "x");
+        let with_colon = McpResponseCache::cache_key(&sid, Some(caller(&uid, Some("a:b"))), &req);
+        let without = McpResponseCache::cache_key(&sid, Some(caller(&uid, Some("ab"))), &req);
+        assert_ne!(with_colon, without);
+    }
+
+    #[test]
+    fn label_underscore_does_not_collide_with_no_label() {
+        // The literal label "_" must not collide with the absent-label
+        // placeholder `_` segment. Hex encoding keeps them distinct
+        // (`_` placeholder vs `5f` hex of `_`).
+        let sid = Uuid::new_v4();
+        let uid = Uuid::new_v4();
+        let req = make_request("tools/call", "x");
+        let no_label = McpResponseCache::cache_key(&sid, Some(caller(&uid, None)), &req);
+        let underscore_label =
+            McpResponseCache::cache_key(&sid, Some(caller(&uid, Some("_"))), &req);
+        assert_ne!(no_label, underscore_label);
     }
 
     #[test]
@@ -303,5 +424,28 @@ mod tests {
             scope_metric_label(Some(caller(&uid, Some("work")))),
             "per_credential"
         );
+    }
+
+    #[test]
+    fn caller_key_parts_global() {
+        let (u, l) = caller_key_parts(None);
+        assert_eq!(u, "_");
+        assert_eq!(l, "_");
+    }
+
+    #[test]
+    fn caller_key_parts_per_user_no_label() {
+        let uid = Uuid::new_v4();
+        let (u, l) = caller_key_parts(Some(caller(&uid, None)));
+        assert_eq!(u, uid.simple().to_string());
+        assert_eq!(l, "_");
+    }
+
+    #[test]
+    fn caller_key_parts_per_credential() {
+        let uid = Uuid::new_v4();
+        let (u, l) = caller_key_parts(Some(caller(&uid, Some("work"))));
+        assert_eq!(u, uid.simple().to_string());
+        assert_eq!(l, hex::encode("work"));
     }
 }

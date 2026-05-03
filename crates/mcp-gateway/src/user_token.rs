@@ -27,6 +27,8 @@ use uuid::Uuid;
 
 use think_watch_common::crypto;
 
+use crate::cache::McpResponseCache;
+
 /// Snapshot of a server's OAuth client registration. Built once at
 /// server-load time and threaded into every resolver call so we don't
 /// hit the DB twice per request.
@@ -98,14 +100,25 @@ pub struct UserTokenResolver {
     /// the hex `ENCRYPTION_KEY` once at boot and passes it in.
     crypto_key: [u8; 32],
     http: reqwest::Client,
+    /// Response cache handle — used to invalidate a user's lane after
+    /// any credential change (refresh / permanent-failure delete) so
+    /// pre-rotation cached responses can't be served against the
+    /// post-rotation upstream identity.
+    cache: McpResponseCache,
 }
 
 impl UserTokenResolver {
-    pub fn new(db: PgPool, crypto_key: [u8; 32], http: reqwest::Client) -> Self {
+    pub fn new(
+        db: PgPool,
+        crypto_key: [u8; 32],
+        http: reqwest::Client,
+        cache: McpResponseCache,
+    ) -> Self {
         Self {
             db,
             crypto_key,
             http,
+            cache,
         }
     }
 
@@ -122,6 +135,13 @@ impl UserTokenResolver {
         oauth_cfg: Option<&OAuthClientCfg>,
         allow_static_token: bool,
     ) -> Result<Option<(String, String)>, ResolverError> {
+        // When the API key's `mcp_account_overrides` map names a label
+        // for this server, look it up *exactly* — no fall-through to
+        // the user's `is_default` credential. The override is an
+        // explicit "use *this* account" routing decision, so a missing
+        // labeled row must surface as `NeedsUserCredentials`, not
+        // silently route to a different account. (Tested at
+        // `crates/test-support/tests/mcp_account_override_routing.rs`.)
         let preferred_label = caller
             .mcp_account_overrides
             .get(server_id.to_string())
@@ -291,10 +311,37 @@ impl UserTokenResolver {
                 })?;
         let refresh_token = self.decrypt_to_string(refresh_bytes)?;
 
-        // Run the refresh.
+        // Run the refresh. Classify failures so we don't punish users
+        // for transient upstream hiccups: 4xx from the token endpoint
+        // (invalid_grant, invalid_client) means the refresh_token is
+        // really gone and we should delete the row; 5xx / network /
+        // timeout means we should keep the row and let the next call
+        // retry.
         let new = match self.oauth_refresh(cfg, &refresh_token).await {
-            Ok(v) => v,
-            Err(e) => {
+            Ok(v) => {
+                metrics::counter!("mcp_token_refresh_total", "outcome" => "success").increment(1);
+                v
+            }
+            Err(OAuthRefreshFailure::Transient(msg)) => {
+                metrics::counter!("mcp_token_refresh_total", "outcome" => "transient_failure")
+                    .increment(1);
+                tracing::warn!(
+                    %server_id, %user_id, account_label, error = %msg,
+                    "OAuth token refresh hit a transient failure; credential preserved for retry"
+                );
+                tx.rollback().await.ok();
+                return Err(ResolverError::RefreshFailed {
+                    server_id,
+                    message: format!("transient: {msg}"),
+                });
+            }
+            Err(OAuthRefreshFailure::Permanent(msg)) => {
+                metrics::counter!("mcp_token_refresh_total", "outcome" => "permanent_failure")
+                    .increment(1);
+                tracing::warn!(
+                    %server_id, %user_id, account_label, error = %msg,
+                    "OAuth token refresh failed permanently; credential row deleted"
+                );
                 // Purge so the next call returns NeedsUserCredentials.
                 sqlx::query(
                     "DELETE FROM mcp_user_credentials WHERE mcp_server_id = $1
@@ -306,9 +353,14 @@ impl UserTokenResolver {
                 .execute(&mut *tx)
                 .await?;
                 tx.commit().await.ok();
+                // Wipe the user's cached responses for this server —
+                // the credential is gone, the AES-encrypted Bearer is
+                // no longer valid, and any cached responses pinned to
+                // this credential are stale.
+                self.cache.invalidate_user_lane(&server_id, &user_id).await;
                 return Err(ResolverError::RefreshFailed {
                     server_id,
-                    message: e.to_string(),
+                    message: msg,
                 });
             }
         };
@@ -342,6 +394,11 @@ impl UserTokenResolver {
         .await?;
 
         tx.commit().await?;
+
+        // Bearer just changed — pre-rotation cached responses are
+        // stale relative to the new identity the upstream will see.
+        self.cache.invalidate_user_lane(&server_id, &user_id).await;
+
         Ok(new.access_token)
     }
 
@@ -349,7 +406,7 @@ impl UserTokenResolver {
         &self,
         cfg: &OAuthClientCfg,
         refresh_token: &str,
-    ) -> Result<TokenResponse, ResolverError> {
+    ) -> Result<TokenResponse, OAuthRefreshFailure> {
         let mut form: Vec<(&str, &str)> = vec![
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
@@ -363,26 +420,40 @@ impl UserTokenResolver {
         }
 
         let body = serde_urlencoded::to_string(&form)
-            .map_err(|e| ResolverError::BadTokenResponse(format!("encode form: {e}")))?;
+            .map_err(|e| OAuthRefreshFailure::Permanent(format!("encode form: {e}")))?;
 
-        let resp = self
+        let resp = match self
             .http
             .post(&cfg.token_endpoint)
             .header("Content-Type", "application/x-www-form-urlencoded")
             .header("Accept", "application/json")
             .body(body)
             .send()
-            .await?;
+            .await
+        {
+            Ok(r) => r,
+            // Network-level errors (DNS, connect, timeout) are transient
+            // — the user's refresh_token is fine, we just couldn't
+            // reach the upstream right now.
+            Err(e) => return Err(OAuthRefreshFailure::Transient(format!("network: {e}"))),
+        };
 
         let status = resp.status();
-        let text = resp.text().await?;
+        let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
-            return Err(ResolverError::BadTokenResponse(format!(
-                "token_endpoint returned {status}: {text}"
-            )));
+            // 4xx (invalid_grant, invalid_client, ...) means the upstream
+            // has firmly rejected this credential — the row should go.
+            // 5xx is upstream's problem, not the user's — keep the row
+            // and let the next call retry.
+            let msg = format!("token_endpoint returned {status}: {text}");
+            return Err(if status.is_client_error() {
+                OAuthRefreshFailure::Permanent(msg)
+            } else {
+                OAuthRefreshFailure::Transient(msg)
+            });
         }
         let parsed: TokenResponse = serde_json::from_str(&text)
-            .map_err(|e| ResolverError::BadTokenResponse(format!("{e}: {text}")))?;
+            .map_err(|e| OAuthRefreshFailure::Permanent(format!("parse: {e}: {text}")))?;
         Ok(parsed)
     }
 
@@ -408,4 +479,19 @@ struct TokenResponse {
     /// crate if it ever appears.
     #[serde(default)]
     expires_in: Option<u64>,
+}
+
+/// Outcome classification for `oauth_refresh`. Drives whether the
+/// caller should DELETE the credential row (permanent) or keep it for
+/// the next retry (transient).
+#[derive(Debug)]
+enum OAuthRefreshFailure {
+    /// 4xx from the token endpoint, encoding error, or malformed
+    /// upstream response. The credential is dead; row should be
+    /// deleted and the user prompted to re-authorize.
+    Permanent(String),
+    /// 5xx from the token endpoint, network/DNS/timeout error. The
+    /// upstream is having a moment — keep the row, let the next call
+    /// retry.
+    Transient(String),
 }

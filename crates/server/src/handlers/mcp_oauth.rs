@@ -62,6 +62,28 @@ struct McpOauthState {
     binding: String,
 }
 
+/// Look at the upstream token-endpoint response body for an OAuth 2.0
+/// error envelope (`{"error": "...", "error_description": "..."}`).
+/// Returns a one-line user-facing summary if the body is shaped like
+/// an error, `None` otherwise.
+///
+/// Per RFC 6749 §5.2 the error response is JSON with at least an
+/// `error` field. We tolerate non-spec upstreams that omit
+/// `error_description` and just fall back to `error` alone.
+fn parse_token_endpoint_error(body: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct ErrorEnvelope {
+        error: String,
+        #[serde(default)]
+        error_description: Option<String>,
+    }
+    let env: ErrorEnvelope = serde_json::from_str(body).ok()?;
+    Some(match env.error_description {
+        Some(d) if !d.is_empty() => format!("{} ({})", d, env.error),
+        _ => env.error,
+    })
+}
+
 fn state_binding(enc_key: &[u8; 32], state: &str, verifier: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(enc_key).expect("HMAC-SHA256 accepts any key length");
@@ -233,6 +255,18 @@ pub async fn start_authorize(
     Json(req): Json<AuthorizeRequest>,
 ) -> Result<Json<AuthorizeResponse>, AppError> {
     auth_user.require_permission("mcp:connect")?;
+
+    // Authorize triggers a Redis state-binding write and a redirect
+    // to an upstream OAuth provider. Rate-limit per user so a stolen
+    // session token can't fill `mcp_oauth:state:*` or hammer the
+    // upstream's authorize endpoint as a stepping stone.
+    super::test_rate_limit::check_test_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        auth_user.claims.iat,
+        "mcp_oauth_authorize",
+    )
+    .await?;
 
     if req.account_label.trim().is_empty() || req.account_label.len() > 64 {
         return Err(AppError::BadRequest(
@@ -423,8 +457,27 @@ pub async fn oauth_callback(
     let status = resp.status();
     let resp_text = resp.text().await.unwrap_or_default();
     if !status.is_success() {
+        // RFC 6749 §5.2 success-vs-error responses both return JSON. On
+        // a non-2xx, peek at the body for `error` / `error_description`
+        // and surface those instead of leaking raw HTTP status text.
+        // Most "wrong client_secret" cases land here as 401 / 400.
+        let detail =
+            parse_token_endpoint_error(&resp_text).unwrap_or_else(|| format!("HTTP {status}"));
         return Err(AppError::BadRequest(format!(
-            "Upstream token endpoint returned {status}: {resp_text}"
+            "Upstream rejected the OAuth exchange: {detail}. \
+             The MCP server's OAuth client_id/secret may be misconfigured — \
+             ask an administrator to verify them at /mcp/servers."
+        )));
+    }
+    // Some upstreams return 200 OK with `{"error": "..."}` instead of
+    // a status-coded error response (looking at you, GitHub on certain
+    // edge cases). Try the error shape first; only fall through to the
+    // success shape if it's clearly not an error envelope.
+    if let Some(detail) = parse_token_endpoint_error(&resp_text) {
+        return Err(AppError::BadRequest(format!(
+            "Upstream rejected the OAuth exchange: {detail}. \
+             The MCP server's OAuth client_id/secret may be misconfigured — \
+             ask an administrator to verify them at /mcp/servers."
         )));
     }
     let token: TokenEndpointResponse = serde_json::from_str(&resp_text)
@@ -486,6 +539,13 @@ pub async fn oauth_callback(
         upstream_subject.as_deref(),
     )
     .await?;
+
+    // If this user previously had a credential for this server (e.g.
+    // re-authorize after revoke, or re-authorize a different scope),
+    // any cached responses from the old identity are stale.
+    think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+        .invalidate_user_lane(&blob.server_id, &blob.user_id)
+        .await;
 
     state.audit.log(
         AuditEntry::new("mcp.connection.authorized")
@@ -565,6 +625,14 @@ pub async fn revoke_connection(
     .bind(&account_label)
     .execute(&state.db)
     .await?;
+
+    // Cached responses pinned to this credential are now serving an
+    // identity that no longer has access. Wipe the user's lane for
+    // this server so post-revoke reads can't tunnel back to the
+    // pre-revoke epoch.
+    think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+        .invalidate_user_lane(&server_id, &auth_user.claims.sub)
+        .await;
 
     state.audit.log(
         AuditEntry::new("mcp.connection.revoked")
@@ -678,6 +746,12 @@ pub async fn paste_static_token(
         None,
     )
     .await?;
+
+    // Replacing a static token in place flips the upstream identity
+    // for this user — wipe any cached responses pinned to the old one.
+    think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+        .invalidate_user_lane(&server_id, &auth_user.claims.sub)
+        .await;
 
     state.audit.log(
         AuditEntry::new("mcp.connection.authorized")

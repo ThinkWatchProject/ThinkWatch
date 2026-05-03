@@ -21,3 +21,4 @@ tracing = { workspace = true }
 fred = { workspace = true }
 metrics = { workspace = true }
 xxhash-rust = { workspace = true }
+hex = { workspace = true }

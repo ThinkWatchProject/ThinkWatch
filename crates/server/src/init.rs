@@ -106,6 +106,7 @@ pub async fn init_state(
         pool.clone(),
         crypto_key,
         init_http_client.clone(),
+        think_watch_mcp_gateway::cache::McpResponseCache::new(redis.clone()),
     );
 
     let state = AppState {
