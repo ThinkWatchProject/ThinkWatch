@@ -146,7 +146,9 @@
     "deployInstructions": "部署说明",
     "noTemplates": "未找到模板",
     "syncRegistry": "同步仓库",
+    "syncing": "同步中...",
     "syncSuccess": "已从仓库同步 {{count}} 个模板",
+    "perUserAuthNote": "安装完成后，每位用户在 <code>/connections</code> 自行授权各自的账户——管理员不会在此粘贴共享 Token。",
     "staticToken": "Token",
     "noAuth": "无需认证",
     "category": {

@@ -146,7 +146,9 @@
     "deployInstructions": "Deployment Instructions",
     "noTemplates": "No templates found",
     "syncRegistry": "Sync Registry",
+    "syncing": "Syncing...",
     "syncSuccess": "Synced {{count}} templates from registry",
+    "perUserAuthNote": "After install, each user authorizes their own account at <code>/connections</code> — admins don't paste a shared token here.",
     "staticToken": "Token",
     "noAuth": "No Auth",
     "category": {

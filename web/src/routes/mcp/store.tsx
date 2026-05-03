@@ -274,7 +274,7 @@ export function McpStorePage() {
             }}
           >
             {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
-            {t('mcpStore.syncRegistry')}
+            {syncing ? t('mcpStore.syncing') : t('mcpStore.syncRegistry')}
           </Button>
         )}
       </div>
@@ -502,13 +502,16 @@ export function McpStorePage() {
 
             {/* Note about per-user credentials — comes AFTER admin
                 inputs because it describes a *user* step, not an
-                admin one. Reading order matches who-acts-when. */}
+                admin one. Reading order matches who-acts-when.
+                The i18n value contains a `<code>/connections</code>`
+                fragment that we render via dangerouslySetInnerHTML —
+                input is i18n-controlled (not user content), so no
+                XSS surface. */}
             {(installTemplate?.oauth_issuer || installTemplate?.allow_static_token) && (
-              <div className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground">
-                After install, each user authorizes their own account at
-                <code className="mx-1 rounded bg-muted px-1">/connections</code>
-                — admins don't paste a shared token here.
-              </div>
+              <div
+                className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground [&_code]:mx-1 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1"
+                dangerouslySetInnerHTML={{ __html: t('mcpStore.perUserAuthNote') }}
+              />
             )}
 
             {/* Connection test — gates Install. Same UX as the /servers
