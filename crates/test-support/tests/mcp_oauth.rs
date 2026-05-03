@@ -637,14 +637,12 @@ async fn override_pointing_at_deleted_credential_does_not_fall_through_to_defaul
     )
     .await
     .unwrap();
-    sqlx::query(
-        "UPDATE api_keys SET mcp_account_overrides = $2::jsonb WHERE id = $1",
-    )
-    .bind(api_key.row.id)
-    .bind(serde_json::to_string(&json!({server_id.to_string(): "work"})).unwrap())
-    .execute(&app.db)
-    .await
-    .unwrap();
+    sqlx::query("UPDATE api_keys SET mcp_account_overrides = $2::jsonb WHERE id = $1")
+        .bind(api_key.row.id)
+        .bind(serde_json::to_string(&json!({server_id.to_string(): "work"})).unwrap())
+        .execute(&app.db)
+        .await
+        .unwrap();
 
     let gw = app.gateway_client();
     gw.set_bearer(&api_key.plaintext);
@@ -664,8 +662,7 @@ async fn override_pointing_at_deleted_credential_does_not_fall_through_to_defaul
     let received_before = upstream.received_requests().await.unwrap();
     assert!(
         received_before.iter().any(|r| {
-            r.headers.get("Authorization").and_then(|v| v.to_str().ok())
-                == Some("Bearer pat-work")
+            r.headers.get("Authorization").and_then(|v| v.to_str().ok()) == Some("Bearer pat-work")
         }),
         "first call should have routed via the 'work' credential"
     );
