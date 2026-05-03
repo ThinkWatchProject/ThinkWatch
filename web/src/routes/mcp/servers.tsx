@@ -239,7 +239,10 @@ export function McpServersPage() {
                           size="icon-sm"
                           onClick={() => setEditServer(s)}
                           title={t('common.edit')}
-                          disabled={!hasPermission('mcp_servers:update')}
+                          disabled={
+                            !hasPermission('mcp_servers:update') ||
+                            discoveringId === s.id
+                          }
                         >
                           <Pencil className="h-4 w-4" />
                         </Button>
@@ -259,7 +262,10 @@ export function McpServersPage() {
                           size="icon-sm"
                           onClick={() => setDeleteTargetId(s.id)}
                           title={t('common.delete')}
-                          disabled={!hasPermission('mcp_servers:delete')}
+                          disabled={
+                            !hasPermission('mcp_servers:delete') ||
+                            discoveringId === s.id
+                          }
                         >
                           <Trash2 className="h-4 w-4" />
                         </Button>

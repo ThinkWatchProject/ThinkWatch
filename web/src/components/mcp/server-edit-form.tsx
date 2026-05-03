@@ -188,6 +188,19 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
 
       {mode === 'oauth' && (
         <>
+          {/* Client_secret rotation foot-gun: the password input is
+              always rendered empty, and on save we treat
+              `length > 0` as "rotate" / `length === 0` as "keep". A
+              user who clicks Save without thinking would clear nothing
+              (correct), but the lack of visual signal makes it easy to
+              miss that "rotate" is also one click away. Banner spells
+              out the contract. */}
+          <Alert className="border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200 [&_svg]:text-amber-600 dark:[&_svg]:text-amber-300">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription className="text-xs">
+              {t('mcpServers.edit.clientSecretRotateHint')}
+            </AlertDescription>
+          </Alert>
           <OAuthFieldset
             values={oauth}
             onChange={setOauth}

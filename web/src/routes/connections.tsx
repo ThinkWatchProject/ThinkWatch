@@ -161,7 +161,32 @@ export function ConnectionsPage() {
         ).then(async (r) => {
           if (!r.ok) throw new Error(await r.text());
         });
-        toast.success(t('connections.tokenSaved'));
+
+        // Verify the token works by exercising the test endpoint. If
+        // the upstream rejects the bearer (typical for typo'd PATs),
+        // the user finds out NOW, not on their first tool call.
+        // The credential is already saved — they can revoke from the
+        // row if the test fails.
+        try {
+          const testResult = await apiPost<{ success: boolean; message: string }>(
+            `/api/mcp/connections/${addTarget.server_id}/${encodeURIComponent(
+              addLabel.trim(),
+            )}/test`,
+            {},
+          );
+          if (testResult.success) {
+            toast.success(t('connections.tokenSavedAndVerified'));
+          } else {
+            toast.warning(
+              t('connections.tokenSavedButTestFailed', { msg: testResult.message }),
+              { duration: 10000 },
+            );
+          }
+        } catch {
+          // Test endpoint may not exist for some configs; fall back to
+          // plain "saved" — the token is in the DB regardless.
+          toast.success(t('connections.tokenSaved'));
+        }
         setAddTarget(null);
         await fetchAll();
       }

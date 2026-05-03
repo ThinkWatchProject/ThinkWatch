@@ -193,6 +193,8 @@
     "tokenLabel": "Token",
     "tokenRequired": "请填写 Token",
     "tokenSaved": "已保存。",
+    "tokenSavedAndVerified": "已保存并验证可用。",
+    "tokenSavedButTestFailed": "已保存，但上游拒绝了：{{msg}}。请撤销后重新粘贴。",
     "howToGetToken": "如何获取此 Token",
     "saveToken": "保存 Token",
     "authorize": "前往授权",
@@ -584,7 +586,7 @@
     "toolsCount": "工具数",
     "callsCount": "调用数",
     "discoverTools": "发现工具",
-    "deleteConfirm": "确定要删除此 MCP 服务器吗？",
+    "deleteConfirm": "删除此 MCP 服务器？所有用户为此服务器保存的凭证（OAuth tokens、静态令牌、account label）都会一并被清除；正在使用其工具的 AI agent 会立即开始失败。此操作不可撤销。",
     "noServers": "尚未注册任何 MCP 服务器。",
     "noServersHint": "注册服务器以开始使用 MCP 工具。",
     "dialogTitle": "注册 MCP 服务器",
@@ -595,7 +597,8 @@
     "editServer": "编辑 MCP 服务器",
     "editDescription": "更新 MCP 服务器设置。",
     "edit": {
-      "modeImmutableHint": "认证模式不可改；如需切换请删除后重建。"
+      "modeImmutableHint": "认证模式不可改；如需切换请删除后重建。",
+      "clientSecretRotateHint": "OAuth client_secret 字段留空 = 保留原值。只在确实需要轮换时才粘贴新值 — 保存后旧 secret 会立刻失效。"
     },
     "testFailedBlocking": "连接测试失败：{{msg}}。请修复后重试。",
     "mustTestFirst": "请先点击\"测试连接\"并确认服务器返回工具列表。",

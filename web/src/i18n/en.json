@@ -193,6 +193,8 @@
     "tokenLabel": "Token",
     "tokenRequired": "Token is required",
     "tokenSaved": "Token saved.",
+    "tokenSavedAndVerified": "Token saved and verified.",
+    "tokenSavedButTestFailed": "Token saved, but the upstream rejected it: {{msg}}. Revoke + paste a fresh one.",
     "howToGetToken": "How to get this token",
     "saveToken": "Save token",
     "authorize": "Continue to provider",
@@ -584,7 +586,7 @@
     "toolsCount": "Tools",
     "callsCount": "Calls",
     "discoverTools": "Discover Tools",
-    "deleteConfirm": "Are you sure you want to delete this MCP server?",
+    "deleteConfirm": "Delete this MCP server? Every user's saved credentials (OAuth tokens, static tokens, account labels) for this server will also be removed and any AI agents currently using its tools will start failing immediately. This cannot be undone.",
     "noServers": "No MCP servers registered yet.",
     "noServersHint": "Register a server to start using MCP tools.",
     "dialogTitle": "Register MCP Server",
@@ -595,7 +597,8 @@
     "editServer": "Edit MCP Server",
     "editDescription": "Update MCP server settings.",
     "edit": {
-      "modeImmutableHint": "Auth mode is fixed; delete + recreate to change."
+      "modeImmutableHint": "Auth mode is fixed; delete + recreate to change.",
+      "clientSecretRotateHint": "Leave the OAuth client_secret blank to keep the current value. Paste a new one only if you actually want to rotate — saving with a new secret revokes the old one immediately."
     },
     "testFailedBlocking": "Connection test failed: {{msg}}. Fix the issue and try again.",
     "mustTestFirst": "Run Test Connection first and confirm the server responds with a tool list.",
