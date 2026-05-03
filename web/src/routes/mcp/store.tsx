@@ -216,7 +216,26 @@ export function McpStorePage() {
         oauth_client_id: isOauthTemplate ? (oauthClientId || undefined) : undefined,
         oauth_client_secret: isOauthTemplate ? (oauthClientSecret || undefined) : undefined,
       });
-      toast.success(t('mcpStore.installSuccess'));
+      // Toast carries the next-step CTA — for OAuth/static-token
+      // templates the install ALONE doesn't make the server usable,
+      // so we link directly to /connections where users authorize.
+      // For public/no-auth templates the server is ready to use; the
+      // toast is just a confirmation.
+      const isPerUserAuth =
+        !!installTemplate.oauth_issuer || installTemplate.allow_static_token;
+      if (isPerUserAuth) {
+        toast.success(t('mcpStore.installSuccess'), {
+          duration: 8000,
+          action: {
+            label: t('mcpStore.goToConnections'),
+            onClick: () => {
+              window.location.href = '/connections';
+            },
+          },
+        });
+      } else {
+        toast.success(t('mcpStore.installSuccess'));
+      }
       setInstallTemplate(null);
       // Refresh store listing + existing-server snapshot so the just-installed
       // template shows the "installed" badge and future collision previews

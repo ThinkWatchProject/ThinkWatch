@@ -38,8 +38,11 @@ export function McpTestPanel({ testing, result, onRetry }: McpTestPanelProps) {
   //   2. success with tools: full success.
   //   3. failure: hard failure (network, 5xx, malformed response).
   if (result.requires_auth) {
+    // Amber-tinted "informational" — visually distinct from the green
+    // full-success panel below. Carries the lock icon so admins
+    // immediately recognise this as "auth gate" rather than "broken".
     return (
-      <Alert>
+      <Alert className="border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200 [&_svg]:text-amber-600 dark:[&_svg]:text-amber-300">
         <Lock className="h-4 w-4" />
         <AlertDescription>
           <div className="font-medium">{t('mcpServers.wizard.requiresAuthTitle')}</div>

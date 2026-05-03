@@ -136,6 +136,7 @@
     "installedTooltip": "已安装",
     "installing": "安装中...",
     "installSuccess": "MCP 服务器安装成功",
+    "goToConnections": "去 /connections",
     "installTitle": "安装 {{name}}",
     "oauthCredentialsTitle": "OAuth 客户端凭证",
     "oauthCredentialsHint": "来自你在 {{issuer}} 上的 OAuth 应用。模板提供 issuer 与端点；你提供 client_id 和 secret。",
@@ -165,6 +166,9 @@
     "title": "我的 MCP 连接",
     "subtitle": "为管理员已注册的 MCP 服务器授权你自己的账号。每次工具调用都会使用调用者本人的凭据。",
     "empty": "还没有注册的 MCP 服务器。请管理员在 MCP 服务器页面添加一个。",
+    "emptyAdmin": "还没有注册的 MCP 服务器。可以去商店选模板，或注册一个自定义服务器。",
+    "browseStore": "去商店",
+    "registerServer": "注册服务器",
     "anonymous": "该服务器无需认证。",
     "notConnected": "尚未连接。",
     "connect": "连接",
@@ -636,6 +640,8 @@
       "retryTest": "重试",
       "requiresAuthTitle": "服务器可达 — 需要认证",
       "requiresAuthHint": "上游对匿名探测返回了 401/403，这对 OAuth / 静态令牌 MCP 来说是预期行为 — 每个用户首次从 /connections 连接时才会验证其认证。",
+      "savedReady": "服务器已注册。工具现已可达，正在后台发现工具列表。",
+      "savedNextConnections": "服务器已注册。请提醒用户去 /connections 授权各自的账户后再调用工具。",
       "modes": {
         "oauth": {
           "title": "OAuth 登录",

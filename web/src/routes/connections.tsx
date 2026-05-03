@@ -15,7 +15,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/confirm-dialog';
-import { api, apiPost, apiDelete } from '@/lib/api';
+import { api, apiPost, apiDelete, hasPermission } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import {
   Plug,
@@ -232,9 +232,23 @@ export function ConnectionsPage() {
         <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
       ) : servers.length === 0 ? (
         <Card>
-          <CardContent className="flex flex-col items-center justify-center py-10 text-center">
-            <Plug className="h-10 w-10 text-muted-foreground mb-3" />
-            <p className="text-sm text-muted-foreground">{t('connections.empty')}</p>
+          <CardContent className="flex flex-col items-center justify-center gap-3 py-10 text-center">
+            <Plug className="h-10 w-10 text-muted-foreground" />
+            <p className="text-sm text-muted-foreground">
+              {hasPermission('mcp_servers:create')
+                ? t('connections.emptyAdmin')
+                : t('connections.empty')}
+            </p>
+            {hasPermission('mcp_servers:create') && (
+              <div className="flex gap-2">
+                <Button asChild size="sm" variant="outline">
+                  <a href="/mcp/store">{t('connections.browseStore')}</a>
+                </Button>
+                <Button asChild size="sm">
+                  <a href="/mcp/servers">{t('connections.registerServer')}</a>
+                </Button>
+              </div>
+            )}
           </CardContent>
         </Card>
       ) : (

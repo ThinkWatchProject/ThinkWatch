@@ -136,6 +136,7 @@
     "installedTooltip": "Already installed",
     "installing": "Installing...",
     "installSuccess": "MCP server installed successfully",
+    "goToConnections": "Go to /connections",
     "installTitle": "Install {{name}}",
     "oauthCredentialsTitle": "OAuth client credentials",
     "oauthCredentialsHint": "From your OAuth app on {{issuer}}. Templates ship the issuer + endpoints; you supply the client_id and secret.",
@@ -165,6 +166,9 @@
     "title": "My MCP Connections",
     "subtitle": "Authorize your own accounts for the MCP servers your admin has registered. Each tool call uses the credentials of the calling user.",
     "empty": "No MCP servers are registered yet. Ask your admin to add one in the MCP Servers page.",
+    "emptyAdmin": "No MCP servers are registered yet. Browse the store for ready-made templates, or register a custom server.",
+    "browseStore": "Browse store",
+    "registerServer": "Register server",
     "anonymous": "This server doesn't require authentication.",
     "notConnected": "Not connected.",
     "connect": "Connect",
@@ -636,6 +640,8 @@
       "retryTest": "Retry test",
       "requiresAuthTitle": "Reachable — auth required",
       "requiresAuthHint": "The upstream returned 401/403 to the anonymous probe. That's expected for OAuth / static-token MCPs — per-user auth will be validated when each user connects from /connections.",
+      "savedReady": "Server registered. Tools are reachable now — discovery is running in the background.",
+      "savedNextConnections": "Server registered. Have users authorize their accounts at /connections before invoking tools.",
       "modes": {
         "oauth": {
           "title": "OAuth login",

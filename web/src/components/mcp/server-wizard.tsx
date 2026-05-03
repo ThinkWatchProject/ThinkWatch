@@ -24,6 +24,7 @@ import {
   type OAuthFields,
 } from './oauth-fieldset';
 import { McpTestPanel, type McpTestResult } from './test-panel';
+import { toast } from 'sonner';
 
 interface ServerWizardProps {
   taken: { names: Set<string>; prefixes: Set<string> };
@@ -141,6 +142,23 @@ export function ServerWizard({ taken, onSuccess, onCancel }: ServerWizardProps) 
         custom_headers: buildHeaders(),
         cache_ttl_secs: cacheTtl ? Number(cacheTtl) : undefined,
       });
+      // Surface "next step" guidance — for OAuth/PAT servers the
+      // admin's job isn't done; users still need to authorize at
+      // /connections. For public/headers servers the gateway can
+      // already invoke tools, so just confirm.
+      if (mode === 'oauth' || allowStaticToken) {
+        toast.success(t('mcpServers.wizard.savedNextConnections'), {
+          duration: 8000,
+          action: {
+            label: t('mcpStore.goToConnections'),
+            onClick: () => {
+              window.location.href = '/connections';
+            },
+          },
+        });
+      } else {
+        toast.success(t('mcpServers.wizard.savedReady'));
+      }
       onSuccess();
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : 'Failed to register server');
