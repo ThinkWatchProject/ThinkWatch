@@ -670,6 +670,8 @@
     "noDescription": "No description",
     "searchPlaceholder": "Search tools by name or description",
     "toolsFound": "tools",
+    "expandSchemaFor": "Expand {{name}} schema",
+    "collapseSchemaFor": "Collapse {{name}} schema",
     "col": {
       "tool": "Tool",
       "server": "Server",

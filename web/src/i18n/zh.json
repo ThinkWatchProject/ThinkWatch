@@ -670,6 +670,8 @@
     "noDescription": "无描述",
     "searchPlaceholder": "按名称或描述搜索工具",
     "toolsFound": "个工具",
+    "expandSchemaFor": "展开 {{name}} 的 schema",
+    "collapseSchemaFor": "收起 {{name}} 的 schema",
     "col": {
       "tool": "工具",
       "server": "服务器",

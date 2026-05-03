@@ -373,7 +373,16 @@ export function McpStorePage() {
       <Dialog
         open={installTemplate !== null}
         onOpenChange={(open) => {
-          if (!open) setInstallTemplate(null);
+          if (!open) {
+            // Reset every per-template field so re-opening for another
+            // template doesn't flash stale state for one render frame.
+            setInstallTemplate(null);
+            setTestResult(null);
+            setTesting(false);
+            setOauthClientId('');
+            setOauthClientSecret('');
+            setCustomHeaders([]);
+          }
         }}
       >
         <DialogContent className="max-w-lg">
@@ -383,7 +392,12 @@ export function McpStorePage() {
                 {t('mcpStore.installTitle', { name: installTemplate?.name })}
               </span>
               {installTemplate && (
-                <AuthModeBadge mode={deriveAuthMode(installTemplate)} />
+                // shrink-0 so a long template name can't squeeze the
+                // badge below readability.
+                <AuthModeBadge
+                  mode={deriveAuthMode(installTemplate)}
+                  className="shrink-0"
+                />
               )}
             </DialogTitle>
             <DialogDescription>
@@ -399,7 +413,7 @@ export function McpStorePage() {
             )}
 
             {/* Name + Namespace prefix — pre-populated from template, editable */}
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div className="space-y-1.5">
                 <Label htmlFor="install-name">{t('common.name')}</Label>
                 <Input
@@ -474,7 +488,7 @@ export function McpStorePage() {
                 <p className="text-xs text-muted-foreground">
                   {t('mcpStore.oauthCredentialsHint', { issuer: installTemplate.oauth_issuer })}
                 </p>
-                <div className="grid grid-cols-2 gap-2">
+                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                   <div className="space-y-1">
                     <Label htmlFor="install-oauth-client-id" className="text-xs">
                       {t('mcpServers.oauth.clientId')}
@@ -517,7 +531,13 @@ export function McpStorePage() {
             {/* Connection test — gates Install. Same UX as the /servers
                 wizard's Step 3 so admins get the same "X tools
                 discovered" preview before committing. */}
-            {testResult && <McpTestPanel testing={testing} result={testResult} />}
+            {testResult && (
+              <McpTestPanel
+                testing={testing}
+                result={testResult}
+                onRetry={handleTestConnection}
+              />
+            )}
 
             {/* Advanced: cache TTL is set globally for the store flow,
                 so this section currently only carries custom headers.

@@ -207,7 +207,12 @@ export function McpToolsPage() {
                               size="icon"
                               className="h-6 w-6"
                               onClick={() => setExpanded(isOpen ? null : tool.id)}
-                              aria-label="Expand"
+                              aria-label={
+                                isOpen
+                                  ? t('mcpTools.collapseSchemaFor', { name: tool.name })
+                                  : t('mcpTools.expandSchemaFor', { name: tool.name })
+                              }
+                              aria-expanded={isOpen}
                             >
                               {isOpen ? (
                                 <ChevronDown className="h-3 w-3" />

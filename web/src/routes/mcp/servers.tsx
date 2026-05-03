@@ -204,12 +204,26 @@ export function McpServersPage() {
                       <TransportBadge transport={s.transport_type} />
                     </TableCell>
                     <TableCell>
-                      <StatusIndicator
-                        status={s.status === 'connected' ? 'healthy' : s.status === 'disconnected' ? 'down' : 'unknown'}
-                        label={t(`common.${s.status === 'connected' ? 'healthy' : s.status === 'disconnected' ? 'down' : 'unknown'}`, s.status)}
-                        showLabel
-                        pulse
-                      />
+                      {(() => {
+                        // Pick the status key once, then translate. Inlining
+                        // both ternaries was making the i18n fallback (last
+                        // arg to t()) be a literal English string ("connected")
+                        // instead of a *translated* status word.
+                        const key: 'healthy' | 'down' | 'unknown' =
+                          s.status === 'connected'
+                            ? 'healthy'
+                            : s.status === 'disconnected'
+                              ? 'down'
+                              : 'unknown';
+                        return (
+                          <StatusIndicator
+                            status={key}
+                            label={t(`common.${key}`)}
+                            showLabel
+                            pulse
+                          />
+                        );
+                      })()}
                     </TableCell>
                     <TableCell className="text-xs text-muted-foreground">
                       {s.last_health_check ? new Date(s.last_health_check).toLocaleString() : '—'}
