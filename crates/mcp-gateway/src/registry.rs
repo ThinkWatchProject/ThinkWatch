@@ -67,11 +67,36 @@ pub struct RegisteredServer {
     /// for this server explicitly.
     #[serde(skip)]
     pub cache_ttl_secs: Option<u64>,
-    /// `true` when any custom header value contains `{{user_id}}` or
-    /// `{{user_email}}` template variables, meaning the upstream request
-    /// varies by caller.  Responses from such servers must NOT be cached.
+    /// How responses from this server may be cached. See
+    /// [`ServerCacheScope`] — drives whether the proxy passes a
+    /// `CallerScope` to the cache layer at request time.
     #[serde(skip)]
-    pub forwards_user_identity: bool,
+    pub cache_scope: ServerCacheScope,
+}
+
+/// How aggressively responses from a server may be shared between
+/// callers.
+///
+/// Determined once at server-load time from the persisted config; see
+/// `crates/server/src/mcp_runtime.rs::determine_cache_scope`.
+///
+/// A given server is **always** cacheable in the sense that, for one
+/// caller, repeating the same `tools/call` within TTL hits Redis. The
+/// scope only controls the *width* of each cache entry's audience.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ServerCacheScope {
+    /// All callers share one cache entry per `(server, method, params)`.
+    /// Safe when the upstream returns identical responses regardless of
+    /// who is calling — public services (Wikipedia, MDN), or services
+    /// authed by a fixed shared header (e.g. `X-API-Key: <secret>`).
+    #[default]
+    Global,
+    /// Each caller gets their own cache lane: one entry per
+    /// `(server, user_id, account_label?, method, params)`. Required
+    /// for OAuth, static-token (PAT), and `{{user_id}}`-templated
+    /// header servers — the upstream sees the caller's own credential
+    /// and may return different data per user.
+    PerCaller,
 }
 
 /// The namespace separator used to prefix tool names with their server name.
@@ -224,7 +249,7 @@ mod tests {
             allow_static_token: false,
             custom_headers: Vec::new(),
             cache_ttl_secs: None,
-            forwards_user_identity: false,
+            cache_scope: ServerCacheScope::Global,
         }
     }
 

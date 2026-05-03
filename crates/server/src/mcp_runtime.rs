@@ -91,11 +91,11 @@ pub async fn build_registered_server(
         })
         .unwrap_or_default();
 
-    // Detect whether any custom header forwards per-user identity —
-    // if so, responses vary by caller and must not be cached.
-    let forwards_user_identity = custom_headers
-        .iter()
-        .any(|(_, v)| v.contains("{{user_id}}") || v.contains("{{user_email}}"));
+    let cache_scope = determine_cache_scope(
+        server.oauth_issuer.as_deref(),
+        server.allow_static_token,
+        &custom_headers,
+    );
 
     // Per-server cache TTL override from config_json.cache_ttl_secs.
     let cache_ttl_secs = server
@@ -116,8 +116,94 @@ pub async fn build_registered_server(
         allow_static_token: server.allow_static_token,
         custom_headers,
         cache_ttl_secs,
-        forwards_user_identity,
+        cache_scope,
     })
+}
+
+/// Decide which [`ServerCacheScope`] applies based on the persisted
+/// auth config.
+///
+/// The rule: any signal that the upstream sees a *per-user credential*
+/// flips the scope to `PerCaller`. Otherwise (public, fixed
+/// service-to-service header) responses are reusable across every
+/// caller, so `Global` is correct and gives the highest hit rate.
+///
+/// Pure function — exposed for unit testing of the auth-shape →
+/// scope mapping without spinning up a DB.
+pub fn determine_cache_scope(
+    oauth_issuer: Option<&str>,
+    allow_static_token: bool,
+    custom_headers: &[(String, String)],
+) -> think_watch_mcp_gateway::registry::ServerCacheScope {
+    use think_watch_mcp_gateway::registry::ServerCacheScope;
+    let identity_forwarded = oauth_issuer.is_some()
+        || allow_static_token
+        || custom_headers
+            .iter()
+            .any(|(_, v)| v.contains("{{user_id}}") || v.contains("{{user_email}}"));
+    if identity_forwarded {
+        ServerCacheScope::PerCaller
+    } else {
+        ServerCacheScope::Global
+    }
+}
+
+#[cfg(test)]
+mod cache_scope_tests {
+    use super::determine_cache_scope;
+    use think_watch_mcp_gateway::registry::ServerCacheScope;
+
+    fn h(k: &str, v: &str) -> Vec<(String, String)> {
+        vec![(k.to_string(), v.to_string())]
+    }
+
+    #[test]
+    fn public_server_is_global() {
+        let s = determine_cache_scope(None, false, &[]);
+        assert_eq!(s, ServerCacheScope::Global);
+    }
+
+    #[test]
+    fn fixed_service_to_service_header_is_global() {
+        // Same secret for every caller — upstream returns the same
+        // data regardless of who called.
+        let s = determine_cache_scope(None, false, &h("X-API-Key", "fixed-secret"));
+        assert_eq!(s, ServerCacheScope::Global);
+    }
+
+    #[test]
+    fn user_id_template_header_is_per_caller() {
+        let s = determine_cache_scope(None, false, &h("X-User-Id", "{{user_id}}"));
+        assert_eq!(s, ServerCacheScope::PerCaller);
+    }
+
+    #[test]
+    fn user_email_template_header_is_per_caller() {
+        let s = determine_cache_scope(None, false, &h("X-User-Email", "{{user_email}}"));
+        assert_eq!(s, ServerCacheScope::PerCaller);
+    }
+
+    #[test]
+    fn oauth_server_is_per_caller_even_without_template_header() {
+        // The actual bug this redesign fixes: a bare OAuth server with
+        // no custom headers used to fall through to Global, leaking
+        // user A's responses to user B.
+        let s = determine_cache_scope(Some("https://github.com"), false, &[]);
+        assert_eq!(s, ServerCacheScope::PerCaller);
+    }
+
+    #[test]
+    fn static_token_server_is_per_caller_even_without_template_header() {
+        // Same bug for PAT/API-key MCPs.
+        let s = determine_cache_scope(None, true, &[]);
+        assert_eq!(s, ServerCacheScope::PerCaller);
+    }
+
+    #[test]
+    fn oauth_with_static_fallback_is_per_caller() {
+        let s = determine_cache_scope(Some("https://github.com"), true, &[]);
+        assert_eq!(s, ServerCacheScope::PerCaller);
+    }
 }
 
 /// Resolve the upstream OAuth client config from a server row. Returns

@@ -571,7 +571,7 @@
     "presetUserId": "User ID",
     "presetUserEmail": "User Email",
     "cacheTtlLabel": "Response Cache TTL (seconds)",
-    "cacheTtlHint": "How long to cache tool-call responses. Empty = use global default. 0 = disable caching for this server. Servers that forward user identity ({{user_id}}/{{user_email}}) are never cached.",
+    "cacheTtlHint": "How long to cache tool-call responses. Empty = use global default. 0 = disable caching for this server. OAuth, static-token, and {{user_id}}/{{user_email}}-forwarding servers cache per-caller (one entry per user + account); public and fixed-header servers share a global entry.",
     "cacheTtlPlaceholder": "Use global default",
     "lastHealthCheck": "Last Health Check",
     "toolsCount": "Tools",

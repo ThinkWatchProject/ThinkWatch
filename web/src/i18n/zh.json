@@ -571,7 +571,7 @@
     "presetUserId": "用户 ID",
     "presetUserEmail": "用户邮箱",
     "cacheTtlLabel": "响应缓存 TTL（秒）",
-    "cacheTtlHint": "工具调用响应缓存时长。留空 = 使用全局默认值。0 = 禁用此服务器缓存。转发用户身份（{{user_id}}/{{user_email}}）的服务器不会被缓存。",
+    "cacheTtlHint": "工具调用响应缓存时长。留空 = 使用全局默认值。0 = 禁用此服务器缓存。OAuth、静态令牌和转发 {{user_id}}/{{user_email}} 的服务器按调用者分桶缓存（每个用户 + 账号一份）；公开和固定请求头的服务器共享一份。",
     "cacheTtlPlaceholder": "使用全局默认值",
     "lastHealthCheck": "最近健康检查",
     "toolsCount": "工具数",

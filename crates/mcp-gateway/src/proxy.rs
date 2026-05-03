@@ -7,10 +7,10 @@ use think_watch_common::limits::{
 };
 
 use crate::access_control::is_tool_allowed;
-use crate::cache::McpResponseCache;
+use crate::cache::{CallerScope, McpResponseCache};
 use crate::circuit_breaker::McpCircuitBreakers;
 use crate::pool::ConnectionPool;
-use crate::registry::Registry;
+use crate::registry::{Registry, ServerCacheScope};
 use crate::session::SessionManager;
 use crate::user_token::{ResolverCaller, ResolverError, UserTokenResolver};
 
@@ -131,6 +131,23 @@ pub struct RequestContext<'a> {
     pub mcp_account_overrides: &'a serde_json::Value,
 }
 
+/// Read the account_label routed to a specific server from the API
+/// key's `mcp_account_overrides` map, without going through the full
+/// credential resolver.
+///
+/// The full resolver does work the cache layer doesn't need (decrypt
+/// secret, refresh token, write back). For cache keying we only care
+/// about the *label string* the caller said to use — that's what
+/// makes "personal vs work" GitHub responses land in distinct cache
+/// entries. When the caller didn't pass an override (`None`), we
+/// scope to user_id only and accept up to one TTL window of staleness
+/// if the user later flips their default credential.
+fn account_label_for_server(overrides: &serde_json::Value, server_id: Uuid) -> Option<&str> {
+    overrides
+        .get(server_id.to_string())
+        .and_then(|v| v.as_str())
+}
+
 // ---------------------------------------------------------------------------
 // McpProxy
 // ---------------------------------------------------------------------------
@@ -153,8 +170,11 @@ pub struct McpProxy {
     /// single source of truth for upstream sessions, replacing the
     /// previous per-connection state that was shared across users.
     pub sessions: SessionManager,
-    /// Redis-backed response cache for MCP tool calls.  Only used for
-    /// servers that don't forward per-user identity headers.
+    /// Redis-backed response cache for MCP tool calls. The cache lane
+    /// is determined per-server via [`ServerCacheScope`]: `Global`
+    /// servers share one entry across users; `PerCaller` servers
+    /// scope by `(user_id, account_label?)` so OAuth/PAT responses
+    /// can't leak across callers.
     pub cache: McpResponseCache,
     pub db: PgPool,
     pub redis: fred::clients::Client,
@@ -455,19 +475,25 @@ impl McpProxy {
             .cache_ttl_secs
             .unwrap_or(self.dynamic_config.mcp_cache_ttl_secs().await);
 
-        // When the server forwards caller identity ({{user_id}} etc.),
-        // scope cache entries per-user so results are never leaked across
-        // users.  Shared servers get a user-agnostic cache lane.
-        let cache_user_id = if server.forwards_user_identity {
-            Some(&user_id)
-        } else {
-            None
+        // Build the per-request cache scope from the server's static
+        // `ServerCacheScope` plus, for PerCaller servers, the
+        // user_id and the optional account_label routed by the
+        // calling API key. PerCaller without an account override
+        // collapses to per-user — the user's *default* credential is
+        // implicit; if they switch defaults they get at most TTL
+        // seconds of stale cache, which is acceptable.
+        let cache_scope = match server.cache_scope {
+            ServerCacheScope::Global => None,
+            ServerCacheScope::PerCaller => Some(CallerScope {
+                user_id: &user_id,
+                account_label: account_label_for_server(ctx.mcp_account_overrides, server.id),
+            }),
         };
 
         if effective_cache_ttl > 0 {
             if let Some(cached) = self
                 .cache
-                .get(&server.id, cache_user_id, &upstream_request)
+                .get(&server.id, cache_scope, &upstream_request)
                 .await
             {
                 metrics::counter!("mcp_cache_hits_total").increment(1);
@@ -631,7 +657,7 @@ impl McpProxy {
             self.cache
                 .set(
                     &server_id,
-                    cache_user_id,
+                    cache_scope,
                     &upstream_request,
                     &response,
                     effective_cache_ttl,
