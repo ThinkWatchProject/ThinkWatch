@@ -583,3 +583,139 @@ async fn test_connection_returns_failure_when_upstream_rejects_token() {
         "expected message to surface the 401 — got {body:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// API key mcp_account_overrides routing — exact-match contract
+// ---------------------------------------------------------------------------
+
+/// When an API key's `mcp_account_overrides` map names a label that
+/// no longer exists (e.g. user revoked that credential after the key
+/// was minted), the resolver MUST return `NeedsUserCredentials` and
+/// NOT silently fall through to the user's `is_default` credential.
+/// Falling through would route a tool call meant for "work" to
+/// "personal" — wrong account, wrong audit trail, possible data leak.
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn override_pointing_at_deleted_credential_does_not_fall_through_to_default() {
+    let app = TestApp::spawn().await;
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let upstream = mcp_upstream().await;
+    let server_id = seed_static_server(&app, &upstream.uri(), "ovr").await;
+
+    let con = app.console_client();
+    login(&con, &admin).await;
+    con.post(&format!("/api/mcp/servers/{server_id}/discover"), json!({}))
+        .await
+        .unwrap()
+        .assert_ok();
+
+    // Paste two tokens. "personal" is default (first-paste wins);
+    // "work" is the explicit account the API key will route to.
+    con.put(
+        &format!("/api/mcp/connections/{server_id}/personal/static-token"),
+        json!({"token": "pat-personal"}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+    con.put(
+        &format!("/api/mcp/connections/{server_id}/work/static-token"),
+        json!({"token": "pat-work"}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    // Mint an API key with an explicit override → "work".
+    let api_key = fixtures::create_api_key(
+        &app.db,
+        admin.user.id,
+        "ovr-key",
+        &["mcp_gateway"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    sqlx::query(
+        "UPDATE api_keys SET mcp_account_overrides = $2::jsonb WHERE id = $1",
+    )
+    .bind(api_key.row.id)
+    .bind(serde_json::to_string(&json!({server_id.to_string(): "work"})).unwrap())
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key.plaintext);
+
+    // Sanity: with the "work" credential present, the call uses it
+    // (the upstream sees `Bearer pat-work`).
+    let _ = gw
+        .post(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "ovr__echo", "arguments": {}}
+            }),
+        )
+        .await
+        .unwrap();
+    let received_before = upstream.received_requests().await.unwrap();
+    assert!(
+        received_before.iter().any(|r| {
+            r.headers.get("Authorization").and_then(|v| v.to_str().ok())
+                == Some("Bearer pat-work")
+        }),
+        "first call should have routed via the 'work' credential"
+    );
+
+    // Now delete the "work" row directly — simulates "user revoked
+    // that account after the key was minted".
+    sqlx::query(
+        "DELETE FROM mcp_user_credentials WHERE mcp_server_id = $1
+         AND user_id = $2 AND account_label = 'work'",
+    )
+    .bind(server_id)
+    .bind(admin.user.id)
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    // The personal credential is untouched and still default. If the
+    // resolver fell through, the next call would silently use it.
+    // The contract says it must NOT.
+    let resp = gw
+        .post(
+            "/mcp",
+            json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "ovr__echo", "arguments": {}}
+            }),
+        )
+        .await
+        .unwrap();
+    let body: Value = resp.json().unwrap();
+    let err = body
+        .get("error")
+        .expect("expected NeedsUserCredentials, not a silent fall-through");
+    assert_eq!(err["code"], -32050, "expected JSON-RPC -32050");
+    assert_eq!(err["data"]["kind"], "needs_user_credentials");
+
+    // Belt-and-suspenders: the upstream must not have been called with
+    // the *personal* token between the delete and the failed call.
+    let post_count = upstream
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| {
+            r.headers.get("Authorization").and_then(|v| v.to_str().ok())
+                == Some("Bearer pat-personal")
+        })
+        .count();
+    assert_eq!(
+        post_count, 0,
+        "resolver fell through to the default credential — that's the bug"
+    );
+}
