@@ -12,7 +12,7 @@ use crate::circuit_breaker::McpCircuitBreakers;
 use crate::pool::ConnectionPool;
 use crate::registry::{Registry, ServerCacheScope};
 use crate::session::SessionManager;
-use crate::user_token::{ResolverCaller, ResolverError, UserTokenResolver};
+use crate::user_token::{RefreshFailureKind, ResolverCaller, ResolverError, UserTokenResolver};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -568,6 +568,17 @@ impl McpProxy {
                 server_id,
                 authorize_url,
             }) => {
+                // Hydrate authorize_url from the registered server when
+                // the resolver couldn't supply one (it doesn't see the
+                // server's OAuth config). With this, AI agents can
+                // surface a clickable re-auth link instead of asking
+                // the user to navigate to the console manually.
+                let resolved_authorize_url = authorize_url.or_else(|| {
+                    server
+                        .oauth_cfg
+                        .as_ref()
+                        .and_then(|c| c.authorization_endpoint.clone())
+                });
                 return JsonRpcResponse {
                     jsonrpc: "2.0".to_owned(),
                     id: request.id,
@@ -576,15 +587,67 @@ impl McpProxy {
                         code: NEEDS_USER_CREDENTIALS,
                         message: format!(
                             "User has not connected an account for MCP server '{server_name}'. \
-                             Open the console and authorize before calling this tool."
+                             Open /connections in the ThinkWatch console to authorize."
                         ),
                         data: Some(serde_json::json!({
                             "kind": "needs_user_credentials",
                             "server_id": server_id.to_string(),
-                            "authorize_url": authorize_url,
+                            "server_name": server_name,
+                            "authorize_url": resolved_authorize_url,
+                            "console_url": "/connections",
                         })),
                     }),
                 };
+            }
+            Err(ResolverError::RefreshFailed {
+                server_id,
+                kind: RefreshFailureKind::Permanent,
+                ..
+            }) => {
+                // The credential row is gone — the user must re-authorize.
+                // Same `NEEDS_USER_CREDENTIALS` envelope as the
+                // never-connected path so AI clients can use one
+                // recovery flow for both. The message tells the human
+                // that this was a re-auth, not a first-time connect.
+                return JsonRpcResponse {
+                    jsonrpc: "2.0".to_owned(),
+                    id: request.id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: NEEDS_USER_CREDENTIALS,
+                        message: format!(
+                            "Authorization for MCP server '{server_name}' was rejected by the \
+                             upstream and has been cleared. Re-authorize at /connections."
+                        ),
+                        data: Some(serde_json::json!({
+                            "kind": "needs_user_credentials",
+                            "reason": "refresh_rejected",
+                            "server_id": server_id.to_string(),
+                            "server_name": server_name,
+                            "authorize_url": server
+                                .oauth_cfg
+                                .as_ref()
+                                .and_then(|c| c.authorization_endpoint.clone()),
+                            "console_url": "/connections",
+                        })),
+                    }),
+                };
+            }
+            Err(ResolverError::RefreshFailed {
+                kind: RefreshFailureKind::Transient,
+                message,
+                ..
+            }) => {
+                // Upstream OAuth provider had a moment. The credential
+                // is still valid; tell the AI client to retry.
+                return err_response(
+                    request.id.clone(),
+                    INTERNAL_ERROR,
+                    format!(
+                        "Upstream OAuth provider for MCP server '{server_name}' is \
+                         temporarily unavailable ({message}). Retry in a few seconds."
+                    ),
+                );
             }
             Err(e) => {
                 tracing::error!(

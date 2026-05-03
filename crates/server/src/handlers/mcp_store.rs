@@ -195,8 +195,16 @@ pub async fn install_template(
         super::mcp_shared::probe_mcp_endpoint(&http, &endpoint_url, req.custom_headers.as_ref())
             .await;
     if !probe.success && !probe.requires_auth {
+        // Probe details first (user may want to copy them), then a
+        // hint on what to do next. Most failures land here from
+        // dead/migrated endpoints — the template URL is from the
+        // catalog, so this is usually an upstream-side problem the
+        // operator can't fix locally.
         return Err(AppError::BadRequest(format!(
-            "Connection test failed: {}",
+            "Could not reach MCP endpoint {endpoint_url} ({}). \
+             The template's upstream may be deprecated or temporarily \
+             unavailable. Try again in a few minutes, or pick a different \
+             template — the install was not saved.",
             probe.message
         )));
     }

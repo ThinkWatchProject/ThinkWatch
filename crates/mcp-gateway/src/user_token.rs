@@ -66,11 +66,16 @@ pub enum ResolverError {
         /// paste flow.
         authorize_url: Option<String>,
     },
-    /// Refresh failed terminally (refresh_token revoked, scope removed,
-    /// upstream 5xx). The stale row is purged so the next call surfaces
-    /// `NeedsUserCredentials` and the user re-authorizes.
+    /// Refresh failed. Carries `kind` so callers can tell apart a
+    /// permanent rejection (refresh_token revoked, scope removed —
+    /// row deleted, user must re-authorize) from a transient hiccup
+    /// (upstream 5xx, network blip — row preserved, next call retries).
     #[error("refresh failed for MCP server {server_id}: {message}")]
-    RefreshFailed { server_id: Uuid, message: String },
+    RefreshFailed {
+        server_id: Uuid,
+        kind: RefreshFailureKind,
+        message: String,
+    },
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
     #[error("crypto error: {0}")]
@@ -79,6 +84,19 @@ pub enum ResolverError {
     Http(#[from] reqwest::Error),
     #[error("invalid token-endpoint response: {0}")]
     BadTokenResponse(String),
+}
+
+/// Discriminant on `ResolverError::RefreshFailed`. Drives whether the
+/// caller should prompt the user to re-authorize or just surface a
+/// transient-error retry hint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefreshFailureKind {
+    /// 4xx from token endpoint, encoding error, or malformed upstream
+    /// response. Credential row deleted — the user must re-authorize.
+    Permanent,
+    /// 5xx / network / DNS / timeout. Credential row preserved — the
+    /// next call will retry.
+    Transient,
 }
 
 /// Cached row read from `mcp_user_credentials`. Internal to the
@@ -307,6 +325,7 @@ impl UserTokenResolver {
                 .as_ref()
                 .ok_or_else(|| ResolverError::RefreshFailed {
                     server_id,
+                    kind: RefreshFailureKind::Permanent,
                     message: "no refresh_token stored".into(),
                 })?;
         let refresh_token = self.decrypt_to_string(refresh_bytes)?;
@@ -332,7 +351,8 @@ impl UserTokenResolver {
                 tx.rollback().await.ok();
                 return Err(ResolverError::RefreshFailed {
                     server_id,
-                    message: format!("transient: {msg}"),
+                    kind: RefreshFailureKind::Transient,
+                    message: msg,
                 });
             }
             Err(OAuthRefreshFailure::Permanent(msg)) => {
@@ -360,6 +380,7 @@ impl UserTokenResolver {
                 self.cache.invalidate_user_lane(&server_id, &user_id).await;
                 return Err(ResolverError::RefreshFailed {
                     server_id,
+                    kind: RefreshFailureKind::Permanent,
                     message: msg,
                 });
             }
