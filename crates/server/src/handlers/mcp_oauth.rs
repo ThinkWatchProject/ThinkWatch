@@ -698,6 +698,15 @@ pub async fn set_default_connection(
     .await?;
     tx.commit().await?;
 
+    // Switching default flips which credential the resolver picks
+    // when no API-key override is set. The no-override lane (`_`)
+    // is now serving responses pinned to the *old* default's
+    // upstream identity — wipe so post-switch reads see the new
+    // default's data.
+    think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+        .invalidate_user_lane(&server_id, &auth_user.claims.sub)
+        .await;
+
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
@@ -851,11 +860,22 @@ pub async fn test_connection(
                 tools: None,
             }));
         }
-        Err(ResolverError::RefreshFailed { message, .. }) => {
+        Err(ResolverError::RefreshFailed { kind, message, .. }) => {
+            // Tailor the next-step hint to the actual failure shape.
+            // Transient = retry; Permanent = the row is gone, user
+            // must re-authorize.
+            let hint = match kind {
+                think_watch_mcp_gateway::user_token::RefreshFailureKind::Transient => {
+                    "The upstream OAuth provider is temporarily unavailable. Retry in a few seconds."
+                }
+                think_watch_mcp_gateway::user_token::RefreshFailureKind::Permanent => {
+                    "Re-authorize this account at /connections."
+                }
+            };
             return Ok(Json(TestMcpServerResponse {
                 success: false,
                 requires_auth: false,
-                message: format!("OAuth refresh failed: {message}. Re-authorize this account."),
+                message: format!("OAuth refresh failed: {message}. {hint}"),
                 latency_ms: 0,
                 tools_count: None,
                 tools: None,

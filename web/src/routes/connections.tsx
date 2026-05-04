@@ -120,12 +120,15 @@ export function ConnectionsPage() {
   }, []);
 
   const sortedServers = useMemo(() => {
-    // Show servers that need user action (no accounts) first, then by name.
+    // Show servers that need user action (no accounts) first, then
+    // alphabetically by *display* name — when admins set custom
+    // display_labels, sorting by the system `server_name` would put
+    // rows in an order that doesn't match what users see.
     return [...servers].sort((a, b) => {
       const aHas = a.accounts.length > 0 ? 1 : 0;
       const bHas = b.accounts.length > 0 ? 1 : 0;
       if (aHas !== bHas) return aHas - bHas;
-      return a.server_name.localeCompare(b.server_name);
+      return serverDisplay(a).localeCompare(serverDisplay(b));
     });
   }, [servers]);
 

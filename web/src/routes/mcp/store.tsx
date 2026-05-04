@@ -156,6 +156,20 @@ export function McpStorePage() {
     setTesting(false);
   };
 
+  // Single source of truth for "user is done with the install dialog".
+  // Both the user-driven close path (X / Escape / outside-click via
+  // Radix's onOpenChange) and the programmatic close after a successful
+  // install funnel through here so we can't leak per-template state
+  // into the next dialog open.
+  const closeInstallDialog = () => {
+    setInstallTemplate(null);
+    setTestResult(null);
+    setTesting(false);
+    setOauthClientId('');
+    setOauthClientSecret('');
+    setCustomHeaders([]);
+  };
+
   const handleTestConnection = async () => {
     setTesting(true);
     setTestResult(null);
@@ -236,7 +250,7 @@ export function McpStorePage() {
       } else {
         toast.success(t('mcpStore.installSuccess'));
       }
-      setInstallTemplate(null);
+      closeInstallDialog();
       // Refresh store listing + existing-server snapshot so the just-installed
       // template shows the "installed" badge and future collision previews
       // account for the new name/prefix.
@@ -392,16 +406,7 @@ export function McpStorePage() {
       <Dialog
         open={installTemplate !== null}
         onOpenChange={(open) => {
-          if (!open) {
-            // Reset every per-template field so re-opening for another
-            // template doesn't flash stale state for one render frame.
-            setInstallTemplate(null);
-            setTestResult(null);
-            setTesting(false);
-            setOauthClientId('');
-            setOauthClientSecret('');
-            setCustomHeaders([]);
-          }
+          if (!open) closeInstallDialog();
         }}
       >
         <DialogContent className="max-w-lg">
