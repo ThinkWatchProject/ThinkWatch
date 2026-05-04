@@ -421,6 +421,14 @@ CREATE TABLE mcp_servers (
     -- to clients as `<namespace_prefix>__<tool_name>`. Must match
     -- [a-z0-9_]{1,32}. Unique so we never collide two servers' prefixes.
     namespace_prefix      VARCHAR(32) NOT NULL UNIQUE,
+    -- Optional human-friendly label shown to end users on /connections
+    -- and in the tool catalog. Distinct from `name` (system identifier,
+    -- audit log key) and `namespace_prefix` (tool routing key). When
+    -- two installs of the same template land as `linear` + `linear_2`,
+    -- admins can label them "Linear (Acme prod)" / "Linear (BBQ corp)"
+    -- so users see something meaningful. Frontend falls back to `name`
+    -- when NULL.
+    display_label         TEXT,
     description           TEXT,
     endpoint_url          VARCHAR(512) NOT NULL,
     transport_type        VARCHAR(50)  NOT NULL DEFAULT 'streamable_http',
@@ -904,6 +912,37 @@ VALUES
 ('notion',         'Notion',           'Read and write Notion pages, databases, and blocks',          'productivity',  '{"notes","wiki","docs"}',        'https://mcp.notion.com/sse',                                    'https://api.notion.com/v1/users/me',                   TRUE,  'https://www.notion.so/my-integrations',                         'Create an internal integration in Notion and copy its token.',                                           'hosted', false),
 ('google-drive',   'Google Drive',     'Search, read, and manage files in Google Drive',              'productivity',  '{"files","google","storage"}',   '',                                                              'https://www.googleapis.com/oauth2/v3/userinfo',        TRUE,  'https://console.cloud.google.com/apis/credentials',             'Create a Google Cloud OAuth2 credential and authorize Drive access.',                                    'manual', false),
 ('jira',           'Jira',             'Manage Jira issues, sprints, and project boards',             'developer',     '{"project","agile","atlassian"}','',                                                              'https://api.atlassian.com/me',                         TRUE,  'https://id.atlassian.com/manage-profile/security/api-tokens',   'Create an API token at id.atlassian.com.',                                                               'manual', false);
+
+-- OAuth-shaped templates: distinct INSERT because they fill the
+-- oauth_issuer / oauth_authorization_endpoint / oauth_token_endpoint /
+-- oauth_default_scopes columns the static-token templates above leave
+-- NULL. Keeping a separate row keeps the catalog catalogues both shapes
+-- of the same upstream so admins can pick (e.g. `linear` for PAT,
+-- `linear-oauth` for org SSO).
+INSERT INTO mcp_store_templates
+    (slug, name, description, category, tags, endpoint_template,
+     oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
+     oauth_userinfo_endpoint, oauth_default_scopes,
+     allow_static_token, static_token_help_url, auth_instructions,
+     deploy_type, featured)
+VALUES (
+    'linear-oauth',
+    'Linear (OAuth)',
+    'Project management — issues, projects, and cycles. OAuth flow for org SSO.',
+    'developer',
+    '{"project","agile","oauth"}',
+    'https://mcp.linear.app/sse',
+    'https://linear.app',
+    'https://linear.app/oauth/authorize',
+    'https://api.linear.app/oauth/token',
+    NULL, -- Linear has no OIDC userinfo; resolver falls back to JWT decode (also unavailable for opaque tokens — upstream_subject ends up NULL, acceptable)
+    '{"read"}',
+    FALSE,
+    NULL,
+    'Register an OAuth application at https://linear.app/settings/api/applications, copy the client ID and secret, and paste them into the install dialog. Linear''s OAuth uses opaque tokens so per-user display names will fall back to email from the access cookie.',
+    'hosted',
+    false
+);
 
 -- MCP Store
 INSERT INTO system_settings (key, value, category, description) VALUES
