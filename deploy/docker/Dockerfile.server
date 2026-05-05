@@ -4,7 +4,10 @@ FROM rust:1.93-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 COPY crates/ crates/
-COPY migrations/ migrations/
+# `db/schema.sql` and `db/seeds.sql` are `include_str!`d into the binary
+# at compile time (see `crates/common/src/db.rs::run_migrations`), so they
+# need to be present in the build context but NOT in the runtime image.
+COPY db/ db/
 COPY deploy/clickhouse/ deploy/clickhouse/
 
 # Determine musl target from the native build arch
@@ -28,7 +31,8 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then \
 FROM gcr.io/distroless/static-debian13:nonroot
 
 COPY --from=builder /think-watch-server /
-COPY --from=builder /app/migrations /migrations
+# No /migrations or /db copy — the SQL is embedded in the binary via
+# `include_str!`, so the runtime image stays minimal.
 
 # Gateway port
 EXPOSE 3000
