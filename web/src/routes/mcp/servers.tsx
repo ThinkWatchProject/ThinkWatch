@@ -225,16 +225,36 @@ export function McpServersPage() {
                         // both ternaries was making the i18n fallback (last
                         // arg to t()) be a literal English string ("connected")
                         // instead of a *translated* status word.
-                        const key: 'healthy' | 'down' | 'unknown' =
+                        //
+                        // `auth_required` (set by `discover_and_persist_tools`
+                        // when the upstream returns 401/403 to the anonymous
+                        // probe) is a valid runtime state — the server is
+                        // reachable, it just needs per-user OAuth/PAT auth.
+                        // Render it amber, not red, so admins don't think
+                        // the server is broken.
+                        const key: 'healthy' | 'down' | 'degraded' | 'unknown' =
                           s.status === 'connected'
                             ? 'healthy'
-                            : s.status === 'disconnected'
-                              ? 'down'
-                              : 'unknown';
+                            : s.status === 'auth_required'
+                              ? 'degraded'
+                              : s.status === 'disconnected'
+                                ? 'down'
+                                : 'unknown';
+                        // Inline so the i18n checker sees every key
+                        // statically — `t(\`common.${dynamic}\`)` would
+                        // require registering a DYNAMIC_ENUMS pattern.
+                        const label =
+                          s.status === 'auth_required'
+                            ? t('common.authRequired')
+                            : key === 'healthy'
+                              ? t('common.healthy')
+                              : key === 'down'
+                                ? t('common.down')
+                                : t('common.unknown');
                         return (
                           <StatusIndicator
                             status={key}
-                            label={t(`common.${key}`)}
+                            label={label}
                             showLabel
                             pulse
                           />

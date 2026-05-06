@@ -1234,12 +1234,16 @@ struct AuthzServerMetadata {
     userinfo_endpoint: Option<String>,
     registration_endpoint: Option<String>,
     scopes_supported: Vec<String>,
-    /// Whether the AS advertises `"none"` in
-    /// `token_endpoint_auth_methods_supported` — i.e. it accepts public
-    /// clients (PKCE-only, no client_secret needed at the token
-    /// endpoint). Drives whether the admin form asks for a Client
-    /// Secret at all.
-    public_client_supported: bool,
+    /// Raw `token_endpoint_auth_methods_supported` list. Used by DCR
+    /// to pick a method the AS will accept; presence of `"none"`
+    /// also flips `is_public_client` on the probe response.
+    token_endpoint_auth_methods: Vec<String>,
+}
+
+impl AuthzServerMetadata {
+    fn public_client_supported(&self) -> bool {
+        self.token_endpoint_auth_methods.iter().any(|m| m == "none")
+    }
 }
 
 fn parse_authz_server_metadata(body: &serde_json::Value) -> AuthzServerMetadata {
@@ -1256,7 +1260,6 @@ fn parse_authz_server_metadata(body: &serde_json::Value) -> AuthzServerMetadata 
             })
             .unwrap_or_default()
     }
-    let auth_methods = arr(body, "token_endpoint_auth_methods_supported");
     AuthzServerMetadata {
         issuer: s(body, "issuer"),
         authorization_endpoint: s(body, "authorization_endpoint"),
@@ -1265,7 +1268,7 @@ fn parse_authz_server_metadata(body: &serde_json::Value) -> AuthzServerMetadata 
         userinfo_endpoint: s(body, "userinfo_endpoint"),
         registration_endpoint: s(body, "registration_endpoint"),
         scopes_supported: arr(body, "scopes_supported"),
-        public_client_supported: auth_methods.iter().any(|m| m == "none"),
+        token_endpoint_auth_methods: arr(body, "token_endpoint_auth_methods_supported"),
     }
 }
 
@@ -1394,7 +1397,7 @@ pub async fn oauth_probe(
         .filter(|s| !s.is_empty())
     {
         Some(reg_endpoint) => {
-            match register_dynamic_client(&http, reg_endpoint, &state, &mut diag).await {
+            match register_dynamic_client(&http, reg_endpoint, &meta, &state, &mut diag).await {
                 Some((id, secret)) => (Some(id), secret),
                 None => (None, None),
             }
@@ -1405,6 +1408,7 @@ pub async fn oauth_probe(
         }
     };
 
+    let is_public_client = meta.public_client_supported();
     Ok(Json(ProbeResponse {
         issuer: meta.issuer.or(Some(issuer)),
         authorization_endpoint: meta.authorization_endpoint,
@@ -1415,7 +1419,7 @@ pub async fn oauth_probe(
         scopes_supported: meta.scopes_supported,
         client_id,
         client_secret,
-        is_public_client: meta.public_client_supported,
+        is_public_client,
         redirect_uri,
         diagnostic: diag,
     }))
@@ -1623,7 +1627,7 @@ async fn fetch_authz_server_metadata(
         userinfo_endpoint: None,
         registration_endpoint: None,
         scopes_supported: vec![],
-        public_client_supported: false,
+        token_endpoint_auth_methods: vec![],
     }
 }
 
@@ -1662,12 +1666,45 @@ fn build_authz_metadata_candidates(issuer: &str) -> Vec<String> {
     ]
 }
 
-/// Step 3 — RFC 7591 dynamic client registration. POSTs the standard
-/// minimum body and returns the assigned `(client_id, client_secret?)`.
+/// Stable RFC 7591 `software_id` for ThinkWatch's MCP gateway.
+/// Same UUID across every deployment so an AS that audit-logs by
+/// `software_id` can group all ThinkWatch installs as one product.
+/// Don't change this — RFC 7591 §2 says it SHOULD remain the same
+/// for all instances of the client software.
+const TW_DCR_SOFTWARE_ID: &str = "0d1f3a2b-4c5e-4f6a-8b9c-0d1e2f3a4b5c";
+
+/// Pick the `token_endpoint_auth_method` we'll request at registration
+/// time. Prefer `none` (public client + PKCE — simplest and supported
+/// by our token-endpoint code), then `client_secret_post` (also
+/// supported), then fall through to whatever the AS lists. Defaults to
+/// `client_secret_post` when the AS doesn't advertise the array, which
+/// is the most widely accepted method.
+fn pick_dcr_auth_method(supported: &[String]) -> &'static str {
+    let has = |m: &str| supported.iter().any(|s| s == m);
+    if has("none") {
+        "none"
+    } else if has("client_secret_post") {
+        "client_secret_post"
+    } else if has("client_secret_basic") {
+        // We don't natively send the Basic header at the token
+        // endpoint today, but registering for `_basic` lets the admin
+        // fall back to a hand-edit later if needed. AS that strictly
+        // require basic will reject `_post`.
+        "client_secret_basic"
+    } else {
+        "client_secret_post"
+    }
+}
+
+/// Step 3 — RFC 7591 dynamic client registration. POSTs an enriched
+/// metadata body (RFC 7591 §2: `software_id`, `software_version`,
+/// `application_type`, `scope`, picked `token_endpoint_auth_method`)
+/// and returns the assigned `(client_id, client_secret?)`.
 /// Best-effort: any failure leaves both fields blank for manual entry.
 async fn register_dynamic_client(
     http: &reqwest::Client,
     registration_endpoint: &str,
+    meta: &AuthzServerMetadata,
     state: &AppState,
     diag: &mut Vec<String>,
 ) -> Option<(String, Option<String>)> {
@@ -1684,13 +1721,31 @@ async fn register_dynamic_client(
             return None;
         }
     };
-    let body = serde_json::json!({
+    let auth_method = pick_dcr_auth_method(&meta.token_endpoint_auth_methods);
+    let scope_join = meta.scopes_supported.join(" ");
+    let mut body = serde_json::json!({
         "client_name": "ThinkWatch MCP gateway",
+        "client_uri": callback_base_url(state).ok(),
         "redirect_uris": [redirect_uri],
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
-        "token_endpoint_auth_method": "client_secret_post",
+        "token_endpoint_auth_method": auth_method,
+        // Always `web` — we run server-side, the redirect_uri is HTTPS,
+        // PKCE is mandatory regardless of `application_type`. RFC 7591
+        // §2 / OAuth 2.0 §2.1.
+        "application_type": "web",
+        // Stable across deployments per RFC 7591 §2 — see constant above.
+        "software_id": TW_DCR_SOFTWARE_ID,
+        "software_version": env!("CARGO_PKG_VERSION"),
     });
+    // Only include `scope` when the AS published `scopes_supported` —
+    // claiming arbitrary scopes against an AS that didn't tell us
+    // what's available is more likely to be rejected than help.
+    if !scope_join.is_empty()
+        && let serde_json::Value::Object(ref mut obj) = body
+    {
+        obj.insert("scope".into(), serde_json::Value::String(scope_join));
+    }
     let resp = match http
         .post(registration_endpoint)
         .header("Content-Type", "application/json")
@@ -1895,6 +1950,30 @@ mod tests {
     fn parse_resource_metadata_hint_returns_none_when_missing() {
         assert_eq!(parse_resource_metadata_hint("Bearer realm=\"mcp\""), None);
         assert_eq!(parse_resource_metadata_hint(""), None);
+    }
+
+    #[test]
+    fn pick_dcr_auth_method_prefers_none_when_supported() {
+        let supported: Vec<String> = ["client_secret_post", "none"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(pick_dcr_auth_method(&supported), "none");
+    }
+
+    #[test]
+    fn pick_dcr_auth_method_falls_back_to_post_when_no_explicit_pref() {
+        // AS lists only basic — we request `_basic` so DCR proceeds,
+        // even though we don't natively send Basic at the token
+        // endpoint. Admin can fall back to a hand-edit if needed.
+        let basic_only: Vec<String> = vec!["client_secret_basic".to_string()];
+        assert_eq!(pick_dcr_auth_method(&basic_only), "client_secret_basic");
+        // AS lists nothing — default to `_post`, the most widely
+        // accepted method.
+        assert_eq!(pick_dcr_auth_method(&[]), "client_secret_post");
+        // AS lists post — pick post.
+        let post_only: Vec<String> = vec!["client_secret_post".to_string()];
+        assert_eq!(pick_dcr_auth_method(&post_only), "client_secret_post");
     }
 
     #[test]

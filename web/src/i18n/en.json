@@ -51,6 +51,7 @@
     "inactive": "Inactive",
     "healthy": "Healthy",
     "down": "Down",
+    "authRequired": "Auth required",
     "unknown": "Unknown",
     "error": "Error",
     "revoke": "Revoke",

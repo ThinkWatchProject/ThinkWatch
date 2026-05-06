@@ -51,6 +51,7 @@
     "inactive": "未激活",
     "healthy": "健康",
     "down": "离线",
+    "authRequired": "需要授权",
     "unknown": "未知",
     "error": "错误",
     "revoke": "撤销",
