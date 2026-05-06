@@ -174,6 +174,37 @@ pub async fn list_servers(
     Ok(Json(servers))
 }
 
+/// SSRF guard for the OAuth `*_endpoint` URLs. The MCP wire endpoint
+/// (`endpoint_url`) is checked separately by the caller — this helper
+/// only covers the four OAuth-flow URLs that the server fetches
+/// later: token, authorization (used by browser redirect, but also
+/// returned to clients in error envelopes), revocation, userinfo.
+///
+/// Empty strings are treated as "not set" and skipped — admins clear
+/// optional URLs by sending `""`, and `validate_url` would otherwise
+/// reject empty input with a confusing message.
+fn validate_oauth_endpoint_urls(
+    authorization: Option<&str>,
+    token: Option<&str>,
+    revocation: Option<&str>,
+    userinfo: Option<&str>,
+) -> Result<(), AppError> {
+    for (field, url) in [
+        ("oauth_authorization_endpoint", authorization),
+        ("oauth_token_endpoint", token),
+        ("oauth_revocation_endpoint", revocation),
+        ("oauth_userinfo_endpoint", userinfo),
+    ] {
+        if let Some(u) = url.filter(|s| !s.is_empty()) {
+            think_watch_common::validation::validate_url(u).map_err(|e| match e {
+                AppError::BadRequest(m) => AppError::BadRequest(format!("{field}: {m}")),
+                other => other,
+            })?;
+        }
+    }
+    Ok(())
+}
+
 /// Encrypt the OAuth client_secret with the configured AES-GCM key.
 /// Returns Ok(None) if no secret was provided.
 ///
@@ -227,7 +258,19 @@ pub async fn create_server(
         &req.name,
     )?;
 
-    // SSRF prevention: validate endpoint_url
+    // SSRF prevention: validate every URL we'll later fetch server-side.
+    // `endpoint_url` is the MCP wire endpoint; the OAuth `*_endpoint` URLs
+    // are POST'd to from `oauth_callback` (token + userinfo) and
+    // `revoke_connection` (revocation). Without these, an admin could
+    // plant `http://169.254.169.254/...` as `oauth_token_endpoint` and
+    // turn the server into an SSRF gadget that carries the AES-decrypted
+    // client_secret in the body.
+    validate_oauth_endpoint_urls(
+        req.oauth_authorization_endpoint.as_deref(),
+        req.oauth_token_endpoint.as_deref(),
+        req.oauth_revocation_endpoint.as_deref(),
+        req.oauth_userinfo_endpoint.as_deref(),
+    )?;
     think_watch_common::validation::validate_url(&req.endpoint_url)?;
 
     // Encrypt the OAuth client_secret if one was supplied.
@@ -517,6 +560,21 @@ pub async fn update_server(
     if req.endpoint_url.is_some() {
         think_watch_common::validation::validate_url(endpoint_url)?;
     }
+    // SSRF: validate any newly-supplied OAuth endpoint URLs. Absent
+    // fields preserve the existing value (already validated when first
+    // set), so we only re-check what the caller is changing.
+    validate_oauth_endpoint_urls(
+        req.oauth_authorization_endpoint
+            .as_ref()
+            .and_then(|o| o.as_deref()),
+        req.oauth_token_endpoint.as_ref().and_then(|o| o.as_deref()),
+        req.oauth_revocation_endpoint
+            .as_ref()
+            .and_then(|o| o.as_deref()),
+        req.oauth_userinfo_endpoint
+            .as_ref()
+            .and_then(|o| o.as_deref()),
+    )?;
 
     // Auto-detect transport type when endpoint changes; otherwise the
     // value the server is already storing stays.
@@ -602,6 +660,17 @@ pub async fn update_server(
         state.mcp_registry.register(registered).await;
         state.mcp_circuit_breakers.register(&updated.name).await;
     }
+
+    // Wipe response cache for this server across every user. Admin
+    // edits are rare and may flip upstream identity (endpoint, OAuth
+    // client, transport, headers) — leaving entries minted under the
+    // previous config in place would tunnel pre-update responses into
+    // the new epoch until TTL elapses. Always invalidating on update
+    // is simpler than tracking which fields actually changed and is
+    // cheap given how rarely admins touch server config.
+    think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+        .invalidate_server_lane(&id)
+        .await;
 
     state.audit.log(
         auth_user

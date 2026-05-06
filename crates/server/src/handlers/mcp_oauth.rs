@@ -585,6 +585,18 @@ pub async fn revoke_connection(
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("mcp:connect")?;
 
+    // Revoke triggers an outbound POST to the upstream revocation
+    // endpoint plus a DB DELETE. Per-user cap so a stolen session
+    // can't script connect/revoke loops to hammer the upstream (or,
+    // if the admin somehow bypassed `validate_url`, an internal one).
+    super::test_rate_limit::check_test_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        auth_user.claims.iat,
+        "mcp_revoke",
+    )
+    .await?;
+
     // Best-effort revoke at the upstream — only when we actually have
     // an access_token AND the server advertises a revocation endpoint.
     let row: Option<(String, Vec<u8>)> = sqlx::query_as(
@@ -662,6 +674,18 @@ pub async fn set_default_connection(
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("mcp:connect")?;
 
+    // Default-switching is a security-relevant routing change — flips
+    // which upstream identity proxies a user's no-override calls. Cap
+    // per user so a stolen session can't churn the partial-unique
+    // index in a loop.
+    super::test_rate_limit::check_test_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        auth_user.claims.iat,
+        "mcp_set_default",
+    )
+    .await?;
+
     let mut tx = state.db.begin().await?;
     let exists: Option<i32> = sqlx::query_scalar(
         r#"SELECT 1 FROM mcp_user_credentials
@@ -707,6 +731,14 @@ pub async fn set_default_connection(
         .invalidate_user_lane(&server_id, &auth_user.claims.sub)
         .await;
 
+    state.audit.log(
+        AuditEntry::new("mcp.connection.default_set")
+            .user_id(auth_user.claims.sub)
+            .resource("mcp_server")
+            .resource_id(server_id.to_string())
+            .detail(serde_json::json!({ "account_label": account_label })),
+    );
+
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
 
@@ -726,6 +758,17 @@ pub async fn paste_static_token(
     Json(req): Json<PasteTokenRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     auth_user.require_permission("mcp:connect")?;
+
+    // No outbound HTTP, but each call writes the credential vault
+    // (encrypt + DB upsert + cache wipe). Same 5/min cap as the other
+    // connection-mutation endpoints for consistency.
+    super::test_rate_limit::check_test_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        auth_user.claims.iat,
+        "mcp_paste_token",
+    )
+    .await?;
 
     if account_label.trim().is_empty() || account_label.len() > 64 {
         return Err(AppError::BadRequest(

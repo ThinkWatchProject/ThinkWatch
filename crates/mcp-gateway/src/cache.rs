@@ -200,6 +200,33 @@ impl McpResponseCache {
     /// request time.
     pub async fn invalidate_user_lane(&self, server_id: &Uuid, user_id: &Uuid) {
         let pattern = format!("{KEY_PREFIX}{}:{}:*", server_id.simple(), user_id.simple());
+        self.scan_and_delete(pattern, "user_lane", Some(*user_id), server_id)
+            .await;
+    }
+
+    /// Wipe every cached response for `server_id` across **all** users
+    /// and account labels.
+    ///
+    /// Called when an admin mutates server configuration that changes
+    /// the upstream identity or wire shape: `endpoint_url`, transport,
+    /// OAuth client/endpoint config, custom headers. Existing entries
+    /// were minted against the *previous* upstream — leaving them in
+    /// place would tunnel pre-update responses (potentially from a
+    /// different provider, schema, or auth realm) into the new epoch
+    /// until TTL expires.
+    pub async fn invalidate_server_lane(&self, server_id: &Uuid) {
+        let pattern = format!("{KEY_PREFIX}{}:*", server_id.simple());
+        self.scan_and_delete(pattern, "server_lane", None, server_id)
+            .await;
+    }
+
+    async fn scan_and_delete(
+        &self,
+        pattern: String,
+        scope: &'static str,
+        user_id: Option<Uuid>,
+        server_id: &Uuid,
+    ) {
         let mut cursor: String = "0".to_string();
         let mut deleted: usize = 0;
         loop {
@@ -216,7 +243,7 @@ impl McpResponseCache {
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(
-                        server = %server_id, user = %user_id, error = %e,
+                        server = %server_id, user = ?user_id, scope, error = %e,
                         "MCP cache invalidate: SCAN failed; some stale entries may persist"
                     );
                     return;
@@ -226,7 +253,7 @@ impl McpResponseCache {
                 let n: Result<u64, _> = self.redis.del(keys.clone()).await;
                 match n {
                     Ok(n) => deleted += n as usize,
-                    Err(e) => tracing::warn!(error = %e, "MCP cache invalidate: DEL failed"),
+                    Err(e) => tracing::warn!(error = %e, scope, "MCP cache invalidate: DEL failed"),
                 }
             }
             if next == "0" {
@@ -237,12 +264,13 @@ impl McpResponseCache {
         if deleted > 0 {
             tracing::info!(
                 server = %server_id,
-                user = %user_id,
+                user = ?user_id,
+                scope,
                 deleted,
-                "MCP cache invalidated user lane"
+                "MCP cache invalidated"
             );
         }
-        metrics::counter!("mcp_cache_invalidate_total").increment(deleted as u64);
+        metrics::counter!("mcp_cache_invalidate_total", "scope" => scope).increment(deleted as u64);
     }
 }
 
