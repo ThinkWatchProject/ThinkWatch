@@ -259,7 +259,7 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
         </div>
       )}
 
-      {(mode === 'headers' || mode === 'public') && (
+      {mode === 'direct' && (
         <div className="space-y-2">
           <Label>{t('providers.customHeaders')}</Label>
           <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>

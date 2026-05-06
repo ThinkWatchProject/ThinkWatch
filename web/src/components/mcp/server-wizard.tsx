@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, ArrowLeft, ChevronDown } from 'lucide-react';
+import { AlertCircle, ArrowLeft, CheckCircle2, ChevronDown, Loader2, Sparkles } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -58,6 +58,20 @@ export function ServerWizard({ taken, onSuccess, onCancel }: ServerWizardProps) 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState('');
 
+  // OAuth auto-discovery (Step 2, OAuth mode only). The probe runs the
+  // RFC 9728 → 8414 → 7591 chain server-side and returns whatever it
+  // could derive — we silently fill the form on full success, leave
+  // the OAuthFieldset visible underneath for review/override on
+  // partial success or failure.
+  const [probing, setProbing] = useState(false);
+  const [probeResult, setProbeResult] = useState<{
+    kind: 'success' | 'partial' | 'failure';
+    issuer?: string;
+    isPublicClient: boolean;
+    redirectUri: string;
+    diagnostic: string[];
+  } | null>(null);
+
   const resolved = useMemo(() => {
     if (!name.trim()) return null;
     const basePrefix = prefixManuallyEdited && namespacePrefix
@@ -96,6 +110,71 @@ export function ServerWizard({ taken, onSuccess, onCancel }: ServerWizardProps) 
     }
     setStep2Error('');
     setStep(3);
+  };
+
+  const runProbe = async () => {
+    if (!endpointUrl.trim()) {
+      toast.error(t('mcpServers.wizard.errors.endpointRequired'));
+      return;
+    }
+    setProbing(true);
+    setProbeResult(null);
+    try {
+      const meta = await apiPost<{
+        issuer?: string;
+        authorization_endpoint?: string;
+        token_endpoint?: string;
+        revocation_endpoint?: string;
+        userinfo_endpoint?: string;
+        registration_endpoint?: string;
+        scopes_supported?: string[];
+        client_id?: string;
+        client_secret?: string;
+        is_public_client: boolean;
+        redirect_uri: string;
+        diagnostic: string[];
+      }>('/api/admin/mcp/oauth-probe', { endpoint_url: endpointUrl.trim() });
+
+      // Merge into the OAuthFieldset state. We *replace* every field
+      // on success — the admin pasted a URL and asked us to figure
+      // out everything, so leaving stale half-filled values would be
+      // worse than wiping. If they prefer a hybrid, the fieldset is
+      // still right below for hand-tweaking.
+      setOauth({
+        issuer: meta.issuer ?? '',
+        authorizationEndpoint: meta.authorization_endpoint ?? '',
+        tokenEndpoint: meta.token_endpoint ?? '',
+        revocationEndpoint: meta.revocation_endpoint ?? '',
+        userinfoEndpoint: meta.userinfo_endpoint ?? '',
+        clientId: meta.client_id ?? '',
+        clientSecret: meta.client_secret ?? '',
+        scopes: (meta.scopes_supported ?? []).join(' '),
+      });
+
+      const haveCore = !!(meta.authorization_endpoint && meta.token_endpoint);
+      const haveClient = !!meta.client_id;
+      const kind: 'success' | 'partial' | 'failure' = haveCore && haveClient
+        ? 'success'
+        : haveCore
+          ? 'partial'
+          : 'failure';
+      setProbeResult({
+        kind,
+        issuer: meta.issuer,
+        isPublicClient: meta.is_public_client,
+        redirectUri: meta.redirect_uri,
+        diagnostic: meta.diagnostic,
+      });
+    } catch (err) {
+      setProbeResult({
+        kind: 'failure',
+        isPublicClient: false,
+        redirectUri: '',
+        diagnostic: [err instanceof Error ? err.message : 'probe failed'],
+      });
+    } finally {
+      setProbing(false);
+    }
   };
 
   const runTest = async () => {
@@ -271,11 +350,119 @@ export function ServerWizard({ taken, onSuccess, onCancel }: ServerWizardProps) 
 
           {mode === 'oauth' && (
             <>
+              <div className="rounded-md border border-dashed p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <p className="text-sm font-medium">{t('mcpServers.oauth.probeTitle')}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {t('mcpServers.oauth.probeHint')}
+                    </p>
+                  </div>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={probing || !endpointUrl.trim()}
+                    onClick={runProbe}
+                  >
+                    {probing ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Sparkles className="h-3 w-3" />
+                    )}
+                    {probing
+                      ? t('mcpServers.oauth.probing')
+                      : t('mcpServers.oauth.probeAction')}
+                  </Button>
+                </div>
+                {probeResult && (
+                  <div
+                    className={cn(
+                      'flex items-start gap-2 rounded-sm p-2 text-xs',
+                      probeResult.kind === 'success' &&
+                        'bg-green-50 text-green-800 dark:bg-green-950/30 dark:text-green-300',
+                      probeResult.kind === 'partial' &&
+                        'bg-amber-50 text-amber-800 dark:bg-amber-950/30 dark:text-amber-300',
+                      probeResult.kind === 'failure' &&
+                        'bg-red-50 text-red-800 dark:bg-red-950/30 dark:text-red-300',
+                    )}
+                  >
+                    {probeResult.kind === 'success' ? (
+                      <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    ) : (
+                      <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                    )}
+                    <div className="flex-1 space-y-2">
+                      <p className="font-medium">
+                        {probeResult.kind === 'success'
+                          ? t('mcpServers.oauth.probeSuccess', { issuer: probeResult.issuer ?? '' })
+                          : probeResult.kind === 'partial'
+                            ? t('mcpServers.oauth.probePartial')
+                            : t('mcpServers.oauth.probeFailure')}
+                      </p>
+                      {probeResult.kind === 'partial' && probeResult.redirectUri && (
+                        <div className="space-y-1">
+                          <p className="font-medium">
+                            {t('mcpServers.oauth.partialNextSteps')}
+                          </p>
+                          <ol className="list-decimal space-y-1 pl-4">
+                            <li>
+                              {t('mcpServers.oauth.partialStepCopyUri')}
+                              <div className="mt-1 flex items-center gap-1">
+                                <code className="flex-1 truncate rounded bg-background/50 px-1 py-0.5 font-mono text-[11px]">
+                                  {probeResult.redirectUri}
+                                </code>
+                                <Button
+                                  type="button"
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-6 px-2 text-[11px]"
+                                  onClick={() => {
+                                    void navigator.clipboard.writeText(probeResult.redirectUri);
+                                    toast.success(t('common.copied'));
+                                  }}
+                                >
+                                  {t('common.copy')}
+                                </Button>
+                              </div>
+                            </li>
+                            <li>
+                              {probeResult.issuer
+                                ? t('mcpServers.oauth.partialStepRegister', {
+                                    issuer: new URL(probeResult.issuer).host,
+                                  })
+                                : t('mcpServers.oauth.partialStepRegisterGeneric')}
+                            </li>
+                            <li>
+                              {probeResult.isPublicClient
+                                ? t('mcpServers.oauth.partialStepPasteIdOnly')
+                                : t('mcpServers.oauth.partialStepPasteIdSecret')}
+                            </li>
+                          </ol>
+                        </div>
+                      )}
+                      {probeResult.kind !== 'success' && probeResult.diagnostic.length > 0 && (
+                        <details className="group">
+                          <summary className="cursor-pointer select-none opacity-75 hover:opacity-100">
+                            {t('mcpServers.oauth.probeDetails')}
+                          </summary>
+                          <ol className="mt-1 list-decimal space-y-0.5 pl-4 font-mono text-[11px] opacity-75">
+                            {probeResult.diagnostic.map((step, i) => (
+                              <li key={i} className="break-all">{step}</li>
+                            ))}
+                          </ol>
+                        </details>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
               <OAuthFieldset
                 values={oauth}
                 onChange={setOauth}
                 collapsibleAdvanced
                 flat
+                publicClient={probeResult?.isPublicClient ?? false}
               />
               <div className="flex items-center gap-2">
                 <Checkbox
@@ -316,7 +503,7 @@ export function ServerWizard({ taken, onSuccess, onCancel }: ServerWizardProps) 
             </div>
           )}
 
-          {mode === 'headers' && (
+          {mode === 'direct' && (
             <div className="space-y-2">
               <Label>{t('providers.customHeaders')}</Label>
               <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
@@ -335,7 +522,7 @@ export function ServerWizard({ taken, onSuccess, onCancel }: ServerWizardProps) 
           <Collapsible className="space-y-2">
             <CollapsibleTrigger className="group flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
               <ChevronDown className="h-3 w-3 transition-transform group-data-[state=open]:rotate-180" />
-              {mode === 'headers'
+              {mode === 'direct'
                 ? t('mcpServers.wizard.advancedSectionTtlOnly')
                 : t('mcpServers.wizard.advancedSection')}
             </CollapsibleTrigger>
@@ -352,7 +539,7 @@ export function ServerWizard({ taken, onSuccess, onCancel }: ServerWizardProps) 
                   onChange={(e) => setCacheTtl(e.target.value)}
                 />
               </div>
-              {mode !== 'headers' && (
+              {mode !== 'direct' && (
                 <div className="space-y-2">
                   <Label>{t('providers.customHeaders')}</Label>
                   <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>

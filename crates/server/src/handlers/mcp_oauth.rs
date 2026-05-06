@@ -208,6 +208,15 @@ pub async fn list_connections(
         let oauth_capable = s.oauth_token_endpoint.is_some()
             && s.oauth_authorization_endpoint.is_some()
             && s.oauth_client_id.is_some();
+        // /connections only lists servers that *need* user-level
+        // credentials. Public / service-to-service / fixed-header MCPs
+        // (oauth_capable=false AND allow_static_token=false) work
+        // anonymously — there's nothing for the user to authorize, so
+        // showing them as a card with no actions was misleading
+        // ("anonymous" message that confused users).
+        if !oauth_capable && !s.allow_static_token {
+            continue;
+        }
         let mut accounts = Vec::new();
         for r in rows.iter().filter(|r| r.mcp_server_id == s.id) {
             accounts.push(ConnectionAccount {
@@ -428,25 +437,35 @@ pub async fn oauth_callback(
         .oauth_client_id
         .as_deref()
         .ok_or_else(|| AppError::BadRequest("OAuth client_id not configured".into()))?;
-    let client_secret_encrypted = server
-        .oauth_client_secret_encrypted
-        .as_ref()
-        .ok_or_else(|| AppError::BadRequest("OAuth client_secret not configured".into()))?;
-
-    let client_secret_bytes = crypto::decrypt(client_secret_encrypted, &enc_key)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("decrypt client_secret: {e}")))?;
-    let client_secret = String::from_utf8(client_secret_bytes)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("client_secret not utf8: {e}")))?;
+    // Public-client mode (RFC 8252 §8.4 / OAuth 2.1 §4.1.3): when the
+    // admin didn't store a client_secret — typical for AS that
+    // advertise `token_endpoint_auth_methods_supported: ["none"]`,
+    // e.g. Feishu — we omit client_secret from the token-endpoint
+    // form. PKCE alone authenticates the request.
+    let client_secret = match server.oauth_client_secret_encrypted.as_ref() {
+        Some(encrypted) => {
+            let bytes = crypto::decrypt(encrypted, &enc_key)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("decrypt client_secret: {e}")))?;
+            Some(
+                String::from_utf8(bytes).map_err(|e| {
+                    AppError::Internal(anyhow::anyhow!("client_secret not utf8: {e}"))
+                })?,
+            )
+        }
+        None => None,
+    };
 
     // POST to token endpoint with PKCE verifier.
-    let form: Vec<(&str, &str)> = vec![
+    let mut form: Vec<(&str, &str)> = vec![
         ("grant_type", "authorization_code"),
         ("code", code.as_str()),
         ("redirect_uri", blob.redirect_uri.as_str()),
         ("client_id", client_id),
-        ("client_secret", client_secret.as_str()),
         ("code_verifier", blob.code_verifier.as_str()),
     ];
+    if let Some(secret) = client_secret.as_deref() {
+        form.push(("client_secret", secret));
+    }
     let body = serde_urlencoded::to_string(&form)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("encode token form: {e}")))?;
 
@@ -1191,25 +1210,531 @@ pub async fn oauth_discover(
 }
 
 fn parse_oauth_metadata(body: &serde_json::Value) -> DiscoverResponse {
+    let parsed = parse_authz_server_metadata(body);
+    DiscoverResponse {
+        authorization_endpoint: parsed.authorization_endpoint,
+        token_endpoint: parsed.token_endpoint,
+        revocation_endpoint: parsed.revocation_endpoint,
+        userinfo_endpoint: parsed.userinfo_endpoint,
+        scopes_supported: parsed.scopes_supported,
+    }
+}
+
+/// Full RFC 8414 / OIDC discovery doc shape — superset of
+/// [`DiscoverResponse`] that also captures the `issuer` claim and the
+/// `registration_endpoint` (RFC 7591 dynamic client registration).
+/// The probe handler needs the extras; the legacy `oauth_discover`
+/// keeps its narrower response shape for back-compat.
+#[derive(Debug)]
+struct AuthzServerMetadata {
+    issuer: Option<String>,
+    authorization_endpoint: Option<String>,
+    token_endpoint: Option<String>,
+    revocation_endpoint: Option<String>,
+    userinfo_endpoint: Option<String>,
+    registration_endpoint: Option<String>,
+    scopes_supported: Vec<String>,
+    /// Whether the AS advertises `"none"` in
+    /// `token_endpoint_auth_methods_supported` — i.e. it accepts public
+    /// clients (PKCE-only, no client_secret needed at the token
+    /// endpoint). Drives whether the admin form asks for a Client
+    /// Secret at all.
+    public_client_supported: bool,
+}
+
+fn parse_authz_server_metadata(body: &serde_json::Value) -> AuthzServerMetadata {
     fn s(v: &serde_json::Value, k: &str) -> Option<String> {
         v.get(k).and_then(|x| x.as_str()).map(|s| s.to_string())
     }
-    let scopes_supported = body
-        .get("scopes_supported")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    DiscoverResponse {
+    fn arr(v: &serde_json::Value, k: &str) -> Vec<String> {
+        v.get(k)
+            .and_then(|x| x.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    }
+    let auth_methods = arr(body, "token_endpoint_auth_methods_supported");
+    AuthzServerMetadata {
+        issuer: s(body, "issuer"),
         authorization_endpoint: s(body, "authorization_endpoint"),
         token_endpoint: s(body, "token_endpoint"),
         revocation_endpoint: s(body, "revocation_endpoint"),
         userinfo_endpoint: s(body, "userinfo_endpoint"),
-        scopes_supported,
+        registration_endpoint: s(body, "registration_endpoint"),
+        scopes_supported: arr(body, "scopes_supported"),
+        public_client_supported: auth_methods.iter().any(|m| m == "none"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/admin/mcp/oauth-probe — full MCP-spec auto-discovery chain
+// ---------------------------------------------------------------------------
+//
+// Maps the GitHub Copilot / VS Code MCP UX of "paste URL, done" onto our
+// admin form. Three RFCs glued together:
+//
+//   1. RFC 9728 (OAuth Protected Resource Metadata) — given an MCP wire
+//      endpoint, find the authorization server. Tries the
+//      `WWW-Authenticate: Bearer resource_metadata="..."` hint first
+//      (per MCP spec 2025-06-18 §authorization), falls back to
+//      `<endpoint>/.well-known/oauth-protected-resource`.
+//   2. RFC 8414 (Authorization Server Metadata) — given the issuer,
+//      fetch authorize/token/revocation/userinfo + (crucially)
+//      `registration_endpoint`. Reuses `parse_authz_server_metadata`.
+//   3. RFC 7591 (Dynamic Client Registration) — POST to
+//      `registration_endpoint` with the console's redirect_uri to
+//      mint a fresh client_id/secret. This is the magic that lets the
+//      admin skip "go register an OAuth app at github.com/developers"
+//      entirely. Skipped when the AS doesn't advertise registration.
+//
+// Each step is best-effort: we return whatever we got, plus a
+// human-readable `diagnostic` string so the UI can either auto-fill
+// the form silently or surface "step N failed because X — please fill
+// the rest manually."
+
+#[derive(Debug, Deserialize)]
+pub struct ProbeRequest {
+    pub endpoint_url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProbeResponse {
+    pub issuer: Option<String>,
+    pub authorization_endpoint: Option<String>,
+    pub token_endpoint: Option<String>,
+    pub revocation_endpoint: Option<String>,
+    pub userinfo_endpoint: Option<String>,
+    pub registration_endpoint: Option<String>,
+    pub scopes_supported: Vec<String>,
+    pub client_id: Option<String>,
+    /// Plaintext — the frontend echoes this straight into the form for
+    /// the admin to review. Persisted encrypted on save like any
+    /// hand-entered secret.
+    pub client_secret: Option<String>,
+    /// True when the upstream AS advertises `"none"` in
+    /// `token_endpoint_auth_methods_supported` — admin only needs to
+    /// paste a Client ID, no Client Secret. Many MCP-spec-aligned
+    /// providers (Feishu, Cloudflare, recent Anthropic-spec compliant
+    /// servers) advertise this so they're compatible with native-app
+    /// public-client flows.
+    pub is_public_client: bool,
+    /// The callback URL admins should register at the upstream's
+    /// developer console (e.g. open.feishu.cn) when DCR is gated /
+    /// unsupported. Surfacing this from the probe means the admin can
+    /// copy-paste it directly instead of guessing the gateway's host.
+    pub redirect_uri: String,
+    /// Step-by-step trace: one entry per discovery step, in order.
+    /// Frontend renders them as a numbered list inside an expandable
+    /// "details" section — one event per line beats a `→`-joined wall
+    /// of text once the chain has 4+ steps.
+    pub diagnostic: Vec<String>,
+}
+
+pub async fn oauth_probe(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<ProbeRequest>,
+) -> Result<Json<ProbeResponse>, AppError> {
+    auth_user.require_permission("mcp_servers:create")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:create")
+        .await?;
+
+    // Each probe makes 3-4 outbound HTTP requests against admin-supplied
+    // URLs. Same per-user 5/min cap as the other probe endpoints to
+    // keep this from being abused as a port scanner.
+    super::test_rate_limit::check_test_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        auth_user.claims.iat,
+        "mcp_oauth_probe",
+    )
+    .await?;
+
+    if req.endpoint_url.is_empty() {
+        return Err(AppError::BadRequest("endpoint_url is required".into()));
+    }
+    think_watch_common::validation::validate_url(&req.endpoint_url)?;
+
+    let http = state.http_client.load();
+    let mut diag: Vec<String> = Vec::new();
+    let redirect_uri = callback_redirect_uri(&state)?;
+
+    // Step 1: find issuer via Protected Resource Metadata.
+    let issuer = match discover_issuer(&http, &req.endpoint_url, &mut diag).await {
+        Some(iss) => iss,
+        None => {
+            return Ok(Json(ProbeResponse {
+                issuer: None,
+                authorization_endpoint: None,
+                token_endpoint: None,
+                revocation_endpoint: None,
+                userinfo_endpoint: None,
+                registration_endpoint: None,
+                scopes_supported: vec![],
+                client_id: None,
+                client_secret: None,
+                is_public_client: false,
+                redirect_uri,
+                diagnostic: diag,
+            }));
+        }
+    };
+
+    // Step 2: fetch authorization server metadata from the issuer.
+    let meta = fetch_authz_server_metadata(&http, &issuer, &mut diag).await;
+
+    // Step 3: dynamic client registration if the AS advertises it.
+    let (client_id, client_secret) = match meta
+        .registration_endpoint
+        .as_deref()
+        .filter(|s| !s.is_empty())
+    {
+        Some(reg_endpoint) => {
+            match register_dynamic_client(&http, reg_endpoint, &state, &mut diag).await {
+                Some((id, secret)) => (Some(id), secret),
+                None => (None, None),
+            }
+        }
+        None => {
+            diag.push("no registration_endpoint — fill client_id/client_secret manually".into());
+            (None, None)
+        }
+    };
+
+    Ok(Json(ProbeResponse {
+        issuer: meta.issuer.or(Some(issuer)),
+        authorization_endpoint: meta.authorization_endpoint,
+        token_endpoint: meta.token_endpoint,
+        revocation_endpoint: meta.revocation_endpoint,
+        userinfo_endpoint: meta.userinfo_endpoint,
+        registration_endpoint: meta.registration_endpoint,
+        scopes_supported: meta.scopes_supported,
+        client_id,
+        client_secret,
+        is_public_client: meta.public_client_supported,
+        redirect_uri,
+        diagnostic: diag,
+    }))
+}
+
+/// Step 1 — RFC 9728. Returns the issuer URL the MCP endpoint points to.
+async fn discover_issuer(
+    http: &reqwest::Client,
+    endpoint_url: &str,
+    diag: &mut Vec<String>,
+) -> Option<String> {
+    // 1a. POST a minimal MCP `initialize` to trigger the auth challenge.
+    // GET against an MCP endpoint typically returns 405 because the
+    // protocol is JSON-RPC over POST — only real protocol requests get
+    // the 401 + WWW-Authenticate response mandated by MCP spec
+    // 2025-06-18 §authorization. We never read the body, only the
+    // header; the `id` is arbitrary.
+    let init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": { "name": "ThinkWatch probe", "version": "0" }
+        }
+    });
+    if let Ok(resp) = http
+        .post(endpoint_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&init)
+        .send()
+        .await
+        && let Some(hint) = resp
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_resource_metadata_hint)
+    {
+        diag.push(format!("got resource_metadata hint from {endpoint_url}"));
+        if let Some(iss) = fetch_protected_resource(http, &hint, diag).await {
+            return Some(iss);
+        }
+    }
+
+    // 1b. Fall back to RFC 9728 §3.1 well-known transformation: for a
+    // resource at `https://host/foo/bar`, metadata lives at
+    // `https://host/.well-known/oauth-protected-resource/foo/bar`. We
+    // try the path-aware form first, then the bare form (some
+    // implementations publish at the bare path even when the resource
+    // has a path).
+    if let Some(parsed) = parse_origin_and_path(endpoint_url) {
+        let candidates = if parsed.path.is_empty() {
+            vec![format!(
+                "{}/.well-known/oauth-protected-resource",
+                parsed.origin
+            )]
+        } else {
+            vec![
+                format!(
+                    "{}/.well-known/oauth-protected-resource{}",
+                    parsed.origin, parsed.path
+                ),
+                format!("{}/.well-known/oauth-protected-resource", parsed.origin),
+            ]
+        };
+        for url in &candidates {
+            if let Some(iss) = fetch_protected_resource(http, url, diag).await {
+                return Some(iss);
+            }
+        }
+        // 1c. Last resort — endpoint origin might already be the issuer.
+        diag.push(format!(
+            "no protected-resource metadata; trying {} as issuer directly",
+            parsed.origin
+        ));
+        return Some(parsed.origin);
+    }
+
+    diag.push("could not derive issuer from endpoint_url".into());
+    None
+}
+
+/// Parsed `(origin, path)` of a URL. Path is normalized to drop a
+/// trailing slash and treat `/` as empty. Used to build RFC 8414 /
+/// RFC 9728 well-known URLs, which require the `.well-known` segment
+/// between the origin and the resource/issuer path.
+struct OriginAndPath {
+    origin: String,
+    path: String,
+}
+
+fn parse_origin_and_path(url_str: &str) -> Option<OriginAndPath> {
+    let url = url::Url::parse(url_str).ok()?;
+    let host = url.host_str()?;
+    let scheme = url.scheme();
+    let port = url.port().map(|p| format!(":{p}")).unwrap_or_default();
+    let origin = format!("{scheme}://{host}{port}");
+    let raw = url.path().trim_end_matches('/');
+    let path = if raw == "/" || raw.is_empty() {
+        String::new()
+    } else {
+        raw.to_string()
+    };
+    Some(OriginAndPath { origin, path })
+}
+
+/// Parse `WWW-Authenticate: Bearer resource_metadata="https://..."`.
+/// Returns the URL, or None if the header isn't shaped that way.
+fn parse_resource_metadata_hint(header: &str) -> Option<String> {
+    // The header is a comma-separated parameter list; we just want the
+    // resource_metadata one. Sloppy parser, but the value is always
+    // double-quoted per RFC 9728 §5.1.
+    let key = "resource_metadata=";
+    let idx = header.find(key)?;
+    let rest = &header[idx + key.len()..];
+    let trimmed = rest.trim_start_matches('"');
+    let end = trimmed.find('"')?;
+    Some(trimmed[..end].to_string())
+}
+
+async fn fetch_protected_resource(
+    http: &reqwest::Client,
+    url: &str,
+    diag: &mut Vec<String>,
+) -> Option<String> {
+    if think_watch_common::validation::validate_url(url).is_err() {
+        diag.push(format!("rejected {url} (SSRF guard)"));
+        return None;
+    }
+    let resp = match http.get(url).send().await {
+        Ok(r) if r.status().is_success() => r,
+        Ok(r) => {
+            diag.push(format!("{url}: HTTP {}", r.status()));
+            return None;
+        }
+        Err(e) => {
+            diag.push(format!("{url}: {e}"));
+            return None;
+        }
+    };
+    let body: serde_json::Value = match resp.json().await {
+        Ok(v) => v,
+        Err(e) => {
+            diag.push(format!("{url}: parse: {e}"));
+            return None;
+        }
+    };
+    let issuer = body
+        .get("authorization_servers")
+        .and_then(|v| v.as_array())
+        .and_then(|a| a.first())
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    if issuer.is_some() {
+        diag.push(format!("found issuer via {url}"));
+    } else {
+        diag.push(format!(
+            "{url}: no authorization_servers[] in protected-resource metadata"
+        ));
+    }
+    issuer
+}
+
+/// Step 2 — RFC 8414 / OIDC. Returns the richer struct with optional
+/// fields populated from whichever well-known URL responded first.
+///
+/// RFC 8414 §3 requires the `.well-known` segment between the issuer's
+/// origin and its path: for `issuer = https://host/foo`, the metadata
+/// lives at `https://host/.well-known/oauth-authorization-server/foo`,
+/// NOT `https://host/foo/.well-known/...`. We try both shapes — the
+/// spec-compliant one first, then the off-spec "under the path" form
+/// some implementations still use.
+async fn fetch_authz_server_metadata(
+    http: &reqwest::Client,
+    issuer: &str,
+    diag: &mut Vec<String>,
+) -> AuthzServerMetadata {
+    let candidates = build_authz_metadata_candidates(issuer);
+    for url in &candidates {
+        if think_watch_common::validation::validate_url(url).is_err() {
+            diag.push(format!("rejected {url} (SSRF guard)"));
+            continue;
+        }
+        match http.get(url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                match resp.json::<serde_json::Value>().await {
+                    Ok(body) => {
+                        diag.push(format!("found authz-server metadata at {url}"));
+                        return parse_authz_server_metadata(&body);
+                    }
+                    Err(e) => diag.push(format!("{url}: parse: {e}")),
+                }
+            }
+            Ok(r) => diag.push(format!("{url}: HTTP {}", r.status())),
+            Err(e) => diag.push(format!("{url}: {e}")),
+        }
+    }
+    AuthzServerMetadata {
+        issuer: None,
+        authorization_endpoint: None,
+        token_endpoint: None,
+        revocation_endpoint: None,
+        userinfo_endpoint: None,
+        registration_endpoint: None,
+        scopes_supported: vec![],
+        public_client_supported: false,
+    }
+}
+
+/// Build the well-known URL candidate list for an issuer, ordered
+/// most-likely-correct first. Pure function so it's easily unit tested.
+fn build_authz_metadata_candidates(issuer: &str) -> Vec<String> {
+    let Some(parsed) = parse_origin_and_path(issuer) else {
+        return vec![];
+    };
+    if parsed.path.is_empty() {
+        return vec![
+            format!("{}/.well-known/oauth-authorization-server", parsed.origin),
+            format!("{}/.well-known/openid-configuration", parsed.origin),
+        ];
+    }
+    vec![
+        // RFC 8414 §3 spec-correct form (".well-known" before path).
+        format!(
+            "{}/.well-known/oauth-authorization-server{}",
+            parsed.origin, parsed.path
+        ),
+        format!(
+            "{}/.well-known/openid-configuration{}",
+            parsed.origin, parsed.path
+        ),
+        // Legacy "under the path" form (still seen in older OIDC
+        // deployments that ignored RFC 8414 and concatenated naively).
+        format!(
+            "{}{}/.well-known/oauth-authorization-server",
+            parsed.origin, parsed.path
+        ),
+        format!(
+            "{}{}/.well-known/openid-configuration",
+            parsed.origin, parsed.path
+        ),
+    ]
+}
+
+/// Step 3 — RFC 7591 dynamic client registration. POSTs the standard
+/// minimum body and returns the assigned `(client_id, client_secret?)`.
+/// Best-effort: any failure leaves both fields blank for manual entry.
+async fn register_dynamic_client(
+    http: &reqwest::Client,
+    registration_endpoint: &str,
+    state: &AppState,
+    diag: &mut Vec<String>,
+) -> Option<(String, Option<String>)> {
+    if think_watch_common::validation::validate_url(registration_endpoint).is_err() {
+        diag.push(format!(
+            "rejected registration_endpoint {registration_endpoint} (SSRF guard)"
+        ));
+        return None;
+    }
+    let redirect_uri = match callback_redirect_uri(state) {
+        Ok(u) => u,
+        Err(e) => {
+            diag.push(format!("redirect_uri build failed: {e}"));
+            return None;
+        }
+    };
+    let body = serde_json::json!({
+        "client_name": "ThinkWatch MCP gateway",
+        "redirect_uris": [redirect_uri],
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "client_secret_post",
+    });
+    let resp = match http
+        .post(registration_endpoint)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json")
+        .json(&body)
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            diag.push(format!("dynamic-registration request failed: {e}"));
+            return None;
+        }
+    };
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        diag.push(format!(
+            "dynamic-registration HTTP {status}: {}",
+            text.chars().take(120).collect::<String>()
+        ));
+        return None;
+    }
+    let parsed: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => {
+            diag.push(format!("dynamic-registration parse: {e}"));
+            return None;
+        }
+    };
+    let client_id = parsed
+        .get("client_id")
+        .and_then(|v| v.as_str())
+        .map(String::from)?;
+    let client_secret = parsed
+        .get("client_secret")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    diag.push(format!(
+        "dynamic-registration ok (client_id={}, secret={})",
+        client_id,
+        client_secret.as_ref().map(|_| "yes").unwrap_or("no")
+    ));
+    Some((client_id, client_secret))
 }
 
 // ---------------------------------------------------------------------------
@@ -1353,6 +1878,124 @@ mod tests {
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_eq!(a, state_binding(&key, "state1", "verifier1"));
+    }
+
+    // -------- RFC 9728 / 8414 / 7591 probe helpers ----------------------
+
+    #[test]
+    fn parse_resource_metadata_hint_extracts_url() {
+        let header = r#"Bearer realm="mcp", resource_metadata="https://api.example.com/.well-known/oauth-protected-resource", error="invalid_token""#;
+        assert_eq!(
+            parse_resource_metadata_hint(header).as_deref(),
+            Some("https://api.example.com/.well-known/oauth-protected-resource")
+        );
+    }
+
+    #[test]
+    fn parse_resource_metadata_hint_returns_none_when_missing() {
+        assert_eq!(parse_resource_metadata_hint("Bearer realm=\"mcp\""), None);
+        assert_eq!(parse_resource_metadata_hint(""), None);
+    }
+
+    #[test]
+    fn parse_authz_server_metadata_extracts_registration_endpoint() {
+        // Real-world shape — Keycloak / Auth0 / GitHub-style.
+        let body = serde_json::json!({
+            "issuer": "https://auth.example.com",
+            "authorization_endpoint": "https://auth.example.com/authorize",
+            "token_endpoint": "https://auth.example.com/oauth/token",
+            "registration_endpoint": "https://auth.example.com/oauth/register",
+            "scopes_supported": ["read", "write"]
+        });
+        let parsed = parse_authz_server_metadata(&body);
+        assert_eq!(parsed.issuer.as_deref(), Some("https://auth.example.com"));
+        assert_eq!(
+            parsed.registration_endpoint.as_deref(),
+            Some("https://auth.example.com/oauth/register")
+        );
+        assert_eq!(parsed.scopes_supported, vec!["read", "write"]);
+    }
+
+    #[test]
+    fn build_authz_metadata_candidates_root_issuer_uses_bare_well_known() {
+        // Issuer = origin (no path) — single well-known shape, no
+        // ambiguity. Covers GitHub, Google, Auth0 default tenants.
+        let urls = build_authz_metadata_candidates("https://github.com");
+        assert_eq!(
+            urls,
+            vec![
+                "https://github.com/.well-known/oauth-authorization-server",
+                "https://github.com/.well-known/openid-configuration",
+            ]
+        );
+    }
+
+    #[test]
+    fn build_authz_metadata_candidates_path_issuer_puts_well_known_before_path() {
+        // RFC 8414 §3: for issuer with a path (Feishu = .../mcp), the
+        // metadata MUST be at host/.well-known/oauth-authorization-server/path,
+        // not host/path/.well-known/.... We try the spec-correct form
+        // first and fall through to the legacy "under-path" form for
+        // off-spec implementations.
+        let urls = build_authz_metadata_candidates("https://accounts.feishu.cn/mcp");
+        assert_eq!(urls.len(), 4);
+        assert_eq!(
+            urls[0],
+            "https://accounts.feishu.cn/.well-known/oauth-authorization-server/mcp"
+        );
+        assert_eq!(
+            urls[1],
+            "https://accounts.feishu.cn/.well-known/openid-configuration/mcp"
+        );
+        assert_eq!(
+            urls[2],
+            "https://accounts.feishu.cn/mcp/.well-known/oauth-authorization-server"
+        );
+        assert_eq!(
+            urls[3],
+            "https://accounts.feishu.cn/mcp/.well-known/openid-configuration"
+        );
+    }
+
+    #[test]
+    fn build_authz_metadata_candidates_strips_trailing_slash() {
+        // `https://issuer/` is the same as `https://issuer`. No
+        // accidental empty-path variant.
+        let urls = build_authz_metadata_candidates("https://issuer.test/");
+        assert_eq!(urls.len(), 2);
+        assert!(urls[0].ends_with("/.well-known/oauth-authorization-server"));
+    }
+
+    #[test]
+    fn parse_origin_and_path_separates_origin_from_resource_path() {
+        let p = parse_origin_and_path("https://api.example.com:8443/foo/bar/").unwrap();
+        assert_eq!(p.origin, "https://api.example.com:8443");
+        assert_eq!(p.path, "/foo/bar");
+    }
+
+    #[test]
+    fn parse_origin_and_path_treats_root_as_empty_path() {
+        let p = parse_origin_and_path("https://api.example.com/").unwrap();
+        assert_eq!(p.path, "");
+        let p = parse_origin_and_path("https://api.example.com").unwrap();
+        assert_eq!(p.path, "");
+    }
+
+    #[test]
+    fn parse_authz_server_metadata_handles_missing_optional_fields() {
+        // Bare-minimum AS that doesn't advertise dynamic registration —
+        // the probe should still extract what's there and fall through
+        // to "fill client_id manually".
+        let body = serde_json::json!({
+            "issuer": "https://issuer.test",
+            "authorization_endpoint": "https://issuer.test/authorize",
+            "token_endpoint": "https://issuer.test/token",
+        });
+        let parsed = parse_authz_server_metadata(&body);
+        assert!(parsed.registration_endpoint.is_none());
+        assert!(parsed.revocation_endpoint.is_none());
+        assert!(parsed.userinfo_endpoint.is_none());
+        assert!(parsed.scopes_supported.is_empty());
     }
 
     // -------- subject_from_jwt -------------------------------------------

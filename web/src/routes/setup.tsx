@@ -459,6 +459,7 @@ export function SetupPage() {
           </div>
         )}
         <Button
+          data-primary-action
           className="w-full"
           size="lg"
           onClick={() => { window.location.href = '/'; }}

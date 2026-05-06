@@ -3,7 +3,7 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::pool::ConnectionPool;
+use crate::pool::{ConnectionPool, PoolError};
 use crate::proxy::JsonRpcRequest;
 use crate::registry::{RegisteredServer, Registry, ServerStatus};
 
@@ -71,6 +71,21 @@ impl HealthChecker {
                     latency_ms: Some(elapsed.as_millis() as u64),
                     last_check: Utc::now(),
                     error: Some(msg),
+                }
+            }
+            // 401/403 means the server is reachable but the anonymous
+            // health probe wasn't allowed to call `initialize`.
+            // That's the *expected* response for OAuth / static-token
+            // MCPs (per-user auth happens at request time), so treat it
+            // as healthy. Marking these "unhealthy" gave admins a
+            // permanently-red dashboard for any MCP that required user
+            // login — useless signal.
+            Err(PoolError::UpstreamError { status, .. }) if status == 401 || status == 403 => {
+                ServerHealth {
+                    status: "healthy".to_owned(),
+                    latency_ms: Some(elapsed.as_millis() as u64),
+                    last_check: Utc::now(),
+                    error: None,
                 }
             }
             Err(e) => ServerHealth {

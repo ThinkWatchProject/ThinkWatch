@@ -54,6 +54,7 @@
     "unknown": "未知",
     "error": "错误",
     "revoke": "撤销",
+    "copy": "复制",
     "copied": "已复制！",
     "done": "完成",
     "edit": "编辑",
@@ -136,7 +137,7 @@
     "installedTooltip": "已安装",
     "installing": "安装中...",
     "installSuccess": "MCP 服务器安装成功",
-    "goToConnections": "去 /connections",
+    "goToConnections": "去「我的连接」",
     "installTitle": "安装 {{name}}",
     "oauthCredentialsTitle": "OAuth 客户端凭证",
     "oauthCredentialsHint": "来自你在 {{issuer}} 上的 OAuth 应用。模板提供 issuer 与端点；你提供 client_id 和 secret。",
@@ -149,7 +150,7 @@
     "syncRegistry": "同步仓库",
     "syncing": "同步中...",
     "syncSuccess": "已从仓库同步 {{count}} 个模板",
-    "perUserAuthNote": "安装完成后，每位用户在 <code>/connections</code> 自行授权各自的账户——管理员不会在此粘贴共享 Token。",
+    "perUserAuthNote": "安装完成后，每位用户在「我的连接」页面自行授权各自的账户——管理员不会在此粘贴共享 Token。",
     "staticToken": "Token",
     "noAuth": "无需认证",
     "category": {
@@ -169,7 +170,6 @@
     "emptyAdmin": "还没有注册的 MCP 服务器。可以去商店选模板，或注册一个自定义服务器。",
     "browseStore": "去商店",
     "registerServer": "注册服务器",
-    "anonymous": "该服务器无需认证。",
     "notConnected": "尚未连接。",
     "connect": "连接",
     "addAccount": "添加账号",
@@ -604,7 +604,7 @@
     "mustTestFirst": "请先点击\"测试连接\"并确认服务器返回工具列表。",
     "displayLabel": "显示名称",
     "displayLabelPlaceholder": "例如 GitHub（Acme 生产）",
-    "displayLabelHint": "面向用户的友好名称，显示在 /connections 和工具目录里。留空则回退到服务器 name —— 同一模板装多份时尤其有用。",
+    "displayLabelHint": "面向用户的友好名称，显示在「我的连接」页面和工具目录里。留空则回退到服务器 name —— 同一模板装多份时尤其有用。",
     "namespacePrefix": "命名空间前缀",
     "namespacePrefixPlaceholder": "例如 github（留空自动生成）",
     "namespacePrefixHint": "工具暴露为 <前缀>__<工具名>。仅支持小写字母、数字和下划线，最多 32 字符。",
@@ -626,7 +626,22 @@
       "discoverSuccess": "已发现 OAuth 元数据",
       "discoverFailed": "发现失败",
       "setIssuerFirst": "请先填写 Issuer",
-      "secretKeepCurrent": "留空保留原值"
+      "secretKeepCurrent": "留空保留原值",
+      "probeTitle": "一键自动配置 OAuth",
+      "probeHint": "从端点 URL 探测 issuer 和各端点，能注册客户端的会自动注册。",
+      "probeAction": " 一键发现",
+      "probing": " 发现中…",
+      "probeSuccess": "已自动配置完成，可直接进入下一步。",
+      "probePartial": "已自动填入 OAuth 端点。请去上游（如 GitHub Developer Settings）注册一个 OAuth 应用，把 Client ID / Secret 填到下面。",
+      "probeFailure": "自动配置没成功，请按下方表单手动填写 OAuth 配置。",
+      "probeDetails": "查看探测详情",
+      "partialNextSteps": "接下来三步：",
+      "partialStepCopyUri": "复制下面的回调 URL：",
+      "partialStepRegister": "去 {{issuer}} 创建一个 OAuth 应用，把回调 URL 填进去。",
+      "partialStepRegisterGeneric": "去上游服务的开发者后台创建一个 OAuth 应用，把回调 URL 填进去。",
+      "partialStepPasteIdOnly": "把得到的 Client ID 粘贴到下方（这个上游不需要 Client Secret）。",
+      "partialStepPasteIdSecret": "把得到的 Client ID 和 Client Secret 粘贴到下方。",
+      "publicClientNote": "上游声明支持公共客户端（PKCE-only），无需 Client Secret。"
     },
     "wizard": {
       "step1Title": "认证模式",
@@ -637,7 +652,7 @@
       "browseStore": "去 MCP 商店 →",
       "allowStaticFallback": "允许用户粘贴自己的静态令牌（PAT / API key）",
       "staticHelpUrl": "帮助链接（用户从哪获取 token）",
-      "staticHelpUrlHint": "在 /connections 页面展示给用户，告诉他们去哪签发自己的 token。",
+      "staticHelpUrlHint": "在「我的连接」页面展示给用户，告诉他们去哪签发自己的 token。",
       "advancedSection": "高级（缓存 TTL、自定义请求头）",
       "advancedSectionTtlOnly": "高级（缓存 TTL）",
       "toolsDiscovered": "个工具",
@@ -645,9 +660,9 @@
       "testing": "正在测试连接…",
       "retryTest": "重试",
       "requiresAuthTitle": "服务器可达 — 需要认证",
-      "requiresAuthHint": "上游对匿名探测返回了 401/403，这对 OAuth / 静态令牌 MCP 来说是预期行为 — 每个用户首次从 /connections 连接时才会验证其认证。",
+      "requiresAuthHint": "上游对匿名探测返回了 401/403，这对 OAuth / 静态令牌 MCP 来说是预期行为 — 每个用户首次从「我的连接」页面连接时才会验证其认证。",
       "savedReady": "服务器已注册。工具现已可达，正在后台发现工具列表。",
-      "savedNextConnections": "服务器已注册。请提醒用户去 /connections 授权各自的账户后再调用工具。",
+      "savedNextConnections": "服务器已注册。请提醒用户去「我的连接」页面授权各自的账户后再调用工具。",
       "modes": {
         "oauth": {
           "title": "OAuth 登录",
@@ -655,15 +670,11 @@
         },
         "static": {
           "title": "静态令牌（PAT / API key）",
-          "description": "每个用户在 /connections 粘贴一次自己的 token。"
+          "description": "每个用户在「我的连接」页面粘贴一次自己的 token。"
         },
-        "headers": {
-          "title": "自定义请求头",
-          "description": "通过 service-to-service 请求头（X-User-Id、X-API-Key）转发用户身份。"
-        },
-        "public": {
-          "title": "公开（无认证）",
-          "description": "上游服务器无需认证 — 任何登录控制台的用户都能调用其工具。"
+        "direct": {
+          "title": "免认证",
+          "description": "用户无需任何操作即可调用工具，可选填自定义请求头转发用户身份。"
         }
       },
       "errors": {

@@ -38,8 +38,10 @@ pub struct OAuthClientCfg {
     pub authorization_endpoint: Option<String>,
     pub client_id: String,
     /// Already decrypted at registry-load time so the hot path avoids
-    /// per-request crypto.
-    pub client_secret: String,
+    /// per-request crypto. `None` for public clients (AS advertises
+    /// `token_endpoint_auth_methods_supported: ["none"]`, e.g. Feishu)
+    /// where PKCE is the sole authenticator at the token endpoint.
+    pub client_secret: Option<String>,
     pub scopes: Vec<String>,
 }
 
@@ -432,8 +434,10 @@ impl UserTokenResolver {
             ("grant_type", "refresh_token"),
             ("refresh_token", refresh_token),
             ("client_id", cfg.client_id.as_str()),
-            ("client_secret", cfg.client_secret.as_str()),
         ];
+        if let Some(secret) = cfg.client_secret.as_deref() {
+            form.push(("client_secret", secret));
+        }
         let scope_joined;
         if !cfg.scopes.is_empty() {
             scope_joined = cfg.scopes.join(" ");

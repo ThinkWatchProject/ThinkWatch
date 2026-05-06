@@ -15,6 +15,7 @@ import {
   DialogFooter,
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/confirm-dialog';
+import { AuthModeBadge } from '@/components/mcp/auth-mode-badge';
 import { api, apiPost, apiDelete, hasPermission } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import {
@@ -457,16 +458,14 @@ function ServerCard({
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 pb-3">
-        <div>
-          <CardTitle className="text-base">
-            {serverDisplay(server)}
-            {server.display_label && server.display_label !== server.server_name && (
-              <span className="ml-2 text-xs font-normal text-muted-foreground">
-                {server.server_name}
-              </span>
-            )}
-          </CardTitle>
-          <p className="text-xs text-muted-foreground font-mono">{server.namespace_prefix}__</p>
+        <div className="space-y-1">
+          <div className="flex items-center gap-2">
+            <CardTitle className="text-base">{serverDisplay(server)}</CardTitle>
+            <AuthModeBadge mode={server.oauth_capable ? 'oauth' : 'static'} />
+          </div>
+          {server.display_label && server.display_label !== server.server_name && (
+            <p className="text-xs text-muted-foreground">{server.server_name}</p>
+          )}
         </div>
         <div className="flex gap-2">
           {server.oauth_capable && (
@@ -491,11 +490,7 @@ function ServerCard({
       </CardHeader>
       <CardContent className="pt-0">
         {empty ? (
-          <p className="text-sm text-muted-foreground">
-            {server.oauth_capable || server.allow_static_token
-              ? t('connections.notConnected')
-              : t('connections.anonymous')}
-          </p>
+          <p className="text-sm text-muted-foreground">{t('connections.notConnected')}</p>
         ) : (
           <ul className="divide-y">
             {server.accounts.map((a) => {

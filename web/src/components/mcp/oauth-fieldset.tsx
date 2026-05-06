@@ -75,6 +75,13 @@ interface OAuthFieldsetProps {
   collapsibleAdvanced?: boolean;
   /** Hide the bordered wrapper (wizard step renders its own surface). */
   flat?: boolean;
+  /**
+   * When true, the AS advertised public-client support
+   * (`token_endpoint_auth_methods_supported: ["none"]`). Hide the
+   * Client Secret field — admin only needs Client ID, PKCE
+   * authenticates the request. Saves one cognitive step.
+   */
+  publicClient?: boolean;
 }
 
 export function OAuthFieldset({
@@ -83,6 +90,7 @@ export function OAuthFieldset({
   secretPlaceholder,
   collapsibleAdvanced = false,
   flat = false,
+  publicClient = false,
 }: OAuthFieldsetProps) {
   const { t } = useTranslation();
   const [discovering, setDiscovering] = useState(false);
@@ -159,7 +167,7 @@ export function OAuthFieldset({
           {discovering ? t('mcpServers.oauth.discovering') : t('mcpServers.oauth.discoverFromIssuer')}
         </Button>
       </div>
-      <div className="grid grid-cols-2 gap-2">
+      {publicClient ? (
         <div className="space-y-1">
           <Label htmlFor={ids.clientId} className="text-xs">{t('mcpServers.oauth.clientId')}</Label>
           <Input
@@ -167,18 +175,32 @@ export function OAuthFieldset({
             value={values.clientId}
             onChange={(e) => onChange({ ...values, clientId: e.target.value })}
           />
+          <p className="text-xs text-muted-foreground">
+            {t('mcpServers.oauth.publicClientNote')}
+          </p>
         </div>
-        <div className="space-y-1">
-          <Label htmlFor={ids.clientSecret} className="text-xs">{t('mcpServers.oauth.clientSecret')}</Label>
-          <Input
-            id={ids.clientSecret}
-            type="password"
-            value={values.clientSecret}
-            onChange={(e) => onChange({ ...values, clientSecret: e.target.value })}
-            placeholder={secretPlaceholder}
-          />
+      ) : (
+        <div className="grid grid-cols-2 gap-2">
+          <div className="space-y-1">
+            <Label htmlFor={ids.clientId} className="text-xs">{t('mcpServers.oauth.clientId')}</Label>
+            <Input
+              id={ids.clientId}
+              value={values.clientId}
+              onChange={(e) => onChange({ ...values, clientId: e.target.value })}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor={ids.clientSecret} className="text-xs">{t('mcpServers.oauth.clientSecret')}</Label>
+            <Input
+              id={ids.clientSecret}
+              type="password"
+              value={values.clientSecret}
+              onChange={(e) => onChange({ ...values, clientSecret: e.target.value })}
+              placeholder={secretPlaceholder}
+            />
+          </div>
         </div>
-      </div>
+      )}
     </>
   );
 

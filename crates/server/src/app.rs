@@ -742,6 +742,14 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/admin/mcp/oauth-discover",
             post(handlers::mcp_oauth::oauth_discover),
         )
+        // Full RFC 9728 + 8414 + 7591 chain — given an MCP wire endpoint,
+        // discovers issuer, fills out endpoints, and (when the AS
+        // supports it) dynamically registers a client. Reduces the
+        // OAuth wizard to a single field for compliant servers.
+        .route(
+            "/api/admin/mcp/oauth-probe",
+            post(handlers::mcp_oauth::oauth_probe),
+        )
         .route(
             "/api/admin/users",
             get(handlers::admin::list_users).post(handlers::admin::create_user),

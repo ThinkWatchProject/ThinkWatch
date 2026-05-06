@@ -54,6 +54,7 @@
     "unknown": "Unknown",
     "error": "Error",
     "revoke": "Revoke",
+    "copy": "Copy",
     "copied": "Copied!",
     "done": "Done",
     "edit": "Edit",
@@ -136,7 +137,7 @@
     "installedTooltip": "Already installed",
     "installing": "Installing...",
     "installSuccess": "MCP server installed successfully",
-    "goToConnections": "Go to /connections",
+    "goToConnections": "Go to My Connections",
     "installTitle": "Install {{name}}",
     "oauthCredentialsTitle": "OAuth client credentials",
     "oauthCredentialsHint": "From your OAuth app on {{issuer}}. Templates ship the issuer + endpoints; you supply the client_id and secret.",
@@ -149,7 +150,7 @@
     "syncRegistry": "Sync Registry",
     "syncing": "Syncing...",
     "syncSuccess": "Synced {{count}} templates from registry",
-    "perUserAuthNote": "After install, each user authorizes their own account at <code>/connections</code> — admins don't paste a shared token here.",
+    "perUserAuthNote": "After install, each user authorizes their own account on the My Connections page — admins don't paste a shared token here.",
     "staticToken": "Token",
     "noAuth": "No Auth",
     "category": {
@@ -169,7 +170,6 @@
     "emptyAdmin": "No MCP servers are registered yet. Browse the store for ready-made templates, or register a custom server.",
     "browseStore": "Browse store",
     "registerServer": "Register server",
-    "anonymous": "This server doesn't require authentication.",
     "notConnected": "Not connected.",
     "connect": "Connect",
     "addAccount": "Add account",
@@ -604,7 +604,7 @@
     "mustTestFirst": "Run Test Connection first and confirm the server responds with a tool list.",
     "displayLabel": "Display label",
     "displayLabelPlaceholder": "e.g. GitHub (Acme prod)",
-    "displayLabelHint": "Human-friendly label shown to users on /connections and in the tool catalog. Falls back to the server name when blank — useful when you have two installs of the same template.",
+    "displayLabelHint": "Human-friendly label shown to users on the My Connections page and in the tool catalog. Falls back to the server name when blank — useful when you have two installs of the same template.",
     "namespacePrefix": "Namespace Prefix",
     "namespacePrefixPlaceholder": "e.g. github (auto-derived if empty)",
     "namespacePrefixHint": "Tools are exposed as <prefix>__<tool_name>. Lowercase letters, digits, underscores only. Max 32 chars.",
@@ -626,7 +626,22 @@
       "discoverSuccess": "Discovered OAuth metadata",
       "discoverFailed": "Discovery failed",
       "setIssuerFirst": "Set issuer first",
-      "secretKeepCurrent": "Leave empty to keep current"
+      "secretKeepCurrent": "Leave empty to keep current",
+      "probeTitle": "Auto-configure OAuth from the endpoint",
+      "probeHint": "Probes the endpoint for the issuer + OAuth endpoints, and registers a client when the upstream supports it.",
+      "probeAction": " Auto-detect",
+      "probing": " Detecting…",
+      "probeSuccess": "Auto-configured. Proceed to test.",
+      "probePartial": "OAuth endpoints filled in. Register an OAuth app upstream (e.g. GitHub Developer Settings) and paste the Client ID / Secret below.",
+      "probeFailure": "Auto-detection didn't work. Fill in the fields below manually.",
+      "probeDetails": "Show probe details",
+      "partialNextSteps": "Three more steps:",
+      "partialStepCopyUri": "Copy the callback URL below:",
+      "partialStepRegister": "Create an OAuth app at {{issuer}} and paste the callback URL into it.",
+      "partialStepRegisterGeneric": "Create an OAuth app in the upstream's developer console and paste the callback URL into it.",
+      "partialStepPasteIdOnly": "Paste the resulting Client ID below (this upstream doesn't need a Client Secret).",
+      "partialStepPasteIdSecret": "Paste the resulting Client ID and Client Secret below.",
+      "publicClientNote": "Upstream advertises public-client support (PKCE-only) — no Client Secret needed."
     },
     "wizard": {
       "step1Title": "Auth mode",
@@ -637,7 +652,7 @@
       "browseStore": "Browse the store →",
       "allowStaticFallback": "Allow users to paste their own static token (PAT / API key)",
       "staticHelpUrl": "Help URL (where users get their token)",
-      "staticHelpUrlHint": "Shown to users on /connections so they know where to issue their token.",
+      "staticHelpUrlHint": "Shown to users on the My Connections page so they know where to issue their token.",
       "advancedSection": "Advanced (cache TTL, custom headers)",
       "advancedSectionTtlOnly": "Advanced (cache TTL)",
       "toolsDiscovered": "tools discovered",
@@ -645,9 +660,9 @@
       "testing": "Testing connection…",
       "retryTest": "Retry test",
       "requiresAuthTitle": "Reachable — auth required",
-      "requiresAuthHint": "The upstream returned 401/403 to the anonymous probe. That's expected for OAuth / static-token MCPs — per-user auth will be validated when each user connects from /connections.",
+      "requiresAuthHint": "The upstream returned 401/403 to the anonymous probe. That's expected for OAuth / static-token MCPs — per-user auth will be validated when each user connects from the My Connections page.",
       "savedReady": "Server registered. Tools are reachable now — discovery is running in the background.",
-      "savedNextConnections": "Server registered. Have users authorize their accounts at /connections before invoking tools.",
+      "savedNextConnections": "Server registered. Have users authorize their accounts on the My Connections page before invoking tools.",
       "modes": {
         "oauth": {
           "title": "OAuth login",
@@ -655,15 +670,11 @@
         },
         "static": {
           "title": "Static token (PAT / API key)",
-          "description": "Each user pastes their own personal access token once on /connections."
+          "description": "Each user pastes their own personal access token once on the My Connections page."
         },
-        "headers": {
-          "title": "Custom request headers",
-          "description": "Forward user identity via service-to-service headers (X-User-Id, X-API-Key)."
-        },
-        "public": {
-          "title": "Public (no auth)",
-          "description": "The upstream server has no auth — any signed-in console user can invoke its tools."
+        "direct": {
+          "title": "No authentication",
+          "description": "Users invoke tools without any setup; optionally forward custom headers to pass caller identity upstream."
         }
       },
       "errors": {

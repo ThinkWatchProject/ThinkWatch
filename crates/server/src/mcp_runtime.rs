@@ -207,41 +207,40 @@ mod cache_scope_tests {
 }
 
 /// Resolve the upstream OAuth client config from a server row. Returns
-/// `None` when any of (token_endpoint, client_id, client_secret) is
-/// missing OR when the secret fails to decrypt. The resolver treats
-/// `None` as "no OAuth" and falls through to the static-token path or
-/// surfaces `NeedsUserCredentials`.
+/// `None` when token_endpoint or client_id is missing — those two are
+/// strictly required. `client_secret` is optional: AS that advertise
+/// public-client support (Feishu, Cloudflare, etc.) accept PKCE-only
+/// token requests, and admin will leave the secret blank for them.
+/// Decryption failures degrade to `None` so a corrupted row doesn't
+/// break the gateway hard.
 pub fn build_oauth_cfg(
     server: &think_watch_common::models::McpServer,
     encryption_key: &str,
 ) -> Option<think_watch_mcp_gateway::user_token::OAuthClientCfg> {
     use think_watch_mcp_gateway::user_token::OAuthClientCfg;
-    match (
-        server.oauth_token_endpoint.as_deref(),
-        server.oauth_client_id.as_deref(),
-        server.oauth_client_secret_encrypted.as_ref(),
-    ) {
-        (Some(token_endpoint), Some(client_id), Some(encrypted)) => {
-            match decrypt_client_secret(encrypted, encryption_key) {
-                Ok(client_secret) => Some(OAuthClientCfg {
-                    token_endpoint: token_endpoint.to_string(),
-                    authorization_endpoint: server.oauth_authorization_endpoint.clone(),
-                    client_id: client_id.to_string(),
-                    client_secret,
-                    scopes: server.oauth_scopes.clone(),
-                }),
-                Err(e) => {
-                    tracing::error!(
-                        mcp_server = %server.name,
-                        error = %e,
-                        "Failed to decrypt MCP OAuth client_secret"
-                    );
-                    None
-                }
+    let token_endpoint = server.oauth_token_endpoint.as_deref()?.to_string();
+    let client_id = server.oauth_client_id.as_deref()?.to_string();
+    let client_secret = match server.oauth_client_secret_encrypted.as_ref() {
+        Some(encrypted) => match decrypt_client_secret(encrypted, encryption_key) {
+            Ok(s) => Some(s),
+            Err(e) => {
+                tracing::error!(
+                    mcp_server = %server.name,
+                    error = %e,
+                    "Failed to decrypt MCP OAuth client_secret"
+                );
+                return None;
             }
-        }
-        _ => None,
-    }
+        },
+        None => None,
+    };
+    Some(OAuthClientCfg {
+        token_endpoint,
+        authorization_endpoint: server.oauth_authorization_endpoint.clone(),
+        client_id,
+        client_secret,
+        scopes: server.oauth_scopes.clone(),
+    })
 }
 
 fn decrypt_client_secret(encrypted: &[u8], encryption_key: &str) -> anyhow::Result<String> {
@@ -297,14 +296,26 @@ pub async fn discover_and_persist_tools(
         .send()
         .await?;
     if !resp.status().is_success() {
-        // Mark the server disconnected and bail.
+        let status = resp.status();
+        // 401/403 means the server is reachable but anonymous tool
+        // discovery isn't allowed — expected for OAuth / static-token
+        // MCPs (e.g. Feishu, GitHub Copilot). Don't flip status to
+        // `disconnected`; mark `auth_required` so the admin UI shows a
+        // neutral signal instead of red, and bail without persisting
+        // tools (we'll catch them when the first authorized user calls).
+        let new_status = if status == 401 || status == 403 {
+            "auth_required"
+        } else {
+            "disconnected"
+        };
         let _ = sqlx::query(
-            "UPDATE mcp_servers SET status = 'disconnected', last_health_check = now() WHERE id = $1",
+            "UPDATE mcp_servers SET status = $1, last_health_check = now() WHERE id = $2",
         )
+        .bind(new_status)
         .bind(server.id)
         .execute(db)
         .await;
-        anyhow::bail!("MCP server returned HTTP {}", resp.status());
+        anyhow::bail!("MCP server returned HTTP {}", status);
     }
 
     // Handle both plain JSON and SSE response formats

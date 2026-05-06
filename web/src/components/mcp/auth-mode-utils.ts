@@ -1,33 +1,35 @@
-import { Globe, KeyRound, Lock, Settings2 } from 'lucide-react';
+import { Globe, KeyRound, Lock } from 'lucide-react';
 
-export type AuthMode = 'public' | 'oauth' | 'static' | 'headers';
+export type AuthMode = 'oauth' | 'static' | 'direct';
 
-export const AUTH_MODES: AuthMode[] = ['oauth', 'static', 'headers', 'public'];
+export const AUTH_MODES: AuthMode[] = ['oauth', 'static', 'direct'];
 
 export const authModeIcon: Record<AuthMode, typeof Globe> = {
   oauth: Lock,
   static: KeyRound,
-  headers: Settings2,
-  public: Globe,
+  direct: Globe,
 };
 
 /**
  * Derive a server's primary auth mode from its persisted fields.
  *
- * Precedence: OAuth wins over static-token (which can be a fallback for
- * OAuth servers); custom_headers alone implies a service-to-service
- * setup; otherwise the server is public. This matches the wizard's
- * mode-picker semantics — pick the *primary* auth mechanism the
- * operator chose, not the union of every signal.
+ * Three modes only — `direct` covers both "public, no headers at all"
+ * and "service-to-service via custom headers", because the data model
+ * doesn't distinguish them: both have no OAuth issuer and no
+ * `allow_static_token`, the only difference is whether
+ * `config_json.custom_headers` is empty. Splitting them in the UI
+ * was confusing — admins kept asking what the difference was.
+ *
+ * Per-user cache scoping is *not* derived from this mode; the
+ * gateway's `determine_cache_scope` keys off whether `custom_headers`
+ * contains `{{user_id}}` / `{{user_email}}` template variables and
+ * flips the lane to per-caller automatically.
  */
 export function deriveAuthMode(server: {
   oauth_issuer: string | null;
   allow_static_token: boolean;
-  config_json?: { custom_headers?: Record<string, string> };
 }): AuthMode {
   if (server.oauth_issuer) return 'oauth';
   if (server.allow_static_token) return 'static';
-  const headers = server.config_json?.custom_headers ?? {};
-  if (Object.keys(headers).length > 0) return 'headers';
-  return 'public';
+  return 'direct';
 }
