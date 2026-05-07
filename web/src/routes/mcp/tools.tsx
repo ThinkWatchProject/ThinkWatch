@@ -250,8 +250,19 @@ export function McpToolsPage() {
                           <ArgsCell schema={tool.input_schema} />
                         </TableCell>
                         <TableCell className="align-top">
+                          {/* `line-clamp-2` needs the text to wrap before
+                              it can clip line 3+. TableCell defaults to
+                              `whitespace-nowrap`, which inherits into
+                              the `<p>` and forces single-line — clamp
+                              never engages, the cell just overflows
+                              horizontally with no ellipsis. Restore
+                              normal wrapping inline. `break-words`
+                              keeps very long unbroken tokens (URLs in
+                              docs blurbs) from blowing out the column.
+                              `title` carries the full text to a native
+                              hover tooltip. */}
                           <p
-                            className="line-clamp-2 text-xs text-muted-foreground"
+                            className="line-clamp-2 whitespace-normal break-words text-xs text-muted-foreground"
                             title={tool.description ?? undefined}
                           >
                             {tool.description || t('mcpTools.noDescription')}
