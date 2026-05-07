@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { AuthModeBadge } from '@/components/mcp/auth-mode-badge';
-import { api, apiPost, apiDelete, hasPermission } from '@/lib/api';
+import { api, apiPost, apiDelete } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import {
   Plug,
@@ -271,28 +271,20 @@ export function ConnectionsPage() {
       {loading ? (
         <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
       ) : servers.length === 0 ? (
+        // This page is strictly about a user authorizing their own
+        // account against admin-registered MCP servers. Don't surface
+        // "browse store" / "register server" CTAs even for admins —
+        // those actions live on /mcp/store and /mcp/servers (and are
+        // already in the sidebar nav). Mixing in admin-management
+        // semantics here muddied the page's purpose.
         <Card>
           <CardContent className="flex flex-col items-center justify-center gap-3 py-10 text-center">
             <Plug className="h-10 w-10 text-muted-foreground" />
-            <p className="text-sm text-muted-foreground">
-              {hasPermission('mcp_servers:create')
-                ? t('connections.emptyAdmin')
-                : t('connections.empty')}
-            </p>
-            {hasPermission('mcp_servers:create') && (
-              <div className="flex gap-2">
-                <Button asChild size="sm" variant="outline">
-                  <a href="/mcp/store">{t('connections.browseStore')}</a>
-                </Button>
-                <Button asChild size="sm">
-                  <a href="/mcp/servers">{t('connections.registerServer')}</a>
-                </Button>
-              </div>
-            )}
+            <p className="text-sm text-muted-foreground">{t('connections.empty')}</p>
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-4">
+        <div className="grid gap-3">
           {sortedServers.map((s) => (
             <ServerCard
               key={s.server_id}
@@ -456,18 +448,18 @@ function ServerCard({
     }
   };
   return (
-    <Card>
-      <CardHeader className="flex flex-row items-center justify-between gap-4 space-y-0 pb-3">
-        <div className="space-y-1">
-          <div className="flex items-center gap-2">
-            <CardTitle className="text-base">{serverDisplay(server)}</CardTitle>
+    <Card data-size="sm">
+      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
+        <div className="min-w-0 space-y-0.5">
+          <div className="flex flex-wrap items-center gap-2">
+            <CardTitle className="text-sm">{serverDisplay(server)}</CardTitle>
             <AuthModeBadge mode={server.oauth_capable ? 'oauth' : 'static'} />
+            {server.display_label && server.display_label !== server.server_name && (
+              <span className="text-xs text-muted-foreground">{server.server_name}</span>
+            )}
           </div>
-          {server.display_label && server.display_label !== server.server_name && (
-            <p className="text-xs text-muted-foreground">{server.server_name}</p>
-          )}
         </div>
-        <div className="flex gap-2">
+        <div className="flex shrink-0 gap-2">
           {server.oauth_capable && (
             <Button size="sm" variant="default" onClick={onAddOauth}>
               <Plus className="h-3 w-3 mr-1" />
@@ -488,10 +480,15 @@ function ServerCard({
           )}
         </div>
       </CardHeader>
-      <CardContent className="pt-0">
-        {empty ? (
-          <p className="text-sm text-muted-foreground">{t('connections.notConnected')}</p>
-        ) : (
+      {/* Account list — only rendered when the user has connected
+          at least once. The "尚未连接" empty branch was visually
+          redundant with the primary "连接" button: the CTA button
+          already implies "you haven't connected yet." Dropping the
+          empty CardContent collapses unconnected cards to a single
+          header row, way denser when a deployment has 10+ servers
+          that the user hasn't all authorized yet. */}
+      {!empty && (
+        <CardContent>
           <ul className="divide-y">
             {server.accounts.map((a) => {
               const result = results[a.account_label];
@@ -638,8 +635,8 @@ function ServerCard({
               );
             })}
           </ul>
-        )}
-      </CardContent>
+        </CardContent>
+      )}
     </Card>
   );
 }

@@ -167,11 +167,7 @@
   "connections": {
     "title": "我的 MCP 连接",
     "subtitle": "为管理员已注册的 MCP 服务器授权你自己的账号。每次工具调用都会使用调用者本人的凭据。",
-    "empty": "还没有注册的 MCP 服务器。请管理员在 MCP 服务器页面添加一个。",
-    "emptyAdmin": "还没有注册的 MCP 服务器。可以去商店选模板，或注册一个自定义服务器。",
-    "browseStore": "去商店",
-    "registerServer": "注册服务器",
-    "notConnected": "尚未连接。",
+    "empty": "暂时没有需要你授权的 MCP 服务器。",
     "connect": "连接",
     "addAccount": "添加账号",
     "useToken": "粘贴 Token",

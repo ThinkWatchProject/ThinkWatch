@@ -167,11 +167,7 @@
   "connections": {
     "title": "My MCP Connections",
     "subtitle": "Authorize your own accounts for the MCP servers your admin has registered. Each tool call uses the credentials of the calling user.",
-    "empty": "No MCP servers are registered yet. Ask your admin to add one in the MCP Servers page.",
-    "emptyAdmin": "No MCP servers are registered yet. Browse the store for ready-made templates, or register a custom server.",
-    "browseStore": "Browse store",
-    "registerServer": "Register server",
-    "notConnected": "Not connected.",
+    "empty": "No MCP servers need your authorization yet.",
     "connect": "Connect",
     "addAccount": "Add account",
     "useToken": "Paste a token",
