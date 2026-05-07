@@ -1173,7 +1173,7 @@ pub async fn oauth_discover(
     if req.issuer.is_empty() {
         return Err(AppError::BadRequest("issuer is required".into()));
     }
-    think_watch_common::validation::validate_url(&req.issuer)?;
+    (state.url_validator)(&req.issuer)?;
 
     let issuer = req.issuer.trim_end_matches('/');
     let candidates = [
@@ -1360,14 +1360,15 @@ pub async fn oauth_probe(
     if req.endpoint_url.is_empty() {
         return Err(AppError::BadRequest("endpoint_url is required".into()));
     }
-    think_watch_common::validation::validate_url(&req.endpoint_url)?;
+    (state.url_validator)(&req.endpoint_url)?;
 
     let http = state.http_client.load();
+    let validator = state.url_validator.clone();
     let mut diag: Vec<String> = Vec::new();
     let redirect_uri = callback_redirect_uri(&state)?;
 
     // Step 1: find issuer via Protected Resource Metadata.
-    let issuer = match discover_issuer(&http, &req.endpoint_url, &mut diag).await {
+    let issuer = match discover_issuer(&http, &validator, &req.endpoint_url, &mut diag).await {
         Some(iss) => iss,
         None => {
             return Ok(Json(ProbeResponse {
@@ -1388,7 +1389,7 @@ pub async fn oauth_probe(
     };
 
     // Step 2: fetch authorization server metadata from the issuer.
-    let meta = fetch_authz_server_metadata(&http, &issuer, &mut diag).await;
+    let meta = fetch_authz_server_metadata(&http, &validator, &issuer, &mut diag).await;
 
     // Step 3: dynamic client registration if the AS advertises it.
     let (client_id, client_secret) = match meta
@@ -1428,6 +1429,7 @@ pub async fn oauth_probe(
 /// Step 1 — RFC 9728. Returns the issuer URL the MCP endpoint points to.
 async fn discover_issuer(
     http: &reqwest::Client,
+    validator: &crate::app::UrlValidator,
     endpoint_url: &str,
     diag: &mut Vec<String>,
 ) -> Option<String> {
@@ -1461,7 +1463,7 @@ async fn discover_issuer(
             .and_then(parse_resource_metadata_hint)
     {
         diag.push(format!("got resource_metadata hint from {endpoint_url}"));
-        if let Some(iss) = fetch_protected_resource(http, &hint, diag).await {
+        if let Some(iss) = fetch_protected_resource(http, validator, &hint, diag).await {
             return Some(iss);
         }
     }
@@ -1488,7 +1490,7 @@ async fn discover_issuer(
             ]
         };
         for url in &candidates {
-            if let Some(iss) = fetch_protected_resource(http, url, diag).await {
+            if let Some(iss) = fetch_protected_resource(http, validator, url, diag).await {
                 return Some(iss);
             }
         }
@@ -1544,10 +1546,11 @@ fn parse_resource_metadata_hint(header: &str) -> Option<String> {
 
 async fn fetch_protected_resource(
     http: &reqwest::Client,
+    validator: &crate::app::UrlValidator,
     url: &str,
     diag: &mut Vec<String>,
 ) -> Option<String> {
-    if think_watch_common::validation::validate_url(url).is_err() {
+    if validator(url).is_err() {
         diag.push(format!("rejected {url} (SSRF guard)"));
         return None;
     }
@@ -1596,12 +1599,13 @@ async fn fetch_protected_resource(
 /// some implementations still use.
 async fn fetch_authz_server_metadata(
     http: &reqwest::Client,
+    validator: &crate::app::UrlValidator,
     issuer: &str,
     diag: &mut Vec<String>,
 ) -> AuthzServerMetadata {
     let candidates = build_authz_metadata_candidates(issuer);
     for url in &candidates {
-        if think_watch_common::validation::validate_url(url).is_err() {
+        if validator(url).is_err() {
             diag.push(format!("rejected {url} (SSRF guard)"));
             continue;
         }
@@ -1708,7 +1712,7 @@ async fn register_dynamic_client(
     state: &AppState,
     diag: &mut Vec<String>,
 ) -> Option<(String, Option<String>)> {
-    if think_watch_common::validation::validate_url(registration_endpoint).is_err() {
+    if (state.url_validator)(registration_endpoint).is_err() {
         diag.push(format!(
             "rejected registration_endpoint {registration_endpoint} (SSRF guard)"
         ));

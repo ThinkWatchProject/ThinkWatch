@@ -129,6 +129,7 @@ pub async fn init_state(
         http_client: Arc::new(arc_swap::ArcSwap::from_pointee(init_http_client)),
         gateway_router,
         user_token_resolver,
+        url_validator: crate::app::production_url_validator(),
     };
 
     Ok(state)

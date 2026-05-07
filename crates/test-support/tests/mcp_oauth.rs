@@ -716,3 +716,283 @@ async fn override_pointing_at_deleted_credential_does_not_fall_through_to_defaul
         "resolver fell through to the default credential — that's the bug"
     );
 }
+
+// ---------------------------------------------------------------------------
+// /api/admin/mcp/oauth-probe — full RFC 9728 → 8414 → 7591 chain
+// ---------------------------------------------------------------------------
+
+/// Wiremock that plays the role of an MCP-spec-compliant upstream MCP
+/// server (issues the WWW-Authenticate challenge) AND its
+/// authorization server (publishes RFC 8414 metadata, accepts RFC 7591
+/// dynamic client registration). Returning a single MockServer keeps
+/// the well-known URL transformations exercising the same origin —
+/// the test wants to verify the *chain*, not multi-host routing.
+async fn mcp_with_oauth_metadata(want_dcr: bool, public_client: bool) -> MockServer {
+    let server = MockServer::start().await;
+    let base = server.uri();
+
+    // Step 1: protocol POST returns 401 + WWW-Authenticate hint per
+    // RFC 9728 §5.1, exactly the way Feishu / GitHub Copilot do it.
+    let www_auth = format!(
+        r#"Bearer realm="mcp", resource_metadata="{base}/.well-known/oauth-protected-resource/mcp""#
+    );
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(
+            ResponseTemplate::new(401)
+                .insert_header("www-authenticate", www_auth.as_str())
+                .set_body_string(""),
+        )
+        .mount(&server)
+        .await;
+
+    // Step 1.5: protected-resource metadata announces the AS.
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-protected-resource/mcp"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "resource": format!("{base}/mcp"),
+            "authorization_servers": [format!("{base}/as")],
+            "bearer_methods_supported": ["header"],
+        })))
+        .mount(&server)
+        .await;
+
+    // Step 2: AS metadata at the path-aware well-known URL — same
+    // shape Feishu uses (`/.well-known/oauth-authorization-server/<path>`).
+    let auth_methods: &[&str] = if public_client {
+        &["none"]
+    } else {
+        &["client_secret_post"]
+    };
+    let mut meta = json!({
+        "issuer": format!("{base}/as"),
+        "authorization_endpoint": format!("{base}/as/authorize"),
+        "token_endpoint": format!("{base}/as/token"),
+        "scopes_supported": ["read", "write"],
+        "code_challenge_methods_supported": ["S256"],
+        "token_endpoint_auth_methods_supported": auth_methods,
+    });
+    if want_dcr {
+        meta.as_object_mut().unwrap().insert(
+            "registration_endpoint".into(),
+            json!(format!("{base}/as/register")),
+        );
+    }
+    Mock::given(method("GET"))
+        .and(path("/.well-known/oauth-authorization-server/as"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(meta))
+        .mount(&server)
+        .await;
+
+    // Step 3: dynamic client registration (RFC 7591) — when enabled,
+    // accept any POST and return a freshly minted client. Public-client
+    // mode (`token_endpoint_auth_method: "none"`) returns no secret.
+    if want_dcr {
+        let registered = if public_client {
+            json!({ "client_id": "minted-public-cid" })
+        } else {
+            json!({
+                "client_id": "minted-cid",
+                "client_secret": "minted-secret",
+            })
+        };
+        Mock::given(method("POST"))
+            .and(path("/as/register"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(registered))
+            .mount(&server)
+            .await;
+    }
+    server
+}
+
+/// SSRF guard for tests: mirrors production semantics (still rejects
+/// the cloud metadata service, blank URLs, non-http schemes) but
+/// allows the 127.0.0.1 origins our wiremocks bind to. Without this
+/// override the probe rejects every wiremock URL before the chain
+/// even starts.
+fn permissive_validator() -> think_watch_server::app::UrlValidator {
+    use std::sync::Arc;
+    use think_watch_common::errors::AppError;
+    Arc::new(|u: &str| {
+        if u.is_empty() {
+            return Err(AppError::BadRequest("URL must contain a host".into()));
+        }
+        if !u.starts_with("http://") && !u.starts_with("https://") {
+            return Err(AppError::BadRequest("URL must use http or https".into()));
+        }
+        // Still defend against the cloud metadata service even in
+        // tests — the real-world bug we don't want to mask.
+        if u.contains("169.254.169.254") || u.contains("metadata.google.internal") {
+            return Err(AppError::BadRequest("URL points to blocked address".into()));
+        }
+        Ok(())
+    })
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn oauth_probe_full_chain_returns_dcr_credentials() {
+    // Confidential-client AS that supports DCR — the happy path
+    // where the admin pastes one URL and the wizard fills in
+    // everything including client_id / client_secret.
+    let upstream =
+        mcp_with_oauth_metadata(/* want_dcr */ true, /* public_client */ false).await;
+    let app = TestApp::try_spawn_with(SpawnOptions {
+        url_validator: Some(permissive_validator()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let con = app.console_client();
+    login(&con, &admin).await;
+
+    let resp = con
+        .post(
+            "/api/admin/mcp/oauth-probe",
+            json!({ "endpoint_url": format!("{}/mcp", upstream.uri()) }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let body: Value = resp.json().unwrap();
+
+    assert_eq!(
+        body["issuer"].as_str().unwrap(),
+        format!("{}/as", upstream.uri()),
+        "issuer should come from the AS metadata's `issuer` claim"
+    );
+    assert_eq!(
+        body["authorization_endpoint"].as_str().unwrap(),
+        format!("{}/as/authorize", upstream.uri())
+    );
+    assert_eq!(
+        body["token_endpoint"].as_str().unwrap(),
+        format!("{}/as/token", upstream.uri())
+    );
+    assert_eq!(
+        body["registration_endpoint"].as_str().unwrap(),
+        format!("{}/as/register", upstream.uri())
+    );
+    assert_eq!(body["client_id"].as_str().unwrap(), "minted-cid");
+    assert_eq!(body["client_secret"].as_str().unwrap(), "minted-secret");
+    assert!(!body["is_public_client"].as_bool().unwrap());
+    assert!(
+        body["redirect_uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("/api/mcp/oauth/callback"),
+        "redirect_uri should be the console callback so admin can copy-paste it upstream"
+    );
+    let scopes: Vec<&str> = body["scopes_supported"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(scopes, vec!["read", "write"]);
+    let diag: Vec<&str> = body["diagnostic"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        diag.iter()
+            .any(|s| s.contains("got resource_metadata hint")),
+        "step 1: WWW-Authenticate hint not surfaced in diagnostic ({diag:?})"
+    );
+    assert!(
+        diag.iter()
+            .any(|s| s.contains("found authz-server metadata")),
+        "step 2: AS metadata fetch not surfaced ({diag:?})"
+    );
+    assert!(
+        diag.iter().any(|s| s.contains("dynamic-registration ok")),
+        "step 3: DCR success not surfaced ({diag:?})"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn oauth_probe_public_client_omits_client_secret() {
+    // AS that advertises `token_endpoint_auth_methods_supported: ["none"]`
+    // (Feishu-style). DCR returns no secret — admin form should hide
+    // the Client Secret input. We assert on the wire-level signal
+    // (`is_public_client = true`); the UI flip is covered separately.
+    let upstream = mcp_with_oauth_metadata(/* want_dcr */ true, /* public_client */ true).await;
+    let app = TestApp::try_spawn_with(SpawnOptions {
+        url_validator: Some(permissive_validator()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let con = app.console_client();
+    login(&con, &admin).await;
+
+    let resp = con
+        .post(
+            "/api/admin/mcp/oauth-probe",
+            json!({ "endpoint_url": format!("{}/mcp", upstream.uri()) }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let body: Value = resp.json().unwrap();
+
+    assert!(body["is_public_client"].as_bool().unwrap());
+    assert_eq!(body["client_id"].as_str().unwrap(), "minted-public-cid");
+    assert!(
+        body["client_secret"].is_null(),
+        "public-client DCR returned a secret — that's surprising and breaks the wizard's hide-secret branch"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn oauth_probe_partial_when_dcr_unavailable() {
+    // AS without `registration_endpoint` — Feishu-after-rejecting-our-DCR
+    // shape. Endpoints fill in, client_id stays empty so the wizard's
+    // partial-state UI ("go register an app upstream and paste back
+    // the Client ID") activates.
+    let upstream =
+        mcp_with_oauth_metadata(/* want_dcr */ false, /* public_client */ false).await;
+    let app = TestApp::try_spawn_with(SpawnOptions {
+        url_validator: Some(permissive_validator()),
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
+    let con = app.console_client();
+    login(&con, &admin).await;
+
+    let resp = con
+        .post(
+            "/api/admin/mcp/oauth-probe",
+            json!({ "endpoint_url": format!("{}/mcp", upstream.uri()) }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let body: Value = resp.json().unwrap();
+
+    assert!(body["client_id"].is_null());
+    assert!(body["client_secret"].is_null());
+    assert!(body["registration_endpoint"].is_null());
+    assert!(
+        body["authorization_endpoint"].as_str().is_some(),
+        "endpoints should still be filled — admin only needs to handle Client ID"
+    );
+    let diag: Vec<&str> = body["diagnostic"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert!(
+        diag.iter().any(|s| s.contains("no registration_endpoint")),
+        "diagnostic should explain why DCR was skipped ({diag:?})"
+    );
+}

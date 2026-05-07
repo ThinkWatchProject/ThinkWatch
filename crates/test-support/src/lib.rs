@@ -68,6 +68,15 @@ pub struct SpawnOptions {
     /// schema bootstrap, and pass the wired-up client to
     /// `init_state` so the audit pipeline writes there.
     pub clickhouse: bool,
+    /// Override the SSRF guard. `None` = production validator
+    /// (rejects loopback / private IPs). Set to a permissive variant
+    /// when the test points the server at a `wiremock` upstream
+    /// living on `127.0.0.1` and needs the production-shaped probe
+    /// chain to actually reach it. The validator runs on every URL
+    /// the server is about to fetch — keep it tight (e.g. still
+    /// reject `169.254.169.254`) so the test surface area mirrors
+    /// production semantics outside the loopback carve-out.
+    pub url_validator: Option<think_watch_server::app::UrlValidator>,
 }
 
 impl TestApp {
@@ -82,9 +91,12 @@ impl TestApp {
     /// `audit_logs`, the analytics endpoints, or anything else that
     /// reads back what the audit pipeline wrote.
     pub async fn spawn_with_clickhouse() -> Self {
-        Self::try_spawn_with(SpawnOptions { clickhouse: true })
-            .await
-            .expect("TestApp::spawn_with_clickhouse failed")
+        Self::try_spawn_with(SpawnOptions {
+            clickhouse: true,
+            ..Default::default()
+        })
+        .await
+        .expect("TestApp::spawn_with_clickhouse failed")
     }
 
     pub async fn try_spawn() -> anyhow::Result<Self> {
@@ -174,7 +186,10 @@ impl TestApp {
         };
         config.validate().map_err(anyhow::Error::msg)?;
 
-        let state = init::init_state(config.clone(), db.clone(), redis, ch_client).await?;
+        let mut state = init::init_state(config.clone(), db.clone(), redis, ch_client).await?;
+        if let Some(v) = opts.url_validator {
+            state.url_validator = v;
+        }
 
         // We deliberately skip:
         //   * install_cb_listener (process-global OnceLock)
@@ -299,6 +314,7 @@ fn init_test_tracing() {
 
 /// Convenience re-exports so test files only need one `use`.
 pub mod prelude {
+    pub use crate::SpawnOptions;
     pub use crate::TestApp;
     pub use crate::client::{SignedKey, TestClient};
     pub use crate::fixtures;

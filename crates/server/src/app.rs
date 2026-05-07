@@ -32,6 +32,22 @@ use think_watch_mcp_gateway::transport::streamable_http::{self, McpGatewayState}
 
 use crate::handlers;
 
+/// SSRF guard for URLs the server is about to fetch. Boxed so tests
+/// can swap in a permissive variant (allowing 127.0.0.1 wiremocks)
+/// without weakening `think_watch_common::validation::validate_url`,
+/// which production code uses by default. The trait-object form costs
+/// one atomic load per call — negligible relative to the outbound
+/// HTTP requests that follow it.
+pub type UrlValidator =
+    Arc<dyn Fn(&str) -> Result<(), think_watch_common::errors::AppError> + Send + Sync>;
+
+/// Construct the production validator, which delegates to
+/// `think_watch_common::validation::validate_url`. Use this in
+/// `init_state`; tests can replace it via `SpawnOptions.url_validator`.
+pub fn production_url_validator() -> UrlValidator {
+    Arc::new(|u: &str| think_watch_common::validation::validate_url(u))
+}
+
 /// Shared state accessible by both gateway and console servers.
 #[derive(Clone)]
 pub struct AppState {
@@ -74,6 +90,11 @@ pub struct AppState {
     /// refresh coalescing, and the console-driven "Test connection"
     /// probe.
     pub user_token_resolver: think_watch_mcp_gateway::user_token::UserTokenResolver,
+    /// Pluggable SSRF guard for outbound URLs. Production code wires
+    /// `production_url_validator()` here; tests can pass a permissive
+    /// variant via `SpawnOptions::url_validator` so wiremock instances
+    /// on 127.0.0.1 are reachable.
+    pub url_validator: UrlValidator,
 }
 
 /// Build a `ContentFilter` from the current `system_settings` value.
