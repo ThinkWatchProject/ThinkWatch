@@ -679,7 +679,21 @@
       "requiresAuthHint": "上游对匿名探测返回了 401/403 — 这对 OAuth / 静态令牌 MCP 是预期行为，每个用户首次连接时才会真正验证。",
       "requiresAuthTitle": "可达 — 需要认证",
       "retryTest": "重试",
-      "testing": "正在测试连接…"
+      "testing": "正在测试连接…",
+      "probeSummary": {
+        "probedUrl": "已探测：",
+        "recommendationLabel": "建议",
+        "oauthDcrTitle": "可达 — 需要认证，已发现 OAuth 并自动注册客户端",
+        "oauthDcrDetail": "匿名 tools/list 返回 401/403。按 RFC 9728 → 8414 链路在 {{issuer}} 找到 OAuth 元数据，并通过 RFC 7591 Dynamic Client Registration 自动注册了客户端。",
+        "oauthDcrRec": "OAuth 2.0（已预填 Issuer / Client ID / Client Secret，确认后继续即可）。",
+        "oauthManualTitle": "可达 — 需要认证，已发现 OAuth 元数据但不支持 DCR",
+        "oauthManualDetail": "匿名 tools/list 返回 401/403。在 {{issuer}} 找到 OAuth 元数据，但上游不支持 Dynamic Client Registration。需要你在上游注册一个 OAuth 应用，把 Client ID（和 Client Secret，如有）粘贴到下方。",
+        "oauthManualRec": "OAuth 2.0（需在上游手动注册应用）。",
+        "staticTitle": "可达 — 需要认证，未发现 OAuth 元数据",
+        "staticRec": "静态 token（PAT / API key）— 选择 header 形态后继续。",
+        "anonymousTitle": "可达 — 匿名服务",
+        "anonymousDetail": "匿名 tools/list 返回 {{count}} 个工具，无需凭据。已自动跳过「认证形态」和「凭据归属」两步。"
+      }
     },
     "credentialOwner": {
       "title": "凭据归属",

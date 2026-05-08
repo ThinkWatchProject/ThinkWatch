@@ -679,7 +679,21 @@
       "requiresAuthHint": "The upstream returned 401/403 to the anonymous probe. Expected for OAuth / static-token MCPs — per-user auth runs at first connect.",
       "requiresAuthTitle": "Reachable — auth required",
       "retryTest": "Retry test",
-      "testing": "Testing connection…"
+      "testing": "Testing connection…",
+      "probeSummary": {
+        "probedUrl": "Probed:",
+        "recommendationLabel": "Recommendation",
+        "oauthDcrTitle": "Reachable — auth required, OAuth detected and registered",
+        "oauthDcrDetail": "Anonymous tools/list returned 401/403. Discovered OAuth metadata at {{issuer}} via the RFC 9728 → 8414 chain, and the upstream supported Dynamic Client Registration (RFC 7591) — a client was registered automatically.",
+        "oauthDcrRec": "OAuth 2.0 (Issuer + Client ID + Client Secret pre-filled below; review and continue).",
+        "oauthManualTitle": "Reachable — auth required, OAuth metadata found but DCR unsupported",
+        "oauthManualDetail": "Anonymous tools/list returned 401/403. Discovered OAuth metadata at {{issuer}}, but the upstream does not support Dynamic Client Registration. You will need to register an OAuth app on the upstream and paste the Client ID (and Client Secret if any) below.",
+        "oauthManualRec": "OAuth 2.0 (manual app registration required).",
+        "staticTitle": "Reachable — auth required, no OAuth metadata",
+        "staticRec": "Static token (PAT / API key) — pick the header shape and continue.",
+        "anonymousTitle": "Reachable — anonymous",
+        "anonymousDetail": "Anonymous tools/list returned {{count}} tool(s) without any credential. Auth shape and credential ownership steps were skipped."
+      }
     },
     "credentialOwner": {
       "title": "Credential ownership",

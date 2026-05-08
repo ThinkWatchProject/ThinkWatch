@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, ArrowLeft, Loader2 } from 'lucide-react';
+import { AlertCircle, ArrowLeft, Info, Loader2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
@@ -77,6 +77,13 @@ export function StepMetadata({
   const canSubmit =
     !!state.name.trim() && !!state.endpoint_url.trim() && !submitting;
 
+  // For anonymous probes the wizard skipped Step 2 + Step 3 entirely,
+  // so the only place we get to surface "what we found and why we
+  // skipped" is here. Step 2 has its own ProbeSummary; this one is
+  // intentionally only shown for anonymous to avoid duplication.
+  const showAnonymousSummary =
+    state.probe?.anonymous_ok && state.auth_shape === 'anonymous';
+
   return (
     <div className="space-y-4">
       {submitError && (
@@ -84,6 +91,28 @@ export function StepMetadata({
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{submitError}</AlertDescription>
         </Alert>
+      )}
+
+      {showAnonymousSummary && state.probe && (
+        <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-900 dark:text-emerald-200">
+          <div className="flex items-start gap-2">
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600 dark:text-emerald-300" />
+            <div className="flex-1 space-y-1">
+              <p className="font-medium">
+                {t('mcpServers.wizard.probeSummary.anonymousTitle')}
+              </p>
+              <p className="opacity-85">
+                {t('mcpServers.wizard.probeSummary.probedUrl')}{' '}
+                <code className="font-mono">{state.endpoint_url}</code>
+              </p>
+              <p className="opacity-85">
+                {t('mcpServers.wizard.probeSummary.anonymousDetail', {
+                  count: state.probe.tools.length,
+                })}
+              </p>
+            </div>
+          </div>
+        </div>
       )}
 
       <div className="space-y-2">

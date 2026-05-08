@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { ArrowLeft, Check } from 'lucide-react';
+import { ArrowLeft, Check, Info } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -9,7 +9,12 @@ import {
   type AuthHeaderFields,
 } from '@/components/mcp/auth-header-fieldset';
 import { cn } from '@/lib/utils';
-import type { AuthShape, WizardState } from './types';
+import type {
+  AuthShape,
+  OAuthProbeResult,
+  ProbeResult,
+  WizardState,
+} from './types';
 
 interface Props {
   state: WizardState;
@@ -62,6 +67,13 @@ export function StepAuthShape({ state, patch, patchOAuth, onNext, onBack }: Prop
 
   return (
     <div className="space-y-4">
+      {state.probe && (
+        <ProbeSummary
+          url={state.endpoint_url}
+          probe={state.probe}
+          oauthProbe={state.oauth_probe}
+        />
+      )}
       <RadioGroup
         value={state.auth_shape}
         onValueChange={(v) => setShape(v as AuthShape)}
@@ -197,6 +209,94 @@ export function StepAuthShape({ state, patch, patchOAuth, onNext, onBack }: Prop
         <Button type="button" onClick={onNext} disabled={!canProceed}>
           {t('common.next')}
         </Button>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Summary banner — surfaces the Step 1 probe verdict and the resulting
+ * recommendation so the auto-pick isn't a black box. Three branches:
+ *
+ *   - `auth_required` + OAuth metadata + DCR succeeded ⇒ green; we
+ *     pre-filled everything (issuer, client_id, client_secret).
+ *   - `auth_required` + OAuth metadata + no DCR ⇒ amber; admin needs
+ *     to register the upstream OAuth app and paste Client ID back.
+ *   - `auth_required` + no OAuth metadata ⇒ neutral; static token
+ *     is the recommendation.
+ *
+ * Anonymous-OK probes never reach Step 2 (the wizard shell skips
+ * straight to Step 4), so we don't render that case here.
+ */
+function ProbeSummary({
+  url,
+  probe,
+  oauthProbe,
+}: {
+  url: string;
+  probe: ProbeResult;
+  oauthProbe: OAuthProbeResult | null;
+}) {
+  const { t } = useTranslation();
+
+  type Tone = 'success' | 'warn' | 'neutral';
+  let tone: Tone;
+  let title: string;
+  let detail: string;
+  let recommendation: string;
+
+  if (oauthProbe?.issuer && oauthProbe.client_id) {
+    tone = 'success';
+    title = t('mcpServers.wizard.probeSummary.oauthDcrTitle');
+    detail = t('mcpServers.wizard.probeSummary.oauthDcrDetail', {
+      issuer: oauthProbe.issuer,
+    });
+    recommendation = t('mcpServers.wizard.probeSummary.oauthDcrRec');
+  } else if (oauthProbe?.issuer) {
+    tone = 'warn';
+    title = t('mcpServers.wizard.probeSummary.oauthManualTitle');
+    detail = t('mcpServers.wizard.probeSummary.oauthManualDetail', {
+      issuer: oauthProbe.issuer,
+    });
+    recommendation = t('mcpServers.wizard.probeSummary.oauthManualRec');
+  } else {
+    tone = 'neutral';
+    title = t('mcpServers.wizard.probeSummary.staticTitle');
+    detail = probe.message;
+    recommendation = t('mcpServers.wizard.probeSummary.staticRec');
+  }
+
+  return (
+    <div
+      className={cn(
+        'rounded-md border p-3 text-xs',
+        tone === 'success' &&
+          'border-emerald-500/30 bg-emerald-500/10 text-emerald-900 dark:text-emerald-200',
+        tone === 'warn' &&
+          'border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200',
+        tone === 'neutral' && 'border-border bg-muted/40 text-muted-foreground',
+      )}
+    >
+      <div className="flex items-start gap-2">
+        <Info
+          className={cn(
+            'mt-0.5 h-4 w-4 shrink-0',
+            tone === 'success' && 'text-emerald-600 dark:text-emerald-300',
+            tone === 'warn' && 'text-amber-600 dark:text-amber-300',
+            tone === 'neutral' && 'text-muted-foreground',
+          )}
+        />
+        <div className="flex-1 space-y-1">
+          <p className="font-medium">{title}</p>
+          <p className="opacity-85">
+            {t('mcpServers.wizard.probeSummary.probedUrl')}{' '}
+            <code className="font-mono">{url}</code>
+          </p>
+          <p className="opacity-85">{detail}</p>
+          <p className="font-medium">
+            {t('mcpServers.wizard.probeSummary.recommendationLabel')}: {recommendation}
+          </p>
+        </div>
       </div>
     </div>
   );
