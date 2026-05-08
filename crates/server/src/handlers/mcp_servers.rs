@@ -346,6 +346,18 @@ pub async fn create_server(
             "credential_owner must be 'per_user' or 'admin_shared'".into(),
         ));
     }
+    // anonymous shape ⇒ no credential is ever needed, so admin_shared
+    // is meaningless here — there's nothing to share. Rejecting the
+    // combo at write time stops orphan mcp_server_shared_credentials
+    // rows from accumulating from misconfigured admins or buggy clients.
+    if auth_shape == "anonymous" && credential_owner == "admin_shared" {
+        return Err(AppError::BadRequest(
+            "credential_owner='admin_shared' is incompatible with auth_shape='anonymous' — \
+             anonymous servers don't carry credentials. Pick OAuth or static, or set \
+             credential_owner='per_user'."
+                .into(),
+        ));
+    }
     if req.wizard_session_id.is_some() && req.shared_static_token.is_some() {
         return Err(AppError::BadRequest(
             "wizard_session_id and shared_static_token are mutually exclusive".into(),
@@ -741,8 +753,23 @@ pub async fn update_server(
             "credential_owner must be 'per_user' or 'admin_shared'".into(),
         ));
     }
+    // See create_server for the rationale.
+    if auth_shape == "anonymous" && credential_owner == "admin_shared" {
+        return Err(AppError::BadRequest(
+            "credential_owner='admin_shared' is incompatible with auth_shape='anonymous' — \
+             anonymous servers don't carry credentials. Pick OAuth or static, or set \
+             credential_owner='per_user'."
+                .into(),
+        ));
+    }
     let switching_to_admin_shared =
         credential_owner == "admin_shared" && existing.credential_owner != "admin_shared";
+    // Reverse direction: admin_shared → per_user. The shared row
+    // becomes orphaned once we leave admin_shared mode (the resolver
+    // ignores it), so we revoke it upstream best-effort and DELETE
+    // the row inside the same TX as the row UPDATE.
+    let switching_off_admin_shared =
+        existing.credential_owner == "admin_shared" && credential_owner != "admin_shared";
 
     // Resolve new namespace_prefix: explicit override > existing value.
     let namespace_prefix = match req.namespace_prefix.as_deref() {
@@ -802,6 +829,21 @@ pub async fn update_server(
         config_json["cache_ttl_secs"] = serde_json::json!(ttl);
     }
 
+    // Best-effort upstream OAuth revocation runs OUTSIDE the TX —
+    // network calls inside a long-held DB lock are a recipe for
+    // deadlocks, and this call is fire-and-forget anyway (the row
+    // gets DELETEd inside the TX regardless of upstream success).
+    if switching_off_admin_shared {
+        super::mcp_oauth::best_effort_revoke_shared_upstream(&state, id).await?;
+    }
+
+    // One transaction for: row UPDATE + (when relevant) credential
+    // cleanup. Without the TX, a DELETE failure after the UPDATE
+    // commits would leave the server in the new auth_shape /
+    // credential_owner with old-shape credentials still attached —
+    // the resolver would then mismatch. Wrapping both in a TX makes
+    // the transition atomic.
+    let mut tx = state.db.begin().await?;
     let updated = sqlx::query_as::<_, McpServer>(
         r#"UPDATE mcp_servers SET
               name = $2, namespace_prefix = $3, display_label = $4,
@@ -837,7 +879,7 @@ pub async fn update_server(
     .bind(&auth_value_template)
     .bind(&credential_owner)
     .bind(&config_json)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(map_mcp_server_unique_violation)?;
 
@@ -850,21 +892,25 @@ pub async fn update_server(
     if switching_to_admin_shared || auth_shape_changed {
         sqlx::query("DELETE FROM mcp_user_credentials WHERE mcp_server_id = $1")
             .bind(id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM mcp_user_tools WHERE mcp_server_id = $1")
             .bind(id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
-        if auth_shape_changed {
-            // Old shared cred is the wrong shape for the new
-            // auth_shape — wipe so the admin re-installs.
-            sqlx::query("DELETE FROM mcp_server_shared_credentials WHERE mcp_server_id = $1")
-                .bind(id)
-                .execute(&state.db)
-                .await?;
-        }
     }
+    // Drop the shared-credential row when *either* the auth_shape
+    // changed (old token is wrong shape) OR we left admin_shared
+    // entirely. Same DELETE either way; collapsing the two
+    // conditions avoids running it twice on a combined transition
+    // (e.g. admin_shared/oauth → per_user/static).
+    if auth_shape_changed || switching_off_admin_shared {
+        sqlx::query("DELETE FROM mcp_server_shared_credentials WHERE mcp_server_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
 
     // Evict any cached connection first — the pool keys by id, so a
     // changed endpoint URL needs a fresh connection.
@@ -898,7 +944,7 @@ pub async fn update_server(
     // serves three purposes:
     //   1. Refresh `mcp_tools` against the (possibly new) endpoint.
     //   2. If the admin flipped this server from "direct" to
-    //      auth-required (added oauth_issuer or allow_static_token),
+    //      auth-required (auth_shape flipped from anonymous to oauth/static),
     //      anonymous tools/list now returns 401 — `discover_and_persist_tools`
     //      catches that and wipes `mcp_tools` + `cached_tools_jsonb` to
     //      `AuthRequired`, so old system-level tool rows can't leak

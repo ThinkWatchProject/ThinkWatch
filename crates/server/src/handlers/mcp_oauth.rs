@@ -2532,38 +2532,11 @@ pub async fn revoke_shared_credential(
         .assert_scope_global(&state.db, "mcp_servers:update")
         .await?;
 
-    let row: Option<(String, Vec<u8>)> = sqlx::query_as(
-        r#"SELECT credential_type, access_token_encrypted
-             FROM mcp_server_shared_credentials WHERE mcp_server_id = $1"#,
-    )
-    .bind(server_id)
-    .fetch_optional(&state.db)
-    .await?;
-    let Some((credential_type, access_encrypted)) = row else {
+    let revoked = best_effort_revoke_shared_upstream(&state, server_id).await?;
+    if !revoked {
         return Err(AppError::NotFound(
             "Shared credential not configured".into(),
         ));
-    };
-
-    if credential_type == "oauth_authcode" {
-        let server = load_server(&state, server_id).await?;
-        if let Some(revocation_endpoint) = server.oauth_revocation_endpoint.as_deref() {
-            let enc_key = parse_encryption_key(&state.config.encryption_key)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
-            if let Ok(token_bytes) = crypto::decrypt(&access_encrypted, &enc_key)
-                && let Ok(token) = String::from_utf8(token_bytes)
-            {
-                let form = vec![("token", token.as_str())];
-                let body = serde_urlencoded::to_string(&form).unwrap_or_default();
-                let http = state.http_client.load();
-                let _ = http
-                    .post(revocation_endpoint)
-                    .header("Content-Type", "application/x-www-form-urlencoded")
-                    .body(body)
-                    .send()
-                    .await;
-            }
-        }
     }
 
     sqlx::query("DELETE FROM mcp_server_shared_credentials WHERE mcp_server_id = $1")
@@ -2586,6 +2559,55 @@ pub async fn revoke_shared_credential(
     );
 
     Ok(Json(serde_json::json!({"status": "revoked"})))
+}
+
+/// Best-effort: read the server's shared credential row and, if it's
+/// an OAuth grant with a known revocation endpoint, POST a revocation
+/// request to the upstream so the bearer is dropped on their side too.
+///
+/// Returns `Ok(true)` when a row existed (regardless of whether the
+/// upstream call succeeded), `Ok(false)` when no shared credential
+/// was configured. Does NOT delete the row — callers do that
+/// themselves so they can sequence it with their own transaction
+/// (e.g., `update_server` admin_shared → per_user transitions).
+///
+/// `pub(super)` so `mcp_servers::update_server` can call it.
+pub(super) async fn best_effort_revoke_shared_upstream(
+    state: &AppState,
+    server_id: Uuid,
+) -> Result<bool, AppError> {
+    let row: Option<(String, Vec<u8>)> = sqlx::query_as(
+        r#"SELECT credential_type, access_token_encrypted
+             FROM mcp_server_shared_credentials WHERE mcp_server_id = $1"#,
+    )
+    .bind(server_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((credential_type, access_encrypted)) = row else {
+        return Ok(false);
+    };
+
+    if credential_type == "oauth_authcode" {
+        let server = load_server(state, server_id).await?;
+        if let Some(revocation_endpoint) = server.oauth_revocation_endpoint.as_deref() {
+            let enc_key = parse_encryption_key(&state.config.encryption_key)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
+            if let Ok(token_bytes) = crypto::decrypt(&access_encrypted, &enc_key)
+                && let Ok(token) = String::from_utf8(token_bytes)
+            {
+                let form = vec![("token", token.as_str())];
+                let body = serde_urlencoded::to_string(&form).unwrap_or_default();
+                let http = state.http_client.load();
+                let _ = http
+                    .post(revocation_endpoint)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(body)
+                    .send()
+                    .await;
+            }
+        }
+    }
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------

@@ -25,8 +25,11 @@ const SAMPLE_OAUTH_SERVER = {
   oauth_userinfo_endpoint: 'https://api.github.com/user',
   oauth_client_id: 'iv-123',
   oauth_scopes: ['repo', 'read:user'],
-  allow_static_token: false,
+  auth_shape: 'oauth',
   static_token_help_url: null,
+  auth_header_name: 'Authorization',
+  auth_value_template: 'Bearer {{token}}',
+  credential_owner: 'per_user',
   status: 'connected',
   last_health_check: null,
   tools_count: 5,
@@ -46,6 +49,7 @@ const SAMPLE_PUBLIC_SERVER = {
   oauth_userinfo_endpoint: null,
   oauth_client_id: null,
   oauth_scopes: [],
+  auth_shape: 'anonymous',
 };
 
 const SAMPLE_STATIC_SERVER = {
@@ -53,7 +57,7 @@ const SAMPLE_STATIC_SERVER = {
   id: 'cccccccc-cccc-cccc-cccc-cccccccccccc',
   name: 'static-mcp',
   namespace_prefix: 'static_mcp',
-  allow_static_token: true,
+  auth_shape: 'static',
   static_token_help_url: 'https://example.com/get-token',
 };
 
@@ -135,7 +139,7 @@ test.describe('MCP servers — registration wizard', () => {
     expect(createdPayload).toMatchObject({
       name: 'wizard-test',
       endpoint_url: 'https://test.example.com/mcp',
-      allow_static_token: false,
+      auth_shape: 'anonymous',
     });
     expect((createdPayload as Record<string, unknown>).oauth_issuer ?? null).toBeNull();
   });

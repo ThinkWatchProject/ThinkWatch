@@ -139,8 +139,16 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
     const currentHeadersObj: Record<string, string> = Object.fromEntries(
       customHeaders.filter(([k]) => k.trim()),
     );
-    const headersChanged =
-      JSON.stringify(baseHeaders) !== JSON.stringify(currentHeadersObj);
+    // Order-stable comparison: dragging two header rows around (or
+    // the underlying object's key insertion order changing) shouldn't
+    // light the dirty dot when the data is functionally identical.
+    const sortedHeaders = (h: Record<string, string>) =>
+      JSON.stringify(
+        Object.keys(h)
+          .sort()
+          .map((k) => [k, h[k]]),
+      );
+    const headersChanged = sortedHeaders(baseHeaders) !== sortedHeaders(currentHeadersObj);
     const cacheTtlChanged =
       (server.config_json?.cache_ttl_secs != null
         ? String(server.config_json.cache_ttl_secs)
