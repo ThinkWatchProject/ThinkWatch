@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
+import { ServiceLogo } from '@/components/ui/service-logo';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -16,7 +17,7 @@ import {
 } from '@/components/ui/dialog';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { AuthModeBadge } from '@/components/mcp/auth-mode-badge';
-import { api, apiPost, apiDelete } from '@/lib/api';
+import { api, apiPost, apiPut, apiDelete } from '@/lib/api';
 import { cn } from '@/lib/utils';
 import {
   Plug,
@@ -163,19 +164,17 @@ export function ConnectionsPage() {
           setSubmitting(false);
           return;
         }
-        await fetch(
+        // Must go through `apiPut`, not raw `fetch` — the api client
+        // attaches ECDSA signature headers (read from IndexedDB) and
+        // retries once after re-registering the key on 401. Bypassing
+        // that meant any user with a registered public key got
+        // `401 Unauthorized` from `verify_signature` middleware.
+        await apiPut(
           `/api/mcp/connections/${addTarget.server_id}/${encodeURIComponent(
             addLabel.trim(),
           )}/static-token`,
-          {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'include',
-            body: JSON.stringify({ token: addToken.trim() }),
-          },
-        ).then(async (r) => {
-          if (!r.ok) throw new Error(await r.text());
-        });
+          { token: addToken.trim() },
+        );
 
         // Verify the token works by exercising the test endpoint. If
         // the upstream rejects the bearer (typical for typo'd PATs),
@@ -214,12 +213,13 @@ export function ConnectionsPage() {
 
   const setDefault = async (server_id: string, account_label: string) => {
     try {
-      await fetch(
+      // Same signing-bypass story as the static-token PUT above —
+      // raw fetch skips the ECDSA headers and gets 401 from
+      // verify_signature when a public key is registered.
+      await apiPut(
         `/api/mcp/connections/${server_id}/${encodeURIComponent(account_label)}/default`,
-        { method: 'PUT', credentials: 'include' },
-      ).then(async (r) => {
-        if (!r.ok) throw new Error(await r.text());
-      });
+        {},
+      );
       await fetchAll();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : 'Failed to set default');
@@ -284,7 +284,7 @@ export function ConnectionsPage() {
           </CardContent>
         </Card>
       ) : (
-        <div className="grid gap-3">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {sortedServers.map((s) => (
             <ServerCard
               key={s.server_id}
@@ -448,47 +448,37 @@ function ServerCard({
     }
   };
   return (
-    <Card data-size="sm">
-      <CardHeader className="flex flex-row items-center justify-between gap-3 space-y-0">
-        <div className="min-w-0 space-y-0.5">
-          <div className="flex flex-wrap items-center gap-2">
-            <CardTitle className="text-sm">{serverDisplay(server)}</CardTitle>
-            <AuthModeBadge mode={server.oauth_capable ? 'oauth' : 'static'} />
-            {server.display_label && server.display_label !== server.server_name && (
-              <span className="text-xs text-muted-foreground">{server.server_name}</span>
-            )}
+    // Tile-style integrations card: logo on the left, name + mode
+    // stacked next to it, CTA(s) on a separated muted footer strip.
+    // Modeled on the /mcp/store template tiles so the two pages feel
+    // like the same product surface. `flex flex-col` lets the footer
+    // anchor to the bottom regardless of how many accounts the
+    // middle section has.
+    <Card data-size="sm" className="flex flex-col">
+      <CardHeader>
+        <div className="flex items-start gap-2.5">
+          <ServiceLogo
+            service={server.server_name}
+            className="size-9 rounded-md shrink-0"
+          />
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <CardTitle className="truncate text-sm">{serverDisplay(server)}</CardTitle>
+            <div className="flex items-center gap-1.5">
+              <AuthModeBadge mode={server.oauth_capable ? 'oauth' : 'static'} />
+              {server.display_label && server.display_label !== server.server_name && (
+                <span className="truncate font-mono text-[10px] text-muted-foreground/70">
+                  {server.server_name}
+                </span>
+              )}
+            </div>
           </div>
-        </div>
-        <div className="flex shrink-0 gap-2">
-          {server.oauth_capable && (
-            <Button size="sm" variant="default" onClick={onAddOauth}>
-              <Plus className="h-3 w-3 mr-1" />
-              {empty ? t('connections.connect') : t('connections.addAccount')}
-            </Button>
-          )}
-          {server.allow_static_token && !server.oauth_capable && (
-            <Button size="sm" variant="default" onClick={onAddStatic}>
-              <KeyRound className="h-3 w-3 mr-1" />
-              {empty ? t('connections.pasteToken', { name: '' }) : t('connections.addAccount')}
-            </Button>
-          )}
-          {server.allow_static_token && server.oauth_capable && (
-            <Button size="sm" variant="outline" onClick={onAddStatic}>
-              <KeyRound className="h-3 w-3 mr-1" />
-              {t('connections.useToken')}
-            </Button>
-          )}
         </div>
       </CardHeader>
       {/* Account list — only rendered when the user has connected
-          at least once. The "尚未连接" empty branch was visually
-          redundant with the primary "连接" button: the CTA button
-          already implies "you haven't connected yet." Dropping the
-          empty CardContent collapses unconnected cards to a single
-          header row, way denser when a deployment has 10+ servers
-          that the user hasn't all authorized yet. */}
+          at least once. `flex-1` lets the footer stick to the bottom
+          when this card has more accounts than its grid neighbors. */}
       {!empty && (
-        <CardContent>
+        <CardContent className="flex-1">
           <ul className="divide-y">
             {server.accounts.map((a) => {
               const result = results[a.account_label];
@@ -637,6 +627,31 @@ function ServerCard({
           </ul>
         </CardContent>
       )}
+      <CardFooter className="gap-2">
+        {server.oauth_capable && (
+          <Button size="sm" variant="default" className="flex-1" onClick={onAddOauth}>
+            <Plus className="h-3 w-3 mr-1" />
+            {empty ? t('connections.connect') : t('connections.addAccount')}
+          </Button>
+        )}
+        {server.allow_static_token && !server.oauth_capable && (
+          <Button size="sm" variant="default" className="flex-1" onClick={onAddStatic}>
+            <KeyRound className="h-3 w-3 mr-1" />
+            {/* `pasteToken` interpolates `{{name}}` and reads "粘贴
+                X 的 Token" — fine as a *dialog* title (we know which
+                server) but on a card button it'd come out redundant
+                with the server name right above. `useToken` is the
+                short copy. */}
+            {empty ? t('connections.useToken') : t('connections.addAccount')}
+          </Button>
+        )}
+        {server.allow_static_token && server.oauth_capable && (
+          <Button size="sm" variant="outline" onClick={onAddStatic}>
+            <KeyRound className="h-3 w-3 mr-1" />
+            {t('connections.useToken')}
+          </Button>
+        )}
+      </CardFooter>
     </Card>
   );
 }
