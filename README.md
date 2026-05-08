@@ -64,11 +64,56 @@ ThinkWatch solves all of this with a single deployment.
 - **Real-time cost tracking** — per-model pricing with team attribution
 
 ### MCP Gateway
-- **Centralized tool proxy** — one MCP endpoint that aggregates tools from all upstream servers
-- **Namespace isolation** — `github__create_issue`, `postgres__query` — no tool name collisions
-- **Tool-level RBAC** — control exactly which users or roles can invoke which tools
-- **Connection pooling & health monitoring** — automatic reconnection, background health checks
-- **Full audit trail** — every tool invocation logged with user, parameters, and response
+
+ThinkWatch's MCP gateway is built on a single design choice that most MCP proxies skip: **the upstream server sees the real end user, not a shared service account.** Every other capability follows from that. See [MCP Gateway: how we compare](#mcp-gateway-how-we-compare) below.
+
+- **Per-user upstream identity** — every MCP request carries the calling user's own OAuth token or PAT to GitHub / Notion / Linear / Slack / Atlassian / Feishu / GitLab / Cloudflare / Google / Discord / etc. Tokens are AES-256-GCM encrypted in `mcp_user_credentials`. Most "MCP gateways" pin one shared admin token to the server config — so the upstream's audit log shows every action as the same service account. ThinkWatch propagates real identity end to end.
+- **Multi-account per user** — bind work and personal GitHub accounts to the same server, label them, mark one as default. The same physical user can have multiple credential rows per server.
+- **API-key → account override** — pin different `tw-` keys to different upstream accounts on the same server. Your Cursor key uses your personal GitHub; the CI key uses the service-bot. One user, multiple agents, multiple identities — without re-issuing credentials.
+- **One-paste OAuth onboarding** — paste an MCP URL, click 一键发现. The probe walks the full RFC 9728 → RFC 8414 → RFC 7591 chain: triggers `WWW-Authenticate` from a JSON-RPC `initialize`, follows the `resource_metadata` hint, fetches AS metadata at the path-aware well-known location, and runs Dynamic Client Registration if the upstream advertises it. When DCR isn't supported the UI shows three concrete next steps (copy callback URL → register app upstream → paste Client ID back) with no protocol jargon.
+- **Public-client support** — detects `token_endpoint_auth_methods_supported: ["none"]` and propagates `is_public_client` end to end. The Client Secret input is hidden for issuers like Feishu that don't use one.
+- **Static-token vault** — for upstreams that only speak PATs / API keys (GitHub PATs, Notion integration tokens). Same per-user surface, same encrypted storage, same /connections UX. Static tokens are verified at paste time so users find out immediately if the token is wrong.
+- **Per-user tool catalogs** — when an upstream filters tool visibility by scope or role (Atlassian, enterprise IDPs), the user-authenticated `tools/list` is cached in `mcp_user_tools` and **only ever returned to that user**. The system-level `mcp_tools` catalog only stores anonymous-discoverable tools. No cross-user leakage; auth-required servers are no longer "0 tools" until someone manually fixes it.
+- **Three-tier upstream subject resolution** — `/connections` shows real upstream identities (`@octocat`, `alice@acme.com`, Slack `Bob`). Resolver tries JWT decode (free) → userinfo endpoint (priority-ranked extractor: `preferred_username` → `sub` → `accountId` → `login` → `email`) → `.well-known` discovery. Pre-seeded for GitHub, Notion, Slack, Atlassian, Cloudflare, GitLab, Discord, Google.
+- **MCP Store with 23+ curated templates** — GitHub, Notion, Linear, Slack, Atlassian, Cloudflare, GitLab, Discord, Google, Feishu and more, pre-seeded with the right OAuth scopes, userinfo endpoints, and PAT help URLs. One-click install. Daily catalog refresh from the registry.
+- **Generic MCP client UX** — for users who haven't authorized yet, the gateway still serves the tool catalog but tags every entry with `_meta: { requires_user_auth: true, server_id, server_name, authorize_url }`. `tools/call` against an unauthorized server returns JSON-RPC error code `-32050` with the authorize URL, so Cursor / Claude Desktop / any compliant MCP client can prompt the user to authorize without the gateway hiding the catalog.
+- **Tool-level RBAC** — per-role tool grants on the server side, per-key `allowed_mcp_tools` allowlist on the API-key side (bounded by the issuing role's grants). A locked-down service key can hold exactly two tools and nothing else.
+- **`mcp:connect` permission** — gates the /connections page and authorize/revoke flow. Granted to admin / team_manager / developer by default.
+- **Cache scoped by `(user, account_label)`** — MCP response cache never serves Alice's authorized response to Bob. Direct-mode (no per-user creds) servers still get global caching.
+- **Race-free token refresh** — OAuth refresh holds a `pg_advisory_xact_lock` keyed by `(server, user, label)` so concurrent tool calls don't race two refresh attempts. Terminal refresh failure purges the row so the next call cleanly surfaces `NeedsUserCredentials`.
+- **Health probe robustness** — 401/403 from an anonymous probe is *expected* on auth-required MCPs; the server is marked `auth_required` (amber), not `disconnected` (red). The /mcp/servers list shows "—" tool count with a hover tooltip for that state.
+- **Step-by-step registration wizard** — auth-mode-aware edit form, per-credential Test Connection button on /connections, admin foot-gun guards (verify static tokens at paste time, no silent fall-through to default account).
+- **SSRF hardening** — discovery and OAuth probe URLs are validated through an injected URL validator; private IP ranges, link-local, and metadata-service hosts are rejected.
+- **Namespace isolation** — `github__create_issue`, `postgres__query` — no tool name collisions across upstreams.
+- **Connection pooling & health monitoring** — automatic reconnection, periodic background probes, per-server health surfaced on the dashboard.
+- **Full audit trail** — every tool invocation logged with user, account label, parameters, response, latency, and error in ClickHouse alongside the AI gateway logs.
+- **Rate limits + budgets apply to MCP** — the same engine that meters AI tokens also meters MCP tool calls; per-user, per-API-key, per-server subjects all stack. See [Rate limits & budgets](#rate-limits--budgets).
+- **One key, two surfaces** — the same `tw-` virtual key works on both `/v1/chat/completions` and `/mcp` via a per-key `surfaces` allowlist (`ai_gateway`, `mcp_gateway`, or both).
+
+### MCP Gateway: how we compare
+
+Most "MCP gateways" available today are thin reverse proxies: one shared admin token per upstream, no end-user identity, and "auth" means "did this user pass the gateway's bearer token". That model works for hobby setups and breaks the moment a real organization plugs it into GitHub / Atlassian / Linear / Slack — every tool call shows up as the same service account, scopes can't differ per user, and there's no honest answer to "who renamed this Linear ticket?".
+
+ThinkWatch is built for the second case.
+
+| Capability | Typical MCP proxy | ThinkWatch |
+|---|---|---|
+| **Upstream sees the real user** | ❌ shared admin token / env var | ✅ per-user OAuth tokens + PAT vault, AES-256-GCM encrypted at rest |
+| **Multi-account per user** | ❌ one config = one identity | ✅ work + personal accounts, labelled, default + named |
+| **API key → account binding** | ❌ keys are opaque | ✅ Cursor → personal, cron → service-bot, all on the same user |
+| **OAuth onboarding** | ❌ hand-edit JSON / env | ✅ paste URL, one-click DCR (RFC 9728 → 8414 → 7591), public-client support |
+| **Per-user tool visibility** | ❌ assumes uniform catalog (privilege-escalation if cached) | ✅ separate `mcp_user_tools` per user, system catalog only holds anonymous-discoverable tools |
+| **Generic MCP client UX (Cursor/Claude Desktop)** | ❌ unauthorized = blank list | ✅ catalog returned with `_meta.requires_user_auth` markers + `-32050` with `authorize_url` |
+| **Tool-level RBAC** | ❌ all-or-nothing | ✅ per-role grants + per-key `allowed_mcp_tools` allowlist bounded by role |
+| **Built-in catalog** | ❌ DIY everything | ✅ 23+ templates seeded (GitHub / Notion / Linear / Slack / Atlassian / Cloudflare / GitLab / Discord / Google / Feishu …) |
+| **Audit / rate limits / budgets** | ❌ LLM-only or absent | ✅ same engine meters AI tokens AND MCP tool calls |
+| **Response cache safety** | ❌ shared cache leaks across users | ✅ scoped by `(user, account_label)` for OAuth/PAT servers |
+| **OAuth refresh races** | ❌ duplicate refresh attempts under concurrency | ✅ `pg_advisory_xact_lock` per `(server, user, label)` |
+| **Health classification** | ❌ 401/403 = "unhealthy" (false alarms) | ✅ `auth_required` is a first-class amber state |
+| **SSRF protection** | ❌ raw fetcher | ✅ injected URL validator, private/link-local/metadata IPs rejected |
+| **One key, two surfaces** | ❌ separate stacks for AI vs MCP | ✅ single `tw-` key, per-key `surfaces` allowlist |
+
+If your only requirement is "expose a few public MCP servers to a small team", the simple proxies do fine. The moment you need *who did what, on whose behalf, with what scopes, billed to which cost center* — ThinkWatch is the design point.
 
 ### Security & Compliance
 - **Dual-port architecture** — gateway (public-facing) and console (internal-only) on separate ports
@@ -295,7 +340,7 @@ ThinkWatch/
 │   ├── mcp-gateway/     # MCP proxy: JSON-RPC, tool aggregation, access control
 │   ├── auth/            # JWT, OIDC, API key, password hashing, RBAC
 │   └── common/          # Config, DB, models, crypto, validation, audit logger
-├── migrations/          # 12 PostgreSQL migration files
+├── db/                  # Declarative PostgreSQL schema (schema.sql + seeds.sql)
 ├── web/                 # React frontend — ~20 page components
 ├── deploy/
 │   ├── docker/          # Dockerfile.server (distroless), Dockerfile.web (nginx)

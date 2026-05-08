@@ -63,11 +63,56 @@ ThinkWatch 一次部署，全部解决。
 - **实时费用追踪** — 按模型计费，预算告警，团队费用归因
 
 ### MCP 网关
-- **中心化工具代理** — 一个 MCP 端点聚合所有上游服务器的工具
-- **命名空间隔离** — `github__create_issue`、`postgres__query` —— 工具名永不冲突
-- **工具级 RBAC** — 精确控制哪些用户或角色可以调用哪些工具
-- **连接池和健康监控** — 自动重连，后台健康检查
-- **完整审计轨迹** — 每次工具调用记录用户、参数和响应
+
+ThinkWatch 的 MCP 网关建立在一个大多数 MCP 代理都跳过的设计选择之上：**上游服务器看到的是真实的最终用户，而不是一个共享的 Service Account。** 其他所有能力都从这一点延伸而出。详见下方 [MCP 网关：与竞品对比](#mcp-网关与竞品对比)。
+
+- **每用户的上游身份** — 每次 MCP 请求都使用调用用户自己的 OAuth Token 或 PAT 访问 GitHub / Notion / Linear / Slack / Atlassian / 飞书 / GitLab / Cloudflare / Google / Discord 等上游。Token 在 `mcp_user_credentials` 表中以 AES-256-GCM 加密存储。绝大多数"MCP 网关"在服务器配置上钉一个共享的管理员 Token——上游审计日志里所有操作看起来都是同一个 Service Account 干的。ThinkWatch 把真实身份端到端地传递下去。
+- **同一用户多账号** — 同一个 GitHub MCP 服务器上同时绑定工作账号和个人账号，打标签，标记默认账号。同一个物理用户可以为同一个服务器持有多条凭据记录。
+- **API Key → 账号覆盖** — 给同一个用户的不同 `tw-` Key 钉到同一服务器的不同上游账号上：Cursor Key 走个人 GitHub，CI Key 走 service-bot。一个用户、多个 Agent、多重身份，无需重发凭据。
+- **一键 OAuth 接入** — 粘贴 MCP URL，点击「一键发现」。探测器走完整 RFC 9728 → RFC 8414 → RFC 7591 链路：通过 JSON-RPC `initialize` 触发 `WWW-Authenticate`，跟随 `resource_metadata` 提示，按路径感知规则取 AS 元数据，若上游通告 DCR 则自动注册客户端。如果上游不支持 DCR，UI 给出三个具体步骤（复制回调 URL → 在上游注册应用 → 粘贴 Client ID 回来），不暴露任何协议术语。
+- **公共客户端支持** — 检测 `token_endpoint_auth_methods_supported: ["none"]` 并将 `is_public_client` 端到端传递。对于飞书等不使用 Client Secret 的 Issuer，UI 自动隐藏 Secret 输入框。
+- **静态 Token 保险箱** — 对只支持 PAT / API Key 的上游（GitHub PAT、Notion 集成 Token），同样的每用户表面、同样的加密存储、同样的「我的连接」交互。静态 Token 在粘贴时即时验证，输错立刻知道。
+- **每用户工具目录** — 当上游按 Scope/Role 过滤工具可见性时（Atlassian、企业 IDP），用户认证后的 `tools/list` 缓存到 `mcp_user_tools`，**只会返回给该用户**。系统级 `mcp_tools` 只存匿名可发现的工具。无跨用户泄漏；需授权服务器不再"工具数 0"等管理员手动修复。
+- **三级上游身份解析** — 「我的连接」页面展示真实的上游身份（`@octocat`、`alice@acme.com`、Slack `Bob`）。解析器依次尝试 JWT 解码（免费）→ Userinfo 端点（按优先级抽取：`preferred_username` → `sub` → `accountId` → `login` → `email`）→ `.well-known` 自动发现。GitHub、Notion、Slack、Atlassian、Cloudflare、GitLab、Discord、Google 已预置。
+- **MCP 应用商店，23+ 精选模板** — GitHub、Notion、Linear、Slack、Atlassian、Cloudflare、GitLab、Discord、Google、飞书等，预置了正确的 OAuth Scope、Userinfo 端点、PAT 帮助 URL。一键安装。每日从 Registry 自动刷新目录。
+- **通用 MCP 客户端友好** — 对尚未授权的用户，网关仍然返回工具目录，并在每条工具上打 `_meta: { requires_user_auth: true, server_id, server_name, authorize_url }` 标记。对未授权服务器的 `tools/call` 返回 JSON-RPC 错误码 `-32050` 并附带授权 URL，Cursor / Claude Desktop / 任何符合规范的 MCP 客户端都能直接弹出授权引导，而不是看到一个空目录。
+- **工具级 RBAC** — 服务器侧按角色授权工具，API Key 侧通过 `allowed_mcp_tools` 白名单进一步收紧（白名单受签发角色的授权范围约束）。一个锁死的服务 Key 可以恰好持有两个工具，多一个都不行。
+- **`mcp:connect` 权限** — 守卫「我的连接」页和授权/吊销流程。默认授予 admin / team_manager / developer。
+- **缓存按 `(user, account_label)` 隔离** — MCP 响应缓存绝不会把 Alice 的鉴权响应给 Bob。直连模式（无每用户凭据）服务器仍走全局缓存。
+- **无竞争的 Token 刷新** — OAuth 刷新持有按 `(server, user, label)` 加锁的 `pg_advisory_xact_lock`，并发工具调用不会触发重复刷新。终态刷新失败时立即清除凭据行，下次调用干净地暴露 `NeedsUserCredentials`。
+- **健康探测稳健** — 匿名探测返回 401/403 在需鉴权的 MCP 上是*预期行为*；服务器被标记为 `auth_required`（黄色），而不是 `disconnected`（红色）。/mcp/servers 列表对该状态显示"—"工具数并附悬停说明。
+- **分步注册向导** — 鉴权模式感知的编辑表单、「我的连接」页的逐凭据 Test Connection 按钮、管理员防呆护栏（粘贴时验证静态 Token、不向默认账号静默回退）。
+- **SSRF 加固** — 发现和 OAuth 探测的 URL 都通过注入式 URL 校验器，私有 IP 段、链路本地、元数据服务主机一律拒绝。
+- **命名空间隔离** — `github__create_issue`、`postgres__query` —— 工具名跨上游永不冲突。
+- **连接池与健康监控** — 自动重连，周期性后台探测，每个服务器的健康状态在仪表盘上呈现。
+- **完整审计轨迹** — 每次工具调用在 ClickHouse 中记录用户、账号标签、参数、响应、延迟和错误，与 AI 网关日志并列。
+- **限流与预算覆盖 MCP** — 计量 AI Token 的同一个引擎也计量 MCP 工具调用；每用户、每 API Key、每服务器作为 Subject 同时叠加生效。
+- **一把 Key 双 Surface** — 同一把 `tw-` 虚拟 Key 通过 `surfaces` 白名单（`ai_gateway`、`mcp_gateway` 或两者）同时在 `/v1/chat/completions` 和 `/mcp` 上工作。
+
+### MCP 网关：与竞品对比
+
+目前市面上多数"MCP 网关"是薄反向代理：每个上游一个共享管理员 Token，没有最终用户身份概念，所谓"鉴权"就是"该用户是否带了网关的 Bearer Token"。这套模型在玩具场景能跑，一旦真实组织把它接到 GitHub / Atlassian / Linear / Slack 就崩盘——所有工具调用都显示为同一个 Service Account，Scope 无法因人而异，"是谁改了这个 Linear 工单"没有诚实的答案。
+
+ThinkWatch 是为后一种场景设计的。
+
+| 能力 | 一般 MCP 代理 | ThinkWatch |
+|---|---|---|
+| **上游看到真实用户** | ❌ 共享管理员 Token / 环境变量 | ✅ 每用户 OAuth Token + PAT 保险箱，AES-256-GCM 加密静态存储 |
+| **同一用户多账号** | ❌ 一份配置 = 一个身份 | ✅ 工作 + 个人账号，可打标签，可设默认 |
+| **API Key → 账号绑定** | ❌ Key 不透明 | ✅ Cursor → 个人，cron → service-bot，同一用户内 |
+| **OAuth 接入** | ❌ 手改 JSON / 环境变量 | ✅ 粘贴 URL 一键 DCR（RFC 9728 → 8414 → 7591），公共客户端支持 |
+| **每用户工具可见性** | ❌ 假定目录均匀（缓存即权限提升风险） | ✅ 独立 `mcp_user_tools`，系统目录只存匿名可发现项 |
+| **通用 MCP 客户端 UX（Cursor/Claude Desktop）** | ❌ 未授权 = 空目录 | ✅ 目录 + `_meta.requires_user_auth` 标记 + `-32050` 携带 `authorize_url` |
+| **工具级 RBAC** | ❌ 一刀切 | ✅ 角色侧授权 + Key 侧 `allowed_mcp_tools` 白名单（受角色约束） |
+| **内置目录** | ❌ 全靠手撸 | ✅ 23+ 模板预置（GitHub / Notion / Linear / Slack / Atlassian / Cloudflare / GitLab / Discord / Google / 飞书 …） |
+| **审计 / 限流 / 预算** | ❌ 仅 LLM 或缺失 | ✅ 同一引擎同时计量 AI Token 和 MCP 工具调用 |
+| **响应缓存安全** | ❌ 共享缓存跨用户泄漏 | ✅ OAuth/PAT 服务器按 `(user, account_label)` 隔离 |
+| **OAuth 刷新竞争** | ❌ 并发下重复刷新 | ✅ `pg_advisory_xact_lock` 按 `(server, user, label)` 加锁 |
+| **健康判定** | ❌ 401/403 即"不健康"（误报） | ✅ `auth_required` 是一等的黄色状态 |
+| **SSRF 防护** | ❌ 裸 fetch | ✅ 注入式 URL 校验器，私有/链路本地/元数据 IP 拒绝 |
+| **一把 Key 双 Surface** | ❌ AI 与 MCP 分开两套 | ✅ 单 `tw-` Key，按 Key 配置 `surfaces` 白名单 |
+
+如果你只需要"把几个公开 MCP 服务器开放给小团队"，简单代理够用。一旦你需要"谁、代表谁、用什么 Scope、记到哪个成本中心"——ThinkWatch 就是为此而设计的。
 
 ### 安全与合规
 - **双端口架构** — Gateway (面向公网) 和 Console (仅限内网) 分端口部署
@@ -163,7 +208,7 @@ ThinkWatch/
 │   ├── mcp-gateway/     # MCP 代理：JSON-RPC、工具聚合、访问控制
 │   ├── auth/            # JWT、OIDC、API Key、密码哈希、RBAC
 │   └── common/          # 配置、数据库、模型、加密、校验、审计日志
-├── migrations/          # 12 个 PostgreSQL 迁移文件
+├── db/                  # 声明式 PostgreSQL Schema (schema.sql + seeds.sql)
 ├── web/                 # React 前端 — 约 20 个页面组件
 ├── deploy/
 │   ├── docker/          # Dockerfile.server (distroless), Dockerfile.web (nginx)
