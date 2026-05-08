@@ -1,0 +1,9 @@
+# pnpm 11 moved the build-script allowlist out of `package.json` ->
+# `pnpm.onlyBuiltDependencies` and into this file under `allowBuilds`.
+# Without this entry `pnpm install --frozen-lockfile` fails CI with
+# `ERR_PNPM_IGNORED_BUILDS: msw@2.12.14` (msw is a transitive dep of
+# vitest and ships a postinstall). Local pnpm 10 still honored the
+# package.json field, hiding the problem until CI's `pnpm@latest`
+# action picked up pnpm 11.
+allowBuilds:
+  msw: true
