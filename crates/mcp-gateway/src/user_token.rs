@@ -612,7 +612,10 @@ impl UserTokenResolver {
         };
         let new_expires_at = new
             .expires_in
-            .map(|secs| now + chrono::Duration::seconds(secs as i64));
+            // try_from so a u64::MAX from a malicious upstream
+            // doesn't silently wrap into a negative i64.
+            .and_then(|secs| i64::try_from(secs).ok())
+            .map(|secs| now + chrono::Duration::seconds(secs));
 
         self.write_refreshed_row(
             &mut tx,

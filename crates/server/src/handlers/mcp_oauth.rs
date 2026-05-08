@@ -347,6 +347,17 @@ pub async fn start_authorize(
                 .into(),
         ));
     }
+    if server.auth_shape != "oauth" {
+        // The admin set this server to a non-OAuth shape — the user
+        // should be pasting a token in /connections, not running the
+        // authorize flow. Surface the actual shape so the UI knows
+        // what to render.
+        return Err(AppError::BadRequest(format!(
+            "This server's auth shape is '{}', not 'oauth'. \
+             OAuth authorize is only valid for OAuth-shape servers.",
+            server.auth_shape
+        )));
+    }
     let auth_endpoint = server
         .oauth_authorization_endpoint
         .as_deref()
@@ -513,7 +524,11 @@ pub async fn oauth_callback(
     };
     let expires_at = token
         .expires_in
-        .map(|s| Utc::now() + chrono::Duration::seconds(s as i64));
+        // Use try_from so a malicious upstream returning u64::MAX
+        // doesn't silently wrap into a negative i64 and produce an
+        // "expired in 1969" timestamp; cap at "no expiry" instead.
+        .and_then(|s| i64::try_from(s).ok())
+        .map(|s| Utc::now() + chrono::Duration::seconds(s));
     let scopes: Vec<String> = token
         .scope
         .as_deref()
@@ -2817,15 +2832,21 @@ pub async fn discard_wizard_credential(
     Ok(Json(serde_json::json!({"status": "discarded"})))
 }
 
-/// Internal helper — fetch and delete the wizard credential blob in
-/// one Redis round-trip, returning the raw fields the create_server
-/// handler needs to insert into `mcp_server_shared_credentials`.
+/// Internal helper — peek at the wizard credential blob in Redis
+/// without deleting it. Used by [`mcp_servers::create_server`]
+/// **before** opening its DB transaction; the blob is consumed
+/// (deleted) only after the TX commits via
+/// [`delete_wizard_credential`]. This split avoids destroying the
+/// admin's pending credential on a TX rollback (e.g. validation
+/// error, namespace collision) — they'd otherwise have to re-run
+/// the OAuth dance with no useful error message.
+///
 /// `pub(super)` so [`mcp_servers::create_server`] can call it.
-pub(super) async fn pop_wizard_credential(
+pub(super) async fn peek_wizard_credential(
     state: &AppState,
     wizard_session_id: &str,
 ) -> Result<Option<PoppedWizardCredential>, AppError> {
-    let stored: Option<String> = fred::interfaces::KeysInterface::getdel(
+    let stored: Option<String> = fred::interfaces::KeysInterface::get(
         &state.redis,
         wizard_credential_redis_key(wizard_session_id),
     )
@@ -2869,6 +2890,18 @@ pub(super) async fn pop_wizard_credential(
         upstream_subject: parsed.upstream_subject,
         configured_by: parsed.configured_by,
     }))
+}
+
+/// Drop the wizard credential blob from Redis. Best-effort —
+/// callers run this AFTER the create_server TX has committed; if
+/// Redis is briefly unavailable the blob will TTL out within an
+/// hour anyway.
+pub(super) async fn delete_wizard_credential(state: &AppState, wizard_session_id: &str) {
+    let _: Result<Option<String>, _> = fred::interfaces::KeysInterface::getdel(
+        &state.redis,
+        wizard_credential_redis_key(wizard_session_id),
+    )
+    .await;
 }
 
 pub(super) struct PoppedWizardCredential {

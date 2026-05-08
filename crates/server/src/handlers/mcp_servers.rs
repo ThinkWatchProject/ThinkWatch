@@ -372,15 +372,15 @@ pub async fn create_server(
         ));
     }
 
-    // Pop the wizard credential up front (outside the TX) — a Redis
-    // GETDEL of a missing key returns None which we treat as 400.
-    // Keeping it outside the TX matches what `paste_shared_static_token`
-    // already does and avoids holding a Postgres lock while talking
-    // to Redis.
+    // Peek (don't pop) the wizard credential up front so a TX
+    // rollback later doesn't destroy the admin's pending credential.
+    // The blob is consumed via `delete_wizard_credential` only after
+    // the TX commits successfully. Network call is outside the TX
+    // to avoid holding a Postgres lock while talking to Redis.
     let wizard_cred = match req.wizard_session_id.as_deref() {
         Some(id) => {
-            let popped = super::mcp_oauth::pop_wizard_credential(&state, id).await?;
-            Some(popped.ok_or_else(|| {
+            let peeked = super::mcp_oauth::peek_wizard_credential(&state, id).await?;
+            Some(peeked.ok_or_else(|| {
                 AppError::BadRequest(
                     "Wizard credential blob not found — the OAuth dance may have timed out. \
                      Re-run authorize from the wizard."
@@ -478,6 +478,15 @@ pub async fn create_server(
 
     tx.commit().await?;
 
+    // The wizard credential has now been transferred to
+    // `mcp_server_shared_credentials` — drop the Redis blob. Best-effort:
+    // even if Redis is briefly unavailable the blob will TTL out.
+    if let Some(id) = req.wizard_session_id.as_deref()
+        && wizard_cred.is_some()
+    {
+        super::mcp_oauth::delete_wizard_credential(&state, id).await;
+    }
+
     // Sync the in-memory MCP registry so the gateway can route to the new
     // server immediately, without a restart. The CB is also pre-registered
     // so the dashboard upstream-health panel reflects it on next snapshot.
@@ -492,9 +501,34 @@ pub async fn create_server(
         state.mcp_circuit_breakers.register(&server.name).await;
     }
 
-    // Kick off tool discovery in the background — adding a server in the
-    // UI should not block on a slow upstream tools/list, but the metadata
-    // should arrive shortly after so the admin sees its tools.
+    // Kick off tool discovery in the background — adding a server in
+    // the UI should not block on a slow upstream tools/list, but the
+    // metadata should arrive shortly after so the admin sees its
+    // tools. For admin_shared servers that already have a bearer
+    // (either pasted as `shared_static_token` or transferred from a
+    // completed wizard OAuth dance), use the shared bearer so the
+    // upstream actually returns tools instead of 401-ing on the
+    // anonymous probe.
+    let shared_discovery_bearer: Option<String> = if credential_owner == "admin_shared" {
+        if let Some(plain) = req.shared_static_token.as_deref().filter(|s| !s.is_empty()) {
+            Some(plain.to_string())
+        } else if let Some(cred) = &wizard_cred {
+            // Decrypt the access token we just stored — the
+            // encryption key handle is already parsed above.
+            let key =
+                think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
+                    .map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("encryption key error: {e}"))
+                    })?;
+            think_watch_common::crypto::decrypt(&cred.access_token_encrypted, &key)
+                .ok()
+                .and_then(|b| String::from_utf8(b).ok())
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     {
         let db = state.db.clone();
         let key = state.config.encryption_key.clone();
@@ -503,9 +537,26 @@ pub async fn create_server(
         let server = server.clone();
         let server_id = server.id;
         let db_for_err = state.db.clone();
+        let bearer = shared_discovery_bearer;
         tokio::spawn(async move {
             use crate::mcp_runtime::SystemDiscoveryOutcome;
-            match crate::mcp_runtime::discover_and_persist_tools(&db, &http, &server).await {
+            // Auth-aware discovery when we have an admin_shared bearer;
+            // anonymous probe otherwise (the historical default).
+            let outcome = match bearer.as_deref() {
+                Some(token) => {
+                    let header_value = server.auth_value_template.replace("{{token}}", token);
+                    let auth = (server.auth_header_name.as_str(), header_value.as_str());
+                    crate::mcp_runtime::discover_and_persist_tools_with_auth(
+                        &db,
+                        &http,
+                        &server,
+                        Some(auth),
+                    )
+                    .await
+                }
+                None => crate::mcp_runtime::discover_and_persist_tools(&db, &http, &server).await,
+            };
+            match outcome {
                 SystemDiscoveryOutcome::Tools(n) => {
                     tracing::info!(
                         mcp_server = %server.name,
