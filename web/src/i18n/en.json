@@ -594,8 +594,9 @@
     "editServer": "Edit MCP Server",
     "editDescription": "Update MCP server settings.",
     "edit": {
-      "modeImmutableHint": "Auth mode is fixed; delete + recreate to change.",
-      "clientSecretRotateHint": "Leave the OAuth client_secret blank to keep the current value. Paste a new one only if you actually want to rotate — saving with a new secret revokes the old one immediately."
+      "clientSecretRotateHint": "Leave the OAuth client_secret blank to keep the current value. Paste a new one only if you actually want to rotate — saving with a new secret revokes the old one immediately.",
+      "authShapeTitle": "Authentication shape",
+      "authShapeChangeWarning": "Changing the auth shape will purge all credentials of the previous shape (per-user rows AND any shared credential) when you save. Callers will need to re-authorize."
     },
     "testFailedBlocking": "Connection test failed: {{msg}}. Fix the issue and try again.",
     "displayLabel": "Display label",

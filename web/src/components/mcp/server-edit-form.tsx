@@ -10,8 +10,6 @@ import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { apiPatch, apiPost } from '@/lib/api';
 import { sanitizePrefixInput } from '@/lib/prefix-utils';
-import { AuthModeBadge } from './auth-mode-badge';
-import { deriveAuthMode, type AuthMode } from './auth-mode-utils';
 import { AuthHeaderFieldset, type AuthHeaderFields } from './auth-header-fieldset';
 import { SharedCredentialPanel } from './shared-credential-panel';
 import {
@@ -35,12 +33,11 @@ export interface McpServerForEdit {
   oauth_userinfo_endpoint: string | null;
   oauth_client_id: string | null;
   oauth_scopes: string[];
-  /** Single-valued auth shape — `'anonymous'`, `'oauth'`, or `'static'`. */
-  auth_shape: 'anonymous' | 'oauth' | 'static';
+  auth_shape: AuthShape;
   static_token_help_url: string | null;
   auth_header_name: string;
   auth_value_template: string;
-  credential_owner: 'per_user' | 'admin_shared';
+  credential_owner: CredentialOwner;
   config_json?: { custom_headers?: Record<string, string>; cache_ttl_secs?: number };
 }
 
@@ -50,17 +47,30 @@ interface ServerEditFormProps {
   onCancel: () => void;
 }
 
+type AuthShape = 'anonymous' | 'oauth' | 'static';
 type CredentialOwner = 'per_user' | 'admin_shared';
 
+/**
+ * Edit form mirrors the new-server wizard's three-axis model:
+ *   - auth_shape (anonymous / oauth / static) — single radio at the top
+ *   - credential_owner (per_user / admin_shared) — only when auth_shape ≠ anonymous
+ *   - auth_header (header_name + value_template) — only when auth_shape ≠ anonymous
+ *
+ * Custom headers + cache TTL are universal — they apply regardless of
+ * auth shape, so they live below the shape-specific block. This is
+ * the difference from the previous edit form, which gated custom
+ * headers on `mode === 'direct'` and silently denied them to OAuth /
+ * static servers that needed identity templates.
+ */
 export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProps) {
   const { t } = useTranslation();
-  const [mode, setMode] = useState<AuthMode>(() => deriveAuthMode(server));
 
   const [name, setName] = useState(server.name);
   const [displayLabel, setDisplayLabel] = useState(server.display_label ?? '');
   const [namespacePrefix, setNamespacePrefix] = useState(server.namespace_prefix ?? '');
   const [description, setDescription] = useState(server.description ?? '');
   const [endpointUrl, setEndpointUrl] = useState(server.endpoint_url);
+  const [authShape, setAuthShape] = useState<AuthShape>(server.auth_shape);
   const [oauth, setOauth] = useState<OAuthFields>(() => oauthFromServer(server));
   const [staticTokenHelpUrl, setStaticTokenHelpUrl] = useState(server.static_token_help_url ?? '');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>(
@@ -80,12 +90,12 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
 
   // Reset state if a different server is edited without unmounting.
   useEffect(() => {
-    setMode(deriveAuthMode(server));
     setName(server.name);
     setDisplayLabel(server.display_label ?? '');
     setNamespacePrefix(server.namespace_prefix ?? '');
     setDescription(server.description ?? '');
     setEndpointUrl(server.endpoint_url);
+    setAuthShape(server.auth_shape);
     setOauth(oauthFromServer(server));
     setStaticTokenHelpUrl(server.static_token_help_url ?? '');
     setCustomHeaders(Object.entries(server.config_json?.custom_headers ?? {}));
@@ -123,6 +133,11 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
         return;
       }
 
+      // OAuth client_secret is rotated only when the user typed
+      // something into the password input — empty stays "keep
+      // current". Only send OAuth fields when the new auth_shape is
+      // actually OAuth; for transitions to static / anonymous the
+      // backend will clear them.
       const includeSecret = oauth.clientSecret.length > 0;
       await apiPatch(`/api/mcp/servers/${server.id}`, {
         name,
@@ -130,11 +145,10 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
         namespace_prefix: namespacePrefix || undefined,
         description,
         endpoint_url: endpointUrl,
-        ...(mode === 'oauth' ? oauthPayload(oauth, includeSecret) : {}),
-        auth_shape: server.auth_shape,
-        static_token_help_url: server.auth_shape === 'static'
-          ? staticTokenHelpUrl || null
-          : null,
+        auth_shape: authShape,
+        ...(authShape === 'oauth' ? oauthPayload(oauth, includeSecret) : {}),
+        static_token_help_url:
+          authShape === 'static' ? staticTokenHelpUrl || null : null,
         custom_headers: headers,
         cache_ttl_secs: cacheTtl ? Number(cacheTtl) : undefined,
         auth_header_name: authHeader.headerName,
@@ -149,15 +163,15 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
     }
   };
 
+  const showOAuth = authShape === 'oauth';
+  const showStatic = authShape === 'static';
+  const showCredOwner = authShape !== 'anonymous';
+  const authShapeChanged = authShape !== server.auth_shape;
+  const switchingToAdminShared =
+    credentialOwner === 'admin_shared' && server.credential_owner !== 'admin_shared';
+
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
-        <AuthModeBadge mode={mode} />
-        <p className="text-xs text-muted-foreground">
-          {t('mcpServers.edit.modeImmutableHint')}
-        </p>
-      </div>
-
       {error && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
@@ -165,6 +179,7 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
         </Alert>
       )}
 
+      {/* ── identity ─────────────────────────────────────────── */}
       <div className="space-y-2">
         <Label htmlFor="edit-mcp-name">{t('common.name')}</Label>
         <Input
@@ -212,11 +227,50 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
         />
       </div>
 
-      {mode === 'oauth' && (
+      {/* ── auth shape ───────────────────────────────────────── */}
+      <div className="space-y-2 rounded-md border p-3">
+        <Label className="text-sm font-medium">
+          {t('mcpServers.edit.authShapeTitle')}
+        </Label>
+        <RadioGroup
+          value={authShape}
+          onValueChange={(v) => setAuthShape(v as AuthShape)}
+          className="space-y-1.5 pt-1"
+        >
+          <ShapeRadio
+            id="anonymous"
+            value="anonymous"
+            label={t('mcpServers.wizard.shape.anonymousTitle')}
+            hint={t('mcpServers.wizard.shape.anonymousHint')}
+            selected={authShape === 'anonymous'}
+          />
+          <ShapeRadio
+            id="oauth"
+            value="oauth"
+            label={t('mcpServers.wizard.shape.oauthTitle')}
+            hint={t('mcpServers.wizard.shape.oauthHint')}
+            selected={authShape === 'oauth'}
+          />
+          <ShapeRadio
+            id="static"
+            value="static"
+            label={t('mcpServers.wizard.shape.staticTitle')}
+            hint={t('mcpServers.wizard.shape.staticHint')}
+            selected={authShape === 'static'}
+          />
+        </RadioGroup>
+        {authShapeChanged && (
+          <Alert className="border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200 [&_svg]:text-amber-600 dark:[&_svg]:text-amber-300">
+            <AlertCircle className="h-4 w-4" />
+            <AlertDescription className="text-xs">
+              {t('mcpServers.edit.authShapeChangeWarning')}
+            </AlertDescription>
+          </Alert>
+        )}
+      </div>
+
+      {showOAuth && (
         <>
-          {/* Client_secret rotation foot-gun: the password input is
-              always rendered empty, and on save we treat
-              `length > 0` as "rotate" / `length === 0` as "keep". */}
           <Alert className="border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200 [&_svg]:text-amber-600 dark:[&_svg]:text-amber-300">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription className="text-xs">
@@ -232,7 +286,7 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
         </>
       )}
 
-      {mode === 'static' && (
+      {showStatic && (
         <div className="space-y-2">
           <Label htmlFor="edit-static-help">{t('mcpServers.wizard.staticHelpUrl')}</Label>
           <Input
@@ -246,23 +300,15 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
         </div>
       )}
 
-      {mode === 'direct' && (
+      {/* ── auth header injection ────────────────────────────── */}
+      {(showOAuth || showStatic) && (
         <div className="space-y-2">
-          <Label>{t('providers.customHeaders')}</Label>
-          <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
-          <HeaderEditor
-            headers={customHeaders}
-            onChange={setCustomHeaders}
-            keyPlaceholder="X-Custom-Header"
-            presets={[
-              { label: t('mcpServers.presetUserId'), header: ['X-User-Id', '{{user_id}}'] },
-              { label: t('mcpServers.presetUserEmail'), header: ['X-User-Email', '{{user_email}}'] },
-            ]}
-          />
+          <AuthHeaderFieldset value={authHeader} onChange={setAuthHeader} />
         </div>
       )}
 
-      {(mode === 'oauth' || mode === 'static') && (
+      {/* ── credential ownership ─────────────────────────────── */}
+      {showCredOwner && (
         <div className="space-y-2 rounded-md border p-3">
           <Label className="text-sm font-medium">
             {t('mcpServers.credentialOwner.title')}
@@ -298,31 +344,45 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
               </Label>
             </div>
           </RadioGroup>
-          {credentialOwner === 'admin_shared' &&
-            server.credential_owner !== 'admin_shared' && (
-              <p className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
-                {t('mcpServers.credentialOwner.switchWarning')}
-              </p>
-            )}
+          {switchingToAdminShared && (
+            <p className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+              {t('mcpServers.credentialOwner.switchWarning')}
+            </p>
+          )}
         </div>
       )}
 
-      {/* Shared-credential management — only meaningful once the server
-          is *already* in admin_shared mode (after a save). */}
-      {server.credential_owner === 'admin_shared' && (
-        <SharedCredentialPanel
-          serverId={server.id}
-          authShape={server.auth_shape}
-          authHeaderName={server.auth_header_name}
-          authValueTemplate={server.auth_value_template}
+      {/* Shared-credential panel — only meaningful once the server is
+          *already* admin_shared (post-save). Mid-edit transitions
+          haven't been persisted yet, so the panel reads stale state
+          if we render based on the in-flight radio value. */}
+      {server.credential_owner === 'admin_shared' &&
+        server.auth_shape !== 'anonymous' && (
+          <SharedCredentialPanel
+            serverId={server.id}
+            authShape={server.auth_shape}
+            authHeaderName={server.auth_header_name}
+            authValueTemplate={server.auth_value_template}
+          />
+        )}
+
+      {/* ── custom headers — apply to ALL auth shapes ────────── */}
+      <div className="space-y-2 rounded-md border p-3">
+        <Label className="text-sm font-medium">{t('providers.customHeaders')}</Label>
+        <p className="text-xs text-muted-foreground">{t('providers.customHeadersDesc')}</p>
+        <HeaderEditor
+          headers={customHeaders}
+          onChange={setCustomHeaders}
+          keyPlaceholder="X-Custom-Header"
+          presets={[
+            { label: t('mcpServers.presetUserId'), header: ['X-User-Id', '{{user_id}}'] },
+            {
+              label: t('mcpServers.presetUserEmail'),
+              header: ['X-User-Email', '{{user_email}}'],
+            },
+          ]}
         />
-      )}
-
-      {(mode === 'oauth' || mode === 'static') && (
-        <div className="space-y-2">
-          <AuthHeaderFieldset value={authHeader} onChange={setAuthHeader} />
-        </div>
-      )}
+      </div>
 
       <div className="space-y-2">
         <Label>{t('mcpServers.cacheTtlLabel')}</Label>
@@ -338,11 +398,40 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
       </div>
 
       <DialogFooter>
-        <Button variant="outline" onClick={onCancel}>{t('common.cancel')}</Button>
+        <Button variant="outline" onClick={onCancel}>
+          {t('common.cancel')}
+        </Button>
         <Button onClick={handleSave} disabled={saving}>
           {saving ? t('common.loading') : t('common.save')}
         </Button>
       </DialogFooter>
+    </div>
+  );
+}
+
+function ShapeRadio({
+  id,
+  value,
+  label,
+  hint,
+  selected,
+}: {
+  id: string;
+  value: AuthShape;
+  label: string;
+  hint: string;
+  selected: boolean;
+}) {
+  return (
+    <div className="flex items-start gap-2">
+      <RadioGroupItem id={`edit-shape-${id}`} value={value} className="mt-0.5" />
+      <Label
+        htmlFor={`edit-shape-${id}`}
+        className={`cursor-pointer space-y-0.5 ${selected ? 'text-foreground' : ''}`}
+      >
+        <div className="text-sm font-medium">{label}</div>
+        <div className="text-xs font-normal text-muted-foreground">{hint}</div>
+      </Label>
     </div>
   );
 }

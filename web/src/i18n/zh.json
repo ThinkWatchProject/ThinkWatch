@@ -594,8 +594,9 @@
     "editServer": "编辑 MCP 服务器",
     "editDescription": "更新 MCP 服务器设置。",
     "edit": {
-      "modeImmutableHint": "认证模式不可改；如需切换请删除后重建。",
-      "clientSecretRotateHint": "OAuth client_secret 字段留空 = 保留原值。只在确实需要轮换时才粘贴新值 — 保存后旧 secret 会立刻失效。"
+      "clientSecretRotateHint": "OAuth client_secret 字段留空 = 保留原值。只在确实需要轮换时才粘贴新值 — 保存后旧 secret 会立刻失效。",
+      "authShapeTitle": "认证形态",
+      "authShapeChangeWarning": "修改认证形态后保存，会一并删除旧形态下的所有凭据（每用户凭据 + 共享凭据）。调用方需要重新授权。"
     },
     "testFailedBlocking": "连接测试失败：{{msg}}。请修复后重试。",
     "displayLabel": "显示名称",
