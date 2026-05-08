@@ -55,7 +55,6 @@
     "unknown": "Unknown",
     "error": "Error",
     "revoke": "Revoke",
-    "copy": "Copy",
     "copied": "Copied!",
     "done": "Done",
     "edit": "Edit",
@@ -171,8 +170,6 @@
     "connect": "Connect",
     "addAccount": "Add account",
     "useToken": "Paste a token",
-    "useTokenInstead": "Paste a static token instead",
-    "useOauthInstead": "Use OAuth instead",
     "default": "default",
     "setDefault": "Set as default",
     "revoke": "Revoke",
@@ -188,6 +185,7 @@
     "accountLabelHint": "Free-form name to tell your accounts apart (e.g. work, personal). Must be unique per server.",
     "labelRequired": "Account label is required",
     "tokenLabel": "Token",
+    "headerPreviewLabel": "Will be sent as",
     "tokenRequired": "Token is required",
     "tokenSaved": "Token saved.",
     "tokenSavedAndVerified": "Token saved and verified.",
@@ -590,8 +588,6 @@
     "deleteConfirm": "Delete this MCP server? Every user's saved credentials (OAuth tokens, static tokens, account labels) for this server will also be removed and any AI agents currently using its tools will start failing immediately. This cannot be undone.",
     "noServers": "No MCP servers registered yet.",
     "noServersHint": "Register a server to start using MCP tools.",
-    "dialogTitle": "Register MCP Server",
-    "dialogDescription": "Connect a new MCP server to the gateway.",
     "registering": "Registering...",
     "transport": "Transport",
     "authMode": "Auth",
@@ -602,7 +598,6 @@
       "clientSecretRotateHint": "Leave the OAuth client_secret blank to keep the current value. Paste a new one only if you actually want to rotate — saving with a new secret revokes the old one immediately."
     },
     "testFailedBlocking": "Connection test failed: {{msg}}. Fix the issue and try again.",
-    "mustTestFirst": "Run Test Connection first and confirm the server responds with a tool list.",
     "displayLabel": "Display label",
     "displayLabelPlaceholder": "e.g. GitHub (Acme prod)",
     "displayLabelHint": "Human-friendly label shown to users on the My Connections page and in the tool catalog. Falls back to the server name when blank — useful when you have two installs of the same template.",
@@ -628,60 +623,110 @@
       "discoverFailed": "Discovery failed",
       "setIssuerFirst": "Set issuer first",
       "secretKeepCurrent": "Leave empty to keep current",
-      "probeTitle": "Auto-configure OAuth from the endpoint",
-      "probeHint": "Probes the endpoint for the issuer + OAuth endpoints, and registers a client when the upstream supports it.",
-      "probeAction": " Auto-detect",
-      "probing": " Detecting…",
-      "probeSuccess": "Auto-configured. Proceed to test.",
-      "probePartial": "OAuth endpoints filled in. Register an OAuth app upstream (e.g. GitHub Developer Settings) and paste the Client ID / Secret below.",
-      "probeFailure": "Auto-detection didn't work. Fill in the fields below manually.",
-      "probeDetails": "Show probe details",
-      "partialNextSteps": "Three more steps:",
-      "partialStepCopyUri": "Copy the callback URL below:",
-      "partialStepRegister": "Create an OAuth app at {{issuer}} and paste the callback URL into it.",
-      "partialStepRegisterGeneric": "Create an OAuth app in the upstream's developer console and paste the callback URL into it.",
-      "partialStepPasteIdOnly": "Paste the resulting Client ID below (this upstream doesn't need a Client Secret).",
-      "partialStepPasteIdSecret": "Paste the resulting Client ID and Client Secret below.",
       "publicClientNote": "Upstream advertises public-client support (PKCE-only) — no Client Secret needed."
     },
     "wizard": {
-      "step1Title": "Auth mode",
-      "step2Title": "Connect",
-      "step3Title": "Test & save",
-      "step1Hint": "Choose how this MCP server authenticates end users.",
-      "lookingForKnown": "Looking for a known MCP?",
-      "browseStore": "Browse the store →",
-      "allowStaticFallback": "Allow users to paste their own static token (PAT / API key)",
-      "staticHelpUrl": "Help URL (where users get their token)",
-      "staticHelpUrlHint": "Shown to users on the My Connections page so they know where to issue their token.",
-      "advancedSection": "Advanced (cache TTL, custom headers)",
-      "advancedSectionTtlOnly": "Advanced (cache TTL)",
-      "toolsDiscovered": "tools discovered",
-      "testAndSave": "Next: test connection",
-      "testing": "Testing connection…",
-      "retryTest": "Retry test",
-      "requiresAuthTitle": "Reachable — auth required",
-      "requiresAuthHint": "The upstream returned 401/403 to the anonymous probe. That's expected for OAuth / static-token MCPs — per-user auth will be validated when each user connects from the My Connections page.",
-      "savedReady": "Server registered. Tools are reachable now — discovery is running in the background.",
-      "savedNextConnections": "Server registered. Have users authorize their accounts on the My Connections page before invoking tools.",
-      "modes": {
-        "oauth": {
-          "title": "OAuth login",
-          "description": "Users sign in with GitHub / Google / company SSO before invoking tools."
-        },
-        "static": {
-          "title": "Static token (PAT / API key)",
-          "description": "Each user pastes their own personal access token once on the My Connections page."
-        },
-        "direct": {
-          "title": "No authentication",
-          "description": "Users invoke tools without any setup; optionally forward custom headers to pass caller identity upstream."
-        }
+      "pageTitle": "Register MCP server",
+      "pageHint": "Walk through four steps: connect, decide how it authenticates, decide who supplies the credential, and confirm.",
+      "stepLabels": {
+        "source": "Connect",
+        "auth": "Auth shape",
+        "owner": "Credential",
+        "metadata": "Confirm"
       },
+      "probing": "Probing…",
+      "urlHint": "Endpoint URL of the MCP server. We probe it once with an anonymous tools/list — auth shape is auto-detected from the response.",
+      "toolsDiscovered": "Tools discovered",
+      "shape": {
+        "anonymousTitle": "Anonymous",
+        "anonymousHint": "Public service — no credentials forwarded.",
+        "oauthTitle": "OAuth 2.0",
+        "oauthHint": "Users (or an admin) authorize via the upstream's OAuth flow.",
+        "staticTitle": "Static token (PAT / API key)",
+        "staticHint": "Token is sent under a configurable header. Pick a preset for X-API-Key, api-key, etc.",
+        "oauthSection": "OAuth client configuration",
+        "staticSection": "HTTP header injection"
+      },
+      "owner": {
+        "perUserTitle": "Each user authorizes themselves",
+        "perUserHint": "Users connect via My Connections page. Standard per-user audit and independent revocation.",
+        "perUserPro1": "Each user audited and rate-limited independently",
+        "perUserPro2": "Tokens never shared between users",
+        "sharedTitle": "Configure once, all users share",
+        "sharedHint": "One admin-supplied credential serves every caller. Audit/quota still per caller.",
+        "sharedPro1": "Users get zero-config access",
+        "sharedCon1": "Token leak affects everyone — rotate carefully"
+      },
+      "shared": {
+        "checkingResume": "Confirming OAuth credential from upstream callback…",
+        "oauthDone": "OAuth authorized — credential will be installed when you save",
+        "authorizeOAuthBtn": "Authorize as service account",
+        "authorizeOAuthHint": "You'll be redirected to the upstream provider, then back to this wizard with the credential staged.",
+        "oauthFieldsMissing": "Token endpoint and Client ID are required before authorize.",
+        "pasteTokenLabel": "Paste a PAT / API key",
+        "pastePlaceholder": "ghp_… or other token",
+        "needCredentialBeforeNext": "Authorize OAuth or paste a token before continuing"
+      },
+      "staticHelpUrl": "Help URL (where users / admins generate the token)",
+      "staticHelpUrlHint": "Shown next to the paste-token UI so users know where to issue their token.",
+      "advancedSection": "Advanced (custom headers, cache TTL)",
+      "savedReady": "Server registered. It's anonymous — tools/list ran on save.",
+      "savedNextConnections": "Server registered. Users can authorize their accounts at My Connections.",
+      "savedSharedReady": "Server registered with shared credential. Tools are reachable now — discovery is running in the background.",
       "errors": {
-        "nameRequired": "Name is required.",
-        "endpointRequired": "Endpoint URL is required.",
-        "issuerRequired": "OAuth issuer is required for OAuth mode."
+        "endpointRequired": "Endpoint URL is required."
+      },
+      "requiresAuthHint": "The upstream returned 401/403 to the anonymous probe. Expected for OAuth / static-token MCPs — per-user auth runs at first connect.",
+      "requiresAuthTitle": "Reachable — auth required",
+      "retryTest": "Retry test",
+      "testing": "Testing connection…"
+    },
+    "credentialOwner": {
+      "title": "Credential ownership",
+      "hint": "Decide who supplies the upstream credential. Per-user keeps each caller responsible for their own access; admin-shared lets one admin-configured credential serve every caller.",
+      "perUser": "User-supplied (default)",
+      "perUserHint": "Each user authorizes or pastes their own token in My Connections. Per-user audit and revocation.",
+      "adminShared": "Admin-supplied (shared)",
+      "adminSharedHint": "An admin configures one credential here; every caller uses it. Caller identity is still recorded for audit and quotas.",
+      "switchWarning": "Switching to admin-shared will delete every existing per-user credential and tool catalog for this server."
+    },
+    "authHeader": {
+      "title": "HTTP auth header",
+      "hint": "How the resolved upstream credential is sent. Defaults match Bearer; override for upstreams using X-API-Key, api-key, etc. The template only supports `{{token}}`.",
+      "headerName": "Header name",
+      "valueTemplate": "Value template",
+      "previewLabel": "Will be sent as"
+    },
+    "sharedCred": {
+      "title": "Shared credential",
+      "hint": "One credential reused for every caller. Authorize OAuth or paste a PAT/API key.",
+      "configuredAs": "Configured ({{type}})",
+      "notConfigured": "Not yet configured. Authorize or paste a token below.",
+      "upstreamSubject": "Upstream identity",
+      "expiresAt": "Expires",
+      "authorizeOAuth": "Authorize OAuth (admin)",
+      "reauthorizeOAuth": "Re-authorize OAuth",
+      "revoke": "Revoke",
+      "revokeConfirm": "Revoke the shared credential? Every caller will immediately lose access to this server until you configure a new one.",
+      "revoked": "Shared credential revoked.",
+      "pasteTokenLabel": "Paste a PAT / API key",
+      "pastePlaceholder": "ghp_… or other token",
+      "savePasted": "Save",
+      "tokenSaved": "Shared token saved. Tool catalog refreshing in the background.",
+      "headerPreview": "Will be sent as"
+    },
+    "authModeBadge": {
+      "oauth": {
+        "title": "OAuth",
+        "description": "Users sign in with the upstream OAuth provider; tokens are stored per user."
+      },
+      "static": {
+        "title": "Static token",
+        "description": "Users paste a personal access token / API key under My Connections."
+      },
+      "direct": {
+        "title": "Anonymous",
+        "description": "No credential is forwarded — public service or shared via custom headers."
       }
     }
   },

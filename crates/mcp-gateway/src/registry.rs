@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
-use crate::user_token::OAuthClientCfg;
+use crate::user_token::{AuthShape, CredentialOwner, OAuthClientCfg, ServerAuthCfg};
 
 /// Information about a single tool exposed by an MCP server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,10 +53,20 @@ pub struct RegisteredServer {
     /// avoid leaking the client_secret through any debug surface.
     #[serde(skip)]
     pub oauth_cfg: Option<OAuthClientCfg>,
-    /// Whether users may paste their own static PAT / API key in
-    /// `/connections` for this server.
+    /// Single-valued authentication shape — see [`AuthShape`].
     #[serde(skip)]
-    pub allow_static_token: bool,
+    pub auth_shape: AuthShape,
+    /// Where the upstream credential lives — drives the resolver's
+    /// storage backend choice. See [`CredentialOwner`].
+    #[serde(skip)]
+    pub credential_owner: CredentialOwner,
+    /// HTTP header name + template under which the resolved token is
+    /// injected into upstream requests. Defaults: `Authorization` /
+    /// `Bearer {{token}}`.
+    #[serde(skip)]
+    pub auth_header_name: String,
+    #[serde(skip)]
+    pub auth_value_template: String,
     /// Custom headers attached to every upstream request. Values may
     /// contain `{{user_id}}` and `{{user_email}}` template variables
     /// which are resolved per-request from the caller's identity.
@@ -97,6 +107,20 @@ pub enum ServerCacheScope {
     /// header servers — the upstream sees the caller's own credential
     /// and may return different data per user.
     PerCaller,
+}
+
+impl RegisteredServer {
+    /// Bundle the server-level auth config the resolver needs. Cheap —
+    /// clones a few short strings; called once per request.
+    pub fn auth_cfg(&self) -> ServerAuthCfg {
+        ServerAuthCfg {
+            credential_owner: self.credential_owner,
+            auth_shape: self.auth_shape,
+            oauth_cfg: self.oauth_cfg.clone(),
+            auth_header_name: self.auth_header_name.clone(),
+            auth_value_template: self.auth_value_template.clone(),
+        }
+    }
 }
 
 /// The namespace separator used to prefix tool names with their server name.
@@ -246,7 +270,10 @@ mod tests {
             status: ServerStatus::Connected,
             last_health_check: None,
             oauth_cfg: None,
-            allow_static_token: false,
+            auth_shape: AuthShape::Anonymous,
+            credential_owner: CredentialOwner::PerUser,
+            auth_header_name: "Authorization".to_string(),
+            auth_value_template: "Bearer {{token}}".to_string(),
             custom_headers: Vec::new(),
             cache_ttl_secs: None,
             cache_scope: ServerCacheScope::Global,

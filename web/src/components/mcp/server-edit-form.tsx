@@ -3,15 +3,17 @@ import { useTranslation } from 'react-i18next';
 import { AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { Checkbox } from '@/components/ui/checkbox';
 import { DialogFooter } from '@/components/ui/dialog';
 import { HeaderEditor } from '@/components/header-editor';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { apiPatch, apiPost } from '@/lib/api';
 import { sanitizePrefixInput } from '@/lib/prefix-utils';
 import { AuthModeBadge } from './auth-mode-badge';
 import { deriveAuthMode, type AuthMode } from './auth-mode-utils';
+import { AuthHeaderFieldset, type AuthHeaderFields } from './auth-header-fieldset';
+import { SharedCredentialPanel } from './shared-credential-panel';
 import {
   oauthFromServer,
   oauthPayload,
@@ -33,8 +35,12 @@ export interface McpServerForEdit {
   oauth_userinfo_endpoint: string | null;
   oauth_client_id: string | null;
   oauth_scopes: string[];
-  allow_static_token: boolean;
+  /** Single-valued auth shape — `'anonymous'`, `'oauth'`, or `'static'`. */
+  auth_shape: 'anonymous' | 'oauth' | 'static';
   static_token_help_url: string | null;
+  auth_header_name: string;
+  auth_value_template: string;
+  credential_owner: 'per_user' | 'admin_shared';
   config_json?: { custom_headers?: Record<string, string>; cache_ttl_secs?: number };
 }
 
@@ -44,12 +50,10 @@ interface ServerEditFormProps {
   onCancel: () => void;
 }
 
+type CredentialOwner = 'per_user' | 'admin_shared';
+
 export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProps) {
   const { t } = useTranslation();
-  // Derived once per `server.id` — the form lets the operator edit
-  // mode-specific fields, but switching auth mode itself isn't allowed
-  // from this dialog (delete + recreate to change mode). The badge +
-  // conditional rendering reflect what the *server currently is*.
   const [mode, setMode] = useState<AuthMode>(() => deriveAuthMode(server));
 
   const [name, setName] = useState(server.name);
@@ -58,7 +62,6 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
   const [description, setDescription] = useState(server.description ?? '');
   const [endpointUrl, setEndpointUrl] = useState(server.endpoint_url);
   const [oauth, setOauth] = useState<OAuthFields>(() => oauthFromServer(server));
-  const [allowStaticToken, setAllowStaticToken] = useState(server.allow_static_token);
   const [staticTokenHelpUrl, setStaticTokenHelpUrl] = useState(server.static_token_help_url ?? '');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>(
     Object.entries(server.config_json?.custom_headers ?? {}),
@@ -66,12 +69,16 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
   const [cacheTtl, setCacheTtl] = useState(
     server.config_json?.cache_ttl_secs != null ? String(server.config_json.cache_ttl_secs) : '',
   );
+  const [credentialOwner, setCredentialOwner] = useState<CredentialOwner>(server.credential_owner);
+  const [authHeader, setAuthHeader] = useState<AuthHeaderFields>({
+    headerName: server.auth_header_name,
+    valueTemplate: server.auth_value_template,
+  });
 
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
 
-  // Reset state if a different server is edited without unmounting (e.g.
-  // the parent reuses the dialog for a sequence of edits).
+  // Reset state if a different server is edited without unmounting.
   useEffect(() => {
     setMode(deriveAuthMode(server));
     setName(server.name);
@@ -80,12 +87,16 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
     setDescription(server.description ?? '');
     setEndpointUrl(server.endpoint_url);
     setOauth(oauthFromServer(server));
-    setAllowStaticToken(server.allow_static_token);
     setStaticTokenHelpUrl(server.static_token_help_url ?? '');
     setCustomHeaders(Object.entries(server.config_json?.custom_headers ?? {}));
     setCacheTtl(
       server.config_json?.cache_ttl_secs != null ? String(server.config_json.cache_ttl_secs) : '',
     );
+    setCredentialOwner(server.credential_owner);
+    setAuthHeader({
+      headerName: server.auth_header_name,
+      valueTemplate: server.auth_value_template,
+    });
     setError('');
   }, [server]);
 
@@ -107,16 +118,11 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
         endpoint_url: endpointUrl,
         custom_headers: headers,
       });
-      // The /test endpoint already treats 401/403 as soft success
-      // (`success=true`) for anonymous probes, so we don't need a
-      // separate requires_auth check here.
       if (!test.success) {
         setError(t('mcpServers.testFailedBlocking', { msg: test.message }));
         return;
       }
 
-      // Only include oauth_client_secret in PATCH when the user typed a
-      // new one — empty string means "no change".
       const includeSecret = oauth.clientSecret.length > 0;
       await apiPatch(`/api/mcp/servers/${server.id}`, {
         name,
@@ -125,10 +131,15 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
         description,
         endpoint_url: endpointUrl,
         ...(mode === 'oauth' ? oauthPayload(oauth, includeSecret) : {}),
-        allow_static_token: allowStaticToken,
-        static_token_help_url: allowStaticToken ? (staticTokenHelpUrl || null) : null,
+        auth_shape: server.auth_shape,
+        static_token_help_url: server.auth_shape === 'static'
+          ? staticTokenHelpUrl || null
+          : null,
         custom_headers: headers,
         cache_ttl_secs: cacheTtl ? Number(cacheTtl) : undefined,
+        auth_header_name: authHeader.headerName,
+        auth_value_template: authHeader.valueTemplate,
+        credential_owner: credentialOwner,
       });
       onSaved();
     } catch (err) {
@@ -205,11 +216,7 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
         <>
           {/* Client_secret rotation foot-gun: the password input is
               always rendered empty, and on save we treat
-              `length > 0` as "rotate" / `length === 0` as "keep". A
-              user who clicks Save without thinking would clear nothing
-              (correct), but the lack of visual signal makes it easy to
-              miss that "rotate" is also one click away. Banner spells
-              out the contract. */}
+              `length > 0` as "rotate" / `length === 0` as "keep". */}
           <Alert className="border-amber-500/30 bg-amber-500/10 text-amber-900 dark:text-amber-200 [&_svg]:text-amber-600 dark:[&_svg]:text-amber-300">
             <AlertCircle className="h-4 w-4" />
             <AlertDescription className="text-xs">
@@ -222,26 +229,6 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
             secretPlaceholder={t('mcpServers.oauth.secretKeepCurrent')}
             flat
           />
-          <div className="flex items-center gap-2">
-            <Checkbox
-              id="edit-allow-static"
-              checked={allowStaticToken}
-              onCheckedChange={(v) => setAllowStaticToken(v === true)}
-            />
-            <Label htmlFor="edit-allow-static" className="cursor-pointer text-sm">
-              {t('mcpServers.wizard.allowStaticFallback')}
-            </Label>
-          </div>
-          {allowStaticToken && (
-            <div className="space-y-2">
-              <Label htmlFor="edit-static-help">{t('mcpServers.wizard.staticHelpUrl')}</Label>
-              <Input
-                id="edit-static-help"
-                value={staticTokenHelpUrl}
-                onChange={(e) => setStaticTokenHelpUrl(e.target.value)}
-              />
-            </div>
-          )}
         </>
       )}
 
@@ -272,6 +259,68 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
               { label: t('mcpServers.presetUserEmail'), header: ['X-User-Email', '{{user_email}}'] },
             ]}
           />
+        </div>
+      )}
+
+      {(mode === 'oauth' || mode === 'static') && (
+        <div className="space-y-2 rounded-md border p-3">
+          <Label className="text-sm font-medium">
+            {t('mcpServers.credentialOwner.title')}
+          </Label>
+          <p className="text-xs text-muted-foreground">
+            {t('mcpServers.credentialOwner.hint')}
+          </p>
+          <RadioGroup
+            value={credentialOwner}
+            onValueChange={(v) => setCredentialOwner(v as CredentialOwner)}
+            className="space-y-1.5 pt-1"
+          >
+            <div className="flex items-start gap-2">
+              <RadioGroupItem id="edit-owner-per-user" value="per_user" className="mt-0.5" />
+              <Label htmlFor="edit-owner-per-user" className="cursor-pointer space-y-0.5">
+                <div className="text-sm font-medium">
+                  {t('mcpServers.credentialOwner.perUser')}
+                </div>
+                <div className="text-xs font-normal text-muted-foreground">
+                  {t('mcpServers.credentialOwner.perUserHint')}
+                </div>
+              </Label>
+            </div>
+            <div className="flex items-start gap-2">
+              <RadioGroupItem id="edit-owner-shared" value="admin_shared" className="mt-0.5" />
+              <Label htmlFor="edit-owner-shared" className="cursor-pointer space-y-0.5">
+                <div className="text-sm font-medium">
+                  {t('mcpServers.credentialOwner.adminShared')}
+                </div>
+                <div className="text-xs font-normal text-muted-foreground">
+                  {t('mcpServers.credentialOwner.adminSharedHint')}
+                </div>
+              </Label>
+            </div>
+          </RadioGroup>
+          {credentialOwner === 'admin_shared' &&
+            server.credential_owner !== 'admin_shared' && (
+              <p className="rounded bg-amber-50 px-2 py-1 text-xs text-amber-800 dark:bg-amber-950/30 dark:text-amber-300">
+                {t('mcpServers.credentialOwner.switchWarning')}
+              </p>
+            )}
+        </div>
+      )}
+
+      {/* Shared-credential management — only meaningful once the server
+          is *already* in admin_shared mode (after a save). */}
+      {server.credential_owner === 'admin_shared' && (
+        <SharedCredentialPanel
+          serverId={server.id}
+          authShape={server.auth_shape}
+          authHeaderName={server.auth_header_name}
+          authValueTemplate={server.auth_value_template}
+        />
+      )}
+
+      {(mode === 'oauth' || mode === 'static') && (
+        <div className="space-y-2">
+          <AuthHeaderFieldset value={authHeader} onChange={setAuthHeader} />
         </div>
       )}
 

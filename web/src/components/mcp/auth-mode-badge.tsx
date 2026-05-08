@@ -15,8 +15,8 @@ interface AuthModeBadgeProps {
 export function AuthModeBadge({ mode, compact = false, className }: AuthModeBadgeProps) {
   const { t } = useTranslation();
   const Icon = authModeIcon[mode];
-  const title = t(`mcpServers.wizard.modes.${mode}.title`);
-  const description = t(`mcpServers.wizard.modes.${mode}.description`);
+  const title = t(`mcpServers.authModeBadge.${mode}.title`);
+  const description = t(`mcpServers.authModeBadge.${mode}.description`);
 
   if (compact) {
     return (

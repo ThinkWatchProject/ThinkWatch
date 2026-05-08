@@ -55,7 +55,6 @@
     "unknown": "未知",
     "error": "错误",
     "revoke": "撤销",
-    "copy": "复制",
     "copied": "已复制！",
     "done": "完成",
     "edit": "编辑",
@@ -171,8 +170,6 @@
     "connect": "连接",
     "addAccount": "添加账号",
     "useToken": "粘贴 Token",
-    "useTokenInstead": "改用静态 Token",
-    "useOauthInstead": "改用 OAuth",
     "default": "默认",
     "setDefault": "设为默认",
     "revoke": "撤销",
@@ -188,6 +185,7 @@
     "accountLabelHint": "用于区分你不同账号的自定义名字（如 work, personal）。每个 server 唯一。",
     "labelRequired": "请填写账号标签",
     "tokenLabel": "Token",
+    "headerPreviewLabel": "将作为以下形式发送",
     "tokenRequired": "请填写 Token",
     "tokenSaved": "已保存。",
     "tokenSavedAndVerified": "已保存并验证可用。",
@@ -590,8 +588,6 @@
     "deleteConfirm": "删除此 MCP 服务器？所有用户为此服务器保存的凭证（OAuth tokens、静态令牌、account label）都会一并被清除；正在使用其工具的 AI agent 会立即开始失败。此操作不可撤销。",
     "noServers": "尚未注册任何 MCP 服务器。",
     "noServersHint": "注册服务器以开始使用 MCP 工具。",
-    "dialogTitle": "注册 MCP 服务器",
-    "dialogDescription": "连接新的 MCP 服务器到网关。",
     "registering": "注册中...",
     "transport": "传输",
     "authMode": "认证",
@@ -602,7 +598,6 @@
       "clientSecretRotateHint": "OAuth client_secret 字段留空 = 保留原值。只在确实需要轮换时才粘贴新值 — 保存后旧 secret 会立刻失效。"
     },
     "testFailedBlocking": "连接测试失败：{{msg}}。请修复后重试。",
-    "mustTestFirst": "请先点击\"测试连接\"并确认服务器返回工具列表。",
     "displayLabel": "显示名称",
     "displayLabelPlaceholder": "例如 GitHub（Acme 生产）",
     "displayLabelHint": "面向用户的友好名称，显示在「我的连接」页面和工具目录里。留空则回退到服务器 name —— 同一模板装多份时尤其有用。",
@@ -628,60 +623,110 @@
       "discoverFailed": "发现失败",
       "setIssuerFirst": "请先填写 Issuer",
       "secretKeepCurrent": "留空保留原值",
-      "probeTitle": "一键自动配置 OAuth",
-      "probeHint": "从端点 URL 探测 issuer 和各端点，能注册客户端的会自动注册。",
-      "probeAction": " 一键发现",
-      "probing": " 发现中…",
-      "probeSuccess": "已自动配置完成，可直接进入下一步。",
-      "probePartial": "已自动填入 OAuth 端点。请去上游（如 GitHub Developer Settings）注册一个 OAuth 应用，把 Client ID / Secret 填到下面。",
-      "probeFailure": "自动配置没成功，请按下方表单手动填写 OAuth 配置。",
-      "probeDetails": "查看探测详情",
-      "partialNextSteps": "接下来三步：",
-      "partialStepCopyUri": "复制下面的回调 URL：",
-      "partialStepRegister": "去 {{issuer}} 创建一个 OAuth 应用，把回调 URL 填进去。",
-      "partialStepRegisterGeneric": "去上游服务的开发者后台创建一个 OAuth 应用，把回调 URL 填进去。",
-      "partialStepPasteIdOnly": "把得到的 Client ID 粘贴到下方（这个上游不需要 Client Secret）。",
-      "partialStepPasteIdSecret": "把得到的 Client ID 和 Client Secret 粘贴到下方。",
       "publicClientNote": "上游声明支持公共客户端（PKCE-only），无需 Client Secret。"
     },
     "wizard": {
-      "step1Title": "认证模式",
-      "step2Title": "连接信息",
-      "step3Title": "测试并保存",
-      "step1Hint": "选择此 MCP 服务器如何对终端用户进行认证。",
-      "lookingForKnown": "想找已知 MCP？",
-      "browseStore": "去 MCP 商店 →",
-      "allowStaticFallback": "允许用户粘贴自己的静态令牌（PAT / API key）",
-      "staticHelpUrl": "帮助链接（用户从哪获取 token）",
-      "staticHelpUrlHint": "在「我的连接」页面展示给用户，告诉他们去哪签发自己的 token。",
-      "advancedSection": "高级（缓存 TTL、自定义请求头）",
-      "advancedSectionTtlOnly": "高级（缓存 TTL）",
-      "toolsDiscovered": "个工具",
-      "testAndSave": "下一步：测试连接",
-      "testing": "正在测试连接…",
-      "retryTest": "重试",
-      "requiresAuthTitle": "服务器可达 — 需要认证",
-      "requiresAuthHint": "上游对匿名探测返回了 401/403，这对 OAuth / 静态令牌 MCP 来说是预期行为 — 每个用户首次从「我的连接」页面连接时才会验证其认证。",
-      "savedReady": "服务器已注册。工具现已可达，正在后台发现工具列表。",
-      "savedNextConnections": "服务器已注册。请提醒用户去「我的连接」页面授权各自的账户后再调用工具。",
-      "modes": {
-        "oauth": {
-          "title": "OAuth 登录",
-          "description": "用户用 GitHub / Google / 公司 SSO 登录后才能调用工具。"
-        },
-        "static": {
-          "title": "静态令牌（PAT / API key）",
-          "description": "每个用户在「我的连接」页面粘贴一次自己的 token。"
-        },
-        "direct": {
-          "title": "免认证",
-          "description": "用户无需任何操作即可调用工具，可选填自定义请求头转发用户身份。"
-        }
+      "pageTitle": "注册 MCP 服务器",
+      "pageHint": "走完四步：连接、确定如何认证、确定凭据归属、确认。",
+      "stepLabels": {
+        "source": "连接",
+        "auth": "认证形态",
+        "owner": "凭据",
+        "metadata": "确认"
       },
+      "probing": "探测中…",
+      "urlHint": "MCP 服务器端点 URL。我们做一次匿名 tools/list — 自动从响应推导认证形态。",
+      "toolsDiscovered": "已发现工具",
+      "shape": {
+        "anonymousTitle": "匿名",
+        "anonymousHint": "公开服务 — 不转发任何凭据。",
+        "oauthTitle": "OAuth 2.0",
+        "oauthHint": "用户（或管理员）通过上游的 OAuth 流程授权。",
+        "staticTitle": "静态 token（PAT / API key）",
+        "staticHint": "Token 通过可配置的 header 发送。可从 X-API-Key、api-key 等预设中选择。",
+        "oauthSection": "OAuth 客户端配置",
+        "staticSection": "HTTP 请求头注入"
+      },
+      "owner": {
+        "perUserTitle": "用户各自授权",
+        "perUserHint": "用户在「我的连接」页面连接。标准的每用户审计与独立撤销。",
+        "perUserPro1": "每个用户独立审计与限流",
+        "perUserPro2": "Token 永远不在用户间共享",
+        "sharedTitle": "管理员预置一份共享",
+        "sharedHint": "管理员配置一份凭据，所有调用方共用。审计与配额仍按用户计。",
+        "sharedPro1": "用户零配置使用",
+        "sharedCon1": "Token 泄露影响所有人 — 谨慎轮换"
+      },
+      "shared": {
+        "checkingResume": "正在确认上游回调返回的 OAuth 凭据…",
+        "oauthDone": "OAuth 已授权 — 保存时会一并安装凭据",
+        "authorizeOAuthBtn": "以服务账号授权",
+        "authorizeOAuthHint": "你会被重定向到上游提供方，然后带着已就绪的凭据返回向导。",
+        "oauthFieldsMissing": "授权前必须填写 Token endpoint 和 Client ID。",
+        "pasteTokenLabel": "粘贴 PAT / API key",
+        "pastePlaceholder": "ghp_… 或其他 token",
+        "needCredentialBeforeNext": "继续前请授权 OAuth 或粘贴 token"
+      },
+      "staticHelpUrl": "帮助链接（用户/管理员从哪获取 token）",
+      "staticHelpUrlHint": "粘贴 token UI 旁边显示，告知用户去哪签发自己的 token。",
+      "advancedSection": "高级（自定义请求头、缓存 TTL）",
+      "savedReady": "服务器已注册。它是匿名的 — 保存时已运行 tools/list。",
+      "savedNextConnections": "服务器已注册。用户可在「我的连接」页面授权各自的账户。",
+      "savedSharedReady": "服务器已注册（含共享凭据）。工具已可达，正在后台发现工具列表。",
       "errors": {
-        "nameRequired": "请填写名称。",
-        "endpointRequired": "请填写端点 URL。",
-        "issuerRequired": "OAuth 模式必须填写 Issuer。"
+        "endpointRequired": "请填写端点 URL。"
+      },
+      "requiresAuthHint": "上游对匿名探测返回了 401/403 — 这对 OAuth / 静态令牌 MCP 是预期行为，每个用户首次连接时才会真正验证。",
+      "requiresAuthTitle": "可达 — 需要认证",
+      "retryTest": "重试",
+      "testing": "正在测试连接…"
+    },
+    "credentialOwner": {
+      "title": "凭据归属",
+      "hint": "决定上游凭据由谁提供。「用户自填」每个调用方各自负责自己的访问；「管理员预置」由管理员配置一份凭据，所有调用方共用。",
+      "perUser": "用户自填（默认）",
+      "perUserHint": "每个用户在「我的连接」里授权或粘贴自己的 token。可按用户审计与撤销。",
+      "adminShared": "管理员预置（共享）",
+      "adminSharedHint": "由管理员在此配置一份凭据，所有调用方共用。调用方身份仍按用户记录用于审计与配额。",
+      "switchWarning": "切换到「管理员预置」会删除该服务器所有现有的每用户凭据和工具目录。"
+    },
+    "authHeader": {
+      "title": "HTTP 鉴权头",
+      "hint": "上游凭据如何发送。默认为 Bearer；对使用 X-API-Key、api-key 等的上游需要重写。模板只支持 `{{token}}`。",
+      "headerName": "Header 名称",
+      "valueTemplate": "值模板",
+      "previewLabel": "将作为以下形式发送"
+    },
+    "sharedCred": {
+      "title": "共享凭据",
+      "hint": "一份凭据被所有调用方复用。可使用 OAuth 授权或粘贴 PAT / API key。",
+      "configuredAs": "已配置（{{type}}）",
+      "notConfigured": "尚未配置。请在下方授权或粘贴 token。",
+      "upstreamSubject": "上游身份",
+      "expiresAt": "到期时间",
+      "authorizeOAuth": "授权 OAuth（管理员）",
+      "reauthorizeOAuth": "重新授权 OAuth",
+      "revoke": "撤销",
+      "revokeConfirm": "撤销共享凭据？所有调用方会立刻失去对该服务器的访问，直到你配置新的凭据。",
+      "revoked": "共享凭据已撤销。",
+      "pasteTokenLabel": "粘贴 PAT / API key",
+      "pastePlaceholder": "ghp_… 或其他 token",
+      "savePasted": "保存",
+      "tokenSaved": "共享 token 已保存。工具目录正在后台刷新。",
+      "headerPreview": "将作为以下形式发送"
+    },
+    "authModeBadge": {
+      "oauth": {
+        "title": "OAuth",
+        "description": "用户通过上游 OAuth 登录；token 按用户存储。"
+      },
+      "static": {
+        "title": "静态 token",
+        "description": "用户在「我的连接」粘贴自己的 PAT / API key。"
+      },
+      "direct": {
+        "title": "匿名",
+        "description": "不转发凭据 — 公开服务或通过自定义请求头共享。"
       }
     }
   },

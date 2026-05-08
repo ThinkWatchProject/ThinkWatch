@@ -41,7 +41,7 @@ interface StoreTemplate {
   oauth_issuer: string | null;
   oauth_token_endpoint: string | null;
   oauth_userinfo_endpoint: string | null;
-  allow_static_token: boolean;
+  auth_shape: 'anonymous' | 'oauth' | 'static';
   static_token_help_url: string | null;
   auth_instructions: string | null;
   deploy_type: string | null;
@@ -235,8 +235,7 @@ export function McpStorePage() {
       // so we link directly to /connections where users authorize.
       // For public/no-auth templates the server is ready to use; the
       // toast is just a confirmation.
-      const isPerUserAuth =
-        !!installTemplate.oauth_issuer || installTemplate.allow_static_token;
+      const isPerUserAuth = installTemplate.auth_shape !== 'anonymous';
       if (isPerUserAuth) {
         toast.success(t('mcpStore.installSuccess'), {
           duration: 8000,
@@ -545,7 +544,7 @@ export function McpStorePage() {
                 fragment that we render via dangerouslySetInnerHTML —
                 input is i18n-controlled (not user content), so no
                 XSS surface. */}
-            {(installTemplate?.oauth_issuer || installTemplate?.allow_static_token) && (
+            {installTemplate?.auth_shape && installTemplate.auth_shape !== 'anonymous' && (
               <div
                 className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground [&_code]:mx-1 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1"
                 dangerouslySetInnerHTML={{ __html: t('mcpStore.perUserAuthNote') }}
@@ -649,16 +648,14 @@ function TemplateAuthBadge({
   template: StoreTemplate;
   t: (key: string) => string;
 }) {
-  const hasOauth = !!template.oauth_issuer;
-  const hasStatic = template.allow_static_token;
-  if (hasOauth) {
+  if (template.auth_shape === 'oauth') {
     return (
       <Badge variant="outline" className="gap-1">
         <Lock className="h-3 w-3" /> OAuth
       </Badge>
     );
   }
-  if (hasStatic) {
+  if (template.auth_shape === 'static') {
     return (
       <Badge variant="outline" className="gap-1">
         <KeyRound className="h-3 w-3" /> {t('mcpStore.staticToken')}

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -10,7 +10,6 @@ import {
   DialogHeader,
   DialogTitle,
   DialogDescription,
-  DialogTrigger,
 } from '@/components/ui/dialog';
 import {
   Table,
@@ -28,7 +27,7 @@ import { DataTablePagination } from '@/components/data-table-pagination';
 import { useClientPagination } from '@/hooks/use-client-pagination';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
-import { ServerWizard } from '@/components/mcp/server-wizard';
+import { Link } from '@tanstack/react-router';
 import { ServerEditForm } from '@/components/mcp/server-edit-form';
 import { AuthModeBadge } from '@/components/mcp/auth-mode-badge';
 import { deriveAuthMode } from '@/components/mcp/auth-mode-utils';
@@ -48,8 +47,11 @@ interface McpServer {
   oauth_userinfo_endpoint: string | null;
   oauth_client_id: string | null;
   oauth_scopes: string[];
-  allow_static_token: boolean;
+  auth_shape: 'anonymous' | 'oauth' | 'static';
   static_token_help_url: string | null;
+  auth_header_name: string;
+  auth_value_template: string;
+  credential_owner: 'per_user' | 'admin_shared';
   status: string;
   last_health_check: string | null;
   tools_count: number;
@@ -64,7 +66,6 @@ export function McpServersPage() {
   const [loading, setLoading] = useState(true);
   const pager = useClientPagination(servers, 20);
   const [error, setError] = useState('');
-  const [dialogOpen, setDialogOpen] = useState(false);
 
   const [editServer, setEditServer] = useState<McpServer | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -87,11 +88,6 @@ export function McpServersPage() {
     fetchServers(controller.signal);
     return () => controller.abort();
   }, []);
-
-  const taken = useMemo(() => ({
-    names: new Set(servers.map((s) => s.name)),
-    prefixes: new Set(servers.map((s) => s.namespace_prefix)),
-  }), [servers]);
 
   const handleDelete = async (id: string) => {
     try {
@@ -137,30 +133,19 @@ export function McpServersPage() {
           <h1 className="text-2xl font-semibold tracking-tight">{t('mcpServers.title')}</h1>
           <p className="text-muted-foreground">{t('mcpServers.subtitle')}</p>
         </div>
-        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
-          <DialogTrigger asChild>
-            <Button disabled={!hasPermission('mcp_servers:create')}>
+        {hasPermission('mcp_servers:create') ? (
+          <Button asChild>
+            <Link to="/mcp/servers/new">
               <Plus className="h-4 w-4" />
               {t('mcpServers.registerServer')}
-            </Button>
-          </DialogTrigger>
-          <DialogContent className="sm:max-w-2xl max-h-[90vh] overflow-y-auto">
-            <DialogHeader>
-              <DialogTitle>{t('mcpServers.dialogTitle')}</DialogTitle>
-              <DialogDescription>{t('mcpServers.dialogDescription')}</DialogDescription>
-            </DialogHeader>
-            {dialogOpen && (
-              <ServerWizard
-                taken={taken}
-                onCancel={() => setDialogOpen(false)}
-                onSuccess={() => {
-                  setDialogOpen(false);
-                  void fetchServers();
-                }}
-              />
-            )}
-          </DialogContent>
-        </Dialog>
+            </Link>
+          </Button>
+        ) : (
+          <Button disabled>
+            <Plus className="h-4 w-4" />
+            {t('mcpServers.registerServer')}
+          </Button>
+        )}
       </div>
 
       {error && (

@@ -433,13 +433,44 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     --   3. Else give up — `upstream_subject` stays NULL and the UI
     --      falls back to the user-supplied account_label.
     oauth_userinfo_endpoint       VARCHAR(512),
-    -- ----- per-user static tokens (PAT / API key) -------------------------
-    -- TRUE ⇒ users may paste their own token in /connections; FALSE ⇒ only
-    -- OAuth is offered (or the upstream doesn't need auth at all).
-    allow_static_token            BOOLEAN NOT NULL DEFAULT FALSE,
+    -- ----- authentication shape (single-valued, no "OAuth + PAT" combo) --
+    -- `anonymous` — public service, no credential forwarded.
+    -- `oauth`     — per-server OAuth client config in the columns above
+    --               drives the authorize/token flow; resulting tokens land
+    --               either in mcp_user_credentials or
+    --               mcp_server_shared_credentials depending on
+    --               credential_owner.
+    -- `static`    — credential is a PAT / API key (per-user paste in
+    --               /connections, or admin-pasted shared token).
+    --
+    -- Single value per server: PAT vs OAuth is a different auth shape,
+    -- not a fallback. Admins who need both register the upstream twice
+    -- with different namespace prefixes.
+    auth_shape                    TEXT NOT NULL DEFAULT 'anonymous'
+        CHECK (auth_shape IN ('anonymous', 'oauth', 'static')),
     -- Optional link shown next to the "paste token" UI so the user knows
-    -- where to generate one.
+    -- where to generate one. Only meaningful when `auth_shape='static'`.
     static_token_help_url         VARCHAR(512),
+    -- ----- HTTP auth header injection ------------------------------------
+    -- How the resolved upstream credential is injected into the proxied
+    -- request. Resolver produces a token (OAuth access_token or static
+    -- PAT); the proxy applies `auth_value_template.replace("{{token}}", t)`
+    -- and sends it under `auth_header_name`. Defaults match the most
+    -- common Bearer pattern; servers using `X-API-Key`, `api-key`,
+    -- `Authorization: token …` set these explicitly.
+    auth_header_name              TEXT NOT NULL DEFAULT 'Authorization',
+    auth_value_template           TEXT NOT NULL DEFAULT 'Bearer {{token}}',
+    -- ----- credential ownership -----------------------------------------
+    -- 'per_user'    ⇒ each user authorizes / pastes their own token in
+    --                  the connections UI; rows live in mcp_user_credentials.
+    -- 'admin_shared'⇒ one credential configured by an admin in the server
+    --                  edit form is used for every caller; row lives in
+    --                  mcp_server_shared_credentials. Per-user audit/quota
+    --                  attribution is unchanged — callers are still
+    --                  identified by their own user_id, only the upstream
+    --                  bearer is shared.
+    credential_owner              TEXT NOT NULL DEFAULT 'per_user'
+        CHECK (credential_owner IN ('per_user', 'admin_shared')),
     -- ----- tool catalog cache ---------------------------------------------
     -- Snapshot from the most recent admin / probe-time tools/list call,
     -- shown to users that haven't authorized yet so the catalog isn't
@@ -488,6 +519,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_mcp_user_credentials_default
     ON mcp_user_credentials(mcp_server_id, user_id) WHERE is_default;
 CREATE INDEX IF NOT EXISTS idx_mcp_user_credentials_user
     ON mcp_user_credentials(user_id);
+
+-- Server-level shared credentials. Used when `mcp_servers.credential_owner`
+-- = 'admin_shared'. One row per server (PK on mcp_server_id), so when
+-- the admin re-pastes a token the upsert replaces the previous row.
+-- Field shape mirrors `mcp_user_credentials` so the OAuth refresh logic
+-- can be unified across the two storage backends.
+CREATE TABLE IF NOT EXISTS mcp_server_shared_credentials (
+    mcp_server_id            UUID PRIMARY KEY REFERENCES mcp_servers(id) ON DELETE CASCADE,
+    credential_type          TEXT NOT NULL
+        CHECK (credential_type IN ('oauth_authcode', 'static_token')),
+    access_token_encrypted   BYTEA NOT NULL,
+    refresh_token_encrypted  BYTEA,
+    expires_at               TIMESTAMPTZ,
+    scopes                   TEXT[] NOT NULL DEFAULT '{}',
+    upstream_subject         TEXT,
+    -- Audit pointer: which admin configured this credential. Kept for
+    -- the admin UI's "configured by" line; never used for caller
+    -- attribution (per-user audit/quota always uses the calling user).
+    configured_by            UUID REFERENCES users(id) ON DELETE SET NULL,
+    created_at               TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at               TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 
 CREATE TABLE IF NOT EXISTS mcp_tools (
     id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -757,8 +810,18 @@ CREATE TABLE IF NOT EXISTS mcp_store_templates (
     oauth_revocation_endpoint     VARCHAR(512),
     oauth_userinfo_endpoint       VARCHAR(512),
     oauth_default_scopes          TEXT[] NOT NULL DEFAULT '{}',
-    allow_static_token            BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Authentication shape — see comment on mcp_servers.auth_shape.
+    -- Templates pre-declare the shape so installation pre-populates the
+    -- new server row's auth_shape.
+    auth_shape                    TEXT NOT NULL DEFAULT 'anonymous'
+        CHECK (auth_shape IN ('anonymous', 'oauth', 'static')),
     static_token_help_url         VARCHAR(512),
+    -- Header / template defaults for upstreams that don't use
+    -- `Authorization: Bearer …`. When a template ships e.g. an Anthropic
+    -- API the install handler copies these into mcp_servers so the
+    -- resolver injects the right header out-of-the-box.
+    auth_header_name              TEXT NOT NULL DEFAULT 'Authorization',
+    auth_value_template           TEXT NOT NULL DEFAULT 'Bearer {{token}}',
     -- Free-form text shown in the install / connect dialogs to point
     -- the user at where to generate a token / set up an OAuth app.
     auth_instructions   TEXT,

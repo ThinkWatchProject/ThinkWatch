@@ -39,13 +39,42 @@ pub struct McpServer {
     /// the JSON for the first non-empty subject-like field, and
     /// gives up silently if both paths fail.
     pub oauth_userinfo_endpoint: Option<String>,
-    /// `true` ⇒ users may paste their own static token (PAT / API key)
-    /// in the per-user connections UI as an alternative (or sole) way
-    /// to authenticate.
-    pub allow_static_token: bool,
+    /// Single-valued authentication shape. Drives whether the server
+    /// uses OAuth, accepts pasted PATs, or is anonymous. Mutually
+    /// exclusive — there is no "OAuth + PAT" combined mode; admins
+    /// who need both register the upstream twice with different
+    /// namespace prefixes.
+    ///
+    /// - `anonymous`: public service, no credential.
+    /// - `oauth`: per-server `oauth_*` columns drive the flow;
+    ///   tokens land in `mcp_user_credentials` or
+    ///   `mcp_server_shared_credentials` depending on
+    ///   `credential_owner`.
+    /// - `static`: PAT / API key flow; pasted by user (per_user)
+    ///   or by admin (admin_shared).
+    pub auth_shape: String,
     /// Optional URL surfaced next to the "paste token" UI so users
-    /// know where to generate the token.
+    /// know where to generate the token. Only meaningful when
+    /// `auth_shape='static'`.
     pub static_token_help_url: Option<String>,
+    /// HTTP header name under which the resolved upstream credential
+    /// is sent. Defaults to `Authorization`. Set to `X-API-Key`,
+    /// `api-key`, etc. for upstreams that don't use Bearer.
+    pub auth_header_name: String,
+    /// Header value template — `{{token}}` is replaced with the
+    /// resolved access token. Defaults to `Bearer {{token}}`. Examples:
+    /// `{{token}}` (X-API-Key naked token), `token {{token}}` (legacy
+    /// GitHub format), `Bearer {{token}}` (default).
+    pub auth_value_template: String,
+    /// Where the upstream credential lives. `per_user` ⇒ each user
+    /// supplies their own (rows in `mcp_user_credentials`).
+    /// `admin_shared` ⇒ a single admin-configured credential is used
+    /// for every caller (row in `mcp_server_shared_credentials`).
+    ///
+    /// Per-user audit and quota attribution is unchanged in either
+    /// mode — `actor_user_id` is always the caller, never the
+    /// configurer of an admin_shared credential.
+    pub credential_owner: String,
     /// Snapshot of the upstream's `tools/list` from the most recent
     /// admin probe. Returned to users that haven't authorized yet so
     /// the catalog isn't silently empty; per-user calls bypass this.

@@ -55,6 +55,10 @@ const ApiKeysPage = lazyRouteComponent(() => import('@/routes/api-keys'), 'ApiKe
 const UnifiedLogsPage = lazyRouteComponent(() => import('@/routes/logs'), 'UnifiedLogsPage');
 const GuidePage = lazyRouteComponent(() => import('@/routes/guide'), 'GuidePage');
 const McpServersPage = lazyRouteComponent(() => import('@/routes/mcp/servers'), 'McpServersPage');
+const McpServerWizardPage = lazyRouteComponent(
+  () => import('@/components/mcp/wizard/server-wizard'),
+  'ServerWizardPage',
+);
 const McpToolsPage = lazyRouteComponent(() => import('@/routes/mcp/tools'), 'McpToolsPage');
 const McpStorePage = lazyRouteComponent(() => import('@/routes/mcp/store'), 'McpStorePage');
 const ConnectionsPage = lazyRouteComponent(() => import('@/routes/connections'), 'ConnectionsPage');
@@ -272,6 +276,15 @@ const mcpServersRoute = createRoute({
   ),
 });
 
+const mcpServerWizardRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/mcp/servers/new',
+  component: gate(
+    McpServerWizardPage as unknown as React.ComponentType,
+    '/mcp/servers',
+  ),
+});
+
 const mcpToolsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/mcp/tools',
@@ -432,6 +445,7 @@ const routeTree = rootRoute.addChildren([
   logsRoute,
   guideRoute,
   mcpServersRoute,
+  mcpServerWizardRoute,
   mcpToolsRoute,
   mcpStoreRoute,
   connectionsRoute,

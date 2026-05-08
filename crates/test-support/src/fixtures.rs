@@ -293,9 +293,11 @@ pub async fn create_mcp_server(
 /// Knobs for [`create_mcp_server_with`]. Default = anonymous server,
 /// no per-user auth, so existing call sites of `create_mcp_server`
 /// keep their behaviour.
-#[derive(Default, Debug, Clone)]
+#[derive(Debug, Clone)]
 pub struct McpServerOpts {
-    pub allow_static_token: bool,
+    /// `'anonymous'`, `'oauth'`, or `'static'`. Single-valued —
+    /// see `McpServer::auth_shape`.
+    pub auth_shape: String,
     pub oauth_issuer: Option<String>,
     pub oauth_authorization_endpoint: Option<String>,
     pub oauth_token_endpoint: Option<String>,
@@ -307,6 +309,29 @@ pub struct McpServerOpts {
     /// agnostic of how the key is sourced.
     pub oauth_client_secret_encrypted: Option<Vec<u8>>,
     pub oauth_scopes: Vec<String>,
+    /// HTTP header injection — defaults to the Bearer pattern.
+    pub auth_header_name: String,
+    pub auth_value_template: String,
+    /// `per_user` (default) or `admin_shared`.
+    pub credential_owner: String,
+}
+
+impl Default for McpServerOpts {
+    fn default() -> Self {
+        Self {
+            auth_shape: "anonymous".to_string(),
+            oauth_issuer: None,
+            oauth_authorization_endpoint: None,
+            oauth_token_endpoint: None,
+            oauth_userinfo_endpoint: None,
+            oauth_client_id: None,
+            oauth_client_secret_encrypted: None,
+            oauth_scopes: Vec::new(),
+            auth_header_name: "Authorization".to_string(),
+            auth_value_template: "Bearer {{token}}".to_string(),
+            credential_owner: "per_user".to_string(),
+        }
+    }
 }
 
 pub async fn create_mcp_server_with(
@@ -323,10 +348,11 @@ pub async fn create_mcp_server_with(
                oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
                oauth_userinfo_endpoint,
                oauth_client_id, oauth_client_secret_encrypted, oauth_scopes,
-               allow_static_token
+               auth_shape,
+               auth_header_name, auth_value_template, credential_owner
            )
            VALUES ($1, $2, $3, $4, 'streamable_http', 'active',
-                   $5, $6, $7, $8, $9, $10, $11, $12)"#,
+                   $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)"#,
     )
     .bind(id)
     .bind(name)
@@ -339,7 +365,10 @@ pub async fn create_mcp_server_with(
     .bind(&opts.oauth_client_id)
     .bind(&opts.oauth_client_secret_encrypted)
     .bind(&opts.oauth_scopes)
-    .bind(opts.allow_static_token)
+    .bind(&opts.auth_shape)
+    .bind(&opts.auth_header_name)
+    .bind(&opts.auth_value_template)
+    .bind(&opts.credential_owner)
     .execute(db)
     .await
     .context("INSERT mcp_servers")?;

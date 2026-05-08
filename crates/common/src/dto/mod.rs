@@ -244,9 +244,14 @@ pub struct CreateMcpServerRequest {
     /// it lands in `oauth_client_secret_encrypted`.
     pub oauth_client_secret: Option<String>,
     pub oauth_scopes: Option<Vec<String>>,
-    /// Allow users to paste their own static PAT / API key.
-    pub allow_static_token: Option<bool>,
-    /// Optional link to where the user generates the token.
+    /// Authentication shape — `'anonymous'`, `'oauth'`, or `'static'`.
+    /// Single-valued (no "OAuth + PAT" combo). Defaults to
+    /// `'anonymous'` when omitted. Determines which auth path the
+    /// resolver runs and which UI the per-user connections page
+    /// shows.
+    pub auth_shape: Option<String>,
+    /// Optional link to where the user generates the token. Only
+    /// meaningful when `auth_shape='static'`.
     pub static_token_help_url: Option<String>,
     /// Custom HTTP headers forwarded when connecting to this MCP server.
     /// Values may contain `{{user_id}}` and `{{user_email}}` template
@@ -255,6 +260,33 @@ pub struct CreateMcpServerRequest {
     /// Per-server response cache TTL in seconds. `None` = use global
     /// `mcp.cache_ttl_secs` setting. `0` = disable caching for this server.
     pub cache_ttl_secs: Option<u64>,
+    /// HTTP header name + value-template under which the upstream
+    /// credential is injected. Both default to the Bearer pattern when
+    /// omitted (`Authorization` / `Bearer {{token}}`). The template
+    /// supports a single `{{token}}` placeholder; any other `{{…}}`
+    /// is rejected — secret splicing and identity templating are kept
+    /// in different machinery on purpose (custom_headers handles the
+    /// latter).
+    pub auth_header_name: Option<String>,
+    pub auth_value_template: Option<String>,
+    /// Where the upstream credential lives. Defaults to `'per_user'`
+    /// when absent. `'admin_shared'` is normally paired with one of
+    /// the two fields below to provision the shared credential
+    /// atomically with row insert; if neither is present the row is
+    /// created with `credential_owner='admin_shared'` but no
+    /// credential — admin must configure it later via the edit panel.
+    pub credential_owner: Option<String>,
+    /// Set by the registration wizard when an admin completed the
+    /// OAuth dance for an admin_shared server before the row exists.
+    /// The handler GETDELs Redis blob `mcp_wizard:cred:{id}` and
+    /// inserts it into `mcp_server_shared_credentials` in the same
+    /// transaction as the row insert.
+    pub wizard_session_id: Option<String>,
+    /// Direct paste of an admin-shared static token at server
+    /// creation time. Plaintext on the wire; encrypted at rest by
+    /// the handler before insert. Mutually exclusive with
+    /// `wizard_session_id` — handler 400s if both are set.
+    pub shared_static_token: Option<String>,
 }
 
 // --- Pagination ---

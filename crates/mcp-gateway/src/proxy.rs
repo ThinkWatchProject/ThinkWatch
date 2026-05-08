@@ -12,7 +12,10 @@ use crate::circuit_breaker::McpCircuitBreakers;
 use crate::pool::ConnectionPool;
 use crate::registry::{Registry, ServerCacheScope};
 use crate::session::SessionManager;
-use crate::user_token::{RefreshFailureKind, ResolverCaller, ResolverError, UserTokenResolver};
+use crate::user_token::{
+    AuthInjection, CredentialOwner, RefreshFailureKind, ResolverCaller, ResolverError,
+    UserTokenResolver,
+};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -316,42 +319,42 @@ impl McpProxy {
         let servers = self.registry.list().await;
         let mut tools: Vec<serde_json::Value> = Vec::new();
         for server in servers {
-            let server_needs_auth = server.oauth_cfg.is_some() || server.allow_static_token;
+            // Admin-shared servers: there's exactly one upstream
+            // identity, so the catalog is identical for every caller
+            // and lives in `server.tools` (populated by
+            // `spawn_shared_tool_discovery` on credential write).
+            // Skip the per-user pathway entirely.
+            let admin_shared = server.credential_owner == CredentialOwner::AdminShared;
+            let server_needs_auth =
+                !matches!(server.auth_shape, crate::user_token::AuthShape::Anonymous,);
             let user_connected = connected_server_ids.contains(&server.id);
-            // The tool is "blocked" when the server gates per-user auth
-            // and this user hasn't connected an account yet. Surface
-            // it anyway with `_meta.requires_user_auth = true` so the
-            // calling client (and our own /connections UI) can prompt.
-            let requires_user_auth = server_needs_auth && !user_connected;
+            // For admin_shared the credential is provisioned by an
+            // admin, not by the calling user — it never makes sense
+            // to mark requires_user_auth on these.
+            let requires_user_auth = !admin_shared && server_needs_auth && !user_connected;
 
             // Pick the tool source for this server:
             //
-            // - **Direct-mode server** (anonymous discovery worked):
-            //   `server.tools` carries the system-level catalog from
-            //   `mcp_tools`. Same for every user.
-            // - **Auth-required + user connected**: the user's own
-            //   filtered catalog from `mcp_user_tools`. If empty
-            //   (eager hook hasn't run yet, or failed), fall through
-            //   to `server.tools` — which will be empty for these
-            //   servers, but we kick off a background discovery so
-            //   the next call sees fresh data.
-            // - **Auth-required + user NOT connected**: emit
+            // - **Admin-shared / direct-mode server**: `server.tools`
+            //   carries the catalog and is identical for every caller.
+            // - **Per-user auth-required + user connected**: the user's
+            //   own filtered catalog from `mcp_user_tools`. Falls back
+            //   to `server.tools` (typically empty) if the eager hook
+            //   missed; lazy refresh kicked off in the background.
+            // - **Per-user auth-required + user NOT connected**: emit
             //   `_meta.requires_user_auth = true` with whatever
-            //   metadata the system-level catalog has (typically
-            //   nothing).
+            //   metadata the system-level catalog has.
             enum ToolSource<'a> {
                 System(&'a [crate::registry::McpToolInfo]),
                 User(&'a [UserToolRow]),
             }
             let user_rows = user_tools_by_server.get(&server.id);
-            let source = if server_needs_auth && user_connected {
+            let source = if admin_shared {
+                ToolSource::System(server.tools.as_slice())
+            } else if server_needs_auth && user_connected {
                 match user_rows.filter(|v| !v.is_empty()) {
                     Some(rows) => ToolSource::User(rows.as_slice()),
                     None => {
-                        // Eager hook missed (or never fired) — kick off a
-                        // refresh so the user's *next* tools/list call sees
-                        // their catalog. This call returns empty for this
-                        // server, which is a one-time quirk.
                         self.spawn_lazy_user_tool_discovery(&server, ctx);
                         ToolSource::System(server.tools.as_slice())
                     }
@@ -427,6 +430,13 @@ impl McpProxy {
         server: &crate::registry::RegisteredServer,
         ctx: &RequestContext<'_>,
     ) {
+        // Admin-shared servers have a single tool catalog populated on
+        // shared-credential write; per-user discovery is not just
+        // wasteful, it'd write `mcp_user_tools` rows that the
+        // `mcp_tools` query short-circuits past anyway.
+        if server.credential_owner == CredentialOwner::AdminShared {
+            return;
+        }
         let server = server.clone();
         let user_id = ctx.user_id;
         let resolver_caller = ResolverCaller {
@@ -436,14 +446,10 @@ impl McpProxy {
         let user_tokens = self.user_tokens.clone();
         let pool = self.pool.clone();
         let db = self.db.clone();
+        let server_auth_cfg = server.auth_cfg();
         tokio::spawn(async move {
             let auth_header = match user_tokens
-                .resolve(
-                    server.id,
-                    &resolver_caller,
-                    server.oauth_cfg.as_ref(),
-                    server.allow_static_token,
-                )
+                .resolve(server.id, &server_auth_cfg, &resolver_caller)
                 .await
             {
                 Ok(Some(h)) => h,
@@ -467,14 +473,7 @@ impl McpProxy {
                 params: None,
             };
             let resp = match pool
-                .send_request(
-                    &conn,
-                    &req,
-                    Some((auth_header.0.as_str(), auth_header.1.as_str())),
-                    None,
-                    None,
-                    None,
-                )
+                .send_request(&conn, &req, Some(auth_header.as_pair()), None, None, None)
                 .await
             {
                 Ok((r, _)) => r,
@@ -765,20 +764,17 @@ impl McpProxy {
             user_id,
             mcp_account_overrides: ctx.mcp_account_overrides.clone(),
         };
+        let server_auth_cfg = server.auth_cfg();
         let auth_header = match self
             .user_tokens
-            .resolve(
-                server_id,
-                &resolver_caller,
-                server.oauth_cfg.as_ref(),
-                server.allow_static_token,
-            )
+            .resolve(server_id, &server_auth_cfg, &resolver_caller)
             .await
         {
             Ok(opt) => opt,
             Err(ResolverError::NeedsUserCredentials {
                 server_id,
                 authorize_url,
+                owner,
             }) => {
                 // Hydrate authorize_url from the registered server when
                 // the resolver couldn't supply one (it doesn't see the
@@ -791,22 +787,37 @@ impl McpProxy {
                         .as_ref()
                         .and_then(|c| c.authorization_endpoint.clone())
                 });
+                let (msg, console_url) = match owner {
+                    CredentialOwner::PerUser => (
+                        format!(
+                            "User has not connected an account for MCP server '{server_name}'. \
+                             Open /connections in the ThinkWatch console to authorize."
+                        ),
+                        "/connections",
+                    ),
+                    CredentialOwner::AdminShared => (
+                        format!(
+                            "MCP server '{server_name}' is configured to use a shared \
+                             credential, but no admin has provisioned one yet. \
+                             Ask an administrator to configure it in the server settings."
+                        ),
+                        "/admin/mcp/servers",
+                    ),
+                };
                 return JsonRpcResponse {
                     jsonrpc: "2.0".to_owned(),
                     id: request.id,
                     result: None,
                     error: Some(JsonRpcError {
                         code: NEEDS_USER_CREDENTIALS,
-                        message: format!(
-                            "User has not connected an account for MCP server '{server_name}'. \
-                             Open /connections in the ThinkWatch console to authorize."
-                        ),
+                        message: msg,
                         data: Some(serde_json::json!({
                             "kind": "needs_user_credentials",
                             "server_id": server_id.to_string(),
                             "server_name": server_name,
                             "authorize_url": resolved_authorize_url,
-                            "console_url": "/connections",
+                            "console_url": console_url,
+                            "owner": owner.as_str(),
                         })),
                     }),
                 };
@@ -816,11 +827,13 @@ impl McpProxy {
                 kind: RefreshFailureKind::Permanent,
                 ..
             }) => {
-                // The credential row is gone — the user must re-authorize.
-                // Same `NEEDS_USER_CREDENTIALS` envelope as the
-                // never-connected path so AI clients can use one
-                // recovery flow for both. The message tells the human
-                // that this was a re-auth, not a first-time connect.
+                // Credential gone — refresh was rejected. Tell whoever
+                // is responsible (caller for per_user, admin for
+                // admin_shared) to re-authorize.
+                let console_url = match server.credential_owner {
+                    CredentialOwner::PerUser => "/connections",
+                    CredentialOwner::AdminShared => "/admin/mcp/servers",
+                };
                 return JsonRpcResponse {
                     jsonrpc: "2.0".to_owned(),
                     id: request.id,
@@ -829,7 +842,7 @@ impl McpProxy {
                         code: NEEDS_USER_CREDENTIALS,
                         message: format!(
                             "Authorization for MCP server '{server_name}' was rejected by the \
-                             upstream and has been cleared. Re-authorize at /connections."
+                             upstream and has been cleared. Re-authorize at {console_url}."
                         ),
                         data: Some(serde_json::json!({
                             "kind": "needs_user_credentials",
@@ -840,7 +853,8 @@ impl McpProxy {
                                 .oauth_cfg
                                 .as_ref()
                                 .and_then(|c| c.authorization_endpoint.clone()),
-                            "console_url": "/connections",
+                            "console_url": console_url,
+                            "owner": server.credential_owner.as_str(),
                         })),
                     }),
                 };
@@ -850,8 +864,6 @@ impl McpProxy {
                 message,
                 ..
             }) => {
-                // Upstream OAuth provider had a moment. The credential
-                // is still valid; tell the AI client to retry.
                 return err_response(
                     request.id.clone(),
                     INTERNAL_ERROR,
@@ -865,7 +877,7 @@ impl McpProxy {
                 tracing::error!(
                     server_id = %server_id,
                     error = %e,
-                    "user-token resolver failed"
+                    "credential resolver failed"
                 );
                 return err_response(
                     request.id.clone(),
@@ -874,7 +886,7 @@ impl McpProxy {
                 );
             }
         };
-        let auth_ref = auth_header.as_ref().map(|(n, v)| (n.as_str(), v.as_str()));
+        let auth_ref = auth_header.as_ref().map(AuthInjection::as_pair);
 
         let response = match self
             .pool

@@ -68,7 +68,7 @@ async fn seed_static_server(app: &TestApp, upstream_uri: &str, prefix: &str) -> 
         prefix,
         &format!("{upstream_uri}/mcp"),
         fixtures::McpServerOpts {
-            allow_static_token: true,
+            auth_shape: "static".to_string(),
             ..Default::default()
         },
     )
@@ -110,7 +110,7 @@ async fn paste_token_then_list_default_revoke_round_trip() {
         .iter()
         .find(|e| e["server_id"].as_str() == Some(&server_id.to_string()))
         .expect("connection list missing the registered server");
-    assert!(entry["allow_static_token"].as_bool().unwrap_or(false));
+    assert_eq!(entry["auth_shape"].as_str(), Some("static"));
     assert_eq!(entry["accounts"].as_array().unwrap().len(), 1);
     assert_eq!(entry["accounts"][0]["account_label"], "work");
     assert_eq!(entry["accounts"][0]["is_default"], true);
@@ -316,7 +316,7 @@ async fn oauth_callback_populates_upstream_subject_via_userinfo() {
         "uinfo",
         &format!("{}/mcp", upstream_mcp.uri()),
         fixtures::McpServerOpts {
-            allow_static_token: false,
+            auth_shape: "oauth".to_string(),
             oauth_issuer: Some(provider.uri()),
             oauth_authorization_endpoint: Some(format!("{}/authorize", provider.uri())),
             oauth_token_endpoint: Some(format!("{}/token", provider.uri())),
@@ -324,6 +324,7 @@ async fn oauth_callback_populates_upstream_subject_via_userinfo() {
             oauth_client_id: Some("test-client".into()),
             oauth_client_secret_encrypted: Some(client_secret_encrypted),
             oauth_scopes: vec!["read".into()],
+            ..Default::default()
         },
     )
     .await

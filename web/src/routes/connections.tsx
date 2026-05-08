@@ -54,9 +54,16 @@ interface ServerConnections {
    *  template would otherwise look identical here. */
   display_label?: string | null;
   namespace_prefix: string;
-  oauth_capable: boolean;
-  allow_static_token: boolean;
+  /** Single-valued auth shape — `'oauth'` or `'static'` (anonymous
+   *  servers are filtered server-side and never appear here). Drives
+   *  which UI renders in the connect dialog. */
+  auth_shape: 'oauth' | 'static';
   static_token_help_url: string | null;
+  /** Header name + template the gateway will send the user-supplied
+   *  token under. Used to render the "submitted as `…`" preview in
+   *  the paste dialog. */
+  auth_header_name: string;
+  auth_value_template: string;
   accounts: ConnectionAccount[];
 }
 
@@ -73,12 +80,14 @@ export function ConnectionsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
 
-  // "Add account" dialog (works for both OAuth and static-token paths)
+  // "Add account" dialog. The dialog's mode is derived from the
+  // target server's `auth_shape` — a server is OAuth or static, never
+  // both, so there's no admin / user choice between flows.
   const [addTarget, setAddTarget] = useState<ServerConnections | null>(null);
   const [addLabel, setAddLabel] = useState('');
   const [addToken, setAddToken] = useState('');
-  const [addMode, setAddMode] = useState<'oauth' | 'static'>('oauth');
   const [submitting, setSubmitting] = useState(false);
+  const addMode: 'oauth' | 'static' = addTarget?.auth_shape ?? 'oauth';
 
   // Revoke confirmation
   const [revokeTarget, setRevokeTarget] = useState<{ server_id: string; account_label: string } | null>(null);
@@ -134,11 +143,10 @@ export function ConnectionsPage() {
     });
   }, [servers]);
 
-  const openAdd = (s: ServerConnections, defaultMode: 'oauth' | 'static') => {
+  const openAdd = (s: ServerConnections) => {
     setAddTarget(s);
     setAddLabel('');
     setAddToken('');
-    setAddMode(defaultMode);
   };
 
   const submitAdd = async () => {
@@ -289,8 +297,7 @@ export function ConnectionsPage() {
             <ServerCard
               key={s.server_id}
               server={s}
-              onAddOauth={() => openAdd(s, 'oauth')}
-              onAddStatic={() => openAdd(s, 'static')}
+              onAdd={() => openAdd(s)}
               onSetDefault={(label) => setDefault(s.server_id, label)}
               onRevoke={(label) =>
                 setRevokeTarget({ server_id: s.server_id, account_label: label })
@@ -337,6 +344,18 @@ export function ConnectionsPage() {
                   onChange={(e) => setAddToken(e.target.value)}
                   placeholder="ghp_..."
                 />
+                {addTarget && (
+                  <div className="rounded border bg-muted/30 px-2 py-1 text-[11px] text-muted-foreground">
+                    {t('connections.headerPreviewLabel')}:{' '}
+                    <code className="font-mono">
+                      {addTarget.auth_header_name}:{' '}
+                      {addTarget.auth_value_template.replaceAll(
+                        '{{token}}',
+                        addToken.length > 0 ? `${addToken.slice(0, 6)}…` : '••••••••',
+                      )}
+                    </code>
+                  </div>
+                )}
                 {addTarget?.static_token_help_url && (
                   <a
                     href={addTarget.static_token_help_url}
@@ -348,24 +367,6 @@ export function ConnectionsPage() {
                   </a>
                 )}
               </div>
-            )}
-            {addMode === 'oauth' && addTarget?.allow_static_token && (
-              <button
-                type="button"
-                className="text-xs text-muted-foreground underline"
-                onClick={() => setAddMode('static')}
-              >
-                {t('connections.useTokenInstead')}
-              </button>
-            )}
-            {addMode === 'static' && addTarget?.oauth_capable && (
-              <button
-                type="button"
-                className="text-xs text-muted-foreground underline"
-                onClick={() => setAddMode('oauth')}
-              >
-                {t('connections.useOauthInstead')}
-              </button>
             )}
           </div>
           <DialogFooter>
@@ -402,15 +403,13 @@ interface TestResult {
 
 function ServerCard({
   server,
-  onAddOauth,
-  onAddStatic,
+  onAdd,
   onSetDefault,
   onRevoke,
   t,
 }: {
   server: ServerConnections;
-  onAddOauth: () => void;
-  onAddStatic: () => void;
+  onAdd: () => void;
   onSetDefault: (label: string) => void;
   onRevoke: (label: string) => void;
   t: (key: string, options?: Record<string, unknown>) => string;
@@ -464,7 +463,7 @@ function ServerCard({
           <div className="min-w-0 flex-1 space-y-0.5">
             <CardTitle className="truncate text-sm">{serverDisplay(server)}</CardTitle>
             <div className="flex items-center gap-1.5">
-              <AuthModeBadge mode={server.oauth_capable ? 'oauth' : 'static'} />
+              <AuthModeBadge mode={server.auth_shape} />
               {server.display_label && server.display_label !== server.server_name && (
                 <span className="truncate font-mono text-[10px] text-muted-foreground/70">
                   {server.server_name}
@@ -550,7 +549,7 @@ function ServerCard({
                         )}
                       </Button>
                       {a.credential_type === 'oauth_authcode' && (
-                        <Button size="sm" variant="ghost" onClick={onAddOauth}>
+                        <Button size="sm" variant="ghost" onClick={onAdd}>
                           <RefreshCw className="h-3 w-3" />
                         </Button>
                       )}
@@ -628,27 +627,19 @@ function ServerCard({
         </CardContent>
       )}
       <CardFooter className="gap-2">
-        {server.oauth_capable && (
-          <Button size="sm" variant="default" className="flex-1" onClick={onAddOauth}>
+        {/* Single-shape model: a server is OAuth or static, never both,
+            so we render exactly one CTA. The dialog mode picks itself
+            up from `addTarget.auth_shape` when opened. */}
+        {server.auth_shape === 'oauth' && (
+          <Button size="sm" variant="default" className="flex-1" onClick={onAdd}>
             <Plus className="h-3 w-3 mr-1" />
             {empty ? t('connections.connect') : t('connections.addAccount')}
           </Button>
         )}
-        {server.allow_static_token && !server.oauth_capable && (
-          <Button size="sm" variant="default" className="flex-1" onClick={onAddStatic}>
+        {server.auth_shape === 'static' && (
+          <Button size="sm" variant="default" className="flex-1" onClick={onAdd}>
             <KeyRound className="h-3 w-3 mr-1" />
-            {/* `pasteToken` interpolates `{{name}}` and reads "粘贴
-                X 的 Token" — fine as a *dialog* title (we know which
-                server) but on a card button it'd come out redundant
-                with the server name right above. `useToken` is the
-                short copy. */}
             {empty ? t('connections.useToken') : t('connections.addAccount')}
-          </Button>
-        )}
-        {server.allow_static_token && server.oauth_capable && (
-          <Button size="sm" variant="outline" onClick={onAddStatic}>
-            <KeyRound className="h-3 w-3 mr-1" />
-            {t('connections.useToken')}
           </Button>
         )}
       </CardFooter>

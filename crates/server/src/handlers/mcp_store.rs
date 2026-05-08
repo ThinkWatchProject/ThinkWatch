@@ -381,8 +381,16 @@ struct RegistryTemplate {
     oauth_revocation_endpoint: Option<String>,
     oauth_userinfo_endpoint: Option<String>,
     oauth_default_scopes: Option<Vec<String>>,
-    allow_static_token: Option<bool>,
+    /// Single-valued auth shape — `'anonymous'`, `'oauth'`, or
+    /// `'static'`. When omitted, the registry parser derives it from
+    /// the OAuth fields (`oauth_issuer set` ⇒ `'oauth'`, else
+    /// `'anonymous'`).
+    auth_shape: Option<String>,
     static_token_help_url: Option<String>,
+    /// Optional header overrides — defaults to `Authorization` /
+    /// `Bearer {{token}}` when omitted.
+    auth_header_name: Option<String>,
+    auth_value_template: Option<String>,
     auth_instructions: Option<serde_json::Value>,
     deploy_type: Option<String>,
     deploy_command: Option<String>,
@@ -464,17 +472,48 @@ pub async fn sync_registry(
 
     let mut synced = 0u32;
     for t in &registry.templates {
+        let auth_header_name = t
+            .auth_header_name
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Authorization".to_string());
+        let auth_value_template = t
+            .auth_value_template
+            .clone()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "Bearer {{token}}".to_string());
+        // Reject malformed templates from upstream registries early —
+        // a typo in a community template shouldn't break gateway boot.
+        if let Err(e) =
+            think_watch_mcp_gateway::user_token::validate_auth_value_template(&auth_value_template)
+        {
+            tracing::warn!(slug = %t.slug, error = %e, "skipping template with invalid auth_value_template");
+            continue;
+        }
+
+        // Derive auth_shape from the registry payload — explicit
+        // value wins; otherwise OAuth issuer presence implies 'oauth';
+        // anonymous as the safest fallback. Templates with a static
+        // help URL but no shape declaration are coerced to 'static'.
+        let auth_shape = match t.auth_shape.as_deref() {
+            Some("oauth") | Some("static") | Some("anonymous") => t.auth_shape.clone().unwrap(),
+            _ if t.oauth_issuer.is_some() => "oauth".to_string(),
+            _ if t.static_token_help_url.is_some() => "static".to_string(),
+            _ => "anonymous".to_string(),
+        };
+
         sqlx::query(
             r#"INSERT INTO mcp_store_templates
                (slug, name, description, category, tags, endpoint_template,
                 oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
                 oauth_revocation_endpoint, oauth_userinfo_endpoint,
                 oauth_default_scopes,
-                allow_static_token, static_token_help_url,
+                auth_shape, static_token_help_url,
+                auth_header_name, auth_value_template,
                 auth_instructions, deploy_type,
                 deploy_command, deploy_docs_url, homepage_url, repo_url, featured, updated_at)
                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                       $16, $17, $18, $19, $20, $21, now())
+                       $16, $17, $18, $19, $20, $21, $22, $23, now())
                ON CONFLICT (slug) DO UPDATE SET
                  name = EXCLUDED.name,
                  description = EXCLUDED.description,
@@ -487,8 +526,10 @@ pub async fn sync_registry(
                  oauth_revocation_endpoint = EXCLUDED.oauth_revocation_endpoint,
                  oauth_userinfo_endpoint = EXCLUDED.oauth_userinfo_endpoint,
                  oauth_default_scopes = EXCLUDED.oauth_default_scopes,
-                 allow_static_token = EXCLUDED.allow_static_token,
+                 auth_shape = EXCLUDED.auth_shape,
                  static_token_help_url = EXCLUDED.static_token_help_url,
+                 auth_header_name = EXCLUDED.auth_header_name,
+                 auth_value_template = EXCLUDED.auth_value_template,
                  auth_instructions = EXCLUDED.auth_instructions,
                  deploy_type = EXCLUDED.deploy_type,
                  deploy_command = EXCLUDED.deploy_command,
@@ -510,8 +551,10 @@ pub async fn sync_registry(
         .bind(&t.oauth_revocation_endpoint)
         .bind(&t.oauth_userinfo_endpoint)
         .bind(t.oauth_default_scopes.as_deref().unwrap_or(&[]))
-        .bind(t.allow_static_token.unwrap_or(false))
+        .bind(&auth_shape)
         .bind(&t.static_token_help_url)
+        .bind(&auth_header_name)
+        .bind(&auth_value_template)
         .bind(
             t.auth_instructions
                 .as_ref()
@@ -645,10 +688,12 @@ pub async fn install_template_into_db(
                oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
                oauth_revocation_endpoint, oauth_userinfo_endpoint, oauth_scopes,
                oauth_client_id, oauth_client_secret_encrypted,
-               allow_static_token, static_token_help_url,
+               auth_shape, static_token_help_url,
+               auth_header_name, auth_value_template,
                config_json
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                   $16, $17, $18)
            RETURNING *"#,
     )
     .bind(&resolved_name)
@@ -668,8 +713,10 @@ pub async fn install_template_into_db(
     } else {
         None
     })
-    .bind(template.allow_static_token)
+    .bind(&template.auth_shape)
     .bind(&template.static_token_help_url)
+    .bind(&template.auth_header_name)
+    .bind(&template.auth_value_template)
     .bind(&config_json)
     .fetch_one(&mut *tx)
     .await?;

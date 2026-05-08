@@ -45,11 +45,54 @@ const OAUTH_STATE_TTL_SECS: i64 = 600;
 // State blob persisted in Redis between authorize and callback
 // ---------------------------------------------------------------------------
 
+/// Where an OAuth callback should land its tokens. Three target
+/// shapes the callback dispatches on:
+///
+///   * **PerUser**: end user authorized from /connections — write
+///     to `mcp_user_credentials` keyed on (server, user, label).
+///   * **AdminShared**: admin re-authorized an existing
+///     admin_shared server — write to
+///     `mcp_server_shared_credentials` keyed on server_id.
+///   * **WizardAdminShared**: admin is in the new-server wizard,
+///     authorizing the shared credential **before the server row
+///     exists**. Bakes the OAuth client config into the state blob
+///     (no server row to look up), and stashes the resulting tokens
+///     in Redis under `mcp_wizard:cred:{wizard_session_id}` so the
+///     wizard's `Save` step can transfer them to
+///     `mcp_server_shared_credentials` atomically with row insert.
+///     Avoids a "pending" server row that could orphan if the
+///     wizard is abandoned.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "kind")]
+enum OauthStateTarget {
+    PerUser {
+        server_id: Uuid,
+        user_id: Uuid,
+        account_label: String,
+    },
+    AdminShared {
+        server_id: Uuid,
+        /// Audit pointer — which admin started the authorize flow.
+        configured_by: Uuid,
+    },
+    WizardAdminShared {
+        wizard_session_id: String,
+        configured_by: Uuid,
+        /// OAuth client config baked in here because there is no
+        /// `mcp_servers` row to look it up from yet.
+        oauth_token_endpoint: String,
+        oauth_client_id: String,
+        /// Pre-encrypted with the server's encryption key. Same
+        /// shape as `mcp_servers.oauth_client_secret_encrypted`.
+        oauth_client_secret_encrypted: Option<Vec<u8>>,
+        oauth_scopes: Vec<String>,
+        oauth_userinfo_endpoint: Option<String>,
+    },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct McpOauthState {
-    user_id: Uuid,
-    server_id: Uuid,
-    account_label: String,
+    target: OauthStateTarget,
     /// PKCE code_verifier — sent to the upstream token endpoint to
     /// prove the same client that started the flow is finishing it.
     code_verifier: String,
@@ -156,13 +199,18 @@ pub struct ServerConnections {
     /// this when set, falling back to `server_name`.
     pub display_label: Option<String>,
     pub namespace_prefix: String,
-    /// Whether this server has an OAuth client registered (admin
-    /// has filled `oauth_*`). Drives the "Connect via OAuth" button.
-    pub oauth_capable: bool,
-    /// Whether users are allowed to paste a static token. Drives
-    /// the alternate "Paste token" UI.
-    pub allow_static_token: bool,
+    /// Single-valued auth shape — drives which UI the connections
+    /// dialog renders (OAuth button vs PAT input). `'anonymous'`
+    /// servers don't surface here at all (filtered server-side).
+    pub auth_shape: String,
     pub static_token_help_url: Option<String>,
+    /// Header name + value template the upstream credential is sent
+    /// under. Surfaced so the connections dialog can show a
+    /// "submitted as `Authorization: Bearer ghp_…`" preview, which
+    /// answers the most common user confusion ("where does this token
+    /// go?").
+    pub auth_header_name: String,
+    pub auth_value_template: String,
     pub accounts: Vec<ConnectionAccount>,
 }
 
@@ -205,16 +253,16 @@ pub async fn list_connections(
 
     let mut out = Vec::with_capacity(servers.len());
     for s in servers {
-        let oauth_capable = s.oauth_token_endpoint.is_some()
-            && s.oauth_authorization_endpoint.is_some()
-            && s.oauth_client_id.is_some();
+        // Admin-shared servers manage their credential through the
+        // admin UI; surfacing them here would only show a card with
+        // no actionable buttons. Skip outright.
+        if s.credential_owner == "admin_shared" {
+            continue;
+        }
         // /connections only lists servers that *need* user-level
-        // credentials. Public / service-to-service / fixed-header MCPs
-        // (oauth_capable=false AND allow_static_token=false) work
-        // anonymously — there's nothing for the user to authorize, so
-        // showing them as a card with no actions was misleading
-        // ("anonymous" message that confused users).
-        if !oauth_capable && !s.allow_static_token {
+        // credentials. Anonymous servers work without setup so a
+        // card with no actions would just be confusing.
+        if s.auth_shape == "anonymous" {
             continue;
         }
         let mut accounts = Vec::new();
@@ -235,9 +283,10 @@ pub async fn list_connections(
             server_name: s.name,
             display_label: s.display_label,
             namespace_prefix: s.namespace_prefix,
-            oauth_capable,
-            allow_static_token: s.allow_static_token,
+            auth_shape: s.auth_shape,
             static_token_help_url: s.static_token_help_url,
+            auth_header_name: s.auth_header_name,
+            auth_value_template: s.auth_value_template,
             accounts,
         });
     }
@@ -290,6 +339,14 @@ pub async fn start_authorize(
     }
 
     let server = load_server(&state, server_id).await?;
+    if server.credential_owner == "admin_shared" {
+        return Err(AppError::BadRequest(
+            "This server uses an admin-supplied shared credential — \
+             the per-user authorize flow is disabled. Ask an administrator \
+             to configure the shared credential instead."
+                .into(),
+        ));
+    }
     let auth_endpoint = server
         .oauth_authorization_endpoint
         .as_deref()
@@ -319,9 +376,11 @@ pub async fn start_authorize(
     let binding = state_binding(&enc_key, &state_token, &code_verifier);
 
     let blob = McpOauthState {
-        user_id: auth_user.claims.sub,
-        server_id,
-        account_label: req.account_label.trim().to_string(),
+        target: OauthStateTarget::PerUser {
+            server_id,
+            user_id: auth_user.claims.sub,
+            account_label: req.account_label.trim().to_string(),
+        },
         code_verifier: code_verifier.clone(),
         redirect_uri: redirect_uri.clone(),
         binding,
@@ -428,89 +487,21 @@ pub async fn oauth_callback(
         ));
     }
 
-    let server = load_server(&state, blob.server_id).await?;
-    let token_endpoint = server
-        .oauth_token_endpoint
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("OAuth token endpoint not configured".into()))?;
-    let client_id = server
-        .oauth_client_id
-        .as_deref()
-        .ok_or_else(|| AppError::BadRequest("OAuth client_id not configured".into()))?;
-    // Public-client mode (RFC 8252 §8.4 / OAuth 2.1 §4.1.3): when the
-    // admin didn't store a client_secret — typical for AS that
-    // advertise `token_endpoint_auth_methods_supported: ["none"]`,
-    // e.g. Feishu — we omit client_secret from the token-endpoint
-    // form. PKCE alone authenticates the request.
-    let client_secret = match server.oauth_client_secret_encrypted.as_ref() {
-        Some(encrypted) => {
-            let bytes = crypto::decrypt(encrypted, &enc_key)
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("decrypt client_secret: {e}")))?;
-            Some(
-                String::from_utf8(bytes).map_err(|e| {
-                    AppError::Internal(anyhow::anyhow!("client_secret not utf8: {e}"))
-                })?,
-            )
-        }
-        None => None,
-    };
+    // Resolve OAuth client config — comes from the server row for
+    // existing-server flows, or from the state blob itself for the
+    // wizard flow (where no server row exists yet).
+    let exchange = build_exchange_context(&state, &blob.target, &enc_key).await?;
 
-    // POST to token endpoint with PKCE verifier.
-    let mut form: Vec<(&str, &str)> = vec![
-        ("grant_type", "authorization_code"),
-        ("code", code.as_str()),
-        ("redirect_uri", blob.redirect_uri.as_str()),
-        ("client_id", client_id),
-        ("code_verifier", blob.code_verifier.as_str()),
-    ];
-    if let Some(secret) = client_secret.as_deref() {
-        form.push(("client_secret", secret));
-    }
-    let body = serde_urlencoded::to_string(&form)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("encode token form: {e}")))?;
-
-    let http = state.http_client.load();
-    let resp = http
-        .post(token_endpoint)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("Accept", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Token endpoint unreachable: {e}")))?;
-
-    let status = resp.status();
-    let resp_text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        // RFC 6749 §5.2 success-vs-error responses both return JSON. On
-        // a non-2xx, peek at the body for `error` / `error_description`
-        // and surface those instead of leaking raw HTTP status text.
-        // Most "wrong client_secret" cases land here as 401 / 400.
-        let detail =
-            parse_token_endpoint_error(&resp_text).unwrap_or_else(|| format!("HTTP {status}"));
-        return Err(AppError::BadRequest(format!(
-            "Upstream rejected the OAuth exchange: {detail}. \
-             The MCP server's OAuth client_id/secret may be misconfigured — \
-             ask an administrator to verify them at /mcp/servers."
-        )));
-    }
-    // Some upstreams return 200 OK with `{"error": "..."}` instead of
-    // a status-coded error response (looking at you, GitHub on certain
-    // edge cases). Try the error shape first; only fall through to the
-    // success shape if it's clearly not an error envelope.
-    if let Some(detail) = parse_token_endpoint_error(&resp_text) {
-        return Err(AppError::BadRequest(format!(
-            "Upstream rejected the OAuth exchange: {detail}. \
-             The MCP server's OAuth client_id/secret may be misconfigured — \
-             ask an administrator to verify them at /mcp/servers."
-        )));
-    }
-    let token: TokenEndpointResponse = serde_json::from_str(&resp_text)
-        .map_err(|e| AppError::BadRequest(format!("Token response not JSON: {e}: {resp_text}")))?;
-
-    // Encrypt + persist. Convert RFC 6749's `expires_in` (seconds from
-    // now) into an absolute timestamp the resolver can compare against
-    // a clock reading without re-doing arithmetic on every request.
+    // Token-exchange + subject resolution + encryption — all
+    // independent of where the credential will land.
+    let token = oauth_token_exchange(
+        state.http_client.load().as_ref(),
+        &exchange,
+        &code,
+        &blob.redirect_uri,
+        &blob.code_verifier,
+    )
+    .await?;
     let access_encrypted = crypto::encrypt(token.access_token.as_bytes(), &enc_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("encrypt access_token: {e}")))?;
     let refresh_encrypted = match token.refresh_token.as_deref() {
@@ -525,90 +516,306 @@ pub async fn oauth_callback(
         .map(|s| Utc::now() + chrono::Duration::seconds(s as i64));
     let scopes: Vec<String> = token
         .scope
-        .map(|s| {
-            s.split_whitespace()
-                .map(|x| x.to_string())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| server.oauth_scopes.clone());
-
-    // Resolve `upstream_subject` for the UI's "@octocat" / "user@example.com"
-    // label. Three-tier best-effort:
-    //   1. Decode the access_token as a JWT and read sub-like fields
-    //      (free for Auth0 / Keycloak / Okta / Azure AD / Google).
-    //   2. Else GET the configured userinfo_endpoint with the access
-    //      token and walk the JSON for the first non-empty
-    //      subject-like field (covers GitHub, Notion, Slack, Jira,
-    //      Cloudflare, Discord — see `mcp_store_templates` seed).
-    //   3. Else give up — the UI falls back to `account_label`.
-    // Failures here never fail the auth itself.
+        .as_deref()
+        .map(|s| s.split_whitespace().map(String::from).collect::<Vec<_>>())
+        .unwrap_or_else(|| exchange.default_scopes.clone());
     let upstream_subject = resolve_upstream_subject(
         state.http_client.load().as_ref(),
         &token.access_token,
-        server.oauth_userinfo_endpoint.as_deref(),
+        exchange.userinfo_endpoint.as_deref(),
     )
     .await;
 
-    // First credential for (server, user) wins is_default; subsequent
-    // ones land non-default so the user keeps their existing routing.
-    upsert_credential(
-        &state,
-        blob.server_id,
-        blob.user_id,
-        &blob.account_label,
-        "oauth_authcode",
-        &access_encrypted,
-        refresh_encrypted.as_deref(),
-        expires_at,
-        &scopes,
-        upstream_subject.as_deref(),
-    )
-    .await?;
-
-    // If this user previously had a credential for this server (e.g.
-    // re-authorize after revoke, or re-authorize a different scope),
-    // any cached responses from the old identity are stale.
-    think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
-        .invalidate_user_lane(&blob.server_id, &blob.user_id)
-        .await;
-
-    // Per-user tool discovery — fire and forget. Now that we have a
-    // working bearer token for this user, hit `tools/list` upstream
-    // and write the result to `mcp_user_tools(server, user)`. This
-    // is the *only* path to tool data for auth-required servers, so
-    // populating it eagerly means the user sees their tool list
-    // immediately on first MCP gateway call rather than after a
-    // round-trip to discover. Failures only warn — not part of the
-    // auth-flow critical path.
-    spawn_user_tool_discovery(
-        state.db.clone(),
-        (**state.http_client.load()).clone(),
-        server.endpoint_url.clone(),
-        server.name.clone(),
-        blob.server_id,
-        blob.user_id,
-        token.access_token.clone(),
-    );
-
-    state.audit.log(
-        AuditEntry::new("mcp.connection.authorized")
-            .user_id(blob.user_id)
-            .resource("mcp_server")
-            .resource_id(blob.server_id.to_string())
-            .detail(serde_json::json!({
-                "account_label": blob.account_label,
+    // Dispatch storage based on target.
+    match &blob.target {
+        OauthStateTarget::PerUser {
+            server_id,
+            user_id,
+            account_label,
+        } => {
+            let server = load_server(&state, *server_id).await?;
+            upsert_credential(
+                &state,
+                *server_id,
+                *user_id,
+                account_label,
+                "oauth_authcode",
+                &access_encrypted,
+                refresh_encrypted.as_deref(),
+                expires_at,
+                &scopes,
+                upstream_subject.as_deref(),
+            )
+            .await?;
+            think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+                .invalidate_user_lane(server_id, user_id)
+                .await;
+            spawn_user_tool_discovery(
+                state.db.clone(),
+                (**state.http_client.load()).clone(),
+                server.endpoint_url.clone(),
+                server.name.clone(),
+                *server_id,
+                *user_id,
+                token.access_token.clone(),
+            );
+            state.audit.log(
+                AuditEntry::new("mcp.connection.authorized")
+                    .user_id(*user_id)
+                    .resource("mcp_server")
+                    .resource_id(server_id.to_string())
+                    .detail(serde_json::json!({
+                        "account_label": account_label,
+                        "scopes": scopes,
+                    })),
+            );
+            let base = callback_base_url(&state)?;
+            let url = format!(
+                "{}/connections#connected={}/{}",
+                base,
+                server_id,
+                urlencode_fragment(account_label),
+            );
+            Ok(Redirect::temporary(&url).into_response())
+        }
+        OauthStateTarget::AdminShared {
+            server_id,
+            configured_by,
+        } => {
+            let server = load_server(&state, *server_id).await?;
+            upsert_shared_credential(
+                &state,
+                *server_id,
+                "oauth_authcode",
+                &access_encrypted,
+                refresh_encrypted.as_deref(),
+                expires_at,
+                &scopes,
+                upstream_subject.as_deref(),
+                *configured_by,
+            )
+            .await?;
+            think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+                .invalidate_server_lane(server_id)
+                .await;
+            spawn_shared_tool_discovery(
+                state.db.clone(),
+                (**state.http_client.load()).clone(),
+                server.clone(),
+                token.access_token.clone(),
+            );
+            state.audit.log(
+                AuditEntry::new("mcp.shared_credential.authorized")
+                    .user_id(*configured_by)
+                    .resource("mcp_server")
+                    .resource_id(server_id.to_string())
+                    .detail(serde_json::json!({ "scopes": scopes })),
+            );
+            let base = callback_base_url(&state)?;
+            let url = format!(
+                "{}/admin/mcp/servers/{}#shared_connected=1",
+                base, server_id
+            );
+            Ok(Redirect::temporary(&url).into_response())
+        }
+        OauthStateTarget::WizardAdminShared {
+            wizard_session_id,
+            configured_by,
+            ..
+        } => {
+            // Stash the encrypted tokens in Redis under the wizard's
+            // session ID — the wizard's "Save" step will GETDEL this
+            // and transfer it into mcp_server_shared_credentials in
+            // the same TX as the server-row insert. No server row is
+            // created here, so abandoning the wizard leaves nothing
+            // behind that needs cleanup beyond Redis TTL.
+            let payload = serde_json::json!({
+                "credential_type": "oauth_authcode",
+                "access_token_encrypted": BASE64URL_NOPAD.encode(&access_encrypted),
+                "refresh_token_encrypted": refresh_encrypted
+                    .as_ref()
+                    .map(|b| BASE64URL_NOPAD.encode(b)),
+                "expires_at": expires_at,
                 "scopes": scopes,
-            })),
-    );
+                "upstream_subject": upstream_subject,
+                "configured_by": configured_by,
+            });
+            fred::interfaces::KeysInterface::set::<(), _, _>(
+                &state.redis,
+                wizard_credential_redis_key(wizard_session_id),
+                payload.to_string(),
+                Some(fred::types::Expiration::EX(WIZARD_CREDENTIAL_TTL_SECS)),
+                None,
+                false,
+            )
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
 
-    let base = callback_base_url(&state)?;
-    let url = format!(
-        "{}/connections#connected={}/{}",
-        base,
-        blob.server_id,
-        urlencode_fragment(&blob.account_label),
-    );
-    Ok(Redirect::temporary(&url).into_response())
+            state.audit.log(
+                AuditEntry::new("mcp.wizard.shared_credential_authorized")
+                    .user_id(*configured_by)
+                    .resource("mcp_wizard")
+                    .resource_id(wizard_session_id.clone())
+                    .detail(serde_json::json!({ "scopes": scopes })),
+            );
+
+            let base = callback_base_url(&state)?;
+            let url = format!(
+                "{}/mcp/servers/new#wizard_resume={}",
+                base,
+                urlencode_fragment(wizard_session_id),
+            );
+            Ok(Redirect::temporary(&url).into_response())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Wizard pending-credential storage in Redis
+// ---------------------------------------------------------------------------
+
+/// TTL on `mcp_wizard:cred:*` blobs. Long enough to cover a thoughtful
+/// admin filling out the rest of the wizard after returning from the
+/// upstream OAuth dance, short enough that abandoned tokens age out
+/// without any cleanup logic.
+const WIZARD_CREDENTIAL_TTL_SECS: i64 = 3_600;
+
+/// Redis key under which the OAuth callback parks a wizard's pending
+/// shared credential. Also used by `finalize_wizard_credential` to
+/// GETDEL the payload at server-create time.
+fn wizard_credential_redis_key(wizard_session_id: &str) -> String {
+    format!("mcp_wizard:cred:{wizard_session_id}")
+}
+
+/// Resolved OAuth client config + tail-state metadata used by the
+/// callback to run a token exchange. Bridges the two cases:
+///   1. The OAuth flow was started against an existing server row —
+///      config comes from the row.
+///   2. The flow was started from the new-server wizard — config is
+///      baked into the state blob (no row exists yet).
+struct ExchangeContext {
+    token_endpoint: String,
+    client_id: String,
+    /// Decrypted plaintext. `None` for public clients.
+    client_secret: Option<String>,
+    default_scopes: Vec<String>,
+    userinfo_endpoint: Option<String>,
+}
+
+async fn build_exchange_context(
+    state: &AppState,
+    target: &OauthStateTarget,
+    enc_key: &[u8; 32],
+) -> Result<ExchangeContext, AppError> {
+    match target {
+        OauthStateTarget::PerUser { server_id, .. }
+        | OauthStateTarget::AdminShared { server_id, .. } => {
+            let server = load_server(state, *server_id).await?;
+            let token_endpoint = server.oauth_token_endpoint.ok_or_else(|| {
+                AppError::BadRequest("OAuth token endpoint not configured".into())
+            })?;
+            let client_id = server
+                .oauth_client_id
+                .ok_or_else(|| AppError::BadRequest("OAuth client_id not configured".into()))?;
+            let client_secret =
+                decrypt_optional_secret(server.oauth_client_secret_encrypted.as_deref(), enc_key)?;
+            Ok(ExchangeContext {
+                token_endpoint,
+                client_id,
+                client_secret,
+                default_scopes: server.oauth_scopes,
+                userinfo_endpoint: server.oauth_userinfo_endpoint,
+            })
+        }
+        OauthStateTarget::WizardAdminShared {
+            oauth_token_endpoint,
+            oauth_client_id,
+            oauth_client_secret_encrypted,
+            oauth_scopes,
+            oauth_userinfo_endpoint,
+            ..
+        } => {
+            let client_secret =
+                decrypt_optional_secret(oauth_client_secret_encrypted.as_deref(), enc_key)?;
+            Ok(ExchangeContext {
+                token_endpoint: oauth_token_endpoint.clone(),
+                client_id: oauth_client_id.clone(),
+                client_secret,
+                default_scopes: oauth_scopes.clone(),
+                userinfo_endpoint: oauth_userinfo_endpoint.clone(),
+            })
+        }
+    }
+}
+
+fn decrypt_optional_secret(
+    encrypted: Option<&[u8]>,
+    enc_key: &[u8; 32],
+) -> Result<Option<String>, AppError> {
+    match encrypted {
+        Some(bytes) => {
+            let plain = crypto::decrypt(bytes, enc_key)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("decrypt client_secret: {e}")))?;
+            let s = String::from_utf8(plain)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("client_secret not utf8: {e}")))?;
+            Ok(Some(s))
+        }
+        None => Ok(None),
+    }
+}
+
+/// POST to the upstream token endpoint with PKCE. Extracted from the
+/// callback so the per-user, admin-shared, and wizard paths all share
+/// one error envelope and one transport.
+async fn oauth_token_exchange(
+    http: &reqwest::Client,
+    cfg: &ExchangeContext,
+    code: &str,
+    redirect_uri: &str,
+    code_verifier: &str,
+) -> Result<TokenEndpointResponse, AppError> {
+    let mut form: Vec<(&str, &str)> = vec![
+        ("grant_type", "authorization_code"),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("client_id", cfg.client_id.as_str()),
+        ("code_verifier", code_verifier),
+    ];
+    if let Some(secret) = cfg.client_secret.as_deref() {
+        form.push(("client_secret", secret));
+    }
+    let body = serde_urlencoded::to_string(&form)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("encode token form: {e}")))?;
+
+    let resp = http
+        .post(&cfg.token_endpoint)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .header("Accept", "application/json")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("Token endpoint unreachable: {e}")))?;
+
+    let status = resp.status();
+    let resp_text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let detail =
+            parse_token_endpoint_error(&resp_text).unwrap_or_else(|| format!("HTTP {status}"));
+        return Err(AppError::BadRequest(format!(
+            "Upstream rejected the OAuth exchange: {detail}. \
+             The MCP server's OAuth client_id/secret may be misconfigured — \
+             ask an administrator to verify them at /mcp/servers."
+        )));
+    }
+    if let Some(detail) = parse_token_endpoint_error(&resp_text) {
+        return Err(AppError::BadRequest(format!(
+            "Upstream rejected the OAuth exchange: {detail}. \
+             The MCP server's OAuth client_id/secret may be misconfigured — \
+             ask an administrator to verify them at /mcp/servers."
+        )));
+    }
+    serde_json::from_str(&resp_text)
+        .map_err(|e| AppError::BadRequest(format!("Token response not JSON: {e}: {resp_text}")))
 }
 
 // ---------------------------------------------------------------------------
@@ -817,9 +1024,16 @@ pub async fn paste_static_token(
     }
 
     let server = load_server(&state, server_id).await?;
-    if !server.allow_static_token {
+    if server.credential_owner == "admin_shared" {
         return Err(AppError::BadRequest(
-            "This server doesn't accept user-provided static tokens".into(),
+            "This server uses an admin-supplied shared credential — no per-user \
+             token is needed."
+                .into(),
+        ));
+    }
+    if server.auth_shape != "static" {
+        return Err(AppError::BadRequest(
+            "This server's auth shape isn't 'static' — pasted tokens can't be used here.".into(),
         ));
     }
 
@@ -974,14 +1188,22 @@ pub async fn test_connection(
         }),
     };
 
+    let server_auth_cfg = think_watch_mcp_gateway::user_token::ServerAuthCfg {
+        // /connections is per-user only — this endpoint is dead code
+        // for admin_shared servers (the UI hides them), so always
+        // resolve as PerUser regardless of the row's actual
+        // credential_owner. Keeps "test my own connection" semantics
+        // unambiguous.
+        credential_owner: think_watch_mcp_gateway::user_token::CredentialOwner::PerUser,
+        auth_shape: think_watch_mcp_gateway::user_token::AuthShape::parse(&server.auth_shape),
+        oauth_cfg,
+        auth_header_name: server.auth_header_name.clone(),
+        auth_value_template: server.auth_value_template.clone(),
+    };
+
     let header = match state
         .user_token_resolver
-        .resolve(
-            server_id,
-            &caller,
-            oauth_cfg.as_ref(),
-            server.allow_static_token,
-        )
+        .resolve(server_id, &server_auth_cfg, &caller)
         .await
     {
         Ok(opt) => opt,
@@ -1020,8 +1242,8 @@ pub async fn test_connection(
     };
 
     let mut headers_map = std::collections::HashMap::new();
-    if let Some((name, value)) = header {
-        headers_map.insert(name, value);
+    if let Some(injection) = header {
+        headers_map.insert(injection.header_name, injection.header_value);
     }
     let http = state.http_client.load();
     let outcome = super::mcp_servers::probe_mcp_endpoint(
@@ -1952,6 +2174,717 @@ async fn upsert_credential(
     .await?;
 
     tx.commit().await?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Admin: shared-credential storage
+// ---------------------------------------------------------------------------
+
+/// UPSERT into `mcp_server_shared_credentials`. Single row per server
+/// — when the admin rotates the credential the new row replaces the
+/// previous one. Uses `INSERT … ON CONFLICT` keyed on the server_id
+/// PK so the lifecycle code in [`UserTokenResolver`] sees a fresh
+/// `(access_token_encrypted, expires_at)` after a rotation without
+/// any extra coordination.
+#[allow(clippy::too_many_arguments)]
+async fn upsert_shared_credential(
+    state: &AppState,
+    server_id: Uuid,
+    credential_type: &str,
+    access_encrypted: &[u8],
+    refresh_encrypted: Option<&[u8]>,
+    expires_at: Option<DateTime<Utc>>,
+    scopes: &[String],
+    upstream_subject: Option<&str>,
+    configured_by: Uuid,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT INTO mcp_server_shared_credentials (
+               mcp_server_id, credential_type,
+               access_token_encrypted, refresh_token_encrypted,
+               expires_at, scopes, upstream_subject, configured_by
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (mcp_server_id) DO UPDATE SET
+               credential_type         = EXCLUDED.credential_type,
+               access_token_encrypted  = EXCLUDED.access_token_encrypted,
+               refresh_token_encrypted = EXCLUDED.refresh_token_encrypted,
+               expires_at              = EXCLUDED.expires_at,
+               scopes                  = EXCLUDED.scopes,
+               upstream_subject        = EXCLUDED.upstream_subject,
+               configured_by           = EXCLUDED.configured_by,
+               updated_at              = now()"#,
+    )
+    .bind(server_id)
+    .bind(credential_type)
+    .bind(access_encrypted)
+    .bind(refresh_encrypted)
+    .bind(expires_at)
+    .bind(scopes)
+    .bind(upstream_subject)
+    .bind(configured_by)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+/// Background tool-catalog refresh after a shared-credential write.
+/// Builds the auth header from the server's `auth_header_name` /
+/// `auth_value_template` so X-API-Key and other non-Bearer shapes
+/// work end-to-end. Failures are logged at warn level — the
+/// credential write succeeds either way.
+fn spawn_shared_tool_discovery(
+    db: sqlx::PgPool,
+    http: reqwest::Client,
+    server: McpServer,
+    bearer_token: String,
+) {
+    tokio::spawn(async move {
+        let header_value = server
+            .auth_value_template
+            .replace("{{token}}", &bearer_token);
+        let auth = (server.auth_header_name.as_str(), header_value.as_str());
+        match crate::mcp_runtime::discover_and_persist_tools_with_auth(
+            &db,
+            &http,
+            &server,
+            Some(auth),
+        )
+        .await
+        {
+            crate::mcp_runtime::SystemDiscoveryOutcome::Tools(n) => {
+                tracing::info!(
+                    mcp_server = %server.name,
+                    tools = n,
+                    "Shared-credential MCP tool discovery succeeded"
+                );
+                let _ = sqlx::query("UPDATE mcp_servers SET last_error = NULL WHERE id = $1")
+                    .bind(server.id)
+                    .execute(&db)
+                    .await;
+            }
+            crate::mcp_runtime::SystemDiscoveryOutcome::AuthRequired => {
+                tracing::warn!(
+                    mcp_server = %server.name,
+                    "Shared credential rejected by upstream tools/list (401/403)"
+                );
+                let _ = sqlx::query("UPDATE mcp_servers SET last_error = $1 WHERE id = $2")
+                    .bind("Shared credential rejected by upstream — verify token / scopes")
+                    .bind(server.id)
+                    .execute(&db)
+                    .await;
+            }
+            crate::mcp_runtime::SystemDiscoveryOutcome::Failed(e) => {
+                tracing::warn!(
+                    mcp_server = %server.name,
+                    error = %e,
+                    "Shared-credential MCP tool discovery failed"
+                );
+                let _ = sqlx::query("UPDATE mcp_servers SET last_error = $1 WHERE id = $2")
+                    .bind(format!("{e}"))
+                    .bind(server.id)
+                    .execute(&db)
+                    .await;
+            }
+        }
+    });
+}
+
+/// PUT /api/admin/mcp/servers/:id/shared-credential/static-token
+///
+/// Admin pastes a shared PAT / API key. Encrypted at rest exactly
+/// like per-user static tokens; replicated through to the tool
+/// catalog via [`spawn_shared_tool_discovery`].
+#[derive(Debug, Deserialize)]
+pub struct SharedStaticTokenRequest {
+    pub token: String,
+}
+
+pub async fn paste_shared_static_token(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(server_id): Path<Uuid>,
+    Json(req): Json<SharedStaticTokenRequest>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("mcp_servers:update")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:update")
+        .await?;
+
+    if req.token.is_empty() {
+        return Err(AppError::BadRequest("token is required".into()));
+    }
+
+    let server = load_server(&state, server_id).await?;
+    if server.credential_owner != "admin_shared" {
+        return Err(AppError::BadRequest(
+            "This server is not configured for admin-shared credentials. \
+             Set credential_owner='admin_shared' in the server settings first."
+                .into(),
+        ));
+    }
+
+    let enc_key = parse_encryption_key(&state.config.encryption_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
+    let access_encrypted = crypto::encrypt(req.token.as_bytes(), &enc_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("encrypt token: {e}")))?;
+
+    upsert_shared_credential(
+        &state,
+        server_id,
+        "static_token",
+        &access_encrypted,
+        None,
+        None,
+        &[],
+        None,
+        auth_user.claims.sub,
+    )
+    .await?;
+
+    // Bearer changed → every cached response was minted under the
+    // previous identity.
+    think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+        .invalidate_server_lane(&server_id)
+        .await;
+
+    spawn_shared_tool_discovery(
+        state.db.clone(),
+        (**state.http_client.load()).clone(),
+        server,
+        req.token.clone(),
+    );
+
+    state.audit.log(
+        AuditEntry::new("mcp.shared_credential.token_set")
+            .user_id(auth_user.claims.sub)
+            .resource("mcp_server")
+            .resource_id(server_id.to_string()),
+    );
+
+    Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// POST /api/admin/mcp/servers/:id/shared-credential/authorize
+///
+/// Start the OAuth flow that ends with the gateway holding a shared
+/// upstream credential for this server. State blob is marked
+/// `target=admin_shared` so [`oauth_callback`] writes to
+/// `mcp_server_shared_credentials` instead of `mcp_user_credentials`.
+pub async fn start_shared_authorize(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(server_id): Path<Uuid>,
+) -> Result<Json<AuthorizeResponse>, AppError> {
+    auth_user.require_permission("mcp_servers:update")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:update")
+        .await?;
+
+    super::test_rate_limit::check_test_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        auth_user.claims.iat,
+        "mcp_oauth_shared_authorize",
+    )
+    .await?;
+
+    let server = load_server(&state, server_id).await?;
+    if server.credential_owner != "admin_shared" {
+        return Err(AppError::BadRequest(
+            "This server is not configured for admin-shared credentials".into(),
+        ));
+    }
+    let auth_endpoint = server
+        .oauth_authorization_endpoint
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("OAuth not configured for this server".into()))?;
+    let client_id = server
+        .oauth_client_id
+        .as_deref()
+        .ok_or_else(|| AppError::BadRequest("OAuth client_id not configured".into()))?;
+    if server.oauth_token_endpoint.is_none() {
+        return Err(AppError::BadRequest(
+            "OAuth token endpoint not configured".into(),
+        ));
+    }
+
+    let state_token = random_token()?;
+    let code_verifier = random_token()?;
+    let code_challenge = pkce_challenge(&code_verifier);
+    let redirect_uri = callback_redirect_uri(&state)?;
+
+    let enc_key = parse_encryption_key(&state.config.encryption_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
+    let binding = state_binding(&enc_key, &state_token, &code_verifier);
+
+    let blob = McpOauthState {
+        target: OauthStateTarget::AdminShared {
+            server_id,
+            configured_by: auth_user.claims.sub,
+        },
+        code_verifier: code_verifier.clone(),
+        redirect_uri: redirect_uri.clone(),
+        binding,
+    };
+    let payload = serde_json::to_string(&blob)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("serialize state: {e}")))?;
+    fred::interfaces::KeysInterface::set::<(), _, _>(
+        &state.redis,
+        format!("{OAUTH_STATE_PREFIX}{state_token}"),
+        payload,
+        Some(fred::types::Expiration::EX(OAUTH_STATE_TTL_SECS)),
+        None,
+        false,
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
+
+    let mut url = url::Url::parse(auth_endpoint)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("invalid authorization_endpoint: {e}")))?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("response_type", "code");
+        q.append_pair("client_id", client_id);
+        q.append_pair("redirect_uri", &redirect_uri);
+        q.append_pair("state", &state_token);
+        q.append_pair("code_challenge", &code_challenge);
+        q.append_pair("code_challenge_method", "S256");
+        if !server.oauth_scopes.is_empty() {
+            q.append_pair("scope", &server.oauth_scopes.join(" "));
+        }
+    }
+
+    Ok(Json(AuthorizeResponse {
+        authorize_url: url.to_string(),
+    }))
+}
+
+/// GET /api/admin/mcp/servers/:id/shared-credential
+///
+/// Status snapshot for the admin UI: `configured` / not, expiry,
+/// upstream subject, who set it up.
+#[derive(Debug, Serialize)]
+pub struct SharedCredentialStatus {
+    pub configured: bool,
+    pub credential_type: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub upstream_subject: Option<String>,
+    pub configured_by: Option<Uuid>,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+pub async fn shared_credential_status(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(server_id): Path<Uuid>,
+) -> Result<Json<SharedCredentialStatus>, AppError> {
+    auth_user.require_permission("mcp_servers:read")?;
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        credential_type: String,
+        expires_at: Option<DateTime<Utc>>,
+        upstream_subject: Option<String>,
+        configured_by: Option<Uuid>,
+        updated_at: DateTime<Utc>,
+    }
+    let row = sqlx::query_as::<_, Row>(
+        r#"SELECT credential_type, expires_at, upstream_subject, configured_by, updated_at
+             FROM mcp_server_shared_credentials WHERE mcp_server_id = $1"#,
+    )
+    .bind(server_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    Ok(Json(match row {
+        Some(r) => SharedCredentialStatus {
+            configured: true,
+            credential_type: Some(r.credential_type),
+            expires_at: r.expires_at,
+            upstream_subject: r.upstream_subject,
+            configured_by: r.configured_by,
+            updated_at: Some(r.updated_at),
+        },
+        None => SharedCredentialStatus {
+            configured: false,
+            credential_type: None,
+            expires_at: None,
+            upstream_subject: None,
+            configured_by: None,
+            updated_at: None,
+        },
+    }))
+}
+
+/// DELETE /api/admin/mcp/servers/:id/shared-credential
+///
+/// Revoke the shared credential. Best-effort upstream revoke when
+/// the server has a revocation endpoint and the row was OAuth.
+pub async fn revoke_shared_credential(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(server_id): Path<Uuid>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("mcp_servers:update")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:update")
+        .await?;
+
+    let row: Option<(String, Vec<u8>)> = sqlx::query_as(
+        r#"SELECT credential_type, access_token_encrypted
+             FROM mcp_server_shared_credentials WHERE mcp_server_id = $1"#,
+    )
+    .bind(server_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((credential_type, access_encrypted)) = row else {
+        return Err(AppError::NotFound(
+            "Shared credential not configured".into(),
+        ));
+    };
+
+    if credential_type == "oauth_authcode" {
+        let server = load_server(&state, server_id).await?;
+        if let Some(revocation_endpoint) = server.oauth_revocation_endpoint.as_deref() {
+            let enc_key = parse_encryption_key(&state.config.encryption_key)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
+            if let Ok(token_bytes) = crypto::decrypt(&access_encrypted, &enc_key)
+                && let Ok(token) = String::from_utf8(token_bytes)
+            {
+                let form = vec![("token", token.as_str())];
+                let body = serde_urlencoded::to_string(&form).unwrap_or_default();
+                let http = state.http_client.load();
+                let _ = http
+                    .post(revocation_endpoint)
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .body(body)
+                    .send()
+                    .await;
+            }
+        }
+    }
+
+    sqlx::query("DELETE FROM mcp_server_shared_credentials WHERE mcp_server_id = $1")
+        .bind(server_id)
+        .execute(&state.db)
+        .await?;
+
+    // The shared bearer is gone — every cached response was minted
+    // under it and is now serving against an identity that no longer
+    // has access.
+    think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+        .invalidate_server_lane(&server_id)
+        .await;
+
+    state.audit.log(
+        AuditEntry::new("mcp.shared_credential.revoked")
+            .user_id(auth_user.claims.sub)
+            .resource("mcp_server")
+            .resource_id(server_id.to_string()),
+    );
+
+    Ok(Json(serde_json::json!({"status": "revoked"})))
+}
+
+// ---------------------------------------------------------------------------
+// Wizard endpoints — authorize an admin-shared OAuth credential before
+// the server row exists, and read back its status from Redis.
+// ---------------------------------------------------------------------------
+
+/// Body for `POST /api/admin/mcp/oauth-wizard-authorize`. Mirrors the
+/// fields the wizard's Step 2 has filled in for OAuth — the handler
+/// bakes them into the OAuth state blob so the callback can run a
+/// token exchange without a server row existing yet.
+#[derive(Debug, Deserialize)]
+pub struct WizardAuthorizeRequest {
+    pub wizard_session_id: String,
+    pub oauth_authorization_endpoint: String,
+    pub oauth_token_endpoint: String,
+    pub oauth_client_id: String,
+    /// Plaintext on the wire; encrypted at rest before persisting.
+    /// Empty string ⇒ public client (PKCE-only).
+    #[serde(default)]
+    pub oauth_client_secret: Option<String>,
+    #[serde(default)]
+    pub oauth_scopes: Vec<String>,
+    /// Userinfo endpoint, if known. Used to populate
+    /// `upstream_subject` on the resulting credential row when the
+    /// wizard finalizes.
+    #[serde(default)]
+    pub oauth_userinfo_endpoint: Option<String>,
+}
+
+pub async fn start_wizard_authorize(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<WizardAuthorizeRequest>,
+) -> Result<Json<AuthorizeResponse>, AppError> {
+    auth_user.require_permission("mcp_servers:create")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:create")
+        .await?;
+
+    super::test_rate_limit::check_test_rate_limit(
+        &state.redis,
+        auth_user.claims.sub,
+        auth_user.claims.iat,
+        "mcp_oauth_wizard_authorize",
+    )
+    .await?;
+
+    if req.wizard_session_id.is_empty() || req.wizard_session_id.len() > 64 {
+        return Err(AppError::BadRequest(
+            "wizard_session_id must be 1–64 characters".into(),
+        ));
+    }
+    // SSRF guard — same check create_server applies. We're about to
+    // POST credentials to these URLs; never let an admin smuggle
+    // `http://169.254.169.254/...` past us.
+    super::mcp_servers::validate_oauth_endpoint_urls(
+        Some(req.oauth_authorization_endpoint.as_str()),
+        Some(req.oauth_token_endpoint.as_str()),
+        None,
+        req.oauth_userinfo_endpoint.as_deref(),
+    )?;
+    if req.oauth_client_id.is_empty() {
+        return Err(AppError::BadRequest("oauth_client_id is required".into()));
+    }
+
+    let state_token = random_token()?;
+    let code_verifier = random_token()?;
+    let code_challenge = pkce_challenge(&code_verifier);
+    let redirect_uri = callback_redirect_uri(&state)?;
+
+    let enc_key = parse_encryption_key(&state.config.encryption_key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
+    let binding = state_binding(&enc_key, &state_token, &code_verifier);
+
+    // Encrypt the client_secret before stashing in the state blob —
+    // the blob lands in Redis and we never want plaintext secrets
+    // there even for the 600s state TTL.
+    let oauth_client_secret_encrypted = match req.oauth_client_secret.as_deref() {
+        Some(s) if !s.is_empty() => Some(
+            crypto::encrypt(s.as_bytes(), &enc_key)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("encrypt client_secret: {e}")))?,
+        ),
+        _ => None,
+    };
+
+    let blob = McpOauthState {
+        target: OauthStateTarget::WizardAdminShared {
+            wizard_session_id: req.wizard_session_id.clone(),
+            configured_by: auth_user.claims.sub,
+            oauth_token_endpoint: req.oauth_token_endpoint.clone(),
+            oauth_client_id: req.oauth_client_id.clone(),
+            oauth_client_secret_encrypted,
+            oauth_scopes: req.oauth_scopes.clone(),
+            oauth_userinfo_endpoint: req.oauth_userinfo_endpoint.clone(),
+        },
+        code_verifier: code_verifier.clone(),
+        redirect_uri: redirect_uri.clone(),
+        binding,
+    };
+    let payload = serde_json::to_string(&blob)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("serialize state: {e}")))?;
+    fred::interfaces::KeysInterface::set::<(), _, _>(
+        &state.redis,
+        format!("{OAUTH_STATE_PREFIX}{state_token}"),
+        payload,
+        Some(fred::types::Expiration::EX(OAUTH_STATE_TTL_SECS)),
+        None,
+        false,
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
+
+    let mut url = url::Url::parse(req.oauth_authorization_endpoint.as_str())
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("invalid authorization_endpoint: {e}")))?;
+    {
+        let mut q = url.query_pairs_mut();
+        q.append_pair("response_type", "code");
+        q.append_pair("client_id", req.oauth_client_id.as_str());
+        q.append_pair("redirect_uri", &redirect_uri);
+        q.append_pair("state", &state_token);
+        q.append_pair("code_challenge", &code_challenge);
+        q.append_pair("code_challenge_method", "S256");
+        if !req.oauth_scopes.is_empty() {
+            q.append_pair("scope", &req.oauth_scopes.join(" "));
+        }
+    }
+
+    Ok(Json(AuthorizeResponse {
+        authorize_url: url.to_string(),
+    }))
+}
+
+/// `GET /api/admin/mcp/wizards/{wizard_session_id}/credential-status`
+///
+/// Lets the wizard's Step 3 poll whether the OAuth dance came back
+/// successfully. Reads the Redis blob written by the callback's
+/// `WizardAdminShared` arm. Returns 404 when nothing's there yet
+/// (admin hasn't finished the dance) — the frontend treats 404 as
+/// "still pending" rather than "error".
+#[derive(Debug, Serialize)]
+pub struct WizardCredentialStatus {
+    pub credential_type: String,
+    pub upstream_subject: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub scopes: Vec<String>,
+}
+
+pub async fn wizard_credential_status(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(wizard_session_id): Path<String>,
+) -> Result<Json<WizardCredentialStatus>, AppError> {
+    auth_user.require_permission("mcp_servers:create")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:create")
+        .await?;
+
+    let stored: Option<String> = fred::interfaces::KeysInterface::get(
+        &state.redis,
+        wizard_credential_redis_key(&wizard_session_id),
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
+    let stored =
+        stored.ok_or_else(|| AppError::NotFound("Wizard credential not yet ready".into()))?;
+
+    #[derive(serde::Deserialize)]
+    struct StoredBlob {
+        credential_type: String,
+        upstream_subject: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        scopes: Vec<String>,
+    }
+    let parsed: StoredBlob = serde_json::from_str(&stored)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("corrupt wizard credential blob: {e}")))?;
+
+    Ok(Json(WizardCredentialStatus {
+        credential_type: parsed.credential_type,
+        upstream_subject: parsed.upstream_subject,
+        expires_at: parsed.expires_at,
+        scopes: parsed.scopes,
+    }))
+}
+
+/// Delete the pending wizard credential. Used when the admin abandons
+/// the wizard or rolls back from Step 3 — the OAuth state's natural
+/// 1-hour TTL would clean it up anyway, but explicit deletion lets
+/// the admin re-run the dance without the old blob shadowing the
+/// new one.
+pub async fn discard_wizard_credential(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(wizard_session_id): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    auth_user.require_permission("mcp_servers:create")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:create")
+        .await?;
+
+    let _: Option<String> = fred::interfaces::KeysInterface::getdel(
+        &state.redis,
+        wizard_credential_redis_key(&wizard_session_id),
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
+    Ok(Json(serde_json::json!({"status": "discarded"})))
+}
+
+/// Internal helper — fetch and delete the wizard credential blob in
+/// one Redis round-trip, returning the raw fields the create_server
+/// handler needs to insert into `mcp_server_shared_credentials`.
+/// `pub(super)` so [`mcp_servers::create_server`] can call it.
+pub(super) async fn pop_wizard_credential(
+    state: &AppState,
+    wizard_session_id: &str,
+) -> Result<Option<PoppedWizardCredential>, AppError> {
+    let stored: Option<String> = fred::interfaces::KeysInterface::getdel(
+        &state.redis,
+        wizard_credential_redis_key(wizard_session_id),
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+
+    #[derive(serde::Deserialize)]
+    struct StoredBlob {
+        credential_type: String,
+        access_token_encrypted: String,
+        refresh_token_encrypted: Option<String>,
+        expires_at: Option<DateTime<Utc>>,
+        scopes: Vec<String>,
+        upstream_subject: Option<String>,
+        configured_by: Uuid,
+    }
+    let parsed: StoredBlob = serde_json::from_str(&stored)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("corrupt wizard credential blob: {e}")))?;
+
+    let access = BASE64URL_NOPAD
+        .decode(parsed.access_token_encrypted.as_bytes())
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("decode access bytes: {e}")))?;
+    let refresh = match parsed.refresh_token_encrypted {
+        Some(s) => Some(
+            BASE64URL_NOPAD
+                .decode(s.as_bytes())
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("decode refresh bytes: {e}")))?,
+        ),
+        None => None,
+    };
+
+    Ok(Some(PoppedWizardCredential {
+        credential_type: parsed.credential_type,
+        access_token_encrypted: access,
+        refresh_token_encrypted: refresh,
+        expires_at: parsed.expires_at,
+        scopes: parsed.scopes,
+        upstream_subject: parsed.upstream_subject,
+        configured_by: parsed.configured_by,
+    }))
+}
+
+pub(super) struct PoppedWizardCredential {
+    pub credential_type: String,
+    pub access_token_encrypted: Vec<u8>,
+    pub refresh_token_encrypted: Option<Vec<u8>>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub scopes: Vec<String>,
+    pub upstream_subject: Option<String>,
+    pub configured_by: Uuid,
+}
+
+/// Insert a popped wizard credential into `mcp_server_shared_credentials`.
+/// Called by [`mcp_servers::create_server`] inside the same TX as the
+/// server-row insert so the credential and the row land atomically.
+pub(super) async fn insert_shared_credential_from_wizard(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    server_id: Uuid,
+    cred: &PoppedWizardCredential,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"INSERT INTO mcp_server_shared_credentials (
+               mcp_server_id, credential_type,
+               access_token_encrypted, refresh_token_encrypted,
+               expires_at, scopes, upstream_subject, configured_by
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+    )
+    .bind(server_id)
+    .bind(&cred.credential_type)
+    .bind(&cred.access_token_encrypted)
+    .bind(cred.refresh_token_encrypted.as_deref())
+    .bind(cred.expires_at)
+    .bind(&cred.scopes)
+    .bind(cred.upstream_subject.as_deref())
+    .bind(cred.configured_by)
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 

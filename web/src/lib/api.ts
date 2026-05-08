@@ -309,6 +309,9 @@ export function describeApiError(
   return t('errors.generic');
 }
 
+export const apiGet = <T>(path: string) =>
+  api<T>(path, { method: 'GET' });
+
 export const apiPost = <T>(path: string, body: unknown) =>
   api<T>(path, { method: 'POST', body });
 

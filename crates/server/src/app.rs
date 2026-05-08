@@ -746,6 +746,36 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/mcp/servers/{id}/discover",
             post(handlers::mcp_tools::discover_tools),
         )
+        // Admin-shared credentials for the server. Reads use the
+        // generic `mcp_servers:read` permission so the wizard can
+        // show "configured / not configured"; writes need
+        // `mcp_servers:update`.
+        .route(
+            "/api/admin/mcp/servers/{id}/shared-credential",
+            get(handlers::mcp_oauth::shared_credential_status)
+                .delete(handlers::mcp_oauth::revoke_shared_credential),
+        )
+        .route(
+            "/api/admin/mcp/servers/{id}/shared-credential/static-token",
+            put(handlers::mcp_oauth::paste_shared_static_token),
+        )
+        .route(
+            "/api/admin/mcp/servers/{id}/shared-credential/authorize",
+            post(handlers::mcp_oauth::start_shared_authorize),
+        )
+        // Wizard pre-creation OAuth flow. The admin starts an
+        // admin_shared OAuth dance before the server row exists; the
+        // resulting credential lives in Redis under the
+        // wizard_session_id until create_server transfers it.
+        .route(
+            "/api/admin/mcp/oauth-wizard-authorize",
+            post(handlers::mcp_oauth::start_wizard_authorize),
+        )
+        .route(
+            "/api/admin/mcp/wizards/{wizard_session_id}/credential-status",
+            get(handlers::mcp_oauth::wizard_credential_status)
+                .delete(handlers::mcp_oauth::discard_wizard_credential),
+        )
         .route(
             "/api/mcp/store/{slug}/install",
             post(handlers::mcp_store::install_template),

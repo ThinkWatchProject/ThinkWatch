@@ -183,7 +183,7 @@ pub async fn list_servers(
 /// Empty strings are treated as "not set" and skipped — admins clear
 /// optional URLs by sending `""`, and `validate_url` would otherwise
 /// reject empty input with a confusing message.
-fn validate_oauth_endpoint_urls(
+pub(super) fn validate_oauth_endpoint_urls(
     authorization: Option<&str>,
     token: Option<&str>,
     revocation: Option<&str>,
@@ -299,19 +299,119 @@ pub async fn create_server(
         }
     };
 
-    let allow_static_token = req.allow_static_token.unwrap_or(false);
+    let auth_shape = req
+        .auth_shape
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("anonymous")
+        .to_string();
+    if !matches!(auth_shape.as_str(), "anonymous" | "oauth" | "static") {
+        return Err(AppError::BadRequest(
+            "auth_shape must be 'anonymous', 'oauth', or 'static'".into(),
+        ));
+    }
     let oauth_scopes = req.oauth_scopes.unwrap_or_default();
 
+    // Auth-header injection. Defaults to the Bearer pattern; admins
+    // override per upstream (X-API-Key, etc.). Validate the template
+    // up front so a bad value is rejected with a 400 instead of
+    // silently smuggling a literal `{{user_id}}` into the upstream.
+    let auth_header_name = req
+        .auth_header_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Authorization")
+        .to_string();
+    let auth_value_template = req
+        .auth_value_template
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Bearer {{token}}")
+        .to_string();
+    think_watch_mcp_gateway::user_token::validate_auth_value_template(&auth_value_template)
+        .map_err(AppError::BadRequest)?;
+
+    // Credential ownership. Default per_user; admin_shared optionally
+    // pairs with `wizard_session_id` (OAuth flow already completed) or
+    // `shared_static_token` (admin pasted at create time) so the
+    // credential lands atomically with the row insert.
+    let credential_owner = req
+        .credential_owner
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("per_user")
+        .to_string();
+    if credential_owner != "per_user" && credential_owner != "admin_shared" {
+        return Err(AppError::BadRequest(
+            "credential_owner must be 'per_user' or 'admin_shared'".into(),
+        ));
+    }
+    if req.wizard_session_id.is_some() && req.shared_static_token.is_some() {
+        return Err(AppError::BadRequest(
+            "wizard_session_id and shared_static_token are mutually exclusive".into(),
+        ));
+    }
+    if (req.wizard_session_id.is_some() || req.shared_static_token.is_some())
+        && credential_owner != "admin_shared"
+    {
+        return Err(AppError::BadRequest(
+            "wizard_session_id / shared_static_token are only valid when credential_owner = 'admin_shared'"
+                .into(),
+        ));
+    }
+
+    // Pop the wizard credential up front (outside the TX) — a Redis
+    // GETDEL of a missing key returns None which we treat as 400.
+    // Keeping it outside the TX matches what `paste_shared_static_token`
+    // already does and avoids holding a Postgres lock while talking
+    // to Redis.
+    let wizard_cred = match req.wizard_session_id.as_deref() {
+        Some(id) => {
+            let popped = super::mcp_oauth::pop_wizard_credential(&state, id).await?;
+            Some(popped.ok_or_else(|| {
+                AppError::BadRequest(
+                    "Wizard credential blob not found — the OAuth dance may have timed out. \
+                     Re-run authorize from the wizard."
+                        .into(),
+                )
+            })?)
+        }
+        None => None,
+    };
+
+    // Encrypt the static token (if provided) outside the TX too —
+    // crypto failures shouldn't roll back a row insert.
+    let shared_static_token_encrypted = match req.shared_static_token.as_deref() {
+        Some(token) if !token.is_empty() => {
+            let key =
+                think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
+                    .map_err(|e| {
+                        AppError::Internal(anyhow::anyhow!("encryption key error: {e}"))
+                    })?;
+            Some(
+                think_watch_common::crypto::encrypt(token.as_bytes(), &key)
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("encrypt token: {e}")))?,
+            )
+        }
+        _ => None,
+    };
+
+    // One transaction: server INSERT + (optional) shared-credential
+    // INSERT. Failures of either roll back the other so we never get
+    // an admin_shared row with no credential anyone can find.
+    let mut tx = state.db.begin().await?;
     let server = sqlx::query_as::<_, McpServer>(
         r#"INSERT INTO mcp_servers (
                name, namespace_prefix, description, endpoint_url, transport_type,
                oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
                oauth_revocation_endpoint, oauth_userinfo_endpoint,
                oauth_client_id, oauth_client_secret_encrypted,
-               oauth_scopes, allow_static_token, static_token_help_url,
+               oauth_scopes, auth_shape, static_token_help_url,
+               auth_header_name, auth_value_template, credential_owner,
                config_json
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
+                   $16, $17, $18, $19)
            RETURNING *"#,
     )
     .bind(&req.name)
@@ -327,8 +427,11 @@ pub async fn create_server(
     .bind(&req.oauth_client_id)
     .bind(&oauth_client_secret_encrypted)
     .bind(&oauth_scopes)
-    .bind(allow_static_token)
+    .bind(&auth_shape)
     .bind(&req.static_token_help_url)
+    .bind(&auth_header_name)
+    .bind(&auth_value_template)
+    .bind(&credential_owner)
     .bind({
         let mut config = serde_json::json!({});
         if let Some(ref headers) = req.custom_headers {
@@ -340,9 +443,28 @@ pub async fn create_server(
         }
         config
     })
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(map_mcp_server_unique_violation)?;
+
+    // Atomic credential install for admin_shared mode.
+    if let Some(cred) = &wizard_cred {
+        super::mcp_oauth::insert_shared_credential_from_wizard(&mut tx, server.id, cred).await?;
+    } else if let Some(encrypted) = &shared_static_token_encrypted {
+        sqlx::query(
+            r#"INSERT INTO mcp_server_shared_credentials (
+                   mcp_server_id, credential_type, access_token_encrypted, configured_by
+               )
+               VALUES ($1, 'static_token', $2, $3)"#,
+        )
+        .bind(server.id)
+        .bind(encrypted)
+        .bind(auth_user.claims.sub)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    tx.commit().await?;
 
     // Sync the in-memory MCP registry so the gateway can route to the new
     // server immediately, without a restart. The CB is also pre-registered
@@ -465,7 +587,11 @@ pub struct UpdateMcpServerRequest {
     /// Encrypted at rest before persisting.
     pub oauth_client_secret: Option<String>,
     pub oauth_scopes: Option<Vec<String>>,
-    pub allow_static_token: Option<bool>,
+    /// Switch the server's auth shape. Changing this purges any
+    /// existing credentials of the previous shape (per-user rows or
+    /// shared row) so callers can't end up with stale OAuth tokens
+    /// on a server that's now static, etc.
+    pub auth_shape: Option<String>,
     #[serde(default, deserialize_with = "deserialize_some")]
     #[schema(value_type = Option<String>)]
     pub static_token_help_url: Option<Option<String>>,
@@ -475,6 +601,16 @@ pub struct UpdateMcpServerRequest {
     /// Per-server response cache TTL in seconds. `None` = use global default.
     /// `0` = disable caching for this server.
     pub cache_ttl_secs: Option<u64>,
+    /// Override the HTTP header name under which the upstream credential
+    /// is sent. Defaults to `Authorization` when absent on create.
+    pub auth_header_name: Option<String>,
+    /// Override the value template (must contain `{{token}}`).
+    pub auth_value_template: Option<String>,
+    /// Switch credential ownership between `per_user` and
+    /// `admin_shared`. When switched to `admin_shared`, any existing
+    /// `mcp_user_credentials` rows are cleaned up by the handler so
+    /// the per-user UI doesn't show stale connections.
+    pub credential_owner: Option<String>,
 }
 
 #[utoipa::path(
@@ -553,13 +689,60 @@ pub async fn update_server(
         None => existing.static_token_help_url.as_deref(),
         Some(inner) => inner.as_deref(),
     };
-    let allow_static_token = req
-        .allow_static_token
-        .unwrap_or(existing.allow_static_token);
+    let auth_shape = req
+        .auth_shape
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&existing.auth_shape)
+        .to_string();
+    if !matches!(auth_shape.as_str(), "anonymous" | "oauth" | "static") {
+        return Err(AppError::BadRequest(
+            "auth_shape must be 'anonymous', 'oauth', or 'static'".into(),
+        ));
+    }
+    let auth_shape_changed = auth_shape != existing.auth_shape;
     let oauth_scopes = req
         .oauth_scopes
         .clone()
         .unwrap_or_else(|| existing.oauth_scopes.clone());
+
+    // Auth-header injection — preserve when absent, validate the
+    // template when supplied so we can never store a placeholder
+    // other than `{{token}}`.
+    let auth_header_name = req
+        .auth_header_name
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&existing.auth_header_name)
+        .to_string();
+    let auth_value_template = match req.auth_value_template.as_deref() {
+        Some(s) if !s.is_empty() => {
+            think_watch_mcp_gateway::user_token::validate_auth_value_template(s)
+                .map_err(AppError::BadRequest)?;
+            s.to_string()
+        }
+        _ => existing.auth_value_template.clone(),
+    };
+
+    // Credential ownership transitions need a side effect: switching
+    // from per_user → admin_shared invalidates per-user credentials
+    // (they're irrelevant when a shared bearer exists), and the
+    // reverse leaves the now-orphaned shared row in place so the
+    // admin can revoke it explicitly. Both decisions are conservative
+    // — we never wipe data the user might still need on a hot toggle.
+    let credential_owner = req
+        .credential_owner
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(&existing.credential_owner)
+        .to_string();
+    if credential_owner != "per_user" && credential_owner != "admin_shared" {
+        return Err(AppError::BadRequest(
+            "credential_owner must be 'per_user' or 'admin_shared'".into(),
+        ));
+    }
+    let switching_to_admin_shared =
+        credential_owner == "admin_shared" && existing.credential_owner != "admin_shared";
 
     // Resolve new namespace_prefix: explicit override > existing value.
     let namespace_prefix = match req.namespace_prefix.as_deref() {
@@ -628,8 +811,9 @@ pub async fn update_server(
               oauth_token_endpoint = $10, oauth_revocation_endpoint = $11,
               oauth_userinfo_endpoint = $12,
               oauth_client_id = $13, oauth_client_secret_encrypted = $14,
-              oauth_scopes = $15, allow_static_token = $16, static_token_help_url = $17,
-              config_json = $18
+              oauth_scopes = $15, auth_shape = $16, static_token_help_url = $17,
+              auth_header_name = $18, auth_value_template = $19, credential_owner = $20,
+              config_json = $21
            WHERE id = $1 RETURNING *"#,
     )
     .bind(id)
@@ -647,12 +831,40 @@ pub async fn update_server(
     .bind(oauth_client_id)
     .bind(&oauth_client_secret_encrypted)
     .bind(&oauth_scopes)
-    .bind(allow_static_token)
+    .bind(&auth_shape)
     .bind(static_token_help_url)
+    .bind(&auth_header_name)
+    .bind(&auth_value_template)
+    .bind(&credential_owner)
     .bind(&config_json)
     .fetch_one(&state.db)
     .await
     .map_err(map_mcp_server_unique_violation)?;
+
+    // Credential cleanup on relevant transitions. Switching to
+    // admin_shared makes per-user creds dead weight; flipping the
+    // auth_shape (oauth ↔ static, or either ↔ anonymous) makes the
+    // *previous shape's* tokens incompatible with the new resolver
+    // path. Both cases purge per-user + shared rows for the server
+    // so callers don't end up holding mismatched credentials.
+    if switching_to_admin_shared || auth_shape_changed {
+        sqlx::query("DELETE FROM mcp_user_credentials WHERE mcp_server_id = $1")
+            .bind(id)
+            .execute(&state.db)
+            .await?;
+        sqlx::query("DELETE FROM mcp_user_tools WHERE mcp_server_id = $1")
+            .bind(id)
+            .execute(&state.db)
+            .await?;
+        if auth_shape_changed {
+            // Old shared cred is the wrong shape for the new
+            // auth_shape — wipe so the admin re-installs.
+            sqlx::query("DELETE FROM mcp_server_shared_credentials WHERE mcp_server_id = $1")
+                .bind(id)
+                .execute(&state.db)
+                .await?;
+        }
+    }
 
     // Evict any cached connection first — the pool keys by id, so a
     // changed endpoint URL needs a fresh connection.

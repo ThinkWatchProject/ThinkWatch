@@ -91,11 +91,11 @@ pub async fn build_registered_server(
         })
         .unwrap_or_default();
 
-    let cache_scope = determine_cache_scope(
-        server.oauth_issuer.as_deref(),
-        server.allow_static_token,
-        &custom_headers,
-    );
+    let credential_owner =
+        think_watch_mcp_gateway::user_token::CredentialOwner::parse(&server.credential_owner);
+    let auth_shape = think_watch_mcp_gateway::user_token::AuthShape::parse(&server.auth_shape);
+
+    let cache_scope = determine_cache_scope(auth_shape, &custom_headers, credential_owner);
 
     // Per-server cache TTL override from config_json.cache_ttl_secs.
     let cache_ttl_secs = server
@@ -113,7 +113,10 @@ pub async fn build_registered_server(
         status: parse_server_status(&server.status),
         last_health_check: server.last_health_check,
         oauth_cfg,
-        allow_static_token: server.allow_static_token,
+        auth_shape,
+        credential_owner,
+        auth_header_name: server.auth_header_name.clone(),
+        auth_value_template: server.auth_value_template.clone(),
         custom_headers,
         cache_ttl_secs,
         cache_scope,
@@ -123,28 +126,40 @@ pub async fn build_registered_server(
 /// Decide which [`ServerCacheScope`] applies based on the persisted
 /// auth config.
 ///
-/// The rule: any signal that the upstream sees a *per-user credential*
-/// flips the scope to `PerCaller`. Otherwise (public, fixed
-/// service-to-service header) responses are reusable across every
-/// caller, so `Global` is correct and gives the highest hit rate.
+/// Rules:
+///   - Per-user template headers (`{{user_id}}` / `{{user_email}}`)
+///     always force `PerCaller` — the upstream sees per-caller
+///     identity in the headers regardless of who owns the credential.
+///   - `admin_shared` ⇒ one bearer for everyone ⇒ `Global` (unless
+///     overridden by template headers above).
+///   - `per_user` + non-anonymous shape ⇒ `PerCaller`.
+///   - `anonymous` ⇒ `Global`.
 ///
-/// Pure function — exposed for unit testing of the auth-shape →
-/// scope mapping without spinning up a DB.
+/// Pure function — exposed for unit testing without spinning up a DB.
 pub fn determine_cache_scope(
-    oauth_issuer: Option<&str>,
-    allow_static_token: bool,
+    auth_shape: think_watch_mcp_gateway::user_token::AuthShape,
     custom_headers: &[(String, String)],
+    credential_owner: think_watch_mcp_gateway::user_token::CredentialOwner,
 ) -> think_watch_mcp_gateway::registry::ServerCacheScope {
     use think_watch_mcp_gateway::registry::ServerCacheScope;
-    let identity_forwarded = oauth_issuer.is_some()
-        || allow_static_token
-        || custom_headers
-            .iter()
-            .any(|(_, v)| v.contains("{{user_id}}") || v.contains("{{user_email}}"));
-    if identity_forwarded {
-        ServerCacheScope::PerCaller
-    } else {
-        ServerCacheScope::Global
+    use think_watch_mcp_gateway::user_token::{AuthShape, CredentialOwner};
+
+    let header_per_caller = custom_headers
+        .iter()
+        .any(|(_, v)| v.contains("{{user_id}}") || v.contains("{{user_email}}"));
+    if header_per_caller {
+        return ServerCacheScope::PerCaller;
+    }
+
+    match (credential_owner, auth_shape) {
+        // Anonymous: no credential at all, response shape is identical
+        // across callers.
+        (_, AuthShape::Anonymous) => ServerCacheScope::Global,
+        // Admin-shared bearer ⇒ every caller looks identical to the
+        // upstream regardless of OAuth/static.
+        (CredentialOwner::AdminShared, _) => ServerCacheScope::Global,
+        // Per-user with any auth ⇒ per-caller upstream identity.
+        (CredentialOwner::PerUser, _) => ServerCacheScope::PerCaller,
     }
 }
 
@@ -152,56 +167,73 @@ pub fn determine_cache_scope(
 mod cache_scope_tests {
     use super::determine_cache_scope;
     use think_watch_mcp_gateway::registry::ServerCacheScope;
+    use think_watch_mcp_gateway::user_token::{AuthShape, CredentialOwner};
 
     fn h(k: &str, v: &str) -> Vec<(String, String)> {
         vec![(k.to_string(), v.to_string())]
     }
 
     #[test]
-    fn public_server_is_global() {
-        let s = determine_cache_scope(None, false, &[]);
-        assert_eq!(s, ServerCacheScope::Global);
+    fn anonymous_is_global_regardless_of_owner() {
+        for owner in [CredentialOwner::PerUser, CredentialOwner::AdminShared] {
+            let s = determine_cache_scope(AuthShape::Anonymous, &[], owner);
+            assert_eq!(s, ServerCacheScope::Global);
+        }
     }
 
     #[test]
     fn fixed_service_to_service_header_is_global() {
-        // Same secret for every caller — upstream returns the same
-        // data regardless of who called.
-        let s = determine_cache_scope(None, false, &h("X-API-Key", "fixed-secret"));
+        // Anonymous shape with a fixed `X-API-Key: <secret>` custom
+        // header — same secret for every caller, response is identical.
+        let s = determine_cache_scope(
+            AuthShape::Anonymous,
+            &h("X-API-Key", "fixed-secret"),
+            CredentialOwner::PerUser,
+        );
         assert_eq!(s, ServerCacheScope::Global);
     }
 
     #[test]
-    fn user_id_template_header_is_per_caller() {
-        let s = determine_cache_scope(None, false, &h("X-User-Id", "{{user_id}}"));
+    fn user_id_template_header_forces_per_caller() {
+        let s = determine_cache_scope(
+            AuthShape::Anonymous,
+            &h("X-User-Id", "{{user_id}}"),
+            CredentialOwner::PerUser,
+        );
         assert_eq!(s, ServerCacheScope::PerCaller);
     }
 
     #[test]
-    fn user_email_template_header_is_per_caller() {
-        let s = determine_cache_scope(None, false, &h("X-User-Email", "{{user_email}}"));
+    fn per_user_oauth_is_per_caller() {
+        let s = determine_cache_scope(AuthShape::OAuth, &[], CredentialOwner::PerUser);
         assert_eq!(s, ServerCacheScope::PerCaller);
     }
 
     #[test]
-    fn oauth_server_is_per_caller_even_without_template_header() {
-        // The actual bug this redesign fixes: a bare OAuth server with
-        // no custom headers used to fall through to Global, leaking
-        // user A's responses to user B.
-        let s = determine_cache_scope(Some("https://github.com"), false, &[]);
+    fn per_user_static_is_per_caller() {
+        let s = determine_cache_scope(AuthShape::Static, &[], CredentialOwner::PerUser);
         assert_eq!(s, ServerCacheScope::PerCaller);
     }
 
     #[test]
-    fn static_token_server_is_per_caller_even_without_template_header() {
-        // Same bug for PAT/API-key MCPs.
-        let s = determine_cache_scope(None, true, &[]);
-        assert_eq!(s, ServerCacheScope::PerCaller);
+    fn admin_shared_oauth_is_global() {
+        let s = determine_cache_scope(AuthShape::OAuth, &[], CredentialOwner::AdminShared);
+        assert_eq!(s, ServerCacheScope::Global);
     }
 
     #[test]
-    fn oauth_with_static_fallback_is_per_caller() {
-        let s = determine_cache_scope(Some("https://github.com"), true, &[]);
+    fn admin_shared_static_is_global() {
+        let s = determine_cache_scope(AuthShape::Static, &[], CredentialOwner::AdminShared);
+        assert_eq!(s, ServerCacheScope::Global);
+    }
+
+    #[test]
+    fn admin_shared_with_user_id_header_still_per_caller() {
+        let s = determine_cache_scope(
+            AuthShape::OAuth,
+            &h("X-User-Id", "{{user_id}}"),
+            CredentialOwner::AdminShared,
+        );
         assert_eq!(s, ServerCacheScope::PerCaller);
     }
 }
@@ -323,6 +355,32 @@ async fn try_discover_and_persist_tools(
     http: &reqwest::Client,
     server: &think_watch_common::models::McpServer,
 ) -> anyhow::Result<SystemDiscoveryOutcome> {
+    try_discover_and_persist_tools_with_auth(db, http, server, None).await
+}
+
+/// Variant that attaches an auth header to the discovery probe. Used
+/// by the admin_shared shared-credential write path: after the admin
+/// pastes a token (or completes the OAuth flow), the catalog is the
+/// same for every caller, so we discover once and write the result
+/// straight into the system-level catalog.
+pub async fn discover_and_persist_tools_with_auth(
+    db: &PgPool,
+    http: &reqwest::Client,
+    server: &think_watch_common::models::McpServer,
+    auth: Option<(&str, &str)>,
+) -> SystemDiscoveryOutcome {
+    match try_discover_and_persist_tools_with_auth(db, http, server, auth).await {
+        Ok(outcome) => outcome,
+        Err(e) => SystemDiscoveryOutcome::Failed(e),
+    }
+}
+
+async fn try_discover_and_persist_tools_with_auth(
+    db: &PgPool,
+    http: &reqwest::Client,
+    server: &think_watch_common::models::McpServer,
+    auth: Option<(&str, &str)>,
+) -> anyhow::Result<SystemDiscoveryOutcome> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -330,13 +388,14 @@ async fn try_discover_and_persist_tools(
         "params": {}
     });
 
-    let resp = http
+    let mut req = http
         .post(&server.endpoint_url)
         .header("Content-Type", "application/json")
-        .header("Accept", "application/json, text/event-stream")
-        .json(&body)
-        .send()
-        .await?;
+        .header("Accept", "application/json, text/event-stream");
+    if let Some((name, value)) = auth {
+        req = req.header(name, value);
+    }
+    let resp = req.json(&body).send().await?;
     if !resp.status().is_success() {
         let status = resp.status();
         // 401/403 means the server is reachable but anonymous tool

@@ -26,10 +26,18 @@ pub struct McpStoreTemplate {
     /// time. See [`crate::models::McpServer::oauth_userinfo_endpoint`].
     pub oauth_userinfo_endpoint: Option<String>,
     pub oauth_default_scopes: Vec<String>,
-    /// `true` ⇒ users can paste their own PAT / API key. Mirrored onto
-    /// `mcp_servers.allow_static_token` at install time.
-    pub allow_static_token: bool,
+    /// Single-valued authentication shape — see
+    /// [`crate::models::McpServer::auth_shape`]. Mirrored onto the
+    /// new server row at install time.
+    pub auth_shape: String,
     pub static_token_help_url: Option<String>,
+    /// HTTP header injection defaults copied onto `mcp_servers` at
+    /// install time. Lets a template ship correct defaults for
+    /// upstreams that don't use Bearer (e.g. an Anthropic template
+    /// would set `auth_header_name='X-API-Key'`,
+    /// `auth_value_template='{{token}}'`).
+    pub auth_header_name: String,
+    pub auth_value_template: String,
     pub auth_instructions: Option<String>,
     pub deploy_type: Option<String>,
     pub deploy_command: Option<String>,
