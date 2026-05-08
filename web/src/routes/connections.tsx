@@ -348,8 +348,8 @@ export function ConnectionsPage() {
                   <div className="rounded border bg-muted/30 px-2 py-1 text-[11px] text-muted-foreground">
                     {t('connections.headerPreviewLabel')}:{' '}
                     <code className="font-mono">
-                      {addTarget.auth_header_name}:{' '}
-                      {addTarget.auth_value_template.replaceAll(
+                      {addTarget.auth_header_name || 'Authorization'}:{' '}
+                      {(addTarget.auth_value_template || 'Bearer {{token}}').replaceAll(
                         '{{token}}',
                         addToken.length > 0 ? `${addToken.slice(0, 6)}…` : '••••••••',
                       )}

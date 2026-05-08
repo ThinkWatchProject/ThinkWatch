@@ -64,7 +64,11 @@ export function AuthHeaderFieldset({ value, onChange, previewToken }: Props) {
   const sample = previewToken && previewToken.length > 0
     ? `${previewToken.slice(0, 6)}…`
     : '••••••••';
-  const renderedValue = value.valueTemplate.replaceAll('{{token}}', sample);
+  // Defensive: callers should always pass a non-empty template, but
+  // if a stale API response sneaks through with an empty string the
+  // preview should still render rather than crash on .replaceAll().
+  const template = value.valueTemplate || 'Bearer {{token}}';
+  const renderedValue = template.replaceAll('{{token}}', sample);
 
   return (
     <div className="space-y-3">

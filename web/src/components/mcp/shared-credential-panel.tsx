@@ -119,7 +119,10 @@ export function SharedCredentialPanel({
   // The header preview helps admins sanity-check what they'll send
   // before pasting (mirrors the per-user dialog's preview).
   const previewSample = pasted.length > 0 ? `${pasted.slice(0, 6)}…` : '••••••••';
-  const previewHeader = `${authHeaderName}: ${authValueTemplate.replaceAll(
+  // Defensive fallback for stale API responses missing these fields.
+  const safeHeaderName = authHeaderName || 'Authorization';
+  const safeTemplate = authValueTemplate || 'Bearer {{token}}';
+  const previewHeader = `${safeHeaderName}: ${safeTemplate.replaceAll(
     '{{token}}',
     previewSample,
   )}`;

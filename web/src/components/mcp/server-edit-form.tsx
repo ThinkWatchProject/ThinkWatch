@@ -81,7 +81,7 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
   const [namespacePrefix, setNamespacePrefix] = useState(server.namespace_prefix ?? '');
   const [description, setDescription] = useState(server.description ?? '');
   const [endpointUrl, setEndpointUrl] = useState(server.endpoint_url);
-  const [authShape, setAuthShape] = useState<AuthShape>(server.auth_shape);
+  const [authShape, setAuthShape] = useState<AuthShape>(server.auth_shape ?? 'anonymous');
   const [oauth, setOauth] = useState<OAuthFields>(() => oauthFromServer(server));
   const [staticTokenHelpUrl, setStaticTokenHelpUrl] = useState(server.static_token_help_url ?? '');
   const [customHeaders, setCustomHeaders] = useState<[string, string][]>(
@@ -90,10 +90,18 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
   const [cacheTtl, setCacheTtl] = useState(
     server.config_json?.cache_ttl_secs != null ? String(server.config_json.cache_ttl_secs) : '',
   );
-  const [credentialOwner, setCredentialOwner] = useState<CredentialOwner>(server.credential_owner);
+  const [credentialOwner, setCredentialOwner] = useState<CredentialOwner>(
+    server.credential_owner ?? 'per_user',
+  );
+  // `auth_header_name` / `auth_value_template` are backend-side
+  // NOT NULL columns with sane defaults, but a dev backend lagging
+  // behind the frontend (or an old API consumer) might omit them
+  // from the response. Fall back to the schema defaults so the
+  // dialog never explodes on the .replaceAll() in
+  // AuthHeaderFieldset's preview.
   const [authHeader, setAuthHeader] = useState<AuthHeaderFields>({
-    headerName: server.auth_header_name,
-    valueTemplate: server.auth_value_template,
+    headerName: server.auth_header_name || 'Authorization',
+    valueTemplate: server.auth_value_template || 'Bearer {{token}}',
   });
 
   const [saving, setSaving] = useState(false);
@@ -107,17 +115,17 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
     setNamespacePrefix(server.namespace_prefix ?? '');
     setDescription(server.description ?? '');
     setEndpointUrl(server.endpoint_url);
-    setAuthShape(server.auth_shape);
+    setAuthShape(server.auth_shape ?? 'anonymous');
     setOauth(oauthFromServer(server));
     setStaticTokenHelpUrl(server.static_token_help_url ?? '');
     setCustomHeaders(Object.entries(server.config_json?.custom_headers ?? {}));
     setCacheTtl(
       server.config_json?.cache_ttl_secs != null ? String(server.config_json.cache_ttl_secs) : '',
     );
-    setCredentialOwner(server.credential_owner);
+    setCredentialOwner(server.credential_owner ?? 'per_user');
     setAuthHeader({
-      headerName: server.auth_header_name,
-      valueTemplate: server.auth_value_template,
+      headerName: server.auth_header_name || 'Authorization',
+      valueTemplate: server.auth_value_template || 'Bearer {{token}}',
     });
     setError('');
   }, [server]);
