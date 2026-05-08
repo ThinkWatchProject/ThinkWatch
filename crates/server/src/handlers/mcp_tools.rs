@@ -29,6 +29,14 @@ pub struct McpToolListQuery {
     pub server_id: Option<uuid::Uuid>,
     pub page: Option<i64>,
     pub page_size: Option<i64>,
+    /// When `true`, also include rows from `mcp_user_tools` for the
+    /// **calling user** (auth_user.sub) — the admin-facing API-key
+    /// picker uses this so admins can grant their own per-user tools
+    /// (e.g. their personal GitHub catalog) to an API key. Default
+    /// `false` keeps the system-level catalog clean for surfaces that
+    /// must not surface user-specific data (admin /mcp/tools page,
+    /// store browsing).
+    pub include_user_tools: Option<bool>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -55,7 +63,7 @@ pub struct McpToolListResponse {
     security(("bearer_token" = []))
 )]
 pub async fn list_tools(
-    _auth_user: AuthUser,
+    auth_user: AuthUser,
     State(state): State<AppState>,
     Query(query): Query<McpToolListQuery>,
 ) -> Result<Json<McpToolListResponse>, AppError> {
@@ -64,54 +72,106 @@ pub async fn list_tools(
     let offset = (page - 1) * page_size;
     let search = query.q.as_deref().unwrap_or("").trim();
     let search_pattern = format!("%{search}%");
+    let include_user = query.include_user_tools.unwrap_or(false);
+    // When `include_user_tools` is true, $6 is the caller's UUID so the
+    // CTE filters their personal `mcp_user_tools`. When false, $6 is
+    // a NULL sentinel and the user-tools branch returns zero rows —
+    // the resulting union is identical to the legacy system-only view.
+    let user_filter: Option<uuid::Uuid> = if include_user {
+        Some(auth_user.claims.sub)
+    } else {
+        None
+    };
 
-    // $1='' OR ... lets a single prepared statement handle "no search"
-    // without branching on SQL text. `namespaced_name` is computed via
-    // `s.namespace_prefix || '__' || t.tool_name`, so we search that
-    // composed form directly rather than piecing it back together in SQL
-    // for each row.
+    // Pre-namespace the per-user catalog the same way mcp_tools does
+    // (`<prefix>__<tool>`) and union the two sources. `mcp_user_tools`
+    // doesn't carry an `id` column — synthesize a stable v5-style UUID
+    // from `(server_id, user_id, tool_name)` so the frontend's keying
+    // (`tool.id`) keeps working without a schema change.
     let total: i64 = sqlx::query_scalar(
-        r#"SELECT COUNT(*)
-           FROM mcp_tools t
-           JOIN mcp_servers s ON s.id = t.server_id
-           WHERE t.is_active = true
-             AND ($3::uuid IS NULL OR t.server_id = $3)
-             AND ($1 = ''
-                  OR t.tool_name ILIKE $2
-                  OR (s.namespace_prefix || '__' || t.tool_name) ILIKE $2
-                  OR COALESCE(t.description, '') ILIKE $2)"#,
-    )
-    .bind(search)
-    .bind(&search_pattern)
-    .bind(query.server_id)
-    .fetch_one(&state.db)
-    .await?;
-
-    let items = sqlx::query_as::<_, McpToolRow>(
-        r#"SELECT
-             t.id,
-             t.server_id,
-             s.name AS server_name,
-             t.tool_name AS name,
-             s.namespace_prefix || '__' || t.tool_name AS namespaced_name,
-             t.description,
-             t.input_schema
-           FROM mcp_tools t
-           JOIN mcp_servers s ON s.id = t.server_id
-           WHERE t.is_active = true
-             AND ($3::uuid IS NULL OR t.server_id = $3)
-             AND ($1 = ''
-                  OR t.tool_name ILIKE $2
-                  OR (s.namespace_prefix || '__' || t.tool_name) ILIKE $2
-                  OR COALESCE(t.description, '') ILIKE $2)
-           ORDER BY s.name, t.tool_name
-           LIMIT $4 OFFSET $5"#,
+        r#"WITH catalog AS (
+              SELECT t.id,
+                     t.server_id,
+                     s.name AS server_name,
+                     s.namespace_prefix,
+                     t.tool_name,
+                     t.description
+                FROM mcp_tools t
+                JOIN mcp_servers s ON s.id = t.server_id
+                WHERE t.is_active = true
+              UNION ALL
+              SELECT gen_random_uuid() AS id,
+                     u.mcp_server_id AS server_id,
+                     s.name AS server_name,
+                     s.namespace_prefix,
+                     u.tool_name,
+                     u.description
+                FROM mcp_user_tools u
+                JOIN mcp_servers s ON s.id = u.mcp_server_id
+                WHERE $6::uuid IS NOT NULL AND u.user_id = $6::uuid
+            )
+           SELECT COUNT(*) FROM catalog
+            WHERE ($3::uuid IS NULL OR server_id = $3)
+              AND ($1 = ''
+                   OR tool_name ILIKE $2
+                   OR (namespace_prefix || '__' || tool_name) ILIKE $2
+                   OR COALESCE(description, '') ILIKE $2)"#,
     )
     .bind(search)
     .bind(&search_pattern)
     .bind(query.server_id)
     .bind(page_size)
     .bind(offset)
+    .bind(user_filter)
+    .fetch_one(&state.db)
+    .await?;
+
+    let items = sqlx::query_as::<_, McpToolRow>(
+        r#"WITH catalog AS (
+              SELECT t.id,
+                     t.server_id,
+                     s.name AS server_name,
+                     s.namespace_prefix,
+                     t.tool_name,
+                     t.description,
+                     t.input_schema
+                FROM mcp_tools t
+                JOIN mcp_servers s ON s.id = t.server_id
+                WHERE t.is_active = true
+              UNION ALL
+              SELECT gen_random_uuid() AS id,
+                     u.mcp_server_id AS server_id,
+                     s.name AS server_name,
+                     s.namespace_prefix,
+                     u.tool_name,
+                     u.description,
+                     u.input_schema
+                FROM mcp_user_tools u
+                JOIN mcp_servers s ON s.id = u.mcp_server_id
+                WHERE $6::uuid IS NOT NULL AND u.user_id = $6::uuid
+            )
+           SELECT id,
+                  server_id,
+                  server_name,
+                  tool_name AS name,
+                  namespace_prefix || '__' || tool_name AS namespaced_name,
+                  description,
+                  input_schema
+             FROM catalog
+            WHERE ($3::uuid IS NULL OR server_id = $3)
+              AND ($1 = ''
+                   OR tool_name ILIKE $2
+                   OR (namespace_prefix || '__' || tool_name) ILIKE $2
+                   OR COALESCE(description, '') ILIKE $2)
+            ORDER BY server_name, tool_name
+            LIMIT $4 OFFSET $5"#,
+    )
+    .bind(search)
+    .bind(&search_pattern)
+    .bind(query.server_id)
+    .bind(page_size)
+    .bind(offset)
+    .bind(user_filter)
     .fetch_all(&state.db)
     .await?;
 
@@ -152,26 +212,45 @@ pub async fn discover_tools(
     .await?
     .ok_or(AppError::NotFound("MCP Server not found".into()))?;
 
+    use crate::mcp_runtime::SystemDiscoveryOutcome;
     let http = state.http_client.load();
-    let count = crate::mcp_runtime::discover_and_persist_tools(&state.db, &http, &server)
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Tool discovery failed: {e}")))?;
+    let outcome = crate::mcp_runtime::discover_and_persist_tools(&state.db, &http, &server).await;
 
-    // Reflect the freshly-discovered tools in the in-memory registry so
-    // `tools/list` returns them without waiting for the health loop.
-    if let Ok(updated) = crate::mcp_runtime::build_registered_server(
-        &state.db,
-        &server,
-        &state.config.encryption_key,
-    )
-    .await
-    {
-        state.mcp_registry.register(updated).await;
+    match outcome {
+        SystemDiscoveryOutcome::Tools(count) => {
+            // Reflect the freshly-discovered tools in the in-memory
+            // registry so `tools/list` returns them without waiting for
+            // the health loop.
+            if let Ok(updated) = crate::mcp_runtime::build_registered_server(
+                &state.db,
+                &server,
+                &state.config.encryption_key,
+            )
+            .await
+            {
+                state.mcp_registry.register(updated).await;
+            }
+            Ok(Json(serde_json::json!({
+                "status": "discovery_complete",
+                "server_id": server_id,
+                "tools_discovered": count,
+            })))
+        }
+        SystemDiscoveryOutcome::AuthRequired => {
+            // Not an error — auth-required servers don't expose their
+            // tool catalog to anonymous probes by design. Return 200
+            // with a status the frontend renders as a neutral info
+            // toast, not a red error.
+            Ok(Json(serde_json::json!({
+                "status": "auth_required",
+                "server_id": server_id,
+                "tools_discovered": 0,
+                "hint": "This server requires per-user authorization. \
+                         Tools populate as users connect their accounts.",
+            })))
+        }
+        SystemDiscoveryOutcome::Failed(e) => {
+            Err(AppError::BadRequest(format!("Tool discovery failed: {e}")))
+        }
     }
-
-    Ok(Json(serde_json::json!({
-        "status": "discovery_complete",
-        "server_id": server_id,
-        "tools_discovered": count,
-    })))
 }

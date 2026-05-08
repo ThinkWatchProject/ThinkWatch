@@ -572,6 +572,24 @@ pub async fn oauth_callback(
         .invalidate_user_lane(&blob.server_id, &blob.user_id)
         .await;
 
+    // Per-user tool discovery — fire and forget. Now that we have a
+    // working bearer token for this user, hit `tools/list` upstream
+    // and write the result to `mcp_user_tools(server, user)`. This
+    // is the *only* path to tool data for auth-required servers, so
+    // populating it eagerly means the user sees their tool list
+    // immediately on first MCP gateway call rather than after a
+    // round-trip to discover. Failures only warn — not part of the
+    // auth-flow critical path.
+    spawn_user_tool_discovery(
+        state.db.clone(),
+        (**state.http_client.load()).clone(),
+        server.endpoint_url.clone(),
+        server.name.clone(),
+        blob.server_id,
+        blob.user_id,
+        token.access_token.clone(),
+    );
+
     state.audit.log(
         AuditEntry::new("mcp.connection.authorized")
             .user_id(blob.user_id)
@@ -830,6 +848,19 @@ pub async fn paste_static_token(
         .invalidate_user_lane(&server_id, &auth_user.claims.sub)
         .await;
 
+    // Per-user tool discovery — same rationale as the OAuth callback
+    // path: token works now, populate `mcp_user_tools` so the user's
+    // first MCP call sees a fresh tool list immediately.
+    spawn_user_tool_discovery(
+        state.db.clone(),
+        (**state.http_client.load()).clone(),
+        server.endpoint_url.clone(),
+        server.name.clone(),
+        server_id,
+        auth_user.claims.sub,
+        req.token.trim().to_string(),
+    );
+
     state.audit.log(
         AuditEntry::new("mcp.connection.authorized")
             .user_id(auth_user.claims.sub)
@@ -842,6 +873,48 @@ pub async fn paste_static_token(
     );
 
     Ok(Json(serde_json::json!({"status": "ok"})))
+}
+
+/// Fire-and-forget helper — spawn `discover_user_tools` so callers in
+/// the credential-write hot path (oauth_callback / paste_static_token)
+/// don't block on the upstream `tools/list` round-trip. Errors are
+/// logged at warn level and discarded; the next gateway request from
+/// this user will lazy-discover via the proxy fallback if this attempt
+/// missed.
+fn spawn_user_tool_discovery(
+    db: sqlx::PgPool,
+    http: reqwest::Client,
+    endpoint_url: String,
+    server_name: String,
+    server_id: Uuid,
+    user_id: Uuid,
+    bearer_token: String,
+) {
+    tokio::spawn(async move {
+        match crate::mcp_runtime::discover_user_tools(
+            &db,
+            &http,
+            &endpoint_url,
+            server_id,
+            user_id,
+            &bearer_token,
+        )
+        .await
+        {
+            Ok(n) => tracing::info!(
+                mcp_server = %server_name,
+                user_id = %user_id,
+                tools = n,
+                "Per-user MCP tool discovery succeeded"
+            ),
+            Err(e) => tracing::warn!(
+                mcp_server = %server_name,
+                user_id = %user_id,
+                error = %e,
+                "Per-user MCP tool discovery failed (will retry on first proxy call)"
+            ),
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------

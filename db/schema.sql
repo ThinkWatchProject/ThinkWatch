@@ -500,6 +500,35 @@ CREATE TABLE IF NOT EXISTS mcp_tools (
     UNIQUE(server_id, tool_name)
 );
 
+-- Per-user tool catalog. Populated when a user's authenticated
+-- `tools/list` returns — either at credential-write time (oauth_callback,
+-- paste_static_token) or lazily on first proxy request. Lives separately
+-- from `mcp_tools` because:
+--
+--   1. Tool catalogs *can* differ per user (Atlassian-style filtering by
+--      role / scope), so caching at the (server) level would cross-leak
+--      one user's filtered view to another's.
+--   2. Auth-required servers MUST NOT have `mcp_tools` rows — that table
+--      is the "system-level" catalog (admin / store visible) and only gets
+--      populated when anonymous discovery succeeds. Writing user-specific
+--      tools to `mcp_tools` would be a privilege-escalation surface.
+--
+-- Refresh strategy: write-through on each authenticated `tools/list` call
+-- (the gateway `tools/list` proxy handler). No background refresh loop —
+-- a user who hasn't called the server in days will pick up the freshest
+-- catalog the next time they do.
+CREATE TABLE IF NOT EXISTS mcp_user_tools (
+    mcp_server_id UUID NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
+    user_id       UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    tool_name     VARCHAR(255) NOT NULL,
+    description   TEXT,
+    input_schema  JSONB,
+    discovered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (mcp_server_id, user_id, tool_name)
+);
+CREATE INDEX IF NOT EXISTS mcp_user_tools_lookup
+    ON mcp_user_tools (user_id, mcp_server_id);
+
 -- --------------------------------------------------------------------------
 -- Per-request usage / analytics data no longer lives in Postgres.
 -- Every gateway call writes a row into ClickHouse `gateway_logs`

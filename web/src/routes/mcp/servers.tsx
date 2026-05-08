@@ -107,11 +107,24 @@ export function McpServersPage() {
   const handleDiscover = async (id: string) => {
     setDiscoveringId(id);
     try {
-      const res = await apiPost<{ tools_discovered: number }>(`/api/mcp/servers/${id}/discover`, {});
-      toast.success(t('mcpServers.discoverTools') + `: ${res.tools_discovered} tools`);
+      const res = await apiPost<{
+        status: 'discovery_complete' | 'auth_required';
+        tools_discovered: number;
+      }>(`/api/mcp/servers/${id}/discover`, {});
+      if (res.status === 'auth_required') {
+        // Not an error — auth-required servers can't expose their
+        // catalog to anonymous probes. Tools populate per user as
+        // they connect via /connections. Use info toast (neutral),
+        // not error (red).
+        toast.info(t('mcpServers.discoverAuthRequired'));
+      } else {
+        toast.success(
+          t('mcpServers.discoverSuccess', { count: res.tools_discovered }),
+        );
+      }
       await fetchServers();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to discover tools');
+      toast.error(err instanceof Error ? err.message : t('mcpServers.discoverFailed'));
     } finally {
       setDiscoveringId(null);
     }
@@ -264,7 +277,23 @@ export function McpServersPage() {
                     <TableCell className="text-xs text-muted-foreground">
                       {s.last_health_check ? new Date(s.last_health_check).toLocaleString() : '—'}
                     </TableCell>
-                    <TableCell className="text-sm">{s.tools_count}</TableCell>
+                    <TableCell className="text-sm">
+                      {/* Auth-required servers don't have a system-level
+                          tool catalog by design — `mcp_tools` is empty,
+                          tools live per-user in `mcp_user_tools`. Show
+                          em-dash so admins don't read "0 tools" as
+                          "broken." */}
+                      {s.status === 'auth_required' ? (
+                        <span
+                          className="text-muted-foreground"
+                          title={t('mcpServers.toolsCountAuthRequiredHint')}
+                        >
+                          —
+                        </span>
+                      ) : (
+                        s.tools_count
+                      )}
+                    </TableCell>
                     <TableCell className="font-mono text-xs tabular-nums text-muted-foreground">
                       {(s.call_count ?? 0).toLocaleString()}
                     </TableCell>

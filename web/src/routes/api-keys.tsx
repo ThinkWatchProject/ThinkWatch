@@ -246,7 +246,13 @@ export function ApiKeysPage() {
     fetchAllPaginated<ModelRow>('/api/admin/models')
       .then(setAvailableModels)
       .catch(() => setAvailableModels([]));
-    fetchAllPaginated<McpToolRow>('/api/mcp/tools')
+    // `include_user_tools=1` unions the system catalog (`mcp_tools`)
+    // with this caller's per-user catalog (`mcp_user_tools` rows where
+    // user_id = self), so an admin can grant their own GitHub /
+    // Atlassian / Feishu personal tools to an API key. Without this
+    // flag the picker would be empty for auth-required servers, since
+    // those servers never populate the system-level table by design.
+    fetchAllPaginated<McpToolRow>('/api/mcp/tools?include_user_tools=1')
       .then(setAvailableMcpTools)
       .catch(() => setAvailableMcpTools([]));
     api<PolicyScope>('/api/keys/policy-scope')

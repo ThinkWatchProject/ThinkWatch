@@ -370,8 +370,9 @@ pub async fn create_server(
         let server_id = server.id;
         let db_for_err = state.db.clone();
         tokio::spawn(async move {
+            use crate::mcp_runtime::SystemDiscoveryOutcome;
             match crate::mcp_runtime::discover_and_persist_tools(&db, &http, &server).await {
-                Ok(n) => {
+                SystemDiscoveryOutcome::Tools(n) => {
                     tracing::info!(
                         mcp_server = %server.name,
                         tools = n,
@@ -387,7 +388,16 @@ pub async fn create_server(
                         registry.register(updated).await;
                     }
                 }
-                Err(e) => {
+                SystemDiscoveryOutcome::AuthRequired => {
+                    // Server requires per-user auth — `mcp_tools` stays
+                    // empty by design. Clear last_error so the admin UI
+                    // doesn't show stale failure text.
+                    let _ = sqlx::query("UPDATE mcp_servers SET last_error = NULL WHERE id = $1")
+                        .bind(server_id)
+                        .execute(&db_for_err)
+                        .await;
+                }
+                SystemDiscoveryOutcome::Failed(e) => {
                     tracing::warn!(
                         mcp_server = %server.name,
                         error = %e,
@@ -671,6 +681,48 @@ pub async fn update_server(
     think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
         .invalidate_server_lane(&id)
         .await;
+
+    // Re-run system-level tool discovery in the background. This
+    // serves three purposes:
+    //   1. Refresh `mcp_tools` against the (possibly new) endpoint.
+    //   2. If the admin flipped this server from "direct" to
+    //      auth-required (added oauth_issuer or allow_static_token),
+    //      anonymous tools/list now returns 401 — `discover_and_persist_tools`
+    //      catches that and wipes `mcp_tools` + `cached_tools_jsonb` to
+    //      `AuthRequired`, so old system-level tool rows can't leak
+    //      to users post-flip.
+    //   3. If the admin flipped from auth-required to direct, the
+    //      anonymous probe will succeed and refill the catalog.
+    //
+    // Per-user tool caches in `mcp_user_tools` are intentionally
+    // *not* wiped — those are scoped to (user, server) and refreshed
+    // by the gateway proxy on the user's next tools/list call.
+    {
+        let db = state.db.clone();
+        let http = (**state.http_client.load()).clone();
+        let server = updated.clone();
+        let key = state.config.encryption_key.clone();
+        let registry = state.mcp_registry.clone();
+        tokio::spawn(async move {
+            use crate::mcp_runtime::SystemDiscoveryOutcome;
+            match crate::mcp_runtime::discover_and_persist_tools(&db, &http, &server).await {
+                SystemDiscoveryOutcome::Tools(_) | SystemDiscoveryOutcome::AuthRequired => {
+                    if let Ok(reg) =
+                        crate::mcp_runtime::build_registered_server(&db, &server, &key).await
+                    {
+                        registry.register(reg).await;
+                    }
+                }
+                SystemDiscoveryOutcome::Failed(e) => {
+                    tracing::warn!(
+                        mcp_server = %server.name,
+                        error = %e,
+                        "post-update tool discovery failed"
+                    );
+                }
+            }
+        });
+    }
 
     state.audit.log(
         auth_user

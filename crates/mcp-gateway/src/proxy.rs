@@ -281,6 +281,38 @@ impl McpProxy {
         .into_iter()
         .collect();
 
+        // Pre-load this user's per-server tool catalogs in one query —
+        // for auth-required servers (OAuth / static-token / template
+        // headers), tools/list responses can differ per user (Atlassian-
+        // style scope filtering), so server-level `mcp_tools` rows are
+        // intentionally empty there. The per-user view lives in
+        // `mcp_user_tools`, populated either by the credential-write
+        // hook (oauth_callback / paste_static_token) or by lazy
+        // discovery on first proxy call (see below).
+        #[derive(sqlx::FromRow)]
+        struct UserToolRow {
+            mcp_server_id: Uuid,
+            tool_name: String,
+            description: Option<String>,
+            input_schema: Option<serde_json::Value>,
+        }
+        let user_tool_rows: Vec<UserToolRow> = sqlx::query_as(
+            "SELECT mcp_server_id, tool_name, description, input_schema
+               FROM mcp_user_tools WHERE user_id = $1",
+        )
+        .bind(ctx.user_id)
+        .fetch_all(&self.db)
+        .await
+        .unwrap_or_default();
+        let mut user_tools_by_server: std::collections::HashMap<Uuid, Vec<UserToolRow>> =
+            std::collections::HashMap::new();
+        for row in user_tool_rows {
+            user_tools_by_server
+                .entry(row.mcp_server_id)
+                .or_default()
+                .push(row);
+        }
+
         let servers = self.registry.list().await;
         let mut tools: Vec<serde_json::Value> = Vec::new();
         for server in servers {
@@ -292,20 +324,78 @@ impl McpProxy {
             // calling client (and our own /connections UI) can prompt.
             let requires_user_auth = server_needs_auth && !user_connected;
 
-            for tool in &server.tools {
+            // Pick the tool source for this server:
+            //
+            // - **Direct-mode server** (anonymous discovery worked):
+            //   `server.tools` carries the system-level catalog from
+            //   `mcp_tools`. Same for every user.
+            // - **Auth-required + user connected**: the user's own
+            //   filtered catalog from `mcp_user_tools`. If empty
+            //   (eager hook hasn't run yet, or failed), fall through
+            //   to `server.tools` — which will be empty for these
+            //   servers, but we kick off a background discovery so
+            //   the next call sees fresh data.
+            // - **Auth-required + user NOT connected**: emit
+            //   `_meta.requires_user_auth = true` with whatever
+            //   metadata the system-level catalog has (typically
+            //   nothing).
+            enum ToolSource<'a> {
+                System(&'a [crate::registry::McpToolInfo]),
+                User(&'a [UserToolRow]),
+            }
+            let user_rows = user_tools_by_server.get(&server.id);
+            let source = if server_needs_auth && user_connected {
+                match user_rows.filter(|v| !v.is_empty()) {
+                    Some(rows) => ToolSource::User(rows.as_slice()),
+                    None => {
+                        // Eager hook missed (or never fired) — kick off a
+                        // refresh so the user's *next* tools/list call sees
+                        // their catalog. This call returns empty for this
+                        // server, which is a one-time quirk.
+                        self.spawn_lazy_user_tool_discovery(&server, ctx);
+                        ToolSource::System(server.tools.as_slice())
+                    }
+                }
+            } else {
+                ToolSource::System(server.tools.as_slice())
+            };
+
+            // Yields (name, description, schema) tuples for whichever
+            // source we picked, so the iteration loop is one-form.
+            let source_iter: Box<
+                dyn Iterator<Item = (&str, Option<&str>, Option<&serde_json::Value>)>,
+            > = match source {
+                ToolSource::System(t) => Box::new(t.iter().map(|t| {
+                    (
+                        t.name.as_str(),
+                        t.description.as_deref(),
+                        t.input_schema.as_ref(),
+                    )
+                })),
+                ToolSource::User(t) => Box::new(t.iter().map(|t| {
+                    (
+                        t.tool_name.as_str(),
+                        t.description.as_deref(),
+                        t.input_schema.as_ref(),
+                    )
+                })),
+            };
+
+            for (tool_name, tool_desc, tool_schema) in source_iter {
                 let namespaced = format!(
                     "{}{}{}",
                     server.namespace_prefix,
                     crate::registry::NAMESPACE_SEPARATOR,
-                    tool.name,
+                    tool_name,
                 );
                 if !is_tool_allowed(ctx.allowed_mcp_tools, &namespaced) {
                     continue;
                 }
                 let mut entry = serde_json::json!({
                     "name": namespaced,
-                    "description": tool.description.clone().unwrap_or_default(),
-                    "inputSchema": tool.input_schema.clone()
+                    "description": tool_desc.unwrap_or_default(),
+                    "inputSchema": tool_schema
+                        .cloned()
                         .unwrap_or(serde_json::json!({"type": "object"})),
                 });
                 if requires_user_auth && let Some(obj) = entry.as_object_mut() {
@@ -323,6 +413,128 @@ impl McpProxy {
         }
 
         ok_response(request.id, serde_json::json!({ "tools": tools }))
+    }
+
+    /// Fire-and-forget lazy discovery for a (user, server) pair whose
+    /// `mcp_user_tools` cache is missing. Uses the same upstream-call
+    /// machinery as `tools/call` — `UserTokenResolver` to grab the
+    /// bearer, `ConnectionPool::send_request` to issue tools/list, then
+    /// writes the parsed list to `mcp_user_tools`. The current request
+    /// returns immediately with whatever was cached (typically empty);
+    /// the user's next tools/list call sees the fresh catalog.
+    fn spawn_lazy_user_tool_discovery(
+        &self,
+        server: &crate::registry::RegisteredServer,
+        ctx: &RequestContext<'_>,
+    ) {
+        let server = server.clone();
+        let user_id = ctx.user_id;
+        let resolver_caller = ResolverCaller {
+            user_id,
+            mcp_account_overrides: ctx.mcp_account_overrides.clone(),
+        };
+        let user_tokens = self.user_tokens.clone();
+        let pool = self.pool.clone();
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            let auth_header = match user_tokens
+                .resolve(
+                    server.id,
+                    &resolver_caller,
+                    server.oauth_cfg.as_ref(),
+                    server.allow_static_token,
+                )
+                .await
+            {
+                Ok(Some(h)) => h,
+                Ok(None) => return,
+                Err(e) => {
+                    tracing::debug!(
+                        server = %server.name,
+                        user_id = %user_id,
+                        error = ?e,
+                        "lazy user-tool discovery skipped: resolver could not produce a credential"
+                    );
+                    return;
+                }
+            };
+
+            let conn = pool.get_or_create(&server).await;
+            let req = JsonRpcRequest {
+                jsonrpc: "2.0".to_owned(),
+                id: Some(serde_json::json!("user-tools-lazy-discover")),
+                method: "tools/list".to_owned(),
+                params: None,
+            };
+            let resp = match pool
+                .send_request(
+                    &conn,
+                    &req,
+                    Some((auth_header.0.as_str(), auth_header.1.as_str())),
+                    None,
+                    None,
+                    None,
+                )
+                .await
+            {
+                Ok((r, _)) => r,
+                Err(e) => {
+                    tracing::warn!(
+                        server = %server.name,
+                        user_id = %user_id,
+                        error = %e,
+                        "lazy user-tool discovery: upstream tools/list failed"
+                    );
+                    return;
+                }
+            };
+            let Some(result) = resp.result else { return };
+            let Some(tools) = result.get("tools").and_then(|v| v.as_array()) else {
+                return;
+            };
+
+            let mut tx = match db.begin().await {
+                Ok(t) => t,
+                Err(_) => return,
+            };
+            if sqlx::query("DELETE FROM mcp_user_tools WHERE mcp_server_id = $1 AND user_id = $2")
+                .bind(server.id)
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await
+                .is_err()
+            {
+                return;
+            }
+            for t in tools {
+                let Some(name) = t.get("name").and_then(|v| v.as_str()) else {
+                    continue;
+                };
+                let description = t.get("description").and_then(|v| v.as_str());
+                let schema = t.get("inputSchema").cloned();
+                let _ = sqlx::query(
+                    r#"INSERT INTO mcp_user_tools
+                          (mcp_server_id, user_id, tool_name, description, input_schema, discovered_at)
+                       VALUES ($1, $2, $3, $4, $5, now())
+                       ON CONFLICT (mcp_server_id, user_id, tool_name)
+                       DO UPDATE SET description = $4, input_schema = $5, discovered_at = now()"#,
+                )
+                .bind(server.id)
+                .bind(user_id)
+                .bind(name)
+                .bind(description)
+                .bind(&schema)
+                .execute(&mut *tx)
+                .await;
+            }
+            let _ = tx.commit().await;
+            tracing::info!(
+                server = %server.name,
+                user_id = %user_id,
+                tools = tools.len(),
+                "lazy user-tool discovery completed"
+            );
+        });
     }
 
     // -----------------------------------------------------------------------

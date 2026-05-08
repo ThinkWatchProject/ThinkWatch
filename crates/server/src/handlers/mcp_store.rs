@@ -279,8 +279,9 @@ pub async fn install_template(
         let server_id = server.id;
         let db_for_err = state.db.clone();
         tokio::spawn(async move {
+            use crate::mcp_runtime::SystemDiscoveryOutcome;
             match crate::mcp_runtime::discover_and_persist_tools(&db, &http, &server).await {
-                Ok(n) => {
+                SystemDiscoveryOutcome::Tools(n) => {
                     tracing::info!(
                         mcp_server = %server.name,
                         tools = n,
@@ -296,7 +297,16 @@ pub async fn install_template(
                         registry.register(updated).await;
                     }
                 }
-                Err(e) => {
+                SystemDiscoveryOutcome::AuthRequired => {
+                    // Auth-required template (Linear OAuth, Feishu, etc.):
+                    // anonymous tools/list returns 401 by design; tools
+                    // populate per user as they authorize via /connections.
+                    let _ = sqlx::query("UPDATE mcp_servers SET last_error = NULL WHERE id = $1")
+                        .bind(server_id)
+                        .execute(&db_for_err)
+                        .await;
+                }
+                SystemDiscoveryOutcome::Failed(e) => {
                     tracing::warn!(
                         mcp_server = %server.name,
                         error = %e,

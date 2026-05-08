@@ -276,11 +276,53 @@ struct McpToolsListResult {
 /// upstreams that gate `tools/list` behind auth this will fail, the
 /// server is marked disconnected, and the cached tool catalog stays
 /// whatever the most recent successful probe produced.
+/// Outcome of a system-level (anonymous) tool discovery attempt.
+///
+/// Three terminal states:
+/// - `Tools(n)` — anonymous probe succeeded; `mcp_tools` and
+///   `mcp_servers.cached_tools_jsonb` were updated with `n` tools.
+/// - `AuthRequired` — upstream returned 401/403; we deliberately
+///   *did not* write any system-level tool metadata. Per-user
+///   discovery (via the gateway's authenticated `tools/list` proxy)
+///   is the only path to tool data for this server. The server's
+///   `status` column was set to `auth_required`.
+/// - `Failed(_)` — network error, 5xx, malformed response, etc.
+///
+/// Callers MUST distinguish `AuthRequired` from `Failed` because
+/// admin-facing surfaces (the manual "rediscover" button) need to
+/// show neutral guidance ("authorize a user first") rather than a
+/// red error toast for the former.
+pub enum SystemDiscoveryOutcome {
+    Tools(usize),
+    AuthRequired,
+    Failed(anyhow::Error),
+}
+
+impl SystemDiscoveryOutcome {
+    pub fn tools_count(&self) -> usize {
+        match self {
+            SystemDiscoveryOutcome::Tools(n) => *n,
+            _ => 0,
+        }
+    }
+}
+
 pub async fn discover_and_persist_tools(
     db: &PgPool,
     http: &reqwest::Client,
     server: &think_watch_common::models::McpServer,
-) -> anyhow::Result<usize> {
+) -> SystemDiscoveryOutcome {
+    match try_discover_and_persist_tools(db, http, server).await {
+        Ok(outcome) => outcome,
+        Err(e) => SystemDiscoveryOutcome::Failed(e),
+    }
+}
+
+async fn try_discover_and_persist_tools(
+    db: &PgPool,
+    http: &reqwest::Client,
+    server: &think_watch_common::models::McpServer,
+) -> anyhow::Result<SystemDiscoveryOutcome> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": 1,
@@ -299,19 +341,33 @@ pub async fn discover_and_persist_tools(
         let status = resp.status();
         // 401/403 means the server is reachable but anonymous tool
         // discovery isn't allowed — expected for OAuth / static-token
-        // MCPs (e.g. Feishu, GitHub Copilot). Don't flip status to
-        // `disconnected`; mark `auth_required` so the admin UI shows a
-        // neutral signal instead of red, and bail without persisting
-        // tools (we'll catch them when the first authorized user calls).
-        let new_status = if status == 401 || status == 403 {
-            "auth_required"
-        } else {
-            "disconnected"
-        };
+        // MCPs (e.g. Feishu, GitHub Copilot). Mark `auth_required` and
+        // wipe any stale system-level catalog (admin may have flipped a
+        // previously-anonymous server to require auth — those rows are
+        // now privilege-escalation risk if left visible to all users).
+        if status == 401 || status == 403 {
+            let mut tx = db.begin().await?;
+            sqlx::query(
+                "UPDATE mcp_servers SET status = 'auth_required',
+                    last_health_check = now(),
+                    cached_tools_jsonb = NULL,
+                    cached_tools_at = NULL
+                 WHERE id = $1",
+            )
+            .bind(server.id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM mcp_tools WHERE server_id = $1")
+                .bind(server.id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(SystemDiscoveryOutcome::AuthRequired);
+        }
         let _ = sqlx::query(
-            "UPDATE mcp_servers SET status = $1, last_health_check = now() WHERE id = $2",
+            "UPDATE mcp_servers SET status = 'disconnected', last_health_check = now()
+             WHERE id = $1",
         )
-        .bind(new_status)
         .bind(server.id)
         .execute(db)
         .await;
@@ -385,6 +441,90 @@ pub async fn discover_and_persist_tools(
     .await?;
     tx.commit().await?;
 
+    Ok(SystemDiscoveryOutcome::Tools(parsed.tools.len()))
+}
+
+/// Per-user tool discovery. POSTs `tools/list` with the user's bearer
+/// token (resolved via `UserTokenResolver`) and writes the response to
+/// `mcp_user_tools(server_id, user_id, ...)`. Never writes to the
+/// system-level `mcp_tools` table — see schema comment for why.
+///
+/// Idempotent: deactivate-then-upsert in one tx. Best-effort: returns
+/// `Ok(0)` and logs a warn on any failure so callers can spawn this
+/// without worrying about error propagation breaking the auth flow.
+pub async fn discover_user_tools(
+    db: &PgPool,
+    http: &reqwest::Client,
+    endpoint_url: &str,
+    server_id: uuid::Uuid,
+    user_id: uuid::Uuid,
+    bearer_token: &str,
+) -> anyhow::Result<usize> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/list",
+        "params": {}
+    });
+
+    let resp = http
+        .post(endpoint_url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .header("Authorization", format!("Bearer {bearer_token}"))
+        .json(&body)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        anyhow::bail!("upstream tools/list returned HTTP {}", resp.status());
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_lowercase();
+    let json: serde_json::Value = if content_type.contains("text/event-stream") {
+        let text = resp.text().await?;
+        parse_sse_json(&text)?
+    } else {
+        resp.json().await?
+    };
+    let result = json
+        .get("result")
+        .ok_or_else(|| anyhow::anyhow!("tools/list response missing `result` field"))?
+        .clone();
+    let parsed: McpToolsListResult = serde_json::from_value(result)?;
+
+    // Replace this user's tool set atomically: clear + reinsert in one
+    // tx so concurrent reads never observe an empty list. Cheaper than
+    // a deactivate/upsert/cleanup since `mcp_user_tools` doesn't need
+    // an `is_active` column — gone means gone.
+    let mut tx = db.begin().await?;
+    sqlx::query("DELETE FROM mcp_user_tools WHERE mcp_server_id = $1 AND user_id = $2")
+        .bind(server_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    for tool in &parsed.tools {
+        sqlx::query(
+            r#"INSERT INTO mcp_user_tools
+                  (mcp_server_id, user_id, tool_name, description, input_schema, discovered_at)
+               VALUES ($1, $2, $3, $4, $5, now())
+               ON CONFLICT (mcp_server_id, user_id, tool_name)
+               DO UPDATE SET description = $4, input_schema = $5, discovered_at = now()"#,
+        )
+        .bind(server_id)
+        .bind(user_id)
+        .bind(&tool.name)
+        .bind(&tool.description)
+        .bind(&tool.input_schema)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+
     Ok(parsed.tools.len())
 }
 
@@ -445,19 +585,26 @@ pub async fn load_mcp_servers_into_registry(
         let registry = registry.clone();
         tokio::spawn(async move {
             match discover_and_persist_tools(&db, &http, &server).await {
-                Ok(n) => {
+                SystemDiscoveryOutcome::Tools(n) => {
                     tracing::info!(
                         mcp_server = %server.name,
                         tools = n,
                         "MCP tool discovery refreshed"
                     );
-                    // Re-build the in-memory entry so the new tool list is
-                    // visible to the gateway without waiting for restart.
                     if let Ok(updated) = build_registered_server(&db, &server, &key).await {
                         registry.register(updated).await;
                     }
                 }
-                Err(e) => {
+                SystemDiscoveryOutcome::AuthRequired => {
+                    // Server needs per-user auth — system-level
+                    // discovery is *expected* to be empty here. Don't
+                    // log warn (would alarm admins for the steady-state).
+                    tracing::debug!(
+                        mcp_server = %server.name,
+                        "anon tools/list rejected; tools populate per user on first call"
+                    );
+                }
+                SystemDiscoveryOutcome::Failed(e) => {
                     tracing::warn!(
                         mcp_server = %server.name,
                         error = %e,
@@ -580,7 +727,7 @@ pub fn spawn_mcp_catalog_refresh_loop(
             for server in &servers {
                 let http = (**state.http_client.load()).clone();
                 match discover_and_persist_tools(&state.db, &http, server).await {
-                    Ok(n) => {
+                    SystemDiscoveryOutcome::Tools(n) => {
                         tracing::info!(
                             mcp_server = %server.name,
                             tools = n,
@@ -591,9 +738,11 @@ pub fn spawn_mcp_catalog_refresh_loop(
                             registry.register(updated).await;
                         }
                     }
-                    Err(e) => {
-                        // Log only — failing here is normal for OAuth-only
-                        // upstreams that reject anonymous tools/list.
+                    SystemDiscoveryOutcome::AuthRequired => {
+                        // Steady state for OAuth/static-token servers.
+                        // Per-user discovery happens on first call.
+                    }
+                    SystemDiscoveryOutcome::Failed(e) => {
                         tracing::debug!(
                             mcp_server = %server.name,
                             error = %e,

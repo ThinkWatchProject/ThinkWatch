@@ -242,21 +242,28 @@ async fn static_token_round_trips_to_upstream_as_bearer() {
     .await
     .unwrap();
 
-    // The wiremock recorded every inbound request. Two land here: the
-    // discover endpoint's `tools/list` probe (anonymous, no
-    // Authorization) and our `tools/call` (must carry the freshly-
-    // pasted PAT as a Bearer).
+    // The wiremock recorded every inbound request. Several land here:
+    //   * the discover endpoint's `tools/list` probe (anonymous)
+    //   * the eager per-user tool-discovery POST that paste_static_token
+    //     fires after persisting the credential (`tools/list` with the
+    //     new bearer)
+    //   * our `tools/call` (must carry the freshly-pasted PAT as a Bearer)
+    // We only care about the tools/call here — find that specific
+    // request and verify it carries the bearer.
     let received = upstream.received_requests().await.unwrap();
-    let with_bearer = received
+    let tools_call = received
         .iter()
-        .find(|r| {
-            r.headers.get("Authorization").and_then(|v| v.to_str().ok())
-                == Some("Bearer live-secret")
+        .find_map(|r| {
+            let body: Value = serde_json::from_slice(&r.body).ok()?;
+            if body.get("method")?.as_str()? != "tools/call" {
+                return None;
+            }
+            let auth = r.headers.get("Authorization")?.to_str().ok()?;
+            Some((body, auth.to_string()))
         })
-        .expect("upstream never saw a request carrying the user's static token");
-    let body: Value = serde_json::from_slice(&with_bearer.body).unwrap();
-    assert_eq!(body["method"], "tools/call");
-    assert_eq!(body["params"]["name"], "echo");
+        .expect("upstream never saw a tools/call");
+    assert_eq!(tools_call.1, "Bearer live-secret");
+    assert_eq!(tools_call.0["params"]["name"], "echo");
 }
 
 /// Wiremock fake of an OAuth provider's `/token` and `/userinfo`
@@ -667,6 +674,25 @@ async fn override_pointing_at_deleted_credential_does_not_fall_through_to_defaul
         "first call should have routed via the 'work' credential"
     );
 
+    // Snapshot the pre-delete count of pat-personal requests. The
+    // eager per-user tool discovery hook (oauth_callback /
+    // paste_static_token) legitimately POSTs `tools/list` with the
+    // freshly-pasted bearer right after the user pastes it, so
+    // pat-personal HAS been used against the upstream once already —
+    // for tool discovery, not for resolver fall-through. The
+    // belt-and-suspenders assertion below checks the *delta* across
+    // the failed tools/call, not the lifetime count.
+    let baseline_personal_calls = upstream
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| {
+            r.headers.get("Authorization").and_then(|v| v.to_str().ok())
+                == Some("Bearer pat-personal")
+        })
+        .count();
+
     // Now delete the "work" row directly — simulates "user revoked
     // that account after the key was minted".
     sqlx::query(
@@ -712,8 +738,9 @@ async fn override_pointing_at_deleted_credential_does_not_fall_through_to_defaul
         })
         .count();
     assert_eq!(
-        post_count, 0,
-        "resolver fell through to the default credential — that's the bug"
+        post_count, baseline_personal_calls,
+        "resolver fell through to the default credential — that's the bug \
+         (baseline {baseline_personal_calls} pre-delete uses, observed {post_count})"
     );
 }
 
