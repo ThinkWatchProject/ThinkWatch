@@ -75,10 +75,7 @@ resources:
     requests: { cpu: "1",   memory: 1Gi }
     limits:   { cpu: "4",   memory: 4Gi }
 
-# Optional SSO/OIDC — can also be configured via the web console later.
+# SSO/OIDC is configured at runtime via Admin > Settings > SSO in the
+# web console (no env vars / Helm values needed).
 secrets:
   # jwtSecret and encryptionKey left empty → auto-generated.
-  oidcIssuerUrl: ""
-  oidcClientId: ""
-  oidcClientSecret: ""
-  oidcRedirectUrl: ""

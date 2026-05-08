@@ -43,10 +43,6 @@ config:
 secrets:
   jwtSecret: ""
   encryptionKey: ""
-  oidcClientId: ""
-  oidcClientSecret: ""
-  oidcIssuerUrl: ""
-  oidcRedirectUrl: ""
 
 # ---- Bundled databases (in-chart StatefulSets) ----
 # Set `bundled: false` to use an external service; then set `externalUrl`.

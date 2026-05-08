@@ -13,7 +13,7 @@ services:
       - "3001"   # Console — only accessible within docker network
     environment:
       DATABASE_URL: postgres://${DB_USER:-thinkwatch}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-think_watch}
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
       JWT_SECRET: ${JWT_SECRET}
       ENCRYPTION_KEY: ${ENCRYPTION_KEY}
       GATEWAY_PORT: "3000"
@@ -23,10 +23,6 @@ services:
       CLICKHOUSE_DB: think_watch
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-thinkwatch}
       CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
-      OIDC_ISSUER_URL: ${OIDC_ISSUER_URL:-}
-      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
-      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
-      OIDC_REDIRECT_URL: ${OIDC_REDIRECT_URL:-}
       RUST_LOG: ${RUST_LOG:-info,think_watch=info}
     depends_on:
       postgres:
