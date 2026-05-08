@@ -596,7 +596,13 @@
     "edit": {
       "clientSecretRotateHint": "OAuth client_secret 字段留空 = 保留原值。只在确实需要轮换时才粘贴新值 — 保存后旧 secret 会立刻失效。",
       "authShapeTitle": "认证形态",
-      "authShapeChangeWarning": "修改认证形态后保存，会一并删除旧形态下的所有凭据（每用户凭据 + 共享凭据）。调用方需要重新授权。"
+      "authShapeChangeWarning": "修改认证形态后保存，会一并删除旧形态下的所有凭据（每用户凭据 + 共享凭据）。调用方需要重新授权。",
+      "tabs": {
+        "basic": "基本",
+        "auth": "认证",
+        "credential": "凭据",
+        "advanced": "高级"
+      }
     },
     "testFailedBlocking": "连接测试失败：{{msg}}。请修复后重试。",
     "displayLabel": "显示名称",

@@ -596,7 +596,13 @@
     "edit": {
       "clientSecretRotateHint": "Leave the OAuth client_secret blank to keep the current value. Paste a new one only if you actually want to rotate — saving with a new secret revokes the old one immediately.",
       "authShapeTitle": "Authentication shape",
-      "authShapeChangeWarning": "Changing the auth shape will purge all credentials of the previous shape (per-user rows AND any shared credential) when you save. Callers will need to re-authorize."
+      "authShapeChangeWarning": "Changing the auth shape will purge all credentials of the previous shape (per-user rows AND any shared credential) when you save. Callers will need to re-authorize.",
+      "tabs": {
+        "basic": "Basics",
+        "auth": "Auth",
+        "credential": "Credential",
+        "advanced": "Advanced"
+      }
     },
     "testFailedBlocking": "Connection test failed: {{msg}}. Fix the issue and try again.",
     "displayLabel": "Display label",
