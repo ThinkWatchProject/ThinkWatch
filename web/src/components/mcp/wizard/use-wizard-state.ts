@@ -121,7 +121,20 @@ interface StoreTemplateForWizard {
 
 /** Apply a freshly-fetched template's defaults onto a fresh wizard
  *  state. Only used for the first-mount prefill — subsequent edits
- *  live in sessionStorage and are never re-applied. */
+ *  live in sessionStorage and are never re-applied.
+ *
+ *  Important: many seeded templates store empty-string `''` for
+ *  optional URL fields (self-deploy templates leave `endpoint_template`
+ *  blank intentionally — admin pastes their own). `??` lets `''`
+ *  through as a "real" value and overwrites the wizard's default. We
+ *  use `pickFilled` to coalesce empty + null into the base. */
+function pickFilled<T extends string | undefined | null>(
+  fromTemplate: T,
+  fallback: string,
+): string {
+  return fromTemplate && fromTemplate.length > 0 ? fromTemplate : fallback;
+}
+
 function applyTemplateDefaults(
   base: WizardState,
   tmpl: StoreTemplateForWizard,
@@ -131,21 +144,36 @@ function applyTemplateDefaults(
     ...base,
     template_slug: tmpl.slug,
     template_name: tmpl.name,
-    endpoint_url: tmpl.endpoint_template ?? base.endpoint_url,
+    endpoint_url: pickFilled(tmpl.endpoint_template, base.endpoint_url),
     auth_shape: shape,
-    static_token_help_url: tmpl.static_token_help_url ?? base.static_token_help_url,
-    auth_header_name: tmpl.auth_header_name ?? base.auth_header_name,
-    auth_value_template: tmpl.auth_value_template ?? base.auth_value_template,
+    static_token_help_url: pickFilled(
+      tmpl.static_token_help_url,
+      base.static_token_help_url,
+    ),
+    auth_header_name: pickFilled(tmpl.auth_header_name, base.auth_header_name),
+    auth_value_template: pickFilled(
+      tmpl.auth_value_template,
+      base.auth_value_template,
+    ),
     oauth: {
       ...base.oauth,
-      issuer: tmpl.oauth_issuer ?? base.oauth.issuer,
-      authorization_endpoint:
-        tmpl.oauth_authorization_endpoint ?? base.oauth.authorization_endpoint,
-      token_endpoint: tmpl.oauth_token_endpoint ?? base.oauth.token_endpoint,
-      revocation_endpoint:
-        tmpl.oauth_revocation_endpoint ?? base.oauth.revocation_endpoint,
-      userinfo_endpoint:
-        tmpl.oauth_userinfo_endpoint ?? base.oauth.userinfo_endpoint,
+      issuer: pickFilled(tmpl.oauth_issuer, base.oauth.issuer),
+      authorization_endpoint: pickFilled(
+        tmpl.oauth_authorization_endpoint,
+        base.oauth.authorization_endpoint,
+      ),
+      token_endpoint: pickFilled(
+        tmpl.oauth_token_endpoint,
+        base.oauth.token_endpoint,
+      ),
+      revocation_endpoint: pickFilled(
+        tmpl.oauth_revocation_endpoint,
+        base.oauth.revocation_endpoint,
+      ),
+      userinfo_endpoint: pickFilled(
+        tmpl.oauth_userinfo_endpoint,
+        base.oauth.userinfo_endpoint,
+      ),
       scopes: (tmpl.oauth_default_scopes ?? []).join(' ') || base.oauth.scopes,
     },
     // Pre-set the metadata defaults from the template name so Step 4
@@ -257,11 +285,17 @@ export function useWizardState(): WizardController {
         );
         if (!alive) return;
         setState((s) => applyTemplateDefaults(s, tmpl));
-      } catch {
+      } catch (err) {
         // Slug doesn't exist (404) or backend hiccup — leave the
         // wizard in its empty default state. The admin can still
         // register a server manually; we just can't claim it came
-        // from this template.
+        // from this template. Log to console so a misrouted slug or
+        // backend regression isn't entirely silent in DevTools.
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[wizard] template prefill failed for slug=${slug}:`,
+          err,
+        );
       } finally {
         if (alive) setTemplateLoading(false);
       }
