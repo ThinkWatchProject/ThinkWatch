@@ -17,6 +17,56 @@ use crate::middleware::auth_guard::AuthUser;
 // reaching across handlers.
 pub use super::mcp_shared::{McpToolSummary, normalize_namespace_prefix, probe_mcp_endpoint};
 
+/// Process-wide advisory-lock key for serializing template installs.
+/// The literal spells "mcpStore" in ASCII so a DBA glancing at
+/// `pg_locks` can tell what's holding it. Any new advisory lock
+/// added elsewhere in the codebase MUST use a distinct constant —
+/// collisions silently serialize unrelated work and can deadlock
+/// under concurrent load.
+///
+/// Reserved advisory lock keys (keep this list current):
+///   * `MCP_STORE_INSTALL_LOCK_KEY` (here): template-install
+///     serialization in `create_server` when `template_slug` is set.
+const MCP_STORE_INSTALL_LOCK_KEY: i64 = 0x6D637053746F7265;
+
+/// Find an available `(name, namespace_prefix)` pair by appending
+/// `_2`, `_3`, … when the base values are already taken. Runs inside
+/// the caller's tx so two concurrent installs of the same template
+/// can't pick the same suffix. Used only on the template-install
+/// path; non-template `create_server` calls just rely on UNIQUE to
+/// reject collisions and surface a 409 to the admin.
+async fn resolve_server_collisions(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    base_name: &str,
+    base_prefix: &str,
+) -> Result<(String, String), AppError> {
+    for i in 1..100 {
+        let (n, p) = if i == 1 {
+            (base_name.to_owned(), base_prefix.to_owned())
+        } else {
+            (format!("{base_name} #{i}"), format!("{base_prefix}_{i}"))
+        };
+        // `SELECT 1` is INT4 on the wire; binding into `Option<i64>`
+        // panics with a column-decode mismatch the moment a row
+        // comes back. We don't actually care about the value — only
+        // whether the row exists — so use Option<i32>.
+        let conflict: Option<i32> = sqlx::query_scalar(
+            "SELECT 1 FROM mcp_servers WHERE name = $1 OR namespace_prefix = $2 LIMIT 1",
+        )
+        .bind(&n)
+        .bind(&p)
+        .fetch_optional(&mut **tx)
+        .await?;
+        if conflict.is_none() {
+            return Ok((n, p));
+        }
+    }
+    Err(AppError::BadRequest(
+        "Too many installations of this template (>99) — remove some before installing again"
+            .into(),
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Test MCP server connection — anonymous probe via JSON-RPC tools/list
 // ---------------------------------------------------------------------------
@@ -408,10 +458,53 @@ pub async fn create_server(
         _ => None,
     };
 
-    // One transaction: server INSERT + (optional) shared-credential
-    // INSERT. Failures of either roll back the other so we never get
-    // an admin_shared row with no credential anyone can find.
+    // Build config_json once before the TX so any validation error
+    // surfaces before we hold a lock.
+    let config_json = {
+        let mut config = serde_json::json!({});
+        if let Some(ref headers) = req.custom_headers {
+            think_watch_common::validation::validate_custom_headers(headers)?;
+            config["custom_headers"] = serde_json::to_value(headers).unwrap_or_default();
+        }
+        if let Some(ttl) = req.cache_ttl_secs {
+            config["cache_ttl_secs"] = serde_json::json!(ttl);
+        }
+        config
+    };
+
+    // One transaction: optional template lock + server INSERT +
+    // optional shared-credential INSERT + optional store-install
+    // audit row. Failures of any step roll back the others so we
+    // never end up with an orphan server, a dangling credential,
+    // or a count drift on `mcp_store_templates.install_count`.
     let mut tx = state.db.begin().await?;
+
+    // Template-install path: when `template_slug` is present, take
+    // a process-wide advisory lock so two concurrent installs of
+    // templates with the same default name can't both grab it,
+    // then auto-resolve `(name, prefix)` collisions by appending
+    // `_2` / `_3` / … . Frontend usually pre-deconflicts via the
+    // existing-servers snapshot but the lock guards the race
+    // window between snapshot fetch and INSERT.
+    let (final_name, final_prefix, template_id) = match req.template_slug.as_deref() {
+        Some(slug) if !slug.is_empty() => {
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(MCP_STORE_INSTALL_LOCK_KEY)
+                .execute(&mut *tx)
+                .await?;
+            let template_id: Uuid =
+                sqlx::query_scalar("SELECT id FROM mcp_store_templates WHERE slug = $1 FOR UPDATE")
+                    .bind(slug)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .ok_or_else(|| AppError::NotFound(format!("Template '{slug}' not found")))?;
+            let (resolved_name, resolved_prefix) =
+                resolve_server_collisions(&mut tx, &req.name, &namespace_prefix).await?;
+            (resolved_name, resolved_prefix, Some(template_id))
+        }
+        _ => (req.name.clone(), namespace_prefix.clone(), None),
+    };
+
     let server = sqlx::query_as::<_, McpServer>(
         r#"INSERT INTO mcp_servers (
                name, namespace_prefix, description, endpoint_url, transport_type,
@@ -426,8 +519,8 @@ pub async fn create_server(
                    $16, $17, $18, $19)
            RETURNING *"#,
     )
-    .bind(&req.name)
-    .bind(&namespace_prefix)
+    .bind(&final_name)
+    .bind(&final_prefix)
     .bind(&req.description)
     .bind(&req.endpoint_url)
     .bind(&transport_type)
@@ -444,20 +537,30 @@ pub async fn create_server(
     .bind(&auth_header_name)
     .bind(&auth_value_template)
     .bind(&credential_owner)
-    .bind({
-        let mut config = serde_json::json!({});
-        if let Some(ref headers) = req.custom_headers {
-            think_watch_common::validation::validate_custom_headers(headers)?;
-            config["custom_headers"] = serde_json::to_value(headers).unwrap_or_default();
-        }
-        if let Some(ttl) = req.cache_ttl_secs {
-            config["cache_ttl_secs"] = serde_json::json!(ttl);
-        }
-        config
-    })
+    .bind(&config_json)
     .fetch_one(&mut *tx)
     .await
     .map_err(map_mcp_server_unique_violation)?;
+
+    // Template install audit row + install_count bump. Same TX as
+    // the server INSERT so the count never drifts even if
+    // mcp_store_installs FK violations rollback the whole thing.
+    if let Some(tid) = template_id {
+        sqlx::query(
+            "INSERT INTO mcp_store_installs (template_id, server_id, installed_by) VALUES ($1, $2, $3)",
+        )
+        .bind(tid)
+        .bind(server.id)
+        .bind(auth_user.claims.sub)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE mcp_store_templates SET install_count = install_count + 1 WHERE id = $1",
+        )
+        .bind(tid)
+        .execute(&mut *tx)
+        .await?;
+    }
 
     // Atomic credential install for admin_shared mode.
     if let Some(cred) = &wizard_cred {

@@ -19,14 +19,13 @@
 //!       the name (`_2`) — multi-instance support is intentional
 //!
 //! The HTTP install endpoint (`POST /api/mcp/store/{slug}/install`)
-//! runs an upstream JSON-RPC probe before persisting, and the SSRF
-//! guard rejects loopback URLs, so we drive `install_template_into_db`
-//! directly — same code path as the production handler past the
-//! probe.
+//! installs run via `POST /api/mcp/servers` with `template_slug` —
+//! the consolidated path that replaced the dedicated
+//! `/api/mcp/store/{slug}/install` handler. Tests use
+//! `https://example.com/mcp` so the SSRF guard accepts the URL.
 
 use serde_json::Value;
 use sqlx::PgPool;
-use think_watch_server::handlers::mcp_store::install_template_into_db;
 use think_watch_test_support::prelude::*;
 
 async fn admin_session(app: &TestApp) -> TestClient {
@@ -218,7 +217,6 @@ async fn store_categories_endpoint_aggregates_counts() {
 #[tokio::test]
 async fn install_template_lifecycle_increments_then_decrements_install_count() {
     let app = TestApp::spawn().await;
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
     // Short slug — namespace prefix derives from it and must match
     // `[a-z0-9_]{1,32}`.
     let slug = format!("life-{}", &uuid::Uuid::new_v4().simple().to_string()[..6]);
@@ -232,21 +230,21 @@ async fn install_template_lifecycle_increments_then_decrements_install_count() {
             .unwrap();
     assert_eq!(initial, 0);
 
-    let server = install_template_into_db(
-        &app.db,
-        tmpl_id,
-        &slug,
-        "https://example.com/mcp",
-        "streamable_http",
-        json!({}),
-        None,
-        None,
-        None,
-        None,
-        admin.user.id,
-    )
-    .await
-    .expect("install must succeed");
+    let con = admin_session(&app).await;
+    let install_payload = json!({
+        "name": "Life IT",
+        "namespace_prefix": slug.replace('-', "_"),
+        "endpoint_url": "https://example.com/mcp",
+        "transport_type": "streamable_http",
+        "template_slug": slug,
+    });
+    let server: Value = con
+        .post("/api/mcp/servers", install_payload.clone())
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let server_id = server["id"].as_str().unwrap().to_owned();
 
     let after_install: i32 =
         sqlx::query_scalar("SELECT install_count FROM mcp_store_templates WHERE id = $1")
@@ -259,10 +257,10 @@ async fn install_template_lifecycle_increments_then_decrements_install_count() {
     // mcp_store_installs records the link.
     let n_links: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM mcp_store_installs \
-         WHERE template_id = $1 AND server_id = $2",
+         WHERE template_id = $1 AND server_id = $2::uuid",
     )
     .bind(tmpl_id)
-    .bind(server.id)
+    .bind(&server_id)
     .fetch_one(&app.db)
     .await
     .unwrap();
@@ -270,8 +268,7 @@ async fn install_template_lifecycle_increments_then_decrements_install_count() {
 
     // Now delete the server through the admin endpoint and verify
     // install_count decrements back.
-    let con = admin_session(&app).await;
-    con.delete(&format!("/api/mcp/servers/{}", server.id))
+    con.delete(&format!("/api/mcp/servers/{server_id}"))
         .await
         .unwrap()
         .assert_ok();
@@ -289,38 +286,20 @@ async fn install_template_lifecycle_increments_then_decrements_install_count() {
 
     // Deleting again must NOT push install_count below zero — the
     // GREATEST(install_count - 1, 0) clamp pinned in the
-    // mcp_servers handler.
+    // mcp_servers handler. Re-install + tamper count to 0 + delete.
+    let server2: Value = con
+        .post("/api/mcp/servers", install_payload)
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let server2_id = server2["id"].as_str().unwrap().to_owned();
     sqlx::query("UPDATE mcp_store_templates SET install_count = 0 WHERE id = $1")
         .bind(tmpl_id)
         .execute(&app.db)
         .await
         .unwrap();
-    // Trigger a second decrement against a 0 baseline by inserting a
-    // fake link + deleting — easiest way is via the same admin path
-    // on a fresh install.
-    let server_2 = install_template_into_db(
-        &app.db,
-        tmpl_id,
-        &slug,
-        "https://example.com/mcp",
-        "streamable_http",
-        json!({}),
-        None,
-        None,
-        None,
-        None,
-        admin.user.id,
-    )
-    .await
-    .expect("second install");
-    // Tamper: zero out the count, then delete. Without the clamp,
-    // install_count would be -1.
-    sqlx::query("UPDATE mcp_store_templates SET install_count = 0 WHERE id = $1")
-        .bind(tmpl_id)
-        .execute(&app.db)
-        .await
-        .unwrap();
-    con.delete(&format!("/api/mcp/servers/{}", server_2.id))
+    con.delete(&format!("/api/mcp/servers/{server2_id}"))
         .await
         .unwrap()
         .assert_ok();
@@ -342,53 +321,41 @@ async fn double_install_of_same_template_auto_suffixes_name() {
     // Multi-instance support is an explicit design choice (see
     // memory `project_mcp_store_issues`): the same template can be
     // installed N times. Collisions on `mcp_servers.name` are
-    // resolved by appending `_2`, `_3`, ... — pin that contract
+    // resolved by appending ` #2`, ` #3`, ... — pin that contract
     // because adding a UNIQUE(template_id) constraint later would
     // silently break it.
     let app = TestApp::spawn().await;
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
     let slug = format!("dup-{}", &uuid::Uuid::new_v4().simple().to_string()[..6]);
     let tmpl_id = seed_template(&app.db, &slug, "Dup IT", "developer", "x", false).await;
 
-    let s1 = install_template_into_db(
-        &app.db,
-        tmpl_id,
-        &slug,
-        "https://example.com/mcp",
-        "streamable_http",
-        json!({}),
-        None,
-        None,
-        None,
-        None,
-        admin.user.id,
-    )
-    .await
-    .expect("first install");
-    let s2 = install_template_into_db(
-        &app.db,
-        tmpl_id,
-        &slug,
-        "https://example.com/mcp",
-        "streamable_http",
-        json!({}),
-        None,
-        None,
-        None,
-        None,
-        admin.user.id,
-    )
-    .await
-    .expect("second install must succeed (multi-instance support)");
-
-    assert_ne!(s1.name, s2.name, "second server must NOT share name");
+    let con = admin_session(&app).await;
+    let payload = json!({
+        "name": "Dup IT",
+        "namespace_prefix": slug.replace('-', "_"),
+        "endpoint_url": "https://example.com/mcp",
+        "transport_type": "streamable_http",
+        "template_slug": slug,
+    });
+    let s1: Value = con
+        .post("/api/mcp/servers", payload.clone())
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let s2: Value = con
+        .post("/api/mcp/servers", payload)
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let s1_name = s1["name"].as_str().unwrap();
+    let s2_name = s2["name"].as_str().unwrap();
+    assert_ne!(s1_name, s2_name, "second server must NOT share name");
     // Resolver appends " #N" (Nginx-style) — pin the format so a
     // refactor that switches to e.g. "_N" or "(2)" is caught.
     assert!(
-        s2.name.starts_with(&s1.name) && s2.name.ends_with("#2"),
-        "second name should suffix \" #2\" from the first: s1={} s2={}",
-        s1.name,
-        s2.name
+        s2_name.starts_with(s1_name) && s2_name.ends_with("#2"),
+        "second name should suffix \" #2\" from the first: s1={s1_name} s2={s2_name}",
     );
 
     let count: i32 =

@@ -777,10 +777,6 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
                 .delete(handlers::mcp_oauth::discard_wizard_credential),
         )
         .route(
-            "/api/mcp/store/{slug}/install",
-            post(handlers::mcp_store::install_template),
-        )
-        .route(
             "/api/admin/mcp-store/sync",
             post(handlers::mcp_store::sync_registry),
         )

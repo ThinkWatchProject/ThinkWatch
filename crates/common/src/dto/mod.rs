@@ -287,6 +287,15 @@ pub struct CreateMcpServerRequest {
     /// the handler before insert. Mutually exclusive with
     /// `wizard_session_id` — handler 400s if both are set.
     pub shared_static_token: Option<String>,
+    /// When set, the server is being installed from an
+    /// `mcp_store_templates` row identified by this slug. The
+    /// handler validates the slug exists, auto-resolves
+    /// (name, namespace_prefix) collisions by appending `_2` /
+    /// `_3` / …, and atomically writes a `mcp_store_installs`
+    /// audit row + bumps `install_count` inside the same TX as the
+    /// server INSERT. The other request fields still apply (admin
+    /// can override anything from the template).
+    pub template_slug: Option<String>,
 }
 
 // --- Pagination ---
