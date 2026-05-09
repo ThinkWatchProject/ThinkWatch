@@ -1,32 +1,24 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { Link } from '@tanstack/react-router';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-  DialogFooter,
-} from '@/components/ui/dialog';
-import { Search, Download, CheckCircle2, ChevronDown, Loader2, Star, RefreshCw, Globe, Lock, KeyRound, Zap } from 'lucide-react';
+  Search,
+  Download,
+  CheckCircle2,
+  Loader2,
+  Star,
+  RefreshCw,
+  Globe,
+  Lock,
+  KeyRound,
+} from 'lucide-react';
 import { api, apiPost, hasPermission } from '@/lib/api';
-import { slugifyPrefix, resolveCollision, sanitizePrefixInput } from '@/lib/prefix-utils';
 import { Skeleton } from '@/components/ui/skeleton';
 import { toast } from 'sonner';
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from '@/components/ui/collapsible';
-import { HeaderEditor } from '@/components/header-editor';
-import { AuthModeBadge } from '@/components/mcp/auth-mode-badge';
-import { deriveAuthMode } from '@/components/mcp/auth-mode-utils';
-import { McpTestPanel, type McpTestResult } from '@/components/mcp/test-panel';
 
 interface StoreTemplate {
   id: string;
@@ -59,14 +51,22 @@ interface CategoryCount {
   count: number;
 }
 
-const CATEGORIES = ['developer', 'database', 'communication', 'cloud', 'utility', 'knowledge', 'productivity'] as const;
+const CATEGORIES = [
+  'developer',
+  'database',
+  'communication',
+  'cloud',
+  'utility',
+  'knowledge',
+  'productivity',
+] as const;
 
 /** Pick the right language from a bilingual string stored as "en\n---\nzh". */
 function i18nText(text: string | null | undefined, lang: string): string {
   if (!text) return '';
   const parts = text.split('\n---\n');
   if (parts.length < 2) return text;
-  return lang.startsWith('zh') ? (parts[1] || parts[0]) : parts[0];
+  return lang.startsWith('zh') ? parts[1] || parts[0] : parts[0];
 }
 
 export function McpStorePage() {
@@ -76,31 +76,7 @@ export function McpStorePage() {
   const [loading, setLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
-
-  // Install dialog state
-  const [installTemplate, setInstallTemplate] = useState<StoreTemplate | null>(null);
-  const [endpointUrl, setEndpointUrl] = useState('');
-  const [customHeaders, setCustomHeaders] = useState<[string, string][]>([]);
-  const [serverName, setServerName] = useState('');
-  const [serverPrefix, setServerPrefix] = useState('');
-  // OAuth client_id / client_secret captured at install time for
-  // templates that ship with `oauth_issuer`. The template provides
-  // the issuer + endpoints (public info), the admin provides their
-  // own app credentials so the server is usable immediately.
-  const [oauthClientId, setOauthClientId] = useState('');
-  const [oauthClientSecret, setOauthClientSecret] = useState('');
-  // Connection test state — gates the Install button so admins don't
-  // commit a misconfigured server. Mirrors the wizard's Step 3 flow.
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState<McpTestResult | null>(null);
-  // Whether the user has manually edited the prefix — if so, we stop
-  // auto-regenerating it from the server name.
-  const [prefixManuallyEdited, setPrefixManuallyEdited] = useState(false);
-  // Existing servers — used client-side to preview what name/prefix a fresh
-  // install will actually receive after collision resolution.
-  const [existingServers, setExistingServers] = useState<{ name: string; namespace_prefix: string }[]>([]);
   const [syncing, setSyncing] = useState(false);
-  const [installing, setInstalling] = useState(false);
 
   const fetchTemplates = async () => {
     try {
@@ -128,11 +104,6 @@ export function McpStorePage() {
 
   useEffect(() => {
     void fetchCategories();
-    // Snapshot existing servers once — used only for client-side collision
-    // preview. Backend still has authoritative UNIQUE enforcement.
-    api<{ name: string; namespace_prefix: string }[]>('/api/mcp/servers')
-      .then(setExistingServers)
-      .catch(() => { /* ignore — preview will just not show collisions */ });
   }, []);
 
   useEffect(() => {
@@ -142,130 +113,6 @@ export function McpStorePage() {
     }, 200);
     return () => clearTimeout(timer);
   }, [searchQuery, activeCategory]);
-
-  const openInstallDialog = (tmpl: StoreTemplate) => {
-    setInstallTemplate(tmpl);
-    setEndpointUrl(tmpl.endpoint_template ?? '');
-    setCustomHeaders([]);
-    setServerName(tmpl.name);
-    setServerPrefix(tmpl.slug.replace(/-/g, '_'));
-    setPrefixManuallyEdited(false);
-    setOauthClientId('');
-    setOauthClientSecret('');
-    setTestResult(null);
-    setTesting(false);
-  };
-
-  // Single source of truth for "user is done with the install dialog".
-  // Both the user-driven close path (X / Escape / outside-click via
-  // Radix's onOpenChange) and the programmatic close after a successful
-  // install funnel through here so we can't leak per-template state
-  // into the next dialog open.
-  const closeInstallDialog = () => {
-    setInstallTemplate(null);
-    setTestResult(null);
-    setTesting(false);
-    setOauthClientId('');
-    setOauthClientSecret('');
-    setCustomHeaders([]);
-  };
-
-  const handleTestConnection = async () => {
-    setTesting(true);
-    setTestResult(null);
-    try {
-      const headers =
-        customHeaders.length > 0
-          ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
-          : null;
-      const res = await apiPost<McpTestResult>('/api/mcp/servers/test', {
-        endpoint_url: endpointUrl,
-        custom_headers: headers,
-      });
-      setTestResult(res);
-    } catch (err) {
-      setTestResult({
-        success: false,
-        message: err instanceof Error ? err.message : 'Connection failed',
-      });
-    } finally {
-      setTesting(false);
-    }
-  };
-
-  // Live preview: what will `name` and `namespace_prefix` actually look like
-  // once the backend resolves collisions? Mirrors backend logic, runs on
-  // the current snapshot of `existingServers`.
-  const takenSets = useMemo(() => ({
-    names: new Set(existingServers.map((s) => s.name)),
-    prefixes: new Set(existingServers.map((s) => s.namespace_prefix)),
-  }), [existingServers]);
-
-  const resolvedInstall = useMemo(() => {
-    if (!installTemplate || !serverName.trim()) return null;
-    const basePrefix = prefixManuallyEdited && serverPrefix
-      ? serverPrefix
-      : slugifyPrefix(serverName);
-    if (!basePrefix) return null;
-    return resolveCollision(serverName.trim(), basePrefix, takenSets.names, takenSets.prefixes);
-  }, [installTemplate, serverName, serverPrefix, prefixManuallyEdited, takenSets]);
-
-  const handleInstall = async (e: FormEvent) => {
-    e.preventDefault();
-    if (!installTemplate) return;
-    setInstalling(true);
-    try {
-      const isOauthTemplate = !!installTemplate.oauth_issuer;
-      await apiPost(`/api/mcp/store/${installTemplate.slug}/install`, {
-        name: resolvedInstall?.name ?? serverName,
-        namespace_prefix: resolvedInstall?.prefix ?? serverPrefix,
-        endpoint_url: endpointUrl || undefined,
-        custom_headers:
-          customHeaders.length > 0
-            ? Object.fromEntries(customHeaders.filter(([k]) => k.trim()))
-            : undefined,
-        // Credentials are only meaningful for OAuth-templates; the
-        // backend ignores them otherwise but we keep the wire payload
-        // tight by skipping the keys entirely.
-        oauth_client_id: isOauthTemplate ? (oauthClientId || undefined) : undefined,
-        oauth_client_secret: isOauthTemplate ? (oauthClientSecret || undefined) : undefined,
-      });
-      // Toast carries the next-step CTA — for OAuth/static-token
-      // templates the install ALONE doesn't make the server usable,
-      // so we link directly to /connections where users authorize.
-      // For public/no-auth templates the server is ready to use; the
-      // toast is just a confirmation.
-      const isPerUserAuth = installTemplate.auth_shape !== 'anonymous';
-      if (isPerUserAuth) {
-        toast.success(t('mcpStore.installSuccess'), {
-          duration: 8000,
-          action: {
-            label: t('mcpStore.goToConnections'),
-            onClick: () => {
-              window.location.href = '/connections';
-            },
-          },
-        });
-      } else {
-        toast.success(t('mcpStore.installSuccess'));
-      }
-      closeInstallDialog();
-      // Refresh store listing + existing-server snapshot so the just-installed
-      // template shows the "installed" badge and future collision previews
-      // account for the new name/prefix.
-      void fetchTemplates();
-      api<{ name: string; namespace_prefix: string }[]>('/api/mcp/servers')
-        .then(setExistingServers)
-        .catch(() => { /* ignore */ });
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
-    } finally {
-      setInstalling(false);
-    }
-  };
-
-  const isHosted = installTemplate?.deploy_type === 'hosted';
-  const needsEndpoint = !isHosted || !installTemplate?.endpoint_template;
 
   // Separate featured templates when no filter is active
   const featuredTemplates =
@@ -305,7 +152,11 @@ export function McpStorePage() {
               }
             }}
           >
-            {syncing ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+            {syncing ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="h-4 w-4" />
+            )}
             {syncing ? t('mcpStore.syncing') : t('mcpStore.syncRegistry')}
           </Button>
         )}
@@ -375,7 +226,6 @@ export function McpStorePage() {
                   <TemplateCard
                     key={tmpl.id}
                     template={tmpl}
-                    onInstall={() => openInstallDialog(tmpl)}
                     t={t}
                     lang={i18n.language}
                   />
@@ -391,7 +241,6 @@ export function McpStorePage() {
                 <TemplateCard
                   key={tmpl.id}
                   template={tmpl}
-                  onInstall={() => openInstallDialog(tmpl)}
                   t={t}
                   lang={i18n.language}
                 />
@@ -400,243 +249,6 @@ export function McpStorePage() {
           )}
         </>
       )}
-
-      {/* Install dialog */}
-      <Dialog
-        open={installTemplate !== null}
-        onOpenChange={(open) => {
-          if (!open) closeInstallDialog();
-        }}
-      >
-        <DialogContent className="max-w-lg">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <span className="truncate">
-                {t('mcpStore.installTitle', { name: installTemplate?.name })}
-              </span>
-              {installTemplate && (
-                // shrink-0 so a long template name can't squeeze the
-                // badge below readability.
-                <AuthModeBadge
-                  mode={deriveAuthMode(installTemplate)}
-                  className="shrink-0"
-                />
-              )}
-            </DialogTitle>
-            <DialogDescription>
-              {i18nText(installTemplate?.description, i18n.language)}
-            </DialogDescription>
-          </DialogHeader>
-          <form onSubmit={handleInstall} className="space-y-4">
-            {installTemplate?.installed && (
-              <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-400">
-                <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                <span>{t('mcpStore.installAgainWarning')}</span>
-              </div>
-            )}
-
-            {/* Name + Namespace prefix — pre-populated from template, editable */}
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label htmlFor="install-name">{t('common.name')}</Label>
-                <Input
-                  id="install-name"
-                  value={serverName}
-                  onChange={(e) => setServerName(e.target.value)}
-                  required
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label htmlFor="install-prefix">{t('mcpServers.namespacePrefix')}</Label>
-                <Input
-                  id="install-prefix"
-                  value={prefixManuallyEdited ? serverPrefix : (resolvedInstall?.prefix ?? slugifyPrefix(serverName))}
-                  onChange={(e) => {
-                    setPrefixManuallyEdited(true);
-                    setServerPrefix(sanitizePrefixInput(e.target.value));
-                  }}
-                  pattern="[a-z0-9_]{1,32}"
-                  maxLength={32}
-                />
-              </div>
-            </div>
-            {resolvedInstall && (resolvedInstall.name !== serverName || resolvedInstall.prefix !== serverPrefix) && (
-              <p className="text-xs text-muted-foreground">
-                {t('mcpServers.willBeStoredAs')}{' '}
-                <code className="rounded bg-muted px-1 font-mono">{resolvedInstall.name}</code>
-                {' / '}
-                <code className="rounded bg-muted px-1 font-mono">{resolvedInstall.prefix}</code>
-              </p>
-            )}
-
-            {/* Endpoint URL — shown for non-hosted or when no template
-                endpoint. Endpoint is the most "configuration-y" field
-                so it sits right after name/prefix. */}
-            {needsEndpoint && (
-              <div className="space-y-1.5">
-                <Label>{t('mcpStore.endpointUrl')}</Label>
-                <Input
-                  value={endpointUrl}
-                  onChange={(e) => {
-                    setEndpointUrl(e.target.value);
-                    // Endpoint changed → previous test result is stale.
-                    setTestResult(null);
-                  }}
-                  placeholder="https://..."
-                  required
-                />
-              </div>
-            )}
-
-            {/* Auth / deploy instructions */}
-            {installTemplate?.auth_instructions && (
-              <div className="rounded-md border bg-muted/50 p-3 text-sm">
-                <p className="mb-1 font-medium">
-                  {isHosted ? t('mcpStore.authInstructions') : t('mcpStore.deployInstructions')}
-                </p>
-                <p className="text-muted-foreground whitespace-pre-wrap">
-                  {i18nText(installTemplate.auth_instructions, i18n.language)}
-                </p>
-              </div>
-            )}
-
-            {/* OAuth client credentials — admin action, sits next to
-                the endpoint config so all the install-time inputs are
-                grouped together before the per-user note. */}
-            {installTemplate?.oauth_issuer && (
-              <div className="space-y-2 rounded-md border p-3">
-                <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  {t('mcpStore.oauthCredentialsTitle')}
-                </p>
-                <p className="text-xs text-muted-foreground">
-                  {t('mcpStore.oauthCredentialsHint', { issuer: installTemplate.oauth_issuer })}
-                </p>
-                <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-                  <div className="space-y-1">
-                    <Label htmlFor="install-oauth-client-id" className="text-xs">
-                      {t('mcpServers.oauth.clientId')}
-                    </Label>
-                    <Input
-                      id="install-oauth-client-id"
-                      value={oauthClientId}
-                      onChange={(e) => setOauthClientId(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <Label htmlFor="install-oauth-client-secret" className="text-xs">
-                      {t('mcpServers.oauth.clientSecret')}
-                    </Label>
-                    <Input
-                      id="install-oauth-client-secret"
-                      type="password"
-                      value={oauthClientSecret}
-                      onChange={(e) => setOauthClientSecret(e.target.value)}
-                    />
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Note about per-user credentials — comes AFTER admin
-                inputs because it describes a *user* step, not an
-                admin one. Reading order matches who-acts-when.
-                The i18n value contains a `<code>/connections</code>`
-                fragment that we render via dangerouslySetInnerHTML —
-                input is i18n-controlled (not user content), so no
-                XSS surface. */}
-            {installTemplate?.auth_shape && installTemplate.auth_shape !== 'anonymous' && (
-              <div
-                className="rounded-md border bg-muted/40 p-3 text-xs text-muted-foreground [&_code]:mx-1 [&_code]:rounded [&_code]:bg-muted [&_code]:px-1"
-                dangerouslySetInnerHTML={{ __html: t('mcpStore.perUserAuthNote') }}
-              />
-            )}
-
-            {/* Connection test — gates Install. Same UX as the /servers
-                wizard's Step 3 so admins get the same "X tools
-                discovered" preview before committing. */}
-            {testResult && (
-              <McpTestPanel
-                testing={testing}
-                result={testResult}
-                onRetry={handleTestConnection}
-              />
-            )}
-
-            {/* Advanced: cache TTL is set globally for the store flow,
-                so this section currently only carries custom headers.
-                Hidden by default — most templates don't need them. */}
-            <Collapsible className="space-y-2">
-              <CollapsibleTrigger className="group flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
-                <ChevronDown className="h-3 w-3 transition-transform group-data-[state=open]:rotate-180" />
-                {t('mcpStore.advancedSection')}
-              </CollapsibleTrigger>
-              <CollapsibleContent className="space-y-2 pt-2">
-                <Label className="text-sm">{t('mcpStore.customHeaders')}</Label>
-                <HeaderEditor
-                  headers={customHeaders}
-                  onChange={(h) => {
-                    setCustomHeaders(h);
-                    setTestResult(null);
-                  }}
-                  keyPlaceholder={t('mcpStore.headerName')}
-                  presets={[
-                    { label: t('mcpServers.presetUserId'), header: ['X-User-Id', '{{user_id}}'] },
-                    { label: t('mcpServers.presetUserEmail'), header: ['X-User-Email', '{{user_email}}'] },
-                  ]}
-                />
-              </CollapsibleContent>
-            </Collapsible>
-
-            <DialogFooter>
-              <Button
-                type="button"
-                variant="outline"
-                disabled={testing || !endpointUrl}
-                onClick={handleTestConnection}
-              >
-                {testing ? <Loader2 className="mr-1 h-4 w-4 animate-spin" /> : <Zap className="mr-1 h-4 w-4" />}
-                {testing ? t('providers.testing') : t('providers.testConnection')}
-              </Button>
-              <Button
-                type="submit"
-                // Store templates ship with curated URLs and the
-                // backend's `install_template` runs its own probe, so
-                // the Test button is an optional *preview* (it shows
-                // the tool list before commit) rather than a gate.
-                // Only block Install when the user explicitly tested
-                // and got a hard failure — at that point we know the
-                // install would fail too, so saving them the click is
-                // friendlier than letting the backend reject.
-                disabled={
-                  installing
-                  || (testResult != null
-                      && !testResult.success
-                      && !testResult.requires_auth)
-                }
-                title={
-                  testResult != null
-                  && !testResult.success
-                  && !testResult.requires_auth
-                    ? t('mcpStore.installBlockedByTestFailure')
-                    : undefined
-                }
-              >
-                {installing ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    {t('mcpStore.installing')}
-                  </>
-                ) : (
-                  <>
-                    <Download className="mr-2 h-4 w-4" />
-                    {t('mcpStore.install')}
-                  </>
-                )}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
@@ -671,15 +283,31 @@ function TemplateAuthBadge({
 
 function TemplateCard({
   template,
-  onInstall,
   t,
   lang,
 }: {
   template: StoreTemplate;
   lang: string;
-  onInstall: () => void;
   t: (key: string) => string;
 }) {
+  // Install handed off to the registration wizard at
+  // /mcp/servers/new?template={slug}. The wizard fetches the template,
+  // prefills Step 1 (URL + auth shape + OAuth + header defaults), and
+  // ships `template_slug` back to POST /api/mcp/servers so the
+  // mcp_store_installs audit row + install_count bump happen in the
+  // same TX as the server INSERT. No more dedicated install dialog.
+  const canInstall = hasPermission('mcp_servers:create');
+  const buttonContent = template.installed ? (
+    <>
+      <CheckCircle2 className="mr-1 h-3 w-3 text-emerald-500" />
+      {t('mcpStore.installAgain')}
+    </>
+  ) : (
+    <>
+      <Download className="mr-1 h-3 w-3" />
+      {t('mcpStore.install')}
+    </>
+  );
   return (
     <Card className="card-interactive flex flex-col justify-between">
       <CardHeader className="pb-2">
@@ -714,25 +342,26 @@ function TemplateCard({
               {template.install_count} installs
             </span>
           </div>
-          <Button
-            size="sm"
-            variant={template.installed ? 'outline' : 'default'}
-            onClick={onInstall}
-            disabled={!hasPermission('mcp_servers:create')}
-            title={template.installed ? t('mcpStore.installAgainHint') : undefined}
-          >
-            {template.installed ? (
-              <>
-                <CheckCircle2 className="mr-1 h-3 w-3 text-emerald-500" />
-                {t('mcpStore.installAgain')}
-              </>
-            ) : (
-              <>
-                <Download className="mr-1 h-3 w-3" />
-                {t('mcpStore.install')}
-              </>
-            )}
-          </Button>
+          {canInstall ? (
+            <Button
+              asChild
+              size="sm"
+              variant={template.installed ? 'outline' : 'default'}
+              title={template.installed ? t('mcpStore.installAgainHint') : undefined}
+            >
+              <Link to="/mcp/servers/new" search={{ template: template.slug }}>
+                {buttonContent}
+              </Link>
+            </Button>
+          ) : (
+            <Button
+              size="sm"
+              variant={template.installed ? 'outline' : 'default'}
+              disabled
+            >
+              {buttonContent}
+            </Button>
+          )}
         </div>
       </CardContent>
     </Card>

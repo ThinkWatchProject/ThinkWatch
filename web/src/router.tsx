@@ -279,6 +279,13 @@ const mcpServersRoute = createRoute({
 const mcpServerWizardRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: '/mcp/servers/new',
+  // Optional `?template=<slug>` — set when arriving from the store's
+  // "Install" button. Validation just narrows the type; the wizard
+  // itself reads the param via useWizardState's first-mount probe.
+  validateSearch: (search: Record<string, unknown>): { template?: string } => {
+    const t = search.template;
+    return typeof t === 'string' && t ? { template: t } : {};
+  },
   component: gate(
     McpServerWizardPage as unknown as React.ComponentType,
     '/mcp/servers',
