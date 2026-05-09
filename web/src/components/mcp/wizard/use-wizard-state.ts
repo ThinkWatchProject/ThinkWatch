@@ -259,13 +259,15 @@ export function useWizardState(): WizardController {
     initialTemplateSlugRef.current !== null,
   );
 
-  // Strip the resume fragment / `?template=` from the URL so a refresh
-  // doesn't re-fire the prefill logic and doesn't re-add the same
-  // template to a wizard the admin has since edited away from. The
-  // session_id stays alive in React state + sessionStorage, neither of
-  // which depends on the URL anymore.
+  // Strip `#wizard_resume=` from the URL on resume mounts. We
+  // CANNOT strip `?template=` here because React 18 strict mode
+  // double-invokes effects: the first mount would fetch + strip,
+  // its setState gets cancelled by the cleanup, and the second
+  // mount has no slug left in the URL to re-fetch from. So
+  // `?template=` gets stripped inside the fetch effect AFTER the
+  // setState lands — see below.
   useEffect(() => {
-    if (!resumedRef.current && initialTemplateSlugRef.current === null) return;
+    if (!resumedRef.current) return;
     if (typeof window !== 'undefined') {
       window.history.replaceState(null, '', window.location.pathname);
     }
@@ -285,6 +287,12 @@ export function useWizardState(): WizardController {
         );
         if (!alive) return;
         setState((s) => applyTemplateDefaults(s, tmpl));
+        // NOW strip the query — only after the prefill landed. If we
+        // stripped earlier and React 18 strict-mode unmounted us,
+        // the second mount would have an empty URL and never re-fetch.
+        if (typeof window !== 'undefined') {
+          window.history.replaceState(null, '', window.location.pathname);
+        }
       } catch (err) {
         // Slug doesn't exist (404) or backend hiccup — leave the
         // wizard in its empty default state. The admin can still
