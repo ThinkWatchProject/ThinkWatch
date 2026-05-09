@@ -161,6 +161,13 @@ export function ServerWizardPage() {
         auth_header_name: wiz.state.auth_header_name,
         auth_value_template: wiz.state.auth_value_template,
         credential_owner: wiz.state.credential_owner,
+        // When the wizard was opened from /mcp/store, ship the slug
+        // back so the backend writes a `mcp_store_installs` audit row
+        // and bumps `install_count` in the same TX as the server
+        // INSERT. The same advisory lock + collision resolver as a
+        // direct API install applies — `name` / `namespace_prefix`
+        // get auto-suffixed if they collide.
+        template_slug: wiz.state.template_slug || undefined,
         ...sharedFields,
       });
 
@@ -213,6 +220,7 @@ export function ServerWizardPage() {
             patchOAuth={wiz.patchOAuth}
             onNext={goNext}
             onCancel={cancel}
+            templateLoading={wiz.templateLoading}
           />
         )}
         {wiz.state.step === 2 && (

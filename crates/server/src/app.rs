@@ -553,6 +553,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/mcp/store/categories",
             get(handlers::mcp_store::list_categories),
         )
+        .route(
+            "/api/mcp/store/{slug}",
+            get(handlers::mcp_store::get_template),
+        )
         .route("/api/mcp/logs", get(handlers::mcp_logs::list_mcp_logs))
         .route(
             "/api/gateway/logs",

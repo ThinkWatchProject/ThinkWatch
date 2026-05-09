@@ -642,6 +642,8 @@
         "metadata": "确认"
       },
       "probing": "探测中…",
+      "loadingTemplate": "加载模板中…",
+      "templatePrefillBanner": "已从应用商店模板预填：{{name}}。继续前可随意修改。",
       "urlHint": "MCP 服务器端点 URL。我们做一次匿名 tools/list — 自动从响应推导认证形态。",
       "toolsDiscovered": "已发现工具",
       "shape": {

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { AlertCircle, Loader2 } from 'lucide-react';
+import { AlertCircle, Loader2, Sparkles } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,6 +14,8 @@ interface Props {
   patchOAuth: (partial: Partial<WizardState['oauth']>) => void;
   onNext: () => void;
   onCancel: () => void;
+  /** True while the `?template=<slug>` prefill fetch is in flight. */
+  templateLoading?: boolean;
 }
 
 /**
@@ -30,7 +32,14 @@ interface Props {
  *   - reachable + OAuth detected ⇒ Step 2 prefilled with discovered metadata
  *   - reachable + auth required, no OAuth ⇒ Step 2 with static-token default
  */
-export function StepSource({ state, patch, patchOAuth, onNext, onCancel }: Props) {
+export function StepSource({
+  state,
+  patch,
+  patchOAuth,
+  onNext,
+  onCancel,
+  templateLoading,
+}: Props) {
   const { t } = useTranslation();
   const [probing, setProbing] = useState(false);
   const [error, setError] = useState('');
@@ -152,6 +161,17 @@ export function StepSource({ state, patch, patchOAuth, onNext, onCancel }: Props
 
   return (
     <div className="space-y-4">
+      {state.template_slug && state.template_name && (
+        <Alert>
+          <Sparkles className="h-4 w-4" />
+          <AlertDescription>
+            {t('mcpServers.wizard.templatePrefillBanner', {
+              name: state.template_name,
+            })}
+          </AlertDescription>
+        </Alert>
+      )}
+
       {error && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
@@ -169,6 +189,7 @@ export function StepSource({ state, patch, patchOAuth, onNext, onCancel }: Props
           }
           placeholder="https://example.com/mcp"
           autoFocus
+          disabled={templateLoading}
           onKeyDown={(e) => {
             if (e.key === 'Enter') {
               e.preventDefault();
@@ -186,10 +207,16 @@ export function StepSource({ state, patch, patchOAuth, onNext, onCancel }: Props
         <Button
           type="button"
           onClick={runProbeAndNext}
-          disabled={probing || !state.endpoint_url.trim()}
+          disabled={probing || templateLoading || !state.endpoint_url.trim()}
         >
-          {probing && <Loader2 className="h-4 w-4 animate-spin" />}
-          {probing ? t('mcpServers.wizard.probing') : t('common.next')}
+          {(probing || templateLoading) && (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          )}
+          {probing
+            ? t('mcpServers.wizard.probing')
+            : templateLoading
+              ? t('mcpServers.wizard.loadingTemplate')
+              : t('common.next')}
         </Button>
       </div>
     </div>

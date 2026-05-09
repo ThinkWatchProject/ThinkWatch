@@ -89,6 +89,15 @@ export type SharedPending =
 export interface WizardState {
   wizard_session_id: string;
 
+  // Store integration — set when the wizard was opened from
+  // `/mcp/store` via `/mcp/servers/new?template={slug}`. The slug
+  // travels through to `POST /api/mcp/servers` so the backend writes
+  // an `mcp_store_installs` audit row + bumps `install_count` in the
+  // same TX. `template_name` is purely cosmetic — drives the "filled
+  // from template X" banner in Step 1.
+  template_slug?: string;
+  template_name?: string;
+
   // Step 1 — URL & probe
   endpoint_url: string;
   transport_type: string;

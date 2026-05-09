@@ -8,6 +8,7 @@ import type {
 
 const STORAGE_KEY_PREFIX = 'mcp:wizard:';
 const RESUME_FRAGMENT = 'wizard_resume=';
+const TEMPLATE_QUERY_PARAM = 'template';
 
 function genSessionId(): string {
   if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) {
@@ -94,6 +95,65 @@ function readResumeIdFromHash(): string | null {
   return id || null;
 }
 
+function readTemplateSlugFromQuery(): string | null {
+  if (typeof window === 'undefined') return null;
+  const params = new URLSearchParams(window.location.search);
+  const slug = params.get(TEMPLATE_QUERY_PARAM);
+  return slug && slug.trim() ? slug.trim() : null;
+}
+
+/** Subset of `McpStoreTemplate` the wizard actually consumes for prefill. */
+interface StoreTemplateForWizard {
+  slug: string;
+  name: string;
+  endpoint_template?: string | null;
+  oauth_issuer?: string | null;
+  oauth_authorization_endpoint?: string | null;
+  oauth_token_endpoint?: string | null;
+  oauth_revocation_endpoint?: string | null;
+  oauth_userinfo_endpoint?: string | null;
+  oauth_default_scopes?: string[];
+  auth_shape: string;
+  static_token_help_url?: string | null;
+  auth_header_name?: string | null;
+  auth_value_template?: string | null;
+}
+
+/** Apply a freshly-fetched template's defaults onto a fresh wizard
+ *  state. Only used for the first-mount prefill — subsequent edits
+ *  live in sessionStorage and are never re-applied. */
+function applyTemplateDefaults(
+  base: WizardState,
+  tmpl: StoreTemplateForWizard,
+): WizardState {
+  const shape = (tmpl.auth_shape || 'anonymous') as WizardState['auth_shape'];
+  return {
+    ...base,
+    template_slug: tmpl.slug,
+    template_name: tmpl.name,
+    endpoint_url: tmpl.endpoint_template ?? base.endpoint_url,
+    auth_shape: shape,
+    static_token_help_url: tmpl.static_token_help_url ?? base.static_token_help_url,
+    auth_header_name: tmpl.auth_header_name ?? base.auth_header_name,
+    auth_value_template: tmpl.auth_value_template ?? base.auth_value_template,
+    oauth: {
+      ...base.oauth,
+      issuer: tmpl.oauth_issuer ?? base.oauth.issuer,
+      authorization_endpoint:
+        tmpl.oauth_authorization_endpoint ?? base.oauth.authorization_endpoint,
+      token_endpoint: tmpl.oauth_token_endpoint ?? base.oauth.token_endpoint,
+      revocation_endpoint:
+        tmpl.oauth_revocation_endpoint ?? base.oauth.revocation_endpoint,
+      userinfo_endpoint:
+        tmpl.oauth_userinfo_endpoint ?? base.oauth.userinfo_endpoint,
+      scopes: (tmpl.oauth_default_scopes ?? []).join(' ') || base.oauth.scopes,
+    },
+    // Pre-set the metadata defaults from the template name so Step 4
+    // already shows something sensible. Admin can edit before submit.
+    name: base.name || tmpl.name,
+  };
+}
+
 interface WizardController {
   state: WizardState;
   /** Patch one or more top-level fields of the wizard state. */
@@ -108,6 +168,8 @@ interface WizardController {
   resumed: boolean;
   /** True while we're awaiting the OAuth-resume credential probe. */
   resumeChecking: boolean;
+  /** True while the `?template=<slug>` prefill fetch is in flight. */
+  templateLoading: boolean;
 }
 
 /**
@@ -133,6 +195,10 @@ export function useWizardState(): WizardController {
   // sessionStorage's most-recent (rare, e.g. browser back), or fresh.
   const sessionIdRef = useRef<string>('');
   const resumedRef = useRef<boolean>(false);
+  // Template prefill from `?template=<slug>` only fires on the very
+  // first mount of a fresh session. Resumes (which already have a
+  // sessionStorage blob carrying `template_slug`) skip the fetch.
+  const initialTemplateSlugRef = useRef<string | null>(null);
   if (!sessionIdRef.current) {
     const fromHash = readResumeIdFromHash();
     if (fromHash) {
@@ -140,6 +206,7 @@ export function useWizardState(): WizardController {
       resumedRef.current = true;
     } else {
       sessionIdRef.current = genSessionId();
+      initialTemplateSlugRef.current = readTemplateSlugFromQuery();
     }
   }
 
@@ -156,15 +223,53 @@ export function useWizardState(): WizardController {
   });
 
   const [resumeChecking, setResumeChecking] = useState<boolean>(resumedRef.current);
+  // Template fetch is deferred to a useEffect (network call) — track
+  // the in-flight state so Step 1 can show a spinner instead of
+  // letting the admin type into a URL field that's about to be
+  // overwritten by the template's `endpoint_template`.
+  const [templateLoading, setTemplateLoading] = useState<boolean>(
+    initialTemplateSlugRef.current !== null,
+  );
 
-  // Strip the resume fragment from the URL so a refresh doesn't re-fire
-  // the resume logic. We keep the session_id alive in React state and
-  // sessionStorage, neither of which depends on the URL anymore.
+  // Strip the resume fragment / `?template=` from the URL so a refresh
+  // doesn't re-fire the prefill logic and doesn't re-add the same
+  // template to a wizard the admin has since edited away from. The
+  // session_id stays alive in React state + sessionStorage, neither of
+  // which depends on the URL anymore.
   useEffect(() => {
-    if (!resumedRef.current) return;
+    if (!resumedRef.current && initialTemplateSlugRef.current === null) return;
     if (typeof window !== 'undefined') {
       window.history.replaceState(null, '', window.location.pathname);
     }
+  }, []);
+
+  // Template prefill — fetch the template by slug and apply its
+  // defaults onto the wizard state. Runs once on mount when the wizard
+  // was opened from `/mcp/store` via `/mcp/servers/new?template=...`.
+  useEffect(() => {
+    const slug = initialTemplateSlugRef.current;
+    if (!slug) return;
+    let alive = true;
+    (async () => {
+      try {
+        const tmpl = await apiGet<StoreTemplateForWizard>(
+          `/api/mcp/store/${encodeURIComponent(slug)}`,
+        );
+        if (!alive) return;
+        setState((s) => applyTemplateDefaults(s, tmpl));
+      } catch {
+        // Slug doesn't exist (404) or backend hiccup — leave the
+        // wizard in its empty default state. The admin can still
+        // register a server manually; we just can't claim it came
+        // from this template.
+      } finally {
+        if (alive) setTemplateLoading(false);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Resume probe — confirm the OAuth dance landed a credential blob.
@@ -246,5 +351,6 @@ export function useWizardState(): WizardController {
     reset,
     resumed: resumedRef.current,
     resumeChecking,
+    templateLoading,
   };
 }

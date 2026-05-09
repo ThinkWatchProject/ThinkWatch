@@ -642,6 +642,8 @@
         "metadata": "Confirm"
       },
       "probing": "Probing…",
+      "loadingTemplate": "Loading template…",
+      "templatePrefillBanner": "Pre-filled from store template: {{name}}. Edit anything before continuing.",
       "urlHint": "Endpoint URL of the MCP server. We probe it once with an anonymous tools/list — auth shape is auto-detected from the response.",
       "toolsDiscovered": "Tools discovered",
       "shape": {

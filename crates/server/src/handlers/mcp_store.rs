@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -31,24 +31,6 @@ pub struct StoreTemplateResponse {
 pub struct CategoryCount {
     pub category: String,
     pub count: i64,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct InstallTemplateRequest {
-    pub endpoint_url: Option<String>,
-    pub custom_headers: Option<std::collections::HashMap<String, String>>,
-    /// Optional overrides for name + namespace_prefix. Frontend pre-resolves
-    /// collisions and passes the already-deconflicted values; backend still
-    /// validates uniqueness so concurrent installs stay safe.
-    pub name: Option<String>,
-    pub namespace_prefix: Option<String>,
-    /// OAuth client_id / client_secret captured at install time for
-    /// templates that ship with `oauth_issuer`. Templates can publish
-    /// the issuer + endpoints (public information) but never secrets,
-    /// so admins paste their own app credentials here. Ignored when
-    /// the template has no `oauth_issuer`.
-    pub oauth_client_id: Option<String>,
-    pub oauth_client_secret: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +93,30 @@ pub async fn list_templates(
         .collect();
 
     Ok(Json(results))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/mcp/store/{slug} — single template
+// ---------------------------------------------------------------------------
+
+/// Returns one template by slug so the registration wizard can prefill
+/// its fields when arriving from the store via
+/// `/mcp/servers/new?template={slug}`. The wizard uses the response to
+/// pre-populate `endpoint_url`, `auth_shape`, OAuth endpoints / scopes
+/// and the `auth_header_*` defaults; admin can override anything before
+/// committing.
+pub async fn get_template(
+    _auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(slug): Path<String>,
+) -> Result<Json<McpStoreTemplate>, AppError> {
+    let template =
+        sqlx::query_as::<_, McpStoreTemplate>("SELECT * FROM mcp_store_templates WHERE slug = $1")
+            .bind(&slug)
+            .fetch_optional(&state.db)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("Template '{slug}' not found")))?;
+    Ok(Json(template))
 }
 
 // ---------------------------------------------------------------------------
