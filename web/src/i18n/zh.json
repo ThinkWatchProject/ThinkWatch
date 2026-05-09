@@ -749,6 +749,16 @@
         "title": "匿名",
         "description": "不转发凭据 — 公开服务或通过自定义请求头共享。"
       }
+    },
+    "credentialOwnerBadge": {
+      "per_user": {
+        "title": "用户自填",
+        "description": "每个用户在「我的连接」里自己授权或粘贴 token。可按用户审计与独立撤销。"
+      },
+      "admin_shared": {
+        "title": "管理员预置",
+        "description": "管理员配置一份凭据,所有调用方共用。审计与配额仍按调用方记。"
+      }
     }
   },
   "mcpTools": {

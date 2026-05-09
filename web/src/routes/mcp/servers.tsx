@@ -31,6 +31,7 @@ import { Link } from '@tanstack/react-router';
 import { ServerEditForm } from '@/components/mcp/server-edit-form';
 import { AuthModeBadge } from '@/components/mcp/auth-mode-badge';
 import { deriveAuthMode } from '@/components/mcp/auth-mode-utils';
+import { CredentialOwnerBadge } from '@/components/mcp/credential-owner-badge';
 
 interface McpServer {
   id: string;
@@ -182,7 +183,7 @@ export function McpServersPage() {
                 <TableRow>
                   <TableHead>{t('common.name')}</TableHead>
                   <TableHead>{t('mcpServers.endpointUrl')}</TableHead>
-                  <TableHead className="w-12">{t('mcpServers.authMode')}</TableHead>
+                  <TableHead className="w-20">{t('mcpServers.authMode')}</TableHead>
                   <TableHead>{t('mcpServers.transport')}</TableHead>
                   <TableHead>{t('common.status')}</TableHead>
                   <TableHead>{t('mcpServers.lastHealthCheck')}</TableHead>
@@ -212,39 +213,40 @@ export function McpServersPage() {
                     </TableCell>
                     <TableCell className="font-mono text-xs">{s.endpoint_url}</TableCell>
                     <TableCell>
-                      <AuthModeBadge mode={deriveAuthMode(s)} compact />
+                      <div className="flex items-center gap-1">
+                        <AuthModeBadge mode={deriveAuthMode(s)} compact />
+                        {/* Anonymous servers carry no credential, so the
+                            owner axis is meaningless — skip the badge. */}
+                        {s.auth_shape !== 'anonymous' && (
+                          <CredentialOwnerBadge owner={s.credential_owner} compact />
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell>
                       <TransportBadge transport={s.transport_type} />
                     </TableCell>
                     <TableCell>
                       {(() => {
-                        // Pick the status key once, then translate. Inlining
-                        // both ternaries was making the i18n fallback (last
-                        // arg to t()) be a literal English string ("connected")
-                        // instead of a *translated* status word.
-                        //
                         // `auth_required` (set by `discover_and_persist_tools`
                         // when the upstream returns 401/403 to the anonymous
-                        // probe) is a valid runtime state — the server is
-                        // reachable, it just needs per-user OAuth/PAT auth.
-                        // Render it amber, not red, so admins don't think
-                        // the server is broken.
-                        const key: 'healthy' | 'down' | 'degraded' | 'unknown' =
-                          s.status === 'connected'
+                        // probe) is the EXPECTED state for any non-anonymous
+                        // server before a user has connected — it's not a
+                        // degradation. Map it to `healthy` so admins don't
+                        // chase a non-issue. The label still says "需要授权"
+                        // so the actionable info isn't hidden.
+                        const key: 'healthy' | 'down' | 'unknown' =
+                          s.status === 'connected' || s.status === 'auth_required'
                             ? 'healthy'
-                            : s.status === 'auth_required'
-                              ? 'degraded'
-                              : s.status === 'disconnected'
-                                ? 'down'
-                                : 'unknown';
+                            : s.status === 'disconnected'
+                              ? 'down'
+                              : 'unknown';
                         // Inline so the i18n checker sees every key
                         // statically — `t(\`common.${dynamic}\`)` would
                         // require registering a DYNAMIC_ENUMS pattern.
                         const label =
                           s.status === 'auth_required'
                             ? t('common.authRequired')
-                            : key === 'healthy'
+                            : s.status === 'connected'
                               ? t('common.healthy')
                               : key === 'down'
                                 ? t('common.down')

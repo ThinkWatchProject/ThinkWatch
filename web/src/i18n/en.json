@@ -749,6 +749,16 @@
         "title": "Anonymous",
         "description": "No credential is forwarded — public service or shared via custom headers."
       }
+    },
+    "credentialOwnerBadge": {
+      "per_user": {
+        "title": "User-supplied",
+        "description": "Each user authorizes (OAuth) or pastes their own token (PAT) under My Connections. Per-user audit and independent revocation."
+      },
+      "admin_shared": {
+        "title": "Admin-shared",
+        "description": "One admin-supplied credential serves every caller. Audit and quotas still attribute to the calling user."
+      }
     }
   },
   "mcpTools": {

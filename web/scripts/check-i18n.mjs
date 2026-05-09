@@ -62,6 +62,8 @@ const DYNAMIC_ENUMS = {
   ],
   'mcpServers.authModeBadge.${_}.title': ['oauth', 'static', 'direct'],
   'mcpServers.authModeBadge.${_}.description': ['oauth', 'static', 'direct'],
+  'mcpServers.credentialOwnerBadge.${_}.title': ['per_user', 'admin_shared'],
+  'mcpServers.credentialOwnerBadge.${_}.description': ['per_user', 'admin_shared'],
   'setup.steps.${_}': ['welcome', 'admin', 'settings', 'complete'],
   'unifiedLogs.${_}': ['audit', 'gateway', 'mcp', 'access', 'app'],
   'unifiedLogs.${_}Desc': ['audit', 'gateway', 'mcp', 'access', 'app'],
