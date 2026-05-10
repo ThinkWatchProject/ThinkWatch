@@ -8,11 +8,6 @@ export interface AuthHeaderFields {
   valueTemplate: string;
 }
 
-export const DEFAULT_AUTH_HEADER: AuthHeaderFields = {
-  headerName: 'Authorization',
-  valueTemplate: 'Bearer {{token}}',
-};
-
 /**
  * Common upstream-credential header shapes. Picking a preset writes
  * both fields at once. The template MUST contain exactly one

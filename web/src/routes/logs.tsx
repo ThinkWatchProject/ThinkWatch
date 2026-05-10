@@ -146,54 +146,58 @@ function levelBadge(level: unknown) {
   return <Badge variant="outline">{l}</Badge>;
 }
 
-function getColumns(cat: LogCategory): ColDef[] {
+function getColumns(cat: LogCategory, t: (key: string) => string): ColDef[] {
+  // Column labels go through `logs.col.*` keys so the unified Logs
+  // page is i18n-clean (zh translations were silently ignored when
+  // the labels were hardcoded English strings).
+  const T = (k: string) => t(`logs.col.${k}`);
   switch (cat) {
     case 'gateway':
       return [
-        { key: 'created_at', label: 'Time' },
-        { key: 'model_id', label: 'Model', mono: true, filterKey: 'model' },
-        { key: 'provider', label: 'Provider', filterKey: 'provider' },
-        { key: 'upstream_model', label: 'Upstream', mono: true, filterKey: 'upstream_model' },
-        { key: 'input_tokens', label: 'In', align: 'right' },
-        { key: 'output_tokens', label: 'Out', align: 'right' },
-        { key: 'cost_usd', label: 'Cost', align: 'right', render: (v) => `$${parseFloat(String(v || 0)).toFixed(4)}` },
-        { key: 'latency_ms', label: 'Latency', align: 'right', render: (v) => v != null ? `${v}ms` : '—' },
-        { key: 'status_code', label: 'Status', render: (v) => statusBadge(v), filterKey: 'status_code' },
+        { key: 'created_at', label: T('time') },
+        { key: 'model_id', label: T('model'), mono: true, filterKey: 'model' },
+        { key: 'provider', label: T('provider'), filterKey: 'provider' },
+        { key: 'upstream_model', label: T('upstream'), mono: true, filterKey: 'upstream_model' },
+        { key: 'input_tokens', label: T('in'), align: 'right' },
+        { key: 'output_tokens', label: T('out'), align: 'right' },
+        { key: 'cost_usd', label: T('cost'), align: 'right', render: (v) => `$${parseFloat(String(v || 0)).toFixed(4)}` },
+        { key: 'latency_ms', label: T('latency'), align: 'right', render: (v) => v != null ? `${v}ms` : '—' },
+        { key: 'status_code', label: T('status'), render: (v) => statusBadge(v), filterKey: 'status_code' },
       ];
     case 'mcp':
       return [
-        { key: 'created_at', label: 'Time' },
-        { key: 'tool_name', label: 'Tool', mono: true, filterKey: 'tool_name' },
-        { key: 'server_name', label: 'Server', filterKey: 'server_id', filterValueKey: 'server_id' },
-        { key: 'duration_ms', label: 'Duration', align: 'right', render: (v) => v != null ? `${v}ms` : '—' },
-        { key: 'status', label: 'Status', render: (v) => <Badge variant={v === 'success' ? 'default' : 'destructive'}>{String(v)}</Badge>, filterKey: 'status' },
-        { key: 'user_email', label: 'User', filterKey: 'user_id', filterValueKey: 'user_id' },
+        { key: 'created_at', label: T('time') },
+        { key: 'tool_name', label: T('tool'), mono: true, filterKey: 'tool_name' },
+        { key: 'server_name', label: T('server'), filterKey: 'server_id', filterValueKey: 'server_id' },
+        { key: 'duration_ms', label: T('duration'), align: 'right', render: (v) => v != null ? `${v}ms` : '—' },
+        { key: 'status', label: T('status'), render: (v) => <Badge variant={v === 'success' ? 'default' : 'destructive'}>{String(v)}</Badge>, filterKey: 'status' },
+        { key: 'user_email', label: T('user'), filterKey: 'user_id', filterValueKey: 'user_id' },
       ];
     case 'audit':
       return [
-        { key: 'created_at', label: 'Time' },
-        { key: 'user_email', label: 'User', filterKey: 'user_id', filterValueKey: 'user_id' },
-        { key: 'action', label: 'Action', filterKey: 'action' },
-        { key: 'resource', label: 'Resource', filterKey: 'resource' },
-        { key: 'ip_address', label: 'IP', mono: true },
+        { key: 'created_at', label: T('time') },
+        { key: 'user_email', label: T('user'), filterKey: 'user_id', filterValueKey: 'user_id' },
+        { key: 'action', label: T('action'), filterKey: 'action' },
+        { key: 'resource', label: T('resource'), filterKey: 'resource' },
+        { key: 'ip_address', label: T('ip'), mono: true },
       ];
     case 'access':
       return [
-        { key: 'created_at', label: 'Time' },
-        { key: 'method', label: 'Method', filterKey: 'method' },
-        { key: 'path', label: 'Path', mono: true, filterKey: 'path' },
-        { key: 'status_code', label: 'Status', render: (v) => statusBadge(v), filterKey: 'status_code' },
-        { key: 'latency_ms', label: 'Latency', align: 'right', render: (v) => `${v}ms` },
-        { key: 'port', label: 'Port', filterKey: 'port' },
-        { key: 'ip_address', label: 'IP', mono: true },
+        { key: 'created_at', label: T('time') },
+        { key: 'method', label: T('method'), filterKey: 'method' },
+        { key: 'path', label: T('path'), mono: true, filterKey: 'path' },
+        { key: 'status_code', label: T('status'), render: (v) => statusBadge(v), filterKey: 'status_code' },
+        { key: 'latency_ms', label: T('latency'), align: 'right', render: (v) => `${v}ms` },
+        { key: 'port', label: T('port'), filterKey: 'port' },
+        { key: 'ip_address', label: T('ip'), mono: true },
       ];
     case 'app':
       return [
-        { key: 'created_at', label: 'Time' },
-        { key: 'level', label: 'Level', render: (v) => levelBadge(v), filterKey: 'level' },
-        { key: 'target', label: 'Target', mono: true, filterKey: 'target' },
-        { key: 'message', label: 'Message' },
-        { key: 'span', label: 'Span' },
+        { key: 'created_at', label: T('time') },
+        { key: 'level', label: T('level'), render: (v) => levelBadge(v), filterKey: 'level' },
+        { key: 'target', label: T('target'), mono: true, filterKey: 'target' },
+        { key: 'message', label: T('message') },
+        { key: 'span', label: T('span') },
       ];
   }
 }
@@ -320,6 +324,7 @@ function LogDetail({
   category: LogCategory;
   timeKey: string;
 }) {
+  const { t } = useTranslation();
   const highlights = DETAIL_HIGHLIGHTS[category];
   // Always include the timestamp first, then the highlight fields, deduped.
   const fields = [timeKey, ...highlights.filter((k) => k !== timeKey)];
@@ -338,7 +343,7 @@ function LogDetail({
       </div>
       <Collapsible className="text-xs">
         <CollapsibleTrigger className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
-          Raw JSON
+          {t('logs.rawJson')}
         </CollapsibleTrigger>
         <CollapsibleContent>
           <RawJsonBlock value={log} />
@@ -523,7 +528,7 @@ export function UnifiedLogsPage() {
   const setPage = (p: number) => updateSearch({ page: p });
 
   const totalPages = Math.ceil(total / PAGE_SIZE);
-  const columns = getColumns(category);
+  const columns = getColumns(category, t);
   const timeKey = getTimeKey(category);
 
   const placeholders: Record<LogCategory, string> = {

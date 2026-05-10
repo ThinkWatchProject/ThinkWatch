@@ -1,12 +1,4 @@
 {
-  "compliance": {
-    "soc2Verified": "已完成 SOC 2 Type II 审计",
-    "soc2VerifiedOn": "已完成 SOC 2 Type II 审计({{date}})",
-    "baaSigned": "已签署业务伙伴协议（BAA）",
-    "baaSignedOn": "已签署 BAA（{{date}}）",
-    "hipaa": "HIPAA 合规控制（数据处理、审计留存、访问日志）",
-    "gdpr": "GDPR 数据主体权利（导出、删除、留存）"
-  },
   "errors": {
     "generic": "出错了，请稍后重试。",
     "byType": {
@@ -71,6 +63,11 @@
     "items": "条记录",
     "rowsPerPage": "每页行数",
     "pageOf": "第 {{page}} / {{total}} 页",
+    "firstPage": "首页",
+    "prevPage": "上一页",
+    "nextPage": "下一页",
+    "lastPage": "末页",
+    "retry": "重试",
     "deleteSuccess": "删除成功",
     "operationFailed": "操作失败",
     "yes": "是",
@@ -633,7 +630,6 @@
       "loadingTemplate": "加载模板中…",
       "templatePrefillBanner": "已从应用商店模板预填：{{name}}。继续前可随意修改。",
       "urlHint": "MCP 服务器端点 URL。我们做一次匿名 tools/list — 自动从响应推导认证形态。",
-      "toolsDiscovered": "已发现工具",
       "shape": {
         "anonymousTitle": "匿名",
         "anonymousHint": "公开服务 — 不转发任何凭据。",
@@ -673,10 +669,6 @@
       "errors": {
         "endpointRequired": "请填写端点 URL。"
       },
-      "requiresAuthHint": "上游对匿名探测返回了 401/403 — 这对 OAuth / 静态令牌 MCP 是预期行为，每个用户首次连接时才会真正验证。",
-      "requiresAuthTitle": "可达 — 需要认证",
-      "retryTest": "重试",
-      "testing": "正在测试连接…",
       "probeSummary": {
         "probedUrl": "已探测：",
         "recommendationLabel": "建议",
@@ -1467,6 +1459,32 @@
     "dateFrom": "开始日期",
     "dateTo": "结束日期",
     "pickDateRange": "选择日期范围",
+    "rawJson": "原始 JSON",
+    "col": {
+      "time": "时间",
+      "model": "模型",
+      "provider": "提供商",
+      "upstream": "上游模型",
+      "in": "输入",
+      "out": "输出",
+      "cost": "成本",
+      "latency": "延迟",
+      "status": "状态",
+      "tool": "工具",
+      "server": "服务器",
+      "duration": "耗时",
+      "user": "用户",
+      "action": "操作",
+      "resource": "资源",
+      "ip": "IP",
+      "method": "方法",
+      "path": "路径",
+      "port": "端口",
+      "level": "级别",
+      "target": "目标",
+      "message": "消息",
+      "span": "Span"
+    },
     "preset": {
       "last1h": "最近 1 小时",
       "last6h": "最近 6 小时",

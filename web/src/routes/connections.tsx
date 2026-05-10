@@ -577,7 +577,7 @@ function ServerCard({
                           {result.success ? '✓' : '✗'} {result.message}
                           {result.success && (
                             <span className="ml-2 font-mono text-muted-foreground">
-                              {result.latency_ms}ms · {result.tools_count} {t('connections.toolsLabel')}
+                              {result.latency_ms}ms · {result.tools_count ?? result.tools?.length ?? 0} {t('connections.toolsLabel')}
                             </span>
                           )}
                         </span>

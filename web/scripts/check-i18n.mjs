@@ -54,6 +54,16 @@ const DYNAMIC_ENUMS = {
   ],
   'roles.template_${_}': ['gateway_user', 'read_only', 'ops_admin', 'analytics_only'],
   'logs.preset.${_}': ['last1h', 'last6h', 'last24h', 'last3d', 'last7d', 'last30d'],
+  // Column labels for the unified logs table — `getColumns` in
+  // src/routes/logs.tsx wraps each label through `t('logs.col.<key>')`.
+  // Keep in sync with the union of column keys across categories
+  // (gateway, mcp, audit, access, app).
+  'logs.col.${_}': [
+    'time', 'model', 'provider', 'upstream', 'in', 'out', 'cost',
+    'latency', 'status', 'tool', 'server', 'duration', 'user',
+    'action', 'resource', 'ip', 'method', 'path', 'port', 'level',
+    'target', 'message', 'span',
+  ],
   'settings.contentFilter.preset.${_}.name': ['basic', 'strict', 'chinese'],
   'settings.contentFilter.preset.${_}.description': ['basic', 'strict', 'chinese'],
   'mcpStore.category.${_}': [

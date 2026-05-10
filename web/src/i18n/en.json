@@ -1,12 +1,4 @@
 {
-  "compliance": {
-    "soc2Verified": "SOC 2 Type II audit completed",
-    "soc2VerifiedOn": "SOC 2 Type II audit completed {{date}}",
-    "baaSigned": "Business Associate Agreement on file",
-    "baaSignedOn": "Business Associate Agreement signed {{date}}",
-    "hipaa": "HIPAA-aligned controls (data handling, audit retention, access logging)",
-    "gdpr": "GDPR data-subject controls (export, erasure, retention)"
-  },
   "errors": {
     "generic": "Something went wrong. Please try again.",
     "byType": {
@@ -71,6 +63,11 @@
     "items": "items",
     "rowsPerPage": "Rows per page",
     "pageOf": "Page {{page}} of {{total}}",
+    "firstPage": "First page",
+    "prevPage": "Previous page",
+    "nextPage": "Next page",
+    "lastPage": "Last page",
+    "retry": "Retry",
     "deleteSuccess": "Deleted successfully",
     "operationFailed": "Operation failed",
     "yes": "Yes",
@@ -633,7 +630,6 @@
       "loadingTemplate": "Loading template…",
       "templatePrefillBanner": "Pre-filled from store template: {{name}}. Edit anything before continuing.",
       "urlHint": "Endpoint URL of the MCP server. We probe it once with an anonymous tools/list — auth shape is auto-detected from the response.",
-      "toolsDiscovered": "Tools discovered",
       "shape": {
         "anonymousTitle": "Anonymous",
         "anonymousHint": "Public service — no credentials forwarded.",
@@ -673,10 +669,6 @@
       "errors": {
         "endpointRequired": "Endpoint URL is required."
       },
-      "requiresAuthHint": "The upstream returned 401/403 to the anonymous probe. Expected for OAuth / static-token MCPs — per-user auth runs at first connect.",
-      "requiresAuthTitle": "Reachable — auth required",
-      "retryTest": "Retry test",
-      "testing": "Testing connection…",
       "probeSummary": {
         "probedUrl": "Probed:",
         "recommendationLabel": "Recommendation",
@@ -1467,6 +1459,32 @@
     "dateFrom": "From",
     "dateTo": "To",
     "pickDateRange": "Select date range",
+    "rawJson": "Raw JSON",
+    "col": {
+      "time": "Time",
+      "model": "Model",
+      "provider": "Provider",
+      "upstream": "Upstream",
+      "in": "In",
+      "out": "Out",
+      "cost": "Cost",
+      "latency": "Latency",
+      "status": "Status",
+      "tool": "Tool",
+      "server": "Server",
+      "duration": "Duration",
+      "user": "User",
+      "action": "Action",
+      "resource": "Resource",
+      "ip": "IP",
+      "method": "Method",
+      "path": "Path",
+      "port": "Port",
+      "level": "Level",
+      "target": "Target",
+      "message": "Message",
+      "span": "Span"
+    },
     "preset": {
       "last1h": "Last 1 hour",
       "last6h": "Last 6 hours",

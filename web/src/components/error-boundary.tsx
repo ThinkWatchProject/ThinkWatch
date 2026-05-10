@@ -1,4 +1,5 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { useTranslation } from 'react-i18next';
 import { AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -61,23 +62,32 @@ export class ErrorBoundary extends Component<Props, State> {
     if (this.state.error) {
       if (this.props.fallback) return this.props.fallback;
       return (
-        <div className="p-6 max-w-xl mx-auto mt-12">
-          <Alert variant="destructive">
-            <AlertCircle className="h-4 w-4" />
-            <AlertDescription className="flex items-center justify-between">
-              <span>{this.state.error.message}</span>
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => this.setState({ error: null })}
-              >
-                Retry
-              </Button>
-            </AlertDescription>
-          </Alert>
-        </div>
+        <DefaultFallback
+          error={this.state.error}
+          onRetry={() => this.setState({ error: null })}
+        />
       );
     }
     return this.props.children;
   }
+}
+
+/** The default fallback. Lifted to its own functional component so we
+ *  can use `useTranslation` — the boundary itself has to stay a class
+ *  component because hook-based error boundaries don't exist yet. */
+function DefaultFallback({ error, onRetry }: { error: Error; onRetry: () => void }) {
+  const { t } = useTranslation();
+  return (
+    <div className="p-6 max-w-xl mx-auto mt-12">
+      <Alert variant="destructive">
+        <AlertCircle className="h-4 w-4" />
+        <AlertDescription className="flex items-center justify-between">
+          <span>{error.message}</span>
+          <Button variant="outline" size="sm" onClick={onRetry}>
+            {t('common.retry')}
+          </Button>
+        </AlertDescription>
+      </Alert>
+    </div>
+  );
 }
