@@ -436,19 +436,24 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
               )}
             </div>
 
-            {/* Shared-credential panel reads against the persisted
-                shape — mid-edit transitions haven't been saved yet,
-                so render only when the *server* (not the in-flight
-                radio) is admin_shared. */}
-            {server.credential_owner === 'admin_shared' &&
-              server.auth_shape !== 'anonymous' && (
-                <SharedCredentialPanel
-                  serverId={server.id}
-                  authShape={server.auth_shape}
-                  authHeaderName={server.auth_header_name}
-                  authValueTemplate={server.auth_value_template}
-                />
-              )}
+            {/* Render the shared-credential panel when EITHER the
+                server is already admin_shared OR the admin is in the
+                middle of transitioning to it. The credential
+                endpoints are keyed by server_id and don't gate on
+                `credential_owner` — they happily accept a write
+                against a per_user server, and the resolver will use
+                the new shared row as soon as the form save flips
+                `credential_owner` to admin_shared. Without this, the
+                edit dialog forced a save → reopen → configure
+                round-trip just to provision the shared credential. */}
+            {credentialOwner === 'admin_shared' && server.auth_shape !== 'anonymous' && (
+              <SharedCredentialPanel
+                serverId={server.id}
+                authShape={server.auth_shape}
+                authHeaderName={server.auth_header_name}
+                authValueTemplate={server.auth_value_template}
+              />
+            )}
           </TabsContent>
         )}
 

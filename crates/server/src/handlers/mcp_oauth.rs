@@ -659,7 +659,7 @@ pub async fn oauth_callback(
             });
             fred::interfaces::KeysInterface::set::<(), _, _>(
                 &state.redis,
-                wizard_credential_redis_key(wizard_session_id),
+                wizard_credential_redis_key(*configured_by, wizard_session_id),
                 payload.to_string(),
                 Some(fred::types::Expiration::EX(WIZARD_CREDENTIAL_TTL_SECS)),
                 None,
@@ -698,10 +698,17 @@ pub async fn oauth_callback(
 const WIZARD_CREDENTIAL_TTL_SECS: i64 = 3_600;
 
 /// Redis key under which the OAuth callback parks a wizard's pending
-/// shared credential. Also used by `finalize_wizard_credential` to
+/// shared credential. Also used by `claim_wizard_credential` to
 /// GETDEL the payload at server-create time.
-fn wizard_credential_redis_key(wizard_session_id: &str) -> String {
-    format!("mcp_wizard:cred:{wizard_session_id}")
+///
+/// Keyed by (configured_by, wizard_session_id) so the blob is bound
+/// to the user who initiated the OAuth dance. Even if a sibling
+/// user somehow learns the session_id (UUID — guessing is hard, but
+/// defense in depth), they can't claim against a different user's
+/// blob — `claim_wizard_credential` checks the requesting JWT's
+/// `sub` against the configured_by half of the key.
+fn wizard_credential_redis_key(configured_by: Uuid, wizard_session_id: &str) -> String {
+    format!("mcp_wizard:cred:{configured_by}:{wizard_session_id}")
 }
 
 /// Resolved OAuth client config + tail-state metadata used by the
@@ -2162,10 +2169,20 @@ async fn upsert_credential(
     scopes: &[String],
     upstream_subject: Option<&str>,
 ) -> Result<(), AppError> {
-    // First credential for (server, user) becomes the default. We
-    // detect that with a separate SELECT inside the same TX so a race
-    // can't elect two defaults.
+    // First credential for (server, user) becomes the default.
+    // SELECT-then-INSERT inside one tx is NOT enough on its own —
+    // two concurrent first-time inserts (admin opens authorize in two
+    // tabs, two account labels) would each read empty + each try
+    // is_default=true and the partial unique index
+    // `uq_mcp_user_credentials_default` would 23505 the loser into a
+    // user-facing 500. Take a per-(server, user) advisory lock so the
+    // decision is serialized.
     let mut tx = state.db.begin().await?;
+    let lock_key = format!("mcp_user_default:{server_id}:{user_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(&lock_key)
+        .execute(&mut *tx)
+        .await?;
     let any_existing: Option<i32> = sqlx::query_scalar(
         r#"SELECT 1 FROM mcp_user_credentials
             WHERE mcp_server_id = $1 AND user_id = $2 LIMIT 1"#,
@@ -2513,6 +2530,15 @@ pub async fn shared_credential_status(
     Path(server_id): Path<Uuid>,
 ) -> Result<Json<SharedCredentialStatus>, AppError> {
     auth_user.require_permission("mcp_servers:read")?;
+    // Match the rest of the shared-credential surface — the
+    // authorize / paste / delete endpoints all pair the permission
+    // check with `assert_scope_global`. Without the scope assertion
+    // a team-scoped reader could see configured / upstream_subject /
+    // configured_by metadata for shared credentials they have no
+    // business knowing about.
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:read")
+        .await?;
 
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -2800,7 +2826,7 @@ pub async fn wizard_credential_status(
 
     let stored: Option<String> = fred::interfaces::KeysInterface::get(
         &state.redis,
-        wizard_credential_redis_key(&wizard_session_id),
+        wizard_credential_redis_key(auth_user.claims.sub, &wizard_session_id),
     )
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
@@ -2842,30 +2868,36 @@ pub async fn discard_wizard_credential(
 
     let _: Option<String> = fred::interfaces::KeysInterface::getdel(
         &state.redis,
-        wizard_credential_redis_key(&wizard_session_id),
+        wizard_credential_redis_key(auth_user.claims.sub, &wizard_session_id),
     )
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
     Ok(Json(serde_json::json!({"status": "discarded"})))
 }
 
-/// Internal helper — peek at the wizard credential blob in Redis
-/// without deleting it. Used by [`mcp_servers::create_server`]
-/// **before** opening its DB transaction; the blob is consumed
-/// (deleted) only after the TX commits via
-/// [`delete_wizard_credential`]. This split avoids destroying the
-/// admin's pending credential on a TX rollback (e.g. validation
-/// error, namespace collision) — they'd otherwise have to re-run
-/// the OAuth dance with no useful error message.
+/// Internal helper — atomically claim (read + delete) the wizard
+/// credential blob from Redis. Called by
+/// [`mcp_servers::create_server`] **inside** its DB transaction,
+/// after taking a `pg_advisory_xact_lock` on the
+/// `wizard_session_id`. GETDEL ensures the blob is consumed
+/// exactly once even under concurrent POSTs with the same session
+/// (e.g. admin opens two tabs and double-submits — a real failure
+/// mode of the previous peek-then-delete-after-commit pattern).
+///
+/// Tradeoff: a TX rollback after the claim loses the blob and the
+/// admin must re-run the OAuth dance. Pre-TX validation in
+/// `create_server` (cross-axis cred-owner checks, payload shape,
+/// SSRF guards) makes that path narrow enough to accept.
 ///
 /// `pub(super)` so [`mcp_servers::create_server`] can call it.
-pub(super) async fn peek_wizard_credential(
+pub(super) async fn claim_wizard_credential(
     state: &AppState,
+    configured_by: Uuid,
     wizard_session_id: &str,
 ) -> Result<Option<PoppedWizardCredential>, AppError> {
-    let stored: Option<String> = fred::interfaces::KeysInterface::get(
+    let stored: Option<String> = fred::interfaces::KeysInterface::getdel(
         &state.redis,
-        wizard_credential_redis_key(wizard_session_id),
+        wizard_credential_redis_key(configured_by, wizard_session_id),
     )
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
@@ -2907,18 +2939,6 @@ pub(super) async fn peek_wizard_credential(
         upstream_subject: parsed.upstream_subject,
         configured_by: parsed.configured_by,
     }))
-}
-
-/// Drop the wizard credential blob from Redis. Best-effort —
-/// callers run this AFTER the create_server TX has committed; if
-/// Redis is briefly unavailable the blob will TTL out within an
-/// hour anyway.
-pub(super) async fn delete_wizard_credential(state: &AppState, wizard_session_id: &str) {
-    let _: Result<Option<String>, _> = fred::interfaces::KeysInterface::getdel(
-        &state.redis,
-        wizard_credential_redis_key(wizard_session_id),
-    )
-    .await;
 }
 
 pub(super) struct PoppedWizardCredential {

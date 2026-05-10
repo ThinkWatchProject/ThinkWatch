@@ -422,24 +422,12 @@ pub async fn create_server(
         ));
     }
 
-    // Peek (don't pop) the wizard credential up front so a TX
-    // rollback later doesn't destroy the admin's pending credential.
-    // The blob is consumed via `delete_wizard_credential` only after
-    // the TX commits successfully. Network call is outside the TX
-    // to avoid holding a Postgres lock while talking to Redis.
-    let wizard_cred = match req.wizard_session_id.as_deref() {
-        Some(id) => {
-            let peeked = super::mcp_oauth::peek_wizard_credential(&state, id).await?;
-            Some(peeked.ok_or_else(|| {
-                AppError::BadRequest(
-                    "Wizard credential blob not found — the OAuth dance may have timed out. \
-                     Re-run authorize from the wizard."
-                        .into(),
-                )
-            })?)
-        }
-        None => None,
-    };
+    // Wizard credential claim is deferred until INSIDE the TX (after
+    // the wizard_session_id advisory lock is held). This makes blob
+    // consumption + server insert atomic, preventing concurrent POSTs
+    // with the same wizard_session_id from each peek-and-insert.
+    // Tradeoff: TX rollback loses the blob; pre-TX validation below
+    // narrows that path enough to accept.
 
     // Encrypt the static token (if provided) outside the TX too —
     // crypto failures shouldn't roll back a row insert.
@@ -472,12 +460,48 @@ pub async fn create_server(
         config
     };
 
-    // One transaction: optional template lock + server INSERT +
-    // optional shared-credential INSERT + optional store-install
-    // audit row. Failures of any step roll back the others so we
-    // never end up with an orphan server, a dangling credential,
-    // or a count drift on `mcp_store_templates.install_count`.
+    // One transaction: optional template lock + optional wizard
+    // claim + server INSERT + optional shared-credential INSERT +
+    // optional store-install audit row. Failures of any step roll
+    // back the others so we never end up with an orphan server, a
+    // dangling credential, or a count drift on
+    // `mcp_store_templates.install_count`.
     let mut tx = state.db.begin().await?;
+
+    // Wizard-session lock: when `wizard_session_id` is present,
+    // serialize concurrent POSTs with the same session id so two
+    // tabs can't each peek-and-insert the same blob into two
+    // server rows. The actual claim (GETDEL on Redis) happens just
+    // below; the lock guards the read-modify-write window.
+    if let Some(id) = req.wizard_session_id.as_deref()
+        && !id.is_empty()
+    {
+        let lock_key = format!("mcp_wizard_session:{id}");
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&lock_key)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // Claim the wizard credential blob inside the TX (GETDEL — atomic
+    // consume). On rollback the blob is gone and the admin must
+    // re-run OAuth, but the lock above + pre-TX validation make
+    // rollback narrow enough to accept; double-spend on concurrent
+    // submits is the bigger risk.
+    let wizard_cred = match req.wizard_session_id.as_deref() {
+        Some(id) if !id.is_empty() => {
+            let claimed =
+                super::mcp_oauth::claim_wizard_credential(&state, auth_user.claims.sub, id).await?;
+            Some(claimed.ok_or_else(|| {
+                AppError::BadRequest(
+                    "Wizard credential blob not found — the OAuth dance may have timed out, \
+                     or another submit already consumed it. Re-run authorize from the wizard."
+                        .into(),
+                )
+            })?)
+        }
+        _ => None,
+    };
 
     // Template-install path: when `template_slug` is present, take
     // a process-wide advisory lock so two concurrent installs of
@@ -591,14 +615,9 @@ pub async fn create_server(
 
     tx.commit().await?;
 
-    // The wizard credential has now been transferred to
-    // `mcp_server_shared_credentials` — drop the Redis blob. Best-effort:
-    // even if Redis is briefly unavailable the blob will TTL out.
-    if let Some(id) = req.wizard_session_id.as_deref()
-        && wizard_cred.is_some()
-    {
-        super::mcp_oauth::delete_wizard_credential(&state, id).await;
-    }
+    // Wizard credential blob was already consumed via GETDEL inside
+    // the TX (see claim_wizard_credential above) — no post-commit
+    // cleanup needed.
 
     // Sync the in-memory MCP registry so the gateway can route to the new
     // server immediately, without a restart. The CB is also pre-registered
