@@ -1776,6 +1776,29 @@ pub async fn ensure_clickhouse_tables(
          GROUP BY bucket_5m, provider",
     )
     .await;
+    // cost_rollup_hourly mirrors gateway_logs at hourly granularity.
+    // The MV at line ~309 of 01_init.sql captures every new row, but
+    // first boot (or schema upgrade adding the MV) leaves the rollup
+    // empty until backfilled. Without this, the cost dashboards show
+    // truncated history despite gateway_logs holding the source rows.
+    backfill_if_empty(
+        client,
+        "cost_rollup_hourly",
+        "INSERT INTO cost_rollup_hourly \
+         SELECT toStartOfHour(created_at) AS hour, \
+                model_id, \
+                provider, \
+                user_id, \
+                api_key_id, \
+                api_key_lineage_id, \
+                toUInt64(count()) AS request_count, \
+                sum(ifNull(input_tokens, 0)) AS input_tokens, \
+                sum(ifNull(output_tokens, 0)) AS output_tokens, \
+                sum(ifNull(cost_usd, 0)) AS cost_usd \
+         FROM gateway_logs \
+         GROUP BY hour, model_id, provider, user_id, api_key_id, api_key_lineage_id",
+    )
+    .await;
 
     tracing::info!("ClickHouse tables initialized");
     Ok(())

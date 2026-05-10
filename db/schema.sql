@@ -109,6 +109,16 @@ CREATE TABLE IF NOT EXISTS rbac_roles (
 );
 
 CREATE INDEX IF NOT EXISTS idx_rbac_roles_is_system ON rbac_roles(is_system);
+-- Every authenticated request that hits an `assert_scope_*` /
+-- `require_permission` middleware path runs a JSONB containment check
+-- (`stmt->'Action' @> to_jsonb($1::text)`) over the role's
+-- policy_document. The seeded role catalog is small (~5 rows) so a
+-- seq-scan is fine today, but instances with many custom roles will
+-- start scanning per request. `jsonb_path_ops` is the right opclass:
+-- it's smaller than the default `jsonb_ops` and `@>` is the only
+-- operator we need.
+CREATE INDEX IF NOT EXISTS idx_rbac_roles_policy_document
+    ON rbac_roles USING GIN (policy_document jsonb_path_ops);
 
 -- Scope is a (kind, id) twople. `scope_marker` collapses the
 -- (kind, NULL id) case into a deterministic UUID so the primary key

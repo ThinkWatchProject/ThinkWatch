@@ -505,24 +505,42 @@ impl McpProxy {
             {
                 return;
             }
+            // Batch upsert via UNNEST — same pattern as the eager
+            // path in mcp_runtime.rs. A 50-tool list used to fire
+            // 50 sequential round-trips inside the lazy-discover TX.
+            let mut names: Vec<&str> = Vec::with_capacity(tools.len());
+            let mut descs: Vec<Option<&str>> = Vec::with_capacity(tools.len());
+            let mut schemas: Vec<serde_json::Value> = Vec::with_capacity(tools.len());
             for t in tools {
                 let Some(name) = t.get("name").and_then(|v| v.as_str()) else {
                     continue;
                 };
-                let description = t.get("description").and_then(|v| v.as_str());
-                let schema = t.get("inputSchema").cloned();
+                names.push(name);
+                descs.push(t.get("description").and_then(|v| v.as_str()));
+                schemas.push(
+                    t.get("inputSchema")
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                );
+            }
+            if !names.is_empty() {
+                let descs_owned: Vec<Option<String>> =
+                    descs.iter().map(|s| s.map(String::from)).collect();
                 let _ = sqlx::query(
                     r#"INSERT INTO mcp_user_tools
                           (mcp_server_id, user_id, tool_name, description, input_schema, discovered_at)
-                       VALUES ($1, $2, $3, $4, $5, now())
+                       SELECT $1, $2, name, descr, schema, now()
+                         FROM UNNEST($3::text[], $4::text[], $5::jsonb[]) AS t(name, descr, schema)
                        ON CONFLICT (mcp_server_id, user_id, tool_name)
-                       DO UPDATE SET description = $4, input_schema = $5, discovered_at = now()"#,
+                       DO UPDATE SET description = EXCLUDED.description,
+                                     input_schema = EXCLUDED.input_schema,
+                                     discovered_at = now()"#,
                 )
                 .bind(server.id)
                 .bind(user_id)
-                .bind(name)
-                .bind(description)
-                .bind(&schema)
+                .bind(&names)
+                .bind(&descs_owned)
+                .bind(&schemas)
                 .execute(&mut *tx)
                 .await;
             }

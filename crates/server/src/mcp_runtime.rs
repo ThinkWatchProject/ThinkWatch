@@ -475,17 +475,33 @@ async fn try_discover_and_persist_tools_with_auth(
         })).collect::<Vec<_>>(),
     });
 
-    for tool in &parsed.tools {
+    // Batch upsert via UNNEST. The previous loop did one round-trip
+    // per tool — a server with 50 tools meant 50 sequential round-trips
+    // inside the same TX. Single statement with array binds collapses
+    // that to one.
+    if !parsed.tools.is_empty() {
+        let names: Vec<&str> = parsed.tools.iter().map(|t| t.name.as_str()).collect();
+        let descriptions: Vec<Option<String>> =
+            parsed.tools.iter().map(|t| t.description.clone()).collect();
+        let input_schemas: Vec<serde_json::Value> = parsed
+            .tools
+            .iter()
+            .map(|t| t.input_schema.clone().unwrap_or(serde_json::Value::Null))
+            .collect();
         sqlx::query(
             r#"INSERT INTO mcp_tools (server_id, tool_name, description, input_schema, is_active, discovered_at)
-               VALUES ($1, $2, $3, $4, true, now())
+               SELECT $1, name, descr, schema, true, now()
+                 FROM UNNEST($2::text[], $3::text[], $4::jsonb[]) AS t(name, descr, schema)
                ON CONFLICT (server_id, tool_name)
-               DO UPDATE SET description = $3, input_schema = $4, is_active = true, discovered_at = now()"#,
+               DO UPDATE SET description = EXCLUDED.description,
+                             input_schema = EXCLUDED.input_schema,
+                             is_active = true,
+                             discovered_at = now()"#,
         )
         .bind(server.id)
-        .bind(&tool.name)
-        .bind(&tool.description)
-        .bind(&tool.input_schema)
+        .bind(&names)
+        .bind(&descriptions)
+        .bind(&input_schemas)
         .execute(&mut *tx)
         .await?;
     }
@@ -575,19 +591,30 @@ pub async fn discover_user_tools(
         .bind(user_id)
         .execute(&mut *tx)
         .await?;
-    for tool in &parsed.tools {
+    if !parsed.tools.is_empty() {
+        let names: Vec<&str> = parsed.tools.iter().map(|t| t.name.as_str()).collect();
+        let descriptions: Vec<Option<String>> =
+            parsed.tools.iter().map(|t| t.description.clone()).collect();
+        let input_schemas: Vec<serde_json::Value> = parsed
+            .tools
+            .iter()
+            .map(|t| t.input_schema.clone().unwrap_or(serde_json::Value::Null))
+            .collect();
         sqlx::query(
             r#"INSERT INTO mcp_user_tools
                   (mcp_server_id, user_id, tool_name, description, input_schema, discovered_at)
-               VALUES ($1, $2, $3, $4, $5, now())
+               SELECT $1, $2, name, descr, schema, now()
+                 FROM UNNEST($3::text[], $4::text[], $5::jsonb[]) AS t(name, descr, schema)
                ON CONFLICT (mcp_server_id, user_id, tool_name)
-               DO UPDATE SET description = $4, input_schema = $5, discovered_at = now()"#,
+               DO UPDATE SET description = EXCLUDED.description,
+                             input_schema = EXCLUDED.input_schema,
+                             discovered_at = now()"#,
         )
         .bind(server_id)
         .bind(user_id)
-        .bind(&tool.name)
-        .bind(&tool.description)
-        .bind(&tool.input_schema)
+        .bind(&names)
+        .bind(&descriptions)
+        .bind(&input_schemas)
         .execute(&mut *tx)
         .await?;
     }
