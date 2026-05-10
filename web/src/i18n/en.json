@@ -626,7 +626,8 @@
         "auth": "Auth shape",
         "owner": "Credential",
         "metadata": "Confirm",
-        "skippedHint": "Auto-skipped because no credential is needed. Click to override."
+        "skippedHint": "Auto-skipped because no credential is needed. Click to override.",
+        "disabledHint": "Not applicable when the auth shape is anonymous — there's no credential to own."
       },
       "probing": "Probing…",
       "loadingTemplate": "Loading template…",

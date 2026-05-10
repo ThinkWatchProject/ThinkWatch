@@ -264,13 +264,16 @@ export function ServerWizardPage() {
   );
 }
 
-/** Step indicator at the top of the wizard. All chips are clickable —
- *  the auto-skip (Step 1 → Step 4 for anonymous probes) is a default,
- *  not a hard rule. Admins who want to override (e.g. force a static
- *  token even though the probe says anonymous works) can jump to the
- *  skipped step via this indicator. The dashed underline + 60% opacity
- *  on auto-skipped steps signals "we'd normally hide this, but you can
- *  open it." */
+/** Step indicator at the top of the wizard. Three chip states:
+ *
+ *   - `current`: the active step. Disabled (already here).
+ *   - `skipped`: auto-skipped but the override still has semantic
+ *     meaning (e.g. Step 2 / "Auth shape" when probe was anonymous —
+ *     admin may want to flip to static / OAuth anyway). Clickable,
+ *     dashed-underline + 60% opacity.
+ *   - `disabled`: structurally meaningless given current state
+ *     (e.g. Step 3 / "Credential" when auth_shape is anonymous —
+ *     there's no credential to own). Not clickable, line-through. */
 function StepIndicator({
   step,
   authShape,
@@ -281,39 +284,57 @@ function StepIndicator({
   onJump: (n: 1 | 2 | 3 | 4) => void;
 }) {
   const { t } = useTranslation();
-  const skipAuth = authShape === 'anonymous';
-  const labels: Array<{ n: 1 | 2 | 3 | 4; label: string; skipped?: boolean }> = [
-    { n: 1, label: t('mcpServers.wizard.stepLabels.source') },
-    { n: 2, label: t('mcpServers.wizard.stepLabels.auth'), skipped: skipAuth },
-    { n: 3, label: t('mcpServers.wizard.stepLabels.owner'), skipped: skipAuth },
-    { n: 4, label: t('mcpServers.wizard.stepLabels.metadata') },
+  const isAnon = authShape === 'anonymous';
+  type ChipState = 'normal' | 'skipped' | 'disabled';
+  const labels: Array<{ n: 1 | 2 | 3 | 4; label: string; chip: ChipState }> = [
+    { n: 1, label: t('mcpServers.wizard.stepLabels.source'), chip: 'normal' },
+    {
+      n: 2,
+      label: t('mcpServers.wizard.stepLabels.auth'),
+      chip: isAnon ? 'skipped' : 'normal',
+    },
+    {
+      n: 3,
+      label: t('mcpServers.wizard.stepLabels.owner'),
+      chip: isAnon ? 'disabled' : 'normal',
+    },
+    { n: 4, label: t('mcpServers.wizard.stepLabels.metadata'), chip: 'normal' },
   ];
   return (
     <div className="flex items-center gap-2 overflow-x-auto text-xs">
-      {labels.map((l, i) => (
-        <div key={l.n} className="flex items-center gap-2">
-          {i > 0 && <span className="text-muted-foreground">→</span>}
-          <button
-            type="button"
-            onClick={() => onJump(l.n)}
-            disabled={l.n === step}
-            title={
-              l.skipped
-                ? t('mcpServers.wizard.stepLabels.skippedHint')
-                : undefined
-            }
-            className={
-              l.n === step
-                ? 'cursor-default rounded bg-primary/10 px-2 py-0.5 font-medium text-primary'
-                : l.skipped
-                  ? 'rounded px-2 py-0.5 text-muted-foreground/60 underline decoration-dashed underline-offset-2 hover:text-foreground hover:decoration-solid'
-                  : 'rounded px-2 py-0.5 text-muted-foreground hover:bg-muted hover:text-foreground'
-            }
-          >
-            {l.n}. {l.label}
-          </button>
-        </div>
-      ))}
+      {labels.map((l, i) => {
+        const isCurrent = l.n === step;
+        const isDisabled = l.chip === 'disabled' || isCurrent;
+        const title = isCurrent
+          ? undefined
+          : l.chip === 'skipped'
+            ? t('mcpServers.wizard.stepLabels.skippedHint')
+            : l.chip === 'disabled'
+              ? t('mcpServers.wizard.stepLabels.disabledHint')
+              : undefined;
+        return (
+          <div key={l.n} className="flex items-center gap-2">
+            {i > 0 && <span className="text-muted-foreground">→</span>}
+            <button
+              type="button"
+              onClick={() => !isDisabled && onJump(l.n)}
+              disabled={isDisabled}
+              title={title}
+              className={
+                isCurrent
+                  ? 'cursor-default rounded bg-primary/10 px-2 py-0.5 font-medium text-primary'
+                  : l.chip === 'skipped'
+                    ? 'rounded px-2 py-0.5 text-muted-foreground/60 underline decoration-dashed underline-offset-2 hover:text-foreground hover:decoration-solid'
+                    : l.chip === 'disabled'
+                      ? 'cursor-not-allowed rounded px-2 py-0.5 text-muted-foreground/40 line-through'
+                      : 'rounded px-2 py-0.5 text-muted-foreground hover:bg-muted hover:text-foreground'
+              }
+            >
+              {l.n}. {l.label}
+            </button>
+          </div>
+        );
+      })}
     </div>
   );
 }

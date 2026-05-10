@@ -626,7 +626,8 @@
         "auth": "认证形态",
         "owner": "凭据",
         "metadata": "确认",
-        "skippedHint": "已自动跳过（无需凭据）。点击可强制打开。"
+        "skippedHint": "已自动跳过（无需凭据）。点击可强制打开。",
+        "disabledHint": "认证形态为「匿名」时不适用 —— 没有凭据需要归属。"
       },
       "probing": "探测中…",
       "loadingTemplate": "加载模板中…",
