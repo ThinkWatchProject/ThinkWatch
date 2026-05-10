@@ -130,6 +130,93 @@ export interface WizardState {
   step: 1 | 2 | 3 | 4;
 }
 
+// ---------------------------------------------------------------------------
+// sessionStorage validation
+// ---------------------------------------------------------------------------
+//
+// Zod schema for the `mcp:wizard:{session_id}` blob the controller
+// rehydrates after a refresh / OAuth resume. Without this, a schema
+// drift after deploy (renamed enum value, removed field) silently
+// landed us on a state with `auth_shape === undefined` — which then
+// made the Step 1 ⇄ Step 4 skip logic in `server-wizard.tsx` branch
+// off "neither anonymous nor oauth nor static" and trap the admin in
+// an unreachable step. Validation rejects malformed blobs at parse
+// time so the wizard falls back to a fresh session and the admin
+// gets a working flow instead of a soft-locked one.
+
+import { z } from 'zod';
+
+const ToolPreviewSchema = z.object({
+  name: z.string(),
+  description: z.string().nullish(),
+});
+
+const ProbeResultSchema = z.object({
+  anonymous_ok: z.boolean(),
+  requires_auth: z.boolean(),
+  transport_type: z.string(),
+  tools: z.array(ToolPreviewSchema),
+  latency_ms: z.number(),
+  message: z.string(),
+});
+
+const OAuthProbeResultSchema = z.object({
+  issuer: z.string().nullable(),
+  public_client: z.boolean(),
+  redirect_uri: z.string(),
+  authorization_endpoint: z.string().nullish(),
+  token_endpoint: z.string().nullish(),
+  revocation_endpoint: z.string().nullish(),
+  userinfo_endpoint: z.string().nullish(),
+  default_scopes: z.array(z.string()).optional(),
+  client_id: z.string().nullish(),
+  client_secret: z.string().nullish(),
+});
+
+const OAuthFieldsSchema = z.object({
+  issuer: z.string(),
+  authorization_endpoint: z.string(),
+  token_endpoint: z.string(),
+  revocation_endpoint: z.string(),
+  userinfo_endpoint: z.string(),
+  client_id: z.string(),
+  client_secret: z.string(),
+  scopes: z.string(),
+});
+
+const SharedPendingPersistedSchema = z
+  .object({
+    kind: z.literal('oauth_done'),
+    upstream_subject: z.string().nullish(),
+    expires_at: z.string().nullish(),
+    scopes: z.array(z.string()),
+  })
+  .nullable();
+
+export const PersistedWizardStateSchema = z.object({
+  wizard_session_id: z.string(),
+  template_slug: z.string().optional(),
+  template_name: z.string().optional(),
+  endpoint_url: z.string(),
+  transport_type: z.string(),
+  probe: ProbeResultSchema.nullable(),
+  oauth_probe: OAuthProbeResultSchema.nullable(),
+  auth_shape: z.enum(['anonymous', 'oauth', 'static']),
+  oauth: OAuthFieldsSchema,
+  static_token_help_url: z.string(),
+  auth_header_name: z.string(),
+  auth_value_template: z.string(),
+  credential_owner: z.enum(['per_user', 'admin_shared']),
+  shared_pending: SharedPendingPersistedSchema,
+  name: z.string(),
+  namespace_prefix: z.string(),
+  display_label: z.string(),
+  description: z.string(),
+  custom_headers: z.array(z.tuple([z.string(), z.string()])),
+  cache_ttl_secs: z.string(),
+  step: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]),
+});
+
 /** What the controller persists to sessionStorage. Static-paste
  *  tokens are scrubbed on serialize; resumed wizards start back at
  *  Step 3 and ask the admin to re-paste. */

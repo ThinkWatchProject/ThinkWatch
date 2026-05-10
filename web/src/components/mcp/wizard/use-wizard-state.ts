@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiDelete, apiGet } from '@/lib/api';
-import type {
-  PersistedWizardState,
-  SharedPending,
-  WizardState,
+import {
+  PersistedWizardStateSchema,
+  type PersistedWizardState,
+  type SharedPending,
+  type WizardState,
 } from './types';
 
 const STORAGE_KEY_PREFIX = 'mcp:wizard:';
@@ -57,12 +58,28 @@ function readStorage(sessionId: string): WizardState | null {
   if (typeof window === 'undefined') return null;
   const raw = window.sessionStorage.getItem(STORAGE_KEY_PREFIX + sessionId);
   if (!raw) return null;
+  let json: unknown;
   try {
-    const parsed = JSON.parse(raw) as PersistedWizardState;
-    return { ...parsed, shared_pending: parsed.shared_pending };
+    json = JSON.parse(raw);
   } catch {
     return null;
   }
+  // Validate against PersistedWizardStateSchema. A schema drift after
+  // deploy (renamed enum, removed field) would otherwise leave the
+  // wizard in a state with `auth_shape === undefined` etc., which the
+  // step-skip logic in server-wizard.tsx soft-locks on. Hard fail
+  // (clear the blob, fall back to a fresh wizard) is the right UX.
+  const result = PersistedWizardStateSchema.safeParse(json);
+  if (!result.success) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[wizard] sessionStorage blob failed schema validation for session ${sessionId}; starting fresh:`,
+      result.error.issues,
+    );
+    window.sessionStorage.removeItem(STORAGE_KEY_PREFIX + sessionId);
+    return null;
+  }
+  return { ...result.data, shared_pending: result.data.shared_pending };
 }
 
 function writeStorage(state: WizardState) {
