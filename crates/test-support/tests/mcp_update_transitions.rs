@@ -25,10 +25,11 @@ async fn admin_session(app: &TestApp) -> (TestClient, fixtures::SeededUser) {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn update_flipping_auth_shape_purges_user_credentials() {
-    // Server starts as static + per_user, gets a user credential,
-    // then flips to oauth — the per-user row should be wiped because
-    // the old token can't be replayed against the new resolver path.
+async fn update_flipping_auth_shape_purges_user_credentials_and_tools() {
+    // Server starts as static + per_user, gets a user credential AND
+    // a mcp_user_tools row (the gateway proxy populates both per
+    // user). Flipping auth_shape to oauth makes both stale — the
+    // handler must purge each in the same TX as the UPDATE.
     let app = TestApp::spawn().await;
     let (con, admin) = admin_session(&app).await;
 
@@ -62,9 +63,24 @@ async fn update_flipping_auth_shape_purges_user_credentials() {
     .await
     .unwrap();
 
+    // Drop a per-user tools row that the gateway would normally write
+    // after the first successful tools/list. Pin that the auth_shape
+    // flip purges it too — otherwise the new auth path would see a
+    // stale tool catalog scoped to the prior shape's identity.
+    sqlx::query(
+        r#"INSERT INTO mcp_user_tools
+              (mcp_server_id, user_id, tool_name, description, input_schema, discovered_at)
+           VALUES ($1, $2, 'echo', 'echo', '{}'::jsonb, now())"#,
+    )
+    .bind(server_id)
+    .bind(admin.user.id)
+    .execute(&app.db)
+    .await
+    .unwrap();
+
     // PATCH: flip auth_shape. The handler must purge the now-stale
-    // user credential as part of the same transaction as the row
-    // UPDATE.
+    // user credential AND user tools as part of the same transaction
+    // as the row UPDATE.
     con.patch(
         &format!("/api/mcp/servers/{server_id}"),
         json!({
@@ -79,15 +95,107 @@ async fn update_flipping_auth_shape_purges_user_credentials() {
     .unwrap()
     .assert_ok();
 
-    let remaining: Option<i32> =
+    let cred_remaining: Option<i32> =
         sqlx::query_scalar("SELECT 1 FROM mcp_user_credentials WHERE mcp_server_id = $1 LIMIT 1")
             .bind(server_id)
             .fetch_optional(&app.db)
             .await
             .unwrap();
     assert!(
-        remaining.is_none(),
+        cred_remaining.is_none(),
         "auth_shape flip must wipe per-user credentials of the prior shape"
+    );
+
+    let tools_remaining: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM mcp_user_tools WHERE mcp_server_id = $1 LIMIT 1")
+            .bind(server_id)
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+    assert!(
+        tools_remaining.is_none(),
+        "auth_shape flip must wipe per-user tool catalog of the prior shape"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn update_per_user_to_admin_shared_purges_per_user_creds_and_tools() {
+    // The reverse of `update_admin_shared_to_per_user_revokes...`:
+    // server is per_user, user has cred + tool rows, admin flips to
+    // admin_shared. Per-user state is now dead weight — the resolver
+    // will bypass it for the shared row that the admin will (or has)
+    // configured. Both rows must go in the same TX as the UPDATE.
+    let app = TestApp::spawn().await;
+    let (con, admin) = admin_session(&app).await;
+
+    let server_id = fixtures::create_mcp_server_with(
+        &app.db,
+        &unique_name("p2as"),
+        "p2as",
+        "https://example.com/mcp",
+        fixtures::McpServerOpts {
+            auth_shape: "static".to_string(),
+            credential_owner: "per_user".into(),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+
+    sqlx::query(
+        r#"INSERT INTO mcp_user_credentials
+              (mcp_server_id, user_id, account_label, credential_type,
+               is_default, access_token_encrypted, scopes)
+           VALUES ($1, $2, 'work', 'static_token', true, $3, '{}')"#,
+    )
+    .bind(server_id)
+    .bind(admin.user.id)
+    .bind(b"opaque-bytes-not-real-ciphertext".to_vec())
+    .execute(&app.db)
+    .await
+    .unwrap();
+    sqlx::query(
+        r#"INSERT INTO mcp_user_tools
+              (mcp_server_id, user_id, tool_name, description, input_schema, discovered_at)
+           VALUES ($1, $2, 'echo', 'echo', '{}'::jsonb, now())"#,
+    )
+    .bind(server_id)
+    .bind(admin.user.id)
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    // Flip credential_owner without changing auth_shape. This isolates
+    // the "switching to admin_shared" cleanup branch from the
+    // "auth_shape changed" one.
+    con.patch(
+        &format!("/api/mcp/servers/{server_id}"),
+        json!({"credential_owner": "admin_shared"}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    let cred_remaining: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM mcp_user_credentials WHERE mcp_server_id = $1 LIMIT 1")
+            .bind(server_id)
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+    assert!(
+        cred_remaining.is_none(),
+        "per_user → admin_shared transition must DELETE per-user credentials"
+    );
+    let tools_remaining: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM mcp_user_tools WHERE mcp_server_id = $1 LIMIT 1")
+            .bind(server_id)
+            .fetch_optional(&app.db)
+            .await
+            .unwrap();
+    assert!(
+        tools_remaining.is_none(),
+        "per_user → admin_shared transition must DELETE per-user tool catalog"
     );
 }
 
