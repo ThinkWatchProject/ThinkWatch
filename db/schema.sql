@@ -795,6 +795,12 @@ CREATE TABLE IF NOT EXISTS webhook_outbox (
 );
 
 CREATE INDEX IF NOT EXISTS idx_webhook_outbox_next_attempt ON webhook_outbox(next_attempt_at);
+-- list_outbox / forwarder-scoped UI queries filter by forwarder_id;
+-- the data-retention task purges by `attempts >= N AND next_attempt_at < now()`.
+-- Compound index covers both: forwarder_id leading for the UI scan,
+-- attempts trailing so the retention sweep can range-scan it.
+CREATE INDEX IF NOT EXISTS idx_webhook_outbox_forwarder_attempts
+    ON webhook_outbox(forwarder_id, next_attempt_at, attempts);
 
 -- --------------------------------------------------------------------------
 -- MCP Store — template marketplace for one-click MCP server installation
@@ -850,9 +856,15 @@ CREATE INDEX IF NOT EXISTS idx_mcp_store_category ON mcp_store_templates(categor
 
 CREATE TABLE IF NOT EXISTS mcp_store_installs (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    template_id     UUID NOT NULL REFERENCES mcp_store_templates(id),
+    -- Block template deletion while installs reference it — silently
+    -- letting a template disappear would leave the audit trail
+    -- pointing into nowhere. Operators delete the install rows
+    -- explicitly first.
+    template_id     UUID NOT NULL REFERENCES mcp_store_templates(id) ON DELETE RESTRICT,
     server_id       UUID NOT NULL REFERENCES mcp_servers(id) ON DELETE CASCADE,
-    installed_by    UUID REFERENCES users(id),
+    -- Audit row for "who installed this"; we keep the row even after
+    -- the user is deleted so install_count + history stay intact.
+    installed_by    UUID REFERENCES users(id) ON DELETE SET NULL,
     installed_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE(server_id)
 );

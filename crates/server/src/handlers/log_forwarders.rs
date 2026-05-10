@@ -397,8 +397,10 @@ pub async fn test_forwarder(
         .user_id(auth_user.claims.sub)
         .resource(format!("log_forwarder:{id}"));
 
-    // Send test message and report result
-    let http_client = reqwest::Client::new();
+    // Reuse the shared HTTP client (timeouts + connection pool +
+    // metric instrumentation) instead of minting a fresh one per
+    // test. The previous `reqwest::Client::new()` skipped both.
+    let http_client = (**state.http_client.load()).clone();
     let result: Result<(), String> = match forwarder.forwarder_type.as_str() {
         "udp_syslog" | "tcp_syslog" => {
             let addr = match forwarder.config.get("address").and_then(|v| v.as_str()) {
@@ -450,6 +452,17 @@ pub async fn test_forwarder(
                     }));
                 }
             };
+            // Re-validate at test-time (TOCTOU): the URL was checked
+            // at create/update via validate_forwarder_config, but DNS
+            // can flip between then and now (operator pointed
+            // foo.example.com at 127.0.0.1 to exfiltrate the test
+            // payload). Cheap enough to re-check on every test.
+            if let Err(e) = (state.url_validator)(&url) {
+                return Ok(Json(TestResult {
+                    success: false,
+                    message: format!("URL validation failed: {e}"),
+                }));
+            }
             let mut req = http_client
                 .post(&url)
                 .header("Content-Type", "application/json")
@@ -484,6 +497,13 @@ pub async fn test_forwarder(
             };
             let payload = serde_json::json!({"records": [{"value": &test_entry}]});
             let url = format!("{}/topics/{}", broker_url.trim_end_matches('/'), topic);
+            // Same TOCTOU revalidation as the webhook arm.
+            if let Err(e) = (state.url_validator)(&url) {
+                return Ok(Json(TestResult {
+                    success: false,
+                    message: format!("URL validation failed: {e}"),
+                }));
+            }
             match http_client
                 .post(&url)
                 .header("Content-Type", "application/vnd.kafka.json.v2+json")
