@@ -1,7 +1,7 @@
-//! Encryption-at-rest roundtrip tests.
+//! Encryption-at-rest roundtrip tests for handler plumbing.
 //!
-//! Three columns hold AES-256-GCM-encrypted secrets:
-//!   - `mcp_servers.auth_secret_encrypted` (BYTEA)
+//! Two columns hold AES-256-GCM-encrypted secrets reachable through
+//! handlers covered here:
 //!   - `system_settings.value` for `oidc.client_secret_encrypted`
 //!     (hex-encoded ciphertext stored in the JSON value)
 //!   - `users.totp_secret` (hex-encoded ciphertext)
@@ -9,9 +9,18 @@
 //! The crypto layer has good unit tests in
 //! `crates/common/src/crypto.rs`. These tests pin the **handler
 //! plumbing**: ciphertext lands in the DB column (not plaintext),
-//! decryption recovers the original on read, and a corrupted
-//! envelope is rejected. A regression here would silently expose
-//! plaintext secrets in any DB dump.
+//! decryption recovers the original on read, and the GET handlers
+//! never echo the plaintext back out.
+//!
+//! MCP server credentials moved to a per-axis storage model (per-user
+//! `mcp_user_credentials` and admin-shared `mcp_server_shared_credentials`,
+//! each with its own encrypted-at-rest token columns). Their
+//! roundtrip is exercised through the per-user OAuth / static-token
+//! integration tests rather than this file.
+//!
+//! TOTP recovery codes are also AES-256-GCM-encrypted; their
+//! single-consume contract is asserted via black-box login attempts in
+//! `totp_recovery.rs` so we don't duplicate the storage check here.
 
 use serde_json::{Value, json};
 use think_watch_test_support::prelude::*;
@@ -27,133 +36,6 @@ async fn admin_session(app: &TestApp) -> TestClient {
     .unwrap()
     .assert_ok();
     con
-}
-
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn mcp_server_auth_secret_lands_encrypted_in_the_db() {
-    let app = TestApp::spawn().await;
-    let con = admin_session(&app).await;
-
-    let plaintext_secret = "ghp_super_secret_TOKEN_value";
-    let resp: Value = con
-        .post(
-            "/api/mcp/servers",
-            json!({
-                "name": unique_name("enc-mcp"),
-                "namespace_prefix": "enc_mcp",
-                "endpoint_url": "https://example.com/mcp",
-                "transport_type": "streamable_http",
-                "auth_type": "bearer",
-                "auth_secret": plaintext_secret,
-            }),
-        )
-        .await
-        .unwrap()
-        .json()
-        .unwrap();
-    let server_id = resp["id"].as_str().unwrap().to_string();
-
-    // Read the raw bytes back from PG. The plaintext MUST NOT be
-    // present in the column — only an AES-GCM envelope.
-    let raw: Option<Vec<u8>> =
-        sqlx::query_scalar("SELECT auth_secret_encrypted FROM mcp_servers WHERE id::text = $1")
-            .bind(&server_id)
-            .fetch_one(&app.db)
-            .await
-            .unwrap();
-    let raw = raw.expect("auth_secret_encrypted must be populated");
-    let raw_str = String::from_utf8_lossy(&raw);
-    assert!(
-        !raw_str.contains(plaintext_secret),
-        "plaintext secret leaked into DB column"
-    );
-    // Versioned envelope: magic + version + nonce(12) + ct.
-    assert!(
-        raw.len() >= 4 + 1 + 12 + 16,
-        "envelope too short: {} bytes",
-        raw.len()
-    );
-
-    // Round-trip: decrypt with the AppState's encryption key and
-    // confirm the plaintext.
-    let key =
-        think_watch_common::crypto::parse_encryption_key(&app.state.config.encryption_key).unwrap();
-    let decoded = think_watch_common::crypto::decrypt(&raw, &key).expect("decrypt");
-    let recovered = String::from_utf8(decoded).unwrap();
-    assert_eq!(
-        recovered, plaintext_secret,
-        "decrypt must recover plaintext"
-    );
-
-    // GET handler MUST NOT echo the plaintext or even the
-    // ciphertext envelope back — McpServer's serde derive should
-    // skip / mask the column.
-    let body: Value = con
-        .get(&format!("/api/mcp/servers/{server_id}"))
-        .await
-        .unwrap()
-        .json()
-        .unwrap();
-    let body_str = serde_json::to_string(&body).unwrap();
-    assert!(
-        !body_str.contains(plaintext_secret),
-        "plaintext secret echoed in GET response: {body_str}"
-    );
-}
-
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn mcp_server_auth_secret_decrypts_on_health_path() {
-    // Sanity that the encrypt-at-create / decrypt-at-use chain
-    // reaches the runtime without losing fidelity. Spawning a real
-    // upstream MCP server is overkill — we exercise just the
-    // encrypt → DB → registry-load → decrypt path.
-    let app = TestApp::spawn().await;
-    let con = admin_session(&app).await;
-
-    let secret = "decrypt-roundtrip-token";
-    let created: Value = con
-        .post(
-            "/api/mcp/servers",
-            json!({
-                "name": unique_name("enc-rt"),
-                "namespace_prefix": "enc_rt",
-                "endpoint_url": "https://example.com/mcp",
-                "transport_type": "streamable_http",
-                "auth_type": "bearer",
-                "auth_secret": secret,
-            }),
-        )
-        .await
-        .unwrap()
-        .json()
-        .unwrap();
-    let server_id = uuid::Uuid::parse_str(created["id"].as_str().unwrap()).unwrap();
-
-    // Pull the row back as an `McpServer` and feed it through the
-    // same `build_registered_server` the gateway uses at startup
-    // — which decrypts the secret. If the envelope is corrupted
-    // or the key is wrong, this fails.
-    let row = sqlx::query_as::<_, think_watch_common::models::McpServer>(
-        "SELECT * FROM mcp_servers WHERE id = $1",
-    )
-    .bind(server_id)
-    .fetch_one(&app.db)
-    .await
-    .unwrap();
-    let registered = think_watch_server::mcp_runtime::build_registered_server(
-        &app.db,
-        &row,
-        &app.state.config.encryption_key,
-    )
-    .await
-    .expect("build_registered_server must succeed with a valid encrypted secret");
-    // The runtime stores the recovered plaintext on the registered
-    // server so the proxy can build the upstream Authorization
-    // header. We don't assert on the exact field name (private),
-    // just that the build succeeded — which means decrypt did.
-    let _ = registered;
 }
 
 #[ignore = "integration test — run via `make test-it`"]
@@ -277,68 +159,26 @@ async fn totp_secret_lands_encrypted_in_users_row() {
         plaintext_secret,
         "decrypt must recover the TOTP base32 secret"
     );
-}
 
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn corrupted_ciphertext_does_not_leak_recoverable_plaintext() {
-    // Pin the **observed** degradation contract: when an MCP
-    // server's `auth_secret_encrypted` envelope is corrupted, the
-    // runtime LOGS the GCM tag failure and continues building the
-    // server WITHOUT an auth header (rather than blowing up the
-    // whole gateway). The upstream then sees an unauthenticated
-    // request, rejects with 401, and the operator notices the
-    // breakage that way.
-    //
-    // This test is the regression guard against a future change
-    // that would silently treat the corrupted bytes as plaintext —
-    // i.e., `to_string` of the raw column without trying decrypt.
-    // If anyone "fixes" the err path that way, the test catches it.
-    let app = TestApp::spawn().await;
-    let con = admin_session(&app).await;
-    let plaintext = "wont-survive-corruption";
-    con.post(
-        "/api/mcp/servers",
-        json!({
-            "name": unique_name("corrupt"),
-            "namespace_prefix": "corrupt_test",
-            "endpoint_url": "https://example.com/mcp",
-            "transport_type": "streamable_http",
-            "auth_type": "bearer",
-            "auth_secret": plaintext,
-        }),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-
-    // Append a junk byte to the ciphertext envelope. Any mutation
-    // post-magic / post-nonce trips the GCM tag check.
-    sqlx::query(
-        r#"UPDATE mcp_servers
-              SET auth_secret_encrypted = auth_secret_encrypted || E'\\xff'::bytea
-            WHERE namespace_prefix = 'corrupt_test'"#,
-    )
-    .execute(&app.db)
-    .await
-    .unwrap();
-
-    let row = sqlx::query_as::<_, think_watch_common::models::McpServer>(
-        "SELECT * FROM mcp_servers WHERE namespace_prefix = 'corrupt_test'",
-    )
-    .fetch_one(&app.db)
-    .await
-    .unwrap();
-    let registered = think_watch_server::mcp_runtime::build_registered_server(
-        &app.db,
-        &row,
-        &app.state.config.encryption_key,
-    )
-    .await
-    .expect("build degrades to no-auth rather than failing");
-    let dbg = format!("{registered:?}");
+    // Recovery codes column also lands as ciphertext (not plaintext
+    // JSON) — pin that contract too. The codes themselves are
+    // exercised by totp_recovery.rs's single-consume tests; here we
+    // only check the storage envelope to catch any future change
+    // that bypasses the encrypt helper.
+    let codes_blob: Option<String> =
+        sqlx::query_scalar("SELECT totp_recovery_codes FROM users WHERE id = $1")
+            .bind(user.user.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    let codes_blob = codes_blob.expect("totp_recovery_codes must be populated");
     assert!(
-        !dbg.contains(plaintext),
-        "registered server must NOT contain the plaintext after corruption: {dbg}"
+        !codes_blob.starts_with('[') && !codes_blob.starts_with('"'),
+        "recovery codes must be hex ciphertext, not plain JSON: {codes_blob}"
     );
+    let codes_bytes = hex::decode(&codes_blob).expect("hex decode recovery codes");
+    let codes_decrypted =
+        think_watch_common::crypto::decrypt(&codes_bytes, &key).expect("decrypt recovery codes");
+    let parsed: Vec<String> = serde_json::from_slice(&codes_decrypted).expect("codes JSON parse");
+    assert_eq!(parsed.len(), 10, "should mint 10 recovery codes");
 }
