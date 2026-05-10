@@ -15,28 +15,42 @@
 use axum::Json;
 use axum::extract::State;
 use chrono::{Datelike, Duration, Utc};
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+use think_watch_common::cost_decimal::decode_i128;
 use think_watch_common::errors::AppError;
 
 use crate::app::AppState;
 use crate::handlers::clickhouse_util::ch_client;
 use crate::middleware::auth_guard::AuthUser;
 
+/// Cost numbers serialized as decimal strings (`"12.3456"`) so the
+/// frontend's decimal.js never sees an f64. Matches the contract every
+/// other cost-bearing endpoint already follows.
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct CostForecast {
-    pub month_to_date_usd: f64,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub month_to_date_usd: Decimal,
     pub days_elapsed: u32,
     pub days_in_month: u32,
     /// Linear month-end projection assuming today's daily run rate
     /// holds for the rest of the month.
-    pub projected_month_end_usd: f64,
+    #[serde(with = "rust_decimal::serde::str")]
+    #[schema(value_type = String)]
+    pub projected_month_end_usd: Decimal,
     /// Same-window spend last month for comparison (`null` if last
     /// month didn't yet have this many days of data — first-month
     /// installs).
-    pub prior_month_same_window_usd: Option<f64>,
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub prior_month_same_window_usd: Option<Decimal>,
     /// Percent change of MTD vs prior_month_same_window (null when
-    /// prior is null or zero).
-    pub trend_pct: Option<f64>,
+    /// prior is null or zero). Decimal so the frontend gets exact
+    /// arithmetic, not the IEEE-754 approximation that f64 carried.
+    #[serde(with = "rust_decimal::serde::str_option")]
+    #[schema(value_type = Option<String>)]
+    pub trend_pct: Option<Decimal>,
 }
 
 /// Days in the year/month tuple. Returns 28..=31.
@@ -96,10 +110,15 @@ pub async fn get_cost_forecast(
         .ok_or_else(|| AppError::Internal(anyhow::anyhow!("date math failed")))?;
     let prior_window_end = prior_start + Duration::days(day as i64);
 
+    // sumIf(Decimal(18,10)) widens to Decimal(38,10) which CH ships
+    // as i128 on the wire. Decoding via decode_i128 keeps the cost
+    // pipeline Decimal end-to-end; the previous f64 path silently
+    // dropped sub-cent precision and disagreed with every other
+    // analytics endpoint.
     #[derive(clickhouse::Row, Deserialize)]
     struct ForecastRow {
-        mtd: f64,
-        prior: f64,
+        mtd: i128,
+        prior: i128,
     }
 
     let ch = ch_client(&state)?;
@@ -128,20 +147,25 @@ pub async fn get_cost_forecast(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("cost_forecast ClickHouse query: {e}")))?;
 
-    let mtd_f = row.mtd;
-    let prior_f = row.prior;
+    let mtd = decode_i128(row.mtd);
+    let prior = decode_i128(row.prior);
 
     let projected = if day == 0 {
-        0.0
+        Decimal::ZERO
     } else {
-        mtd_f * (days_in as f64) / (day as f64)
+        mtd * Decimal::from(days_in) / Decimal::from(day)
     };
 
-    let prior_opt = if prior_f > 0.0 { Some(prior_f) } else { None };
-    let trend_pct = prior_opt.map(|p| (mtd_f - p) / p * 100.0);
+    let prior_opt = if prior > Decimal::ZERO {
+        Some(prior)
+    } else {
+        None
+    };
+    let hundred = Decimal::from(100);
+    let trend_pct = prior_opt.map(|p| (mtd - p) / p * hundred);
 
     Ok(Json(CostForecast {
-        month_to_date_usd: mtd_f,
+        month_to_date_usd: mtd,
         days_elapsed: day,
         days_in_month: days_in,
         projected_month_end_usd: projected,
