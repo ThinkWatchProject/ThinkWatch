@@ -12,10 +12,12 @@ import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { useNavigate } from '@tanstack/react-router';
+import { useAuth } from '@/hooks/use-auth';
 
 export function ProfilePage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const { logout } = useAuth();
 
   // --- Password change ---
   const [oldPassword, setOldPassword] = useState('');
@@ -94,11 +96,15 @@ export function ProfilePage() {
     }
   };
 
-  const clearTokensAndRedirect = async () => {
-    localStorage.removeItem('access_token');
-    localStorage.removeItem('refresh_token');
-    const { clearSigningKey } = await import('@/lib/crypto-store');
-    await clearSigningKey();
+  // Real logout — POSTs /api/auth/logout (clears HttpOnly cookies +
+  // invalidates refresh tokens server-side), wipes local signing key,
+  // clears the cached permission set, and broadcasts to sibling tabs.
+  // The previous helper here only deleted long-empty `localStorage`
+  // tokens (the project moved to HttpOnly cookies long ago) — leaving
+  // the session valid after password change / session revoke / account
+  // delete.
+  const logoutAndRedirect = async () => {
+    await logout();
     navigate({ to: '/' });
   };
 
@@ -131,7 +137,7 @@ export function ProfilePage() {
       setNewPassword('');
       setConfirmPassword('');
       // Force logout after 2 seconds
-      setTimeout(clearTokensAndRedirect, 2000);
+      setTimeout(logoutAndRedirect, 2000);
     } catch (err) {
       setPwError(err instanceof Error ? err.message : 'Failed to change password');
     } finally {
@@ -146,7 +152,7 @@ export function ProfilePage() {
     try {
       await apiPost('/api/auth/revoke-sessions', {});
       setRevokeDialogOpen(false);
-      clearTokensAndRedirect();
+      logoutAndRedirect();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed');
     } finally {
@@ -161,7 +167,7 @@ export function ProfilePage() {
     try {
       await apiDelete('/api/auth/account');
       setDeleteDialogOpen(false);
-      clearTokensAndRedirect();
+      logoutAndRedirect();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Failed');
     } finally {
