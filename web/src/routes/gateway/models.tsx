@@ -224,8 +224,8 @@ export function ModelsPage() {
   const { t } = useTranslation();
   // Reads `?import=<providerId>` to auto-open the batch import dialog
   // on this provider — sent by the "Import Models" shortcut on the
-  // Providers page.
-  const routeSearch = useSearch({ strict: false }) as { import?: string };
+  // Providers page. Typed via the route's `validateSearch`.
+  const routeSearch = useSearch({ from: '/gateway/models' });
   const navigate = useNavigate();
 
   // Model list state

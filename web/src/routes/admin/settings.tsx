@@ -49,9 +49,9 @@ export function SettingsPage() {
 
   // URL is the source of truth for the active tab — makes the page
   // deep-linkable and keeps the browser back/forward buttons honest.
-  // `strict: false` so the route's typed search shape doesn't clash
-  // with nested routes; the validator in router.tsx already narrows it.
-  const search = useSearch({ strict: false }) as { tab?: string };
+  // Typed via the route's `validateSearch` in router.tsx — schema
+  // changes flip into compile errors here.
+  const search = useSearch({ from: '/admin/settings' });
   const activeTab = search.tab ?? 'general';
   const navigate = useNavigate();
   const setTab = (tab: string) => {

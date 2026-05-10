@@ -366,13 +366,10 @@ export function UnifiedLogsPage() {
   // URL search params are the source of truth for category, query, time
   // range, and page so refreshing or sharing the URL preserves the view.
   const navigate = useNavigate({ from: '/logs' });
-  const search = useSearch({ from: '/logs' }) as {
-    category?: string;
-    q?: string;
-    from?: string;
-    to?: string;
-    page?: number;
-  };
+  // Typed via the route's `validateSearch` in router.tsx. No cast —
+  // if the route's search shape changes, `useSearch` here becomes
+  // a compile error and we get told instead of silently drifting.
+  const search = useSearch({ from: '/logs' });
 
   const category: LogCategory = isLogCategory(search.category) ? search.category : 'audit';
   const activeQuery = search.q ?? '';
