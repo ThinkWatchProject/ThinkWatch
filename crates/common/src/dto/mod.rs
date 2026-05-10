@@ -225,6 +225,12 @@ pub struct CreateMcpServerRequest {
     /// Optional short identifier used as tool namespace prefix. If omitted,
     /// derived automatically from `name`. Must match `[a-z0-9_]{1,32}`.
     pub namespace_prefix: Option<String>,
+    /// Friendly user-facing label shown on the My Connections page and
+    /// in the tool catalog. Falls back to `name` when null/empty —
+    /// useful when the same template is installed multiple times and
+    /// each instance gets a `name` like `GitHub #2` while the operator
+    /// wants both to read as `GitHub` in the user-facing list.
+    pub display_label: Option<String>,
     pub description: Option<String>,
     pub endpoint_url: String,
     pub transport_type: Option<String>,

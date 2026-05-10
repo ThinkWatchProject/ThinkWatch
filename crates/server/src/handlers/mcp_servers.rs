@@ -505,9 +505,18 @@ pub async fn create_server(
         _ => (req.name.clone(), namespace_prefix.clone(), None),
     };
 
+    // Empty-string display_label collapses to NULL so the server-list
+    // and connections-page fallback to `name` works uniformly.
+    let display_label = req
+        .display_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from);
+
     let server = sqlx::query_as::<_, McpServer>(
         r#"INSERT INTO mcp_servers (
-               name, namespace_prefix, description, endpoint_url, transport_type,
+               name, namespace_prefix, display_label, description, endpoint_url, transport_type,
                oauth_issuer, oauth_authorization_endpoint, oauth_token_endpoint,
                oauth_revocation_endpoint, oauth_userinfo_endpoint,
                oauth_client_id, oauth_client_secret_encrypted,
@@ -516,11 +525,12 @@ pub async fn create_server(
                config_json
            )
            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                   $16, $17, $18, $19)
+                   $16, $17, $18, $19, $20)
            RETURNING *"#,
     )
     .bind(&final_name)
     .bind(&final_prefix)
+    .bind(&display_label)
     .bind(&req.description)
     .bind(&req.endpoint_url)
     .bind(&transport_type)
