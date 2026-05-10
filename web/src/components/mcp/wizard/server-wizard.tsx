@@ -212,7 +212,11 @@ export function ServerWizardPage() {
         </p>
       </div>
 
-      <StepIndicator step={wiz.state.step} authShape={wiz.state.auth_shape} />
+      <StepIndicator
+        step={wiz.state.step}
+        authShape={wiz.state.auth_shape}
+        onJump={wiz.goToStep}
+      />
 
       <Card className="p-4">
         {wiz.state.step === 1 && (
@@ -260,14 +264,21 @@ export function ServerWizardPage() {
   );
 }
 
-/** Step indicator at the top of the wizard. Anonymous-flow paths
- *  visually skip Step 2 + Step 3. */
+/** Step indicator at the top of the wizard. All chips are clickable —
+ *  the auto-skip (Step 1 → Step 4 for anonymous probes) is a default,
+ *  not a hard rule. Admins who want to override (e.g. force a static
+ *  token even though the probe says anonymous works) can jump to the
+ *  skipped step via this indicator. The dashed underline + 60% opacity
+ *  on auto-skipped steps signals "we'd normally hide this, but you can
+ *  open it." */
 function StepIndicator({
   step,
   authShape,
+  onJump,
 }: {
   step: 1 | 2 | 3 | 4;
   authShape: string;
+  onJump: (n: 1 | 2 | 3 | 4) => void;
 }) {
   const { t } = useTranslation();
   const skipAuth = authShape === 'anonymous';
@@ -282,17 +293,25 @@ function StepIndicator({
       {labels.map((l, i) => (
         <div key={l.n} className="flex items-center gap-2">
           {i > 0 && <span className="text-muted-foreground">→</span>}
-          <span
+          <button
+            type="button"
+            onClick={() => onJump(l.n)}
+            disabled={l.n === step}
+            title={
+              l.skipped
+                ? t('mcpServers.wizard.stepLabels.skippedHint')
+                : undefined
+            }
             className={
               l.n === step
-                ? 'rounded bg-primary/10 px-2 py-0.5 font-medium text-primary'
+                ? 'cursor-default rounded bg-primary/10 px-2 py-0.5 font-medium text-primary'
                 : l.skipped
-                  ? 'text-muted-foreground/50 line-through'
-                  : 'text-muted-foreground'
+                  ? 'rounded px-2 py-0.5 text-muted-foreground/60 underline decoration-dashed underline-offset-2 hover:text-foreground hover:decoration-solid'
+                  : 'rounded px-2 py-0.5 text-muted-foreground hover:bg-muted hover:text-foreground'
             }
           >
             {l.n}. {l.label}
-          </span>
+          </button>
         </div>
       ))}
     </div>

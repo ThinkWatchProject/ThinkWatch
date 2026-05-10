@@ -625,7 +625,8 @@
         "source": "Connect",
         "auth": "Auth shape",
         "owner": "Credential",
-        "metadata": "Confirm"
+        "metadata": "Confirm",
+        "skippedHint": "Auto-skipped because no credential is needed. Click to override."
       },
       "probing": "Probing…",
       "loadingTemplate": "Loading template…",
