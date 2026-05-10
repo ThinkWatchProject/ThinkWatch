@@ -150,7 +150,11 @@ export function ServerWizardPage() {
         display_label: wiz.state.display_label.trim() || null,
         description: wiz.state.description || null,
         endpoint_url: wiz.state.endpoint_url.trim(),
-        transport_type: wiz.state.transport_type,
+        // transport_type intentionally omitted — the wizard never
+        // asks for it, the state default ('streamable_http') would
+        // suppress the backend's auto-detect, and SSE-only upstreams
+        // would then 4xx. Letting create_server detect from the
+        // endpoint shape is correct.
         ...oauthFields,
         auth_shape: wiz.state.auth_shape,
         static_token_help_url: isStatic
