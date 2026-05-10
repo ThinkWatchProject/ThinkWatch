@@ -189,3 +189,175 @@ async fn wizard_session_id_with_missing_redis_blob_400s() {
         "missing wizard credential blob should 400 with 'rerun authorize'"
     );
 }
+
+/// Helper: stand up a fake OAuth provider returning a deterministic
+/// access_token / refresh_token pair on `/token` and a userinfo blob
+/// on `/userinfo`.
+async fn wizard_oauth_provider() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "access_token": "wizard-access-token",
+            "refresh_token": "wizard-refresh-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+            "scope": "read",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/userinfo"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "preferred_username": "wizard-bot",
+        })))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn wizard_oauth_admin_shared_full_round_trip() {
+    // Full wizard OAuth admin_shared flow:
+    //   1. POST /api/admin/mcp/oauth-wizard-authorize → state token
+    //      stashed in Redis under OAUTH_STATE_PREFIX, browser-redirect
+    //      URL returned.
+    //   2. Drive callback /api/mcp/oauth/callback?code=…&state=… →
+    //      WizardAdminShared arm exchanges the code at the wiremock
+    //      provider, fetches userinfo, writes the credential blob to
+    //      `mcp_wizard:cred:{configured_by}:{wizard_session_id}`.
+    //   3. GET /api/admin/mcp/wizards/{id}/credential-status → 200,
+    //      shape includes credential_type=oauth_authcode and the
+    //      upstream_subject from /userinfo.
+    //   4. POST /api/mcp/servers with `wizard_session_id` →
+    //      claim_wizard_credential GETDELs the blob and the server
+    //      row + mcp_server_shared_credentials row land atomically.
+    //   5. Status endpoint should now 404 (blob consumed).
+    //
+    // This pins the round-trip the audit flagged as untested.
+    let app = TestApp::spawn().await;
+    let (con, _admin) = admin_session(&app).await;
+    let provider = wizard_oauth_provider().await;
+
+    let session_id = unique_name("wiz-sess");
+
+    // Phase 1 — authorize.
+    let auth_resp = con
+        .post(
+            "/api/admin/mcp/oauth-wizard-authorize",
+            json!({
+                "wizard_session_id": session_id,
+                "oauth_authorization_endpoint": format!("{}/authorize", provider.uri()),
+                "oauth_token_endpoint": format!("{}/token", provider.uri()),
+                "oauth_client_id": "test-wizard-client",
+                "oauth_client_secret": "shh-its-a-wizard",
+                "oauth_scopes": ["read"],
+                "oauth_userinfo_endpoint": format!("{}/userinfo", provider.uri()),
+            }),
+        )
+        .await
+        .unwrap();
+    auth_resp.assert_ok();
+    let authorize_url = auth_resp.json::<Value>().unwrap()["authorize_url"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let state_token = url::Url::parse(&authorize_url)
+        .unwrap()
+        .query_pairs()
+        .find(|(k, _)| k == "state")
+        .map(|(_, v)| v.into_owned())
+        .expect("authorize_url missing state param");
+
+    // Phase 2 — drive the callback. Wiremock provider's /token returns
+    // wizard-access-token / wizard-refresh-token; /userinfo returns
+    // preferred_username=wizard-bot.
+    let cb = con
+        .get(&format!(
+            "/api/mcp/oauth/callback?code=fake-wizard-code&state={state_token}"
+        ))
+        .await
+        .unwrap();
+    assert!(
+        cb.status.is_redirection(),
+        "callback should redirect to /mcp/servers/new#wizard_resume=…, got {}",
+        cb.status
+    );
+
+    // Phase 3 — credential-status endpoint reflects the staged blob.
+    let status: Value = con
+        .get(&format!(
+            "/api/admin/mcp/wizards/{session_id}/credential-status"
+        ))
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(status["credential_type"], "oauth_authcode");
+    assert_eq!(
+        status["upstream_subject"], "wizard-bot",
+        "userinfo round-trip should populate upstream_subject"
+    );
+
+    // Phase 4 — claim the blob via create_server. The server row
+    // should land alongside a shared-credential row in one TX.
+    let create_resp = con
+        .post(
+            "/api/mcp/servers",
+            json!({
+                "name": unique_name("wizard-oauth"),
+                "namespace_prefix": "wzoa",
+                "endpoint_url": "https://example.com/mcp",
+                "transport_type": "streamable_http",
+                "auth_shape": "oauth",
+                "credential_owner": "admin_shared",
+                "wizard_session_id": session_id,
+                // Echo the OAuth client config so the new server row
+                // can refresh the access_token later (the wizard form
+                // collects these in Step 2 alongside the authorize).
+                "oauth_authorization_endpoint": format!("{}/authorize", provider.uri()),
+                "oauth_token_endpoint": format!("{}/token", provider.uri()),
+                "oauth_userinfo_endpoint": format!("{}/userinfo", provider.uri()),
+                "oauth_client_id": "test-wizard-client",
+                "oauth_client_secret": "shh-its-a-wizard",
+                "oauth_scopes": ["read"],
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        create_resp.status,
+        200,
+        "create_server with wizard_session_id should succeed; got: {}",
+        create_resp.text()
+    );
+    let server_id = create_resp.json::<Value>().unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let shared_row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT credential_type, upstream_subject \
+           FROM mcp_server_shared_credentials WHERE mcp_server_id = $1",
+    )
+    .bind(uuid::Uuid::parse_str(&server_id).unwrap())
+    .fetch_optional(&app.db)
+    .await
+    .unwrap();
+    let row = shared_row.expect("shared credential row should exist");
+    assert_eq!(row.0, "oauth_authcode");
+    assert_eq!(row.1.as_deref(), Some("wizard-bot"));
+
+    // Phase 5 — blob is consumed (GETDEL). Status endpoint now 404s.
+    let status_after = con
+        .get(&format!(
+            "/api/admin/mcp/wizards/{session_id}/credential-status"
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        status_after.status, 404,
+        "blob must be consumed exactly once after create"
+    );
+}
