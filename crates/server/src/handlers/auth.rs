@@ -327,26 +327,29 @@ pub async fn login(
                 // the same recovery code can't both succeed.
                 if !totp_valid {
                     let mut recovery_used = false;
-                    if let Some(ref codes_json) = user.totp_recovery_codes
-                        && let Ok(mut codes) = serde_json::from_str::<Vec<String>>(codes_json)
+                    if let Some(ref codes_blob) = user.totp_recovery_codes
+                        && let Ok(mut codes) = crate::services::totp_service::decrypt_recovery_codes(
+                            &state, codes_blob,
+                        )
                         && let Some(pos) = think_watch_auth::totp::find_recovery_code(&codes, code)
                     {
                         codes.remove(pos);
-                        let updated = serde_json::to_string(&codes).map_err(|e| {
-                            AppError::Internal(anyhow::anyhow!(
-                                "Recovery codes serialization failed: {e}"
-                            ))
-                        })?;
-                        // Compare-and-swap: only update if the column still
-                        // matches what we read. If another request raced us
-                        // to consume the same code, rows_affected == 0.
+                        let updated_blob =
+                            crate::services::totp_service::encrypt_recovery_codes(&state, &codes)?;
+                        // Compare-and-swap on the *ciphertext* column. AES-GCM
+                        // ciphertext for the same plaintext is unique per
+                        // call (fresh nonce), so a CAS on the encrypted
+                        // string is functionally identical to a CAS on the
+                        // plaintext: two concurrent requests reading the
+                        // same `codes_blob` and racing to update will see
+                        // exactly one rows_affected==1.
                         let rows = sqlx::query(
                             "UPDATE users SET totp_recovery_codes = $1 \
                              WHERE id = $2 AND totp_recovery_codes = $3",
                         )
-                        .bind(&updated)
+                        .bind(&updated_blob)
                         .bind(user.id)
-                        .bind(codes_json)
+                        .bind(codes_blob)
                         .execute(&state.db)
                         .await?
                         .rows_affected();
@@ -531,6 +534,7 @@ pub async fn register(
 
     // Input validation
     validate_password(&req.password)?;
+    think_watch_common::validation::validate_email(&req.email)?;
 
     let password_hash = password::hash_password(&req.password)?;
 
@@ -1197,16 +1201,18 @@ pub async fn totp_verify_setup(
         return Err(AppError::BadRequest("Invalid TOTP code".into()));
     }
 
-    // Encrypt and store
+    // Encrypt and store. Recovery codes are full 2FA bypass tokens,
+    // so they go through the same AES-256-GCM envelope as totp_secret —
+    // a DB dump must NOT yield plaintext bypass codes.
     let encrypted_secret = crate::services::totp_service::encrypt_secret(&state, &pending.secret)?;
-    let recovery_json = serde_json::to_string(&pending.recovery_codes)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("JSON serialization error: {e}")))?;
+    let encrypted_recovery_codes =
+        crate::services::totp_service::encrypt_recovery_codes(&state, &pending.recovery_codes)?;
 
     sqlx::query(
         "UPDATE users SET totp_secret = $1, totp_enabled = true, totp_recovery_codes = $2, updated_at = now() WHERE id = $3",
     )
     .bind(&encrypted_secret)
-    .bind(&recovery_json)
+    .bind(&encrypted_recovery_codes)
     .bind(user_id)
     .execute(&state.db)
     .await?;

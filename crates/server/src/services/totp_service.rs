@@ -34,3 +34,30 @@ pub(crate) fn decrypt_secret(state: &AppState, encrypted_hex: &str) -> Result<St
     think_watch_auth::totp::decrypt_secret(encrypted_hex, &key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("TOTP decrypt error: {e}")))
 }
+
+/// Encrypt the JSON-serialized recovery-codes blob for at-rest
+/// storage. Wraps the same AES-256-GCM primitive `encrypt_secret`
+/// uses — recovery codes are full TOTP-bypass tokens and must be
+/// at-rest-encrypted with the same envelope as `totp_secret`.
+pub(crate) fn encrypt_recovery_codes(
+    state: &AppState,
+    codes: &[String],
+) -> Result<String, AppError> {
+    let key = encryption_key(state)?;
+    let json = serde_json::to_string(codes)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Recovery codes JSON error: {e}")))?;
+    think_watch_auth::totp::encrypt_secret(&json, &key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Recovery codes encrypt error: {e}")))
+}
+
+/// Decrypt + parse the at-rest recovery-codes blob.
+pub(crate) fn decrypt_recovery_codes(
+    state: &AppState,
+    encrypted_hex: &str,
+) -> Result<Vec<String>, AppError> {
+    let key = encryption_key(state)?;
+    let json = think_watch_auth::totp::decrypt_secret(encrypted_hex, &key)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Recovery codes decrypt error: {e}")))?;
+    serde_json::from_str(&json)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Recovery codes JSON parse error: {e}")))
+}

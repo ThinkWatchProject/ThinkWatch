@@ -38,10 +38,11 @@ pub fn current_code(secret_base32: &str, email: &str) -> anyhow::Result<String> 
 /// Codes are guaranteed unique within the returned set. The raw 40-bit
 /// presentation space (8 base32 chars) makes birthday-paradox collisions
 /// vanishingly rare for typical counts (~1 in 2^39 per pair), but the
-/// codes are stored in a single `totp_recovery_codes` JSON column with
-/// no DB-side uniqueness constraint — a duplicate there would let one
-/// code be consumed twice. Dedup at generation so that's impossible by
-/// construction.
+/// codes live in a single AES-256-GCM-encrypted JSON blob in
+/// `totp_recovery_codes` (same envelope as `totp_secret`) with no
+/// DB-side uniqueness constraint — a duplicate inside the blob would
+/// let one code be consumed twice. Dedup at generation so that's
+/// impossible by construction.
 pub fn generate_recovery_codes(count: usize) -> Vec<String> {
     let mut codes = Vec::with_capacity(count);
     let mut seen = std::collections::HashSet::with_capacity(count);

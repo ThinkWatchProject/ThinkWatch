@@ -22,6 +22,25 @@ pub fn validate_password(password: &str) -> Result<(), AppError> {
     Ok(())
 }
 
+/// Validate basic email format: `<local>@<domain>` with a `.` somewhere
+/// in the domain, no leading/trailing dot in the domain. Conservative
+/// rather than RFC-strict — we want to keep typos out of the DB
+/// (`foo`, `foo@`, `@bar.com`, `foo@.bar`, `foo@bar.`) without
+/// rejecting weird-but-legal addresses.
+pub fn validate_email(email: &str) -> Result<(), AppError> {
+    let parts: Vec<&str> = email.splitn(2, '@').collect();
+    if parts.len() != 2
+        || parts[0].is_empty()
+        || parts[1].is_empty()
+        || !parts[1].contains('.')
+        || parts[1].starts_with('.')
+        || parts[1].ends_with('.')
+    {
+        return Err(AppError::BadRequest("Invalid email format".into()));
+    }
+    Ok(())
+}
+
 // --- Outbound URL + header validation (shared SSRF + injection guards) ---
 //
 // Used by every handler that configures an upstream endpoint:

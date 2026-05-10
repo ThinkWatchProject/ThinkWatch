@@ -72,26 +72,12 @@ async fn recovery_code_grants_login_then_is_consumed() {
         .unwrap();
     resp.assert_ok();
 
-    // The DB must reflect that the code was consumed (one fewer
-    // entry in users.totp_recovery_codes).
-    let stored: Option<String> =
-        sqlx::query_scalar("SELECT totp_recovery_codes FROM users WHERE id = $1")
-            .bind(user.user.id)
-            .fetch_one(&app.db)
-            .await
-            .unwrap();
-    let remaining: Vec<String> = serde_json::from_str(&stored.unwrap()).unwrap();
-    assert_eq!(
-        remaining.len(),
-        9,
-        "exactly one code must have been consumed"
-    );
-    assert!(
-        !remaining.contains(&target_code),
-        "consumed code must NOT remain in the list"
-    );
-
-    // Same code reused → must fail.
+    // Black-box assertion of "exactly one code consumed":
+    //   1. Replay the same code → 401 (proves it's gone)
+    //   2. A different code → 200 (proves siblings still work)
+    // We deliberately don't peek at the DB column anymore — recovery
+    // codes are now encrypted at rest and the storage shape is an
+    // implementation detail of the auth handler.
     let replay = app
         .console_client()
         .post(
@@ -105,6 +91,20 @@ async fn recovery_code_grants_login_then_is_consumed() {
         .await
         .unwrap();
     replay.assert_status(401);
+
+    let sibling = app
+        .console_client()
+        .post(
+            "/api/auth/login",
+            json!({
+                "email": user.user.email,
+                "password": user.plaintext_password,
+                "totp_code": codes[1]
+            }),
+        )
+        .await
+        .unwrap();
+    sibling.assert_ok();
 }
 
 #[ignore = "integration test — run via `make test-it`"]

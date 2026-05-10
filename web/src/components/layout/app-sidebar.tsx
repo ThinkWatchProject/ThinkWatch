@@ -77,9 +77,9 @@ const navGroups: NavGroup[] = [
     labelKey: 'nav.mcpGateway',
     items: [
       { titleKey: 'nav.mcpServers', icon: Server, href: '/mcp/servers' },
+      { titleKey: 'nav.connections', icon: Plug2, href: '/connections' },
       { titleKey: 'nav.tools', icon: Wrench, href: '/mcp/tools' },
       { titleKey: 'nav.mcpStore', icon: Store, href: '/mcp/store' },
-      { titleKey: 'nav.connections', icon: Plug2, href: '/connections' },
     ],
   },
   {
