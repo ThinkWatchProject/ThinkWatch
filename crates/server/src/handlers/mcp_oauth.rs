@@ -572,6 +572,8 @@ pub async fn oauth_callback(
                 server.name.clone(),
                 *server_id,
                 *user_id,
+                server.auth_header_name.clone(),
+                server.auth_value_template.clone(),
                 token.access_token.clone(),
             );
             state.audit.log(
@@ -1087,6 +1089,8 @@ pub async fn paste_static_token(
         server.name.clone(),
         server_id,
         auth_user.claims.sub,
+        server.auth_header_name.clone(),
+        server.auth_value_template.clone(),
         req.token.trim().to_string(),
     );
 
@@ -1110,6 +1114,15 @@ pub async fn paste_static_token(
 /// logged at warn level and discarded; the next gateway request from
 /// this user will lazy-discover via the proxy fallback if this attempt
 /// missed.
+///
+/// Substitutes `{{token}}` in `auth_value_template` with the freshly
+/// minted token before handing the resolved header to
+/// `discover_user_tools`. Without this, per-user servers configured
+/// with a custom header (e.g. `X-API-Key: {{token}}`) would receive
+/// `Authorization: Bearer ...` instead and 401 — leaving
+/// `mcp_user_tools` empty for that user until the proxy's lazy
+/// fallback re-discovers on the first real call.
+#[allow(clippy::too_many_arguments)]
 fn spawn_user_tool_discovery(
     db: sqlx::PgPool,
     http: reqwest::Client,
@@ -1117,8 +1130,11 @@ fn spawn_user_tool_discovery(
     server_name: String,
     server_id: Uuid,
     user_id: Uuid,
-    bearer_token: String,
+    auth_header_name: String,
+    auth_value_template: String,
+    token: String,
 ) {
+    let auth_header_value = auth_value_template.replace("{{token}}", &token);
     tokio::spawn(async move {
         match crate::mcp_runtime::discover_user_tools(
             &db,
@@ -1126,7 +1142,8 @@ fn spawn_user_tool_discovery(
             &endpoint_url,
             server_id,
             user_id,
-            &bearer_token,
+            &auth_header_name,
+            &auth_header_value,
         )
         .await
         {

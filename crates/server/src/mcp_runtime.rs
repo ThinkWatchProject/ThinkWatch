@@ -503,12 +503,20 @@ async fn try_discover_and_persist_tools_with_auth(
     Ok(SystemDiscoveryOutcome::Tools(parsed.tools.len()))
 }
 
-/// Per-user tool discovery. POSTs `tools/list` with the user's bearer
-/// token (resolved via `UserTokenResolver`) and writes the response to
-/// `mcp_user_tools(server_id, user_id, ...)`. Never writes to the
-/// system-level `mcp_tools` table — see schema comment for why.
+/// Per-user tool discovery. POSTs `tools/list` with the supplied auth
+/// header (already template-substituted by the caller — typically
+/// `auth_value_template.replace("{{token}}", access_token)`) and
+/// writes the response to `mcp_user_tools(server_id, user_id, ...)`.
+/// Never writes to the system-level `mcp_tools` table — see schema
+/// comment for why.
 ///
-/// Idempotent: deactivate-then-upsert in one tx. Best-effort: returns
+/// The header is fully caller-supplied — we don't assume `Authorization:
+/// Bearer ...`. Per-server `auth_header_name` (`X-API-Key`, `api-key`,
+/// ...) and `auth_value_template` (`{{token}}`, `Bearer {{token}}`,
+/// ...) configurations all work without this function knowing about
+/// them.
+///
+/// Idempotent: delete-then-upsert in one tx. Best-effort: returns
 /// `Ok(0)` and logs a warn on any failure so callers can spawn this
 /// without worrying about error propagation breaking the auth flow.
 pub async fn discover_user_tools(
@@ -517,7 +525,8 @@ pub async fn discover_user_tools(
     endpoint_url: &str,
     server_id: uuid::Uuid,
     user_id: uuid::Uuid,
-    bearer_token: &str,
+    auth_header_name: &str,
+    auth_header_value: &str,
 ) -> anyhow::Result<usize> {
     let body = serde_json::json!({
         "jsonrpc": "2.0",
@@ -530,7 +539,7 @@ pub async fn discover_user_tools(
         .post(endpoint_url)
         .header("Content-Type", "application/json")
         .header("Accept", "application/json, text/event-stream")
-        .header("Authorization", format!("Bearer {bearer_token}"))
+        .header(auth_header_name, auth_header_value)
         .json(&body)
         .send()
         .await?;
