@@ -35,11 +35,33 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use sqlx::Row;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+use tokio::sync::Mutex as TokioMutex;
 use uuid::Uuid;
 
 use think_watch_common::crypto;
 
 use crate::cache::McpResponseCache;
+
+/// In-process per-key serialization for OAuth refresh.
+///
+/// The previous implementation took a `pg_advisory_xact_lock` and held
+/// the surrounding transaction open across the upstream HTTP refresh
+/// call. Under a slow OAuth provider every concurrent refresh held a
+/// PG connection for the duration of the upstream round-trip, starving
+/// the rest of the application of pool slots.
+///
+/// Now: per-`lock_key` `tokio::Mutex` serializes refreshes inside this
+/// process; no DB connection is held during the HTTP call. The DB is
+/// only touched in two short windows — recheck-and-decrypt before
+/// the call, and write-back after. Cross-process races (multiple node
+/// instances refreshing the same credential simultaneously) are
+/// handled by recheck-on-entry plus the OAuth provider's own
+/// refresh_token reuse detection: the loser sees a permanent failure
+/// and the user re-authorizes. For ThinkWatch's single-node default
+/// deployment this is not a concern.
+type RefreshLockMap = Arc<StdMutex<HashMap<String, Arc<TokioMutex<()>>>>>;
 
 /// Snapshot of a server's OAuth client registration. Built once at
 /// server-load time and threaded into every resolver call so we don't
@@ -313,6 +335,9 @@ pub struct UserTokenResolver {
     /// cached responses can't be served against the post-rotation
     /// upstream identity.
     cache: McpResponseCache,
+    /// Per-key tokio mutexes for refresh serialization. See
+    /// [`RefreshLockMap`] doc.
+    refresh_locks: RefreshLockMap,
 }
 
 impl UserTokenResolver {
@@ -327,6 +352,43 @@ impl UserTokenResolver {
             crypto_key,
             http,
             cache,
+            refresh_locks: Arc::new(StdMutex::new(HashMap::new())),
+        }
+    }
+
+    /// Acquire (creating if needed) the per-key tokio mutex used to
+    /// serialize OAuth refreshes for a given credential locator.
+    fn refresh_mutex_for(&self, lock_key: &str) -> Arc<TokioMutex<()>> {
+        let mut guard = self
+            .refresh_locks
+            .lock()
+            .expect("refresh_locks mutex poisoned");
+        Arc::clone(
+            guard
+                .entry(lock_key.to_owned())
+                .or_insert_with(|| Arc::new(TokioMutex::new(()))),
+        )
+    }
+
+    /// Drop the per-key mutex from the map if no other caller is
+    /// currently holding or waiting on it. Called on the success path
+    /// after a refresh so the map doesn't grow unbounded for
+    /// long-lived processes that see many distinct credentials.
+    fn try_evict_refresh_mutex(&self, lock_key: &str, mu: &Arc<TokioMutex<()>>) {
+        // We hold one Arc, the map holds another. Anyone else awaiting
+        // would also hold an Arc — so 2 means "only us + the map."
+        if Arc::strong_count(mu) <= 2 {
+            let mut guard = self
+                .refresh_locks
+                .lock()
+                .expect("refresh_locks mutex poisoned");
+            // Re-check under the std mutex: another caller may have
+            // grabbed the Arc between our check and the lock.
+            if let Some(entry) = guard.get(lock_key)
+                && Arc::strong_count(entry) <= 2
+            {
+                guard.remove(lock_key);
+            }
         }
     }
 
@@ -503,10 +565,17 @@ impl UserTokenResolver {
         Ok(row_opt)
     }
 
-    /// Refresh the access token under a Postgres advisory lock. The
-    /// lock is held for the duration of the transaction, which means
-    /// concurrent callers either all see the freshly refreshed value
-    /// or all participate in the refresh-failed unwind.
+    /// Refresh the access token under an in-process per-key tokio
+    /// mutex. The mutex is held across the upstream HTTP refresh so
+    /// concurrent callers for the same credential see a single
+    /// refresh, but NO Postgres connection is held during the HTTP —
+    /// only short read/write windows before and after.
+    ///
+    /// Cross-process concurrency: refreshes from sibling processes
+    /// race directly. The OAuth provider's refresh_token reuse
+    /// detection is the source of truth — the loser sees a permanent
+    /// failure and the user re-authorizes. Single-node deployments
+    /// (the default) never hit this path.
     async fn refresh_locked(
         &self,
         locator: &CredLocator,
@@ -514,22 +583,15 @@ impl UserTokenResolver {
         cfg: &OAuthClientCfg,
     ) -> Result<String, ResolverError> {
         let lock_key = locator.refresh_lock_key();
-        let mut tx = self.db.begin().await?;
+        let mu = self.refresh_mutex_for(&lock_key);
+        let _hold = mu.lock().await;
 
-        // Take the advisory lock. `hashtextextended(text, 0)` returns
-        // a stable bigint so this is idempotent across processes.
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(&lock_key)
-            .execute(&mut *tx)
-            .await?;
-
-        // Re-check the row inside the lock. Another caller may have
-        // already done the refresh while we were waiting.
-        let recheck = self.recheck_row(&mut tx, locator).await?;
-
+        // Phase 1 — short read window. Re-check the row inside the
+        // serialization point: another caller in this process may
+        // have refreshed while we were waiting on the mutex.
+        let recheck = self.fetch_row(locator).await?;
         let Some(current) = recheck else {
-            // Row deleted between fetch and lock acquisition.
-            tx.rollback().await.ok();
+            self.try_evict_refresh_mutex(&lock_key, &mu);
             return Err(ResolverError::NeedsUserCredentials {
                 server_id: locator.server_id(),
                 authorize_url: cfg.authorization_endpoint.clone(),
@@ -549,11 +611,10 @@ impl UserTokenResolver {
             // Lost the race — another caller already refreshed. Use
             // their value.
             let token = self.decrypt_to_string(&current.access_token_encrypted)?;
-            tx.commit().await?;
+            self.try_evict_refresh_mutex(&lock_key, &mu);
             return Ok(token);
         }
 
-        // Decrypt the refresh_token.
         let refresh_bytes =
             row.refresh_token_encrypted
                 .as_ref()
@@ -564,8 +625,7 @@ impl UserTokenResolver {
                 })?;
         let refresh_token = self.decrypt_to_string(refresh_bytes)?;
 
-        // Run the refresh. Classify failures so we don't punish users
-        // for transient upstream hiccups.
+        // Phase 2 — HTTP. NO DB connection held here.
         let new = match self.oauth_refresh(cfg, &refresh_token).await {
             Ok(v) => {
                 metrics::counter!("mcp_token_refresh_total", "outcome" => "success").increment(1);
@@ -578,7 +638,7 @@ impl UserTokenResolver {
                     server_id = %locator.server_id(), error = %msg,
                     "OAuth token refresh hit a transient failure; credential preserved for retry"
                 );
-                tx.rollback().await.ok();
+                self.try_evict_refresh_mutex(&lock_key, &mu);
                 return Err(ResolverError::RefreshFailed {
                     server_id: locator.server_id(),
                     kind: RefreshFailureKind::Transient,
@@ -592,9 +652,11 @@ impl UserTokenResolver {
                     server_id = %locator.server_id(), error = %msg,
                     "OAuth token refresh failed permanently; credential row deleted"
                 );
+                let mut tx = self.db.begin().await?;
                 self.delete_row(&mut tx, locator).await?;
                 tx.commit().await.ok();
                 locator.invalidate_cache_after_change(&self.cache).await;
+                self.try_evict_refresh_mutex(&lock_key, &mu);
                 return Err(ResolverError::RefreshFailed {
                     server_id: locator.server_id(),
                     kind: RefreshFailureKind::Permanent,
@@ -617,6 +679,8 @@ impl UserTokenResolver {
             .and_then(|secs| i64::try_from(secs).ok())
             .map(|secs| now + chrono::Duration::seconds(secs));
 
+        // Phase 3 — short write window.
+        let mut tx = self.db.begin().await?;
         self.write_refreshed_row(
             &mut tx,
             locator,
@@ -625,72 +689,14 @@ impl UserTokenResolver {
             new_expires_at,
         )
         .await?;
-
         tx.commit().await?;
 
         // Bearer just changed — pre-rotation cached responses are
         // stale relative to the new identity the upstream will see.
         locator.invalidate_cache_after_change(&self.cache).await;
 
+        self.try_evict_refresh_mutex(&lock_key, &mu);
         Ok(new.access_token)
-    }
-
-    async fn recheck_row(
-        &self,
-        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-        locator: &CredLocator,
-    ) -> Result<Option<CredentialRow>, ResolverError> {
-        let row_opt = match locator {
-            CredLocator::PerUser {
-                server_id,
-                user_id,
-                preferred_label,
-            } => {
-                // Inside the lock we always look up by exact label —
-                // for the `is_default` case the outer fetch has
-                // already resolved it, but the row we want is the one
-                // we just read. We carried `account_label` on the row
-                // for that reason.
-                let label = preferred_label
-                    .as_deref()
-                    .ok_or_else(|| ResolverError::Crypto("missing label inside lock".into()))?;
-                sqlx::query(
-                    r#"SELECT credential_type, access_token_encrypted,
-                              refresh_token_encrypted, expires_at, account_label
-                         FROM mcp_user_credentials
-                        WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3"#,
-                )
-                .bind(server_id)
-                .bind(user_id)
-                .bind(label)
-                .fetch_optional(&mut **tx)
-                .await?
-                .map(|r| CredentialRow {
-                    credential_type: r.get("credential_type"),
-                    access_token_encrypted: r.get("access_token_encrypted"),
-                    refresh_token_encrypted: r.get("refresh_token_encrypted"),
-                    expires_at: r.get("expires_at"),
-                    account_label: Some(r.get("account_label")),
-                })
-            }
-            CredLocator::AdminShared { server_id } => sqlx::query(
-                r#"SELECT credential_type, access_token_encrypted,
-                          refresh_token_encrypted, expires_at
-                     FROM mcp_server_shared_credentials
-                    WHERE mcp_server_id = $1"#,
-            )
-            .bind(server_id)
-            .fetch_optional(&mut **tx)
-            .await?
-            .map(|r| CredentialRow {
-                credential_type: r.get("credential_type"),
-                access_token_encrypted: r.get("access_token_encrypted"),
-                refresh_token_encrypted: r.get("refresh_token_encrypted"),
-                expires_at: r.get("expires_at"),
-                account_label: None,
-            }),
-        };
-        Ok(row_opt)
     }
 
     async fn delete_row(
