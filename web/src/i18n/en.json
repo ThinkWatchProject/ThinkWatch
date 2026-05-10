@@ -686,8 +686,9 @@
         "oauthManualRec": "OAuth 2.0 (manual app registration required).",
         "staticTitle": "Reachable — auth required, no OAuth metadata",
         "staticRec": "Static token (PAT / API key) — pick the header shape and continue.",
-        "anonymousTitle": "Reachable — anonymous",
-        "anonymousDetail": "Anonymous tools/list returned {{count}} tool(s) without any credential. Auth shape and credential ownership steps were skipped."
+        "anonymousTitle": "Reachable — public service",
+        "anonymousDetail": "Anonymous tools/list returned {{count}} tool(s) without any credential. Auth shape and credential ownership steps were skipped.",
+        "anonymousRec": "Anonymous — no credential is forwarded. Continue to confirm."
       }
     },
     "credentialOwner": {

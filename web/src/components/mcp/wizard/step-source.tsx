@@ -13,6 +13,11 @@ interface Props {
   patch: (partial: Partial<WizardState>) => void;
   patchOAuth: (partial: Partial<WizardState['oauth']>) => void;
   onNext: () => void;
+  /** Direct jump used by the anonymous-OK probe shortcut to land on
+   *  Step 4. We can't call `onNext` because it intentionally always
+   *  goes to Step 2 — the auto-skip is a one-shot probe-completion
+   *  decision, not a recurring traversal rule. */
+  goToStep: (step: 1 | 2 | 3 | 4) => void;
   onCancel: () => void;
   /** True while the `?template=<slug>` prefill fetch is in flight. */
   templateLoading?: boolean;
@@ -37,6 +42,7 @@ export function StepSource({
   patch,
   patchOAuth,
   onNext,
+  goToStep,
   onCancel,
   templateLoading,
 }: Props) {
@@ -149,6 +155,16 @@ export function StepSource({
       // pre-selected.
       if (!probe.anonymous_ok && !probe.requires_auth) {
         setError(probe.message);
+        return;
+      }
+      // Anonymous shortcut: probe passed without credentials → no
+      // auth shape to pick, no credential owner to choose. Jump to
+      // Step 4 (confirm) directly. This skip is INTENTIONALLY a
+      // one-shot probe-completion decision, not a permanent traversal
+      // rule — once the admin lands on Step 4 they can `Back` through
+      // every step normally to adjust shape / credentials.
+      if (probe.anonymous_ok) {
+        goToStep(4);
         return;
       }
       onNext();

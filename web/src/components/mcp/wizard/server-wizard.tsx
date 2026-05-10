@@ -59,15 +59,14 @@ export function ServerWizardPage() {
 
   const goNext = () => {
     const cur = wiz.state.step;
-    // Anonymous shortcut: skip Step 2 and Step 3 if Step 1 detected
-    // a public server. Admin can still go back and pick a non-anon
-    // shape to override.
-    if (cur === 1 && wiz.state.probe?.anonymous_ok && wiz.state.auth_shape === 'anonymous') {
-      wiz.goToStep(4);
-      return;
-    }
+    // Step 2 → Step 4 when admin chose anonymous (Step 3 is meaningless
+    // — no credential to own). Step 1 used to short-circuit here too,
+    // but that created a back→next loop: "Back" from Step 4 lands on
+    // Step 1, then "Next" auto-skipped to Step 4 again, blocking the
+    // admin from ever reaching Step 2. The anonymous shortcut from
+    // Step 1 now lives inside `step-source.tsx`'s probe handler and
+    // fires exactly once on probe completion, not on every traversal.
     if (cur === 2 && wiz.state.auth_shape === 'anonymous') {
-      // No credential to own when there's no auth.
       wiz.patch({ credential_owner: 'per_user', shared_pending: null });
       wiz.goToStep(4);
       return;
@@ -79,9 +78,12 @@ export function ServerWizardPage() {
 
   const goBack = () => {
     const cur = wiz.state.step;
-    // Mirror the skip logic in reverse.
+    // From Step 4, mirror the forward anonymous shortcut: jump back
+    // to Step 2 (where the admin can change the shape away from
+    // anonymous). Going back to Step 1 would force a re-probe and
+    // re-trigger the auto-skip, which is the loop we just fixed.
     if (cur === 4 && wiz.state.auth_shape === 'anonymous') {
-      wiz.goToStep(1);
+      wiz.goToStep(2);
       return;
     }
     if (cur > 1) {
@@ -219,6 +221,7 @@ export function ServerWizardPage() {
             patch={wiz.patch}
             patchOAuth={wiz.patchOAuth}
             onNext={goNext}
+            goToStep={wiz.goToStep}
             onCancel={cancel}
             templateLoading={wiz.templateLoading}
           />

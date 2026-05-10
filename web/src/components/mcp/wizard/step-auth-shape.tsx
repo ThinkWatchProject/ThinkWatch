@@ -216,17 +216,17 @@ export function StepAuthShape({ state, patch, patchOAuth, onNext, onBack }: Prop
 
 /**
  * Summary banner — surfaces the Step 1 probe verdict and the resulting
- * recommendation so the auto-pick isn't a black box. Three branches:
+ * recommendation so the auto-pick isn't a black box. Four branches:
  *
+ *   - `anonymous_ok` ⇒ success; public service, "Anonymous" is the
+ *     correct pick. (Reachable when the admin navigates back to
+ *     Step 2 after the probe shortcutted them to Step 4.)
  *   - `auth_required` + OAuth metadata + DCR succeeded ⇒ green; we
  *     pre-filled everything (issuer, client_id, client_secret).
  *   - `auth_required` + OAuth metadata + no DCR ⇒ amber; admin needs
  *     to register the upstream OAuth app and paste Client ID back.
  *   - `auth_required` + no OAuth metadata ⇒ neutral; static token
  *     is the recommendation.
- *
- * Anonymous-OK probes never reach Step 2 (the wizard shell skips
- * straight to Step 4), so we don't render that case here.
  */
 function ProbeSummary({
   url,
@@ -245,7 +245,12 @@ function ProbeSummary({
   let detail: string;
   let recommendation: string;
 
-  if (oauthProbe?.issuer && oauthProbe.client_id) {
+  if (probe.anonymous_ok) {
+    tone = 'success';
+    title = t('mcpServers.wizard.probeSummary.anonymousTitle');
+    detail = probe.message;
+    recommendation = t('mcpServers.wizard.probeSummary.anonymousRec');
+  } else if (oauthProbe?.issuer && oauthProbe.client_id) {
     tone = 'success';
     title = t('mcpServers.wizard.probeSummary.oauthDcrTitle');
     detail = t('mcpServers.wizard.probeSummary.oauthDcrDetail', {

@@ -686,8 +686,9 @@
         "oauthManualRec": "OAuth 2.0（需在上游手动注册应用）。",
         "staticTitle": "可达 — 需要认证，未发现 OAuth 元数据",
         "staticRec": "静态 token（PAT / API key）— 选择 header 形态后继续。",
-        "anonymousTitle": "可达 — 匿名服务",
-        "anonymousDetail": "匿名 tools/list 返回 {{count}} 个工具，无需凭据。已自动跳过「认证形态」和「凭据归属」两步。"
+        "anonymousTitle": "可达 — 公开服务",
+        "anonymousDetail": "匿名 tools/list 返回 {{count}} 个工具，无需凭据。已自动跳过「认证形态」和「凭据归属」两步。",
+        "anonymousRec": "匿名 — 不转发任何凭据。点「下一步」继续到确认。"
       }
     },
     "credentialOwner": {
