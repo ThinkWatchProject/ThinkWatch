@@ -49,7 +49,17 @@ export function useAuth() {
   const login = async (email: string, password: string, totpCode?: string): Promise<LoginResponse> => {
     const body: Record<string, string> = { email, password };
     if (totpCode) body.totp_code = totpCode;
-    const res = await apiPost<LoginResponse>('/api/auth/login', body);
+    // `no401Redirect: true` — login is the *exact* endpoint where 401
+    // means "wrong password", not "session expired." Without this flag
+    // the api client would redirect to `/` on bad creds, which reloads
+    // the LoginPage and drops the in-memory error state — the user
+    // would see "Login failed" flash for ~100ms before the page
+    // reload wiped it.
+    const res = await api<LoginResponse>('/api/auth/login', {
+      method: 'POST',
+      body,
+      no401Redirect: true,
+    });
     if (res.totp_required) {
       return res; // Caller must handle TOTP step
     }
