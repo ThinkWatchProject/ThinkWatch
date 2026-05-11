@@ -188,11 +188,13 @@
     "signIn": "Sign in",
     "signInWith": "Sign in with SSO",
     "signingIn": "Signing in...",
-    "powGrinding": "Verifying…",
-    "powFetching": "Preparing challenge…",
-    "powGrindingHint": "Anti-brute-force verification… ({{tried}} hashes tried)",
     "powStillVerifying": "Verification still running. Try again in a moment.",
-    "powFetchFailed": "Could not fetch verification challenge: {{error}}",
+    "pow": {
+      "fetching": "Anti-bot shield · preparing challenge…",
+      "grinding": "Anti-bot shield · computing proof",
+      "ready": "Anti-bot shield · verified",
+      "errorShort": "Anti-bot shield · challenge failed"
+    },
     "email": "Email",
     "password": "Password",
     "or": "Or",

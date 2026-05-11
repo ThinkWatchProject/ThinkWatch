@@ -21,6 +21,10 @@ interface PowState {
   solution: PowSolution | null;
   /** Approximate progress during grinding. */
   tried: number;
+  /** Wall-clock grind time in ms. Final value when status==='ready'. */
+  elapsedMs: number;
+  /** Difficulty (leading zero bits) the server demanded. */
+  difficulty: number;
   /** Last error message (network failure / refresh). */
   error: string | null;
 }
@@ -37,6 +41,8 @@ export function usePowChallenge(): PowState & { refresh: () => void } {
   const [status, setStatus] = useState<Status>('idle');
   const [solution, setSolution] = useState<PowSolution | null>(null);
   const [tried, setTried] = useState(0);
+  const [elapsedMs, setElapsedMs] = useState(0);
+  const [difficulty, setDifficulty] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const workerRef = useRef<Worker | null>(null);
   // Cancellation flag so a refresh() during an in-flight grind
@@ -49,6 +55,7 @@ export function usePowChallenge(): PowState & { refresh: () => void } {
     setStatus('fetching');
     setSolution(null);
     setTried(0);
+    setElapsedMs(0);
     setError(null);
 
     // Tear down any in-flight worker.
@@ -72,6 +79,7 @@ export function usePowChallenge(): PowState & { refresh: () => void } {
     }
     if (epoch !== epochRef.current) return;
 
+    setDifficulty(challenge.difficulty);
     setStatus('grinding');
     const worker = new Worker(new URL('@/lib/pow-worker.ts', import.meta.url), {
       type: 'module',
@@ -89,6 +97,7 @@ export function usePowChallenge(): PowState & { refresh: () => void } {
       if (msg.type === 'done') {
         setSolution({ challenge_id: challenge.challenge_id, nonce: msg.nonce });
         setTried(msg.tried);
+        setElapsedMs(msg.elapsed_ms);
         setStatus('ready');
         // Worker self-closes after `done`; null the ref so a follow-
         // up refresh() doesn't try to terminate a dead worker.
@@ -122,5 +131,5 @@ export function usePowChallenge(): PowState & { refresh: () => void } {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { status, solution, tried, error, refresh: start };
+  return { status, solution, tried, elapsedMs, difficulty, error, refresh: start };
 }

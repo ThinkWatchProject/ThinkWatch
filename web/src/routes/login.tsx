@@ -4,12 +4,13 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle, ShieldCheck, Loader2 } from 'lucide-react';
+import { AlertCircle } from 'lucide-react';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { API_BASE } from '@/lib/api';
 import { useSsoStatus } from '@/hooks/use-sso-status';
 import { usePowChallenge, type PowSolution } from '@/hooks/use-pow-challenge';
+import { PowIndicator } from '@/components/auth/pow-indicator';
 
 interface LoginPageProps {
   onLogin: (
@@ -97,21 +98,6 @@ export function LoginPage({ onLogin }: LoginPageProps) {
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
             )}
-            {pow.status === 'error' && (
-              <Alert variant="destructive">
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription className="flex items-center justify-between gap-2">
-                  <span>{t('auth.powFetchFailed', { error: pow.error ?? '' })}</span>
-                  <button
-                    type="button"
-                    className="underline"
-                    onClick={pow.refresh}
-                  >
-                    {t('common.retry')}
-                  </button>
-                </AlertDescription>
-              </Alert>
-            )}
             <div className="space-y-2">
               <Label htmlFor="email">{t('auth.email')}</Label>
               <Input
@@ -153,27 +139,21 @@ export function LoginPage({ onLogin }: LoginPageProps) {
               </div>
             )}
             <Button type="submit" className="w-full" disabled={submitDisabled}>
-              {loading
-                ? t('auth.signingIn')
-                : pow.status === 'fetching' || pow.status === 'grinding'
-                  ? t('auth.powGrinding')
-                  : t('auth.signIn')}
+              {loading ? t('auth.signingIn') : t('auth.signIn')}
             </Button>
-            {/* PoW status hint — small + dismissible visually so the
-                rare slow-device case is explained without nagging
-                users on hardware where it completes in <300ms. */}
-            {(pow.status === 'fetching' || pow.status === 'grinding') && (
-              <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
-                {pow.status === 'fetching' ? (
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                ) : (
-                  <ShieldCheck className="h-3 w-3" />
-                )}
-                {pow.status === 'fetching'
-                  ? t('auth.powFetching')
-                  : t('auth.powGrindingHint', { tried: pow.tried })}
-              </p>
-            )}
+            {/* Always-visible PoW status. Renders in every state
+                (fetching / grinding / ready / error) so the user
+                sees the security work happening — no mysterious
+                button-disabled period and no spec-detail noise
+                hidden inside the button label. */}
+            <PowIndicator
+              status={pow.status}
+              tried={pow.tried}
+              elapsedMs={pow.elapsedMs}
+              difficulty={pow.difficulty}
+              errorMessage={pow.error}
+              onRetry={pow.refresh}
+            />
             {ssoEnabled && (
               <>
                 <div className="relative my-4">
