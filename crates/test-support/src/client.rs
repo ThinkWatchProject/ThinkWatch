@@ -124,7 +124,84 @@ impl TestClient {
     }
 
     pub async fn post(&self, path: &str, body: impl Serialize) -> Result<TestResponse> {
+        // Auto-attach a freshly minted + ground PoW solution when
+        // posting to /api/auth/login. The handler now requires
+        // proof-of-work on every login attempt; injecting it
+        // transparently here avoids touching the ~70 existing call
+        // sites in the integration suite. Tests that explicitly want
+        // to assert the missing/wrong-PoW path can still use
+        // `send(POST, ...)` directly or pass a body with `pow` already
+        // set (we won't overwrite it).
+        if path == "/api/auth/login" {
+            let value = serde_json::to_value(&body)
+                .with_context(|| "serialize login body for PoW injection")?;
+            if let Value::Object(map) = &value
+                && !map.contains_key("pow")
+            {
+                let solution = self.mint_and_grind_pow().await?;
+                let mut owned = map.clone();
+                owned.insert("pow".into(), solution);
+                return self
+                    .send(Method::POST, path, Some(&Value::Object(owned)))
+                    .await;
+            }
+            return self.send(Method::POST, path, Some(&value)).await;
+        }
         self.send(Method::POST, path, Some(&body)).await
+    }
+
+    /// Hit `POST /api/auth/pow-challenge`, grind the returned
+    /// challenge until SHA-256 has the required leading zero bits,
+    /// and return the `{ challenge_id, nonce }` body the login
+    /// handler expects under `pow`.
+    async fn mint_and_grind_pow(&self) -> Result<Value> {
+        let challenge_resp = self
+            .send(
+                Method::POST,
+                "/api/auth/pow-challenge",
+                Some(&serde_json::json!({})),
+            )
+            .await?;
+        if !challenge_resp.status.is_success() {
+            anyhow::bail!(
+                "POST /api/auth/pow-challenge failed: {} {}",
+                challenge_resp.status,
+                challenge_resp.text()
+            );
+        }
+        let challenge: Value = challenge_resp.json()?;
+        let challenge_id = challenge["challenge_id"]
+            .as_str()
+            .context("challenge_id missing from /api/auth/pow-challenge response")?
+            .to_owned();
+        let challenge_random = challenge["challenge_random"]
+            .as_str()
+            .context("challenge_random missing")?;
+        let difficulty = challenge["difficulty"]
+            .as_u64()
+            .and_then(|n| u8::try_from(n).ok())
+            .context("difficulty missing or out of range")?;
+
+        let mut nonce: u64 = 0;
+        loop {
+            let nonce_str = nonce.to_string();
+            if think_watch_auth::pow::verify_pow(challenge_random, &nonce_str, difficulty) {
+                return Ok(serde_json::json!({
+                    "challenge_id": challenge_id,
+                    "nonce": nonce_str,
+                }));
+            }
+            nonce += 1;
+            // Safety belt — at default difficulty 19 the expected
+            // iteration count is ~262k. Stop at 10M (40-ish bits)
+            // to fail-fast if difficulty is misconfigured.
+            if nonce > 10_000_000 {
+                anyhow::bail!(
+                    "PoW grinder exceeded 10M iterations at difficulty {difficulty}; \
+                     either DEFAULT_DIFFICULTY was raised dangerously high or there's a bug"
+                );
+            }
+        }
     }
 
     pub async fn post_empty(&self, path: &str) -> Result<TestResponse> {
@@ -148,7 +225,10 @@ impl TestClient {
         self.send(Method::DELETE, path, Some(&body)).await
     }
 
-    async fn send<B: Serialize + ?Sized>(
+    /// Lower-level send. Intentionally exposed so tests that want to
+    /// assert on PoW reject paths (missing/wrong PoW) can bypass the
+    /// `post()` auto-injection.
+    pub async fn send<B: Serialize + ?Sized>(
         &self,
         method: Method,
         path: &str,

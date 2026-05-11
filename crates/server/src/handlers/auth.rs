@@ -5,8 +5,12 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use think_watch_auth::password;
+use think_watch_auth::pow;
 use think_watch_common::audit::AuditEntry;
-use think_watch_common::dto::{CreateUserRequest, LoginRequest, RefreshRequest, UserResponse};
+use think_watch_common::dto::{
+    CreateUserRequest, LoginRequest, PowChallengeResponse, PowSolution, RefreshRequest,
+    UserResponse,
+};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
 use think_watch_common::validation::validate_password;
@@ -43,6 +47,134 @@ pub(crate) use crate::services::session_service::{
 pub struct ChangePasswordRequest {
     pub old_password: String,
     pub new_password: String,
+}
+
+/// `POST /api/auth/pow-challenge` — issue a fresh proof-of-work
+/// challenge for the next login attempt.
+///
+/// Per-IP rate-limited (60/min) so an attacker can't hammer the
+/// endpoint and either (a) churn through Redis storage faster than
+/// challenges TTL out, or (b) burn server CPU minting random bytes.
+#[utoipa::path(
+    post,
+    path = "/api/auth/pow-challenge",
+    tag = "Auth",
+    responses(
+        (status = 200, description = "Challenge minted"),
+        (status = 429, description = "Per-IP challenge mint rate exceeded"),
+    ),
+    security(()),
+)]
+pub async fn issue_pow_challenge(
+    State(state): State<AppState>,
+    request: axum::extract::Request,
+) -> Result<Json<PowChallengeResponse>, AppError> {
+    let client_ip = crate::middleware::auth_guard::extract_client_ip(
+        &state,
+        request.headers(),
+        request.extensions(),
+    )
+    .await
+    .unwrap_or_else(|| "unknown".to_string());
+
+    // Per-IP rate limit on challenge minting. Higher than the
+    // login limit (30/min) because each login attempt may consume +
+    // re-issue a challenge on a wrong-password retry, so a real
+    // user mistyping twice already needs ~3 mints.
+    let key = format!("pow_mint_ip:{client_ip}");
+    let _: () = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &key,
+        "0",
+        Some(fred::types::Expiration::EX(60)),
+        Some(fred::types::SetOptions::NX),
+        false,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Redis pow-mint rate-limit init failed: {e}");
+        AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
+    })?;
+    let count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &key, 1)
+        .await
+        .map_err(|e| {
+            tracing::error!("Redis pow-mint rate-limit incr failed: {e}");
+            AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
+        })?;
+    if count > 60 {
+        return Err(AppError::BadRequest(
+            "Too many challenge requests from this address. Please slow down.".into(),
+        ));
+    }
+
+    let (challenge_id, challenge_random) = pow::mint_challenge();
+    let difficulty = pow::DEFAULT_DIFFICULTY;
+
+    // Stash so login can verify + atomically consume it.
+    // Format: `random:difficulty` packed into one string so a single
+    // GETDEL pulls everything we need.
+    let blob = format!("{challenge_random}:{difficulty}");
+    let _: () = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        format!("{}{challenge_id}", pow::POW_CHALLENGE_PREFIX),
+        blob,
+        Some(fred::types::Expiration::EX(pow::CHALLENGE_TTL_SECS)),
+        None,
+        false,
+    )
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis pow store failed: {e}")))?;
+
+    Ok(Json(PowChallengeResponse {
+        challenge_id,
+        challenge_random,
+        difficulty,
+        issued_at: chrono::Utc::now().timestamp(),
+    }))
+}
+
+/// Atomically claim + verify a PoW solution from the login request.
+/// Returns `Ok(())` on a valid proof; any other outcome (missing
+/// challenge, expired challenge, wrong nonce) maps to `BadRequest`.
+///
+/// GETDEL prevents replay — a valid solution is single-use.
+async fn verify_login_pow(
+    state: &AppState,
+    pow_solution: Option<&PowSolution>,
+) -> Result<(), AppError> {
+    let solution = pow_solution.ok_or_else(|| {
+        AppError::BadRequest(
+            "Proof-of-work required. Request a fresh challenge from /api/auth/pow-challenge."
+                .into(),
+        )
+    })?;
+
+    let key = format!("{}{}", pow::POW_CHALLENGE_PREFIX, solution.challenge_id);
+    let stored: Option<String> = fred::interfaces::KeysInterface::getdel(&state.redis, &key)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis pow lookup failed: {e}")))?;
+    let blob = stored.ok_or_else(|| {
+        AppError::BadRequest(
+            "Proof-of-work challenge expired or already consumed. Request a fresh one.".into(),
+        )
+    })?;
+
+    // `random:difficulty` packed in mint_challenge above. A
+    // malformed blob (race with a manual Redis edit?) is a server
+    // problem, not a user problem.
+    let (challenge_random, difficulty_str) = blob
+        .split_once(':')
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("corrupt pow blob")))?;
+    let difficulty: u8 = difficulty_str
+        .parse()
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("corrupt pow difficulty")))?;
+
+    if !pow::verify_pow(challenge_random, &solution.nonce, difficulty) {
+        return Err(AppError::BadRequest(
+            "Invalid proof-of-work nonce. Re-grind the challenge.".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[utoipa::path(
@@ -105,6 +237,18 @@ pub async fn login(
             return Err(AppError::BadRequest("Invalid email format".into()));
         }
     }
+
+    // Proof-of-work BEFORE rate limit / lockout / password check.
+    // This is the layer that defeats distributed brute-force: an
+    // attacker controlling N IPs each below the per-IP cap can no
+    // longer probe credentials without committing CPU. The frontend
+    // grinds in a Web Worker while the user types, so legitimate
+    // users almost never wait. Single-use (GETDEL inside verify) so
+    // a valid solution can't be replayed.
+    //
+    // TOTP-step second submits ride a freshly minted challenge too —
+    // every login POST consumes one.
+    verify_login_pow(&state, req.pow.as_ref()).await?;
 
     // Composite rate limiting: per-email AND per-IP.
     //

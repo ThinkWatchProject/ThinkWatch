@@ -22,6 +22,11 @@ interface LoginResponse {
   totp_required?: boolean;
 }
 
+interface PowSolution {
+  challenge_id: string;
+  nonce: string;
+}
+
 export function useAuth() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
@@ -46,9 +51,15 @@ export function useAuth() {
 
   useEffect(() => { fetchUser(); }, [fetchUser]);
 
-  const login = async (email: string, password: string, totpCode?: string): Promise<LoginResponse> => {
-    const body: Record<string, string> = { email, password };
+  const login = async (
+    email: string,
+    password: string,
+    totpCode?: string,
+    pow?: PowSolution,
+  ): Promise<LoginResponse> => {
+    const body: Record<string, unknown> = { email, password };
     if (totpCode) body.totp_code = totpCode;
+    if (pow) body.pow = pow;
     // `no401Redirect: true` — login is the *exact* endpoint where 401
     // means "wrong password", not "session expired." Without this flag
     // the api client would redirect to `/` on bad creds, which reloads

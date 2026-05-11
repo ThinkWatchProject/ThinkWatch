@@ -393,6 +393,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
     // Public auth routes
     let public_routes = Router::new()
         .route("/api/auth/login", post(handlers::auth::login))
+        .route(
+            "/api/auth/pow-challenge",
+            post(handlers::auth::issue_pow_challenge),
+        )
         .route("/api/auth/register", post(handlers::auth::register))
         .route("/api/auth/refresh", post(handlers::auth::refresh))
         .route("/api/auth/sso/authorize", get(handlers::sso::sso_authorize))

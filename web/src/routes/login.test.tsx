@@ -13,6 +13,20 @@ beforeEach(() => {
   }))
 })
 
+// Stub the PoW hook out so tests don't need a real Web Worker (Vitest's
+// jsdom doesn't ship one) and don't try to hit /api/auth/pow-challenge.
+// Returning `status: 'ready'` immediately means the submit button stays
+// "Sign in" without waiting for a grind.
+vi.mock('@/hooks/use-pow-challenge', () => ({
+  usePowChallenge: () => ({
+    status: 'ready',
+    solution: { challenge_id: 'test-challenge', nonce: '0' },
+    tried: 0,
+    error: null,
+    refresh: vi.fn(),
+  }),
+}))
+
 describe('LoginPage', () => {
   it('renders email and password inputs', () => {
     render(<LoginPage onLogin={vi.fn()} />)
@@ -39,7 +53,7 @@ describe('LoginPage', () => {
     expect(screen.getByText(/don't have an account/i)).toBeInTheDocument()
   })
 
-  it('calls onLogin with email and password on submit', async () => {
+  it('calls onLogin with email, password, totp, and pow on submit', async () => {
     const user = userEvent.setup()
     const onLogin = vi.fn().mockResolvedValue({})
     render(<LoginPage onLogin={onLogin} />)
@@ -48,7 +62,12 @@ describe('LoginPage', () => {
     await user.type(screen.getByLabelText(/password/i), 'secretpass')
     await user.click(screen.getByRole('button', { name: /sign in$/i }))
 
-    expect(onLogin).toHaveBeenCalledWith('test@example.com', 'secretpass', undefined)
+    expect(onLogin).toHaveBeenCalledWith(
+      'test@example.com',
+      'secretpass',
+      undefined,
+      { challenge_id: 'test-challenge', nonce: '0' },
+    )
   })
 
   it('displays error when login fails', async () => {

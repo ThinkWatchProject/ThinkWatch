@@ -28,6 +28,33 @@ pub struct LoginRequest {
     pub password: String,
     /// TOTP code for two-factor authentication (required if user has TOTP enabled).
     pub totp_code: Option<String>,
+    /// Proof-of-work solution. Required on every login attempt so a
+    /// distributed brute-forcer can't dodge per-IP / per-email rate
+    /// limits without committing CPU. The frontend grinds in a Web
+    /// Worker while the user types their password, so legitimate
+    /// users almost never wait.
+    #[serde(default)]
+    pub pow: Option<PowSolution>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PowSolution {
+    /// Opaque ID returned by `POST /api/auth/pow-challenge`.
+    pub challenge_id: String,
+    /// UTF-8 nonce the client found such that the SHA-256 of
+    /// `challenge_random:nonce` has the required leading-zero bits.
+    pub nonce: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PowChallengeResponse {
+    pub challenge_id: String,
+    pub challenge_random: String,
+    pub difficulty: u8,
+    /// Issued-at timestamp (epoch seconds) so the client can age out
+    /// stale challenges proactively rather than rely on the server's
+    /// `Challenge expired` error.
+    pub issued_at: i64,
 }
 
 /// Login / refresh / SSO callback response.

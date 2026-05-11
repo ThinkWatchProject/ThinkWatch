@@ -4,14 +4,20 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, ShieldCheck, Loader2 } from 'lucide-react';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { API_BASE } from '@/lib/api';
 import { useSsoStatus } from '@/hooks/use-sso-status';
+import { usePowChallenge, type PowSolution } from '@/hooks/use-pow-challenge';
 
 interface LoginPageProps {
-  onLogin: (email: string, password: string, totpCode?: string) => Promise<{ totp_required?: boolean; password_change_required?: boolean }>;
+  onLogin: (
+    email: string,
+    password: string,
+    totpCode?: string,
+    pow?: PowSolution,
+  ) => Promise<{ totp_required?: boolean; password_change_required?: boolean }>;
 }
 
 export function LoginPage({ onLogin }: LoginPageProps) {
@@ -23,18 +29,41 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   const { ssoEnabled, allowRegistration: registrationOpen } = useSsoStatus();
   const [totpStep, setTotpStep] = useState(false);
   const [totpCode, setTotpCode] = useState('');
+  // PoW grinder runs in a Web Worker from mount. By the time the
+  // user has typed their password and clicked Sign in, the solution
+  // is usually already `ready` and the click is instant.
+  const pow = usePowChallenge();
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     setError('');
+    if (!pow.solution) {
+      // Worker still grinding (slow device or just-mounted page).
+      // The Sign-in button is disabled in that state, but defend
+      // against a programmatic submit.
+      setError(t('auth.powStillVerifying'));
+      return;
+    }
     setLoading(true);
     try {
-      const res = await onLogin(email, password, totpStep ? totpCode : undefined);
+      const res = await onLogin(
+        email,
+        password,
+        totpStep ? totpCode : undefined,
+        pow.solution,
+      );
       if (res.totp_required) {
         setTotpStep(true);
+        // TOTP step also needs a fresh PoW (the previous one was
+        // consumed by the password call). Mint + grind in the
+        // background so the user can paste their code while we work.
+        pow.refresh();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Login failed');
+      // Failed login consumed the PoW; mint a new one so the next
+      // attempt isn't artificially delayed.
+      pow.refresh();
     } finally {
       setLoading(false);
     }
@@ -43,6 +72,12 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   const handleSsoLogin = () => {
     window.location.href = `${API_BASE}/api/auth/sso/authorize`;
   };
+
+  // Disable submit while the worker hasn't produced a solution.
+  // `error` PoW state means the challenge endpoint failed (rate
+  // limit or backend down) — surface that as a recoverable error
+  // rather than silently locking the form.
+  const submitDisabled = loading || pow.status !== 'ready';
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-4">
@@ -60,6 +95,21 @@ export function LoginPage({ onLogin }: LoginPageProps) {
               <Alert variant="destructive">
                 <AlertCircle className="h-4 w-4" />
                 <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+            {pow.status === 'error' && (
+              <Alert variant="destructive">
+                <AlertCircle className="h-4 w-4" />
+                <AlertDescription className="flex items-center justify-between gap-2">
+                  <span>{t('auth.powFetchFailed', { error: pow.error ?? '' })}</span>
+                  <button
+                    type="button"
+                    className="underline"
+                    onClick={pow.refresh}
+                  >
+                    {t('common.retry')}
+                  </button>
+                </AlertDescription>
               </Alert>
             )}
             <div className="space-y-2">
@@ -102,9 +152,28 @@ export function LoginPage({ onLogin }: LoginPageProps) {
                 <p className="text-xs text-muted-foreground">{t('auth.totpHint')}</p>
               </div>
             )}
-            <Button type="submit" className="w-full" disabled={loading}>
-              {loading ? t('auth.signingIn') : t('auth.signIn')}
+            <Button type="submit" className="w-full" disabled={submitDisabled}>
+              {loading
+                ? t('auth.signingIn')
+                : pow.status === 'fetching' || pow.status === 'grinding'
+                  ? t('auth.powGrinding')
+                  : t('auth.signIn')}
             </Button>
+            {/* PoW status hint — small + dismissible visually so the
+                rare slow-device case is explained without nagging
+                users on hardware where it completes in <300ms. */}
+            {(pow.status === 'fetching' || pow.status === 'grinding') && (
+              <p className="flex items-center justify-center gap-1.5 text-xs text-muted-foreground">
+                {pow.status === 'fetching' ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <ShieldCheck className="h-3 w-3" />
+                )}
+                {pow.status === 'fetching'
+                  ? t('auth.powFetching')
+                  : t('auth.powGrindingHint', { tried: pow.tried })}
+              </p>
+            )}
             {ssoEnabled && (
               <>
                 <div className="relative my-4">
