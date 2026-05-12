@@ -196,13 +196,9 @@ VALUES
 ('aws',            'AWS',              'Manage S3 buckets, Lambda functions, EC2 instances, and more','cloud',         '{"infrastructure","devops"}',    '',                                                              NULL,                                                   'static',    'https://console.aws.amazon.com/iam/home#/security_credentials', 'Provide an AWS access-key pair (or assume-role token) for the MCP server.',                              'docker', false),
 ('cloudflare',     'Cloudflare',       'Manage DNS records, Workers, and edge configuration',         'cloud',         '{"cdn","dns","edge"}',           'https://mcp.cloudflare.com',                                    'https://api.cloudflare.com/client/v4/user',            'static',    'https://dash.cloudflare.com/profile/api-tokens',                'Create an API token in Cloudflare.',                                                                     'hosted', false),
 ('filesystem',     'Filesystem',       'Read and write local files, browse directories',              'utility',       '{"files","local"}',              '',                                                              NULL,                                                   'anonymous', NULL,                                                            'Deploys locally — grants access to the configured directory.',                                           'docker', false),
-('web-search',     'Web Search',       'Search the web and fetch page content',                       'utility',       '{"search","web"}',               '',                                                              NULL,                                                   'static',    NULL,                                                            'Requires a search API key (Google, Bing, or Brave).',                                                    'docker', true),
 ('puppeteer',      'Puppeteer',        'Browser automation — navigate, screenshot, and extract data','utility',       '{"browser","scraping"}',         '',                                                              NULL,                                                   'anonymous', NULL,                                                            'Deploy the Puppeteer MCP server with a headless Chrome instance.',                                       'docker', false),
 ('microsoft-docs', 'Microsoft Docs',   'Search and browse Microsoft Learn documentation',             'knowledge',     '{"docs","microsoft","azure"}',   'https://learn.microsoft.com/api/mcp',                           NULL,                                                   'anonymous', NULL,                                                            NULL,                                                                                                     'hosted', false),
 ('aws-docs',       'AWS Documentation','Search and browse AWS service documentation',                  'knowledge',     '{"docs","aws","cloud"}',         'https://knowledge-mcp.global.api.aws',                          NULL,                                                   'anonymous', NULL,                                                            NULL,                                                                                                     'hosted', false),
-('mdn-web-docs',   'MDN Web Docs',     'Search MDN for HTML, CSS, JavaScript, and Web API references','knowledge',     '{"docs","web","frontend"}',      '',                                                              NULL,                                                   'anonymous', NULL,                                                            NULL,                                                                                                     'docker', false),
-('wikipedia',      'Wikipedia',        'Search and read Wikipedia articles in any language',          'knowledge',     '{"docs","encyclopedia"}',        '',                                                              NULL,                                                   'anonymous', NULL,                                                            NULL,                                                                                                     'docker', false),
-('arxiv',          'arXiv',            'Search and read academic papers from arXiv',                  'knowledge',     '{"docs","research","papers"}',   '',                                                              NULL,                                                   'anonymous', NULL,                                                            NULL,                                                                                                     'docker', false),
 ('notion',         'Notion',           'Read and write Notion pages, databases, and blocks',          'productivity',  '{"notes","wiki","docs"}',        'https://mcp.notion.com/sse',                                    'https://api.notion.com/v1/users/me',                   'static',    'https://www.notion.so/my-integrations',                         'Create an internal integration in Notion and copy its token.',                                           'hosted', false),
 ('google-drive',   'Google Drive',     'Search, read, and manage files in Google Drive',              'productivity',  '{"files","google","storage"}',   '',                                                              'https://www.googleapis.com/oauth2/v3/userinfo',        'static',    'https://console.cloud.google.com/apis/credentials',             'Create a Google Cloud OAuth2 credential and authorize Drive access.',                                    'manual', false),
 ('jira',           'Jira',             'Manage Jira issues, sprints, and project boards',             'developer',     '{"project","agile","atlassian"}','',                                                              'https://api.atlassian.com/me',                         'static',    'https://id.atlassian.com/manage-profile/security/api-tokens',   'Create an API token at id.atlassian.com.',                                                               'manual', false)
@@ -238,6 +234,65 @@ VALUES (
     'hosted',
     false
 )
+ON CONFLICT (slug) DO NOTHING;
+
+-- Drop name-only templates that pre-configured neither an endpoint nor
+-- any auth/deploy guidance. They surfaced in the store as un-installable
+-- shells. Idempotent — ON DELETE RESTRICT keeps this honest: if anyone
+-- somehow installed one, the seed fails loud rather than silently leaving
+-- dangling installs.
+DELETE FROM mcp_store_templates
+WHERE slug IN ('web-search', 'mdn-web-docs', 'wikipedia', 'arxiv');
+
+-- Backfill deploy_command + deploy_docs_url for the self-deploy templates
+-- the original INSERT shipped without. Guarded by `IS NULL` so admin edits
+-- are preserved across reboots.
+UPDATE mcp_store_templates SET
+    deploy_command  = 'npx -y @modelcontextprotocol/server-postgres postgres://USER:PASS@HOST:5432/DB',
+    deploy_docs_url = 'https://github.com/modelcontextprotocol/servers/tree/main/src/postgres'
+WHERE slug = 'postgresql' AND deploy_command IS NULL;
+
+UPDATE mcp_store_templates SET
+    deploy_command  = 'npx -y @benborla29/mcp-server-mysql',
+    deploy_docs_url = 'https://github.com/benborla/mcp-server-mysql'
+WHERE slug = 'mysql' AND deploy_command IS NULL;
+
+UPDATE mcp_store_templates SET
+    deploy_command  = 'npx -y @modelcontextprotocol/server-redis redis://HOST:6379',
+    deploy_docs_url = 'https://github.com/modelcontextprotocol/servers/tree/main/src/redis'
+WHERE slug = 'redis' AND deploy_command IS NULL;
+
+UPDATE mcp_store_templates SET
+    deploy_command  = 'npx -y mongodb-mcp-server --connectionString "mongodb://USER:PASS@HOST:27017/DB"',
+    deploy_docs_url = 'https://github.com/mongodb-js/mongodb-mcp-server'
+WHERE slug = 'mongodb' AND deploy_command IS NULL;
+
+UPDATE mcp_store_templates SET
+    deploy_command  = 'npx -y @modelcontextprotocol/server-filesystem /path/to/dir',
+    deploy_docs_url = 'https://github.com/modelcontextprotocol/servers/tree/main/src/filesystem'
+WHERE slug = 'filesystem' AND deploy_command IS NULL;
+
+-- Puppeteer's official MCP was deprecated in favor of Playwright's;
+-- keep the slug for compat but point the deploy at @playwright/mcp.
+UPDATE mcp_store_templates SET
+    deploy_command  = 'npx -y @playwright/mcp@latest',
+    deploy_docs_url = 'https://github.com/microsoft/playwright-mcp'
+WHERE slug = 'puppeteer' AND deploy_command IS NULL;
+
+-- Extended catalog: hosted MCP + reference servers + popular search APIs.
+-- Each row pre-configures either a real endpoint OR a working
+-- `deploy_command` so install is one click away.
+INSERT INTO mcp_store_templates
+    (slug, name, description, category, tags, endpoint_template,
+     oauth_userinfo_endpoint,
+     auth_shape, static_token_help_url, auth_instructions,
+     deploy_type, deploy_command, deploy_docs_url, featured)
+VALUES
+('stripe',              'Stripe',              'Payments — charges, customers, invoices, and subscriptions',  'productivity', '{"payments","billing"}',         'https://mcp.stripe.com',                                        NULL,                                                   'static',    'https://dashboard.stripe.com/apikeys',                          'Create a restricted API key in the Stripe dashboard and paste it. Read-only keys recommended for most agent use cases.',                            'hosted', NULL,                                                                                                'https://docs.stripe.com/mcp',                                                false),
+('memory',              'Memory',              'Knowledge graph memory — persistent facts across sessions',  'utility',      '{"agent","memory"}',             '',                                                              NULL,                                                   'anonymous', NULL,                                                            'Reference MCP server that gives the agent a persistent knowledge graph. State lives in the container''s working directory.',                       'docker', 'npx -y @modelcontextprotocol/server-memory',                                                       'https://github.com/modelcontextprotocol/servers/tree/main/src/memory',                                                                                     false),
+('sequential-thinking', 'Sequential Thinking', 'Step-by-step reasoning helper for complex problems',         'utility',      '{"agent","reasoning"}',          '',                                                              NULL,                                                   'anonymous', NULL,                                                            'Reference MCP server that exposes a `sequential_thinking` tool the model uses to externalize multi-step reasoning.',                                'docker', 'npx -y @modelcontextprotocol/server-sequential-thinking',                                          'https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking',                                                                         false),
+('brave-search',        'Brave Search',        'Web + local search via the Brave Search API',                'utility',      '{"search","web"}',               '',                                                              NULL,                                                   'static',    'https://brave.com/search/api/',                                 'Create a Brave Search API key (free tier available) and provide it as `BRAVE_API_KEY`.',                                                            'docker', 'npx -y @modelcontextprotocol/server-brave-search',                                                 'https://github.com/modelcontextprotocol/servers/tree/main/src/brave-search',                                                                               true),
+('tavily',              'Tavily',              'LLM-optimized web search and content extraction',            'utility',      '{"search","web","ai"}',          '',                                                              NULL,                                                   'static',    'https://app.tavily.com/',                                       'Sign up at tavily.com, create an API key, and provide it as `TAVILY_API_KEY`.',                                                                     'docker', 'npx -y tavily-mcp',                                                                                'https://github.com/tavily-ai/tavily-mcp',                                                                                                                   false)
 ON CONFLICT (slug) DO NOTHING;
 
 -- MCP Store
