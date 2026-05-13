@@ -199,3 +199,49 @@ fn csv_escape(value: &str) -> String {
         value.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::csv_escape;
+
+    #[test]
+    fn plain_value_passes_through() {
+        // No special chars → no quoting. Pulling in heavy CSV escaping
+        // for every cell would bloat the chargeback report unnecessarily.
+        assert_eq!(csv_escape("plain"), "plain");
+        assert_eq!(csv_escape("model-id-123"), "model-id-123");
+        assert_eq!(csv_escape(""), "");
+    }
+
+    #[test]
+    fn comma_triggers_quoting() {
+        // RFC 4180: a value containing the delimiter must be quoted.
+        assert_eq!(csv_escape("a,b"), "\"a,b\"");
+    }
+
+    #[test]
+    fn double_quote_is_doubled_and_field_quoted() {
+        // RFC 4180: `"` inside a quoted field is escaped as `""`.
+        assert_eq!(csv_escape("he said \"hi\""), "\"he said \"\"hi\"\"\"");
+    }
+
+    #[test]
+    fn newline_triggers_quoting() {
+        assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
+    }
+
+    #[test]
+    fn cr_alone_does_not_trigger_quoting() {
+        // We only check for `\n`, not `\r`. Lock that in so a refactor
+        // that adds `\r` accidentally doesn't widen the quoting condition
+        // (which would generate noisy diffs in existing exports).
+        assert_eq!(csv_escape("a\rb"), "a\rb");
+    }
+
+    #[test]
+    fn solitary_quote_in_otherwise_plain_value_still_quotes() {
+        // Even a single `"` triggers the quoting path — RFC 4180 doesn't
+        // allow bare quotes in unquoted fields.
+        assert_eq!(csv_escape("a\"b"), "\"a\"\"b\"");
+    }
+}

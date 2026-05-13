@@ -642,3 +642,146 @@ fn validate_kafka_topic(topic: &str) -> Result<(), AppError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------
+    // validate_host_port — SSRF defense for syslog destinations
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn host_port_accepts_public_address() {
+        assert!(validate_host_port("syslog.example.com:514").is_ok());
+        assert!(validate_host_port("203.0.113.5:6514").is_ok());
+    }
+
+    #[test]
+    fn host_port_rejects_missing_separator() {
+        let err = validate_host_port("syslog.example.com").unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn host_port_rejects_non_numeric_port() {
+        assert!(validate_host_port("host:abc").is_err());
+    }
+
+    #[test]
+    fn host_port_rejects_port_zero() {
+        // port == 0 is technically u16-parseable but reserved.
+        assert!(validate_host_port("host:0").is_err());
+    }
+
+    #[test]
+    fn host_port_rejects_port_over_65535() {
+        // u16::parse fails for 65536+ → caught by the parse error path.
+        assert!(validate_host_port("host:65536").is_err());
+        assert!(validate_host_port("host:99999").is_err());
+    }
+
+    #[test]
+    fn host_port_rejects_empty_host() {
+        assert!(validate_host_port(":514").is_err());
+    }
+
+    #[test]
+    fn host_port_blocks_localhost_alias() {
+        // SSRF defense — operator can't proxy syslog at the gateway itself.
+        for h in [
+            "localhost:514",
+            "127.0.0.1:514",
+            "0.0.0.0:514",
+            "::1:514",
+        ] {
+            assert!(
+                validate_host_port(h).is_err(),
+                "{h} should be blocked but wasn't"
+            );
+        }
+    }
+
+    #[test]
+    fn host_port_blocks_cloud_metadata_endpoints() {
+        // 169.254.169.254 is the EC2/GCE metadata IP; the hostname form is
+        // the GCE alias. Both must be blocked to prevent token exfil.
+        assert!(validate_host_port("169.254.169.254:80").is_err());
+        assert!(validate_host_port("metadata.google.internal:80").is_err());
+    }
+
+    #[test]
+    fn host_port_blocks_private_rfc1918_via_ip_check() {
+        // Defers to common::validation::is_blocked_ip for the full range
+        // check. Spot-check a 10. and a 192.168. address.
+        assert!(validate_host_port("10.0.0.1:514").is_err());
+        assert!(validate_host_port("192.168.1.1:514").is_err());
+    }
+
+    #[test]
+    fn host_port_uses_rsplit_so_ipv6_in_brackets_works() {
+        // rsplit_once(':') means an IPv6 like `[2001:db8::1]:514` splits
+        // correctly at the last colon. Public IPv6 should pass.
+        // (Bracket form is the conventional way to disambiguate.)
+        assert!(validate_host_port("[2001:db8::1]:514").is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // validate_kafka_topic — character allowlist + dot rules
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn kafka_topic_accepts_typical_names() {
+        for ok in ["audit-logs", "events.v1", "my_topic", "abc123", "a"] {
+            assert!(validate_kafka_topic(ok).is_ok(), "{ok} should pass");
+        }
+    }
+
+    #[test]
+    fn kafka_topic_rejects_empty() {
+        assert!(validate_kafka_topic("").is_err());
+    }
+
+    #[test]
+    fn kafka_topic_rejects_overlength() {
+        let s = "a".repeat(250);
+        assert!(validate_kafka_topic(&s).is_err());
+    }
+
+    #[test]
+    fn kafka_topic_accepts_exactly_249_chars() {
+        // Boundary — `> 249` triggers rejection; exactly 249 must pass.
+        let s = "a".repeat(249);
+        assert!(validate_kafka_topic(&s).is_ok());
+    }
+
+    #[test]
+    fn kafka_topic_rejects_leading_dot() {
+        // Defense against shell/HTTP path traversal when the topic is
+        // interpolated into a URL.
+        assert!(validate_kafka_topic(".hidden").is_err());
+    }
+
+    #[test]
+    fn kafka_topic_rejects_double_dot() {
+        assert!(validate_kafka_topic("foo..bar").is_err());
+    }
+
+    #[test]
+    fn kafka_topic_rejects_disallowed_chars() {
+        // Slash, space, plus signs — common HTTP-path / URL-encoding traps.
+        for bad in ["foo/bar", "foo bar", "foo+bar", "foo:bar", "foo*"] {
+            assert!(
+                validate_kafka_topic(bad).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn kafka_topic_rejects_non_ascii() {
+        // Unicode word chars look "alphanumeric" in some checkers but
+        // Kafka rejects them; lock the ASCII-only contract in.
+        assert!(validate_kafka_topic("audit-日志").is_err());
+    }
+}
