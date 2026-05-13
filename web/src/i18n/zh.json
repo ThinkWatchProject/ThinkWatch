@@ -577,6 +577,10 @@
     "discoverAuthRequired": "此服务器需要用户授权才能发现工具。在「我的连接」连接账号后会自动获取你的工具列表。",
     "toolsCountAuthRequiredHint": "此服务器需要用户授权——工具按用户存储，不在系统级目录中显示。",
     "discoverFailed": "发现工具失败",
+    "discoverFailedDetail": {
+      "title": "发现工具失败",
+      "unknown": "发现失败但未返回错误详情。请查看服务器日志。"
+    },
     "deleteConfirm": "删除此 MCP 服务器？所有用户为此服务器保存的凭证（OAuth tokens、静态令牌、account label）都会一并被清除；正在使用其工具的 AI agent 会立即开始失败。此操作不可撤销。",
     "noServers": "尚未注册任何 MCP 服务器。",
     "noServersHint": "注册服务器以开始使用 MCP 工具。",

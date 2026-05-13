@@ -105,8 +105,9 @@ export function McpServersPage() {
     setDiscoveringId(id);
     try {
       const res = await apiPost<{
-        status: 'discovery_complete' | 'auth_required';
+        status: 'discovery_complete' | 'auth_required' | 'discovery_failed';
         tools_discovered: number;
+        error?: string;
       }>(`/api/mcp/servers/${id}/discover`, {});
       if (res.status === 'auth_required') {
         // Not an error — auth-required servers can't expose their
@@ -114,6 +115,13 @@ export function McpServersPage() {
         // they connect via /connections. Use info toast (neutral),
         // not error (red).
         toast.info(t('mcpServers.discoverAuthRequired'));
+      } else if (res.status === 'discovery_failed') {
+        // Surface the underlying error string so admins can tell
+        // whether it was a network timeout, a 5xx, a malformed
+        // response, etc. The server bounded the length already.
+        toast.error(t('mcpServers.discoverFailedDetail.title'), {
+          description: res.error ?? t('mcpServers.discoverFailedDetail.unknown'),
+        });
       } else {
         toast.success(
           t('mcpServers.discoverSuccess', { count: res.tools_discovered }),
