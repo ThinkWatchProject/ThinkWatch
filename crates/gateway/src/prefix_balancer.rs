@@ -213,7 +213,9 @@ mod tests {
         let providers: Vec<Arc<dyn DynAiProvider>> = (0..backends)
             .map(|i| {
                 let name = Box::leak(format!("p{i}").into_boxed_str()) as &'static str;
-                Arc::new(DummyProvider { provider_name: name }) as Arc<dyn DynAiProvider>
+                Arc::new(DummyProvider {
+                    provider_name: name,
+                }) as Arc<dyn DynAiProvider>
             })
             .collect();
         PrefixBalancer::new(providers, prefix_length)
@@ -339,9 +341,7 @@ mod tests {
         // Hash mod len must always produce a valid index. Sweep a bunch
         // of different prefixes to make sure no path returns >= len.
         let b = balancer(3, 10);
-        for prompt in [
-            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta",
-        ] {
+        for prompt in ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta"] {
             let r = req(vec![user_msg(prompt)]);
             let idx = b.select_backend(&r).await;
             assert!(idx < 3, "{prompt} → idx {idx} out of bounds for len 3");

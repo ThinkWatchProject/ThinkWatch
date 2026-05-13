@@ -519,10 +519,7 @@ mod tests {
         let out = html_escape(payload);
         assert!(!out.contains("<script>"));
         assert!(!out.contains("</script>"));
-        assert_eq!(
-            out,
-            "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
-        );
+        assert_eq!(out, "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;");
     }
 
     #[test]
@@ -583,9 +580,6 @@ mod tests {
         let key = [7u8; 32];
         let a = state_nonce_binding(&key, "ab", "cd");
         let b = state_nonce_binding(&key, "a", "bcd");
-        assert_ne!(
-            a, b,
-            "delimiter must prevent boundary-shift collision"
-        );
+        assert_ne!(a, b, "delimiter must prevent boundary-shift collision");
     }
 }

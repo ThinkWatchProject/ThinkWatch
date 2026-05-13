@@ -1107,7 +1107,10 @@ mod tests {
         for (name, _) in SYSTEM_ROLE_DEFAULTS {
             let policy = system_role_default_policy(name)
                 .unwrap_or_else(|| panic!("{name} default policy failed to parse"));
-            assert!(policy["Statement"].is_array(), "{name} missing Statement array");
+            assert!(
+                policy["Statement"].is_array(),
+                "{name} missing Statement array"
+            );
         }
     }
 

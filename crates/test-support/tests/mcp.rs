@@ -7,6 +7,8 @@
 
 use serde_json::Value;
 use think_watch_test_support::prelude::*;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn pick_list(value: &Value) -> Option<&Vec<Value>> {
     value
@@ -164,6 +166,57 @@ async fn mcp_tools_endpoint_returns_array_for_authenticated_user() {
     // and be empty.
     let arr = pick_list(&json).expect("tools list");
     assert!(arr.is_empty(), "expected empty tools list, got: {arr:?}");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn discover_failure_returns_structured_error_detail() {
+    // Stand up a wiremock that returns 500 for `tools/list` — the
+    // discover handler should surface the underlying error string in
+    // the new `discovery_failed` discriminator instead of collapsing
+    // it into a generic 400.
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+
+    let upstream = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/mcp"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("upstream is on fire"))
+        .mount(&upstream)
+        .await;
+
+    // Insert directly via fixtures — the public POST /api/mcp/servers
+    // route's SSRF guard rejects 127.0.0.1, where wiremock listens.
+    let server_id = fixtures::create_mcp_server_with(
+        &app.db,
+        &unique_name("fail"),
+        "failns",
+        &format!("{}/mcp", upstream.uri()),
+        fixtures::McpServerOpts::default(),
+    )
+    .await
+    .unwrap();
+
+    let resp = con
+        .post(&format!("/api/mcp/servers/{server_id}/discover"), json!({}))
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let body: Value = resp.json().unwrap();
+    assert_eq!(
+        body["status"], "discovery_failed",
+        "expected discovery_failed discriminator, got: {body}"
+    );
+    assert_eq!(body["server_id"], server_id.to_string());
+    assert_eq!(body["tools_discovered"], 0);
+    let err = body["error"]
+        .as_str()
+        .expect("error field must be a string");
+    assert!(
+        err.contains("500"),
+        "error should reference upstream HTTP 500, got: {err}"
+    );
+    assert!(err.len() <= 500 + 4, "error must be bounded: {err}");
 }
 
 #[ignore = "integration test — run via `make test-it`"]

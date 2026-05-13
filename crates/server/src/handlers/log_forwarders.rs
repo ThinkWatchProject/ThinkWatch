@@ -689,12 +689,7 @@ mod tests {
     #[test]
     fn host_port_blocks_localhost_alias() {
         // SSRF defense — operator can't proxy syslog at the gateway itself.
-        for h in [
-            "localhost:514",
-            "127.0.0.1:514",
-            "0.0.0.0:514",
-            "::1:514",
-        ] {
+        for h in ["localhost:514", "127.0.0.1:514", "0.0.0.0:514", "::1:514"] {
             assert!(
                 validate_host_port(h).is_err(),
                 "{h} should be blocked but wasn't"

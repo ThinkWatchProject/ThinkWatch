@@ -190,8 +190,7 @@ pub async fn list_tools(
         ("id" = uuid::Uuid, Path, description = "MCP server ID to run tool discovery against"),
     ),
     responses(
-        (status = 200, description = "Discovery result with count of discovered tools"),
-        (status = 400, description = "Discovery failed"),
+        (status = 200, description = "Discovery result: discriminated union with `status` in {discovery_complete, auth_required, discovery_failed}. Non-2xx statuses are reserved for auth/permission/lookup errors."),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Forbidden"),
         (status = 404, description = "Server not found"),
@@ -250,7 +249,23 @@ pub async fn discover_tools(
             })))
         }
         SystemDiscoveryOutcome::Failed(e) => {
-            Err(AppError::BadRequest(format!("Tool discovery failed: {e}")))
+            // Return the underlying error so admins can tell whether the
+            // failure was a network timeout, a 5xx, a malformed response,
+            // etc. Match the `auth_required` shape (200 OK with a
+            // discriminated `status`) so the frontend can surface the
+            // detail in a single try-branch. The error string is bounded
+            // to keep log floods and oversize toasts in check.
+            let mut detail = e.to_string().trim().to_string();
+            const MAX_ERROR_LEN: usize = 500;
+            if detail.chars().count() > MAX_ERROR_LEN {
+                detail = detail.chars().take(MAX_ERROR_LEN).collect::<String>() + "…";
+            }
+            Ok(Json(serde_json::json!({
+                "status": "discovery_failed",
+                "server_id": server_id,
+                "tools_discovered": 0,
+                "error": detail,
+            })))
         }
     }
 }
