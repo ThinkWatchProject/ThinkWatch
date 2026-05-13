@@ -1278,4 +1278,54 @@ mod helper_tests {
         assert_eq!(csv_escape("a,b"), "\"a,b\"");
         assert_eq!(csv_escape("line1\nline2"), "\"line1\nline2\"");
     }
+
+    /// CostStats serializes Decimal fields as JSON strings (not
+    /// numbers) so the JS side can feed them straight into decimal.js
+    /// without round-tripping through f64. The Costs page relies on
+    /// `total_cost` (period-scoped) and `prev_total_cost` (prior
+    /// equal-length window) to render the period card + delta badge —
+    /// regressions here silently break that UI.
+    #[test]
+    fn cost_stats_serializes_decimal_fields_as_strings() {
+        use rust_decimal::prelude::FromStr;
+        let stats = CostStats {
+            total_cost: Decimal::from_str("12.3456789012").unwrap(),
+            budget_usage_pct: Some(42.5),
+            cost_buckets: vec![CostBucket(Decimal::from_str("1.0").unwrap())],
+            range: "7d".into(),
+            total_cost_mtd: Decimal::from_str("100.0000000001").unwrap(),
+            prev_total_cost: Some(Decimal::from_str("8.0000000000").unwrap()),
+        };
+        let v: serde_json::Value = serde_json::to_value(&stats).expect("serializes");
+        // Every money field is a string — never a JSON number.
+        assert_eq!(v["total_cost"], serde_json::json!("12.3456789012"));
+        assert_eq!(v["total_cost_mtd"], serde_json::json!("100.0000000001"));
+        assert_eq!(v["prev_total_cost"], serde_json::json!("8.0000000000"));
+        // Per-bucket cost is a string too (transparent newtype on Decimal).
+        assert_eq!(v["cost_buckets"], serde_json::json!(["1.0"]));
+        // Budget percentage stays a number — it's a ratio, not money.
+        assert!(v["budget_usage_pct"].is_number());
+        assert_eq!(v["range"], serde_json::json!("7d"));
+    }
+
+    /// When `compare=false` the handler emits `prev_total_cost: None`,
+    /// which must drop the field entirely (rather than emit
+    /// `prev_total_cost: null`). The frontend treats "missing" as
+    /// "hide the delta badge" via `prev_total_cost != null`.
+    #[test]
+    fn cost_stats_omits_prev_when_not_compared() {
+        let stats = CostStats {
+            total_cost: Decimal::ZERO,
+            budget_usage_pct: None,
+            cost_buckets: vec![],
+            range: "24h".into(),
+            total_cost_mtd: Decimal::ZERO,
+            prev_total_cost: None,
+        };
+        let s = serde_json::to_string(&stats).expect("serializes");
+        assert!(
+            !s.contains("prev_total_cost"),
+            "prev_total_cost must be skipped when None, got: {s}"
+        );
+    }
 }

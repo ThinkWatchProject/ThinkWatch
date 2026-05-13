@@ -9,7 +9,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { DollarSign, TrendingUp, AlertCircle, Download, ChevronDown } from 'lucide-react';
+import { DollarSign, TrendingUp, TrendingDown, AlertCircle, Download, ChevronDown } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { api } from '@/lib/api';
@@ -51,6 +51,12 @@ const TIME_RANGE_OPTIONS: readonly TimeRange[] = ['24h', '7d', '30d', 'mtd'] as 
 interface CostStats {
   total_cost_mtd: string;
   budget_usage_pct: number | null;
+  // Period-scoped totals from the same `range` the chart is showing.
+  // Wire format is a Decimal string (rust_decimal::serde::str on the
+  // server) so JS never sees an f64. Both fields are optional because
+  // older payloads / non-compare requests may omit them.
+  total_cost?: string;
+  prev_total_cost?: string;
 }
 
 /** Extract the display value for a dimension from a CostRow. */
@@ -104,9 +110,20 @@ export function CostsPage() {
 
   const fetchData = useCallback(() => {
     setLoading(true);
+    // Cost-stats endpoint accepts `range=24h|7d|30d` (anything else
+    // — including `mtd` — falls back to 24h server-side). Forward the
+    // page's range so the period total + delta match the chart, and
+    // request `compare=true` to populate `prev_total_cost`.
+    const statsParams = new URLSearchParams();
+    if (selectedTeam) statsParams.set('team_id', selectedTeam);
+    if (timeRange !== 'mtd') {
+      statsParams.set('range', timeRange);
+      statsParams.set('compare', 'true');
+    }
+    const statsQs = statsParams.toString();
     Promise.all([
       api<{ items: CostRow[]; total: { request_count: number; input_tokens: number; output_tokens: number; total_cost: string } }>(`/api/analytics/costs${queryString()}`),
-      api<CostStats>(`/api/analytics/costs/stats${selectedTeam ? `?team_id=${selectedTeam}` : ''}`),
+      api<CostStats>(`/api/analytics/costs/stats${statsQs ? `?${statsQs}` : ''}`),
     ])
       .then(([costData, statsData]) => {
         setRows(costData.items);
@@ -114,7 +131,7 @@ export function CostsPage() {
       })
       .catch((err) => setError(err instanceof Error ? err.message : t('common.error')))
       .finally(() => setLoading(false));
-  }, [queryString, selectedTeam]);
+  }, [queryString, selectedTeam, timeRange, t]);
 
   useEffect(() => {
     fetchData();
@@ -172,6 +189,25 @@ export function CostsPage() {
     [rows],
   );
   const budgetPct = stats.budget_usage_pct ?? 0;
+
+  // Period-scoped total + delta vs. the previous equal-length window.
+  // MTD has its own card already, so the period card only renders for
+  // 24h / 7d / 30d. Everything stays in `Decimal` so the precision
+  // story matches the rest of the page.
+  const showPeriodCard = timeRange !== 'mtd';
+  const periodTotal = useMemo(
+    () =>
+      stats.total_cost != null ? new Decimal(stats.total_cost) : null,
+    [stats.total_cost],
+  );
+  const periodDeltaPct = useMemo(() => {
+    if (!periodTotal || stats.prev_total_cost == null) return null;
+    const prev = new Decimal(stats.prev_total_cost);
+    // Avoid divide-by-zero; the hint is irrelevant when there was no
+    // prior spend to compare against.
+    if (prev.isZero()) return null;
+    return periodTotal.minus(prev).dividedBy(prev).times(100);
+  }, [periodTotal, stats.prev_total_cost]);
 
   // ---- Pivot table data (2-dimension mode) ----
   const pivotData = useMemo(() => {
@@ -298,7 +334,7 @@ export function CostsPage() {
         </div>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-2">
+      <div className={`grid gap-4 ${showPeriodCard ? 'md:grid-cols-3' : 'md:grid-cols-2'}`}>
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium">{t('analyticsCosts.totalCostMtd')}</CardTitle>
@@ -310,6 +346,56 @@ export function CostsPage() {
             </div>
           </CardContent>
         </Card>
+        {showPeriodCard && (
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between pb-2">
+              <CardTitle className="text-sm font-medium">
+                {t('analyticsCosts.period.title', { range: t(`analyticsCosts.range_${timeRange}`) })}
+              </CardTitle>
+              <DollarSign className="h-4 w-4 text-muted-foreground" />
+            </CardHeader>
+            <CardContent>
+              <div className="flex items-center gap-2">
+                <div className="text-2xl font-bold">
+                  {loading || periodTotal == null ? (
+                    <Skeleton className="h-8 w-24" />
+                  ) : (
+                    `$${periodTotal.toFixed(2)}`
+                  )}
+                </div>
+                {!loading && periodDeltaPct != null && (
+                  <Badge
+                    variant="secondary"
+                    className={
+                      periodDeltaPct.isNegative()
+                        ? 'gap-1 bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300'
+                        : 'gap-1 bg-red-100 text-red-800 dark:bg-red-900/40 dark:text-red-300'
+                    }
+                    aria-label={
+                      periodDeltaPct.isNegative()
+                        ? t('analyticsCosts.period.deltaDown', { pct: periodDeltaPct.abs().toFixed(1) })
+                        : t('analyticsCosts.period.deltaUp', { pct: periodDeltaPct.toFixed(1) })
+                    }
+                  >
+                    {periodDeltaPct.isNegative() ? (
+                      <TrendingDown className="h-3 w-3" />
+                    ) : (
+                      <TrendingUp className="h-3 w-3" />
+                    )}
+                    {periodDeltaPct.isNegative()
+                      ? `-${periodDeltaPct.abs().toFixed(1)}%`
+                      : `+${periodDeltaPct.toFixed(1)}%`}
+                  </Badge>
+                )}
+                {!loading && periodDeltaPct == null && periodTotal != null && (
+                  <span className="text-xs text-muted-foreground">
+                    {t('analyticsCosts.period.noPrior')}
+                  </span>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium">{t('analyticsCosts.budgetUsage')}</CardTitle>

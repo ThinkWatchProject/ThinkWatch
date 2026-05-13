@@ -841,7 +841,13 @@
     "pivotTotal": "Total",
     "dimRow": "Row",
     "dimCol": "Col",
-    "dimHint": "Select up to 2 dimensions"
+    "dimHint": "Select up to 2 dimensions",
+    "period": {
+      "title": "Period total ({{range}})",
+      "deltaUp": "Up {{pct}}% vs. previous period",
+      "deltaDown": "Down {{pct}}% vs. previous period",
+      "noPrior": "no prior period"
+    }
   },
   "limits": {
     "title": "Rate limits & budgets",
