@@ -7,7 +7,7 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Separator } from '@/components/ui/separator';
-import { Lock, LogOut, Trash2, ShieldCheck, AlertCircle } from 'lucide-react';
+import { Lock, LogOut, Trash2, ShieldCheck, AlertCircle, Copy, Check, Download } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiDelete } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -45,6 +45,7 @@ export function ProfilePage() {
   const [totpDisablePassword, setTotpDisablePassword] = useState('');
   const [totpDisableError, setTotpDisableError] = useState('');
   const [disableDialogOpen, setDisableDialogOpen] = useState(false);
+  const [codesCopied, setCodesCopied] = useState(false);
 
   useEffect(() => {
     api<{ enabled: boolean; required: boolean }>('/api/auth/totp/status')
@@ -82,6 +83,26 @@ export function ProfilePage() {
     } finally {
       setTotpVerifyLoading(false);
     }
+  };
+
+  const handleCopyRecoveryCodes = async () => {
+    if (!totpSetup) return;
+    await navigator.clipboard.writeText(totpSetup.recovery_codes.join('\n'));
+    setCodesCopied(true);
+    setTimeout(() => setCodesCopied(false), 2000);
+  };
+
+  const handleDownloadRecoveryCodes = () => {
+    if (!totpSetup) return;
+    const blob = new Blob([totpSetup.recovery_codes.join('\n') + '\n'], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'thinkwatch-recovery-codes.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
   const handleTotpDisable = async () => {
@@ -278,8 +299,8 @@ export function ProfilePage() {
                     {t('auth.totpManualEntry', 'Manual entry')}
                   </CollapsibleTrigger>
                   <CollapsibleContent>
-                    <code className="mt-1 block rounded bg-muted p-2 break-all">
-                      {totpSetup.otpauth_uri}
+                    <code className="mt-1 block rounded bg-muted p-2 break-all font-mono tracking-wider">
+                      {totpSetup.secret}
                     </code>
                   </CollapsibleContent>
                 </Collapsible>
@@ -290,6 +311,16 @@ export function ProfilePage() {
                   {totpSetup.recovery_codes.map((code) => (
                     <code key={code} className="text-xs font-mono">{code}</code>
                   ))}
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <Button type="button" variant="outline" size="sm" onClick={handleCopyRecoveryCodes}>
+                    {codesCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                    {codesCopied ? t('common.copied') : t('auth.totpCopyCodes')}
+                  </Button>
+                  <Button type="button" variant="outline" size="sm" onClick={handleDownloadRecoveryCodes}>
+                    <Download className="h-3.5 w-3.5" />
+                    {t('auth.totpDownloadCodes')}
+                  </Button>
                 </div>
                 <p className="text-xs text-muted-foreground">{t('auth.totpRecoveryWarning')}</p>
               </div>
@@ -313,9 +344,19 @@ export function ProfilePage() {
                     required
                   />
                 </div>
-                <Button type="submit" disabled={totpVerifyLoading}>
-                  {totpVerifyLoading ? t('common.loading') : t('auth.totpVerify')}
-                </Button>
+                <div className="flex gap-2">
+                  <Button type="submit" disabled={totpVerifyLoading}>
+                    {totpVerifyLoading ? t('common.loading') : t('auth.totpVerify')}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => { setTotpSetup(null); setTotpVerifyCode(''); setTotpVerifyError(''); }}
+                    disabled={totpVerifyLoading}
+                  >
+                    {t('common.cancel')}
+                  </Button>
+                </div>
               </form>
             </div>
           ) : (

@@ -236,7 +236,9 @@
     "totpRecoveryWarning": "Save these codes in a safe place. Each code can only be used once.",
     "totpCode": "Authentication Code",
     "totpHint": "Enter the 6-digit code from your authenticator app, or a recovery code.",
-    "totpVerify": "Verify & Enable"
+    "totpVerify": "Verify & Enable",
+    "totpCopyCodes": "Copy codes",
+    "totpDownloadCodes": "Download .txt"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -1183,6 +1185,7 @@
     "title": "Settings",
     "subtitle": "System configuration and integrations",
     "partialLoadFailure": "Some settings failed to load: {{what}}. You may be viewing partial data — refresh or check your permissions.",
+    "notConfigured": "Not configured",
     "loadKey": {
       "serverInfo": "server info",
       "auditConfig": "audit config",

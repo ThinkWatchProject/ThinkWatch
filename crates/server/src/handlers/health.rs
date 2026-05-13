@@ -104,7 +104,11 @@ pub async fn sso_status(State(state): State<AppState>) -> Json<Value> {
 pub struct ServiceHealth {
     pub postgres: bool,
     pub redis: bool,
-    pub clickhouse: bool,
+    /// `None` when ClickHouse is not configured for this deployment;
+    /// `Some(true)`/`Some(false)` when configured and reachable / not.
+    /// Distinguishing the two prevents the frontend from reporting a
+    /// CH-less deployment as permanently degraded.
+    pub clickhouse: Option<bool>,
     pub pg_latency_ms: Option<i64>,
     pub redis_latency_ms: Option<i64>,
     pub clickhouse_latency_ms: Option<i64>,
@@ -131,13 +135,14 @@ pub async fn api_health_check(State(state): State<AppState>) -> Response {
     };
     let redis_latency = redis_start.elapsed().as_millis() as i64;
 
-    // ClickHouse — use SDK client if available
-    let (ch_ok, ch_latency) = if let Some(ref ch) = state.clickhouse {
+    // ClickHouse — `None` if the deployment doesn't configure it; otherwise
+    // the ping result so the UI can distinguish "not configured" from "down".
+    let (ch_status, ch_latency) = if let Some(ref ch) = state.clickhouse {
         let ch_start = std::time::Instant::now();
         let ok = ch.query("SELECT 1").fetch_one::<u8>().await.is_ok();
-        (ok, Some(ch_start.elapsed().as_millis() as i64))
+        (Some(ok), Some(ch_start.elapsed().as_millis() as i64))
     } else {
-        (false, None)
+        (None, None)
     };
 
     // Pool stats
@@ -149,7 +154,7 @@ pub async fn api_health_check(State(state): State<AppState>) -> Response {
     let health = ServiceHealth {
         postgres: pg_ok,
         redis: redis_ok,
-        clickhouse: ch_ok,
+        clickhouse: ch_status,
         pg_latency_ms: if pg_ok { Some(pg_latency) } else { None },
         redis_latency_ms: if redis_ok { Some(redis_latency) } else { None },
         clickhouse_latency_ms: ch_latency,

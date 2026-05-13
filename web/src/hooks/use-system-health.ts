@@ -4,7 +4,9 @@ import { api } from '@/lib/api';
 interface HealthPayload {
   postgres: boolean;
   redis: boolean;
-  clickhouse: boolean;
+  // null when ClickHouse isn't configured for this deployment; in that
+  // case it must NOT count against system health.
+  clickhouse: boolean | null;
 }
 
 export type SystemStatus = 'operational' | 'degraded' | 'down' | 'unknown';
@@ -25,8 +27,10 @@ export function useSystemHealth(): SystemStatus {
           no401Redirect: true,
         });
         if (cancelled) return;
-        const up = [h.postgres, h.redis, h.clickhouse].filter(Boolean).length;
-        setStatus(up === 3 ? 'operational' : up === 0 ? 'down' : 'degraded');
+        const services: boolean[] = [h.postgres, h.redis];
+        if (h.clickhouse !== null) services.push(h.clickhouse);
+        const up = services.filter(Boolean).length;
+        setStatus(up === services.length ? 'operational' : up === 0 ? 'down' : 'degraded');
       } catch {
         if (cancelled) return;
         setStatus('down');

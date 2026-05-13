@@ -66,7 +66,7 @@ export function SettingsPage() {
 
   // Read-only state from dedicated endpoints
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
-  const [health, setHealth] = useState<{ postgres: boolean; redis: boolean; clickhouse: boolean } | null>(null);
+  const [health, setHealth] = useState<{ postgres: boolean; redis: boolean; clickhouse: boolean | null } | null>(null);
   const [auditConfig, setAuditConfig] = useState<AuditConfig | null>(null);
 
   // Editable settings from GET /api/admin/settings
@@ -204,7 +204,7 @@ export function SettingsPage() {
       api<SystemInfo>('/api/admin/settings/system').catch(tag('serverInfo', null)),
       api<AuditConfig>('/api/admin/settings/audit').catch(tag('auditConfig', null)),
       api<Record<string, SettingEntry[]>>('/api/admin/settings').catch(tag('settings', {})),
-      api<{ postgres: boolean; redis: boolean; clickhouse: boolean }>('/api/health').catch(tag('health', null)),
+      api<{ postgres: boolean; redis: boolean; clickhouse: boolean | null }>('/api/health').catch(tag('health', null)),
       api<{ items: { id: string; name: string }[] }>('/api/admin/roles').catch(tag('roles', { items: [] })),
     ])
       .then(([sys, audit, settings, hp, rolesData]) => {
@@ -390,15 +390,21 @@ export function SettingsPage() {
                           { name: 'Redis', key: 'redis' as const, icon: MemoryStick },
                           { name: 'ClickHouse', key: 'clickhouse' as const, icon: Search },
                         ].map((svc) => {
-                          const ok = health?.[svc.key] ?? false;
+                          const raw = health?.[svc.key];
+                          const notConfigured = raw === null;
+                          const ok = raw === true;
                           return (
                             <div key={svc.key} className="flex items-center justify-between rounded-md border px-3 py-2">
                               <div className="flex items-center gap-2">
                                 <svc.icon className="h-4 w-4 text-muted-foreground" />
                                 <span className="text-sm font-medium">{svc.name}</span>
                               </div>
-                              <Badge variant={ok ? 'default' : 'destructive'}>
-                                {ok ? t('common.healthy') : t('dashboard.unreachable')}
+                              <Badge variant={notConfigured ? 'outline' : ok ? 'default' : 'destructive'}>
+                                {notConfigured
+                                  ? t('settingsPage.notConfigured')
+                                  : ok
+                                    ? t('common.healthy')
+                                    : t('dashboard.unreachable')}
                               </Badge>
                             </div>
                           );

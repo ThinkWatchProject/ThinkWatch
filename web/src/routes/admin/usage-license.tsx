@@ -150,7 +150,7 @@ export function UsageLicensePage() {
                   <p className="text-xs text-muted-foreground">
                     {t('usageLicense.nextTierAt', {
                       tier: t(`usageLicense.tier.${data.next_tier.name.toLowerCase()}`),
-                      ceiling: fmtShort(data.current_tier.tokens_ceiling ?? 0),
+                      ceiling: fmtShort(data.next_tier.tokens_ceiling),
                     })}
                   </p>
                 )}

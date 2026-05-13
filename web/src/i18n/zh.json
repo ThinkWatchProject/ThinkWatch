@@ -236,7 +236,9 @@
     "totpRecoveryWarning": "请将这些代码保存在安全的地方，每个代码只能使用一次。",
     "totpCode": "验证码",
     "totpHint": "输入身份验证器中的 6 位数字代码，或使用恢复代码。",
-    "totpVerify": "验证并启用"
+    "totpVerify": "验证并启用",
+    "totpCopyCodes": "复制代码",
+    "totpDownloadCodes": "下载 .txt"
   },
   "dashboard": {
     "title": "仪表盘",
@@ -1183,6 +1185,7 @@
     "title": "设置",
     "subtitle": "系统配置和集成",
     "partialLoadFailure": "部分设置加载失败:{{what}}。你看到的可能是不完整的数据——请刷新或检查你的权限。",
+    "notConfigured": "未配置",
     "loadKey": {
       "serverInfo": "服务器信息",
       "auditConfig": "审计配置",
