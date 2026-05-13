@@ -173,3 +173,64 @@ pub async fn get_cost_forecast(
         trend_pct,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::days_in_month;
+
+    #[test]
+    fn standard_31_day_months() {
+        for m in [1, 3, 5, 7, 8, 10, 12] {
+            assert_eq!(days_in_month(2025, m), 31, "month {m} should be 31 days");
+        }
+    }
+
+    #[test]
+    fn standard_30_day_months() {
+        for m in [4, 6, 9, 11] {
+            assert_eq!(days_in_month(2025, m), 30, "month {m} should be 30 days");
+        }
+    }
+
+    #[test]
+    fn february_non_leap_year() {
+        assert_eq!(days_in_month(2025, 2), 28);
+        assert_eq!(days_in_month(2023, 2), 28);
+    }
+
+    #[test]
+    fn february_leap_year() {
+        // 2024 = divisible by 4, not by 100 → leap
+        assert_eq!(days_in_month(2024, 2), 29);
+        // 2000 = divisible by 400 → leap
+        assert_eq!(days_in_month(2000, 2), 29);
+    }
+
+    #[test]
+    fn february_century_non_leap() {
+        // 1900, 2100 = divisible by 100 but not 400 → NOT leap.
+        // Lock this in — common bug-magnet for hand-rolled implementations.
+        assert_eq!(days_in_month(1900, 2), 28);
+        assert_eq!(days_in_month(2100, 2), 28);
+    }
+
+    #[test]
+    fn december_to_january_wraps_year_correctly() {
+        // The implementation forms "next month" by adding 1 to month
+        // unless month == 12, in which case it advances to (year+1, 1).
+        // Verify both branches return correctly without an off-by-one
+        // or year overflow.
+        assert_eq!(days_in_month(2025, 12), 31);
+        assert_eq!(days_in_month(2025, 11), 30);
+    }
+
+    #[test]
+    fn invalid_month_falls_back_to_30() {
+        // Defensive: a month value outside 1..=12 makes
+        // `from_ymd_opt` return None, and the function falls back to
+        // 30 rather than panicking. Catches the case where a caller
+        // forgets that chrono::Datelike returns u32.
+        assert_eq!(days_in_month(2025, 13), 30);
+        assert_eq!(days_in_month(2025, 0), 30);
+    }
+}

@@ -31,7 +31,15 @@ const MAX_FIELD_LEN: usize = 4_000;
 fn truncate(s: Option<String>) -> Option<String> {
     s.map(|mut v| {
         if v.len() > MAX_FIELD_LEN {
-            v.truncate(MAX_FIELD_LEN);
+            // `String::truncate` panics if the cut isn't on a char
+            // boundary — for a UTF-8 string whose Nth byte falls
+            // mid-codepoint we'd crash the server on an inbound report.
+            // Walk back to the nearest boundary at or below MAX_FIELD_LEN.
+            let mut cut = MAX_FIELD_LEN;
+            while !v.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            v.truncate(cut);
             v.push_str("…[truncated]");
         }
         v
@@ -68,4 +76,66 @@ pub async fn report_client_error(
         "Client-side ErrorBoundary fired"
     );
     Ok(Json(serde_json::json!({ "status": "received" })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_FIELD_LEN, truncate};
+
+    #[test]
+    fn truncate_passes_through_none() {
+        assert_eq!(truncate(None), None);
+    }
+
+    #[test]
+    fn truncate_passes_through_short_string() {
+        let s = "a short error message".to_string();
+        assert_eq!(truncate(Some(s.clone())), Some(s));
+    }
+
+    #[test]
+    fn truncate_at_exactly_max_keeps_full_value() {
+        // `>` not `>=` — a string of exactly MAX_FIELD_LEN should NOT
+        // be truncated. Lock the boundary so a refactor to `>=` doesn't
+        // start appending the marker to every max-length string.
+        let s = "a".repeat(MAX_FIELD_LEN);
+        let out = truncate(Some(s.clone())).unwrap();
+        assert_eq!(out, s);
+        assert!(!out.contains("…[truncated]"));
+    }
+
+    #[test]
+    fn truncate_oversized_appends_marker() {
+        let s = "a".repeat(MAX_FIELD_LEN + 100);
+        let out = truncate(Some(s)).unwrap();
+        // The marker is appended AFTER truncating to MAX_FIELD_LEN bytes,
+        // so the final length is MAX_FIELD_LEN + marker.len().
+        let marker = "…[truncated]";
+        assert!(out.ends_with(marker));
+        assert_eq!(out.len(), MAX_FIELD_LEN + marker.len());
+    }
+
+    #[test]
+    fn truncate_walks_back_to_char_boundary_no_panic() {
+        // Pre-fix, `String::truncate(4000)` panicked if byte 4000 fell
+        // mid-codepoint. Construct exactly that case: 3998 ASCII bytes
+        // followed by a 4-byte char so the boundary at byte 4000 is
+        // mid-codepoint, and confirm we no longer crash.
+        let mut s = "a".repeat(MAX_FIELD_LEN - 2);
+        s.push('💥'); // 4 bytes → total = MAX + 2, byte 4000 is mid-char
+        let out = truncate(Some(s)).unwrap();
+        // The walked-back cut puts the marker at byte MAX_FIELD_LEN - 2.
+        assert!(out.ends_with("…[truncated]"));
+        assert!(out.is_char_boundary(out.len()));
+    }
+
+    #[test]
+    fn truncate_pure_ascii_unaffected_by_boundary_walk() {
+        // For ASCII, every byte IS a char boundary — the walk-back is a
+        // no-op. Cut should land exactly at MAX_FIELD_LEN.
+        let s = "a".repeat(MAX_FIELD_LEN + 50);
+        let out = truncate(Some(s)).unwrap();
+        let marker = "…[truncated]";
+        assert_eq!(out.len(), MAX_FIELD_LEN + marker.len());
+    }
 }

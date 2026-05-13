@@ -1616,3 +1616,88 @@ pub async fn list_remote_models(
 
     Ok(Json(resp.models.unwrap_or_default()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_overrides_pass_when_all_none() {
+        assert!(validate_routing_overrides(None, None, None).is_ok());
+    }
+
+    #[test]
+    fn routing_strategy_accepts_each_canonical_value() {
+        // Mirrors `crates/gateway/src/strategy.rs::RoutingStrategy` and
+        // the DB CHECK constraint — adding a new strategy here without
+        // updating either side would silently let the value through
+        // until SQL trips.
+        for ok in ["weighted", "latency", "health", "latency_health"] {
+            assert!(
+                validate_routing_overrides(Some(ok), None, None).is_ok(),
+                "{ok} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn routing_strategy_rejects_unknown_values() {
+        for bad in ["round_robin", "", "WEIGHTED", "random"] {
+            assert!(
+                validate_routing_overrides(Some(bad), None, None).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn affinity_mode_accepts_each_canonical_value() {
+        for ok in ["none", "provider", "route"] {
+            assert!(
+                validate_routing_overrides(None, Some(ok), None).is_ok(),
+                "{ok} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn affinity_mode_rejects_unknown_values() {
+        for bad in ["sticky", "", "PROVIDER"] {
+            assert!(
+                validate_routing_overrides(None, Some(bad), None).is_err(),
+                "{bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn affinity_ttl_accepts_zero_and_max() {
+        // 0 means "off"; 86400 (24h) is the documented upper bound.
+        assert!(validate_routing_overrides(None, None, Some(0)).is_ok());
+        assert!(validate_routing_overrides(None, None, Some(86400)).is_ok());
+    }
+
+    #[test]
+    fn affinity_ttl_rejects_negative() {
+        assert!(validate_routing_overrides(None, None, Some(-1)).is_err());
+    }
+
+    #[test]
+    fn affinity_ttl_rejects_above_86400() {
+        // Cap is one day — protect operators from accidentally pinning
+        // affinity for a week and not understanding why traffic stays
+        // skewed.
+        assert!(validate_routing_overrides(None, None, Some(86401)).is_err());
+        assert!(validate_routing_overrides(None, None, Some(i32::MAX)).is_err());
+    }
+
+    #[test]
+    fn routing_overrides_combine_independently() {
+        // All three fields valid together → ok. A failure on any single
+        // field returns immediately, but a happy-path combination must
+        // still pass.
+        assert!(
+            validate_routing_overrides(Some("latency"), Some("route"), Some(300)).is_ok()
+        );
+    }
+}
