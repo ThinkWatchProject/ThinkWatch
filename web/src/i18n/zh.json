@@ -1483,6 +1483,9 @@
     "dateTo": "结束日期",
     "pickDateRange": "选择日期范围",
     "rawJson": "原始 JSON",
+    "audit": {
+      "detailJson": "详情"
+    },
     "col": {
       "time": "时间",
       "model": "模型",
@@ -1500,6 +1503,7 @@
       "action": "操作",
       "resource": "资源",
       "ip": "IP",
+      "apiKeyId": "API 密钥",
       "method": "方法",
       "path": "路径",
       "port": "端口",

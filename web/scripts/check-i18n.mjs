@@ -61,7 +61,7 @@ const DYNAMIC_ENUMS = {
   'logs.col.${_}': [
     'time', 'model', 'provider', 'upstream', 'in', 'out', 'cost',
     'latency', 'status', 'tool', 'server', 'duration', 'user',
-    'action', 'resource', 'ip', 'method', 'path', 'port', 'level',
+    'action', 'resource', 'ip', 'apiKeyId', 'method', 'path', 'port', 'level',
     'target', 'message', 'span',
   ],
   // Tags emitted by the Promise.all loader in src/routes/admin/settings.tsx.

@@ -1483,6 +1483,9 @@
     "dateTo": "To",
     "pickDateRange": "Select date range",
     "rawJson": "Raw JSON",
+    "audit": {
+      "detailJson": "Detail"
+    },
     "col": {
       "time": "Time",
       "model": "Model",
@@ -1500,6 +1503,7 @@
       "action": "Action",
       "resource": "Resource",
       "ip": "IP",
+      "apiKeyId": "API key",
       "method": "Method",
       "path": "Path",
       "port": "Port",
