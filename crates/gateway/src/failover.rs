@@ -369,3 +369,201 @@ impl DynAiProvider for FailoverProvider {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::traits::*;
+    use futures::Stream;
+
+    struct DummyProvider {
+        name: &'static str,
+    }
+
+    impl AiProvider for DummyProvider {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn chat_completion(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse, GatewayError> {
+            Err(GatewayError::ProviderError("dummy".into()))
+        }
+
+        fn stream_chat_completion(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    fn backend(failure_threshold: u32) -> FailoverBackend {
+        let provider: Arc<dyn DynAiProvider> = Arc::new(DummyProvider { name: "dummy" });
+        FailoverBackend::new(provider, failure_threshold)
+    }
+
+    #[tokio::test]
+    async fn initial_state_is_closed() {
+        let b = backend(3);
+        let inner = b.inner.lock().await;
+        assert_eq!(inner.state, CbState::Closed);
+        assert_eq!(inner.consecutive_failures, 0);
+        assert_eq!(inner.half_open_successes, 0);
+    }
+
+    #[tokio::test]
+    async fn closed_stays_closed_below_threshold() {
+        let b = backend(3);
+        b.record_failure().await;
+        b.record_failure().await;
+        let inner = b.inner.lock().await;
+        assert_eq!(inner.state, CbState::Closed);
+        assert_eq!(inner.consecutive_failures, 2);
+    }
+
+    #[tokio::test]
+    async fn n_consecutive_failures_trip_open() {
+        let b = backend(3);
+        for _ in 0..3 {
+            b.record_failure().await;
+        }
+        let inner = b.inner.lock().await;
+        assert_eq!(inner.state, CbState::Open);
+        assert!(inner.last_failure.is_some());
+    }
+
+    #[tokio::test]
+    async fn success_resets_failure_counter_while_closed() {
+        let b = backend(3);
+        b.record_failure().await;
+        b.record_failure().await;
+        b.record_success().await;
+        let inner = b.inner.lock().await;
+        assert_eq!(inner.state, CbState::Closed);
+        assert_eq!(inner.consecutive_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn maybe_recover_is_noop_when_closed() {
+        let b = backend(3);
+        b.maybe_recover(0).await;
+        let inner = b.inner.lock().await;
+        assert_eq!(inner.state, CbState::Closed);
+    }
+
+    #[tokio::test]
+    async fn maybe_recover_holds_open_before_recovery_window() {
+        let b = backend(3);
+        for _ in 0..3 {
+            b.record_failure().await;
+        }
+        // 3600s window means we should NOT transition for a long time.
+        b.maybe_recover(3600).await;
+        let inner = b.inner.lock().await;
+        assert_eq!(inner.state, CbState::Open);
+    }
+
+    #[tokio::test]
+    async fn maybe_recover_transitions_open_to_half_open_after_window() {
+        let b = backend(3);
+        for _ in 0..3 {
+            b.record_failure().await;
+        }
+        // Force last_failure into the past so the elapsed check passes
+        // without needing a real wall-clock sleep.
+        {
+            let mut inner = b.inner.lock().await;
+            inner.last_failure = Some(Instant::now() - Duration::from_secs(120));
+        }
+        b.maybe_recover(60).await;
+        let inner = b.inner.lock().await;
+        assert_eq!(inner.state, CbState::HalfOpen);
+        // half_open_successes and consecutive_failures both zeroed on entry.
+        assert_eq!(inner.half_open_successes, 0);
+        assert_eq!(inner.consecutive_failures, 0);
+    }
+
+    #[tokio::test]
+    async fn half_open_failure_trips_back_to_open() {
+        let b = backend(3);
+        // Drop into HalfOpen directly.
+        {
+            let mut inner = b.inner.lock().await;
+            inner.state = CbState::HalfOpen;
+            inner.half_open_successes = 2;
+        }
+        b.record_failure().await;
+        let inner = b.inner.lock().await;
+        assert_eq!(inner.state, CbState::Open);
+        // Half-open success budget must reset so the next probe cycle
+        // starts from zero rather than carrying credit through Open.
+        assert_eq!(inner.half_open_successes, 0);
+        assert!(inner.last_failure.is_some());
+    }
+
+    #[tokio::test]
+    async fn half_open_closes_after_m_consecutive_successes() {
+        let b = backend(3);
+        // Enter HalfOpen.
+        {
+            let mut inner = b.inner.lock().await;
+            inner.state = CbState::HalfOpen;
+        }
+        // half_open_max defaults to 3 in FailoverBackend::new.
+        for _ in 0..3 {
+            b.record_success().await;
+        }
+        let inner = b.inner.lock().await;
+        assert_eq!(inner.state, CbState::Closed);
+        assert_eq!(inner.half_open_successes, 0);
+    }
+
+    #[tokio::test]
+    async fn record_success_in_open_state_recovers_gracefully() {
+        // Documented as "should not happen, but handle gracefully".
+        // Locks in the contract that an out-of-band success doesn't leave
+        // the breaker stuck Open forever.
+        let b = backend(3);
+        {
+            let mut inner = b.inner.lock().await;
+            inner.state = CbState::Open;
+        }
+        b.record_success().await;
+        let inner = b.inner.lock().await;
+        assert_eq!(inner.state, CbState::Closed);
+    }
+
+    #[tokio::test]
+    async fn is_healthy_fast_reflects_failure_count() {
+        let b = backend(3);
+        assert!(b.is_healthy_fast());
+        b.record_failure().await;
+        b.record_failure().await;
+        // Still under threshold.
+        assert!(b.is_healthy_fast());
+        b.record_failure().await;
+        assert!(!b.is_healthy_fast());
+    }
+
+    #[test]
+    fn is_retryable_only_for_transport_errors() {
+        assert!(FailoverProvider::is_retryable(&GatewayError::NetworkError(
+            "x".into()
+        )));
+        assert!(FailoverProvider::is_retryable(
+            &GatewayError::UpstreamAuthError
+        ));
+        assert!(FailoverProvider::is_retryable(
+            &GatewayError::UpstreamRateLimited
+        ));
+        // ProviderError represents a content-level failure (model-specific),
+        // not transport-level — retrying the same upstream would just
+        // reproduce the same answer.
+        assert!(!FailoverProvider::is_retryable(&GatewayError::ProviderError(
+            "x".into()
+        )));
+    }
+}

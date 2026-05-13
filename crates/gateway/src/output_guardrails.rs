@@ -100,4 +100,74 @@ mod tests {
         let err = apply_output_guardrails(&r, &rules).unwrap_err();
         assert!(matches!(err, GatewayError::TransformError(_)));
     }
+
+    #[test]
+    fn empty_rules_pass_any_response() {
+        let r = resp(&"x".repeat(10_000));
+        assert!(apply_output_guardrails(&r, &[]).is_ok());
+    }
+
+    #[test]
+    fn exactly_at_cap_passes() {
+        // `>` not `>=` — content of exactly max_chars must be allowed.
+        // Lock this in so an over-cautious refactor to `>=` is caught.
+        let r = resp(&"x".repeat(100));
+        let rules = [OutputGuardrail::MaxLength { max_chars: 100 }];
+        assert!(apply_output_guardrails(&r, &rules).is_ok());
+    }
+
+    #[test]
+    fn one_char_over_cap_rejects() {
+        let r = resp(&"x".repeat(101));
+        let rules = [OutputGuardrail::MaxLength { max_chars: 100 }];
+        assert!(apply_output_guardrails(&r, &rules).is_err());
+    }
+
+    #[test]
+    fn non_string_content_counts_as_zero() {
+        // Tool-call responses set content to a JSON array; the guardrail
+        // shouldn't blow up there — it should just count those choices
+        // as zero-length and let the rule decide.
+        let r = ChatCompletionResponse {
+            id: "id".into(),
+            object: "chat.completion".into(),
+            created: 0,
+            model: "m".into(),
+            choices: vec![Choice {
+                index: 0,
+                message: ChatMessage {
+                    role: "assistant".into(),
+                    content: serde_json::json!([{"type": "tool_use"}]),
+                },
+                finish_reason: None,
+            }],
+            usage: None,
+        };
+        let rules = [OutputGuardrail::MaxLength { max_chars: 5 }];
+        assert!(apply_output_guardrails(&r, &rules).is_ok());
+    }
+
+    #[test]
+    fn multi_choice_content_sums_across_choices() {
+        // n-best sampling: two choices, each 60 chars, summed = 120 > 100.
+        let r = ChatCompletionResponse {
+            id: "id".into(),
+            object: "chat.completion".into(),
+            created: 0,
+            model: "m".into(),
+            choices: (0..2)
+                .map(|i| Choice {
+                    index: i,
+                    message: ChatMessage {
+                        role: "assistant".into(),
+                        content: serde_json::Value::String("x".repeat(60)),
+                    },
+                    finish_reason: None,
+                })
+                .collect(),
+            usage: None,
+        };
+        let rules = [OutputGuardrail::MaxLength { max_chars: 100 }];
+        assert!(apply_output_guardrails(&r, &rules).is_err());
+    }
 }

@@ -15,7 +15,7 @@
 //! key with no cost_center tag.
 
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, header};
+use axum::http::{HeaderMap, HeaderValue, header};
 use axum::response::IntoResponse;
 use chrono::{DateTime, Datelike, Utc};
 use rust_decimal::Decimal;
@@ -176,7 +176,7 @@ pub async fn export_chargeback_csv(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        "text/csv; charset=utf-8".parse().unwrap(),
+        HeaderValue::from_static("text/csv; charset=utf-8"),
     );
     headers.insert(
         header::CONTENT_DISPOSITION,
@@ -186,7 +186,7 @@ pub async fn export_chargeback_csv(
             to.format("%Y%m%d"),
         )
         .parse()
-        .unwrap(),
+        .expect("YYYYMMDD dates produce ASCII-only header value"),
     );
     Ok((headers, body))
 }

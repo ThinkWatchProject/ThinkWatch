@@ -168,14 +168,21 @@ impl ChannelScheduler {
 }
 
 /// Select one channel from a group using weighted random.
+///
+/// Caller must guarantee the group is non-empty — `select_with_priority`
+/// returns `None` before reaching this, and `top_group` always contains the
+/// pivot channel.
 fn weighted_select(group: &[&Channel]) -> Arc<dyn DynAiProvider> {
+    let first = group
+        .first()
+        .expect("weighted_select called with empty group");
     if group.len() == 1 {
-        return Arc::clone(&group[0].provider);
+        return Arc::clone(&first.provider);
     }
 
     let total_weight: u32 = group.iter().map(|c| c.weight).sum();
     if total_weight == 0 {
-        return Arc::clone(&group[0].provider);
+        return Arc::clone(&first.provider);
     }
 
     let mut rng = rand::rng();
@@ -189,7 +196,8 @@ fn weighted_select(group: &[&Channel]) -> Arc<dyn DynAiProvider> {
         }
     }
 
-    Arc::clone(&group.last().unwrap().provider)
+    // Unreachable when total_weight > 0 — loop always crosses cumulative.
+    Arc::clone(&first.provider)
 }
 
 /// Shuffle channels in-place using weighted probability.
@@ -340,6 +348,22 @@ mod tests {
             "heavy should dominate: heavy={heavy_count}, light={light_count}"
         );
         assert!(light_count > 0, "light should get some selections");
+    }
+
+    #[tokio::test]
+    async fn zero_weight_group_falls_back_to_first_channel() {
+        // All-zero weights is degenerate config — caller still expects
+        // a selection rather than a hang or panic.
+        let scheduler = ChannelScheduler::new();
+        scheduler
+            .add_channel(make_channel("1", "first", 0, 0, vec!["gpt-4o"]))
+            .await;
+        scheduler
+            .add_channel(make_channel("2", "second", 0, 0, vec!["gpt-4o"]))
+            .await;
+
+        let provider = scheduler.select("gpt-4o").await.unwrap();
+        assert_eq!(provider.name(), "first");
     }
 
     #[tokio::test]
