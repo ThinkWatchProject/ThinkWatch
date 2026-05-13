@@ -249,7 +249,17 @@ WHERE slug IN (
     'filesystem', 'puppeteer',
     'memory', 'sequential-thinking',
     'brave-search', 'tavily',
-    'jira'
+    'jira',
+    -- Hosted MCPs that gate access by an explicit AI-client allowlist
+    -- (Vercel publishes a whitelist of approved clients; HubSpot,
+    -- Workato, and Canva ship their MCP as a marketplace app that
+    -- only approved client identities can install). ThinkWatch
+    -- registers each install via RFC 7591 DCR with a dynamic
+    -- client_id, which these providers reject by policy — the
+    -- problem is not localhost-vs-HTTPS, it's "you are not in the
+    -- approved list of AI clients". Drop them rather than ship
+    -- templates that 100% fail on install.
+    'vercel', 'hubspot', 'workato', 'canva'
 );
 
 -- Backfill deploy_command + deploy_docs_url for the self-deploy DB
@@ -278,19 +288,26 @@ UPDATE mcp_store_templates SET
     deploy_docs_url = 'https://github.com/mongodb-js/mongodb-mcp-server'
 WHERE slug = 'mongodb' AND deploy_command IS NULL;
 
--- Upgrade sentry and slack to point at their now-live hosted MCPs.
--- Their seed rows predate the hosted launches so they were stuck as
--- `deploy_type=manual` with no endpoint. Guarded so admin endpoint
--- overrides survive.
+-- Upgrade sentry to point at its now-live hosted MCP. The seed row
+-- predates the hosted launch so it was stuck as `deploy_type=manual`
+-- with no endpoint. Guarded so admin endpoint overrides survive.
+-- Slack is NOT upgraded similarly: slack.com/mcp is OAuth-only and
+-- behind Slack's app-marketplace allowlist (same shape as Vercel's
+-- approved-client list), so a DCR-registered ThinkWatch client can't
+-- complete authorization. Stick with the original manual + bot-token
+-- form (admin runs a self-hosted Slack MCP and pastes xoxb-…).
 UPDATE mcp_store_templates SET
     endpoint_template = 'https://mcp.sentry.dev/mcp',
     deploy_type       = 'hosted'
 WHERE slug = 'sentry' AND (endpoint_template IS NULL OR endpoint_template = '');
 
+-- One-shot revert for dev/test DBs that already ran the earlier
+-- (mistaken) slack hosted-upgrade. Idempotent — only fires on the
+-- exact bad state we wrote.
 UPDATE mcp_store_templates SET
-    endpoint_template = 'https://slack.com/mcp',
-    deploy_type       = 'hosted'
-WHERE slug = 'slack' AND (endpoint_template IS NULL OR endpoint_template = '');
+    endpoint_template = '',
+    deploy_type       = 'manual'
+WHERE slug = 'slack' AND endpoint_template = 'https://slack.com/mcp';
 
 -- Extended catalog: hosted MCPs vetted by curl probe (each endpoint
 -- returned a live HTTP code — 200/302/307/401/405 — indicating a real
@@ -306,16 +323,13 @@ INSERT INTO mcp_store_templates
 VALUES
 -- Developer
 ('atlassian',              'Atlassian (Jira + Confluence)', 'Manage Jira issues, sprints, project boards, and Confluence pages — one OAuth MCP for the whole suite',  'developer',     '{"project","agile","atlassian","wiki"}', 'https://mcp.atlassian.com/v1/mcp',         NULL, 'oauth',     NULL,                                                            'Click Install → authorize Atlassian via OAuth. Requires admin consent for the workspace.',                                                  'hosted', NULL, 'https://www.atlassian.com/blog/announcements/remote-mcp-server',                          true),
-('vercel',                 'Vercel',                        'Deploy, inspect projects, read build logs, manage environment variables',                                  'developer',     '{"deploy","frontend","serverless"}',     'https://mcp.vercel.com',                   NULL, 'oauth',     NULL,                                                            'Click Install → authorize Vercel via OAuth.',                                                                                                'hosted', NULL, 'https://vercel.com/docs/mcp',                                                              false),
 ('clerk',                  'Clerk',                         'Manage users, sessions, and authentication settings',                                                       'developer',     '{"auth","users","saas"}',                'https://mcp.clerk.com',                    NULL, 'static',    'https://dashboard.clerk.com/last-active?path=api-keys',         'Create a Clerk secret key in the dashboard and paste it.',                                                                                   'hosted', NULL, 'https://clerk.com/docs/integrations/mcp',                                                  false),
 -- Productivity
 ('stripe',                 'Stripe',                        'Payments — charges, customers, invoices, and subscriptions',                                                'productivity',  '{"payments","billing"}',                 'https://mcp.stripe.com',                   NULL, 'static',    'https://dashboard.stripe.com/apikeys',                          'Create a restricted API key in the Stripe dashboard. Read-only keys recommended for most agent use cases.',                                 'hosted', NULL, 'https://docs.stripe.com/mcp',                                                              true),
 ('paypal',                 'PayPal',                        'Payments, invoicing, disputes, and B2B operations',                                                         'productivity',  '{"payments","billing"}',                 'https://mcp.paypal.com/mcp',               NULL, 'oauth',     NULL,                                                            'Click Install → authorize PayPal via OAuth.',                                                                                                'hosted', NULL, 'https://developer.paypal.com/community/blog/paypal-mcp/',                                  false),
 ('square',                 'Square',                        'POS payments, orders, catalog, and customers',                                                              'productivity',  '{"payments","pos","commerce"}',          'https://mcp.squareup.com/sse',             NULL, 'oauth',     NULL,                                                            'Click Install → authorize Square via OAuth.',                                                                                                'hosted', NULL, 'https://developer.squareup.com/docs/mcp',                                                  false),
 ('plaid',                  'Plaid',                         'Banking data — accounts, transactions, balances (per-user audit critical)',                                  'productivity',  '{"banking","finance","payments"}',       'https://api.dashboard.plaid.com/mcp/sse',  NULL, 'oauth',     NULL,                                                            'Click Install → authorize via Plaid dashboard OAuth.',                                                                                       'hosted', NULL, 'https://plaid.com/docs/mcp/',                                                              false),
-('hubspot',                'HubSpot',                       'CRM — contacts, companies, deals, and tickets',                                                             'productivity',  '{"crm","sales","marketing"}',            'https://mcp.hubspot.com',                  NULL, 'oauth',     NULL,                                                            'Click Install → authorize HubSpot via OAuth.',                                                                                               'hosted', NULL, 'https://developers.hubspot.com/docs/mcp',                                                  false),
 ('asana',                  'Asana',                         'Tasks, projects, and team workload',                                                                        'productivity',  '{"project","tasks","collaboration"}',    'https://mcp.asana.com/sse',                NULL, 'oauth',     NULL,                                                            'Click Install → authorize Asana via OAuth.',                                                                                                 'hosted', NULL, 'https://developers.asana.com/docs/mcp',                                                    false),
-('canva',                  'Canva',                         'Design assets, brand templates, and content automation',                                                    'productivity',  '{"design","creative","branding"}',       'https://mcp.canva.com',                    NULL, 'oauth',     NULL,                                                            'Click Install → authorize Canva via OAuth.',                                                                                                 'hosted', NULL, 'https://www.canva.dev/docs/apps/mcp/',                                                     false),
 ('webflow',                'Webflow',                       'CMS items, site publishing, and SEO operations',                                                            'productivity',  '{"cms","web","design"}',                 'https://mcp.webflow.com/sse',              NULL, 'oauth',     NULL,                                                            'Click Install → authorize Webflow via OAuth.',                                                                                               'hosted', NULL, 'https://developers.webflow.com/data/docs/mcp',                                             false),
 -- Database
 ('mongodb-atlas',          'MongoDB Atlas',                 'Hosted MongoDB — clusters, collections, indexes, and queries via the official Atlas MCP',                   'database',      '{"nosql","document","cloud"}',           'https://mcp.mongodb.com',                  NULL, 'static',    'https://cloud.mongodb.com/v2#/account/access/api',              'Create an Atlas API key (Project → Access Manager → Create API Key) and paste it.',                                                          'hosted', NULL, 'https://www.mongodb.com/docs/mcp-server/',                                                 false),
@@ -333,8 +347,7 @@ VALUES
 ('exa',                    'Exa Search',                    'LLM-optimized semantic web search and content extraction',                                                  'utility',       '{"search","web","ai"}',                  'https://mcp.exa.ai',                       NULL, 'static',    'https://dashboard.exa.ai/api-keys',                             'Create an Exa API key in the dashboard and paste it.',                                                                                        'hosted', NULL, 'https://docs.exa.ai/reference/mcp',                                                        true),
 ('firecrawl',              'Firecrawl',                     'Crawl and scrape websites into clean Markdown',                                                             'utility',       '{"scraping","web","extract"}',           'https://mcp.firecrawl.dev',                NULL, 'static',    'https://www.firecrawl.dev/app/api-keys',                        'Create a Firecrawl API key in the dashboard and paste it.',                                                                                  'hosted', NULL, 'https://docs.firecrawl.dev/mcp',                                                           false),
 ('replicate',              'Replicate',                     'Run hosted ML models — image / video / audio generation',                                                   'utility',       '{"ai","models","inference"}',            'https://mcp.replicate.com',                NULL, 'static',    'https://replicate.com/account/api-tokens',                      'Create a Replicate API token and paste it.',                                                                                                  'hosted', NULL, 'https://replicate.com/docs/topics/mcp',                                                    false),
-('zapier',                 'Zapier',                        'Cross-system automation — trigger Zaps and call thousands of integrations from the agent',                  'utility',       '{"automation","ipaas","integration"}',   'https://mcp.zapier.com',                   NULL, 'oauth',     NULL,                                                            'Click Install → authorize Zapier via OAuth. Select which Zaps the agent is allowed to invoke.',                                              'hosted', NULL, 'https://zapier.com/mcp',                                                                   false),
-('workato',                'Workato',                       'Enterprise iPaaS automation — recipes and connectors across business apps',                                  'utility',       '{"automation","ipaas","enterprise"}',    'https://mcp.workato.com',                  NULL, 'oauth',     NULL,                                                            'Click Install → authorize Workato via OAuth.',                                                                                               'hosted', NULL, 'https://docs.workato.com/mcp.html',                                                        false)
+('zapier',                 'Zapier',                        'Cross-system automation — trigger Zaps and call thousands of integrations from the agent',                  'utility',       '{"automation","ipaas","integration"}',   'https://mcp.zapier.com',                   NULL, 'oauth',     NULL,                                                            'Click Install → authorize Zapier via OAuth. Select which Zaps the agent is allowed to invoke.',                                              'hosted', NULL, 'https://zapier.com/mcp',                                                                   false)
 ON CONFLICT (slug) DO NOTHING;
 
 -- MCP Store
