@@ -834,7 +834,13 @@
     "pivotTotal": "合计",
     "dimRow": "行",
     "dimCol": "列",
-    "dimHint": "最多选择 2 个维度"
+    "dimHint": "最多选择 2 个维度",
+    "period": {
+      "title": "周期总成本（{{range}}）",
+      "deltaUp": "较上一周期上升 {{pct}}%",
+      "deltaDown": "较上一周期下降 {{pct}}%",
+      "noPrior": "无上一周期数据"
+    }
   },
   "limits": {
     "title": "限速与配额",
