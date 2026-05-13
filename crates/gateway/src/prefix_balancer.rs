@@ -179,3 +179,179 @@ impl DynAiProvider for PrefixBalancer {
         self.backends[idx].stream_chat_completion(request)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::traits::{ChatCompletionChunk, ChatMessage};
+
+    struct DummyProvider {
+        provider_name: &'static str,
+    }
+
+    impl crate::providers::traits::AiProvider for DummyProvider {
+        fn name(&self) -> &str {
+            self.provider_name
+        }
+
+        async fn chat_completion(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Result<ChatCompletionResponse, GatewayError> {
+            Err(GatewayError::ProviderError("dummy".into()))
+        }
+
+        fn stream_chat_completion(
+            &self,
+            _request: ChatCompletionRequest,
+        ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
+            Box::pin(futures::stream::empty())
+        }
+    }
+
+    fn balancer(backends: usize, prefix_length: usize) -> PrefixBalancer {
+        let providers: Vec<Arc<dyn DynAiProvider>> = (0..backends)
+            .map(|i| {
+                let name = Box::leak(format!("p{i}").into_boxed_str()) as &'static str;
+                Arc::new(DummyProvider { provider_name: name }) as Arc<dyn DynAiProvider>
+            })
+            .collect();
+        PrefixBalancer::new(providers, prefix_length)
+    }
+
+    fn req(messages: Vec<ChatMessage>) -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "m".into(),
+            messages,
+            temperature: None,
+            max_tokens: None,
+            stream: None,
+            extra: serde_json::Value::Null,
+            caller_user_id: None,
+            caller_user_email: None,
+            trace_id: None,
+        }
+    }
+
+    fn user_msg(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "user".into(),
+            content: serde_json::Value::String(content.into()),
+        }
+    }
+
+    fn system_msg(content: &str) -> ChatMessage {
+        ChatMessage {
+            role: "system".into(),
+            content: serde_json::Value::String(content.into()),
+        }
+    }
+
+    #[test]
+    fn extract_prefix_takes_first_user_message() {
+        let b = balancer(2, 20);
+        let r = req(vec![
+            system_msg("You are a helpful assistant"),
+            user_msg("Hello world"),
+        ]);
+        assert_eq!(b.extract_prefix(&r), Some("Hello world".into()));
+    }
+
+    #[test]
+    fn extract_prefix_truncates_to_prefix_length() {
+        let b = balancer(2, 5);
+        let r = req(vec![user_msg("Hello world this is long")]);
+        assert_eq!(b.extract_prefix(&r), Some("Hello".into()));
+    }
+
+    #[test]
+    fn extract_prefix_concatenates_array_content_text_parts() {
+        // OpenAI-style multimodal: content is an array of {type, text}/{type, image_url}.
+        // Only the text parts contribute to the prefix — images are skipped.
+        let b = balancer(2, 100);
+        let r = req(vec![ChatMessage {
+            role: "user".into(),
+            content: serde_json::json!([
+                {"type": "text", "text": "Part one. "},
+                {"type": "image_url", "image_url": {"url": "data:..."}},
+                {"type": "text", "text": "Part two."},
+            ]),
+        }]);
+        assert_eq!(b.extract_prefix(&r), Some("Part one. Part two.".into()));
+    }
+
+    #[test]
+    fn extract_prefix_skips_empty_user_message_then_takes_next() {
+        // Defensive: an empty user message followed by a real one (e.g. caller
+        // building up history) should still produce the real prefix.
+        let b = balancer(2, 50);
+        let r = req(vec![
+            ChatMessage {
+                role: "user".into(),
+                content: serde_json::Value::String(String::new()),
+            },
+            user_msg("real question"),
+        ]);
+        assert_eq!(b.extract_prefix(&r), Some("real question".into()));
+    }
+
+    #[test]
+    fn extract_prefix_returns_none_when_no_user_message() {
+        let b = balancer(2, 50);
+        let r = req(vec![system_msg("just a system prompt")]);
+        assert_eq!(b.extract_prefix(&r), None);
+    }
+
+    #[test]
+    fn extract_prefix_handles_unicode_char_boundary() {
+        // `.chars().take(N)` not `[..N]` — locks in that we count graphemes,
+        // not bytes, so multi-byte chars don't panic at a non-boundary cut.
+        let b = balancer(2, 3);
+        let r = req(vec![user_msg("你好世界")]);
+        assert_eq!(b.extract_prefix(&r), Some("你好世".into()));
+    }
+
+    #[tokio::test]
+    async fn select_backend_is_sticky_for_same_prefix() {
+        // The first selection writes the mapping; every subsequent call
+        // with the same prefix MUST return the same backend, otherwise
+        // the KV-cache-affinity rationale collapses.
+        let b = balancer(4, 10);
+        let r = req(vec![user_msg("system prompt v1")]);
+        let first = b.select_backend(&r).await;
+        for _ in 0..20 {
+            assert_eq!(b.select_backend(&r).await, first);
+        }
+    }
+
+    #[tokio::test]
+    async fn select_backend_returns_zero_when_no_backends() {
+        // Defensive default — no backends means there's nothing to pick;
+        // returning 0 here matches the empty-request behavior so the caller
+        // hits the same `backends.is_empty()` guard in chat_completion_boxed.
+        let b = balancer(0, 10);
+        let r = req(vec![user_msg("anything")]);
+        assert_eq!(b.select_backend(&r).await, 0);
+    }
+
+    #[tokio::test]
+    async fn select_backend_indexes_within_bounds() {
+        // Hash mod len must always produce a valid index. Sweep a bunch
+        // of different prefixes to make sure no path returns >= len.
+        let b = balancer(3, 10);
+        for prompt in [
+            "alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta",
+        ] {
+            let r = req(vec![user_msg(prompt)]);
+            let idx = b.select_backend(&r).await;
+            assert!(idx < 3, "{prompt} → idx {idx} out of bounds for len 3");
+        }
+    }
+
+    #[tokio::test]
+    async fn select_backend_returns_zero_for_no_user_message() {
+        let b = balancer(3, 10);
+        let r = req(vec![system_msg("only a system prompt")]);
+        assert_eq!(b.select_backend(&r).await, 0);
+    }
+}
