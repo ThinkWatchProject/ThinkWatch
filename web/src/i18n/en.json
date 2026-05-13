@@ -477,7 +477,8 @@
       "notesPlaceholder": "Free-form admin note (optional)",
       "evenSplitTooltip": "Reset to even split",
       "liveStatus": "Live status",
-      "errorPctLabel": "Error rate"
+      "errorPctLabel": "Error rate",
+      "lifetimeLabel": "Lifetime: {{formatted}} requests"
     },
     "affinity": {
       "none": "None — every request routes fresh",

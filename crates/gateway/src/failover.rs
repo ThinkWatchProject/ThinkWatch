@@ -562,8 +562,8 @@ mod tests {
         // ProviderError represents a content-level failure (model-specific),
         // not transport-level — retrying the same upstream would just
         // reproduce the same answer.
-        assert!(!FailoverProvider::is_retryable(&GatewayError::ProviderError(
-            "x".into()
-        )));
+        assert!(!FailoverProvider::is_retryable(
+            &GatewayError::ProviderError("x".into())
+        ));
     }
 }

@@ -15,6 +15,11 @@
 //!     Empty / missing means "closed" (optimistic default). State
 //!     transitions are written atomically inside the Lua script
 //!     alongside the sample insert.
+//!   * `route_health:{route_id}:counters` — Hash. Currently a single
+//!     `lifetime_requests` field, `HINCRBY`-ed by 1 on every call.
+//!     Counts cumulative traffic the rolling-window `total` can't
+//!     express — operators tuning weights need to know whether a
+//!     route has actually carried any requests at all.
 //!
 //! ### Circuit-breaker semantics
 //!
@@ -37,7 +42,7 @@
 //! effective window shrinks, which is fine for breaker decisions.
 
 use fred::clients::Client;
-use fred::interfaces::{KeysInterface, LuaInterface, SortedSetsInterface};
+use fred::interfaces::{HashesInterface, KeysInterface, LuaInterface, SortedSetsInterface};
 use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
@@ -48,11 +53,13 @@ const SAMPLE_CAP: u32 = 1000;
 static SAMPLE_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Atomic record + breaker transition. Returns the post-update
-/// `(state, total, errs, ewma_ms_x100)` so the caller can include
-/// these in the decision log without a second round-trip.
+/// `(state, total, errs, ewma_ms_x100, lifetime_requests)` so the
+/// caller can include these in the decision log without a second
+/// round-trip.
 const LUA_RECORD: &str = r#"
 local samples_key  = KEYS[1]
 local state_key    = KEYS[2]
+local counters_key = KEYS[3]
 local now_ms       = tonumber(ARGV[1])
 local window_start = tonumber(ARGV[2])
 local member       = ARGV[3]
@@ -74,6 +81,10 @@ end
 -- Insert new sample.
 redis.call('ZADD', samples_key, now_ms, member)
 redis.call('EXPIRE', samples_key, math.max(60, open_secs * 4))
+
+-- Bump the cumulative lifetime counter. Persistent (no EXPIRE) —
+-- this is the all-time view the rolling window can't express.
+local lifetime = redis.call('HINCRBY', counters_key, 'lifetime_requests', 1)
 
 -- Tally rolling window from member names: format "<seq>:<lat>:<err>".
 local members = redis.call('ZRANGEBYSCORE', samples_key, window_start, '+inf')
@@ -139,7 +150,7 @@ if new_state == 'closed' and state == 'half_open' and is_error == 0 then
     ewma_num = latency_ms
 end
 
-return { new_state, total, errs, math.floor(ewma_num * 100) }
+return { new_state, total, errs, math.floor(ewma_num * 100), lifetime }
 "#;
 
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -149,6 +160,13 @@ pub struct RouteHealth {
     pub errors: u32,
     pub error_pct: f64,
     pub ewma_latency_ms: Option<f64>,
+    /// Cumulative all-time request count for this route. Survives
+    /// rolling-window expiry and circuit-breaker resets — operators
+    /// tuning weights use this to tell apart "no traffic yet" from
+    /// "quiet right now". `HINCRBY`-backed in Redis; persists across
+    /// gateway restarts since the counter hash carries no TTL.
+    #[serde(default)]
+    pub lifetime_requests: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -223,15 +241,21 @@ impl HealthTracker {
         let member = format!("{seq}:{latency_ms}:{}", if is_error { 1 } else { 0 });
         let samples_key = format!("route_health:{route_id}:samples");
         let state_key = format!("route_health:{route_id}:state");
+        let counters_key = format!("route_health:{route_id}:counters");
 
-        // Lua returns [state_string, total, errors, ewma_ms_x100].
-        // Decoded as a tuple of fred-supported scalar types — Vec of
-        // mixed-type Lua replies isn't directly FromValue-compatible.
-        let result: Result<(String, i64, i64, i64), _> = self
+        // Lua returns [state_string, total, errors, ewma_ms_x100,
+        // lifetime_requests]. Decoded as a tuple of fred-supported
+        // scalar types — Vec of mixed-type Lua replies isn't
+        // directly FromValue-compatible.
+        let result: Result<(String, i64, i64, i64, i64), _> = self
             .redis
             .eval(
                 LUA_RECORD,
-                vec![samples_key.as_str(), state_key.as_str()],
+                vec![
+                    samples_key.as_str(),
+                    state_key.as_str(),
+                    counters_key.as_str(),
+                ],
                 vec![
                     now_ms.to_string(),
                     window_start.to_string(),
@@ -248,7 +272,7 @@ impl HealthTracker {
             .await;
 
         match result {
-            Ok((state, total, errs, ewma_x100)) => {
+            Ok((state, total, errs, ewma_x100, lifetime)) => {
                 let total_u = total.max(0) as u32;
                 let errs_u = errs.max(0) as u32;
                 let error_pct = if total_u > 0 {
@@ -263,6 +287,7 @@ impl HealthTracker {
                     errors: errs_u,
                     error_pct,
                     ewma_latency_ms: if ewma > 0.0 { Some(ewma) } else { None },
+                    lifetime_requests: lifetime.max(0) as u64,
                 }
             }
             Err(e) => {
@@ -278,6 +303,7 @@ impl HealthTracker {
     pub async fn snapshot(&self, route_id: Uuid, window_secs: u32) -> RouteHealth {
         let samples_key = format!("route_health:{route_id}:samples");
         let state_key = format!("route_health:{route_id}:state");
+        let counters_key = format!("route_health:{route_id}:counters");
 
         let state_raw: Option<String> = self.redis.get(&state_key).await.ok().flatten();
         let state = state_raw
@@ -285,6 +311,19 @@ impl HealthTracker {
             .and_then(|s| s.split(':').next())
             .map(BreakerState::from_redis)
             .unwrap_or_default();
+
+        // HGET → Option<String>; missing field == route hasn't seen
+        // any traffic yet, which we render as 0.
+        let lifetime_raw: Option<String> = self
+            .redis
+            .hget(&counters_key, "lifetime_requests")
+            .await
+            .ok()
+            .flatten();
+        let lifetime_requests = lifetime_raw
+            .as_deref()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
 
         let now_ms = chrono::Utc::now().timestamp_millis();
         let window_start = (now_ms - (window_secs as i64) * 1000) as f64;
@@ -328,6 +367,7 @@ impl HealthTracker {
             errors: errs,
             error_pct,
             ewma_latency_ms: if total > 0 { Some(ewma) } else { None },
+            lifetime_requests,
         }
     }
 
@@ -344,5 +384,59 @@ impl HealthTracker {
             out.push((*id, self.snapshot(*id, window_secs).await));
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Default health is the value the wire emits when a route has
+    /// never seen a request — must include a zero lifetime counter
+    /// so the UI never has to handle `undefined` for that field.
+    #[test]
+    fn default_route_health_has_zero_lifetime() {
+        let h = RouteHealth::default();
+        assert_eq!(h.lifetime_requests, 0);
+        assert_eq!(h.total, 0);
+        assert_eq!(h.errors, 0);
+    }
+
+    /// Serialized wire shape: `lifetime_requests` must round-trip
+    /// through JSON so the frontend can read it directly off the
+    /// route-health endpoint without an aliased field.
+    #[test]
+    fn route_health_serializes_lifetime_requests() {
+        let h = RouteHealth {
+            state: BreakerState::Closed,
+            total: 3,
+            errors: 1,
+            error_pct: 33.3,
+            ewma_latency_ms: Some(120.5),
+            lifetime_requests: 42,
+        };
+        let json = serde_json::to_value(&h).unwrap();
+        assert_eq!(json["lifetime_requests"], 42);
+        assert_eq!(json["total"], 3);
+
+        // Round-trip preserves the value.
+        let back: RouteHealth = serde_json::from_value(json).unwrap();
+        assert_eq!(back.lifetime_requests, 42);
+    }
+
+    /// Deserialization tolerates missing `lifetime_requests` via the
+    /// serde default — keeps the snapshot decode path robust if Redis
+    /// hands back an older blob we don't expect to see in practice.
+    #[test]
+    fn route_health_deserializes_without_lifetime_field() {
+        let raw = serde_json::json!({
+            "state": "closed",
+            "total": 0,
+            "errors": 0,
+            "error_pct": 0.0,
+            "ewma_latency_ms": null,
+        });
+        let h: RouteHealth = serde_json::from_value(raw).unwrap();
+        assert_eq!(h.lifetime_requests, 0);
     }
 }

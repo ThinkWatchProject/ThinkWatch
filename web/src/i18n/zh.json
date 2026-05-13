@@ -477,7 +477,8 @@
       "notesPlaceholder": "管理员自由备注 (可选)",
       "evenSplitTooltip": "重置为均分",
       "liveStatus": "实时状态",
-      "errorPctLabel": "错误率"
+      "errorPctLabel": "错误率",
+      "lifetimeLabel": "累计：{{formatted}} 次请求"
     },
     "affinity": {
       "none": "无 — 每次请求重新选路",

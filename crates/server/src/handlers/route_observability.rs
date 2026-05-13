@@ -21,9 +21,10 @@ pub struct RouteHealthEntry {
     pub upstream_model: String,
     pub weight: i32,
     pub enabled: bool,
-    /// Health snapshot (`closed`/`open`/`half_open` + counts + EWMA).
-    /// Defaults to a "closed, no data" record when the route has had
-    /// no recent traffic.
+    /// Health snapshot — rolling-window state (`closed`/`open`/
+    /// `half_open` + counts + EWMA) plus the cumulative
+    /// `lifetime_requests` counter. Defaults to a "closed, no data"
+    /// record when the route has had no traffic at all.
     pub health: RouteHealth,
 }
 

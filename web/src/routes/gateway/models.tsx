@@ -112,6 +112,10 @@ export interface RouteHealth {
   errors: number;
   error_pct: number;
   ewma_latency_ms?: number | null;
+  /// Cumulative all-time request count for this route. Outlives the
+  /// rolling window — operators tuning weights use it to tell apart
+  /// "no traffic yet" from "quiet right now".
+  lifetime_requests: number;
 }
 
 export interface RouteHealthEntry {
@@ -1521,6 +1525,19 @@ export function ModelsPage() {
                       })()}
                     </dd>
                   </dl>
+                  {/* Cumulative all-time count — visually subordinate
+                      to the rolling-window stats above (smaller +
+                      muted) but always shown, even at 0, so operators
+                      can tell apart "never used" from "quiet now". */}
+                  <p className="text-[10px] text-muted-foreground">
+                    {t('models.routing.lifetimeLabel', {
+                      count:
+                        routeHealth[editingRoute.id]?.health?.lifetime_requests ?? 0,
+                      formatted: (
+                        routeHealth[editingRoute.id]?.health?.lifetime_requests ?? 0
+                      ).toLocaleString(),
+                    })}
+                  </p>
                 </div>
               )}
               {routeFormError && (
