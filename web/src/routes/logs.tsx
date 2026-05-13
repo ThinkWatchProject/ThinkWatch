@@ -177,6 +177,7 @@ function getColumns(cat: LogCategory, t: (key: string) => string): ColDef[] {
       return [
         { key: 'created_at', label: T('time') },
         { key: 'user_email', label: T('user'), filterKey: 'user_id', filterValueKey: 'user_id' },
+        { key: 'api_key_id', label: T('apiKeyId'), mono: true, filterKey: 'api_key_id' },
         { key: 'action', label: T('action'), filterKey: 'action' },
         { key: 'resource', label: T('resource'), filterKey: 'resource' },
         { key: 'ip_address', label: T('ip'), mono: true },
@@ -244,7 +245,7 @@ function defaultToLocal(): string {
 const DETAIL_HIGHLIGHTS: Record<LogCategory, string[]> = {
   gateway: ['model_id', 'provider', 'upstream_model', 'input_tokens', 'output_tokens', 'cost_usd', 'latency_ms', 'status_code', 'user_id', 'api_key_id', 'ip_address'],
   mcp: ['tool_name', 'server_name', 'duration_ms', 'status', 'error_message', 'user_id', 'ip_address'],
-  audit: ['action', 'resource', 'resource_id', 'user_email', 'user_id', 'ip_address', 'user_agent'],
+  audit: ['action', 'resource', 'resource_id', 'user_email', 'user_id', 'api_key_id', 'ip_address', 'user_agent', 'detail'],
   access: ['method', 'path', 'status_code', 'latency_ms', 'port', 'user_id', 'ip_address', 'user_agent'],
   app: ['level', 'target', 'message', 'span', 'fields'],
 };
@@ -280,6 +281,12 @@ function formatDetailValue(key: string, raw: unknown): React.ReactNode {
   if (key === 'cost_usd') return `$${parseFloat(String(raw)).toFixed(6)}`;
   if (key === 'latency_ms' || key === 'duration_ms') return `${raw}ms`;
   if (key === 'created_at' || key === 'timestamp') return formatBackendTimestamp(String(raw));
+  // Audit `detail` is a structured who-changed-what-from-X-to-Y blob. A flat
+  // JSON.stringify is unreadable; pretty-print it so reviewers can scan
+  // multi-key diffs at a glance. Other object fields keep the compact form.
+  if (key === 'detail' && typeof raw === 'object') {
+    return <PrettyJsonBlock value={raw} />;
+  }
   if (typeof raw === 'object') {
     return <ObjectDetailValue value={raw} />;
   }
@@ -306,6 +313,19 @@ const ObjectDetailValue = React.memo(function ObjectDetailValue({ value }: { val
   return <code className="font-mono text-xs">{text}</code>;
 });
 
+// Pretty-printed JSON for the audit `detail` field. Kept separate from
+// RawJsonBlock so the 2-column grid cell can host it without inheriting
+// the outer card's background, and so a huge detail (e.g. a large policy
+// diff) doesn't dominate the row — the max-height caps it at ~16rem.
+const PrettyJsonBlock = React.memo(function PrettyJsonBlock({ value }: { value: unknown }) {
+  const text = useMemo(() => JSON.stringify(value, null, 2), [value]);
+  return (
+    <pre className="rounded bg-muted/60 p-2 font-mono text-xs whitespace-pre-wrap break-all max-h-64 overflow-auto">
+      {text}
+    </pre>
+  );
+});
+
 const RawJsonBlock = React.memo(function RawJsonBlock({ value }: { value: unknown }) {
   const text = useMemo(() => JSON.stringify(value, null, 2), [value]);
   return (
@@ -327,12 +347,19 @@ function LogDetail({
   const { t } = useTranslation();
   const highlights = DETAIL_HIGHLIGHTS[category];
   // Always include the timestamp first, then the highlight fields, deduped.
-  const fields = [timeKey, ...highlights.filter((k) => k !== timeKey)];
+  // The audit `detail` blob renders as a full-width section below the grid
+  // (it's too tall to fit a 2-col cell cleanly) — drop it from the grid here.
+  const gridFields = [timeKey, ...highlights.filter((k) => k !== timeKey && k !== 'detail')];
+  const showAuditDetail =
+    category === 'audit' &&
+    log.detail !== null &&
+    log.detail !== undefined &&
+    typeof log.detail === 'object';
 
   return (
     <div className="space-y-3 p-3">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
-        {fields.map((key) => (
+        {gridFields.map((key) => (
           <div key={key} className="flex items-baseline gap-2 text-sm min-w-0">
             <span className="text-xs uppercase tracking-wide text-muted-foreground shrink-0 w-28">
               {key}
@@ -341,6 +368,14 @@ function LogDetail({
           </div>
         ))}
       </div>
+      {showAuditDetail && (
+        <div className="space-y-1">
+          <div className="text-xs uppercase tracking-wide text-muted-foreground">
+            {t('logs.audit.detailJson')}
+          </div>
+          <PrettyJsonBlock value={log.detail} />
+        </div>
+      )}
       <Collapsible className="text-xs">
         <CollapsibleTrigger className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
           {t('logs.rawJson')}

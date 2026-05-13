@@ -84,6 +84,24 @@ describe('parseQuery', () => {
     const out = parseQuery('level:info level:error');
     expect(out.params.level).toBe('error');
   });
+
+  it('extracts api_key_id as a positive filter (audit log column)', () => {
+    // Audit-log table surfaces api_key_id as a clickable filter chip.
+    // The parser's key regex is `\w+`, so underscores must pass through —
+    // pin it so a future "tighten the grammar" refactor doesn't drop the
+    // only column on the audit table that has an underscore in its key.
+    const id = '11111111-2222-3333-4444-555555555555';
+    const out = parseQuery(`api_key_id:${id}`);
+    expect(out.params).toEqual({ api_key_id: id });
+    expect(out.excludes).toEqual([]);
+  });
+
+  it('routes -api_key_id:value to excludes', () => {
+    const id = '11111111-2222-3333-4444-555555555555';
+    const out = parseQuery(`-api_key_id:${id}`);
+    expect(out.params).toEqual({});
+    expect(out.excludes).toEqual([`api_key_id:${id}`]);
+  });
 });
 
 describe('removeFilterToken', () => {
@@ -122,5 +140,12 @@ describe('removeFilterToken', () => {
     expect(removeFilterToken('level:error', 'target', false)).toBe(
       'level:error',
     );
+  });
+
+  it('strips api_key_id chips (underscore in key)', () => {
+    const id = '11111111-2222-3333-4444-555555555555';
+    expect(
+      removeFilterToken(`action:role.granted api_key_id:${id}`, 'api_key_id', false),
+    ).toBe('action:role.granted');
   });
 });
