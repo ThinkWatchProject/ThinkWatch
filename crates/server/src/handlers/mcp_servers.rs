@@ -1284,3 +1284,78 @@ fn map_mcp_server_unique_violation(e: sqlx::Error) -> AppError {
     }
     AppError::from(e)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Generate a valid 64-char hex key (32 bytes) for crypto tests.
+    fn test_hex_key() -> String {
+        "0".repeat(64)
+    }
+
+    #[test]
+    fn encrypt_client_secret_returns_none_for_no_input() {
+        let out = encrypt_client_secret(None, &test_hex_key()).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn encrypt_client_secret_returns_none_for_empty_string() {
+        // Empty string treated the same as None — admins toggling the
+        // input field shouldn't accidentally persist an empty ciphertext
+        // that decrypts to an empty bearer token.
+        let out = encrypt_client_secret(Some(""), &test_hex_key()).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn encrypt_client_secret_produces_ciphertext_for_real_value() {
+        let out = encrypt_client_secret(Some("my-secret"), &test_hex_key()).unwrap();
+        let bytes = out.expect("Some ciphertext when secret is non-empty");
+        // AES-GCM ciphertext = nonce (12) + ciphertext + tag (16) ≥ 28 bytes
+        // even for a single byte of input. "my-secret" (9 bytes) → ≥ 37.
+        assert!(
+            bytes.len() >= 28,
+            "ciphertext smaller than nonce+tag overhead: {}",
+            bytes.len()
+        );
+        // Ciphertext must NOT contain the plaintext as a substring.
+        assert!(
+            !bytes.windows(9).any(|w| w == b"my-secret"),
+            "ciphertext contains plaintext leakage"
+        );
+    }
+
+    #[test]
+    fn encrypt_client_secret_uses_nonce_so_ciphertexts_differ() {
+        // AES-GCM with a fresh nonce per call MUST produce distinct
+        // ciphertexts for the same plaintext+key. Catches a refactor
+        // that accidentally fixes the nonce (catastrophic for GCM).
+        let key = test_hex_key();
+        let a = encrypt_client_secret(Some("same-secret"), &key)
+            .unwrap()
+            .unwrap();
+        let b = encrypt_client_secret(Some("same-secret"), &key)
+            .unwrap()
+            .unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn encrypt_client_secret_rejects_invalid_hex_key() {
+        // Non-hex chars in the key surface as Internal — admins seeing
+        // this in logs know to check their `ENCRYPTION_KEY` env var.
+        let err = encrypt_client_secret(Some("x"), "not-hex").unwrap_err();
+        assert!(matches!(err, AppError::Internal(_)));
+    }
+
+    #[test]
+    fn encrypt_client_secret_rejects_short_key() {
+        // 30 hex chars = 15 bytes ≠ 32. Must fail rather than silently
+        // pad or truncate (which would weaken the cipher).
+        let short = "ab".repeat(15);
+        let err = encrypt_client_secret(Some("x"), &short).unwrap_err();
+        assert!(matches!(err, AppError::Internal(_)));
+    }
+}
