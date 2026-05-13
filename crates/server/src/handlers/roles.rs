@@ -1025,3 +1025,157 @@ pub async fn list_role_history(
 
     Ok(Json(RoleHistoryResponse { items }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn is_known_permission_recognizes_real_keys() {
+        // Spot-check well-known permissions across resource groups.
+        assert!(is_known_permission("ai_gateway:use"));
+        assert!(is_known_permission("api_keys:read"));
+        assert!(is_known_permission("api_keys:rotate"));
+        assert!(is_known_permission("settings:write"));
+    }
+
+    #[test]
+    fn is_known_permission_rejects_unknown() {
+        assert!(!is_known_permission(""));
+        assert!(!is_known_permission("nope:read"));
+        // Action exists, resource doesn't.
+        assert!(!is_known_permission("nonexistent:read"));
+        // Resource exists, action doesn't.
+        assert!(!is_known_permission("api_keys:teleport"));
+        // Case-sensitive — the catalog is lowercase.
+        assert!(!is_known_permission("API_KEYS:read"));
+    }
+
+    #[test]
+    fn all_permission_keys_matches_permissions_catalog() {
+        // Reflection consistency: every key in the PERMISSIONS array
+        // shows up in the flat key list, and the lengths match.
+        let keys = all_permission_keys();
+        assert_eq!(keys.len(), PERMISSIONS.len());
+        for p in PERMISSIONS {
+            assert!(
+                keys.contains(&p.key),
+                "{} present in PERMISSIONS but missing from all_permission_keys()",
+                p.key
+            );
+        }
+    }
+
+    #[test]
+    fn all_permission_keys_has_no_duplicates() {
+        // Two PermissionDef entries with the same key would silently
+        // collapse to one permission in the UI grid. Catch the drift
+        // here rather than in production.
+        let keys = all_permission_keys();
+        let mut sorted = keys.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(
+            sorted.len(),
+            keys.len(),
+            "duplicate permission key in PERMISSIONS catalog"
+        );
+    }
+
+    #[test]
+    fn system_role_default_policy_returns_super_admin_full_access() {
+        let policy = system_role_default_policy("super_admin").expect("super_admin defaults");
+        // Super-admin uses the wildcard form: Action="*", Resource="*".
+        let statement = &policy["Statement"][0];
+        assert_eq!(statement["Action"], "*");
+        assert_eq!(statement["Resource"], "*");
+        assert_eq!(statement["Effect"], "Allow");
+    }
+
+    #[test]
+    fn system_role_default_policy_returns_none_for_unknown_role() {
+        assert!(system_role_default_policy("nonexistent_role").is_none());
+        assert!(system_role_default_policy("").is_none());
+    }
+
+    #[test]
+    fn system_role_default_policy_all_seeded_roles_parse() {
+        // Every entry in SYSTEM_ROLE_DEFAULTS must produce valid JSON.
+        // A typo in the raw string literal would only surface when
+        // someone hit "Reset to defaults" in production otherwise.
+        for (name, _) in SYSTEM_ROLE_DEFAULTS {
+            let policy = system_role_default_policy(name)
+                .unwrap_or_else(|| panic!("{name} default policy failed to parse"));
+            assert!(policy["Statement"].is_array(), "{name} missing Statement array");
+        }
+    }
+
+    #[test]
+    fn system_role_default_policy_all_actions_in_catalog() {
+        // Drift check: every action listed in a seeded role's default
+        // policy MUST be in the PERMISSIONS catalog. Otherwise
+        // `validate_seeded_roles` would fail at server startup the
+        // moment someone clicks "Reset to defaults". Catch it here
+        // instead of as a production server-refuses-to-start.
+        for (name, _) in SYSTEM_ROLE_DEFAULTS {
+            let policy = system_role_default_policy(name).unwrap();
+            let actions = match policy["Statement"][0]["Action"].clone() {
+                serde_json::Value::String(s) => vec![s],
+                serde_json::Value::Array(arr) => arr
+                    .into_iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                _ => continue,
+            };
+            for action in actions {
+                if action == "*" {
+                    continue; // wildcard
+                }
+                assert!(
+                    is_known_permission(&action),
+                    "role {name} grants unknown permission `{action}` — \
+                     update PERMISSIONS catalog or fix the default"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validate_policy_constraints_accepts_doc_without_constraints() {
+        let doc = json!({
+            "Version": "2024-01-01",
+            "Statement": [{"Effect": "Allow", "Action": "*", "Resource": "*"}],
+        });
+        assert!(validate_policy_constraints_in_doc(&doc).is_ok());
+    }
+
+    #[test]
+    fn validate_policy_constraints_accepts_missing_statement() {
+        // Defensive: if the doc has no Statement array we should
+        // pass through (other validators will reject the doc later).
+        let doc = json!({"Version": "2024-01-01"});
+        assert!(validate_policy_constraints_in_doc(&doc).is_ok());
+    }
+
+    #[test]
+    fn validate_policy_constraints_accepts_null_constraints() {
+        // `"Constraints": null` is treated the same as no Constraints
+        // field at all — common output from a UI that uses `null` for
+        // "unset".
+        let doc = json!({
+            "Statement": [{"Effect": "Allow", "Action": "*", "Constraints": null}],
+        });
+        assert!(validate_policy_constraints_in_doc(&doc).is_ok());
+    }
+
+    #[test]
+    fn validate_policy_constraints_rejects_malformed_constraints() {
+        // Non-object Constraints fails the inner deserialize.
+        let doc = json!({
+            "Statement": [{"Effect": "Allow", "Action": "*", "Constraints": "not an object"}],
+        });
+        let err = validate_policy_constraints_in_doc(&doc).unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+}

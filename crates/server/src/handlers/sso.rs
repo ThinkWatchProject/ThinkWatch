@@ -478,3 +478,114 @@ fn html_escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&#39;")
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------
+    // html_escape — XSS defense for the OIDC wizard's test-close page
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn html_escape_passes_through_safe_text() {
+        assert_eq!(html_escape("plain text"), "plain text");
+        assert_eq!(html_escape(""), "");
+    }
+
+    #[test]
+    fn html_escape_escapes_the_five_xss_chars() {
+        assert_eq!(html_escape("<"), "&lt;");
+        assert_eq!(html_escape(">"), "&gt;");
+        assert_eq!(html_escape("\""), "&quot;");
+        assert_eq!(html_escape("'"), "&#39;");
+        assert_eq!(html_escape("&"), "&amp;");
+    }
+
+    #[test]
+    fn html_escape_handles_ampersand_first_no_double_escape() {
+        // CRITICAL: `&` MUST be escaped before `<`, otherwise the result
+        // of escaping `<` to `&lt;` would itself get re-escaped to
+        // `&amp;lt;`. Lock the order in.
+        assert_eq!(html_escape("<a>"), "&lt;a&gt;");
+        assert_eq!(html_escape("&lt;"), "&amp;lt;");
+    }
+
+    #[test]
+    fn html_escape_neutralizes_classic_xss_payload() {
+        // Concrete safety check: the rendered page must contain no live
+        // tag after escaping a known payload.
+        let payload = "<script>alert('xss')</script>";
+        let out = html_escape(payload);
+        assert!(!out.contains("<script>"));
+        assert!(!out.contains("</script>"));
+        assert_eq!(
+            out,
+            "&lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"
+        );
+    }
+
+    #[test]
+    fn html_escape_handles_attribute_breakout_attempts() {
+        // `"` and `'` close attributes; both must be neutralized so a
+        // value can be safely interpolated inside `attr="..."` or
+        // `attr='...'`.
+        assert_eq!(
+            html_escape(r#"x" onerror="alert(1)"#),
+            "x&quot; onerror=&quot;alert(1)"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // state_nonce_binding — HMAC binding state+nonce against CSRF on
+    // the OIDC callback. Determinism + per-input change matter.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn state_nonce_binding_is_deterministic() {
+        let key = [42u8; 32];
+        let a = state_nonce_binding(&key, "state1", "nonce1");
+        let b = state_nonce_binding(&key, "state1", "nonce1");
+        assert_eq!(a, b);
+        // SHA-256 hex = 64 chars.
+        assert_eq!(a.len(), 64);
+    }
+
+    #[test]
+    fn state_nonce_binding_changes_with_state() {
+        let key = [42u8; 32];
+        let a = state_nonce_binding(&key, "state1", "nonce1");
+        let b = state_nonce_binding(&key, "state2", "nonce1");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn state_nonce_binding_changes_with_nonce() {
+        let key = [42u8; 32];
+        let a = state_nonce_binding(&key, "state1", "nonce1");
+        let b = state_nonce_binding(&key, "state1", "nonce2");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn state_nonce_binding_changes_with_key() {
+        let a = state_nonce_binding(&[1u8; 32], "state1", "nonce1");
+        let b = state_nonce_binding(&[2u8; 32], "state1", "nonce1");
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn state_nonce_binding_separates_state_from_nonce_via_delimiter() {
+        // Without the `:` delimiter between state and nonce, splitting
+        // a character from one into the other would still produce the
+        // same HMAC. The `:` in the source guards against that — verify
+        // by feeding shifted boundaries.
+        let key = [7u8; 32];
+        let a = state_nonce_binding(&key, "ab", "cd");
+        let b = state_nonce_binding(&key, "a", "bcd");
+        assert_ne!(
+            a, b,
+            "delimiter must prevent boundary-shift collision"
+        );
+    }
+}
