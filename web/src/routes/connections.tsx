@@ -7,6 +7,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   Dialog,
   DialogContent,
@@ -102,7 +103,7 @@ export function ConnectionsPage() {
       setError('');
     } catch (err) {
       if (signal?.aborted) return;
-      setError(err instanceof Error ? err.message : 'Failed to load connections');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }
@@ -213,7 +214,7 @@ export function ConnectionsPage() {
         await fetchAll();
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to save');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setSubmitting(false);
     }
@@ -230,7 +231,7 @@ export function ConnectionsPage() {
       );
       await fetchAll();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to set default');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -246,7 +247,7 @@ export function ConnectionsPage() {
       setRevokeTarget(null);
       await fetchAll();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to revoke');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -277,7 +278,23 @@ export function ConnectionsPage() {
       )}
 
       {loading ? (
-        <p className="text-sm text-muted-foreground">{t('common.loading')}</p>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {[...Array(3)].map((_, i) => (
+            <Card key={i}>
+              <CardHeader className="flex flex-row items-center gap-3">
+                <Skeleton className="h-10 w-10 rounded" />
+                <div className="space-y-2 flex-1">
+                  <Skeleton className="h-4 w-32" />
+                  <Skeleton className="h-3 w-24" />
+                </div>
+              </CardHeader>
+              <CardContent>
+                <Skeleton className="h-3 w-full" />
+                <Skeleton className="h-3 w-3/4 mt-2" />
+              </CardContent>
+            </Card>
+          ))}
+        </div>
       ) : servers.length === 0 ? (
         // This page is strictly about a user authorizing their own
         // account against admin-registered MCP servers. Don't surface

@@ -75,7 +75,7 @@ export function OidcWizardCard() {
       // wait for "Edit config" / "Set up SSO".
       setEditing((prev) => prev || !!d.draft);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to load OIDC settings');
+      setError(e instanceof Error ? e.message : t('common.error'));
     } finally {
       setLoading(false);
     }
@@ -176,7 +176,7 @@ function ActiveSummary({ data, editing, canEdit, onEdit, onReload }: ActiveSumma
       toast.success(next ? t('settings.oidc.enabledToast') : t('settings.oidc.disabledToast'));
       await onReload();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Toggle failed');
+      toast.error(e instanceof Error ? e.message : t('common.error'));
     }
   };
 
@@ -323,7 +323,7 @@ function Wizard({ data, canEdit, onReload, onClose }: WizardProps) {
               await onReload();
               onClose();
             } catch (e) {
-              toast.error(e instanceof Error ? e.message : 'Discard failed');
+              toast.error(e instanceof Error ? e.message : t('common.error'));
             }
           }}
           disabled={!canEdit || !draft}
@@ -434,7 +434,7 @@ function ProviderAndIssuerStep({ draft, canEdit, onSaved }: ProviderAndIssuerSte
       setDiscovery(meta);
       await onSaved();
     } catch (e) {
-      setVerifyError(e instanceof Error ? e.message : 'Discovery failed');
+      setVerifyError(e instanceof Error ? e.message : t('common.error'));
     } finally {
       setVerifying(false);
     }
@@ -540,7 +540,7 @@ function RedirectUrlStep({ draft, defaultRedirect, canEdit, onSaved }: RedirectU
       await navigator.clipboard.writeText(value);
       toast.success(t('settings.oidc.copied'));
     } catch {
-      toast.error('Clipboard unavailable');
+      toast.error(t('settings.oidc.clipboardUnavailable'));
     }
   };
 
@@ -549,7 +549,7 @@ function RedirectUrlStep({ draft, defaultRedirect, canEdit, onSaved }: RedirectU
       await apiPatch('/api/admin/settings/oidc/draft', { redirect_url: value });
       await onSaved();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Save failed');
+      toast.error(e instanceof Error ? e.message : t('common.error'));
     }
   };
 
@@ -611,7 +611,7 @@ function CredentialsStep({ draft, canEdit, onSaved }: CredentialsStepProps) {
       await onSaved();
       toast.success(t('settings.oidc.credentialsSaved'));
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Save failed');
+      toast.error(e instanceof Error ? e.message : t('common.error'));
     } finally {
       setSaving(false);
     }
@@ -752,7 +752,7 @@ function TestLoginStep({ test, canEdit, onResult }: TestLoginStepProps) {
       popupRef.current = popup;
       setPopupOpen(true);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Test launch failed');
+      toast.error(e instanceof Error ? e.message : t('common.error'));
     } finally {
       setLaunching(false);
     }
@@ -821,7 +821,7 @@ function ActivateStep({ canEdit, onActivated }: ActivateStepProps) {
       toast.success(t('settings.oidc.activated'));
       await onActivated();
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : 'Activation failed');
+      toast.error(e instanceof Error ? e.message : t('common.error'));
     } finally {
       setActivating(false);
     }

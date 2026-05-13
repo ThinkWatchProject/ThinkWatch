@@ -146,7 +146,7 @@ export function McpStorePage() {
                 toast.success(t('mcpStore.syncSuccess', { count: res.count }));
                 await fetchTemplates();
               } catch (err) {
-                toast.error(err instanceof Error ? err.message : 'Sync failed');
+                toast.error(err instanceof Error ? err.message : t('common.error'));
               } finally {
                 setSyncing(false);
               }

@@ -106,7 +106,7 @@ export function TeamDetailPage() {
       setTeam(data);
       setError('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load team');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }
@@ -169,7 +169,7 @@ export function TeamDetailPage() {
       setEditOpen(false);
       await fetchTeam();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Failed to save');
+      setFormError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setSaving(false);
     }
@@ -212,7 +212,7 @@ export function TeamDetailPage() {
       await fetchMembers();
       await fetchTeam(); // refresh member_count
     } catch (err) {
-      setMemberError(err instanceof Error ? err.message : 'Failed to add member');
+      setMemberError(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -224,7 +224,7 @@ export function TeamDetailPage() {
         setTeam({ ...team, member_count: Math.max(0, team.member_count - 1) });
       }
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to remove member');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     }
   };
 

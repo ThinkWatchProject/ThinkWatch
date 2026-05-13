@@ -64,7 +64,7 @@ export function ProfilePage() {
       const res = await apiPost<{ secret: string; otpauth_uri: string; recovery_codes: string[] }>('/api/auth/totp/setup', {});
       setTotpSetup(res);
     } catch (err) {
-      setTotpVerifyError(err instanceof Error ? err.message : 'Failed');
+      setTotpVerifyError(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -78,7 +78,7 @@ export function ProfilePage() {
       setTotpSetup(null);
       setTotpVerifyCode('');
     } catch (err) {
-      setTotpVerifyError(err instanceof Error ? err.message : 'Failed');
+      setTotpVerifyError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setTotpVerifyLoading(false);
     }
@@ -92,7 +92,7 @@ export function ProfilePage() {
       setDisableDialogOpen(false);
       setTotpDisablePassword('');
     } catch (err) {
-      setTotpDisableError(err instanceof Error ? err.message : 'Failed');
+      setTotpDisableError(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -139,7 +139,7 @@ export function ProfilePage() {
       // Force logout after 2 seconds
       setTimeout(logoutAndRedirect, 2000);
     } catch (err) {
-      setPwError(err instanceof Error ? err.message : 'Failed to change password');
+      setPwError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setPwLoading(false);
     }
@@ -154,7 +154,7 @@ export function ProfilePage() {
       setRevokeDialogOpen(false);
       logoutAndRedirect();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Failed');
+      setActionError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setRevokeLoading(false);
     }
@@ -169,7 +169,7 @@ export function ProfilePage() {
       setDeleteDialogOpen(false);
       logoutAndRedirect();
     } catch (err) {
-      setActionError(err instanceof Error ? err.message : 'Failed');
+      setActionError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setDeleteLoading(false);
     }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import i18n from '@/i18n';
 
 export type FieldSaveState = 'idle' | 'saving' | 'saved' | 'error';
 
@@ -70,7 +71,7 @@ export function useFieldAutosave<T>({
         }, 1500);
       } catch (err) {
         setState('error');
-        setError(err instanceof Error ? err.message : 'Save failed');
+        setError(err instanceof Error ? err.message : i18n.t('common.error'));
       }
     }, debounceMs);
 

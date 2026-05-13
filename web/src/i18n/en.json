@@ -47,6 +47,7 @@
     "unknown": "Unknown",
     "error": "Error",
     "revoke": "Revoke",
+    "copy": "Copy",
     "copied": "Copied!",
     "done": "Done",
     "edit": "Edit",
@@ -330,6 +331,7 @@
     "title": "API Keys",
     "subtitle": "Manage gateway API keys",
     "createKey": "Create API Key",
+    "updated": "API key updated",
     "keyPrefix": "Key Prefix",
     "expires": "Expires",
     "allowedModels": "Allowed Models",
@@ -1180,6 +1182,14 @@
   "settingsPage": {
     "title": "Settings",
     "subtitle": "System configuration and integrations",
+    "partialLoadFailure": "Some settings failed to load: {{what}}. You may be viewing partial data — refresh or check your permissions.",
+    "loadKey": {
+      "serverInfo": "server info",
+      "auditConfig": "audit config",
+      "settings": "settings",
+      "health": "health",
+      "roles": "roles"
+    },
     "platformPricing": {
       "title": "Platform Pricing Baseline",
       "hint": "Cost reports are computed as `baseline × model weight × tokens`. Change this once to re-price every model at once.",
@@ -1247,6 +1257,7 @@
       "redirectInstruction": "Register this redirect URL at your OIDC provider, then come back to enter your client credentials.",
       "redirectConfirm": "I registered this URL",
       "copied": "Copied",
+      "clipboardUnavailable": "Clipboard unavailable",
       "clientIdLabel": "Client ID",
       "clientSecretLabel": "Client secret",
       "clientSecretKeep": "••••••• leave blank to keep existing",
@@ -1533,7 +1544,13 @@
     "transportProtocol": "Transport Protocol",
     "signingSecret": "HMAC Signing Secret",
     "signingSecretPlaceholder": "Leave blank to disable signing",
-    "signingSecretHint": "When set, each webhook payload is signed with HMAC-SHA256 and delivered with an 'x-signature: sha256=<hex>' header. Deliveries also retry up to 3 times with exponential backoff on network errors and 5xx responses."
+    "signingSecretHint": "When set, each webhook payload is signed with HMAC-SHA256 and delivered with an 'x-signature: sha256=<hex>' header. Deliveries also retry up to 3 times with exponential backoff on network errors and 5xx responses.",
+    "toast": {
+      "created": "Forwarder created",
+      "updated": "Forwarder updated",
+      "toggled": "Forwarder updated",
+      "statsReset": "Stats reset"
+    }
   },
   "guide": {
     "title": "Configuration Guide",

@@ -61,7 +61,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
         pow.refresh();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Login failed');
+      setError(err instanceof Error ? err.message : t('common.error'));
       // Failed login consumed the PoW; mint a new one so the next
       // attempt isn't artificially delayed.
       pow.refresh();

@@ -112,7 +112,7 @@ export function CostsPage() {
         setRows(costData.items);
         setStats(statsData);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load cost data'))
+      .catch((err) => setError(err instanceof Error ? err.message : t('common.error')))
       .finally(() => setLoading(false));
   }, [queryString, selectedTeam]);
 

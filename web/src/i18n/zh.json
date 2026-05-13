@@ -47,6 +47,7 @@
     "unknown": "未知",
     "error": "错误",
     "revoke": "撤销",
+    "copy": "复制",
     "copied": "已复制！",
     "done": "完成",
     "edit": "编辑",
@@ -330,6 +331,7 @@
     "title": "API 密钥",
     "subtitle": "管理网关 API 密钥",
     "createKey": "创建 API 密钥",
+    "updated": "API 密钥已更新",
     "keyPrefix": "密钥前缀",
     "expires": "过期时间",
     "allowedModels": "允许的模型",
@@ -1180,6 +1182,14 @@
   "settingsPage": {
     "title": "设置",
     "subtitle": "系统配置和集成",
+    "partialLoadFailure": "部分设置加载失败:{{what}}。你看到的可能是不完整的数据——请刷新或检查你的权限。",
+    "loadKey": {
+      "serverInfo": "服务器信息",
+      "auditConfig": "审计配置",
+      "settings": "设置",
+      "health": "健康检查",
+      "roles": "角色"
+    },
     "platformPricing": {
       "title": "平台定价基准",
       "hint": "成本报表按「基准 × 模型权重 × token 数」计算。改这里一次，所有模型的成本自动重算。",
@@ -1247,6 +1257,7 @@
       "redirectInstruction": "请将这个回调 URL 注册到你的 OIDC 提供商,然后回到此处填入客户端凭据。",
       "redirectConfirm": "我已注册此 URL",
       "copied": "已复制",
+      "clipboardUnavailable": "剪贴板不可用",
       "clientIdLabel": "客户端 ID",
       "clientSecretLabel": "客户端密钥",
       "clientSecretKeep": "••••••• 留空则保留现有值",
@@ -1533,7 +1544,13 @@
     "transportProtocol": "传输协议",
     "signingSecret": "HMAC 签名密钥",
     "signingSecretPlaceholder": "留空关闭签名",
-    "signingSecretHint": "设置后,每条 webhook 载荷会用 HMAC-SHA256 签名,随 'x-signature: sha256=<hex>' 头一起投递。网络错误或 5xx 响应时指数退避重试,最多 3 次。"
+    "signingSecretHint": "设置后,每条 webhook 载荷会用 HMAC-SHA256 签名,随 'x-signature: sha256=<hex>' 头一起投递。网络错误或 5xx 响应时指数退避重试,最多 3 次。",
+    "toast": {
+      "created": "已创建转发器",
+      "updated": "转发器已更新",
+      "toggled": "转发器已更新",
+      "statsReset": "统计已重置"
+    }
   },
   "guide": {
     "title": "配置指南",

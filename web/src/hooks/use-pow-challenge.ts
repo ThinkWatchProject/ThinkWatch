@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
+import i18n from '@/i18n';
 
 interface PowChallenge {
   challenge_id: string;
@@ -74,7 +75,7 @@ export function usePowChallenge(): PowState & { refresh: () => void } {
     } catch (err) {
       if (epoch !== epochRef.current) return;
       setStatus('error');
-      setError(err instanceof Error ? err.message : 'Failed to fetch challenge');
+      setError(err instanceof Error ? err.message : i18n.t('common.error'));
       return;
     }
     if (epoch !== epochRef.current) return;

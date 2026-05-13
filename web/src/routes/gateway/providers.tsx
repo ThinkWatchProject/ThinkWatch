@@ -45,7 +45,7 @@ export function ProvidersPage() {
       setProviders(data);
     } catch (err) {
       if (signal?.aborted) return;
-      setError(err instanceof Error ? err.message : 'Failed to load providers');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }
@@ -158,6 +158,7 @@ export function ProvidersPage() {
                             })
                           }
                           title={t('providers.importModels')}
+                          aria-label={t('providers.importModels')}
                           disabled={!hasPermission('models:write')}
                         >
                           <Download className="h-4 w-4" />
@@ -167,6 +168,7 @@ export function ProvidersPage() {
                           size="icon-sm"
                           onClick={() => openEditDialog(p)}
                           title={t('common.edit')}
+                          aria-label={t('common.edit')}
                           disabled={!hasPermission('providers:update')}
                         >
                           <Pencil className="h-4 w-4" />
@@ -176,6 +178,7 @@ export function ProvidersPage() {
                           size="icon-sm"
                           onClick={() => setDeleteTargetId(p.id)}
                           title={t('common.delete')}
+                          aria-label={t('common.delete')}
                           disabled={!hasPermission('providers:delete')}
                         >
                           <Trash2 className="h-4 w-4" />

@@ -221,7 +221,7 @@ export function ApiKeysPage() {
       const res = await api<PaginatedResponse<ApiKey>>(url);
       setKeys(res.data);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load API keys');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }

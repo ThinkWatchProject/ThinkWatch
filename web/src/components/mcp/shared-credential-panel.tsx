@@ -79,7 +79,7 @@ export function SharedCredentialPanel({
       );
       window.location.href = res.authorize_url;
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to start OAuth flow');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
       setSubmitting(false);
     }
   };
@@ -96,7 +96,7 @@ export function SharedCredentialPanel({
       setPasted('');
       await refresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to save token');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setSubmitting(false);
     }
@@ -110,7 +110,7 @@ export function SharedCredentialPanel({
       toast.success(t('mcpServers.sharedCred.revoked'));
       await refresh();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to revoke');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setSubmitting(false);
     }

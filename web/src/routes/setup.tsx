@@ -448,7 +448,12 @@ export function SetupPage() {
                 value={result.api_key}
                 className="font-mono text-sm"
               />
-              <Button variant="outline" size="icon" onClick={handleCopyApiKey}>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={handleCopyApiKey}
+                aria-label={copied ? t('common.copied') : t('common.copy')}
+              >
                 {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
               </Button>
             </div>

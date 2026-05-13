@@ -199,7 +199,7 @@ export function ServerWizardPage() {
       await wiz.reset();
       navigate({ to: '/mcp/servers' });
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : 'Failed to register server');
+      setSubmitError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setSubmitting(false);
     }

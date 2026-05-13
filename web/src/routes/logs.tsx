@@ -454,7 +454,7 @@ export function UnifiedLogsPage() {
       setLogs(res.items ?? []);
       setTotal(res.total ?? 0);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load logs');
+      setError(err instanceof Error ? err.message : t('common.error'));
       setLogs([]);
       setTotal(0);
     } finally {

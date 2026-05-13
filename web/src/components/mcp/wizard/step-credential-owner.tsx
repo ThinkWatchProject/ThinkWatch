@@ -98,7 +98,7 @@ export function StepCredentialOwner({
       // controller hook restores everything.
       window.location.href = res.authorize_url;
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to start OAuth flow');
+      setError(err instanceof Error ? err.message : t('common.error'));
       setAuthorizing(false);
     }
   };

@@ -73,6 +73,10 @@ export function SettingsPage() {
   const [_allSettings, setAllSettings] = useState<Record<string, SettingEntry[]>>({});
 
   const [loading, setLoading] = useState(true);
+  // Names of endpoints whose initial fetch failed. Surfaced as a single
+  // banner so admins can tell a half-loaded page from a half-permission'd
+  // one. Empty when everything loaded.
+  const [loadErrors, setLoadErrors] = useState<string[]>([]);
 
   // --- Editable form state ---
   // General
@@ -188,12 +192,20 @@ export function SettingsPage() {
   }, []);
 
   useEffect(() => {
+    // Each catch tags itself so a banner can name what failed without
+    // collapsing every error into one opaque "loading failed".
+    const failures: string[] = [];
+    const tag = <T,>(label: string, fallback: T) => (err: unknown) => {
+      failures.push(label);
+      console.error(`settings: failed to load ${label}:`, err);
+      return fallback;
+    };
     Promise.all([
-      api<SystemInfo>('/api/admin/settings/system').catch(() => null),
-      api<AuditConfig>('/api/admin/settings/audit').catch(() => null),
-      api<Record<string, SettingEntry[]>>('/api/admin/settings').catch(() => ({})),
-      api<{ postgres: boolean; redis: boolean; clickhouse: boolean }>('/api/health').catch(() => null),
-      api<{ items: { id: string; name: string }[] }>('/api/admin/roles').catch(() => ({ items: [] })),
+      api<SystemInfo>('/api/admin/settings/system').catch(tag('serverInfo', null)),
+      api<AuditConfig>('/api/admin/settings/audit').catch(tag('auditConfig', null)),
+      api<Record<string, SettingEntry[]>>('/api/admin/settings').catch(tag('settings', {})),
+      api<{ postgres: boolean; redis: boolean; clickhouse: boolean }>('/api/health').catch(tag('health', null)),
+      api<{ items: { id: string; name: string }[] }>('/api/admin/roles').catch(tag('roles', { items: [] })),
     ])
       .then(([sys, audit, settings, hp, rolesData]) => {
         if (rolesData) setAvailableRoles(rolesData.items);
@@ -203,6 +215,7 @@ export function SettingsPage() {
         const s = settings ?? {};
         setAllSettings(s);
         populateForm(s);
+        setLoadErrors(failures);
       })
       .finally(() => setLoading(false));
   }, [populateForm]);
@@ -281,6 +294,17 @@ export function SettingsPage() {
           {t('settingsPage.subtitle')} <span className="text-xs">· {t('settings.autosaveHint')}</span>
         </p>
       </div>
+
+      {loadErrors.length > 0 && (
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>
+            {t('settingsPage.partialLoadFailure', {
+              what: loadErrors.map((k) => t(`settingsPage.loadKey.${k}`)).join(', '),
+            })}
+          </AlertDescription>
+        </Alert>
+      )}
 
       <Tabs value={activeTab} onValueChange={setTab}>
         <TabsList>
@@ -1051,7 +1075,7 @@ function PlatformPricingCard() {
       setOutputPerM((Number(p.output_price_per_token) * 1_000_000).toString());
       setCurrency(p.currency);
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load pricing');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }

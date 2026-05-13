@@ -186,7 +186,7 @@ export function UsersPage() {
       if (availablePermissions.length === 0) setAvailablePermissions(permsRes);
     } catch (err) {
       if (signal?.aborted) return;
-      setError(err instanceof Error ? err.message : 'Failed to load users');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }
@@ -253,7 +253,7 @@ export function UsersPage() {
       });
       setCreateOpen(false); resetCreateForm(); await fetchUsers();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Failed');
+      setFormError(err instanceof Error ? err.message : t('common.error'));
     } finally { setSubmitting(false); }
   };
 
@@ -294,7 +294,7 @@ export function UsersPage() {
       }
       setEditOpen(false); setEditUser(null); await fetchUsers();
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Failed');
+      setEditError(err instanceof Error ? err.message : t('common.error'));
     } finally { setEditLoading(false); }
   };
 
@@ -313,7 +313,7 @@ export function UsersPage() {
       }
       setConfirmAction(null); await fetchUsers();
     } catch (err) {
-      setConfirmError(err instanceof Error ? err.message : 'Failed');
+      setConfirmError(err instanceof Error ? err.message : t('common.error'));
     } finally { setConfirmLoading(false); }
   };
 
@@ -387,7 +387,7 @@ export function UsersPage() {
       setResetResult({ password: res.temporary_password, userId: res.user_id });
       setResetConfirmUser(null);
     } catch (err) {
-      setConfirmError(err instanceof Error ? err.message : 'Failed');
+      setConfirmError(err instanceof Error ? err.message : t('common.error'));
     } finally { setResetLoading(false); }
   };
 
@@ -1001,7 +1001,13 @@ export function UsersPage() {
             <Label>{t('users.temporaryPassword')}</Label>
             <div className="flex items-center gap-2">
               <Input value={resetResult?.password ?? ''} readOnly className="font-mono" />
-              <Button variant="outline" size="icon" onClick={() => { navigator.clipboard.writeText(resetResult?.password ?? ''); }}>
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={() => { navigator.clipboard.writeText(resetResult?.password ?? ''); }}
+                aria-label={t('common.copy')}
+                title={t('common.copy')}
+              >
                 <Copy className="h-4 w-4" />
               </Button>
             </div>

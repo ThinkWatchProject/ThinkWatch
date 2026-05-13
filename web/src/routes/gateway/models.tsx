@@ -344,7 +344,7 @@ export function ModelsPage() {
         setTotalModels(res.total);
         setError('');
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load models');
+        setError(err instanceof Error ? err.message : t('common.error'));
       } finally {
         setLoading(false);
       }
@@ -378,7 +378,7 @@ export function ModelsPage() {
       );
       setRoutesByModel((m) => ({ ...m, [modelId]: rows }));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to load routes');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setRoutesLoading((s) => {
         const next = new Set(s);
@@ -578,7 +578,7 @@ export function ModelsPage() {
       setModelDialogOpen(false);
       await fetchModels();
     } catch (err) {
-      setModelFormError(err instanceof Error ? err.message : 'Failed to save');
+      setModelFormError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setModelSaving(false);
     }
@@ -592,7 +592,7 @@ export function ModelsPage() {
       setCleanupOpen(false);
       await fetchModels();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Cleanup failed');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setCleanupRunning(false);
     }
@@ -613,7 +613,7 @@ export function ModelsPage() {
       setSelectedIds(new Set());
       await fetchModels();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -629,7 +629,7 @@ export function ModelsPage() {
       setBulkDeleteOpen(false);
       await fetchModels();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to delete');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setBulkDeleting(false);
     }
@@ -644,7 +644,7 @@ export function ModelsPage() {
       setDetailModelId(null);
       await fetchModels();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to delete');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -737,7 +737,7 @@ export function ModelsPage() {
       }
       setRouteDialogOpen(false);
     } catch (err) {
-      setRouteFormError(err instanceof Error ? err.message : 'Failed to save');
+      setRouteFormError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setRouteSaving(false);
     }
@@ -763,7 +763,7 @@ export function ModelsPage() {
       await fetchRoutesFor(modelId);
       await fetchModels();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -778,7 +778,7 @@ export function ModelsPage() {
       // reflects the new value next time the drawer opens.
       await fetchModels();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to update strategy');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -808,7 +808,7 @@ export function ModelsPage() {
     try {
       await apiPatch('/api/admin/model-routes/batch-weights', { updates });
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to update weights');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
       void fetchRoutesFor(modelId);
     }
   };
@@ -823,7 +823,7 @@ export function ModelsPage() {
       setDeleteRoute(null);
       await fetchRoutesFor(modelId);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to delete route');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -901,7 +901,7 @@ export function ModelsPage() {
       }
       setExistingModelIds(seen);
     } catch (err) {
-      setRemoteModelsError(err instanceof Error ? err.message : 'Failed to load models');
+      setRemoteModelsError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setRemoteModelsLoading(false);
     }
@@ -957,7 +957,7 @@ export function ModelsPage() {
       // If the drawer is open on a model we just touched, refresh it.
       if (detailModelId) void fetchRoutesFor(detailModelId);
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to import');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setBatchSaving(false);
     }
@@ -2082,6 +2082,8 @@ export function ModelsPage() {
                                           size="icon"
                                           className="h-7 w-7"
                                           onClick={() => openEditRoute(r)}
+                                          aria-label={t('common.edit')}
+                                          title={t('common.edit')}
                                         >
                                           <Pencil className="h-3.5 w-3.5" />
                                         </Button>
@@ -2090,6 +2092,8 @@ export function ModelsPage() {
                                           size="icon"
                                           className="h-7 w-7"
                                           onClick={() => setDeleteRoute(r)}
+                                          aria-label={t('common.delete')}
+                                          title={t('common.delete')}
                                         >
                                           <Trash2 className="h-3.5 w-3.5 text-destructive" />
                                         </Button>

@@ -61,7 +61,7 @@ export function RegisterPage({ onRegistered }: RegisterPageProps) {
       setCachedPermissions(res.permissions, res.denied_permissions);
       onRegistered();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Registration failed');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }

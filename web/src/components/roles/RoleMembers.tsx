@@ -73,7 +73,7 @@ export function RoleMembers({ role, teamsById, onMembersChanged }: RoleMembersPr
       const res = await api<{ data: PickableUser[] }>('/api/admin/users');
       setUsers(res.data);
     } catch (e) {
-      setMemberError(e instanceof Error ? e.message : 'Failed to load users');
+      setMemberError(e instanceof Error ? e.message : t('common.error'));
     }
   };
 
@@ -108,7 +108,7 @@ export function RoleMembers({ role, teamsById, onMembersChanged }: RoleMembersPr
       await reloadMembers();
       onMembersChanged();
     } catch (e) {
-      setMemberError(e instanceof Error ? e.message : 'Failed');
+      setMemberError(e instanceof Error ? e.message : t('common.error'));
     } finally {
       setBusy(false);
     }
@@ -138,7 +138,7 @@ export function RoleMembers({ role, teamsById, onMembersChanged }: RoleMembersPr
       await reloadMembers();
       onMembersChanged();
     } catch (e) {
-      setMemberError(e instanceof Error ? e.message : 'Failed');
+      setMemberError(e instanceof Error ? e.message : t('common.error'));
     } finally {
       setBusy(false);
     }

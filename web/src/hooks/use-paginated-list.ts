@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
+import i18n from '@/i18n';
 
 /**
  * Paginated admin-table response envelope. Matches every server-
@@ -98,7 +99,7 @@ export function usePaginatedList<T>(
         setError(null);
       } catch (err) {
         if (controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : 'Failed to load');
+        setError(err instanceof Error ? err.message : i18n.t('common.error'));
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }

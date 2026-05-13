@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -183,7 +184,7 @@ export function CreateApiKeyDialog({
       setCreatedKey(res.key);
       onSuccess();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Failed to create key');
+      setFormError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setSubmitting(false);
     }
@@ -419,8 +420,9 @@ export function EditApiKeyDialog({
       }
       onOpenChange(false);
       onSuccess();
+      toast.success(t('apiKeys.updated'));
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Failed to update key');
+      setEditError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setEditSubmitting(false);
     }
@@ -659,7 +661,7 @@ export function RotateApiKeyDialog({
       setRotatedNewKey(res.key);
       onSuccess();
     } catch (err) {
-      setRotateError(err instanceof Error ? err.message : 'Failed to rotate key');
+      setRotateError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setRotateSubmitting(false);
     }

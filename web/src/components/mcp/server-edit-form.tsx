@@ -224,7 +224,7 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
       });
       onSaved();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to update server');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setSaving(false);
     }

@@ -76,7 +76,7 @@ export function OutboxBacklogDialog({
         );
         setData(res);
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load');
+        setError(err instanceof Error ? err.message : t('common.error'));
       } finally {
         if (isInitial) setLoading(false);
       }
@@ -106,7 +106,7 @@ export function OutboxBacklogDialog({
       await load(false);
       onChanged?.();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Retry failed');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setBusyId(null);
     }
@@ -121,7 +121,7 @@ export function OutboxBacklogDialog({
       await load(false);
       onChanged?.();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Delete failed');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setBusyId(null);
     }

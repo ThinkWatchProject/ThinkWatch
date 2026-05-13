@@ -58,7 +58,7 @@ export function TeamsPage() {
       setTeams(data);
       setError('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load teams');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }
@@ -89,7 +89,7 @@ export function TeamsPage() {
       setDialogOpen(false);
       await fetchTeams();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Failed to save');
+      setFormError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setSaving(false);
     }
@@ -103,7 +103,7 @@ export function TeamsPage() {
       setDeleteTarget(null);
       await fetchTeams();
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : 'Failed to delete');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     }
   };
 
@@ -172,6 +172,7 @@ export function TeamsPage() {
                         size="icon"
                         onClick={() => navigate({ to: '/admin/teams/$id', params: { id: team.id } })}
                         title={t('teams.viewDetail')}
+                        aria-label={t('teams.viewDetail')}
                       >
                         <MoreHorizontal className="h-4 w-4" />
                       </Button>
@@ -180,6 +181,7 @@ export function TeamsPage() {
                         size="icon"
                         onClick={() => setDeleteTarget(team)}
                         title={t('common.delete')}
+                        aria-label={t('common.delete')}
                         disabled={!hasPermission('teams:delete')}
                       >
                         <Trash2 className="h-4 w-4 text-destructive" />

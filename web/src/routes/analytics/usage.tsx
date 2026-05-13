@@ -59,7 +59,7 @@ export function UsagePage() {
         setRows(usageData);
         setStats(statsData);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load usage data'))
+      .catch((err) => setError(err instanceof Error ? err.message : t('common.error')))
       .finally(() => setLoading(false));
   }, []);
 

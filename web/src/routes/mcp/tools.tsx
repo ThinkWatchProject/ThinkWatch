@@ -60,7 +60,7 @@ export function McpToolsPage() {
     api<McpServer[]>('/api/mcp/servers')
       .then(setServers)
       .catch((err) =>
-        setError(err instanceof Error ? err.message : 'Failed to load servers'),
+        setError(err instanceof Error ? err.message : t('common.error')),
       );
   }, []);
 
@@ -91,7 +91,7 @@ export function McpToolsPage() {
       setTotal(res.total);
       setError('');
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load tools');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }

@@ -629,7 +629,7 @@ export function RolesPage() {
         } catch (e) {
           failed.push({
             name: r.name,
-            reason: e instanceof Error ? e.message : 'Failed',
+            reason: e instanceof Error ? e.message : t('common.error'),
           });
         }
       }

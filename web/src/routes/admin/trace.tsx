@@ -53,7 +53,7 @@ export function TracePage() {
     setError('');
     api<TraceResponse>(`/api/admin/trace/${encodeURIComponent(traceId)}`)
       .then(setData)
-      .catch((err) => setError(err instanceof Error ? err.message : 'Failed to load trace'))
+      .catch((err) => setError(err instanceof Error ? err.message : t('common.error')))
       .finally(() => {
         if (isInitial) setLoading(false);
       });

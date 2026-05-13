@@ -94,7 +94,7 @@ export function GatewaySecurityPage() {
       })
       .catch((err) => {
         // Previously silent — left the form blank with no feedback.
-        toast.error(err instanceof Error ? err.message : 'Failed to load security settings');
+        toast.error(err instanceof Error ? err.message : t('common.error'));
       })
       .finally(() => setLoading(false));
   }, []);
@@ -122,7 +122,7 @@ export function GatewaySecurityPage() {
     } catch (err) {
       setStatusMsg({
         type: 'error',
-        text: `${t('settings.saveError')}: ${err instanceof Error ? err.message : 'Unknown error'}`,
+        text: `${t('settings.saveError')}: ${err instanceof Error ? err.message : t('common.error')}`,
       });
     } finally {
       setSaving(false);
@@ -378,7 +378,13 @@ export function GatewaySecurityPage() {
                       </Select>
                     </TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="icon-sm" onClick={() => removeContentFilter(globalIndex)}>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => removeContentFilter(globalIndex)}
+                        aria-label={t('common.delete')}
+                        title={t('common.delete')}
+                      >
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     </TableCell>
@@ -504,7 +510,13 @@ export function GatewaySecurityPage() {
                       />
                     </TableCell>
                     <TableCell>
-                      <Button variant="ghost" size="icon-sm" onClick={() => removePiiPattern(globalIndex)}>
+                      <Button
+                        variant="ghost"
+                        size="icon-sm"
+                        onClick={() => removePiiPattern(globalIndex)}
+                        aria-label={t('common.delete')}
+                        title={t('common.delete')}
+                      >
                         <Trash2 className="h-4 w-4" />
                       </Button>
                     </TableCell>

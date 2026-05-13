@@ -43,6 +43,7 @@ import {
 } from 'lucide-react';
 import { HeaderEditor } from '@/components/header-editor';
 import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
+import { toast } from 'sonner';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription, AlertAction } from '@/components/ui/alert';
 import { OutboxBacklogDialog } from './outbox-backlog-dialog';
@@ -222,6 +223,7 @@ export function LogForwardersPage() {
       setDialogOpen(false);
       resetForm();
       loadForwarders();
+      toast.success(t('logForwarders.toast.created'));
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
@@ -233,6 +235,7 @@ export function LogForwardersPage() {
     try {
       await apiPost(`/api/admin/log-forwarders/${id}/toggle`, {});
       loadForwarders();
+      toast.success(t('logForwarders.toast.toggled'));
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
     }
@@ -266,6 +269,7 @@ export function LogForwardersPage() {
     try {
       await apiPost(`/api/admin/log-forwarders/${id}/reset-stats`, {});
       loadForwarders();
+      toast.success(t('logForwarders.toast.statsReset'));
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
     }
@@ -347,6 +351,7 @@ export function LogForwardersPage() {
       setEditDialogOpen(false);
       setEditForwarder(null);
       loadForwarders();
+      toast.success(t('logForwarders.toast.updated'));
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
     } finally {

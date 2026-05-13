@@ -297,6 +297,7 @@ interface LayoutPayload {
 /// to avoid a first-paint flash back to default order while the API call
 /// is in flight; the API result wins if it differs.
 function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
+  const { t } = useTranslation();
   const defaultOrder = useMemo(() => Object.keys(cards), [cards]);
 
   const mergeOrder = (saved: unknown): string[] => {
@@ -360,7 +361,7 @@ function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
       name: 'default',
       layout_json: { stat_order: next } satisfies LayoutPayload,
     }).catch((err: unknown) => {
-      toast.error(err instanceof Error ? err.message : 'Failed to save layout');
+      toast.error(err instanceof Error ? err.message : t('common.error'));
     });
   };
 

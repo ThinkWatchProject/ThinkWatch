@@ -49,7 +49,7 @@ export function UsageLicensePage() {
         if (!cancelled) setData(res);
       })
       .catch((err) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : 'Failed to load');
+        if (!cancelled) setError(err instanceof Error ? err.message : t('common.error'));
       })
       .finally(() => {
         if (!cancelled) setLoading(false);

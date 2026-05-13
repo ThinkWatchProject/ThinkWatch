@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import i18n from '@/i18n';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
@@ -112,7 +113,7 @@ async function handleTestConnection(
     );
     setTestResult(res);
   } catch (err) {
-    setTestResult({ success: false, message: err instanceof Error ? err.message : 'Connection failed' });
+    setTestResult({ success: false, message: err instanceof Error ? err.message : i18n.t('common.error') });
   } finally {
     setTesting(false);
   }
@@ -182,7 +183,7 @@ export function CreateProviderDialog({ open, onOpenChange, onSuccess }: CreatePr
       toast.success(t('providers.providerCreated'));
       await onSuccess();
     } catch (err) {
-      setFormError(err instanceof Error ? err.message : 'Failed to create provider');
+      setFormError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setSubmitting(false);
     }
@@ -371,7 +372,7 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
       onOpenChange(false);
       await onSuccess();
     } catch (err) {
-      setEditError(err instanceof Error ? err.message : 'Failed to update provider');
+      setEditError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setEditSaving(false);
     }

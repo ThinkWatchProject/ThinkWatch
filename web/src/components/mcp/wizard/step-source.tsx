@@ -169,7 +169,7 @@ export function StepSource({
       }
       onNext();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Probe failed');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setProbing(false);
     }

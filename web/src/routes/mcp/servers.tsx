@@ -78,7 +78,7 @@ export function McpServersPage() {
       setServers(data);
     } catch (err) {
       if (signal?.aborted) return;
-      setError(err instanceof Error ? err.message : 'Failed to load MCP servers');
+      setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
       setLoading(false);
     }
@@ -291,6 +291,7 @@ export function McpServersPage() {
                           size="icon-sm"
                           onClick={() => setEditServer(s)}
                           title={t('common.edit')}
+                          aria-label={t('common.edit')}
                           disabled={
                             !hasPermission('mcp_servers:update') ||
                             discoveringId === s.id
@@ -306,6 +307,7 @@ export function McpServersPage() {
                             discoveringId === s.id || !hasPermission('mcp_servers:update')
                           }
                           title={t('mcpServers.discoverTools')}
+                          aria-label={t('mcpServers.discoverTools')}
                         >
                           {discoveringId === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
                         </Button>
@@ -314,6 +316,7 @@ export function McpServersPage() {
                           size="icon-sm"
                           onClick={() => setDeleteTargetId(s.id)}
                           title={t('common.delete')}
+                          aria-label={t('common.delete')}
                           disabled={
                             !hasPermission('mcp_servers:delete') ||
                             discoveringId === s.id
