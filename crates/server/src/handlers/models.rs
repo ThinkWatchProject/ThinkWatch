@@ -1696,8 +1696,6 @@ mod tests {
         // All three fields valid together → ok. A failure on any single
         // field returns immediately, but a happy-path combination must
         // still pass.
-        assert!(
-            validate_routing_overrides(Some("latency"), Some("route"), Some(300)).is_ok()
-        );
+        assert!(validate_routing_overrides(Some("latency"), Some("route"), Some(300)).is_ok());
     }
 }
