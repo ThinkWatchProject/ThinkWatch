@@ -29,3 +29,57 @@ where
 {
     T::deserialize(deserializer).map(Some)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::deserialize_some;
+    use serde::Deserialize;
+
+    // Concrete usage: a PATCH request body where each field encodes
+    // tri-state via `Option<Option<String>>`. Each test asserts a
+    // different cell of the absent/null/value matrix.
+    #[derive(Debug, Default, Deserialize, PartialEq)]
+    struct PatchReq {
+        #[serde(default, deserialize_with = "deserialize_some")]
+        name: Option<Option<String>>,
+    }
+
+    #[test]
+    fn absent_field_deserializes_to_outer_none() {
+        // "don't touch" semantics — caller didn't include the field.
+        let parsed: PatchReq = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.name, None);
+    }
+
+    #[test]
+    fn null_field_deserializes_to_some_none() {
+        // "clear this field" — explicit JSON null.
+        let parsed: PatchReq = serde_json::from_str(r#"{"name": null}"#).unwrap();
+        assert_eq!(parsed.name, Some(None));
+    }
+
+    #[test]
+    fn value_field_deserializes_to_some_some() {
+        // "replace with this value".
+        let parsed: PatchReq = serde_json::from_str(r#"{"name": "alice"}"#).unwrap();
+        assert_eq!(parsed.name, Some(Some("alice".into())));
+    }
+
+    #[test]
+    fn empty_string_value_still_some_some_not_some_none() {
+        // Empty string is a *value*, not "clear". The handler may
+        // decide to treat it as clear at the validation layer, but the
+        // wire-level deserialization MUST distinguish the two.
+        let parsed: PatchReq = serde_json::from_str(r#"{"name": ""}"#).unwrap();
+        assert_eq!(parsed.name, Some(Some(String::new())));
+    }
+
+    #[test]
+    fn wrong_type_surfaces_as_error_not_silent_none() {
+        // A type mismatch must be a deserialize error, not silently
+        // dropped to None — otherwise the API would accept invalid
+        // payloads and ignore them.
+        let result: Result<PatchReq, _> = serde_json::from_str(r#"{"name": 42}"#);
+        assert!(result.is_err());
+    }
+}

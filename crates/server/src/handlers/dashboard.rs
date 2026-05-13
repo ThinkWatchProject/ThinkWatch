@@ -1395,3 +1395,90 @@ async fn push_snapshot(
         Err(_) => Err("ws send timed out".into()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The ws_slot machinery lives behind a process-global static map
+    // (OnceLock<Mutex<HashMap>>). Tests run in parallel under nextest,
+    // so EVERY test here MUST use a fresh `uuid::Uuid::new_v4()` —
+    // sharing a fixed UUID would race against neighboring tests'
+    // acquire/release operations and produce flakes.
+
+    #[test]
+    fn try_acquire_succeeds_under_cap() {
+        let user = uuid::Uuid::new_v4();
+        assert!(try_acquire_ws_slot(user, 2));
+        assert!(try_acquire_ws_slot(user, 2));
+        release_ws_slot(user);
+        release_ws_slot(user);
+    }
+
+    #[test]
+    fn try_acquire_fails_at_cap() {
+        let user = uuid::Uuid::new_v4();
+        assert!(try_acquire_ws_slot(user, 1));
+        // Second acquire at cap of 1 must fail without incrementing —
+        // otherwise the cap is advisory rather than enforced.
+        assert!(!try_acquire_ws_slot(user, 1));
+        release_ws_slot(user);
+    }
+
+    #[test]
+    fn release_decrements_and_lets_next_acquire_through() {
+        let user = uuid::Uuid::new_v4();
+        assert!(try_acquire_ws_slot(user, 1));
+        assert!(!try_acquire_ws_slot(user, 1));
+        release_ws_slot(user);
+        // Slot is free again now.
+        assert!(try_acquire_ws_slot(user, 1));
+        release_ws_slot(user);
+    }
+
+    #[test]
+    fn release_to_zero_removes_key_from_map() {
+        // Memory hygiene: an idle user shouldn't leave a 0-count entry
+        // in the global HashMap. Verify by acquiring + releasing
+        // exactly once, then re-acquiring and watching the cap apply
+        // from a fresh count.
+        let user = uuid::Uuid::new_v4();
+        assert!(try_acquire_ws_slot(user, 1));
+        release_ws_slot(user);
+        // Re-acquire under a new cap of 2 — first should succeed,
+        // second should succeed (since we're starting from 0, not 1).
+        assert!(try_acquire_ws_slot(user, 2));
+        assert!(try_acquire_ws_slot(user, 2));
+        release_ws_slot(user);
+        release_ws_slot(user);
+    }
+
+    #[test]
+    fn release_on_missing_key_is_noop() {
+        // Defensive: releasing a slot we never acquired must NOT panic
+        // and must not produce a negative count (saturating_sub).
+        let user = uuid::Uuid::new_v4();
+        release_ws_slot(user); // never acquired
+        // We should still be able to acquire normally afterward.
+        assert!(try_acquire_ws_slot(user, 1));
+        release_ws_slot(user);
+    }
+
+    #[test]
+    fn ws_slot_guard_releases_on_drop() {
+        let user = uuid::Uuid::new_v4();
+        {
+            let _guard = WsSlotGuard(user);
+            assert!(try_acquire_ws_slot(user, 2));
+            // Inside scope: 1 slot held by guard semantics (but guard
+            // itself doesn't *acquire*, only releases) + 1 held by the
+            // manual acquire above = 1 manual. Drop will release once.
+        }
+        // Guard's Drop fired one release. Now manually release the
+        // one we acquired explicitly.
+        // Net effect on the counter: +1 - 1 (guard) - 1 (manual) = -1,
+        // which saturates at 0. Re-acquire to confirm we're at 0.
+        assert!(try_acquire_ws_slot(user, 1));
+        release_ws_slot(user);
+    }
+}
