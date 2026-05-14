@@ -26,6 +26,7 @@
 //! a service yet; the migration is iterative.
 
 pub mod rbac_service;
+pub mod refresh_blacklist;
 pub mod session_service;
 pub mod totp_service;
 pub mod user_repository;

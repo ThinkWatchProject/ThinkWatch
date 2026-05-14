@@ -816,11 +816,6 @@ pub async fn refresh(
     // revoked. See the comment in wave 3 commit for the full
     // model: hash → blacklist with TTL = remaining lifetime →
     // reject on replay.
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(presented_token.as_bytes());
-    let token_hash = hex::encode(hasher.finalize());
-    let blacklist_key = format!("refresh_blacklist:{token_hash}");
 
     use fred::interfaces::KeysInterface;
     // Reject refresh tokens issued before the last password change.
@@ -849,26 +844,13 @@ pub async fn refresh(
         return Err(AppError::Unauthorized);
     }
 
-    // Atomic claim: SET NX EX. The previous code did a separate GET
-    // then SET, which let two concurrent /refresh calls with the same
-    // refresh token both see `None` from GET and both proceed to mint
-    // a session — a legit double-tab refresh could mint TWO valid
-    // access+refresh pairs out of one source token. SET NX returns
-    // "OK" if the caller claimed the key first, or Nil if another
-    // caller already did; the latter is the replay case (either an
-    // attacker re-using a captured token, or the losing side of a
-    // double-tab race).
-    let now = chrono::Utc::now().timestamp();
-    let remaining_secs = (claims.exp - now).max(60);
-    let claimed: Option<String> = state
-        .redis
-        .set(
-            &blacklist_key,
-            "1",
-            Some(fred::types::Expiration::EX(remaining_secs)),
-            Some(fred::types::SetOptions::NX),
-            false,
-        )
+    // Atomic claim: SET NX EX via the shared helper. The previous
+    // code hand-rolled this here AND in logout, which let the two
+    // sites drift on atomicity. `AlreadyClaimed` is the replay path
+    // (either an attacker re-using a captured token, or the losing
+    // side of a legit double-tab race).
+    use crate::services::refresh_blacklist::{self, ClaimOutcome};
+    let outcome = refresh_blacklist::claim(&state.redis, &presented_token, claims.exp)
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "Redis unavailable while claiming refresh-token blacklist");
@@ -876,7 +858,7 @@ pub async fn refresh(
                 .increment(1);
             AppError::Unauthorized
         })?;
-    if claimed.is_none() {
+    if outcome == ClaimOutcome::AlreadyClaimed {
         tracing::warn!(
             user_id = %claims.sub,
             "refresh token replay detected — token already claimed"
@@ -934,20 +916,17 @@ pub async fn logout(
     ) && let Ok(claims) = state.jwt.verify_token(&presented)
         && claims.token_type == "refresh"
     {
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(presented.as_bytes());
-        let token_hash = hex::encode(hasher.finalize());
-        let blacklist_key = format!("refresh_blacklist:{token_hash}");
-        let now = chrono::Utc::now().timestamp();
-        let remaining_secs = (claims.exp - now).max(60) as u64;
-        let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+        // Use the shared SET-NX-EX claim so logout matches refresh
+        // semantics. Outcome is ignored: AlreadyClaimed is fine
+        // (token was already neutered, nothing more to do); Claimed
+        // is the happy path; Redis errors are non-fatal here since
+        // /logout's main purpose is the signing-key delete + cookie
+        // clear, and the access cookie's natural TTL bounds the
+        // damage from a missed blacklist write.
+        let _ = crate::services::refresh_blacklist::claim(
             &state.redis,
-            &blacklist_key,
-            "1",
-            Some(fred::types::Expiration::EX(remaining_secs as i64)),
-            None,
-            false,
+            &presented,
+            claims.exp,
         )
         .await;
     }
