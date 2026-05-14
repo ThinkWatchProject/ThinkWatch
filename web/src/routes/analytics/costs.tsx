@@ -148,6 +148,10 @@ export function CostsPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
+      // Override the server's Content-Disposition filename with one
+      // that captures the *selected dimensions* — the server only
+      // knows the time window. curl users get the server fallback;
+      // browser users get this richer name.
       a.download = `costs-${selectedDimensions.join('-')}-${new Date().toISOString().slice(0, 10)}.csv`;
       document.body.appendChild(a);
       a.click();

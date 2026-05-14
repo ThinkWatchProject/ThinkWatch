@@ -1141,7 +1141,7 @@ pub async fn get_costs(
         return Ok((
             axum::http::StatusCode::OK,
             [
-                (axum::http::header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                (axum::http::header::CONTENT_TYPE, COSTS_CSV_CONTENT_TYPE),
                 (
                     axum::http::header::CONTENT_DISPOSITION,
                     &format!("attachment; filename=\"{filename}\""),
@@ -1175,6 +1175,12 @@ fn csv_escape(s: &str) -> String {
 /// precision (no `$` prefix, no rounding). The `_usd` suffix names the
 /// unit explicitly; keeping it numeric means `=SUM(...)` works without
 /// massaging.
+///
+/// Content-Type for the costs CSV response. `charset=utf-8` paired
+/// with the in-body BOM tells Excel to read this as UTF-8 instead of
+/// falling back to the local codepage.
+const COSTS_CSV_CONTENT_TYPE: &str = "text/csv; charset=utf-8";
+
 fn build_costs_csv(dims: &[CostGroupBy], breakdown: &CostBreakdown) -> String {
     use std::fmt::Write;
     let mut body = String::new();
@@ -1408,20 +1414,18 @@ mod helper_tests {
     /// `text/csv; charset=utf-8` must be declared in the Content-Type so
     /// downstream HTTP clients (and Excel's `Get Data → From Web`)
     /// pick UTF-8 decoding instead of falling back to the local
-    /// codepage. This pairs with the BOM in [`build_costs_csv`] —
-    /// belt and braces.
+    /// codepage. Pins the [`COSTS_CSV_CONTENT_TYPE`] const that
+    /// `get_costs` actually emits, so a future refactor that swaps the
+    /// literal breaks this test rather than silently regressing.
     #[test]
     fn costs_csv_content_type_declares_utf8_charset() {
-        // Mirrors the literal used in the get_costs handler — keep them
-        // in sync. If you change one, change both.
-        let content_type = "text/csv; charset=utf-8";
         assert!(
-            content_type.contains("charset=utf-8"),
-            "Content-Type must declare charset=utf-8: {content_type}",
+            COSTS_CSV_CONTENT_TYPE.contains("charset=utf-8"),
+            "Content-Type must declare charset=utf-8: {COSTS_CSV_CONTENT_TYPE}",
         );
         assert!(
-            content_type.starts_with("text/csv"),
-            "Content-Type must be text/csv: {content_type}",
+            COSTS_CSV_CONTENT_TYPE.starts_with("text/csv"),
+            "Content-Type must be text/csv: {COSTS_CSV_CONTENT_TYPE}",
         );
     }
 

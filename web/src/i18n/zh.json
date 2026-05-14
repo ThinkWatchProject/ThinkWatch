@@ -465,7 +465,7 @@
     "routingOverrideHint": "针对此模型覆盖网关全局默认。留空则继承「设置 → 网关」中的配置。",
     "outputGuardrails": {
       "title": "输出护栏",
-      "description": "在响应返回调用方之前,对上游响应执行针对该模型的检查。当前仅支持最大长度规则。",
+      "description": "在响应返回调用方之前,对上游响应执行针对该模型的检查。当前仅支持最大长度规则,且仅作用于非流式响应——流式补全会绕过此检查。",
       "addMaxLength": "添加最大长度护栏",
       "noRules": "未配置任何护栏。",
       "maxLengthLabel": "最大长度: {{count}} 个字符",

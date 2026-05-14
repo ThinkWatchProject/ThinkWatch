@@ -465,7 +465,7 @@
     "routingOverrideHint": "Override the gateway-wide defaults for this model. Leave blank to inherit from Settings → Gateway.",
     "outputGuardrails": {
       "title": "Output guardrails",
-      "description": "Reject upstream responses that violate per-model checks before they reach the caller. Today only a maximum-length rule is wired.",
+      "description": "Reject upstream responses that violate per-model checks before they reach the caller. Today only a maximum-length rule is wired, and it applies to non-streaming responses only — streaming completions bypass these checks.",
       "addMaxLength": "Add max-length guardrail",
       "noRules": "No guardrails configured.",
       "maxLengthLabel": "Max length: {{count}} chars",
