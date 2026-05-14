@@ -211,7 +211,15 @@ pub async fn get_trace(
             level: String,
             message: String,
         }
-        let pattern = format!("%{trace_id}%");
+        // Escape LIKE metacharacters in the user-supplied trace_id so
+        // `trace_id=%` doesn't trigger a 1h-window app_logs scan
+        // bypassing the substring-search intent. LIMIT 200 + PREWHERE
+        // already bound damage, but escaping costs nothing.
+        let escaped = trace_id
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_");
+        let pattern = format!("%{escaped}%");
         let app_rows: Vec<AppLogRow> = ch
             .query(
                 "SELECT id, \

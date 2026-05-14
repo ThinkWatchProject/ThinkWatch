@@ -412,6 +412,18 @@ pub async fn test_forwarder(
                     }));
                 }
             };
+            // Revalidate the address at test time. Create/update already
+            // call validate_host_port, but DNS for a previously-public
+            // host could flip to 127.0.0.1 between create and test;
+            // without this re-check the test endpoint becomes an
+            // internal-port prober. Webhook/Kafka branches below
+            // revalidate the same way.
+            if let Err(e) = validate_host_port(&addr) {
+                return Ok(Json(TestResult {
+                    success: false,
+                    message: format!("Address rejected by SSRF guard: {e}"),
+                }));
+            }
             let facility: u8 = forwarder
                 .config
                 .get("facility")

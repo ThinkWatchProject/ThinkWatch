@@ -102,6 +102,13 @@ pub async fn list_gateway_logs(
     Query(params): Query<GatewayLogsQuery>,
 ) -> Result<Json<GatewayLogsResponse>, AppError> {
     auth_user.require_permission("logs:read_all")?;
+    // `logs:read_all` is a global-scope permission; require_permission
+    // only checks the action and would pass a team-scoped grant of
+    // the Admin role too. Pair with assert_scope_global to refuse
+    // that case, matching the pattern used by analytics:read_all.
+    auth_user
+        .assert_scope_global(&state.db, "logs:read_all")
+        .await?;
     if !ch_available(&state) {
         return Ok(Json(GatewayLogsResponse {
             total: 0,

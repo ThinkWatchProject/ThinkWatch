@@ -63,6 +63,9 @@ pub async fn list_mcp_logs(
     Query(params): Query<McpLogsQuery>,
 ) -> Result<Json<McpLogsResponse>, AppError> {
     auth_user.require_permission("logs:read_all")?;
+    auth_user
+        .assert_scope_global(&state.db, "logs:read_all")
+        .await?;
     if !ch_available(&state) {
         return Ok(Json(McpLogsResponse {
             total: 0,
