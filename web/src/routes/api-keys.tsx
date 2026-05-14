@@ -186,7 +186,7 @@ export function ApiKeysPage() {
   const [keys, setKeys] = useState<ApiKey[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [tab, setTab] = useState('all');
+  const [tab, setTab] = useState('active');
 
   // Shared data for dialogs
   const [costCenterOptions, setCostCenterOptions] = useState<string[]>([]);
@@ -319,7 +319,7 @@ export function ApiKeysPage() {
         })
       : tab === 'inactive'
         ? keys.filter((k) => !k.is_active || !!k.disabled_reason)
-        : keys;
+        : keys.filter((k) => k.is_active && !k.disabled_reason);
 
   // ---------------------------------------------------------------------------
   // Callbacks
@@ -415,7 +415,7 @@ export function ApiKeysPage() {
       <div className="mb-4 flex items-center">
         <Tabs value={tab} onValueChange={setTab}>
           <TabsList>
-            <TabsTrigger value="all">{t('common.total')}</TabsTrigger>
+            <TabsTrigger value="active">{t('common.active')}</TabsTrigger>
             <TabsTrigger value="expiring">{t('apiKeys.expiringSoon')}</TabsTrigger>
             <TabsTrigger value="inactive">{t('apiKeys.inactiveTab')}</TabsTrigger>
           </TabsList>
@@ -442,9 +442,9 @@ export function ApiKeysPage() {
             <div className="flex h-full flex-col items-center justify-center text-center">
               <KeyRound className="h-10 w-10 text-muted-foreground mb-3" />
               <p className="text-sm text-muted-foreground">
-                {tab === 'all' ? t('apiKeys.noKeys') : t('common.noData')}
+                {keys.length === 0 ? t('apiKeys.noKeys') : t('common.noData')}
               </p>
-              {tab === 'all' && (
+              {keys.length === 0 && (
                 <>
                   <p className="text-xs text-muted-foreground mt-1">{t('apiKeys.noKeysHint')}</p>
                   {hasPermission('api_keys:create') && (
