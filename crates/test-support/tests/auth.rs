@@ -364,6 +364,157 @@ async fn totp_setup_then_verify_then_login_requires_code() {
     .assert_ok();
 }
 
+/// Drive the /totp/setup → /totp/verify-setup flow against `con` and
+/// return the freshly-issued shared secret, leaving the user with
+/// `totp_enabled = true`. Used as a shared arm for the disable-flow
+/// tests below.
+async fn enable_totp_for(con: &TestClient, email: &str) -> String {
+    let setup: Value = con
+        .post_empty("/api/auth/totp/setup")
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let secret = setup["secret"]
+        .as_str()
+        .expect("totp secret in body")
+        .to_string();
+    let code = think_watch_auth::totp::current_code(&secret, email).unwrap();
+    con.post("/api/auth/totp/verify-setup", json!({"code": code}))
+        .await
+        .unwrap()
+        .assert_ok();
+    secret
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn totp_disable_succeeds_with_correct_password() {
+    let app = TestApp::spawn().await;
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let con = app.console_client();
+    con.post(
+        "/api/auth/login",
+        json!({"email": user.user.email, "password": user.plaintext_password}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    enable_totp_for(&con, &user.user.email).await;
+
+    let resp = con
+        .post(
+            "/api/auth/totp/disable",
+            json!({"old_password": user.plaintext_password}),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+
+    // Row flips back to disabled.
+    let row: (bool, Option<String>) =
+        sqlx::query_as("SELECT totp_enabled, totp_secret FROM users WHERE id = $1")
+            .bind(user.user.id)
+            .fetch_one(&app.db)
+            .await
+            .unwrap();
+    assert!(!row.0, "totp_enabled should be false after disable");
+    assert!(row.1.is_none(), "totp_secret should be cleared");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn totp_disable_rejects_wrong_password() {
+    let app = TestApp::spawn().await;
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let con = app.console_client();
+    con.post(
+        "/api/auth/login",
+        json!({"email": user.user.email, "password": user.plaintext_password}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    enable_totp_for(&con, &user.user.email).await;
+
+    let resp = con
+        .post(
+            "/api/auth/totp/disable",
+            json!({"old_password": "wrong_password_12345!"}),
+        )
+        .await
+        .unwrap();
+    resp.assert_status(401);
+
+    // Row unchanged.
+    let enabled: bool = sqlx::query_scalar("SELECT totp_enabled FROM users WHERE id = $1")
+        .bind(user.user.id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    assert!(enabled, "totp_enabled must still be true");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn totp_disable_rejects_when_not_enabled() {
+    let app = TestApp::spawn().await;
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let con = app.console_client();
+    con.post(
+        "/api/auth/login",
+        json!({"email": user.user.email, "password": user.plaintext_password}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    // No enable step → totp_enabled is false.
+    let resp = con
+        .post(
+            "/api/auth/totp/disable",
+            json!({"old_password": user.plaintext_password}),
+        )
+        .await
+        .unwrap();
+    resp.assert_status(400);
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn totp_disable_rejects_sso_account() {
+    let app = TestApp::spawn().await;
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let con = app.console_client();
+    con.post(
+        "/api/auth/login",
+        json!({"email": user.user.email, "password": user.plaintext_password}),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    // Enable TOTP first so the `not enabled` guard passes, then strip
+    // the password_hash to simulate an SSO-only account.
+    enable_totp_for(&con, &user.user.email).await;
+    sqlx::query("UPDATE users SET password_hash = NULL WHERE id = $1")
+        .bind(user.user.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    let resp = con
+        .post(
+            "/api/auth/totp/disable",
+            json!({"old_password": user.plaintext_password}),
+        )
+        .await
+        .unwrap();
+    resp.assert_status(400);
+}
+
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn delete_account_soft_deletes_and_blocks_login() {

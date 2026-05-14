@@ -49,6 +49,11 @@ pub struct ChangePasswordRequest {
     pub new_password: String,
 }
 
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct DisableTotpRequest {
+    pub old_password: String,
+}
+
 /// `POST /api/auth/pow-challenge` — issue a fresh proof-of-work
 /// challenge for the next login attempt.
 ///
@@ -1380,7 +1385,7 @@ pub async fn totp_verify_setup(
     post,
     path = "/api/auth/totp/disable",
     tag = "Auth",
-    request_body = ChangePasswordRequest,
+    request_body = DisableTotpRequest,
     responses(
         (status = 200, description = "TOTP disabled"),
         (status = 400, description = "TOTP not enabled or SSO account"),
@@ -1390,7 +1395,7 @@ pub async fn totp_verify_setup(
 pub async fn totp_disable(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    Json(req): Json<ChangePasswordRequest>,
+    Json(req): Json<DisableTotpRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user = sqlx::query_as::<_, User>(
         "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
@@ -1404,7 +1409,7 @@ pub async fn totp_disable(
         return Err(AppError::BadRequest("TOTP is not enabled".into()));
     }
 
-    // Verify current password (use old_password field)
+    // Verify current password.
     let hash = user.password_hash.as_ref().ok_or(AppError::BadRequest(
         "SSO accounts cannot manage TOTP here".into(),
     ))?;

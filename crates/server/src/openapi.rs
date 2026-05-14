@@ -7,7 +7,7 @@ use crate::handlers::{
     analytics::{CostBreakdown, CostItem, CostStats, CostTotals, UsageRow, UsageStats},
     api_keys::{ForceRevokeRequest, PolicyScopeResponse, UpdateKeyRequest},
     app_logs::{AppLogEntryResponse, AppLogsResponse},
-    auth::{ChangePasswordRequest, TotpSetupResponse, TotpVerifyRequest},
+    auth::{ChangePasswordRequest, DisableTotpRequest, TotpSetupResponse, TotpVerifyRequest},
     dashboard::{
         DashboardLayout, DashboardLive, DashboardStats, LiveLogRow, ProviderHealth, RpmBucket,
         WsTicketResponse,
@@ -208,7 +208,7 @@ use crate::handlers::{
     components(
         schemas(
             // Auth
-            ChangePasswordRequest, TotpSetupResponse, TotpVerifyRequest,
+            ChangePasswordRequest, DisableTotpRequest, TotpSetupResponse, TotpVerifyRequest,
             // API Keys
             UpdateKeyRequest,
             ForceRevokeRequest,
