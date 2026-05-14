@@ -1293,13 +1293,15 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
         Duration::from_secs(state.dynamic_config.perf_dashboard_ws_io_secs().await as u64);
     let tick_secs = state.dynamic_config.perf_dashboard_ws_tick_secs().await as u64;
 
-    // Resolve the team / user filter ONCE on connect. The filter is
-    // determined by RBAC role assignments, which change rarely; we
-    // accept ~24h staleness here in exchange for not querying the
-    // RBAC tables on every push (every 4s × hundreds of connections
-    // would dominate Postgres). A re-login picks up changes
-    // immediately because the WS is closed and reopened.
-    let user_filter = match resolve_dashboard_user_filter(&state.db, user_id).await {
+    // Resolve the team / user filter on connect and re-resolve on every
+    // revoke tick (~32s) so a role that's revoked mid-session stops
+    // delivering data within the same window the revoke key is polled.
+    // Earlier this was resolved ONCE and cached for the connection's
+    // lifetime — an admin removing a user from a team kept streaming
+    // that team's data to the user's open tab until they refreshed.
+    // The RBAC query is two indexed joins (~1ms); at the 32s cadence
+    // it's well under the gateway-snapshot cost.
+    let mut user_filter = match resolve_dashboard_user_filter(&state.db, user_id).await {
         Ok(f) => f,
         Err(e) => {
             tracing::warn!(%user_id, "dashboard scope resolve failed: {e}");
@@ -1343,6 +1345,17 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
                     )
                     .await;
                     return;
+                }
+                // Refresh the team/user filter. A role un-assignment or
+                // team membership change between two revoke ticks
+                // tightens the visible-user set on the next snapshot.
+                // A Redis hiccup on the revoke check above is fail-soft
+                // (continue serving); a Postgres hiccup here is the
+                // same — keep the previous filter rather than break
+                // the connection over a transient error.
+                match resolve_dashboard_user_filter(&state.db, user_id).await {
+                    Ok(f) => user_filter = f,
+                    Err(e) => tracing::warn!(%user_id, "dashboard scope re-resolve failed (keeping stale filter): {e}"),
                 }
             }
             _ = ticker.tick() => {
