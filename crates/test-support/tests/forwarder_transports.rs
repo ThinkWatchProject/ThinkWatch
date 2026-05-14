@@ -303,7 +303,14 @@ async fn kafka_forwarder_failure_lands_in_outbox_for_retry() {
         .audit
         .log(AuditEntry::new("test.kafka_dlq").resource("forwarder_test"));
 
-    for _ in 0..50 {
+    // 100 × 100ms = 10s budget. Earlier this was 50 × 50ms = 2.5s
+    // which flaked on slow CI runners where the audit pipeline's
+    // inline retry budget (3× reqwest @ default timeout) plus channel
+    // dispatch added more latency than the assertion allowed. The
+    // assertion is "did the row eventually land", not "did it land
+    // fast", so the longer budget is the right ceiling.
+    let mut last_n: i64 = -1;
+    for _ in 0..100 {
         let n: i64 =
             sqlx::query_scalar("SELECT count(*) FROM webhook_outbox WHERE forwarder_id = $1")
                 .bind(forwarder_id)
@@ -313,7 +320,12 @@ async fn kafka_forwarder_failure_lands_in_outbox_for_retry() {
         if n > 0 {
             return;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        last_n = n;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    panic!("Kafka 5xx delivery never landed in webhook_outbox — DLQ wiring broken");
+    panic!(
+        "Kafka 5xx delivery never landed in webhook_outbox after 10s — \
+         last observed count={last_n}. Either the audit pipeline isn't \
+         flushing or the DLQ wiring is broken."
+    );
 }
