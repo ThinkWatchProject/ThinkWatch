@@ -1,4 +1,4 @@
-use crate::providers::traits::{ChatCompletionRequest, ChatCompletionResponse};
+use crate::providers::traits::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
 use fred::clients::Client;
 use fred::interfaces::KeysInterface;
 use xxhash_rust::xxh3::xxh3_128;
@@ -48,13 +48,21 @@ impl ResponseCache {
     /// Compute the cache key for a request. Purely semantic — no user
     /// scoping. Identical model + messages + params = same key.
     pub fn cache_key(request: &ChatCompletionRequest) -> String {
-        let messages_json = serde_json::to_string(&request.messages).unwrap_or_default();
+        Self::cache_key_for(&request.model, &request.messages, request.max_tokens)
+    }
+
+    /// Compute the cache key from the model + messages + max_tokens
+    /// triple directly. Most callers should use [`cache_key`]; this
+    /// variant exists for tests and any future caller that constructs
+    /// the key without holding the full request struct.
+    pub fn cache_key_for(model: &str, messages: &[ChatMessage], max_tokens: Option<u32>) -> String {
+        let messages_json = serde_json::to_string(messages).unwrap_or_default();
 
         let mut input = Vec::with_capacity(256);
-        input.extend_from_slice(request.model.as_bytes());
+        input.extend_from_slice(model.as_bytes());
         input.push(b':');
         input.extend_from_slice(messages_json.as_bytes());
-        if let Some(mt) = request.max_tokens {
+        if let Some(mt) = max_tokens {
             input.extend_from_slice(b":mt=");
             input.extend_from_slice(mt.to_string().as_bytes());
         }
@@ -69,9 +77,20 @@ impl ResponseCache {
         if !Self::is_cacheable(request) {
             return None;
         }
+        self.get_for(&request.model, &request.messages, request.max_tokens)
+            .await
+    }
 
-        let key = Self::cache_key(request);
-
+    /// Like [`get`] but takes an explicit `messages` slice. Bypasses
+    /// the `is_cacheable` temperature check — caller is responsible
+    /// for asserting cacheability if it matters.
+    pub async fn get_for(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        max_tokens: Option<u32>,
+    ) -> Option<ChatCompletionResponse> {
+        let key = Self::cache_key_for(model, messages, max_tokens);
         let cached: Option<String> = self.redis.get(&key).await.ok().flatten();
 
         cached.and_then(|json| {
@@ -127,8 +146,27 @@ return total
         if !Self::is_cacheable(request) {
             return;
         }
+        self.set_for(
+            &request.model,
+            &request.messages,
+            request.max_tokens,
+            response,
+            ttl,
+        )
+        .await;
+    }
 
-        let key = Self::cache_key(request);
+    /// Like [`set`] but takes an explicit `messages` slice. Skips the
+    /// cacheability check; caller filters cacheable requests.
+    pub async fn set_for(
+        &self,
+        model: &str,
+        messages: &[ChatMessage],
+        max_tokens: Option<u32>,
+        response: &ChatCompletionResponse,
+        ttl: Option<u64>,
+    ) {
+        let key = Self::cache_key_for(model, messages, max_tokens);
         let ttl_secs = ttl.unwrap_or(self.default_ttl);
 
         let json = match serde_json::to_string(response) {

@@ -1,5 +1,4 @@
 use crate::providers::traits::{ChatCompletionResponse, ChatMessage};
-use rand::RngExt;
 use regex::Regex;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -28,7 +27,7 @@ struct PiiPattern {
 
 /// Holds the mapping from placeholders back to original PII values.
 pub struct RedactionContext {
-    /// Maps placeholder (e.g. `{{EMAIL_a3f1_1}}`) to original value.
+    /// Maps placeholder (e.g. `{{EMAIL_1}}`) to original value.
     pub replacements: HashMap<String, String>,
 }
 
@@ -151,12 +150,18 @@ impl PiiRedactor {
         let mut counters: HashMap<String, u32> = HashMap::new();
         let mut replacements: HashMap<String, String> = HashMap::new();
 
-        // Per-request random salt to prevent placeholder prediction.
-        // 64 bits gives 2^64 possible values — wide enough that an
-        // attacker can't enumerate placeholder space across requests
-        // to correlate redacted PII.
-        let salt: u64 = rand::rng().random();
-        let salt_hex = format!("{salt:016x}");
+        // Placeholders are stable per request — `{{EMAIL_1}}`,
+        // `{{PHONE_2}}`, … — *not* randomised with a per-request
+        // salt. Earlier this carried a 64-bit salt to "prevent
+        // prediction", but the salt also made cache keys unique
+        // per request (cache stores keyed on redacted bytes), so
+        // every PII-bearing prompt was a guaranteed cache miss
+        // (see DESIGN-001 in proxy.rs). The salt protected against
+        // nothing real: cross-caller cache leak requires identical
+        // pre-redaction text — but two callers sharing identical
+        // pre-redaction text MUST also share identical redaction
+        // contexts (the PII values come from the text itself), so
+        // restoration is symmetric on either side of the cache.
 
         let redacted = messages
             .iter()
@@ -168,13 +173,8 @@ impl PiiRedactor {
                 let new_content = match &msg.content {
                     // OpenAI / Anthropic single-string form
                     serde_json::Value::String(s) => {
-                        let redacted = self.redact_text(
-                            s,
-                            &mut counters,
-                            &mut replacements,
-                            &salt_hex,
-                            "user message",
-                        );
+                        let redacted =
+                            self.redact_text(s, &mut counters, &mut replacements, "user message");
                         serde_json::Value::String(redacted)
                     }
                     // Multimodal form: `[{"type":"text","text":"..."}, {"type":"image_url",...}]`
@@ -192,7 +192,6 @@ impl PiiRedactor {
                                             t,
                                             &mut counters,
                                             &mut replacements,
-                                            &salt_hex,
                                             "user message (multimodal)",
                                         );
                                         let mut new_map = map.clone();
@@ -229,7 +228,6 @@ impl PiiRedactor {
         content_str: &str,
         counters: &mut HashMap<String, u32>,
         replacements: &mut HashMap<String, String>,
-        salt_hex: &str,
         log_origin: &str,
     ) -> String {
         let mut all_matches: Vec<(usize, usize, usize)> = Vec::new();
@@ -266,10 +264,7 @@ impl PiiRedactor {
                 .entry(pattern.placeholder_prefix.clone())
                 .or_insert(0);
             *counter += 1;
-            let placeholder = format!(
-                "{{{{{}_{}_{}}}}}",
-                pattern.placeholder_prefix, salt_hex, counter
-            );
+            let placeholder = format!("{{{{{}_{}}}}}", pattern.placeholder_prefix, counter);
             replacements.insert(placeholder.clone(), matched_value.to_string());
             redacted_content.replace_range(start..end, &placeholder);
         }
@@ -584,50 +579,39 @@ mod tests {
     }
 
     #[test]
-    fn salt_is_64_bit_hex() {
-        // The wave-4 salt widening from u16 to u64 changes the
-        // placeholder format from `{{EMAIL_xxxx_1}}` (4 hex chars)
-        // to `{{EMAIL_xxxxxxxxxxxxxxxx_1}}` (16 hex chars). A
-        // regression to the narrow salt would re-open the
-        // collision-correlation gap the wave-4 review flagged.
+    fn placeholders_are_stable_counter_only() {
+        // Stable placeholder format: `{{EMAIL_<counter>}}`. The salt
+        // was dropped intentionally — see DESIGN-001 in proxy.rs —
+        // so that two callers with identical pre-redaction prompts
+        // produce identical redacted bodies, allowing the response
+        // cache to actually hit. Two callers with identical text
+        // must also have identical contexts (PII values come from
+        // the text itself), so the symmetry is safe.
         let redactor = PiiRedactor::new();
         let messages = vec![user_msg("Reach me at alice@example.com")];
         let (_redacted, ctx) = redactor.redact_messages(&messages);
         let placeholder = find_placeholder(&ctx, "alice@example.com");
-        // Format: `{{EMAIL_<16 hex>_<counter>}}`
-        let inside = placeholder
-            .strip_prefix("{{EMAIL_")
-            .and_then(|s| s.strip_suffix("}}"))
-            .expect("placeholder format unexpected");
-        let parts: Vec<&str> = inside.split('_').collect();
-        assert_eq!(parts.len(), 2, "expected SALT_COUNTER, got {placeholder}");
         assert_eq!(
-            parts[0].len(),
-            16,
-            "salt must be 16 hex chars (64 bits), got {} chars in {placeholder}",
-            parts[0].len()
-        );
-        assert!(
-            parts[0].chars().all(|c| c.is_ascii_hexdigit()),
-            "salt must be hex: {placeholder}"
+            placeholder, "{{EMAIL_1}}",
+            "placeholder must be stable counter-only form"
         );
     }
 
     #[test]
-    fn salt_differs_per_request() {
-        // Each redact_messages call generates a fresh salt, so the
-        // same email in two different requests gets two different
-        // placeholders. The narrow u16 salt had a 65k collision
-        // space; the new u64 should never collide in practice.
+    fn placeholders_are_identical_across_two_calls_with_same_input() {
+        // The cache layer keys on pre-redaction content but stores
+        // the redacted-form response; for that to work, redaction
+        // must be deterministic on the input. This test pins that
+        // contract.
         let redactor = PiiRedactor::new();
         let messages = vec![user_msg("alice@example.com")];
         let (_, ctx_a) = redactor.redact_messages(&messages);
         let (_, ctx_b) = redactor.redact_messages(&messages);
         let ph_a = find_placeholder(&ctx_a, "alice@example.com");
         let ph_b = find_placeholder(&ctx_b, "alice@example.com");
-        assert_ne!(
+        assert_eq!(
             ph_a, ph_b,
-            "salt must differ across requests; got identical {ph_a}"
+            "redaction must be deterministic so cache hits restore correctly"
         );
     }
 

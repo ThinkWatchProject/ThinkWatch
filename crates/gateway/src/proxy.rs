@@ -1165,7 +1165,17 @@ pub async fn proxy_chat_completion(
     request.caller_user_id = identity.user_id.clone();
     request.caller_user_email = identity.user_email.clone();
 
-    // 6. PII redaction — redact user messages before sending upstream
+    // 6. PII redaction — redact user messages before sending upstream.
+    //    Placeholders are stable (no per-request salt) so two callers
+    //    sending structurally-identical prompts produce identical
+    //    redacted bodies. The cache keys on the redacted form: same
+    //    structure ⇒ same key ⇒ shared cache slot. The cache stores
+    //    the *unrestored* response (with placeholders intact); each
+    //    retrieving caller restores using their own redaction context
+    //    on the way out. Two callers with different PII embedded
+    //    inside the same prompt structure each see their own values
+    //    on restoration — symmetric and correct because upstream
+    //    only ever saw the placeholder.
     let pii_redactor = state.pii_redactor.load();
     let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&request.messages);
     request.messages = redacted_messages;
@@ -1192,27 +1202,48 @@ pub async fn proxy_chat_completion(
     // a single-chunk SSE stream so the client gets the format it
     // asked for.
     //
-    // Known limitations (DESIGN-001, DESIGN-002):
+    // Two contracts the lookup enforces:
     //
-    // - PII-bearing requests never hit cache. `redact_messages` (1170
-    //   above) mutates `request.messages` to placeholders that carry a
-    //   per-request 64-bit salt, so two calls with identical content
-    //   produce different cache keys. The salt prevents cross-caller
-    //   leakage of the cached *restored* response, but it also defeats
-    //   the cache for the very prompts that would benefit most. Fix
-    //   requires keying on pre-redaction content + storing the
-    //   unrestored response.
+    // 1. **Key by pre-redaction content** so identical user-visible
+    //    prompts collide on the same cache slot regardless of whose
+    //    PII the prompt contained. The stored response carries
+    //    redaction placeholders (`{{EMAIL_1}}` etc.) and we restore
+    //    using THIS caller's redaction context on the way out. Two
+    //    callers with identical pre-redaction text MUST share
+    //    identical redaction contexts (the PII values come from the
+    //    text itself), so cross-caller restoration is symmetric.
     //
-    // - Cache hits do not consume quota (we return before the
-    //   `state.quota.consume` call below). Treating cache hits as free
-    //   is the standard contract — they cost no upstream tokens — but
-    //   it lets a user with a deterministic prompt amortise a single
-    //   real call across an unbounded quota window. If we ever need
-    //   to gate this, debit a configurable fraction of the cached
-    //   `usage.total_tokens` on hit.
-    if let Some(cached) = state.cache.get(&request).await {
+    // 2. **Cache hits debit quota** the same way an upstream call
+    //    would have. The traditional "cache hits are free" reading
+    //    lets a user with a deterministic prompt amortise a single
+    //    real call across an unbounded quota window — i.e. quota
+    //    enforcement becomes optional. Debit the cached
+    //    `usage.total_tokens` so monthly caps still bind.
+    if let Some(mut cached) = state.cache.get(&request).await {
         metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
         tracing::debug!(model = %request.model, stream = is_stream, "Cache HIT");
+
+        // (2) Quota — debit before serving the cached body so the user
+        // can't trivially exceed their monthly cap through cached
+        // round-trips. Quota errors here STILL serve the cached
+        // response because we already passed the `check_quota` gate
+        // at the top of the handler; treating consume as best-effort
+        // matches the post-upstream path below at line 1463.
+        if let Some(ref usage) = cached.usage
+            && let Err(e) = state.quota.consume(&quota_key, usage.total_tokens).await
+        {
+            tracing::warn!(
+                quota_key = %quota_key,
+                tokens = usage.total_tokens,
+                "quota consume on cache hit failed: {e}"
+            );
+        }
+
+        // (1) Restore PII for this caller using their own redaction
+        // context. The cached response carries opaque placeholders;
+        // each consumer paints in their own values.
+        pii_redactor.restore_response(&mut cached, &redaction_ctx);
+
         if is_stream {
             // Re-emit as SSE: one data chunk with the full response + [DONE]
             let chunk_json = serde_json::to_string(&cached).unwrap_or_default();
@@ -1454,10 +1485,19 @@ pub async fn proxy_chat_completion(
             return Err(ctx.emit(e).into());
         }
 
-        // 8a. Restore PII in the response
+        // 8a. Cache the *unrestored* response BEFORE PII restoration
+        // so future cache hits can restore using their own caller's
+        // redaction context. Storing the restored form would bake
+        // this caller's PII into the shared cache entry. The key is
+        // computed from the *redacted* request body, so two callers
+        // sending structurally-identical prompts (even with different
+        // PII embedded) collide on the same slot.
+        state.cache.set(&request, &response, None).await;
+
+        // 8b. Restore PII in the response (this caller's view).
         pii_redactor.restore_response(&mut response, &redaction_ctx);
 
-        // 8b. Consume quota based on actual token usage
+        // 8c. Consume quota based on actual token usage
         if let Some(ref usage) = response.usage {
             let total = usage.total_tokens;
             if let Err(e) = state.quota.consume(&quota_key, total).await {
@@ -1465,7 +1505,7 @@ pub async fn proxy_chat_completion(
             }
         }
 
-        // 8b.1. Post-flight accounting against the limits engine.
+        // 8d. Post-flight accounting against the limits engine.
         if let Some(ref usage) = response.usage {
             post_flight_account(
                 state.db.clone(),
@@ -1481,9 +1521,6 @@ pub async fn proxy_chat_completion(
             )
             .await;
         }
-
-        // 8d. Cache the response
-        state.cache.set(&request, &response, None).await;
 
         // 8e. Log audit detail including metadata
         tracing::info!(
