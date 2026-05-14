@@ -327,7 +327,11 @@
     "awsImdsv2Hint": "凭证将自动从 EC2 实例元数据服务获取。请确保实例绑定了具有 Bedrock 权限的 IAM 角色。",
     "testConnection": "测试连接",
     "testing": "测试中...",
-    "providerCreated": "提供商已创建。"
+    "providerCreated": "提供商已创建。",
+    "testResult": {
+      "latencyAndModels": "{{latency}}ms · {{count}} 个模型",
+      "showModels": "显示模型"
+    }
   },
   "apiKeys": {
     "title": "API 密钥",
