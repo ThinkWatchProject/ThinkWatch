@@ -50,8 +50,20 @@ pub struct Model {
     /// untouched so toggling back restores the prior split.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Per-model output guardrails — JSON array of rule objects
+    /// applied to upstream responses before they reach the caller.
+    /// Stored as `serde_json::Value` here so the common crate stays
+    /// free of gateway types; the gateway side decodes into
+    /// `Vec<OutputGuardrail>` at router-load time. Empty array ⇒ no
+    /// guardrails (matches the DB default).
+    #[serde(default = "default_output_guardrails")]
+    pub output_guardrails: serde_json::Value,
 }
 
 fn default_enabled() -> bool {
     true
+}
+
+fn default_output_guardrails() -> serde_json::Value {
+    serde_json::Value::Array(Vec::new())
 }

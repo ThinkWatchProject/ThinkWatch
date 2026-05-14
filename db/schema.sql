@@ -350,8 +350,20 @@ CREATE TABLE IF NOT EXISTS models (
     -- preserved across model disable/re-enable, so flipping this back
     -- on restores the previous traffic split exactly.
     enabled           BOOLEAN NOT NULL DEFAULT TRUE,
+    -- Output guardrails — JSON-encoded list of rule objects applied to
+    -- the upstream response before it reaches the caller. Each entry
+    -- is `{"type": "max_length", "max_chars": N}` (the only variant
+    -- wired today; see crates/gateway/src/output_guardrails.rs). On
+    -- rejection the gateway returns `TransformError` so OBS-05 logs
+    -- carry the triggering rule.
+    output_guardrails JSONB NOT NULL DEFAULT '[]'::jsonb,
     created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Defensive ADD COLUMN for already-existing deployments: the CREATE
+-- TABLE block above is gated by IF NOT EXISTS, so it's a no-op on
+-- pre-existing databases. ADD COLUMN IF NOT EXISTS lands the new
+-- column on those upgrades without a separate release migration.
+ALTER TABLE models ADD COLUMN IF NOT EXISTS output_guardrails JSONB NOT NULL DEFAULT '[]'::jsonb;
 
 -- Platform-wide per-token pricing baseline. Single-row singleton
 -- (PK pinned to 1 via CHECK). `cost($) = tokens × weight × baseline`.

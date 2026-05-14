@@ -25,11 +25,26 @@
 //! triggering rule (the existing OBS-05 error-type taxonomy already
 //! has slots for this).
 
+use serde::{Deserialize, Serialize};
+
 use crate::providers::traits::{ChatCompletionResponse, GatewayError};
+
+/// Inclusive upper bound on `MaxLength.max_chars`. Anything past this
+/// is almost certainly a configuration mistake — even a 1M-char
+/// completion is well beyond any model's context window — so we
+/// reject it at admission rather than store a value the guardrail
+/// could never trigger on.
+pub const MAX_LENGTH_CAP_CEILING: usize = 1_000_000;
 
 /// Single guardrail rule. New variants slot in here; the runtime
 /// matches on them in `apply_output_guardrails`.
-#[derive(Debug, Clone)]
+///
+/// Serialized as `{"type": "max_length", "max_chars": N}` so the
+/// `models.output_guardrails` JSONB column carries the discriminator
+/// inline and future variants (JsonSchema, Toxicity — see module
+/// docstring) land without breaking older rows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputGuardrail {
     /// Reject when the assistant message exceeds `max_chars`. Cheap
     /// to evaluate and protects rendering pipelines from runaway

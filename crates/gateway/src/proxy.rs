@@ -1419,6 +1419,22 @@ pub async fn proxy_chat_completion(
         // Restore original model name in response (don't leak upstream_model)
         response.model = original_model.clone();
 
+        // 8a-pre. Output guardrails — enforce per-model size / shape
+        // caps on the assistant message before it reaches the caller.
+        // Runs BEFORE PII restore because the rule operates on raw
+        // completion text; running it after would let a redaction
+        // placeholder push a legitimate completion past the cap.
+        // Streaming guardrails would require buffering the whole
+        // stream, which fights latency — non-streaming only for now.
+        let model_cfg = router.config_for(&original_model);
+        if let Err(e) = crate::output_guardrails::apply_output_guardrails(
+            &response,
+            &model_cfg.output_guardrails,
+        ) {
+            finalize_health(&state, sel_record, false).await;
+            return Err(ctx.emit(e).into());
+        }
+
         // 8a. Restore PII in the response
         pii_redactor.restore_response(&mut response, &redaction_ctx);
 
@@ -1807,6 +1823,18 @@ pub async fn proxy_anthropic_messages(
 
         // Restore original model name
         response.model = mapped_model.clone();
+
+        // Output guardrails — same hook as the chat-completions surface;
+        // see proxy_chat_completion for rationale on ordering vs. PII
+        // restore and the streaming carve-out.
+        let model_cfg = router.config_for(&mapped_model);
+        if let Err(e) = crate::output_guardrails::apply_output_guardrails(
+            &response,
+            &model_cfg.output_guardrails,
+        ) {
+            finalize_health(&state, sel_record, false).await;
+            return Err(ctx.emit(e).into());
+        }
 
         pii_redactor.restore_response(&mut response, &redaction_ctx);
 
@@ -2202,6 +2230,16 @@ pub async fn proxy_responses(
 
         // Restore original model name
         response.model = mapped_model.clone();
+
+        // Output guardrails — see proxy_chat_completion for ordering.
+        let model_cfg = router.config_for(&mapped_model);
+        if let Err(e) = crate::output_guardrails::apply_output_guardrails(
+            &response,
+            &model_cfg.output_guardrails,
+        ) {
+            finalize_health(&state, sel_record, false).await;
+            return Err(ctx.emit(e).into());
+        }
 
         // Restore PII placeholders so the converted response carries
         // the original user data the model echoed back.

@@ -1232,18 +1232,35 @@ async fn load_providers_into_router(
         routing_strategy: Option<String>,
         affinity_mode: Option<String>,
         affinity_ttl_secs: Option<i32>,
+        output_guardrails: serde_json::Value,
     }
     let model_rows = sqlx::query_as::<_, ModelRow>(
-        r#"SELECT model_id, routing_strategy, affinity_mode, affinity_ttl_secs
+        r#"SELECT model_id, routing_strategy, affinity_mode, affinity_ttl_secs,
+                  output_guardrails
              FROM models"#,
     )
     .fetch_all(&state.db)
     .await?;
 
     use std::str::FromStr;
+    use think_watch_gateway::output_guardrails::OutputGuardrail;
     use think_watch_gateway::router::{AffinityMode, ModelRoutingConfig};
     use think_watch_gateway::strategy::RoutingStrategy;
     for m in &model_rows {
+        // Tolerate junk rows: if the JSON doesn't deserialise into
+        // `Vec<OutputGuardrail>` (rule schema drift, partial migrate)
+        // log it and fall back to "no guardrails" rather than fail
+        // the whole router rebuild. The model still serves traffic;
+        // the admin gets a chance to fix the row.
+        let guardrails: Vec<OutputGuardrail> = serde_json::from_value(m.output_guardrails.clone())
+            .unwrap_or_else(|e| {
+                tracing::warn!(
+                    model_id = %m.model_id,
+                    error = %e,
+                    "Failed to decode output_guardrails — running model without guardrails"
+                );
+                Vec::new()
+            });
         let cfg = ModelRoutingConfig {
             strategy: m
                 .routing_strategy
@@ -1256,10 +1273,14 @@ async fn load_providers_into_router(
             affinity_ttl_secs: m
                 .affinity_ttl_secs
                 .and_then(|v| if v >= 0 { Some(v as u32) } else { None }),
+            output_guardrails: guardrails,
         };
-        // Skip storing the all-`None` config (saves a HashMap entry
+        // Skip storing the all-default config (saves a HashMap entry
         // per model that's just inheriting global defaults).
-        if cfg.strategy.is_some() || cfg.affinity_mode.is_some() || cfg.affinity_ttl_secs.is_some()
+        if cfg.strategy.is_some()
+            || cfg.affinity_mode.is_some()
+            || cfg.affinity_ttl_secs.is_some()
+            || !cfg.output_guardrails.is_empty()
         {
             router.set_model_config(&m.model_id, cfg);
         }
