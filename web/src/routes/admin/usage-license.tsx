@@ -181,6 +181,14 @@ export function UsageLicensePage() {
                       })
                     : t('usageLicense.unboundedTier')}
                 </p>
+                {data.next_tier && data.next_tier.calls_ceiling != null && (
+                  <p className="text-xs text-muted-foreground">
+                    {t('usageLicense.nextTierAt', {
+                      tier: t(`usageLicense.tier.${data.next_tier.name.toLowerCase()}`),
+                      ceiling: fmtShort(data.next_tier.calls_ceiling),
+                    })}
+                  </p>
+                )}
               </>
             )}
           </CardContent>

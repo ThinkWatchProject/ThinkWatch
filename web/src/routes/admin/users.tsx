@@ -33,7 +33,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, Ban, CheckCircle, Users as UsersIcon, AlertCircle, Copy, Search, ChevronRight, ChevronDown, X } from 'lucide-react';
+import { Plus, MoreHorizontal, Pencil, Trash2, LogOut as LogOutIcon, KeyRound, Ban, CheckCircle, Users as UsersIcon, AlertCircle, Copy, Check, Search, ChevronRight, ChevronDown, X } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import type { TeamSummary } from '@/lib/types';
@@ -145,6 +145,7 @@ export function UsersPage() {
 
   // Reset password dialog
   const [resetResult, setResetResult] = useState<{ password: string; userId: string } | null>(null);
+  const [resetCopied, setResetCopied] = useState(false);
   const [resetConfirmUser, setResetConfirmUser] = useState<User | null>(null);
   const [resetLoading, setResetLoading] = useState(false);
 
@@ -991,7 +992,7 @@ export function UsersPage() {
       />
 
       {/* Reset password result */}
-      <Dialog open={!!resetResult} onOpenChange={(open) => { if (!open) setResetResult(null); }}>
+      <Dialog open={!!resetResult} onOpenChange={(open) => { if (!open) { setResetResult(null); setResetCopied(false); } }}>
         <DialogContent className="sm:max-w-md max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>{t('users.resetPasswordSuccess')}</DialogTitle>
@@ -1004,11 +1005,15 @@ export function UsersPage() {
               <Button
                 variant="outline"
                 size="icon"
-                onClick={() => { navigator.clipboard.writeText(resetResult?.password ?? ''); }}
-                aria-label={t('common.copy')}
-                title={t('common.copy')}
+                onClick={async () => {
+                  await navigator.clipboard.writeText(resetResult?.password ?? '');
+                  setResetCopied(true);
+                  setTimeout(() => setResetCopied(false), 2000);
+                }}
+                aria-label={resetCopied ? t('common.copied') : t('common.copy')}
+                title={resetCopied ? t('common.copied') : t('common.copy')}
               >
-                <Copy className="h-4 w-4" />
+                {resetCopied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
               </Button>
             </div>
           </div>
