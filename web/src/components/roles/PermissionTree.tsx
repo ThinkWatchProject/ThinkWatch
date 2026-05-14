@@ -8,6 +8,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { matchPermission } from '@/lib/permissions';
 import type { PermissionDef } from '@/routes/admin/roles/types';
 
 /** Compile a glob-style pattern (`*` wildcard) to a RegExp. Escapes
@@ -92,7 +93,29 @@ export function PermissionTree({
   renderGroupExtra,
 }: PermissionTreeProps) {
   const { t } = useTranslation();
-  const groups = Array.from(grouped.entries());
+  const [filter, setFilter] = React.useState('');
+
+  // Filter the groups by query: keep a group when its resource name
+  // matches case-insensitively, otherwise keep only the permissions
+  // inside it whose keys match (via the shared glob helper). Empty
+  // query returns the full tree. Filtering is presentational — it
+  // never mutates `selected`, so hidden perms keep their checked
+  // state.
+  const filteredGroups = React.useMemo(() => {
+    const q = filter.trim().toLowerCase();
+    const entries = Array.from(grouped.entries());
+    if (!q) return entries;
+    const out: [string, PermissionDef[]][] = [];
+    for (const [resource, perms] of entries) {
+      if (resource.toLowerCase().includes(q)) {
+        out.push([resource, perms]);
+        continue;
+      }
+      const kept = perms.filter((p) => matchPermission(p.key.toLowerCase(), q));
+      if (kept.length > 0) out.push([resource, kept]);
+    }
+    return out;
+  }, [grouped, filter]);
 
   return (
     <div>
@@ -119,18 +142,36 @@ export function PermissionTree({
           </Button>
         </div>
       </div>
+      <Input
+        value={filter}
+        onChange={(e) => setFilter(e.target.value)}
+        placeholder={t('roles.filterPermissions')}
+        className="mt-2 h-8 text-xs"
+        aria-label={t('roles.filterPermissions')}
+      />
       <ScrollArea className="mt-2 h-[22rem] rounded-md border">
+        {filteredGroups.length === 0 ? (
+          <p className="px-3 py-6 text-center text-xs italic text-muted-foreground">
+            {t('roles.noPermissionsMatch')}
+          </p>
+        ) : (
         <div className="divide-y">
-          {groups.map(([resource, perms]) => {
-            const allOn = perms.every((p) => selected.has(p.key));
-            const someOn = !allOn && perms.some((p) => selected.has(p.key));
+          {filteredGroups.map(([resource, perms]) => {
+            // Group header reflects the FULL group, not the filtered
+            // slice, so clicking the parent checkbox under an active
+            // filter still toggles every perm in the resource (not
+            // just the visible ones). This keeps "select group" a
+            // first-class action even when the search hides siblings.
+            const fullPerms = grouped.get(resource) ?? perms;
+            const allOn = fullPerms.every((p) => selected.has(p.key));
+            const someOn = !allOn && fullPerms.some((p) => selected.has(p.key));
             return (
               <div key={resource} className="px-3 py-2">
                 <label className="flex cursor-pointer items-center gap-2 text-xs font-medium">
                   <Checkbox
                     checked={allOn}
                     data-state={someOn ? 'indeterminate' : allOn ? 'checked' : 'unchecked'}
-                    onCheckedChange={() => onToggleGroup(perms)}
+                    onCheckedChange={() => onToggleGroup(fullPerms)}
                   />
                   <span className="font-mono uppercase tracking-wider text-muted-foreground">
                     {t(`permissions.resource.${resource}` as const, { defaultValue: resource })}
@@ -187,6 +228,7 @@ export function PermissionTree({
             );
           })}
         </div>
+        )}
       </ScrollArea>
     </div>
   );

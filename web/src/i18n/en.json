@@ -1171,7 +1171,9 @@
     "toolPatternPlaceholder": "Search or type server__* pattern…",
     "coveredBy": "covered by pattern",
     "addPattern": "Add pattern",
-    "addExact": "Add"
+    "addExact": "Add",
+    "filterPermissions": "Filter permissions…",
+    "noPermissionsMatch": "No permissions match"
   },
   "permissions": {
     "resource": {
