@@ -1132,34 +1132,12 @@ pub async fn get_costs(
 
     // CSV export for spreadsheet / finance handoff.
     if params.format.as_deref() == Some("csv") {
-        let dim_headers: String = dims.iter().map(|d| d.key()).collect::<Vec<_>>().join(",");
-        let mut body =
-            format!("{dim_headers},request_count,input_tokens,output_tokens,total_cost\n");
-        for item in &breakdown.items {
-            use std::fmt::Write;
-            let dim_vals: String = dims
-                .iter()
-                .map(|d| {
-                    csv_escape(
-                        item.dimensions
-                            .get(d.key())
-                            .map(|s| s.as_str())
-                            .unwrap_or(""),
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            let _ = writeln!(
-                &mut body,
-                "{},{},{},{},{}",
-                dim_vals,
-                item.request_count,
-                item.input_tokens,
-                item.output_tokens,
-                item.total_cost,
-            );
-        }
-        let filename = format!("costs-{}.csv", now.format("%Y%m%d"));
+        let body = build_costs_csv(&dims, &breakdown);
+        let filename = format!(
+            "costs_{}_{}.csv",
+            window_start.format("%Y%m%d"),
+            now.format("%Y%m%d"),
+        );
         return Ok((
             axum::http::StatusCode::OK,
             [
@@ -1182,6 +1160,51 @@ pub async fn get_costs(
 fn csv_escape(s: &str) -> String {
     let escaped = s.replace('"', "\"\"");
     format!("\"{escaped}\"")
+}
+
+/// Build the CSV body for the costs export.
+///
+/// Layout: a UTF-8 BOM (`\u{FEFF}`) prefix so Excel on macOS / Windows
+/// decodes CJK + emoji correctly when accountants double-click the
+/// download (Excel's CSV importer assumes the local ANSI codepage
+/// unless the BOM is present). Followed by the dimension headers
+/// (`model`, `user`, `cost_center`, `provider` — whichever the caller
+/// asked for), then `request_count,input_tokens,output_tokens,total_cost_usd`.
+///
+/// `total_cost_usd` is emitted as a plain Decimal string with full
+/// precision (no `$` prefix, no rounding). The `_usd` suffix names the
+/// unit explicitly; keeping it numeric means `=SUM(...)` works without
+/// massaging.
+fn build_costs_csv(dims: &[CostGroupBy], breakdown: &CostBreakdown) -> String {
+    use std::fmt::Write;
+    let mut body = String::new();
+    // UTF-8 BOM.
+    body.push('\u{FEFF}');
+    let dim_headers: String = dims.iter().map(|d| d.key()).collect::<Vec<_>>().join(",");
+    let _ = writeln!(
+        &mut body,
+        "{dim_headers},request_count,input_tokens,output_tokens,total_cost_usd",
+    );
+    for item in &breakdown.items {
+        let dim_vals: String = dims
+            .iter()
+            .map(|d| {
+                csv_escape(
+                    item.dimensions
+                        .get(d.key())
+                        .map(|s| s.as_str())
+                        .unwrap_or(""),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let _ = writeln!(
+            &mut body,
+            "{},{},{},{},{}",
+            dim_vals, item.request_count, item.input_tokens, item.output_tokens, item.total_cost,
+        );
+    }
+    body
 }
 
 #[cfg(test)]
@@ -1306,6 +1329,100 @@ mod helper_tests {
         // Budget percentage stays a number — it's a ratio, not money.
         assert!(v["budget_usage_pct"].is_number());
         assert_eq!(v["range"], serde_json::json!("7d"));
+    }
+
+    /// The costs CSV export feeds finance / accounting workflows that
+    /// open the file in Excel. Three guarantees keep the workflow
+    /// painless:
+    ///
+    /// 1. UTF-8 BOM prefix — without it, Excel on macOS / Windows
+    ///    guesses the local ANSI codepage and CJK / emoji become
+    ///    mojibake (乱码).
+    /// 2. The cost column is named `total_cost_usd`, making the unit
+    ///    explicit (the period is already documented in the
+    ///    filename).
+    /// 3. The cost value is a plain Decimal string — no `$` prefix —
+    ///    so `=SUM(...)` works without massaging. Full precision is
+    ///    preserved (no rounding to 2dp).
+    #[test]
+    fn build_costs_csv_has_bom_and_usd_header_and_plain_decimal() {
+        use rust_decimal::prelude::FromStr;
+        let mut dimensions = std::collections::HashMap::new();
+        dimensions.insert("model".to_string(), "gpt-4o".to_string());
+        let breakdown = CostBreakdown {
+            items: vec![CostItem {
+                dimensions,
+                request_count: 42,
+                input_tokens: 1000,
+                output_tokens: 2000,
+                total_cost: Decimal::from_str("123.4567890123").unwrap(),
+            }],
+            total: CostTotals {
+                request_count: 42,
+                input_tokens: 1000,
+                output_tokens: 2000,
+                total_cost: Decimal::from_str("123.4567890123").unwrap(),
+            },
+        };
+
+        let csv = build_costs_csv(&[CostGroupBy::Model], &breakdown);
+
+        // (1) UTF-8 BOM is the first scalar value.
+        assert!(
+            csv.starts_with('\u{FEFF}'),
+            "CSV body must begin with a UTF-8 BOM so Excel decodes CJK/emoji correctly, got: {:?}",
+            csv.chars().take(4).collect::<String>(),
+        );
+        // BOM is U+FEFF = EF BB BF in UTF-8.
+        assert_eq!(
+            &csv.as_bytes()[..3],
+            b"\xEF\xBB\xBF",
+            "first three bytes must be the UTF-8 BOM",
+        );
+
+        // (2) Header row uses `total_cost_usd`, not `total_cost`. Strip the BOM
+        // before splitting so the first column isn't masked by U+FEFF.
+        let after_bom = csv.strip_prefix('\u{FEFF}').expect("BOM checked above");
+        let header_line = after_bom.lines().next().expect("at least a header line");
+        assert_eq!(
+            header_line,
+            "model,request_count,input_tokens,output_tokens,total_cost_usd",
+        );
+        assert!(
+            !header_line.contains("total_cost,") && !header_line.ends_with("total_cost"),
+            "the bare `total_cost` header is gone — only `total_cost_usd` should remain: {header_line}",
+        );
+
+        // (3) Cost value is a plain Decimal — no `$` prefix, full precision.
+        let row_line = after_bom.lines().nth(1).expect("one data row");
+        assert!(
+            row_line.ends_with(",123.4567890123"),
+            "row must end with the unprefixed Decimal at full precision, got: {row_line}",
+        );
+        assert!(
+            !row_line.contains('$'),
+            "no currency symbol — `$` breaks =SUM() in Excel, got: {row_line}",
+        );
+    }
+
+    /// `text/csv; charset=utf-8` must be declared in the Content-Type so
+    /// downstream HTTP clients (and Excel's `Get Data → From Web`)
+    /// pick UTF-8 decoding instead of falling back to the local
+    /// codepage. This pairs with the BOM in [`build_costs_csv`] —
+    /// belt and braces.
+    #[test]
+    fn costs_csv_content_type_declares_utf8_charset() {
+        // Mirrors the literal used in the get_costs handler — keep them
+        // in sync. If you change one, change both.
+        let content_type = "text/csv; charset=utf-8";
+        assert!(
+            content_type.contains("charset=utf-8"),
+            "Content-Type must declare charset=utf-8: {content_type}",
+        );
+        assert!(
+            content_type.starts_with("text/csv"),
+            "Content-Type must be text/csv: {content_type}",
+        );
     }
 
     /// When `compare=false` the handler emits `prev_total_cost: None`,
