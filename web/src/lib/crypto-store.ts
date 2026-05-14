@@ -83,6 +83,15 @@ export async function getSigningKey(): Promise<CryptoKey | null> {
 
 /** Delete the key pair from IndexedDB (logout / expiry). */
 export async function clearSigningKey(): Promise<void> {
+  // Also wipe the cross-tab register-keypair throttle so the next
+  // login generates a fresh pair instead of inheriting a stale one
+  // from a recent registration. localStorage write can throw in
+  // private mode — non-fatal.
+  try {
+    localStorage.removeItem('thinkwatch_keypair_last_registered_ms');
+  } catch {
+    // ignore
+  }
   try {
     const db = await openDb();
     return new Promise((resolve, reject) => {

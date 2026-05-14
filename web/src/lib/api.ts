@@ -104,17 +104,59 @@ async function signRequest(
 /**
  * Generate an ECDSA key pair and register the public key with the server.
  * Called after login, register, SSO callback, and token refresh.
+ *
+ * Cross-tab coordination: two tabs both refreshing at roughly the same
+ * time used to each generate a fresh key and POST it to /register-key,
+ * with whichever request arrived second silently invalidating the
+ * first tab's signing capability. We now (a) serialise via
+ * `navigator.locks` so only one tab is inside the critical section at
+ * a time, and (b) skip the re-generate if another tab finished one
+ * very recently (5s window). The IDB key entry is shared across tabs
+ * for the same origin, so the late-arriving tab just reads what the
+ * winner wrote.
  */
-export async function registerKeyPair(): Promise<void> {
+const KEYPAIR_LAST_REGISTERED_KEY = 'thinkwatch_keypair_last_registered_ms';
+const KEYPAIR_REUSE_WINDOW_MS = 5_000;
+
+async function doRegisterKeyPair(): Promise<void> {
   const { generateAndStoreKeyPair } = await import('./crypto-store');
   const publicJwk = await generateAndStoreKeyPair();
-  // POST the public key to the server (no signature needed on this endpoint)
   await fetch(`${API_BASE}/api/auth/register-key`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ public_key: publicJwk }),
   });
+  try {
+    localStorage.setItem(KEYPAIR_LAST_REGISTERED_KEY, String(Date.now()));
+  } catch {
+    // Private-mode browsers throw on localStorage write; skipping the
+    // throttle is fine — `navigator.locks` still serialises.
+  }
+}
+
+export async function registerKeyPair(): Promise<void> {
+  const inWindow = () => {
+    try {
+      const ts = parseInt(localStorage.getItem(KEYPAIR_LAST_REGISTERED_KEY) ?? '0', 10);
+      return Date.now() - ts < KEYPAIR_REUSE_WINDOW_MS;
+    } catch {
+      return false;
+    }
+  };
+
+  if (typeof navigator !== 'undefined' && 'locks' in navigator) {
+    await navigator.locks.request('thinkwatch-register-keypair', async () => {
+      if (inWindow()) return;
+      await doRegisterKeyPair();
+    });
+    return;
+  }
+  // Fallback for environments without the Web Locks API (older
+  // browsers / jsdom in tests). No cross-tab coordination, but the
+  // throttle still avoids back-to-back regenerations within one tab.
+  if (inWindow()) return;
+  await doRegisterKeyPair();
 }
 
 // --- Token Refresh ---

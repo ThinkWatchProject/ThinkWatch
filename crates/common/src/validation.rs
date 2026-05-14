@@ -28,6 +28,16 @@ pub fn validate_password(password: &str) -> Result<(), AppError> {
 /// (`foo`, `foo@`, `@bar.com`, `foo@.bar`, `foo@bar.`) without
 /// rejecting weird-but-legal addresses.
 pub fn validate_email(email: &str) -> Result<(), AppError> {
+    // RFC 5321 caps the entire address at 254 chars; longer is
+    // either deliberately oversized (DoS via huge insert error
+    // text) or guaranteed to be rejected by the DB column anyway.
+    // Reject up front with a clean 400 instead of letting it land
+    // as an opaque DB error mid-request.
+    if email.len() > 254 {
+        return Err(AppError::BadRequest(
+            "Email too long (max 254 chars)".into(),
+        ));
+    }
     let parts: Vec<&str> = email.splitn(2, '@').collect();
     if parts.len() != 2
         || parts[0].is_empty()
@@ -37,6 +47,12 @@ pub fn validate_email(email: &str) -> Result<(), AppError> {
         || parts[1].ends_with('.')
     {
         return Err(AppError::BadRequest("Invalid email format".into()));
+    }
+    // Local-part max 64 chars per RFC 5321 — same DoS guard scope.
+    if parts[0].len() > 64 {
+        return Err(AppError::BadRequest(
+            "Email local part too long (max 64 chars)".into(),
+        ));
     }
     Ok(())
 }
@@ -237,6 +253,25 @@ mod tests {
     #[test]
     fn too_short() {
         assert!(validate_password("Ab1").is_err());
+    }
+
+    #[test]
+    fn email_rejects_oversize_addresses() {
+        // RFC 5321 caps the whole address at 254 chars.
+        let local = "a".repeat(60);
+        let domain = format!("{}.com", "b".repeat(220));
+        let too_long = format!("{local}@{domain}");
+        assert!(too_long.len() > 254);
+        assert!(validate_email(&too_long).is_err());
+
+        // Local-part > 64 chars also rejected even if total fits.
+        let oversize_local = format!("{}@example.com", "a".repeat(65));
+        assert!(validate_email(&oversize_local).is_err());
+
+        // Boundary cases that should pass.
+        assert!(validate_email("alice@example.com").is_ok());
+        let max_local = format!("{}@example.com", "a".repeat(64));
+        assert!(validate_email(&max_local).is_ok());
     }
 
     #[test]

@@ -23,7 +23,15 @@ pub fn generate_api_key() -> GeneratedApiKey {
     let encoded = hex::encode(&random_bytes);
 
     let plaintext = format!("{KEY_PREFIX}{encoded}");
-    let prefix = plaintext[..11].to_string(); // "tw-" + 8 chars
+    // "tw-" + 12 hex chars → 48 bits of prefix entropy. Auth still
+    // happens via the (uniquely-indexed) HMAC `hash`; the prefix is
+    // observability only — logs / admin search / "rotated key X"
+    // links — but at 32 bits (the prior 8-char width) the birthday
+    // probability of two keys sharing a prefix was ~50% at 65 k
+    // total keys, which became ambiguous in support tickets. 48
+    // bits pushes that threshold to ~16 M. DB column is VARCHAR(16)
+    // so the wider value still fits.
+    let prefix = plaintext[..15].to_string();
     let hash = hash_api_key(&plaintext);
 
     GeneratedApiKey {
@@ -60,7 +68,11 @@ mod tests {
             key.prefix.starts_with("tw-"),
             "prefix should start with tw-"
         );
-        assert_eq!(key.prefix.len(), 11, "prefix should be 11 chars (tw- + 8)");
+        assert_eq!(
+            key.prefix.len(),
+            15,
+            "prefix should be 15 chars (tw- + 12 hex) for 48-bit entropy"
+        );
     }
 
     #[test]
