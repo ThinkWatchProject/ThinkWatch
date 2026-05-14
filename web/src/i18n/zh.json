@@ -908,7 +908,9 @@
     "surface_console": "控制台",
     "surfaceShort_ai_gateway": "AI",
     "surfaceShort_mcp_gateway": "MCP",
-    "surfaceShort_console": "控制台"
+    "surfaceShort_console": "控制台",
+    "remainingLabel": "剩余 {{count}}",
+    "exceeded": "已超限"
   },
   "bulkOverride": {
     "titleForCount": "为 {{count}} 位用户应用覆盖",
