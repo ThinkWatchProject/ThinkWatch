@@ -29,3 +29,4 @@ metrics = { workspace = true }
 clickhouse = { workspace = true }
 bytes = { workspace = true }
 url = { workspace = true }
+regex = "1"

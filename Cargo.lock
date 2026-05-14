@@ -4057,6 +4057,7 @@ dependencies = [
  "hmac 0.13.0",
  "metrics",
  "rand 0.10.0",
+ "regex",
  "reqwest 0.13.2",
  "rust_decimal",
  "serde",

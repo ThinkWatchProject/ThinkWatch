@@ -40,10 +40,16 @@ impl Default for PiiRedactor {
 
 impl PiiRedactor {
     /// Create a PII redactor from a list of pattern configs (from DynamicConfig).
+    ///
+    /// Each pattern is compiled through
+    /// `think_watch_common::regex_util::compile_bounded` so an operator
+    /// who saves a pathological pattern can't DOS the redactor —
+    /// every gateway request would otherwise pay seconds of regex
+    /// engine work per inbound message.
     pub fn from_config(configs: &[PiiPatternConfig]) -> Self {
         let patterns = configs
             .iter()
-            .filter_map(|c| match Regex::new(&c.regex) {
+            .filter_map(|c| match think_watch_common::regex_util::compile_bounded(&c.regex) {
                 Ok(regex) => Some(PiiPattern {
                     name: c.name.clone(),
                     regex,

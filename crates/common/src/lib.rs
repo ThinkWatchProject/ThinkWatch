@@ -44,4 +44,5 @@ pub mod retry;
 
 // --- Utilities ---
 pub mod crypto;
+pub mod regex_util;
 pub mod validation;

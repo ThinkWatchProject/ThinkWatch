@@ -2477,9 +2477,11 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                         "Rule {i}: match_type must be 'contains' or 'regex'"
                     )));
                 }
-                if match_type == "regex" && regex::Regex::new(pattern).is_err() {
+                if match_type == "regex"
+                    && think_watch_common::regex_util::compile_bounded(pattern).is_err()
+                {
                     return Err(AppError::BadRequest(format!(
-                        "Rule {i}: invalid regex pattern"
+                        "Rule {i}: invalid or oversized regex pattern"
                     )));
                 }
                 let action = item.get("action").and_then(|v| v.as_str()).ok_or_else(|| {
@@ -2516,10 +2518,14 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                         "PII pattern {i}: regex max 1000 characters"
                     )));
                 }
-                // Validate regex compiles (prevents ReDoS storage of invalid patterns)
-                if regex::Regex::new(regex_str).is_err() {
+                // Validate regex compiles AND fits the bounded size budget.
+                // Bare `regex::Regex::new` accepts 10 MiB NFA + 2 MiB DFA
+                // by default — large enough to ReDoS the gateway at
+                // request time. Use the shared bounded helper so save-time
+                // rejection matches what the runtime would accept.
+                if think_watch_common::regex_util::compile_bounded(regex_str).is_err() {
                     return Err(AppError::BadRequest(format!(
-                        "PII pattern {i}: invalid regex syntax"
+                        "PII pattern {i}: invalid or oversized regex"
                     )));
                 }
                 if item
