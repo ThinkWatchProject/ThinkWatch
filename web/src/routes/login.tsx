@@ -127,11 +127,11 @@ export function LoginPage({ onLogin }: LoginPageProps) {
                   id="totp"
                   type="text"
                   inputMode="numeric"
-                  pattern="[0-9A-Za-z\-]*"
+                  pattern="[0-9A-Z\-]*"
                   maxLength={10}
                   placeholder="000000"
                   value={totpCode}
-                  onChange={(e) => setTotpCode(e.target.value)}
+                  onChange={(e) => setTotpCode(e.target.value.toUpperCase())}
                   autoFocus
                   required
                 />
