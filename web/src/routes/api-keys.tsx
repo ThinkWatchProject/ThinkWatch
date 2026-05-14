@@ -341,10 +341,12 @@ export function ApiKeysPage() {
     setRotateDialogOpen(true);
   };
 
+  const refetchForCurrentTab = () => fetchKeys(tab === 'inactive' ? 'inactive' : 'live');
+
   const handleRevokeSuccess = () => {
     setRevokeTargetId(null);
     toast.success(t('common.deleteSuccess'));
-    fetchKeys();
+    refetchForCurrentTab();
   };
 
   // ---------------------------------------------------------------------------
@@ -377,7 +379,7 @@ export function ApiKeysPage() {
       <CreateApiKeyDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
-        onSuccess={fetchKeys}
+        onSuccess={refetchForCurrentTab}
         modelsByProvider={modelsByProvider}
         mcpToolsByServer={mcpToolsByServer}
         costCenterOptions={costCenterOptions}
@@ -387,7 +389,7 @@ export function ApiKeysPage() {
       <EditApiKeyDialog
         open={editDialogOpen}
         onOpenChange={setEditDialogOpen}
-        onSuccess={fetchKeys}
+        onSuccess={refetchForCurrentTab}
         apiKey={editingKey}
         modelsByProvider={modelsByProvider}
         mcpToolsByServer={mcpToolsByServer}
@@ -398,7 +400,7 @@ export function ApiKeysPage() {
       <RotateApiKeyDialog
         open={rotateDialogOpen}
         onOpenChange={setRotateDialogOpen}
-        onSuccess={fetchKeys}
+        onSuccess={refetchForCurrentTab}
         apiKey={rotatingKey}
       />
 
