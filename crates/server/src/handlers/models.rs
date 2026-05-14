@@ -1067,6 +1067,13 @@ pub async fn delete_model_route(
         return Err(AppError::NotFound("Route not found".into()));
     }
 
+    // Purge the per-route Redis keys (samples / state / counters).
+    // The lifetime counter hash has no TTL by design, so without this
+    // it would leak forever every time an admin deletes a route.
+    think_watch_gateway::health::HealthTracker::new(state.redis.clone())
+        .forget(route_id)
+        .await;
+
     state.audit.log(
         auth_user
             .audit("model_route.deleted")

@@ -385,6 +385,24 @@ impl HealthTracker {
         }
         out
     }
+
+    /// Drop every Redis key associated with a route — called when the
+    /// admin deletes a route from `model_routes` so the `:samples`,
+    /// `:state`, and (TTL-less) `:counters` hashes don't pile up as
+    /// orphan keys after route churn. Best-effort: a Redis hiccup
+    /// here is not worth failing the delete over.
+    pub async fn forget(&self, route_id: Uuid) {
+        let samples_key = format!("route_health:{route_id}:samples");
+        let state_key = format!("route_health:{route_id}:state");
+        let counters_key = format!("route_health:{route_id}:counters");
+        if let Err(e) = self
+            .redis
+            .del::<i64, _>(vec![samples_key, state_key, counters_key])
+            .await
+        {
+            tracing::warn!(?route_id, error = %e, "failed to purge route_health keys on route delete");
+        }
+    }
 }
 
 #[cfg(test)]
