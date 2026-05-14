@@ -376,63 +376,17 @@ pub async fn login(
         // progressive lockout. This counter aggregates across IPs so
         // the same email can only fail N times globally in the
         // rate-limit window regardless of source address.
-        let email_fail_key = format!("auth_email_fails:{}", req.email);
-        let _: () = fred::interfaces::KeysInterface::set(
-            &state.redis,
-            &email_fail_key,
-            "0",
-            Some(fred::types::Expiration::EX(900)),
-            Some(fred::types::SetOptions::NX),
-            false,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("Redis email-failure counter init failed (fail-closed): {e}");
-            AppError::Internal(anyhow::anyhow!("Authentication temporarily unavailable"))
-        })?;
-        let email_fails: u64 =
-            fred::interfaces::KeysInterface::incr_by(&state.redis, &email_fail_key, 1)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Redis email-failure counter failed (fail-closed): {e}");
-                    AppError::Internal(anyhow::anyhow!("Authentication temporarily unavailable"))
-                })?;
-
-        // Progressive lockout: lock account after repeated failures.
-        // Lockout duration increases: 5 fails=60s, 8=300s, 10+=900s.
-        // Fail closed on Redis errors so a Redis outage doesn't disable
-        // brute-force protection mid-attack.
         //
         // The threshold compares against `max(count, email_fails)` so
         // the lockout trips on either the per-IP+email counter OR the
         // per-email aggregate — defeating IP-rotation bypass without
         // punishing a single user on a shared NAT.
+        let email_fail_key = format!("auth_email_fails:{}", req.email);
+        let email_fails =
+            crate::services::auth_lockout::record_failure(&state.redis, &email_fail_key).await?;
         let trigger = count.max(email_fails);
-        let lockout_secs: Option<i64> = if trigger >= 10 {
-            Some(900)
-        } else if trigger >= 8 {
-            Some(300)
-        } else if trigger >= 5 {
-            Some(60)
-        } else {
-            None
-        };
-        if let Some(secs) = lockout_secs {
-            let r: Result<(), _> = fred::interfaces::KeysInterface::set(
-                &state.redis,
-                &lockout_key,
-                "1",
-                Some(fred::types::Expiration::EX(secs)),
-                None,
-                false,
-            )
-            .await;
-            if let Err(e) = r {
-                tracing::error!("Redis lockout SET failed (fail-closed): {e}");
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "Authentication temporarily unavailable"
-                )));
-            }
+        if let Some(secs) = crate::services::auth_lockout::ladder_secs(trigger) {
+            crate::services::auth_lockout::apply_lockout(&state.redis, &lockout_key, secs).await?;
         }
 
         // Log failed attempt
@@ -563,18 +517,9 @@ pub async fn login(
     }
 
     // Clear rate limit, lockout, and email-failure keys on successful login
-    let _: i64 = fred::interfaces::KeysInterface::del(&state.redis, &rate_key)
-        .await
-        .unwrap_or(0);
-    let _: i64 = fred::interfaces::KeysInterface::del(&state.redis, &lockout_key)
-        .await
-        .unwrap_or(0);
-    let _: i64 = fred::interfaces::KeysInterface::del(
-        &state.redis,
-        &format!("auth_email_fails:{}", req.email),
-    )
-    .await
-    .unwrap_or(0);
+    let email_fail_key = format!("auth_email_fails:{}", req.email);
+    crate::services::auth_lockout::clear(&state.redis, &[&rate_key, &lockout_key, &email_fail_key])
+        .await;
 
     let mut entry = AuditEntry::new("auth.login")
         .user_id(user.id)
@@ -923,12 +868,8 @@ pub async fn logout(
         // /logout's main purpose is the signing-key delete + cookie
         // clear, and the access cookie's natural TTL bounds the
         // damage from a missed blacklist write.
-        let _ = crate::services::refresh_blacklist::claim(
-            &state.redis,
-            &presented,
-            claims.exp,
-        )
-        .await;
+        let _ =
+            crate::services::refresh_blacklist::claim(&state.redis, &presented, claims.exp).await;
     }
 
     let mut response = Json(serde_json::json!({"status": "ok"})).into_response();
@@ -1086,68 +1027,26 @@ pub async fn change_password(
     // the authenticated user id. Without this an attacker who already
     // has the session cookie (a temporarily-borrowed laptop is the
     // canonical example) can grind old_password offline-speed against
-    // Argon2, bypassing /login's 5/8/10 lockout. Counter expires after
-    // 15 min of no failures.
+    // Argon2, bypassing /login's 5/8/10 lockout.
     let pwchange_fail_key = format!("pwchange_fails:{}", user.id);
-    let lockout_key = format!("pwchange_locked:{}", user.id);
-    let still_locked: Option<String> =
-        fred::interfaces::KeysInterface::get(&state.redis, &lockout_key)
-            .await
-            .map_err(|e| {
-                tracing::error!("Redis pwchange-lockout check failed (fail-closed): {e}");
-                AppError::Internal(anyhow::anyhow!("Service temporarily unavailable"))
-            })?;
-    if still_locked.is_some() {
+    let pwchange_locked_key = format!("pwchange_locked:{}", user.id);
+    if crate::services::auth_lockout::is_locked(&state.redis, &pwchange_locked_key).await? {
         return Err(AppError::Unauthorized);
     }
 
     if !password::verify_password(&req.old_password, current_hash)? {
-        let _: () = fred::interfaces::KeysInterface::set(
-            &state.redis,
-            &pwchange_fail_key,
-            "0",
-            Some(fred::types::Expiration::EX(900)),
-            Some(fred::types::SetOptions::NX),
-            false,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("Redis pwchange-fail counter init failed (fail-closed): {e}");
-            AppError::Internal(anyhow::anyhow!("Service temporarily unavailable"))
-        })?;
-        let fails: u64 =
-            fred::interfaces::KeysInterface::incr_by(&state.redis, &pwchange_fail_key, 1)
-                .await
-                .map_err(|e| {
-                    tracing::error!("Redis pwchange-fail counter incr failed (fail-closed): {e}");
-                    AppError::Internal(anyhow::anyhow!("Service temporarily unavailable"))
-                })?;
-        let lockout_secs: Option<i64> = if fails >= 10 {
-            Some(900)
-        } else if fails >= 8 {
-            Some(300)
-        } else if fails >= 5 {
-            Some(60)
-        } else {
-            None
-        };
-        if let Some(secs) = lockout_secs {
-            let _: Result<(), _> = fred::interfaces::KeysInterface::set(
-                &state.redis,
-                &lockout_key,
-                "1",
-                Some(fred::types::Expiration::EX(secs)),
-                None,
-                false,
-            )
-            .await;
+        let fails =
+            crate::services::auth_lockout::record_failure(&state.redis, &pwchange_fail_key).await?;
+        if let Some(secs) = crate::services::auth_lockout::ladder_secs(fails) {
+            crate::services::auth_lockout::apply_lockout(&state.redis, &pwchange_locked_key, secs)
+                .await?;
         }
         return Err(AppError::Unauthorized);
     }
 
-    // Successful old-password verify clears the fail counter.
-    let _: Result<(), _> =
-        fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &pwchange_fail_key).await;
+    // Successful old-password verify clears the counter + lock.
+    crate::services::auth_lockout::clear(&state.redis, &[&pwchange_fail_key, &pwchange_locked_key])
+        .await;
 
     let new_hash = password::hash_password(&req.new_password)?;
     sqlx::query("UPDATE users SET password_hash = $1, password_change_required = false, updated_at = now() WHERE id = $2")

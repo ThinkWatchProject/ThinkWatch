@@ -49,32 +49,34 @@ impl PiiRedactor {
     pub fn from_config(configs: &[PiiPatternConfig]) -> Self {
         let patterns = configs
             .iter()
-            .filter_map(|c| match think_watch_common::regex_util::compile_bounded(&c.regex) {
-                Ok(regex) => Some(PiiPattern {
-                    name: c.name.clone(),
-                    regex,
-                    placeholder_prefix: c.placeholder_prefix.clone(),
-                }),
-                Err(e) => {
-                    // Save-time validation in admin/settings should prevent
-                    // invalid patterns from ever reaching us. If one shows
-                    // up here it means the DB row was hand-edited or the
-                    // validator drifted — either way, surface loudly so
-                    // operators don't think PII redaction is on when it
-                    // silently isn't.
-                    tracing::error!(
-                        pattern = %c.name,
-                        error = %e,
-                        "Invalid PII regex — pattern is DISABLED for redaction"
-                    );
-                    metrics::counter!(
-                        "gateway_pii_pattern_invalid_total",
-                        "pattern" => c.name.clone(),
-                    )
-                    .increment(1);
-                    None
-                }
-            })
+            .filter_map(
+                |c| match think_watch_common::regex_util::compile_bounded(&c.regex) {
+                    Ok(regex) => Some(PiiPattern {
+                        name: c.name.clone(),
+                        regex,
+                        placeholder_prefix: c.placeholder_prefix.clone(),
+                    }),
+                    Err(e) => {
+                        // Save-time validation in admin/settings should prevent
+                        // invalid patterns from ever reaching us. If one shows
+                        // up here it means the DB row was hand-edited or the
+                        // validator drifted — either way, surface loudly so
+                        // operators don't think PII redaction is on when it
+                        // silently isn't.
+                        tracing::error!(
+                            pattern = %c.name,
+                            error = %e,
+                            "Invalid PII regex — pattern is DISABLED for redaction"
+                        );
+                        metrics::counter!(
+                            "gateway_pii_pattern_invalid_total",
+                            "pattern" => c.name.clone(),
+                        )
+                        .increment(1);
+                        None
+                    }
+                },
+            )
             .collect();
         Self { patterns }
     }

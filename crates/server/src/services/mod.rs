@@ -25,6 +25,7 @@
 //! [`REVIEW_PLAN_2026-04-20.md`] (gitignored). Not every handler has
 //! a service yet; the migration is iterative.
 
+pub mod auth_lockout;
 pub mod rbac_service;
 pub mod refresh_blacklist;
 pub mod session_service;

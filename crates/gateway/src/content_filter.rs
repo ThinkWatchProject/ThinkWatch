@@ -127,13 +127,15 @@ impl ContentFilter {
                 // helper so a pathological pattern (e.g. `(a|aa){200}`)
                 // can't DOS every gateway request that touches the rule.
                 let compiled_regex = match match_type {
-                    MatchType::Regex => match think_watch_common::regex_util::compile_bounded_ci(&c.pattern) {
-                        Ok(re) => Some(re),
-                        Err(e) => {
-                            tracing::warn!("Invalid content filter regex '{}': {e}", c.pattern);
-                            return None;
+                    MatchType::Regex => {
+                        match think_watch_common::regex_util::compile_bounded_ci(&c.pattern) {
+                            Ok(re) => Some(re),
+                            Err(e) => {
+                                tracing::warn!("Invalid content filter regex '{}': {e}", c.pattern);
+                                return None;
+                            }
                         }
-                    },
+                    }
                     MatchType::Contains => None,
                 };
                 Some(DenyRule {
