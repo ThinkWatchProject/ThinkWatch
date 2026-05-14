@@ -101,14 +101,12 @@ pub async fn list_app_logs(
             .replace('_', "\\_");
         binds.push(format!("%{escaped}%"));
     }
-    if let Some(ref v) = params.from {
-        conditions.push("created_at >= ?".into());
-        binds.push(v.clone());
-    }
-    if let Some(ref v) = params.to {
-        conditions.push("created_at <= ?".into());
-        binds.push(v.clone());
-    }
+    push_time_range_conditions(
+        &mut conditions,
+        &mut binds,
+        params.from.as_deref(),
+        params.to.as_deref(),
+    )?;
 
     for (frag, val) in parse_exclude_param(
         params.exclude.as_deref(),

@@ -93,14 +93,12 @@ pub async fn list_mcp_logs(
         conditions.push("status = ?".into());
         binds.push(v.clone());
     }
-    if let Some(ref v) = params.from {
-        conditions.push("created_at >= ?".into());
-        binds.push(v.clone());
-    }
-    if let Some(ref v) = params.to {
-        conditions.push("created_at <= ?".into());
-        binds.push(v.clone());
-    }
+    push_time_range_conditions(
+        &mut conditions,
+        &mut binds,
+        params.from.as_deref(),
+        params.to.as_deref(),
+    )?;
     if let Some(ref v) = params.q
         && !v.is_empty()
     {

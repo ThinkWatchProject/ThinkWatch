@@ -169,14 +169,12 @@ pub async fn list_gateway_logs(
         conditions.push("status_code = ?".to_string());
         bind_values.push(v.to_string());
     }
-    if let Some(ref from) = params.from {
-        conditions.push("created_at >= ?".to_string());
-        bind_values.push(from.clone());
-    }
-    if let Some(ref to) = params.to {
-        conditions.push("created_at <= ?".to_string());
-        bind_values.push(to.clone());
-    }
+    push_time_range_conditions(
+        &mut conditions,
+        &mut bind_values,
+        params.from.as_deref(),
+        params.to.as_deref(),
+    )?;
     // Free-text `q` searches model_id with case-insensitive substring match.
     // The user input is escaped for LIKE wildcards (% / _ / \) so they can
     // only match literal characters, not patterns.

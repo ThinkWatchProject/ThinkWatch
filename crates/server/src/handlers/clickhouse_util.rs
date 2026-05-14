@@ -30,6 +30,94 @@ pub fn clamp_pagination(limit: Option<i64>, offset: Option<i64>, max_limit: i64)
     (limit, offset)
 }
 
+/// Default lookback window when the caller didn't supply an explicit
+/// `from`. Bounds the worst-case CH scan to a week of partitions
+/// instead of every retained day.
+pub const DEFAULT_LOG_LOOKBACK_DAYS: i64 = 7;
+
+/// Maximum span between `from` and `to` when both are supplied.
+/// Even with `from` set, an attacker could send
+/// `from=1970-01-01&to=2099-01-01` and force CH to scan the full
+/// retained history. 90 days is enough for legitimate compliance
+/// pulls; longer ranges should page through dedicated retention
+/// exports.
+pub const MAX_LOG_WINDOW_DAYS: i64 = 90;
+
+/// Push `created_at >= ?` and (optional) `created_at <= ?` predicates
+/// onto a log-query WHERE collector with the standard floor and
+/// max-window cap. Mutates `conditions` and `binds` in place; returns
+/// a `BadRequest` if the explicit range exceeds [`MAX_LOG_WINDOW_DAYS`].
+///
+/// Every CH-backed log handler should call this instead of pushing
+/// raw `from` / `to` strings — otherwise a missed handler ships
+/// without the DoS guard. The audit log handler used to roll this
+/// inline; lifting it here keeps the 5 sibling handlers in sync.
+pub fn push_time_range_conditions(
+    conditions: &mut Vec<String>,
+    binds: &mut Vec<String>,
+    from: Option<&str>,
+    to: Option<&str>,
+) -> Result<(), AppError> {
+    use chrono::NaiveDateTime;
+
+    let parse = |s: &str| -> Result<NaiveDateTime, AppError> {
+        // CH accepts both RFC3339 and "YYYY-MM-DD HH:MM:SS". Try
+        // datetime variants in widest-first order so a UI sending
+        // millisecond-precision timestamps still parses.
+        NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f")
+            .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S"))
+            .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f"))
+            .or_else(|_| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S"))
+            .or_else(|_| {
+                NaiveDateTime::parse_from_str(&format!("{s} 00:00:00"), "%Y-%m-%d %H:%M:%S")
+            })
+            .map_err(|e| {
+                AppError::BadRequest(format!(
+                    "Invalid timestamp '{s}': {e}. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM:SS."
+                ))
+            })
+    };
+
+    let from_val: String = match from {
+        Some(s) => {
+            // Validate the explicit value; we don't rewrite it,
+            // because CH may have its own preference for the
+            // representation.
+            let _ = parse(s)?;
+            s.to_string()
+        }
+        None => {
+            let now = chrono::Utc::now();
+            (now - chrono::Duration::days(DEFAULT_LOG_LOOKBACK_DAYS))
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        }
+    };
+
+    if let Some(to_str) = to {
+        let to_parsed = parse(to_str)?;
+        let from_parsed = parse(&from_val)?;
+        let span = to_parsed - from_parsed;
+        if span > chrono::Duration::days(MAX_LOG_WINDOW_DAYS) {
+            return Err(AppError::BadRequest(format!(
+                "Time range too large (max {MAX_LOG_WINDOW_DAYS} days). \
+                 Tighten the window or export from the retention tools."
+            )));
+        }
+        if span < chrono::Duration::zero() {
+            return Err(AppError::BadRequest("`to` must be >= `from`".into()));
+        }
+    }
+
+    conditions.push("created_at >= ?".into());
+    binds.push(from_val);
+    if let Some(to) = to {
+        conditions.push("created_at <= ?".into());
+        binds.push(to.to_string());
+    }
+    Ok(())
+}
+
 /// How a column should be matched when emitted as an exclude clause.
 #[derive(Debug, Clone, Copy)]
 pub enum ExcludeMode {
@@ -188,6 +276,79 @@ mod tests {
         // We can't easily construct AppState in a unit test, but we verify
         // the function signature compiles correctly. Integration tests
         // would cover the full path.
+    }
+
+    #[test]
+    fn push_time_range_defaults_to_seven_days_back_when_no_from() {
+        let mut conds = Vec::new();
+        let mut binds = Vec::new();
+        push_time_range_conditions(&mut conds, &mut binds, None, None).unwrap();
+        assert_eq!(conds, vec!["created_at >= ?".to_string()]);
+        assert_eq!(binds.len(), 1);
+        let parsed = chrono::NaiveDateTime::parse_from_str(&binds[0], "%Y-%m-%d %H:%M:%S")
+            .expect("default from must be parseable");
+        let now = chrono::Utc::now().naive_utc();
+        let delta = now - parsed;
+        assert!(delta >= chrono::Duration::days(6));
+        assert!(delta <= chrono::Duration::days(8));
+    }
+
+    #[test]
+    fn push_time_range_rejects_explicit_range_over_max_window() {
+        let mut conds = Vec::new();
+        let mut binds = Vec::new();
+        let err = push_time_range_conditions(
+            &mut conds,
+            &mut binds,
+            Some("2024-01-01"),
+            Some("2024-12-31"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn push_time_range_rejects_inverted_range() {
+        let mut conds = Vec::new();
+        let mut binds = Vec::new();
+        let err = push_time_range_conditions(
+            &mut conds,
+            &mut binds,
+            Some("2024-06-01"),
+            Some("2024-05-01"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn push_time_range_rejects_invalid_timestamp() {
+        let mut conds = Vec::new();
+        let mut binds = Vec::new();
+        let err = push_time_range_conditions(&mut conds, &mut binds, Some("not-a-date"), None)
+            .unwrap_err();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[test]
+    fn push_time_range_accepts_in_window_explicit_range() {
+        let mut conds = Vec::new();
+        let mut binds = Vec::new();
+        push_time_range_conditions(
+            &mut conds,
+            &mut binds,
+            Some("2024-01-01"),
+            Some("2024-03-15"),
+        )
+        .unwrap();
+        assert_eq!(
+            conds,
+            vec!["created_at >= ?".to_string(), "created_at <= ?".to_string()]
+        );
+        assert_eq!(
+            binds,
+            vec!["2024-01-01".to_string(), "2024-03-15".to_string()]
+        );
     }
 
     #[test]

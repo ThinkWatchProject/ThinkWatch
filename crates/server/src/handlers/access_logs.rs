@@ -120,14 +120,12 @@ pub async fn list_access_logs(
             .replace('_', "\\_");
         binds.push(format!("%{escaped}%"));
     }
-    if let Some(ref v) = params.from {
-        conditions.push("created_at >= ?".into());
-        binds.push(v.clone());
-    }
-    if let Some(ref v) = params.to {
-        conditions.push("created_at <= ?".into());
-        binds.push(v.clone());
-    }
+    push_time_range_conditions(
+        &mut conditions,
+        &mut binds,
+        params.from.as_deref(),
+        params.to.as_deref(),
+    )?;
 
     // Excludes (-key:value tokens from the unified log explorer).
     // Numeric columns (status_code, port) must validate before binding
