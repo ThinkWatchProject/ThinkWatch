@@ -20,6 +20,7 @@
 
 import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { toast } from 'sonner';
 import { ChevronDown, Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -358,20 +359,33 @@ function AddRuleInline({
   const [metric, setMetric] = useState<Metric>('requests');
   const [windowKey, setWindowKey] = useState<string>('1h');
   const [maxCount, setMaxCount] = useState('');
+  const [error, setError] = useState<string>('');
 
   const setSurfaceWithMetric = (s: Surface) => {
     setSurface(s);
     if (s === 'mcp_gateway' && metric === 'tokens') setMetric('requests');
   };
 
+  // Range mirrors the backend CHECK constraints on rate_limit_rules.max_count
+  // — positive int, capped at 1e9 so a typo can't poison the JSONB column.
+  const parsed = parseInt(maxCount, 10);
+  const valid = Number.isFinite(parsed) && parsed >= 1 && parsed <= 1_000_000_000;
+
+  const handleChange = (v: string) => {
+    setMaxCount(v);
+    if (error) setError('');
+  };
+
   const submit = () => {
-    const n = parseInt(maxCount, 10);
-    if (!Number.isFinite(n) || n <= 0) {
-      window.alert(t('limits.maxCountInvalid'));
+    if (!valid) {
+      const msg = t('limits.invalidCount');
+      setError(msg);
+      toast.error(msg);
       return;
     }
-    onAdd(surface, { metric, window: windowKey, maxCount: n, enabled: true });
+    onAdd(surface, { metric, window: windowKey, maxCount: parsed, enabled: true });
     setMaxCount('');
+    setError('');
   };
 
   return (
@@ -429,17 +443,24 @@ function AddRuleInline({
         <Input
           type="number"
           min={1}
+          max={1_000_000_000}
           value={maxCount}
-          onChange={(e) => setMaxCount(e.target.value)}
+          onChange={(e) => handleChange(e.target.value)}
           placeholder={metric === 'tokens' ? '100000' : '60'}
           className="w-28 text-xs"
           style={{ height: 28 }}
+          aria-invalid={!!error}
         />
       </div>
-      <Button type="button" onClick={submit} disabled={!maxCount} style={{ height: 28 }}>
+      <Button type="button" onClick={submit} disabled={!valid} style={{ height: 28 }}>
         <Plus className="mr-1 h-3 w-3" />
         {t('limits.add')}
       </Button>
+      {error && (
+        <p role="alert" className="basis-full text-[10px] text-destructive">
+          {error}
+        </p>
+      )}
     </div>
   );
 }
@@ -455,15 +476,28 @@ function AddBudgetInline({
   const [surface, setSurface] = useState<Surface>(surfaces[0] ?? 'ai_gateway');
   const [period, setPeriod] = useState<Period>('monthly');
   const [limitTokens, setLimitTokens] = useState('');
+  const [error, setError] = useState<string>('');
+
+  // Range mirrors backend CHECK constraints on budget_caps.max_tokens
+  // — positive int, capped at 1e9.
+  const parsed = parseInt(limitTokens, 10);
+  const valid = Number.isFinite(parsed) && parsed >= 1 && parsed <= 1_000_000_000;
+
+  const handleChange = (v: string) => {
+    setLimitTokens(v);
+    if (error) setError('');
+  };
 
   const submit = () => {
-    const n = parseInt(limitTokens, 10);
-    if (!Number.isFinite(n) || n <= 0) {
-      window.alert(t('limits.limitTokensInvalid'));
+    if (!valid) {
+      const msg = t('limits.invalidTokens');
+      setError(msg);
+      toast.error(msg);
       return;
     }
-    onAdd(surface, { period, maxTokens: n, enabled: true });
+    onAdd(surface, { period, maxTokens: parsed, enabled: true });
     setLimitTokens('');
+    setError('');
   };
 
   return (
@@ -505,17 +539,24 @@ function AddBudgetInline({
         <Input
           type="number"
           min={1}
+          max={1_000_000_000}
           value={limitTokens}
-          onChange={(e) => setLimitTokens(e.target.value)}
+          onChange={(e) => handleChange(e.target.value)}
           placeholder="1000000"
           className="w-32 text-xs"
           style={{ height: 28 }}
+          aria-invalid={!!error}
         />
       </div>
-      <Button type="button" onClick={submit} disabled={!limitTokens} style={{ height: 28 }}>
+      <Button type="button" onClick={submit} disabled={!valid} style={{ height: 28 }}>
         <Plus className="mr-1 h-3 w-3" />
         {t('limits.add')}
       </Button>
+      {error && (
+        <p role="alert" className="basis-full text-[10px] text-destructive">
+          {error}
+        </p>
+      )}
     </div>
   );
 }
