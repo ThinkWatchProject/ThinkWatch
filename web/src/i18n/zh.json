@@ -381,7 +381,8 @@
     "expiringSoon": "即将过期",
     "expired": "已过期",
     "rotated": "已轮换",
-    "gracePeriod": "过渡期"
+    "gracePeriod": "过渡期",
+    "inactiveTab": "已失效"
   },
   "models": {
     "title": "模型",

@@ -381,7 +381,8 @@
     "expiringSoon": "Expiring Soon",
     "expired": "Expired",
     "rotated": "Rotated",
-    "gracePeriod": "Grace Period"
+    "gracePeriod": "Grace Period",
+    "inactiveTab": "Inactive"
   },
   "models": {
     "title": "Models",

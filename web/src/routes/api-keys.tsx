@@ -211,15 +211,26 @@ export function ApiKeysPage() {
   // Data fetching
   // ---------------------------------------------------------------------------
 
-  // The "Revoked" tab needs the archived view from the server — those
-  // rows have `deleted_at IS NOT NULL` and the default list endpoint
-  // hides them. Other tabs filter client-side off the live result set.
-  const fetchKeys = async (mode: 'live' | 'archived' = 'live') => {
+  // The "Inactive" tab needs the archived view in addition to live —
+  // revoked keys have `deleted_at IS NOT NULL` and the default list
+  // endpoint hides them. Expired and rotated keys still appear in the
+  // live set with `disabled_reason` set, so we union both sources and
+  // dedupe by id (archived row wins — it carries the deletion record).
+  const fetchKeys = async (mode: 'live' | 'inactive' = 'live') => {
     try {
-      const url =
-        mode === 'archived' ? '/api/keys?archived=true' : '/api/keys';
-      const res = await api<PaginatedResponse<ApiKey>>(url);
-      setKeys(res.data);
+      if (mode === 'inactive') {
+        const [live, archived] = await Promise.all([
+          api<PaginatedResponse<ApiKey>>('/api/keys'),
+          api<PaginatedResponse<ApiKey>>('/api/keys?archived=true'),
+        ]);
+        const byId = new Map<string, ApiKey>();
+        for (const k of live.data) byId.set(k.id, k);
+        for (const k of archived.data) byId.set(k.id, k);
+        setKeys([...byId.values()]);
+      } else {
+        const res = await api<PaginatedResponse<ApiKey>>('/api/keys');
+        setKeys(res.data);
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
     } finally {
@@ -227,12 +238,11 @@ export function ApiKeysPage() {
     }
   };
 
-  // Keys re-fetch on tab change because the "Revoked" tab pulls from
-  // the archived view (different server-side filter), not the same
-  // result set with a client-side mask.
+  // Keys re-fetch on tab change because the "Inactive" tab unions a
+  // second server-side query, not just a client-side mask.
   useEffect(() => {
     setLoading(true);
-    fetchKeys(tab === 'revoked' ? 'archived' : 'live');
+    fetchKeys(tab === 'inactive' ? 'inactive' : 'live');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);
 
@@ -307,7 +317,9 @@ export function ApiKeysPage() {
           const days = daysUntilExpiry(k.expires_at);
           return days !== null && days >= 0 && days < 7;
         })
-      : keys;
+      : tab === 'inactive'
+        ? keys.filter((k) => !k.is_active || !!k.disabled_reason)
+        : keys;
 
   // ---------------------------------------------------------------------------
   // Callbacks
@@ -403,7 +415,7 @@ export function ApiKeysPage() {
           <TabsList>
             <TabsTrigger value="all">{t('common.total')}</TabsTrigger>
             <TabsTrigger value="expiring">{t('apiKeys.expiringSoon')}</TabsTrigger>
-            <TabsTrigger value="revoked">{t('apiKeys.revoked')}</TabsTrigger>
+            <TabsTrigger value="inactive">{t('apiKeys.inactiveTab')}</TabsTrigger>
           </TabsList>
         </Tabs>
       </div>
