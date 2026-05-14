@@ -206,6 +206,32 @@ async fn revoke_sessions_invalidates_other_devices() {
         .await
         .unwrap();
     replay.assert_status(401);
+
+    // …and the side effects the endpoint name promises actually fired.
+    // Earlier the test only checked the refresh-token replay path; a
+    // regression that removed either of these two Redis writes would
+    // silently keep the WebSocket and signed-request paths usable.
+    use fred::interfaces::KeysInterface;
+    let signing_exists: i64 = app
+        .state
+        .redis
+        .exists(format!("signing_pubkey:{}", admin.user.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        signing_exists, 0,
+        "signing_pubkey must be deleted so signed-request middleware re-prompts auth"
+    );
+    let revoke_exists: i64 = app
+        .state
+        .redis
+        .exists(format!("dashboard_user_revoked:{}", admin.user.id))
+        .await
+        .unwrap();
+    assert_eq!(
+        revoke_exists, 1,
+        "dashboard_user_revoked must be set so live dashboard WS disconnects within the revoke window"
+    );
 }
 
 #[ignore = "integration test — run via `make test-it`"]

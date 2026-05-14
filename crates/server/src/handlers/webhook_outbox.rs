@@ -151,10 +151,16 @@ pub async fn outbox_counts(
     auth_user
         .assert_scope_global(&state.db, "log_forwarders:write")
         .await?;
+    // Cap at 500 forwarder rows so a deployment with hundreds of dead
+    // endpoints can't return a multi-megabyte JSON body. Sorted by
+    // backlog desc so operators see the biggest offenders first; the
+    // tail (rare in practice) is dropped silently.
     let rows: Vec<(Uuid, i64)> = sqlx::query_as(
         "SELECT forwarder_id, COUNT(*) AS count \
            FROM webhook_outbox \
-          GROUP BY forwarder_id",
+          GROUP BY forwarder_id \
+          ORDER BY count DESC \
+          LIMIT 500",
     )
     .fetch_all(&state.db)
     .await?;

@@ -1319,32 +1319,33 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
     // First tick fires immediately — we already pushed once, so consume it.
     ticker.tick().await;
 
-    // Re-check session revocation periodically. The auth handler's
-    // revoke_sessions sets a `dashboard_user_revoked:{uid}` flag in Redis;
-    // 8 ticks @ 4s = ~32s window between revoke and forced disconnect.
-    let mut ticks_since_revoke_check: u32 = 0;
-    const REVOKE_CHECK_EVERY: u32 = 8;
+    // Re-check session revocation on a fixed wall-clock interval so the
+    // revoke window doesn't stretch when an operator tunes the snapshot
+    // tick to a longer value for performance. Bound is fixed at 32s
+    // independent of `tick_secs`; previously this was 8×tick_secs which
+    // grew to several minutes when tick_secs was raised.
     let revoke_key = user_revoked_key(user_id);
+    let mut revoke_ticker = tokio::time::interval(Duration::from_secs(32));
+    revoke_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    revoke_ticker.tick().await;
 
     loop {
         tokio::select! {
-            _ = ticker.tick() => {
-                ticks_since_revoke_check += 1;
-                if ticks_since_revoke_check >= REVOKE_CHECK_EVERY {
-                    ticks_since_revoke_check = 0;
-                    let revoked: u8 = fred::interfaces::KeysInterface::exists(&state.redis, &revoke_key)
-                        .await
-                        .unwrap_or(0);
-                    if revoked > 0 {
-                        tracing::info!(%user_id, "dashboard ws closing: user revoked");
-                        let _ = tokio::time::timeout(
-                            io_timeout,
-                            socket.send(Message::Close(None)),
-                        )
-                        .await;
-                        return;
-                    }
+            _ = revoke_ticker.tick() => {
+                let revoked: u8 = fred::interfaces::KeysInterface::exists(&state.redis, &revoke_key)
+                    .await
+                    .unwrap_or(0);
+                if revoked > 0 {
+                    tracing::info!(%user_id, "dashboard ws closing: user revoked");
+                    let _ = tokio::time::timeout(
+                        io_timeout,
+                        socket.send(Message::Close(None)),
+                    )
+                    .await;
+                    return;
                 }
+            }
+            _ = ticker.tick() => {
                 if let Err(e) = push_snapshot(&mut socket, &state, user_filter.as_deref(), io_timeout).await {
                     tracing::debug!("dashboard ws push failed: {e}");
                     return;

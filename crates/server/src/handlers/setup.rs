@@ -88,18 +88,23 @@ pub async fn setup_initialize(
     .unwrap_or_else(|| "unknown".into());
 
     let req: SetupInitRequest = super::auth::parse_json_body(request, 1024 * 1024).await?;
-    // Check if already initialized (fast path from cache)
+    // Check if already initialized (fast path from cache). Done BEFORE
+    // incrementing the rate counter so a low-volume attacker can't pin
+    // the bucket at 6 against an already-initialized cluster.
     if state.dynamic_config.is_initialized().await {
         return Err(AppError::Forbidden("Setup already completed".into()));
     }
 
-    // Rate limit: max 5 setup attempts per minute (global, not per-user since no auth)
-    let rate_key = "setup_rate_limit";
-    let count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, rate_key, 1)
+    // Rate limit: max 5 setup attempts per minute per IP. Per-IP rather
+    // than global so a single attacker can't lock real operators out of
+    // first-boot. `unknown` is its own bucket (covers misconfigured
+    // proxy / direct localhost).
+    let rate_key = format!("setup_rate_limit:{client_ip}");
+    let count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1)
         .await
         .unwrap_or(1);
     if count == 1 {
-        let _: () = fred::interfaces::KeysInterface::expire(&state.redis, rate_key, 60, None)
+        let _: () = fred::interfaces::KeysInterface::expire(&state.redis, &rate_key, 60, None)
             .await
             .unwrap_or(());
     }
