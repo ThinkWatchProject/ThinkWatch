@@ -585,6 +585,16 @@
       "unknown": "Discovery failed with no error detail. Check the server logs."
     },
     "deleteConfirm": "Delete this MCP server? Every user's saved credentials (OAuth tokens, static tokens, account labels) for this server will also be removed and any AI agents currently using its tools will start failing immediately. This cannot be undone.",
+    "bulkDelete": {
+      "selectAll": "Select all servers on this page",
+      "selectRow": "Select {{name}}",
+      "selectedCount": "{{count}} selected",
+      "action": "Delete {{count}} selected",
+      "confirmTitle": "Delete {{count}} MCP servers?",
+      "confirmDescription": "About to remove: {{names}}. Every user's saved credentials for each of these servers will be wiped and any AI agents currently using their tools will start failing immediately. This cannot be undone.",
+      "success": "Deleted {{count}} MCP server(s)",
+      "partial": "Deleted {{deleted}}; skipped {{skipped}} ({{reasons}})"
+    },
     "noServers": "No MCP servers registered yet.",
     "noServersHint": "Register a server to start using MCP tools.",
     "registering": "Registering...",

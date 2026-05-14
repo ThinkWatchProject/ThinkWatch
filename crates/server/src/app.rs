@@ -744,6 +744,14 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/mcp/servers/test",
             post(handlers::mcp_servers::test_mcp_server),
         )
+        // Bulk delete uses POST (not DELETE) because most HTTP
+        // clients/browsers don't reliably allow request bodies on
+        // DELETE. Permission stack matches single-server delete via
+        // the handler's `require_permission` + `assert_scope_global`.
+        .route(
+            "/api/mcp/servers/bulk-delete",
+            post(handlers::mcp_servers::bulk_delete_servers),
+        )
         .route(
             "/api/mcp/servers/{id}",
             get(handlers::mcp_servers::get_server)

@@ -23,7 +23,10 @@ use crate::handlers::{
     },
     log_forwarders::{CreateForwarderRequest, TestResult, UpdateForwarderRequest},
     mcp_logs::{McpLogEntry, McpLogsResponse},
-    mcp_servers::UpdateMcpServerRequest,
+    mcp_servers::{
+        BulkDeleteMcpServersRequest, BulkDeleteMcpServersResponse, BulkDeleteSkip,
+        UpdateMcpServerRequest,
+    },
     mcp_tools::{McpToolListResponse, McpToolRow},
     models::{
         BatchWeightUpdate, BatchWeightsRequest, CreateModelRequest, ModelRow, RouteHistoryBucket,
@@ -190,6 +193,7 @@ use crate::handlers::{
         crate::handlers::mcp_servers::get_server,
         crate::handlers::mcp_servers::update_server,
         crate::handlers::mcp_servers::delete_server,
+        crate::handlers::mcp_servers::bulk_delete_servers,
         crate::handlers::mcp_tools::list_tools,
         crate::handlers::mcp_tools::discover_tools,
         // Log Forwarders
@@ -244,6 +248,7 @@ use crate::handlers::{
             AppLogEntryResponse, AppLogsResponse,
             // MCP
             UpdateMcpServerRequest,
+            BulkDeleteMcpServersRequest, BulkDeleteMcpServersResponse, BulkDeleteSkip,
             // Log Forwarders
             CreateForwarderRequest, UpdateForwarderRequest, TestResult,
             // Settings
