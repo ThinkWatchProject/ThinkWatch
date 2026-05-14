@@ -85,6 +85,12 @@ pub struct AppState {
     /// Gateway model router. Wrapped in `ArcSwap` so route changes
     /// (provider/model CRUD, sync) take effect without restart.
     pub gateway_router: Arc<arc_swap::ArcSwap<ModelRouter>>,
+    /// Shared model-weight cache (per-model `input_weight` /
+    /// `output_weight` pulled from the `models` table). Lives on
+    /// AppState so model CRUD handlers can invalidate it after a
+    /// weight edit — otherwise rate-limit + cost arithmetic uses the
+    /// stale cached weights for up to the 5-minute TTL.
+    pub weight_cache: think_watch_common::limits::weight::WeightCache,
     /// Per-user MCP credential resolver. Shared with `McpProxy` so a
     /// single instance handles request-time credential lookup, OAuth
     /// refresh coalescing, and the console-driven "Test connection"
@@ -192,10 +198,10 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
     }
     state.gateway_router.store(Arc::new(initial_router));
 
-    // Share one WeightCache between the limits engine and the cost
-    // tracker so a cache miss loaded for rate limiting also serves the
-    // cost calculation on the same request.
-    let weight_cache = think_watch_common::limits::weight::WeightCache::new();
+    // Reuse AppState's WeightCache so the limits engine, cost tracker,
+    // AND the model CRUD handlers all reference the SAME cache — the
+    // CRUD handlers need a handle to invalidate after weight edits.
+    let weight_cache = state.weight_cache.clone();
 
     let gateway_state = GatewayState {
         router: state.gateway_router.clone(),
@@ -1145,7 +1151,11 @@ async fn load_providers_into_router(
     let mut provider_map: HashMap<uuid::Uuid, ProviderMapEntry> = HashMap::new();
 
     for provider in &providers {
-        // Parse unified headers from config_json
+        // Parse unified headers from config_json. Each `value` is either
+        // a `{"$enc": "<b64>"}` envelope (production) or a legacy
+        // plaintext string. Plaintext rows emit a one-shot warn so
+        // admins know to re-save them.
+        let mut legacy_plaintext_seen = false;
         let headers: Vec<(String, String)> = provider
             .config_json
             .get("headers")
@@ -1154,12 +1164,37 @@ async fn load_providers_into_router(
                 arr.iter()
                     .filter_map(|item| {
                         let key = item.get("key")?.as_str()?.to_string();
-                        let value = item.get("value")?.as_str()?.to_string();
-                        Some((key, value))
+                        let raw = item.get("value")?;
+                        match crate::handlers::providers::decrypt_secret_from_json(
+                            raw,
+                            &state.config.encryption_key,
+                        ) {
+                            Ok((value, was_encrypted)) => {
+                                if !was_encrypted && !value.is_empty() {
+                                    legacy_plaintext_seen = true;
+                                }
+                                Some((key, value))
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    provider = %provider.name,
+                                    header = %key,
+                                    "Failed to decrypt provider header — skipping: {e}"
+                                );
+                                None
+                            }
+                        }
                     })
                     .collect()
             })
             .unwrap_or_default();
+        if legacy_plaintext_seen {
+            tracing::warn!(
+                provider = %provider.name,
+                provider_id = %provider.id,
+                "Provider has plaintext header values at rest — re-save the provider in the admin UI to encrypt them"
+            );
+        }
 
         let dyn_provider: Arc<dyn think_watch_gateway::providers::DynAiProvider> = match provider
             .provider_type
@@ -1187,17 +1222,40 @@ async fn load_providers_into_router(
                 )
             }
             "bedrock" => {
-                // AWS credentials stored as separate config_json fields, not headers
+                // AWS credentials stored as separate config_json fields, not headers.
+                // The access_key_id is not sensitive; the secret_access_key is
+                // wrapped as `{"$enc": ...}` at rest (or a legacy plaintext
+                // string on dev DBs that haven't been backfilled yet).
                 let access_key = provider
                     .config_json
                     .get("aws_access_key_id")
                     .and_then(|v| v.as_str())
-                    .unwrap_or_default();
-                let secret_key = provider
+                    .unwrap_or_default()
+                    .to_string();
+                let (secret_key, secret_was_encrypted) = provider
                     .config_json
                     .get("aws_secret_access_key")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default();
+                    .map(|v| {
+                        crate::handlers::providers::decrypt_secret_from_json(
+                            v,
+                            &state.config.encryption_key,
+                        )
+                        .unwrap_or_else(|e| {
+                            tracing::error!(
+                                provider = %provider.name,
+                                "Failed to decrypt aws_secret_access_key — treating as IMDSv2 mode: {e}"
+                            );
+                            (String::new(), true)
+                        })
+                    })
+                    .unwrap_or((String::new(), true));
+                if !secret_was_encrypted && !secret_key.is_empty() {
+                    tracing::warn!(
+                        provider = %provider.name,
+                        provider_id = %provider.id,
+                        "Provider has plaintext aws_secret_access_key at rest — re-save the provider in the admin UI to encrypt it"
+                    );
+                }
                 let credentials = if access_key.is_empty() && secret_key.is_empty() {
                     String::new() // IMDSv2 mode
                 } else {
@@ -1395,4 +1453,112 @@ async fn load_providers_into_router(
     );
 
     Ok(())
+}
+
+/// Idempotent startup backfill that re-encrypts any provider rows still
+/// holding plaintext header values or AWS secrets in `config_json`.
+///
+/// Runs once per boot. Rows whose header values are already wrapped as
+/// `{"$enc": "<b64>"}` (and whose `aws_secret_access_key` is either
+/// missing, empty, or already wrapped) are skipped — we only UPDATE
+/// rows that actually need rewriting. The detector is the same wrapper
+/// shape the create/update handlers emit, so subsequent boots are a
+/// no-op.
+///
+/// Safe to run before `load_providers_into_router` because both go
+/// through the same JSON shape. Logs a single summary line.
+pub async fn backfill_provider_secrets(
+    db: &sqlx::PgPool,
+    encryption_key: &str,
+) -> anyhow::Result<usize> {
+    use crate::handlers::providers::ENC_MARKER;
+
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: uuid::Uuid,
+        name: String,
+        config_json: serde_json::Value,
+    }
+
+    let rows: Vec<Row> = sqlx::query_as::<_, Row>(
+        "SELECT id, name, config_json FROM providers WHERE deleted_at IS NULL",
+    )
+    .fetch_all(db)
+    .await?;
+
+    let key = think_watch_common::crypto::parse_encryption_key(encryption_key)
+        .map_err(|e| anyhow::anyhow!("invalid ENCRYPTION_KEY: {e}"))?;
+
+    fn is_encrypted(v: &serde_json::Value) -> bool {
+        v.as_object().is_some_and(|o| o.contains_key(ENC_MARKER))
+    }
+    fn wrap_plaintext(plain: &str, key: &[u8; 32]) -> anyhow::Result<serde_json::Value> {
+        let bytes = think_watch_common::crypto::encrypt(plain.as_bytes(), key)?;
+        let encoded = hex::encode(bytes);
+        Ok(serde_json::json!({ ENC_MARKER: encoded }))
+    }
+
+    let mut rewritten = 0usize;
+    for row in rows {
+        let mut config = row.config_json.clone();
+        let mut changed = false;
+
+        // Headers list — encrypt every plaintext header value.
+        if let Some(arr) = config.get_mut("headers").and_then(|v| v.as_array_mut()) {
+            for item in arr.iter_mut() {
+                let Some(obj) = item.as_object_mut() else {
+                    continue;
+                };
+                let Some(value) = obj.get("value") else {
+                    continue;
+                };
+                if is_encrypted(value) {
+                    continue;
+                }
+                let Some(plain) = value.as_str() else {
+                    continue;
+                };
+                if plain.is_empty() {
+                    continue;
+                }
+                let enc = wrap_plaintext(plain, &key)?;
+                obj.insert("value".to_string(), enc);
+                changed = true;
+            }
+        }
+
+        // AWS bedrock secret.
+        if let Some(obj) = config.as_object_mut()
+            && let Some(value) = obj.get("aws_secret_access_key")
+            && !is_encrypted(value)
+            && let Some(plain) = value.as_str()
+            && !plain.is_empty()
+        {
+            let enc = wrap_plaintext(plain, &key)?;
+            obj.insert("aws_secret_access_key".to_string(), enc);
+            changed = true;
+        }
+
+        if changed {
+            sqlx::query("UPDATE providers SET config_json = $2 WHERE id = $1")
+                .bind(row.id)
+                .bind(&config)
+                .execute(db)
+                .await?;
+            rewritten += 1;
+            tracing::info!(
+                provider = %row.name,
+                provider_id = %row.id,
+                "Backfilled plaintext provider secrets → AES-GCM envelope"
+            );
+        }
+    }
+
+    if rewritten > 0 {
+        tracing::info!(
+            count = rewritten,
+            "Provider secret backfill complete (re-encrypted plaintext rows)"
+        );
+    }
+    Ok(rewritten)
 }

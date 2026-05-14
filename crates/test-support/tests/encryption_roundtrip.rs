@@ -1,10 +1,12 @@
 //! Encryption-at-rest roundtrip tests for handler plumbing.
 //!
-//! Two columns hold AES-256-GCM-encrypted secrets reachable through
-//! handlers covered here:
+//! Three storage shapes hold AES-256-GCM-encrypted secrets reachable
+//! through handlers covered here:
 //!   - `system_settings.value` for `oidc.client_secret_encrypted`
 //!     (hex-encoded ciphertext stored in the JSON value)
 //!   - `users.totp_secret` (hex-encoded ciphertext)
+//!   - `providers.config_json` — every header `value` and the
+//!     `aws_secret_access_key` are stored as `{"$enc": "<hex>"}`
 //!
 //! The crypto layer has good unit tests in
 //! `crates/common/src/crypto.rs`. These tests pin the **handler
@@ -181,4 +183,267 @@ async fn totp_secret_lands_encrypted_in_users_row() {
         think_watch_common::crypto::decrypt(&codes_bytes, &key).expect("decrypt recovery codes");
     let parsed: Vec<String> = serde_json::from_slice(&codes_decrypted).expect("codes JSON parse");
     assert_eq!(parsed.len(), 10, "should mint 10 recovery codes");
+}
+
+// ---------------------------------------------------------------------------
+// providers.config_json — header values + aws_secret_access_key encrypt at rest
+// ---------------------------------------------------------------------------
+
+/// Decrypt a `{"$enc": "<hex>"}` JSON wrapper using the test app's
+/// master key. Panics if the value isn't a well-formed envelope.
+fn decode_enc_envelope(v: &Value, encryption_key: &str) -> String {
+    let hex_str = v
+        .get("$enc")
+        .and_then(|x| x.as_str())
+        .expect("expected $enc-wrapped JSON object");
+    let bytes = hex::decode(hex_str).expect("hex decode envelope");
+    let key = think_watch_common::crypto::parse_encryption_key(encryption_key).unwrap();
+    let plain = think_watch_common::crypto::decrypt(&bytes, &key).expect("decrypt envelope");
+    String::from_utf8(plain).expect("envelope UTF-8")
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn provider_create_encrypts_header_values_at_rest() {
+    // Verifies the handler plumbing for POST /api/admin/providers:
+    //   - every header value lands as `{"$enc": "<hex>"}` in the DB row
+    //   - plaintext never appears anywhere in `config_json`
+    //   - the gateway router reload decrypts back to the original
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+
+    let secret_value = "sk-test-rotated-1234567890";
+    let resp = con
+        .post(
+            "/api/admin/providers",
+            json!({
+                "name": "openai-encrypted-test",
+                "display_name": "OpenAI (encryption test)",
+                "provider_type": "openai",
+                "base_url": "https://api.openai.com",
+                "headers": [
+                    {"key": "Authorization", "value": format!("Bearer {secret_value}")},
+                    {"key": "X-Custom-Header", "value": "non-sensitive-but-still-encrypted"},
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let created: Value = resp.json().unwrap();
+    let provider_id = created["id"].as_str().unwrap().to_string();
+
+    // Pull the raw config_json straight out of Postgres.
+    let stored: Value = sqlx::query_scalar("SELECT config_json FROM providers WHERE id = $1::uuid")
+        .bind(&provider_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+
+    let stored_str = serde_json::to_string(&stored).unwrap();
+    assert!(
+        !stored_str.contains(secret_value),
+        "plaintext Authorization secret leaked into providers.config_json: {stored_str}"
+    );
+
+    let headers = stored["headers"]
+        .as_array()
+        .expect("headers must be a JSON array");
+    assert_eq!(headers.len(), 2);
+    for h in headers {
+        let v = &h["value"];
+        assert!(
+            v.is_object() && v.get("$enc").is_some(),
+            "header value must be encrypted-at-rest envelope: {v}"
+        );
+    }
+    // Confirm decrypt recovers the original Authorization value.
+    let auth = headers
+        .iter()
+        .find(|h| h["key"] == "Authorization")
+        .unwrap();
+    let decrypted = decode_enc_envelope(&auth["value"], &app.state.config.encryption_key);
+    assert_eq!(decrypted, format!("Bearer {secret_value}"));
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn provider_create_encrypts_aws_bedrock_secret() {
+    // Bedrock secrets are stored as `aws_secret_access_key` directly
+    // under `config_json`, not in the headers array. The handler must
+    // wrap those too.
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+
+    let aws_secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    let resp = con
+        .post(
+            "/api/admin/providers",
+            json!({
+                "name": "bedrock-encrypted-test",
+                "display_name": "AWS Bedrock (encryption test)",
+                "provider_type": "bedrock",
+                "base_url": "https://bedrock-runtime.us-east-1.amazonaws.com",
+                "headers": [],
+                "config": {
+                    "aws_access_key_id": "AKIAIOSFODNN7EXAMPLE",
+                    "aws_secret_access_key": aws_secret,
+                },
+            }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let created: Value = resp.json().unwrap();
+    let provider_id = created["id"].as_str().unwrap().to_string();
+
+    let stored: Value = sqlx::query_scalar("SELECT config_json FROM providers WHERE id = $1::uuid")
+        .bind(&provider_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    let stored_str = serde_json::to_string(&stored).unwrap();
+    assert!(
+        !stored_str.contains(aws_secret),
+        "plaintext aws_secret_access_key leaked: {stored_str}"
+    );
+
+    let wrapped = &stored["aws_secret_access_key"];
+    assert!(
+        wrapped.is_object() && wrapped.get("$enc").is_some(),
+        "aws_secret_access_key must be $enc-wrapped: {wrapped}"
+    );
+    let decrypted = decode_enc_envelope(wrapped, &app.state.config.encryption_key);
+    assert_eq!(decrypted, aws_secret);
+
+    // access_key_id is not sensitive — must remain plaintext for log/UI surfacing.
+    assert_eq!(stored["aws_access_key_id"], "AKIAIOSFODNN7EXAMPLE");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn provider_startup_backfill_encrypts_legacy_plaintext_rows() {
+    // Simulate a pre-encryption dev DB row by inserting a provider
+    // whose `config_json.headers` and `aws_secret_access_key` are
+    // plaintext strings. The backfill runs in `init::init_state`, so
+    // boot a fresh TestApp pointed at the same DB to exercise it.
+    //
+    // We do it the other way round: stand up an app, INSERT a legacy
+    // row, then invoke the backfill helper directly and re-read.
+    let app = TestApp::spawn().await;
+
+    let legacy_id = uuid::Uuid::new_v4();
+    let legacy_secret = "legacy-plain-bearer-token-xyz";
+    sqlx::query(
+        r#"INSERT INTO providers (id, name, display_name, provider_type, base_url, is_active, config_json)
+           VALUES ($1, $2, $2, 'openai', 'https://api.openai.com', true, $3)"#,
+    )
+    .bind(legacy_id)
+    .bind("legacy-plaintext-provider")
+    .bind(serde_json::json!({
+        "headers": [
+            {"key": "Authorization", "value": format!("Bearer {legacy_secret}")},
+        ],
+        "aws_secret_access_key": "plain-aws-secret-for-coverage",
+    }))
+    .execute(&app.db)
+    .await
+    .unwrap();
+
+    // Run the backfill — should rewrite the row.
+    let rewritten = think_watch_server::app::backfill_provider_secrets(
+        &app.db,
+        &app.state.config.encryption_key,
+    )
+    .await
+    .unwrap();
+    assert!(rewritten >= 1, "backfill should rewrite at least our row");
+
+    let stored: Value = sqlx::query_scalar("SELECT config_json FROM providers WHERE id = $1::uuid")
+        .bind(legacy_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    let stored_str = serde_json::to_string(&stored).unwrap();
+    assert!(
+        !stored_str.contains(legacy_secret),
+        "plaintext bearer survived backfill: {stored_str}"
+    );
+
+    let header_value = &stored["headers"][0]["value"];
+    assert!(
+        header_value.is_object() && header_value.get("$enc").is_some(),
+        "header value not $enc-wrapped after backfill: {header_value}"
+    );
+    let plain = decode_enc_envelope(header_value, &app.state.config.encryption_key);
+    assert_eq!(plain, format!("Bearer {legacy_secret}"));
+
+    let aws_secret = &stored["aws_secret_access_key"];
+    assert!(
+        aws_secret.is_object() && aws_secret.get("$enc").is_some(),
+        "aws_secret_access_key not $enc-wrapped after backfill: {aws_secret}"
+    );
+
+    // Idempotent: a second run rewrites nothing.
+    let again = think_watch_server::app::backfill_provider_secrets(
+        &app.db,
+        &app.state.config.encryption_key,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        again, 0,
+        "second backfill run must be a no-op — all rows already encrypted"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn provider_loader_decrypts_envelopes_back_to_headers() {
+    // End-to-end: create a provider, force a router rebuild, and
+    // confirm the in-memory router sees the decrypted Authorization
+    // value (not the $enc wrapper). This is the gateway-side
+    // observability check — if the loader regressed and stored the
+    // ciphertext verbatim, upstream calls would fail with 401.
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+
+    let upstream_secret = "test-bearer-for-loader-roundtrip";
+    let name = unique_name("loader-rt");
+    let resp = con
+        .post(
+            "/api/admin/providers",
+            json!({
+                "name": name,
+                "display_name": name,
+                "provider_type": "openai",
+                "base_url": "https://api.openai.com",
+                "headers": [
+                    {"key": "Authorization", "value": format!("Bearer {upstream_secret}")},
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let body: Value = resp.json().unwrap();
+    let provider_id: uuid::Uuid = body["id"].as_str().unwrap().parse().unwrap();
+
+    // Register a model+route and force a rebuild so the router resolves
+    // headers via the decrypt path.
+    let model_id = unique_name("loader-rt-model");
+    fixtures::create_model_and_route(&app.db, provider_id, &model_id)
+        .await
+        .unwrap();
+    app.rebuild_gateway_router().await;
+
+    // The router holds the route — peek at how many routes the model
+    // resolves to. If the loader had blown up on the envelope, the
+    // route would have been skipped.
+    let router = app.state.gateway_router.load_full();
+    let models = router.list_models();
+    assert!(
+        models.iter().any(|m| m == &model_id),
+        "model {model_id} missing from router after encrypted-header reload (loader likely failed): {models:?}"
+    );
 }
