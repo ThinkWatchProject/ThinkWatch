@@ -20,6 +20,7 @@ use uuid::Uuid;
 use think_watch_common::dto::ProviderHeader;
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Model;
+use think_watch_gateway::output_guardrails::{MAX_LENGTH_CAP_CEILING, OutputGuardrail};
 
 use super::serde_util::deserialize_some;
 use crate::app::AppState;
@@ -55,6 +56,12 @@ pub struct ModelRow {
     pub routing_strategy: Option<String>,
     pub affinity_mode: Option<String>,
     pub affinity_ttl_secs: Option<i32>,
+    /// Output guardrails as stored in JSONB. The list endpoint returns
+    /// the raw `Value` (rather than `Vec<OutputGuardrail>`) so the UI
+    /// can render unrecognised future variants without breaking. The
+    /// shape is `[{ "type": "max_length", "max_chars": N }, ...]`.
+    #[schema(value_type = serde_json::Value)]
+    pub output_guardrails: serde_json::Value,
 }
 
 /// `status` filter accepted by `GET /api/admin/models`:
@@ -148,7 +155,8 @@ pub async fn list_models(
                   COALESCE(rc.enabled_route_count, 0) AS enabled_route_count,
                   m.enabled,
                   COALESCE(rc.providers, '{{}}'::text[]) AS providers,
-                  m.routing_strategy, m.affinity_mode, m.affinity_ttl_secs
+                  m.routing_strategy, m.affinity_mode, m.affinity_ttl_secs,
+                  m.output_guardrails
            FROM models m
            LEFT JOIN LATERAL (
              SELECT COUNT(*)                                 AS route_count,
@@ -208,6 +216,12 @@ pub struct CreateModelRequest {
     /// Free-form admin tags. NULL = no tags.
     #[serde(default)]
     pub tags: Option<Vec<String>>,
+    /// Optional per-model output guardrails. NULL/missing = empty
+    /// list. See [`OutputGuardrail`] for the variant set; the
+    /// gateway crate is the source of truth.
+    #[serde(default)]
+    #[schema(value_type = Vec<serde_json::Value>)]
+    pub output_guardrails: Option<Vec<OutputGuardrail>>,
 }
 
 #[utoipa::path(
@@ -248,14 +262,20 @@ pub async fn create_model(
         req.affinity_mode.as_deref(),
         req.affinity_ttl_secs,
     )?;
+    let guardrails = req.output_guardrails.unwrap_or_default();
+    validate_output_guardrails(&guardrails)?;
+    let guardrails_json = serde_json::to_value(&guardrails)
+        .map_err(|e| AppError::BadRequest(format!("failed to serialize output_guardrails: {e}")))?;
 
     let model = sqlx::query_as::<_, Model>(
         r#"INSERT INTO models
               (model_id, display_name, input_weight, output_weight,
-               routing_strategy, affinity_mode, affinity_ttl_secs, tags)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+               routing_strategy, affinity_mode, affinity_ttl_secs, tags,
+               output_guardrails)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING id, model_id, display_name, input_weight, output_weight,
-                     routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled"#,
+                     routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled,
+                     output_guardrails"#,
     )
     .bind(&req.model_id)
     .bind(&req.display_name)
@@ -265,6 +285,7 @@ pub async fn create_model(
     .bind(&req.affinity_mode)
     .bind(req.affinity_ttl_secs)
     .bind(req.tags.as_deref())
+    .bind(&guardrails_json)
     .fetch_one(&state.db)
     .await?;
 
@@ -301,6 +322,35 @@ pub struct UpdateModelRequest {
     pub tags: Option<Option<Vec<String>>>,
     /// Model-level kill switch. Absent = unchanged.
     pub enabled: Option<bool>,
+    /// PATCH-clearable output guardrails. Absent = unchanged, JSON
+    /// `null` = clear (no guardrails), array = replace the whole
+    /// list. Validation runs over the supplied list before persisting.
+    #[serde(default, deserialize_with = "deserialize_some")]
+    #[schema(value_type = Option<Vec<serde_json::Value>>)]
+    pub output_guardrails: Option<Option<Vec<OutputGuardrail>>>,
+}
+
+/// Validate each guardrail's parameters before they hit the DB.
+/// Today only `MaxLength` is wired; future variants land here as
+/// their own match arm. Rejection short-circuits with a 400 so the
+/// admin sees a useful message rather than the row landing and then
+/// blowing up at request time.
+pub(crate) fn validate_output_guardrails(rules: &[OutputGuardrail]) -> Result<(), AppError> {
+    for rule in rules {
+        match rule {
+            OutputGuardrail::MaxLength { max_chars } => {
+                // 0 is a config bug (every response is rejected). The
+                // ceiling caps absurd values so the column can't be
+                // used as a "guardrail off-but-not-removed" toggle.
+                if *max_chars == 0 || *max_chars > MAX_LENGTH_CAP_CEILING {
+                    return Err(AppError::BadRequest(format!(
+                        "output_guardrails: max_length.max_chars must be 1..={MAX_LENGTH_CAP_CEILING}"
+                    )));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Validate routing-strategy override values mirror the CHECK
@@ -363,7 +413,8 @@ pub async fn update_model(
         .await?;
     let existing = sqlx::query_as::<_, Model>(
         r#"SELECT id, model_id, display_name, input_weight, output_weight,
-                  routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled
+                  routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled,
+                  output_guardrails
            FROM models WHERE id = $1"#,
     )
     .bind(id)
@@ -396,6 +447,18 @@ pub async fn update_model(
         None => existing.tags.clone(),
         Some(inner) => inner.clone(),
     };
+    // Guardrails PATCH: absent ⇒ keep existing JSON as-is; Some(None)
+    // ⇒ clear (empty list); Some(Some(rules)) ⇒ validate + replace.
+    let new_guardrails_json: serde_json::Value = match &req.output_guardrails {
+        None => existing.output_guardrails.clone(),
+        Some(None) => serde_json::Value::Array(Vec::new()),
+        Some(Some(rules)) => {
+            validate_output_guardrails(rules)?;
+            serde_json::to_value(rules).map_err(|e| {
+                AppError::BadRequest(format!("failed to serialize output_guardrails: {e}"))
+            })?
+        }
+    };
     validate_routing_overrides(
         new_strategy.as_deref(),
         new_affinity_mode.as_deref(),
@@ -411,10 +474,12 @@ pub async fn update_model(
               affinity_mode     = $6,
               affinity_ttl_secs = $7,
               tags              = $8,
-              enabled           = $9
+              enabled           = $9,
+              output_guardrails = $10
            WHERE id = $1
            RETURNING id, model_id, display_name, input_weight, output_weight,
-                     routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled"#,
+                     routing_strategy, affinity_mode, affinity_ttl_secs, tags, enabled,
+                     output_guardrails"#,
     )
     .bind(id)
     .bind(
@@ -429,6 +494,7 @@ pub async fn update_model(
     .bind(new_affinity_ttl)
     .bind(new_tags.as_deref())
     .bind(req.enabled.unwrap_or(existing.enabled))
+    .bind(&new_guardrails_json)
     .fetch_one(&state.db)
     .await?;
 
@@ -1697,5 +1763,61 @@ mod tests {
         // field returns immediately, but a happy-path combination must
         // still pass.
         assert!(validate_routing_overrides(Some("latency"), Some("route"), Some(300)).is_ok());
+    }
+
+    #[test]
+    fn output_guardrails_empty_passes() {
+        // No rules = no constraints — trivially valid.
+        assert!(validate_output_guardrails(&[]).is_ok());
+    }
+
+    #[test]
+    fn output_guardrails_accepts_canonical_value() {
+        let rules = [OutputGuardrail::MaxLength { max_chars: 4096 }];
+        assert!(validate_output_guardrails(&rules).is_ok());
+    }
+
+    #[test]
+    fn output_guardrails_accepts_inclusive_endpoints() {
+        // 1 is the smallest sensible cap (one-character responses are
+        // pathological but not invalid); the ceiling is the documented
+        // upper bound. Lock both edges so a future tightening doesn't
+        // silently invalidate previously-stored configs.
+        assert!(validate_output_guardrails(&[OutputGuardrail::MaxLength { max_chars: 1 }]).is_ok());
+        assert!(
+            validate_output_guardrails(&[OutputGuardrail::MaxLength {
+                max_chars: MAX_LENGTH_CAP_CEILING,
+            }])
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn output_guardrails_rejects_zero_max_chars() {
+        // 0 would reject every response — that's a config bug, not a
+        // valid "guardrail off" toggle. Admins clear by removing the
+        // rule entirely.
+        let rules = [OutputGuardrail::MaxLength { max_chars: 0 }];
+        assert!(validate_output_guardrails(&rules).is_err());
+    }
+
+    #[test]
+    fn output_guardrails_rejects_above_ceiling() {
+        let rules = [OutputGuardrail::MaxLength {
+            max_chars: MAX_LENGTH_CAP_CEILING + 1,
+        }];
+        assert!(validate_output_guardrails(&rules).is_err());
+    }
+
+    #[test]
+    fn output_guardrails_rejects_any_bad_rule_in_list() {
+        // A list with one valid + one invalid rule must still fail —
+        // partial-acceptance would let admins store a misconfiguration
+        // and only notice at runtime.
+        let rules = [
+            OutputGuardrail::MaxLength { max_chars: 100 },
+            OutputGuardrail::MaxLength { max_chars: 0 },
+        ];
+        assert!(validate_output_guardrails(&rules).is_err());
     }
 }

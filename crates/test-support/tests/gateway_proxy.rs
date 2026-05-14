@@ -321,6 +321,110 @@ async fn list_models_endpoint_returns_registered_models() {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
+async fn output_guardrail_max_length_rejects_oversize_response() {
+    // End-to-end: seed a model with a `max_length` guardrail tighter
+    // than the mocked upstream's response, fire a chat-completion,
+    // and assert the gateway rejects with the TransformError taxonomy
+    // documented in `crates/gateway/src/output_guardrails.rs`. The
+    // mock returns "hello world" (11 chars); we cap at 5 so the
+    // guardrail must trigger.
+    let app = TestApp::spawn().await;
+    let upstream = MockProvider::openai_chat_ok("guarded-model").await;
+    let api_key =
+        seed_provider_and_key(&app, &upstream.uri(), "openai", "guarded-model", None).await;
+
+    // Attach the guardrail rule to the seeded model row. We hit the DB
+    // directly rather than the admin handler because this test is
+    // about the gateway's runtime behavior, not the admin CRUD path —
+    // that lives in the handler's unit tests + the openapi contract.
+    sqlx::query(
+        r#"UPDATE models
+              SET output_guardrails = $1::jsonb
+            WHERE model_id = $2"#,
+    )
+    .bind(serde_json::json!([{"type": "max_length", "max_chars": 5}]))
+    .bind("guarded-model")
+    .execute(&app.db)
+    .await
+    .unwrap();
+    // Router caches per-model config at load time, so the guardrail
+    // only takes effect after a rebuild.
+    app.rebuild_gateway_router().await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    let resp = gw
+        .post(
+            "/v1/chat/completions",
+            json!({
+                "model": "guarded-model",
+                "messages": [{"role": "user", "content": "ping"}]
+            }),
+        )
+        .await
+        .unwrap();
+
+    // GatewayError::TransformError surfaces as a non-2xx. We don't
+    // pin the exact status code here — the error-class mapping is a
+    // separate concern owned by the proxy's error handler — but the
+    // body must name the guardrail so operators can trace the
+    // rejection back to a config row.
+    assert!(
+        !resp.status.is_success(),
+        "guardrail-rejected response should not be 2xx: {} {}",
+        resp.status,
+        resp.text()
+    );
+    let body = resp.text();
+    assert!(
+        body.contains("max_length") || body.contains("guardrail"),
+        "error body should mention the triggering guardrail: {body}"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn output_guardrail_max_length_allows_under_cap() {
+    // Symmetric to the oversize test: with a cap above the mocked
+    // response size ("hello world" = 11 chars), the guardrail must
+    // NOT interfere with normal traffic. Locks in that "guardrail
+    // configured" doesn't accidentally short-circuit happy paths.
+    let app = TestApp::spawn().await;
+    let upstream = MockProvider::openai_chat_ok("allowed-model").await;
+    let api_key =
+        seed_provider_and_key(&app, &upstream.uri(), "openai", "allowed-model", None).await;
+
+    sqlx::query(
+        r#"UPDATE models
+              SET output_guardrails = $1::jsonb
+            WHERE model_id = $2"#,
+    )
+    .bind(serde_json::json!([{"type": "max_length", "max_chars": 1024}]))
+    .bind("allowed-model")
+    .execute(&app.db)
+    .await
+    .unwrap();
+    app.rebuild_gateway_router().await;
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    let resp = gw
+        .post(
+            "/v1/chat/completions",
+            json!({
+                "model": "allowed-model",
+                "messages": [{"role": "user", "content": "ping"}]
+            }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let body: Value = resp.json().unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"], "hello world");
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
 async fn revoked_api_key_no_longer_authorises() {
     let app = TestApp::spawn().await;
     let upstream = MockProvider::openai_chat_ok("any").await;

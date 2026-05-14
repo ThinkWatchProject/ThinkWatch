@@ -83,7 +83,31 @@ interface ModelRow {
   routing_strategy?: RoutingStrategy | null;
   affinity_mode?: AffinityMode | null;
   affinity_ttl_secs?: number | null;
+  /// Raw guardrails JSON from the server — discriminator-tagged
+  /// objects. Decoded into known variants at edit-open via
+  /// `parseGuardrails`; today only `max_length` lands.
+  output_guardrails?: OutputGuardrail[] | null;
 }
+
+function parseGuardrails(value: OutputGuardrail[] | null | undefined): OutputGuardrail[] {
+  if (!Array.isArray(value)) return [];
+  // Filter to known variants — keeps the form state strongly typed so
+  // future additions (json_schema, toxicity) require an explicit branch.
+  return value.filter((g): g is OutputGuardrail => g?.type === 'max_length');
+}
+
+/// Output guardrail rule shape — discriminated on `type` to match
+/// the Rust `#[serde(tag = "type", rename_all = "snake_case")]`
+/// encoding in `crates/gateway/src/output_guardrails.rs`. Today only
+/// `max_length` lands; other variants stay TODO in the roadmap.
+export type OutputGuardrail = { type: 'max_length'; max_chars: number };
+
+/// Default for the inline add form. 4096 covers most chat-completion
+/// caps without surprising the admin who immediately saves.
+const DEFAULT_MAX_CHARS = 4096;
+/// Mirrors the server-side ceiling in
+/// `crates/gateway/src/output_guardrails.rs::MAX_LENGTH_CAP_CEILING`.
+const MAX_CHARS_CEILING = 1_000_000;
 
 export type RoutingStrategy = 'weighted' | 'latency' | 'health' | 'latency_health';
 export type AffinityMode = 'none' | 'provider' | 'route';
@@ -187,6 +211,9 @@ interface ModelFormState {
   routing_strategy: '' | RoutingStrategy;
   affinity_mode: '' | AffinityMode;
   affinity_ttl_secs: string;
+  /// Per-model output guardrails. Replaced wholesale on submit
+  /// (PATCH array semantics on the server). Empty = no guardrails.
+  output_guardrails: OutputGuardrail[];
 }
 
 interface RouteFormState {
@@ -210,6 +237,7 @@ const emptyModelForm: ModelFormState = {
   routing_strategy: '',
   affinity_mode: '',
   affinity_ttl_secs: '',
+  output_guardrails: [],
 };
 
 const emptyRouteForm: RouteFormState = {
@@ -532,6 +560,7 @@ export function ModelsPage() {
       affinity_mode: (m.affinity_mode ?? '') as ModelFormState['affinity_mode'],
       affinity_ttl_secs:
         m.affinity_ttl_secs == null ? '' : String(m.affinity_ttl_secs),
+      output_guardrails: parseGuardrails(m.output_guardrails),
     });
     setModelFormError('');
     setModelDialogOpen(true);
@@ -554,6 +583,20 @@ export function ModelsPage() {
       setModelFormError(t('models.errors.affinityTtlRange'));
       return;
     }
+    // Mirror the server's `validate_output_guardrails`: every
+    // max_length entry must be 1..=MAX_CHARS_CEILING. We could let
+    // the server reject but a client-side check gives a snappier
+    // error than a 400 round trip.
+    for (const g of modelForm.output_guardrails) {
+      if (g.type === 'max_length') {
+        if (!Number.isInteger(g.max_chars) || g.max_chars < 1 || g.max_chars > MAX_CHARS_CEILING) {
+          setModelFormError(
+            t('models.outputGuardrails.maxLengthRange', { max: MAX_CHARS_CEILING }),
+          );
+          return;
+        }
+      }
+    }
     const body = {
       display_name: modelForm.display_name.trim() || modelForm.model_id.trim(),
       input_weight: inW,
@@ -561,6 +604,7 @@ export function ModelsPage() {
       routing_strategy: modelForm.routing_strategy === '' ? null : modelForm.routing_strategy,
       affinity_mode: modelForm.affinity_mode === '' ? null : modelForm.affinity_mode,
       affinity_ttl_secs: ttlNum,
+      output_guardrails: modelForm.output_guardrails,
     };
     setModelSaving(true);
     try {
@@ -1328,6 +1372,16 @@ export function ModelsPage() {
                   </div>
                 </div>
               </div>
+              {/* Output guardrails — per-model post-flight checks on
+                  the provider response. Today only "max_length" is
+                  wired; future variants (JSON schema, toxicity) slot
+                  in here behind their own add buttons. */}
+              <OutputGuardrailsCard
+                rules={modelForm.output_guardrails}
+                onChange={(next) =>
+                  setModelForm({ ...modelForm, output_guardrails: next })
+                }
+              />
               {modelFormError && (
                 <Alert variant="destructive">
                   <AlertCircle className="h-4 w-4" />
@@ -2276,6 +2330,123 @@ function CostPreview({
         currency: currency ?? 'USD',
       })}
     </p>
+  );
+}
+
+/* ---------- output guardrails ---------- */
+
+/// Per-model output guardrails sub-form rendered inside the model
+/// edit drawer. Lists current rules with a remove button each, and
+/// exposes an inline "+ Add max-length guardrail" affordance. Today
+/// only `max_length` is wired — other variants stay TODO in the
+/// gateway crate's roadmap docstring.
+function OutputGuardrailsCard({
+  rules,
+  onChange,
+}: {
+  rules: OutputGuardrail[];
+  onChange: (next: OutputGuardrail[]) => void;
+}) {
+  const { t } = useTranslation();
+  const [adding, setAdding] = useState(false);
+  const [draftMaxChars, setDraftMaxChars] = useState<string>(String(DEFAULT_MAX_CHARS));
+  const [draftError, setDraftError] = useState('');
+
+  const removeAt = (i: number) => {
+    const next = rules.slice();
+    next.splice(i, 1);
+    onChange(next);
+  };
+
+  const startAdd = () => {
+    setDraftMaxChars(String(DEFAULT_MAX_CHARS));
+    setDraftError('');
+    setAdding(true);
+  };
+
+  const cancelAdd = () => {
+    setAdding(false);
+    setDraftError('');
+  };
+
+  const commitAdd = () => {
+    const n = Number(draftMaxChars);
+    if (!Number.isInteger(n) || n < 1 || n > MAX_CHARS_CEILING) {
+      setDraftError(t('models.outputGuardrails.maxLengthRange', { max: MAX_CHARS_CEILING }));
+      return;
+    }
+    onChange([...rules, { type: 'max_length', max_chars: n }]);
+    setAdding(false);
+    setDraftError('');
+  };
+
+  return (
+    <div className="space-y-2 border-t pt-4">
+      <Label className="text-sm font-medium">{t('models.outputGuardrails.title')}</Label>
+      <p className="text-xs text-muted-foreground">
+        {t('models.outputGuardrails.description')}
+      </p>
+      {rules.length === 0 && !adding && (
+        <p className="text-xs italic text-muted-foreground">
+          {t('models.outputGuardrails.noRules')}
+        </p>
+      )}
+      {rules.length > 0 && (
+        <ul className="space-y-1">
+          {rules.map((rule, i) => (
+            <li
+              key={i}
+              className="flex items-center justify-between gap-2 rounded border px-2 py-1 text-xs"
+            >
+              <span className="font-mono">
+                {t('models.outputGuardrails.maxLengthLabel', { count: rule.max_chars })}
+              </span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={() => removeAt(i)}
+                aria-label={t('common.remove')}
+              >
+                <Trash2 className="h-3.5 w-3.5 text-destructive" />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {adding ? (
+        <div className="space-y-2 rounded border p-2">
+          <Label htmlFor="guardrail_max_chars" className="text-xs">
+            {t('models.outputGuardrails.maxLengthLabelShort')}
+          </Label>
+          <Input
+            id="guardrail_max_chars"
+            value={draftMaxChars}
+            onChange={(e) => setDraftMaxChars(e.target.value)}
+            inputMode="numeric"
+            min={1}
+            max={MAX_CHARS_CEILING}
+            type="number"
+          />
+          {draftError && (
+            <p className="text-xs text-destructive">{draftError}</p>
+          )}
+          <div className="flex justify-end gap-2">
+            <Button type="button" variant="ghost" size="sm" onClick={cancelAdd}>
+              {t('common.cancel')}
+            </Button>
+            <Button type="button" size="sm" onClick={commitAdd}>
+              {t('common.add')}
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <Button type="button" variant="outline" size="sm" onClick={startAdd}>
+          <Plus className="mr-1 h-3.5 w-3.5" />
+          {t('models.outputGuardrails.addMaxLength')}
+        </Button>
+      )}
+    </div>
   );
 }
 
