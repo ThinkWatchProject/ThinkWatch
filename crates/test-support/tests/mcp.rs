@@ -111,6 +111,122 @@ async fn mcp_servers_create_list_delete_cycle() {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
+async fn mcp_servers_bulk_delete_happy_path() {
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+
+    let mut ids: Vec<String> = Vec::new();
+    for i in 0..3 {
+        let created: Value = con
+            .post(
+                "/api/mcp/servers",
+                json!({
+                    "name": unique_name(&format!("bulk{i}")),
+                    "namespace_prefix": format!("bulk_ns_{}", uuid::Uuid::new_v4().simple()),
+                    "endpoint_url": "https://example.com/mcp",
+                    "transport_type": "streamable_http"
+                }),
+            )
+            .await
+            .unwrap()
+            .json()
+            .unwrap();
+        ids.push(created["id"].as_str().unwrap().to_string());
+    }
+
+    let resp = con
+        .post("/api/mcp/servers/bulk-delete", json!({ "server_ids": ids }))
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let body: Value = resp.json().unwrap();
+    let deleted = body["deleted"].as_array().expect("deleted array");
+    let skipped = body["skipped"].as_array().expect("skipped array");
+    assert_eq!(deleted.len(), 3, "all three ids should be deleted: {body}");
+    assert!(skipped.is_empty(), "nothing should skip: {body}");
+
+    // All gone from the active list.
+    let after: Value = con.get("/api/mcp/servers").await.unwrap().json().unwrap();
+    let after_arr = pick_list(&after).expect("after list");
+    for id in &ids {
+        assert!(
+            !after_arr.iter().any(|s| s["id"] == json!(id)),
+            "id {id} should be gone after bulk delete"
+        );
+    }
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn mcp_servers_bulk_delete_skips_not_found() {
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+
+    let created: Value = con
+        .post(
+            "/api/mcp/servers",
+            json!({
+                "name": unique_name("present"),
+                "namespace_prefix": format!("present_{}", uuid::Uuid::new_v4().simple()),
+                "endpoint_url": "https://example.com/mcp",
+                "transport_type": "streamable_http"
+            }),
+        )
+        .await
+        .unwrap()
+        .json()
+        .unwrap();
+    let real_id = created["id"].as_str().unwrap().to_string();
+    let phantom = uuid::Uuid::new_v4().to_string();
+
+    let resp = con
+        .post(
+            "/api/mcp/servers/bulk-delete",
+            json!({ "server_ids": [real_id, phantom] }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let body: Value = resp.json().unwrap();
+    let deleted = body["deleted"].as_array().expect("deleted array");
+    let skipped = body["skipped"].as_array().expect("skipped array");
+    assert_eq!(
+        deleted.len(),
+        1,
+        "only the present id should land in deleted: {body}"
+    );
+    assert_eq!(skipped.len(), 1, "phantom id should be skipped: {body}");
+    assert_eq!(
+        skipped[0]["reason"], "not_found",
+        "skip reason must be not_found"
+    );
+    assert_eq!(skipped[0]["id"], json!(phantom));
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn mcp_servers_bulk_delete_rejects_oversized_batch() {
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+
+    // 51 fake ids — never touches the DB because the handler should
+    // reject with 400 before doing any work.
+    let ids: Vec<String> = (0..51).map(|_| uuid::Uuid::new_v4().to_string()).collect();
+    let resp = con
+        .post("/api/mcp/servers/bulk-delete", json!({ "server_ids": ids }))
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status.as_u16(),
+        400,
+        "oversized batch must be rejected with 400, got {} body={}",
+        resp.status,
+        resp.text()
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
 async fn mcp_servers_reject_duplicate_namespace_prefix() {
     let app = TestApp::spawn().await;
     let con = admin_session(&app).await;

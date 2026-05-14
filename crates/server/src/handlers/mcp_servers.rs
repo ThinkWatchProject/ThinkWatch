@@ -1230,24 +1230,12 @@ pub async fn delete_server(
     auth_user
         .assert_scope_global(&state.db, "mcp_servers:delete")
         .await?;
-    let name: Option<String> = sqlx::query_scalar("SELECT name FROM mcp_servers WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await?;
 
-    // Decrement install_count if this server was installed from the store
-    sqlx::query(
-        r#"UPDATE mcp_store_templates SET install_count = GREATEST(install_count - 1, 0)
-           WHERE id = (SELECT template_id FROM mcp_store_installs WHERE server_id = $1)"#,
-    )
-    .bind(id)
-    .execute(&state.db)
-    .await?;
-
-    sqlx::query("DELETE FROM mcp_servers WHERE id = $1")
-        .bind(id)
-        .execute(&state.db)
-        .await?;
+    let mut tx = state.db.begin().await?;
+    let name = delete_server_inner(&mut tx, id)
+        .await?
+        .ok_or_else(|| AppError::NotFound("MCP Server not found".into()))?;
+    tx.commit().await?;
 
     // Drop from the in-memory registry and connection pool — otherwise the
     // gateway would keep a stale entry for a server that no longer exists
@@ -1264,6 +1252,165 @@ pub async fn delete_server(
     );
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
+}
+
+/// Tear down a single MCP server inside the caller's transaction.
+/// Performs the same DB-side work as [`delete_server`]:
+///   * SELECT the server name (returned to the caller for audit detail)
+///   * decrement the originating store template's `install_count`
+///   * DELETE the server row (children CASCADE: `mcp_tools`,
+///     `mcp_user_credentials`, `mcp_server_shared_credentials`,
+///     `mcp_user_tools`, `mcp_store_installs`)
+///
+/// Returns `Ok(Some(name))` on success, `Ok(None)` if the row doesn't
+/// exist (caller maps that to a "not_found" skip). In-memory registry
+/// / connection-pool eviction happens at the call site, *after* the
+/// TX commits, so a rolled-back batch never desyncs the registry.
+pub(super) async fn delete_server_inner(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+) -> Result<Option<String>, AppError> {
+    let name: Option<String> = sqlx::query_scalar("SELECT name FROM mcp_servers WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&mut **tx)
+        .await?;
+    if name.is_none() {
+        return Ok(None);
+    }
+
+    // Decrement install_count if this server was installed from the store.
+    sqlx::query(
+        r#"UPDATE mcp_store_templates SET install_count = GREATEST(install_count - 1, 0)
+           WHERE id = (SELECT template_id FROM mcp_store_installs WHERE server_id = $1)"#,
+    )
+    .bind(id)
+    .execute(&mut **tx)
+    .await?;
+
+    sqlx::query("DELETE FROM mcp_servers WHERE id = $1")
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+
+    Ok(name)
+}
+
+/// Hard cap on `POST /api/mcp/servers/bulk-delete` batch size. Picked
+/// to keep the worst-case transaction short — every id triggers a
+/// SELECT + UPDATE + DELETE plus CASCADE work on
+/// `mcp_user_credentials` / `mcp_user_tools`, so 50 is the upper
+/// bound at which the TX still completes well under any reasonable
+/// statement timeout.
+pub(super) const BULK_DELETE_MAX: usize = 50;
+
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct BulkDeleteMcpServersRequest {
+    /// IDs of MCP servers to delete. Duplicates are collapsed
+    /// server-side; ordering of the result is not guaranteed.
+    pub server_ids: Vec<Uuid>,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct BulkDeleteSkip {
+    pub id: Uuid,
+    /// Stable machine-readable reason: `"not_found"` (no row with
+    /// that id) for now. Reserved values: `"unauthorized"`,
+    /// `"active_sessions"` — added when those checks come online.
+    pub reason: String,
+}
+
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct BulkDeleteMcpServersResponse {
+    pub deleted: Vec<Uuid>,
+    pub skipped: Vec<BulkDeleteSkip>,
+}
+
+#[utoipa::path(
+    post,
+    path = "/api/mcp/servers/bulk-delete",
+    tag = "MCP Servers",
+    request_body = BulkDeleteMcpServersRequest,
+    responses(
+        (status = 200, description = "Bulk delete result", body = BulkDeleteMcpServersResponse),
+        (status = 400, description = "Bad request"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
+pub async fn bulk_delete_servers(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<BulkDeleteMcpServersRequest>,
+) -> Result<Json<BulkDeleteMcpServersResponse>, AppError> {
+    auth_user.require_permission("mcp_servers:delete")?;
+    auth_user
+        .assert_scope_global(&state.db, "mcp_servers:delete")
+        .await?;
+
+    if req.server_ids.is_empty() {
+        return Err(AppError::BadRequest("server_ids must not be empty".into()));
+    }
+    if req.server_ids.len() > BULK_DELETE_MAX {
+        return Err(AppError::BadRequest(format!(
+            "server_ids exceeds bulk-delete cap of {BULK_DELETE_MAX}"
+        )));
+    }
+
+    // Collapse duplicates so a caller that sent the same id twice
+    // doesn't get one "deleted" + one "not_found" entry for the same
+    // row (the second pass would land on the now-missing row inside
+    // the same TX).
+    let mut unique_ids: Vec<Uuid> = Vec::with_capacity(req.server_ids.len());
+    {
+        let mut seen = std::collections::HashSet::with_capacity(req.server_ids.len());
+        for id in &req.server_ids {
+            if seen.insert(*id) {
+                unique_ids.push(*id);
+            }
+        }
+    }
+
+    // Single transaction so the batch is atomic — either every id we
+    // report as deleted is gone (and the corresponding install_count
+    // decrements applied), or nothing changed. A per-id loop with
+    // separate TXs would let a mid-batch failure leave the DB in a
+    // half-deleted state, which is exactly the footgun bulk-delete
+    // is meant to avoid.
+    let mut tx = state.db.begin().await?;
+    let mut deleted_pairs: Vec<(Uuid, String)> = Vec::new();
+    let mut skipped: Vec<BulkDeleteSkip> = Vec::new();
+    for id in unique_ids {
+        match delete_server_inner(&mut tx, id).await? {
+            Some(name) => deleted_pairs.push((id, name)),
+            None => skipped.push(BulkDeleteSkip {
+                id,
+                reason: "not_found".to_string(),
+            }),
+        }
+    }
+    tx.commit().await?;
+
+    // Post-commit cleanup + audit. Done outside the TX so an audit
+    // emit that briefly blocks on the forwarder pool can't roll back
+    // the delete. One audit entry per server preserves
+    // resource-level granularity in `/api/admin/audit`.
+    for (id, name) in &deleted_pairs {
+        state.mcp_registry.unregister(*id).await;
+        state.mcp_pool.load().remove(*id).await;
+        state.audit.log(
+            auth_user
+                .audit("mcp_server.deleted")
+                .resource("mcp_server")
+                .resource_id(id.to_string())
+                .detail(serde_json::json!({ "name": name, "bulk": true })),
+        );
+    }
+
+    Ok(Json(BulkDeleteMcpServersResponse {
+        deleted: deleted_pairs.into_iter().map(|(id, _)| id).collect(),
+        skipped,
+    }))
 }
 
 /// Translate PostgreSQL unique-constraint violations on `mcp_servers` into

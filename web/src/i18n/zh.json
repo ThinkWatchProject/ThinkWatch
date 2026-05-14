@@ -585,6 +585,16 @@
       "unknown": "发现失败但未返回错误详情。请查看服务器日志。"
     },
     "deleteConfirm": "删除此 MCP 服务器？所有用户为此服务器保存的凭证（OAuth tokens、静态令牌、account label）都会一并被清除；正在使用其工具的 AI agent 会立即开始失败。此操作不可撤销。",
+    "bulkDelete": {
+      "selectAll": "选择此页所有服务器",
+      "selectRow": "选择 {{name}}",
+      "selectedCount": "已选择 {{count}} 个",
+      "action": "删除已选 {{count}} 个",
+      "confirmTitle": "删除 {{count}} 个 MCP 服务器？",
+      "confirmDescription": "即将删除：{{names}}。所有用户为这些服务器保存的凭证都会被清除；正在使用其工具的 AI agent 会立即开始失败。此操作不可撤销。",
+      "success": "已删除 {{count}} 个 MCP 服务器",
+      "partial": "已删除 {{deleted}} 个；跳过 {{skipped}} 个（{{reasons}}）"
+    },
     "noServers": "尚未注册任何 MCP 服务器。",
     "noServersHint": "注册服务器以开始使用 MCP 工具。",
     "registering": "注册中...",

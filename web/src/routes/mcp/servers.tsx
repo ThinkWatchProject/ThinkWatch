@@ -22,6 +22,7 @@ import {
 import { Plus, Trash2, Pencil, Server, AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { api, apiPost, apiDelete, hasPermission } from '@/lib/api';
+import { Checkbox } from '@/components/ui/checkbox';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { DataTablePagination } from '@/components/data-table-pagination';
 import { useClientPagination } from '@/hooks/use-client-pagination';
@@ -72,6 +73,12 @@ export function McpServersPage() {
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [discoveringId, setDiscoveringId] = useState<string | null>(null);
 
+  // Multi-select for bulk delete. Stores server `id` (UUID), matches
+  // the `POST /api/mcp/servers/bulk-delete` payload contract.
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+
   const fetchServers = async (signal?: AbortSignal) => {
     try {
       const data = await api<McpServer[]>('/api/mcp/servers', { signal });
@@ -100,6 +107,83 @@ export function McpServersPage() {
       toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
     }
   };
+
+  // Selection helpers. Header checkbox is tri-state: every row of the
+  // CURRENT page picked = checked, some picked = indeterminate, none
+  // picked = unchecked. We scope the "select all" to the current page
+  // (`pager.paginated`) rather than the full server list — admins
+  // browsing page 3 don't expect ticking the header to silently grab
+  // pages 1-2 as well.
+  const visibleServers = pager.paginated;
+  const allVisibleSelected =
+    visibleServers.length > 0 && visibleServers.every((s) => selectedIds.has(s.id));
+  const someVisibleSelected =
+    !allVisibleSelected && visibleServers.some((s) => selectedIds.has(s.id));
+  const headerCheckState: boolean | 'indeterminate' = allVisibleSelected
+    ? true
+    : someVisibleSelected
+      ? 'indeterminate'
+      : false;
+
+  const toggleSelectAll = () => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) for (const s of visibleServers) next.delete(s.id);
+      else for (const s of visibleServers) next.add(s.id);
+      return next;
+    });
+  };
+
+  const toggleSelect = (id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const confirmBulkDelete = async () => {
+    if (selectedIds.size === 0) return;
+    setBulkDeleting(true);
+    try {
+      const res = await apiPost<{
+        deleted: string[];
+        skipped: { id: string; reason: string }[];
+      }>('/api/mcp/servers/bulk-delete', {
+        server_ids: Array.from(selectedIds),
+      });
+      if (res.skipped.length === 0) {
+        toast.success(t('mcpServers.bulkDelete.success', { count: res.deleted.length }));
+      } else {
+        // Partial outcome: include both numbers + a short reason
+        // breakdown so admins can tell whether a phantom id or a
+        // permission issue triggered the skip.
+        const reasons = res.skipped.map((s) => s.reason).join(', ');
+        toast.warning(
+          t('mcpServers.bulkDelete.partial', {
+            deleted: res.deleted.length,
+            skipped: res.skipped.length,
+            reasons,
+          }),
+        );
+      }
+      setSelectedIds(new Set());
+      setBulkDeleteOpen(false);
+      await fetchServers();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
+  // Names of currently-selected servers, used in the confirm dialog
+  // body. Falls back to display_label so the admin sees the same
+  // string they're used to in the table.
+  const selectedServerNames = servers
+    .filter((s) => selectedIds.has(s.id))
+    .map((s) => s.display_label ?? s.name);
 
   const handleDiscover = async (id: string) => {
     setDiscoveringId(id);
@@ -164,6 +248,23 @@ export function McpServersPage() {
         </Alert>
       )}
 
+      {selectedIds.size > 0 && (
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-sm text-muted-foreground">
+            {t('mcpServers.bulkDelete.selectedCount', { count: selectedIds.size })}
+          </span>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={() => setBulkDeleteOpen(true)}
+            disabled={!hasPermission('mcp_servers:delete')}
+          >
+            <Trash2 className="mr-1 h-3.5 w-3.5" />
+            {t('mcpServers.bulkDelete.action', { count: selectedIds.size })}
+          </Button>
+        </div>
+      )}
+
       <Card className="flex flex-col min-h-0 flex-1 py-0 gap-0">
         <CardContent className="p-0 overflow-auto flex-1 [&>[data-slot=table-container]]:overflow-visible">
           {loading ? (
@@ -189,6 +290,14 @@ export function McpServersPage() {
             <Table>
               <TableHeader className="sticky top-0 z-10 bg-card [&_tr]:border-b shadow-[inset_0_-1px_0_var(--border)]">
                 <TableRow>
+                  <TableHead className="w-10">
+                    <Checkbox
+                      checked={headerCheckState}
+                      onCheckedChange={toggleSelectAll}
+                      aria-label={t('mcpServers.bulkDelete.selectAll')}
+                      disabled={!hasPermission('mcp_servers:delete')}
+                    />
+                  </TableHead>
                   <TableHead>{t('common.name')}</TableHead>
                   <TableHead>{t('mcpServers.endpointUrl')}</TableHead>
                   <TableHead className="w-20">{t('mcpServers.authMode')}</TableHead>
@@ -202,7 +311,15 @@ export function McpServersPage() {
               </TableHeader>
               <TableBody>
                 {pager.paginated.map((s) => (
-                  <TableRow key={s.id}>
+                  <TableRow key={s.id} data-state={selectedIds.has(s.id) ? 'selected' : undefined}>
+                    <TableCell className="w-10">
+                      <Checkbox
+                        checked={selectedIds.has(s.id)}
+                        onCheckedChange={() => toggleSelect(s.id)}
+                        aria-label={t('mcpServers.bulkDelete.selectRow', { name: s.display_label ?? s.name })}
+                        disabled={!hasPermission('mcp_servers:delete')}
+                      />
+                    </TableCell>
                     <TableCell className="font-medium">
                       {s.display_label ? (
                         // When the operator has set a display_label,
@@ -378,6 +495,27 @@ export function McpServersPage() {
         variant="destructive"
         confirmLabel={t('common.delete')}
         onConfirm={() => { if (deleteTargetId) handleDelete(deleteTargetId); }}
+      />
+
+      <ConfirmDialog
+        open={bulkDeleteOpen}
+        onOpenChange={setBulkDeleteOpen}
+        title={t('mcpServers.bulkDelete.confirmTitle', { count: selectedIds.size })}
+        // Include the names being removed in the body so the admin
+        // can spot a misclick before confirming. Cap the listed names
+        // at a sane length — the actual delete cap (50) is enforced
+        // server-side too, but the text would get unwieldy past ~10.
+        description={t('mcpServers.bulkDelete.confirmDescription', {
+          count: selectedIds.size,
+          names:
+            selectedServerNames.length <= 10
+              ? selectedServerNames.join(', ')
+              : `${selectedServerNames.slice(0, 10).join(', ')}, …`,
+        })}
+        variant="destructive"
+        confirmLabel={t('common.delete')}
+        loading={bulkDeleting}
+        onConfirm={() => void confirmBulkDelete()}
       />
     </div>
   );
