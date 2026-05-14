@@ -86,6 +86,7 @@ import {
 } from 'lucide-react';
 import { api, apiPost, apiPatch, apiDelete, hasPermission } from '@/lib/api';
 import { fetchAllPaginated } from '@/lib/paginated-fetch';
+import { matchPermission } from '@/lib/permissions';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { LimitsPanel } from '@/components/limits/limits-panel';
@@ -307,22 +308,6 @@ export function RolesPage() {
   // UI was confusing — operators expect "system role" to mean
   // "untouchable from this page". Use clone-from to fork instead.
   const canEditSystem = false;
-
-  /// Match a single permission key against a search query. The query
-  /// is treated as a literal substring unless it contains `*`, in
-  /// which case it's compiled to a regex anchored at start/end. This
-  /// lets the admin type `*:delete` to find every role with any
-  /// `:delete` permission, or `providers:*` to find every role that
-  /// touches providers.
-  const matchPermission = (perm: string, query: string): boolean => {
-    if (!query.includes('*')) return perm.includes(query);
-    const escaped = query.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*');
-    try {
-      return new RegExp(`^${escaped}$`).test(perm);
-    } catch {
-      return false;
-    }
-  };
 
   /// Collect Action keys out of a policy_document so glob search hits
   /// policy-mode roles too. Doesn't try to interpret Effect / Resource —

@@ -1167,7 +1167,9 @@
     "toolPatternPlaceholder": "搜索或输入 server__* 模式…",
     "coveredBy": "已被模式覆盖",
     "addPattern": "添加模式",
-    "addExact": "添加"
+    "addExact": "添加",
+    "filterPermissions": "筛选权限…",
+    "noPermissionsMatch": "无匹配的权限"
   },
   "permissions": {
     "resource": {
