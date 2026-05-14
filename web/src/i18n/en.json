@@ -904,7 +904,9 @@
     "surface_console": "Console",
     "surfaceShort_ai_gateway": "AI",
     "surfaceShort_mcp_gateway": "MCP",
-    "surfaceShort_console": "Console"
+    "surfaceShort_console": "Console",
+    "remainingLabel": "{{count}} remaining",
+    "exceeded": "Exceeded"
   },
   "bulkOverride": {
     "titleForCount": "Apply override to {{count}} user(s)",

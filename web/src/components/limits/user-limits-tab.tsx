@@ -583,7 +583,8 @@ function RuleRow({
   onEdit: () => void;
   onReset: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = i18n.language === 'zh' ? 'zh-CN' : 'en-US';
   const pct = row.max_count > 0 ? Math.min(100, (row.current / row.max_count) * 100) : 0;
   const toneClass =
     pct >= 100
@@ -592,6 +593,8 @@ function RuleRow({
         ? '[&>[data-slot=progress-indicator]]:bg-yellow-500'
         : '';
   const deltaChip = deltaLabel(row.role_default_max_count, row.max_count);
+  const overCap = row.max_count > 0 && row.current >= row.max_count;
+  const remaining = row.max_count - row.current;
   return (
     <tr className={selected ? 'bg-muted/30' : ''}>
       <td className="px-2 py-1.5">
@@ -624,6 +627,15 @@ function RuleRow({
           <span className="text-[10px] text-muted-foreground">
             {pct.toFixed(0)}%
           </span>
+          {overCap ? (
+            <span className="text-[10px] font-medium text-destructive">
+              {t('limits.exceeded')}
+            </span>
+          ) : remaining > 0 ? (
+            <span className="text-[10px] text-muted-foreground">
+              {t('limits.remainingLabel', { count: remaining.toLocaleString(locale) })}
+            </span>
+          ) : null}
         </div>
       </td>
       <td className="px-2 py-1.5 text-[11px]">
@@ -656,7 +668,8 @@ function CapRow({
   onEdit: () => void;
   onReset: () => void;
 }) {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
+  const locale = i18n.language === 'zh' ? 'zh-CN' : 'en-US';
   const pct =
     row.limit_tokens > 0
       ? Math.min(100, (row.current / row.limit_tokens) * 100)
@@ -668,6 +681,8 @@ function CapRow({
         ? '[&>[data-slot=progress-indicator]]:bg-yellow-500'
         : '';
   const deltaChip = deltaLabel(row.role_default_limit_tokens, row.limit_tokens);
+  const overCap = row.limit_tokens > 0 && row.current >= row.limit_tokens;
+  const remaining = row.limit_tokens - row.current;
   return (
     <tr className={selected ? 'bg-muted/30' : ''}>
       <td className="px-2 py-1.5">
@@ -700,6 +715,15 @@ function CapRow({
           <span className="text-[10px] text-muted-foreground">
             {pct.toFixed(0)}%
           </span>
+          {overCap ? (
+            <span className="text-[10px] font-medium text-destructive">
+              {t('limits.exceeded')}
+            </span>
+          ) : remaining > 0 ? (
+            <span className="text-[10px] text-muted-foreground">
+              {t('limits.remainingLabel', { count: remaining.toLocaleString(locale) })}
+            </span>
+          ) : null}
         </div>
       </td>
       <td className="px-2 py-1.5 text-[11px]">
