@@ -108,7 +108,7 @@ export function ProfilePage() {
   const handleTotpDisable = async () => {
     setTotpDisableError('');
     try {
-      await apiPost('/api/auth/totp/disable', { old_password: totpDisablePassword, new_password: '' });
+      await apiPost('/api/auth/totp/disable', { old_password: totpDisablePassword });
       setTotpEnabled(false);
       setDisableDialogOpen(false);
       setTotpDisablePassword('');
