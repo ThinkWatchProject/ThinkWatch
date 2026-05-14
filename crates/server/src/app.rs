@@ -1471,7 +1471,7 @@ pub async fn backfill_provider_secrets(
     db: &sqlx::PgPool,
     encryption_key: &str,
 ) -> anyhow::Result<usize> {
-    use crate::handlers::providers::ENC_MARKER;
+    use think_watch_common::json_secret::JsonSecret;
 
     #[derive(sqlx::FromRow)]
     struct Row {
@@ -1486,17 +1486,14 @@ pub async fn backfill_provider_secrets(
     .fetch_all(db)
     .await?;
 
-    let key = think_watch_common::crypto::parse_encryption_key(encryption_key)
-        .map_err(|e| anyhow::anyhow!("invalid ENCRYPTION_KEY: {e}"))?;
-
-    fn is_encrypted(v: &serde_json::Value) -> bool {
-        v.as_object().is_some_and(|o| o.contains_key(ENC_MARKER))
-    }
-    fn wrap_plaintext(plain: &str, key: &[u8; 32]) -> anyhow::Result<serde_json::Value> {
-        let bytes = think_watch_common::crypto::encrypt(plain.as_bytes(), key)?;
-        let encoded = hex::encode(bytes);
-        Ok(serde_json::json!({ ENC_MARKER: encoded }))
-    }
+    // Wrap a plaintext value as `{"$enc": "<hex>"}` via the shared
+    // helper so the wire format stays in lockstep with the runtime
+    // read path and the create/update encrypt path.
+    let wrap_plaintext = |plain: &str| -> anyhow::Result<serde_json::Value> {
+        Ok(JsonSecret::encrypt(plain, encryption_key)
+            .map_err(|e| anyhow::anyhow!("encrypt failed: {e:?}"))?
+            .to_json())
+    };
 
     let mut rewritten = 0usize;
     for row in rows {
@@ -1512,7 +1509,7 @@ pub async fn backfill_provider_secrets(
                 let Some(value) = obj.get("value") else {
                     continue;
                 };
-                if is_encrypted(value) {
+                if JsonSecret::json_is_encrypted(value) {
                     continue;
                 }
                 let Some(plain) = value.as_str() else {
@@ -1521,8 +1518,7 @@ pub async fn backfill_provider_secrets(
                 if plain.is_empty() {
                     continue;
                 }
-                let enc = wrap_plaintext(plain, &key)?;
-                obj.insert("value".to_string(), enc);
+                obj.insert("value".to_string(), wrap_plaintext(plain)?);
                 changed = true;
             }
         }
@@ -1530,12 +1526,11 @@ pub async fn backfill_provider_secrets(
         // AWS bedrock secret.
         if let Some(obj) = config.as_object_mut()
             && let Some(value) = obj.get("aws_secret_access_key")
-            && !is_encrypted(value)
+            && !JsonSecret::json_is_encrypted(value)
             && let Some(plain) = value.as_str()
             && !plain.is_empty()
         {
-            let enc = wrap_plaintext(plain, &key)?;
-            obj.insert("aws_secret_access_key".to_string(), enc);
+            obj.insert("aws_secret_access_key".to_string(), wrap_plaintext(plain)?);
             changed = true;
         }
 

@@ -2,7 +2,6 @@ use axum::Json;
 use axum::extract::{Path, State};
 use uuid::Uuid;
 
-use think_watch_common::crypto;
 use think_watch_common::dto::{CreateProviderRequest, ProviderHeader};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Provider;
@@ -27,61 +26,26 @@ use crate::middleware::auth_guard::AuthUser;
 // converts every plaintext row on first boot, after which no plaintext exists.
 // ---------------------------------------------------------------------------
 
-/// JSON marker key used to distinguish encrypted-at-rest payloads from
-/// legacy plaintext strings inside `providers.config_json`.
-pub(crate) const ENC_MARKER: &str = "$enc";
+use think_watch_common::json_secret::JsonSecret;
 
-/// Encrypt `plaintext` with the master encryption key and return a
-/// `{"$enc": "<hex-envelope>"}` JSON value suitable for storing in
-/// `config_json`. Empty inputs round-trip unchanged: callers shouldn't
-/// burn AES on `""`, and the loader treats missing/empty fields as
-/// "no credential supplied" anyway.
+/// Encrypt `plaintext` and return a value suitable for storing inside
+/// `providers.config_json`. Thin wrapper over [`JsonSecret::encrypt`]
+/// that exposes the unified envelope shape to callers in this module.
 pub(crate) fn encrypt_secret_to_json(
     plaintext: &str,
     encryption_key: &str,
 ) -> Result<serde_json::Value, AppError> {
-    if plaintext.is_empty() {
-        return Ok(serde_json::Value::String(String::new()));
-    }
-    let key = crypto::parse_encryption_key(encryption_key)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))?;
-    let bytes = crypto::encrypt(plaintext.as_bytes(), &key)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Provider secret encrypt failed: {e}")))?;
-    let encoded = hex::encode(bytes);
-    Ok(serde_json::json!({ ENC_MARKER: encoded }))
+    Ok(JsonSecret::encrypt(plaintext, encryption_key)?.to_json())
 }
 
-/// Inverse of [`encrypt_secret_to_json`]. Recognises three shapes:
-///   - `{"$enc": "<hex>"}` → decrypt envelope (production read path)
-///   - `"<plaintext>"` → legacy plaintext row (returned verbatim;
-///     caller logs a warn so admins re-save)
-///   - missing / non-string / not-an-object → empty string
-///
-/// Returns `(plaintext, was_encrypted)` so the caller can tell whether a
-/// `tracing::warn!` is warranted.
+/// Inverse of [`encrypt_secret_to_json`]. Returns `(plaintext,
+/// was_encrypted)` so the caller can decide whether to surface a
+/// `tracing::warn!` prompting an admin to re-save the row.
 pub(crate) fn decrypt_secret_from_json(
     value: &serde_json::Value,
     encryption_key: &str,
 ) -> Result<(String, bool), AppError> {
-    // Encrypted envelope?
-    if let Some(obj) = value.as_object()
-        && let Some(hex_str) = obj.get(ENC_MARKER).and_then(|v| v.as_str())
-    {
-        let bytes = hex::decode(hex_str).map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("Provider secret hex decode failed: {e}"))
-        })?;
-        let key = crypto::parse_encryption_key(encryption_key)
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("Invalid encryption key: {e}")))?;
-        let plain = crypto::decrypt(&bytes, &key).map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("Provider secret decrypt failed: {e}"))
-        })?;
-        let s = String::from_utf8(plain).map_err(|e| {
-            AppError::Internal(anyhow::anyhow!("Provider secret is not valid UTF-8: {e}"))
-        })?;
-        return Ok((s, true));
-    }
-    // Legacy plaintext or empty.
-    Ok((value.as_str().unwrap_or("").to_string(), false))
+    JsonSecret::from_json(value).decrypt(encryption_key)
 }
 
 /// Take a header list as supplied in a request and return a JSON array
@@ -103,8 +67,8 @@ fn encrypt_headers_for_storage(
 }
 
 /// If `config["aws_secret_access_key"]` is a plaintext string, wrap it
-/// with the encrypted envelope. Already-encrypted (`{"$enc": ...}`) or
-/// empty values are left alone.
+/// with the encryption envelope. Already-encrypted or empty values are
+/// left alone (idempotent under repeated calls).
 fn encrypt_aws_secret_in_config(
     config: &mut serde_json::Value,
     encryption_key: &str,
@@ -115,8 +79,7 @@ fn encrypt_aws_secret_in_config(
     let Some(raw) = obj.get("aws_secret_access_key") else {
         return Ok(());
     };
-    // Already encrypted — preserve as-is.
-    if raw.is_object() && raw.as_object().is_some_and(|o| o.contains_key(ENC_MARKER)) {
+    if JsonSecret::json_is_encrypted(raw) {
         return Ok(());
     }
     let Some(s) = raw.as_str() else {
@@ -562,17 +525,15 @@ mod tests {
     #[test]
     fn encrypt_secret_round_trips() {
         let json = encrypt_secret_to_json("sk-supersecret", test_hex_key()).unwrap();
-        let obj = json
-            .as_object()
-            .expect("encrypted secret must be a JSON object");
         assert!(
-            obj.contains_key(ENC_MARKER),
-            "wrapper must include the $enc marker"
+            JsonSecret::json_is_encrypted(&json),
+            "wrapper must round-trip as the encrypted envelope"
         );
-        let hex_str = obj[ENC_MARKER].as_str().unwrap();
         assert!(
-            !hex_str.contains("sk-supersecret"),
-            "plaintext must not appear in hex envelope: {hex_str}"
+            !serde_json::to_string(&json)
+                .unwrap()
+                .contains("sk-supersecret"),
+            "plaintext must not appear in stored JSON"
         );
 
         let (plain, was_encrypted) = decrypt_secret_from_json(&json, test_hex_key()).unwrap();
@@ -623,7 +584,7 @@ mod tests {
         for item in arr {
             let v = &item["value"];
             assert!(
-                v.is_object() && v.as_object().unwrap().contains_key(ENC_MARKER),
+                JsonSecret::json_is_encrypted(v),
                 "every header value must be wrapped in $enc — got {v}"
             );
             assert!(
@@ -643,7 +604,7 @@ mod tests {
         encrypt_aws_secret_in_config(&mut cfg, key).unwrap();
         let wrapped = &cfg["aws_secret_access_key"];
         assert!(
-            wrapped.is_object() && wrapped.as_object().unwrap().contains_key(ENC_MARKER),
+            JsonSecret::json_is_encrypted(wrapped),
             "plaintext aws_secret_access_key must be wrapped"
         );
         assert!(

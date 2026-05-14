@@ -189,17 +189,18 @@ async fn totp_secret_lands_encrypted_in_users_row() {
 // providers.config_json — header values + aws_secret_access_key encrypt at rest
 // ---------------------------------------------------------------------------
 
-/// Decrypt a `{"$enc": "<hex>"}` JSON wrapper using the test app's
-/// master key. Panics if the value isn't a well-formed envelope.
+/// Decrypt a `JsonSecret`-wrapped value using the test app's master
+/// key. Panics if the value isn't a well-formed envelope.
 fn decode_enc_envelope(v: &Value, encryption_key: &str) -> String {
-    let hex_str = v
-        .get("$enc")
-        .and_then(|x| x.as_str())
-        .expect("expected $enc-wrapped JSON object");
-    let bytes = hex::decode(hex_str).expect("hex decode envelope");
-    let key = think_watch_common::crypto::parse_encryption_key(encryption_key).unwrap();
-    let plain = think_watch_common::crypto::decrypt(&bytes, &key).expect("decrypt envelope");
-    String::from_utf8(plain).expect("envelope UTF-8")
+    use think_watch_common::json_secret::JsonSecret;
+    let secret = JsonSecret::from_json(v);
+    assert!(
+        secret.is_encrypted(),
+        "expected JsonSecret::Encrypted wrapper, got {v}"
+    );
+    let (plain, was_enc) = secret.decrypt(encryption_key).expect("decrypt envelope");
+    assert!(was_enc);
+    plain
 }
 
 #[ignore = "integration test — run via `make test-it`"]
@@ -249,11 +250,12 @@ async fn provider_create_encrypts_header_values_at_rest() {
     let headers = stored["headers"]
         .as_array()
         .expect("headers must be a JSON array");
+    use think_watch_common::json_secret::JsonSecret;
     assert_eq!(headers.len(), 2);
     for h in headers {
         let v = &h["value"];
         assert!(
-            v.is_object() && v.get("$enc").is_some(),
+            JsonSecret::json_is_encrypted(v),
             "header value must be encrypted-at-rest envelope: {v}"
         );
     }
@@ -308,10 +310,11 @@ async fn provider_create_encrypts_aws_bedrock_secret() {
         "plaintext aws_secret_access_key leaked: {stored_str}"
     );
 
+    use think_watch_common::json_secret::JsonSecret;
     let wrapped = &stored["aws_secret_access_key"];
     assert!(
-        wrapped.is_object() && wrapped.get("$enc").is_some(),
-        "aws_secret_access_key must be $enc-wrapped: {wrapped}"
+        JsonSecret::json_is_encrypted(wrapped),
+        "aws_secret_access_key must be encrypted-at-rest: {wrapped}"
     );
     let decrypted = decode_enc_envelope(wrapped, &app.state.config.encryption_key);
     assert_eq!(decrypted, aws_secret);
@@ -370,18 +373,19 @@ async fn provider_startup_backfill_encrypts_legacy_plaintext_rows() {
         "plaintext bearer survived backfill: {stored_str}"
     );
 
+    use think_watch_common::json_secret::JsonSecret;
     let header_value = &stored["headers"][0]["value"];
     assert!(
-        header_value.is_object() && header_value.get("$enc").is_some(),
-        "header value not $enc-wrapped after backfill: {header_value}"
+        JsonSecret::json_is_encrypted(header_value),
+        "header value not encrypted-at-rest after backfill: {header_value}"
     );
     let plain = decode_enc_envelope(header_value, &app.state.config.encryption_key);
     assert_eq!(plain, format!("Bearer {legacy_secret}"));
 
     let aws_secret = &stored["aws_secret_access_key"];
     assert!(
-        aws_secret.is_object() && aws_secret.get("$enc").is_some(),
-        "aws_secret_access_key not $enc-wrapped after backfill: {aws_secret}"
+        JsonSecret::json_is_encrypted(aws_secret),
+        "aws_secret_access_key not encrypted-at-rest after backfill: {aws_secret}"
     );
 
     // Idempotent: a second run rewrites nothing.
