@@ -13,11 +13,12 @@ import {
   DialogDescription,
   DialogFooter,
 } from '@/components/ui/dialog';
-import { AlertCircle, Zap, Loader2, CheckCircle2, XCircle } from 'lucide-react';
+import { AlertCircle, Zap, Loader2, CheckCircle2, XCircle, Check, ChevronDown } from 'lucide-react';
 import { HeaderEditor } from '@/components/header-editor';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { apiPost, apiPatch } from '@/lib/api';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { toast } from 'sonner';
 import type { Provider, TestResult } from './provider-types';
 
@@ -54,22 +55,43 @@ const defaultBaseUrl: Record<string, string> = {
 };
 
 function TestResultPanel({ testResult }: { testResult: TestResult | null }) {
+  const { t } = useTranslation();
   if (!testResult) return null;
+  const modelCount = testResult.model_count ?? testResult.models?.length;
+  const showStats = testResult.success && testResult.latency_ms != null && modelCount != null;
   return (
     <div className="space-y-2">
       <Alert variant={testResult.success ? 'default' : 'destructive'}>
         {testResult.success ? <CheckCircle2 className="h-4 w-4" /> : <XCircle className="h-4 w-4" />}
         <AlertDescription>
-          {testResult.message}
-          {testResult.latency_ms != null && ` (${testResult.latency_ms}ms)`}
+          <div>{testResult.message}</div>
+          {showStats && (
+            <div className="mt-1 flex items-center gap-1 text-xs text-muted-foreground">
+              <Check className="h-3 w-3" aria-hidden="true" />
+              <span>
+                {t('providers.testResult.latencyAndModels', {
+                  latency: testResult.latency_ms,
+                  count: modelCount,
+                })}
+              </span>
+            </div>
+          )}
         </AlertDescription>
       </Alert>
       {testResult.models && testResult.models.length > 0 && (
-        <ScrollArea className="h-32 rounded-md border p-2">
-          <ul className="space-y-0.5 text-xs font-mono">
-            {testResult.models.map((m) => <li key={m}>{m}</li>)}
-          </ul>
-        </ScrollArea>
+        <Collapsible className="space-y-2">
+          <CollapsibleTrigger className="group flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
+            <ChevronDown className="h-3 w-3 transition-transform group-data-[state=open]:rotate-180" />
+            {t('providers.testResult.showModels')}
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            <ScrollArea className="h-32 rounded-md border p-2">
+              <ul className="space-y-0.5 text-xs font-mono">
+                {testResult.models.map((m) => <li key={m}>{m}</li>)}
+              </ul>
+            </ScrollArea>
+          </CollapsibleContent>
+        </Collapsible>
       )}
     </div>
   );

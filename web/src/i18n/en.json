@@ -327,7 +327,11 @@
     "awsImdsv2Hint": "Credentials are automatically obtained from the EC2 instance metadata service. Make sure the instance has an IAM role with Bedrock permissions.",
     "testConnection": "Test Connection",
     "testing": "Testing...",
-    "providerCreated": "Provider created."
+    "providerCreated": "Provider created.",
+    "testResult": {
+      "latencyAndModels": "{{latency}}ms · {{count}} models",
+      "showModels": "Show models"
+    }
   },
   "apiKeys": {
     "title": "API Keys",
