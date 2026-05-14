@@ -144,25 +144,33 @@ impl SessionManager {
 
     /// Touch the `last_active` timestamp on a session.
     pub async fn update_activity(&self, id: &str) {
-        let mut sessions = self.local.write().await;
-        if let Some(session) = sessions.get_mut(id) {
+        // Mutate locally + clone the post-update snapshot, then drop
+        // the write guard BEFORE the Redis round-trip. Holding the
+        // lock across `ttl_secs().await` + `set().await` serialised
+        // every session touch on a single Redis call.
+        let (snapshot, redis_handle) = {
+            let mut sessions = self.local.write().await;
+            let Some(session) = sessions.get_mut(id) else {
+                return;
+            };
             session.last_active = Utc::now();
+            (
+                serde_json::to_string(session).ok(),
+                self.redis.as_ref().cloned(),
+            )
+        };
 
-            // Sync to Redis
-            if let Some(ref redis) = self.redis
-                && let Ok(json) = serde_json::to_string(session)
-            {
-                let ttl = self.ttl_secs().await;
-                let _: Result<(), _> = fred::interfaces::KeysInterface::set(
-                    redis,
-                    Self::redis_key(id),
-                    json,
-                    Some(fred::types::Expiration::EX(ttl)),
-                    None,
-                    false,
-                )
-                .await;
-            }
+        if let (Some(redis), Some(json)) = (redis_handle, snapshot) {
+            let ttl = self.ttl_secs().await;
+            let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+                &redis,
+                Self::redis_key(id),
+                json,
+                Some(fred::types::Expiration::EX(ttl)),
+                None,
+                false,
+            )
+            .await;
         }
     }
 
@@ -173,27 +181,33 @@ impl SessionManager {
         server_id: Uuid,
         upstream_session_id: String,
     ) {
-        let mut sessions = self.local.write().await;
-        if let Some(session) = sessions.get_mut(session_id) {
+        // Same pattern as update_activity — mutate under the write
+        // lock, snapshot, drop the guard before any await on Redis.
+        let (snapshot, redis_handle) = {
+            let mut sessions = self.local.write().await;
+            let Some(session) = sessions.get_mut(session_id) else {
+                return;
+            };
             session
                 .upstream_sessions
                 .insert(server_id, upstream_session_id);
+            (
+                serde_json::to_string(session).ok(),
+                self.redis.as_ref().cloned(),
+            )
+        };
 
-            // Sync to Redis
-            if let Some(ref redis) = self.redis
-                && let Ok(json) = serde_json::to_string(session)
-            {
-                let ttl = self.ttl_secs().await;
-                let _: Result<(), _> = fred::interfaces::KeysInterface::set(
-                    redis,
-                    Self::redis_key(session_id),
-                    json,
-                    Some(fred::types::Expiration::EX(ttl)),
-                    None,
-                    false,
-                )
-                .await;
-            }
+        if let (Some(redis), Some(json)) = (redis_handle, snapshot) {
+            let ttl = self.ttl_secs().await;
+            let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+                &redis,
+                Self::redis_key(session_id),
+                json,
+                Some(fred::types::Expiration::EX(ttl)),
+                None,
+                false,
+            )
+            .await;
         }
     }
 

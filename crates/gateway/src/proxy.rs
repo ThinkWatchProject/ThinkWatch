@@ -1191,6 +1191,25 @@ pub async fn proxy_chat_completion(
     // for a streaming request we re-emit the assembled response as
     // a single-chunk SSE stream so the client gets the format it
     // asked for.
+    //
+    // Known limitations (DESIGN-001, DESIGN-002):
+    //
+    // - PII-bearing requests never hit cache. `redact_messages` (1170
+    //   above) mutates `request.messages` to placeholders that carry a
+    //   per-request 64-bit salt, so two calls with identical content
+    //   produce different cache keys. The salt prevents cross-caller
+    //   leakage of the cached *restored* response, but it also defeats
+    //   the cache for the very prompts that would benefit most. Fix
+    //   requires keying on pre-redaction content + storing the
+    //   unrestored response.
+    //
+    // - Cache hits do not consume quota (we return before the
+    //   `state.quota.consume` call below). Treating cache hits as free
+    //   is the standard contract — they cost no upstream tokens — but
+    //   it lets a user with a deterministic prompt amortise a single
+    //   real call across an unbounded quota window. If we ever need
+    //   to gate this, debit a configurable fraction of the cached
+    //   `usage.total_tokens` on hit.
     if let Some(cached) = state.cache.get(&request).await {
         metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
         tracing::debug!(model = %request.model, stream = is_stream, "Cache HIT");

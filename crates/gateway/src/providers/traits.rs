@@ -132,9 +132,20 @@ pub struct ProviderBase {
 
 impl ProviderBase {
     pub fn new(base_url: String) -> Self {
+        // Wall-clock bounds on upstream HTTP. Without these a hung
+        // upstream pins a connection forever; failover only retries
+        // across routes, not within a stuck attempt. The 5-min total
+        // is generous enough for slow LLM completions but cuts off
+        // truly stuck calls; the 10s connect timeout is short because
+        // a healthy upstream resolves and TCPs in well under that.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(300))
+            .build()
+            .expect("reqwest client builder cannot fail on stable inputs");
         Self {
             base_url,
-            client: reqwest::Client::new(),
+            client,
             custom_headers: Vec::new(),
         }
     }
