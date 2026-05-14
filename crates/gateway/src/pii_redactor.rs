@@ -157,76 +157,125 @@ impl PiiRedactor {
                     return msg.clone();
                 }
 
-                let content_str = match msg.content.as_str() {
-                    Some(s) => s.to_string(),
-                    None => return msg.clone(),
+                let new_content = match &msg.content {
+                    // OpenAI / Anthropic single-string form
+                    serde_json::Value::String(s) => {
+                        let redacted = self.redact_text(
+                            s,
+                            &mut counters,
+                            &mut replacements,
+                            &salt_hex,
+                            "user message",
+                        );
+                        serde_json::Value::String(redacted)
+                    }
+                    // Multimodal form: `[{"type":"text","text":"..."}, {"type":"image_url",...}]`
+                    // Each text part is redacted in place; non-text parts (images,
+                    // tool_use blocks) pass through unchanged. Without this the
+                    // redactor silently bypassed every vision-style request that
+                    // contained PII in a text segment.
+                    serde_json::Value::Array(parts) => {
+                        let new_parts: Vec<serde_json::Value> = parts
+                            .iter()
+                            .map(|part| match part {
+                                serde_json::Value::Object(map) => {
+                                    if let Some(serde_json::Value::String(t)) = map.get("text") {
+                                        let red = self.redact_text(
+                                            t,
+                                            &mut counters,
+                                            &mut replacements,
+                                            &salt_hex,
+                                            "user message (multimodal)",
+                                        );
+                                        let mut new_map = map.clone();
+                                        new_map
+                                            .insert("text".into(), serde_json::Value::String(red));
+                                        serde_json::Value::Object(new_map)
+                                    } else {
+                                        part.clone()
+                                    }
+                                }
+                                _ => part.clone(),
+                            })
+                            .collect();
+                        serde_json::Value::Array(new_parts)
+                    }
+                    other => other.clone(),
                 };
-
-                // Collect all matches across all patterns with their positions
-                let mut all_matches: Vec<(usize, usize, usize)> = Vec::new(); // (start, end, pattern_idx)
-                for (pattern_idx, pattern) in self.patterns.iter().enumerate() {
-                    for m in pattern.regex.find_iter(&content_str) {
-                        all_matches.push((m.start(), m.end(), pattern_idx));
-                    }
-                }
-
-                if all_matches.is_empty() {
-                    return msg.clone();
-                }
-
-                // Sort by start position ascending, then by length descending (prefer longer matches)
-                all_matches
-                    .sort_by(|a, b| a.0.cmp(&b.0).then_with(|| (b.1 - b.0).cmp(&(a.1 - a.0))));
-
-                // Remove overlapping matches — keep the longest match at each position
-                let mut filtered: Vec<(usize, usize, usize)> = Vec::new();
-                for m in &all_matches {
-                    // Only add if it doesn't overlap with any already-accepted match
-                    if filtered.iter().all(|f| m.0 >= f.1 || m.1 <= f.0) {
-                        filtered.push(*m);
-                    }
-                }
-                // Sort descending by start for safe replacement
-                filtered.sort_by_key(|b| std::cmp::Reverse(b.0));
-
-                // Collect pattern names for logging before consuming filtered
-                let redacted_pattern_names: Vec<String> = filtered
-                    .iter()
-                    .map(|(_, _, idx)| self.patterns[*idx].name.clone())
-                    .collect();
-
-                let mut redacted_content = content_str;
-                for (start, end, pattern_idx) in filtered {
-                    let pattern = &self.patterns[pattern_idx];
-                    let matched_value = &redacted_content[start..end];
-                    let counter = counters
-                        .entry(pattern.placeholder_prefix.clone())
-                        .or_insert(0);
-                    *counter += 1;
-                    let placeholder = format!(
-                        "{{{{{}_{}_{}}}}}",
-                        pattern.placeholder_prefix, salt_hex, counter
-                    );
-                    replacements.insert(placeholder.clone(), matched_value.to_string());
-                    redacted_content.replace_range(start..end, &placeholder);
-                }
-
-                if !redacted_pattern_names.is_empty() {
-                    tracing::debug!(
-                        patterns = ?redacted_pattern_names,
-                        count = redacted_pattern_names.len(),
-                        "PII redacted from user message"
-                    );
-                }
 
                 ChatMessage {
                     role: msg.role.clone(),
-                    content: serde_json::Value::String(redacted_content),
+                    content: new_content,
                 }
             })
             .collect();
 
         (redacted, RedactionContext { replacements })
+    }
+
+    /// Apply the redaction patterns to a single text blob. Shared
+    /// between the single-string and multimodal-array branches of
+    /// `redact_messages` so both shapes get identical treatment.
+    fn redact_text(
+        &self,
+        content_str: &str,
+        counters: &mut HashMap<String, u32>,
+        replacements: &mut HashMap<String, String>,
+        salt_hex: &str,
+        log_origin: &str,
+    ) -> String {
+        let mut all_matches: Vec<(usize, usize, usize)> = Vec::new();
+        for (pattern_idx, pattern) in self.patterns.iter().enumerate() {
+            for m in pattern.regex.find_iter(content_str) {
+                all_matches.push((m.start(), m.end(), pattern_idx));
+            }
+        }
+
+        if all_matches.is_empty() {
+            return content_str.to_string();
+        }
+
+        all_matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| (b.1 - b.0).cmp(&(a.1 - a.0))));
+
+        let mut filtered: Vec<(usize, usize, usize)> = Vec::new();
+        for m in &all_matches {
+            if filtered.iter().all(|f| m.0 >= f.1 || m.1 <= f.0) {
+                filtered.push(*m);
+            }
+        }
+        filtered.sort_by_key(|b| std::cmp::Reverse(b.0));
+
+        let redacted_pattern_names: Vec<String> = filtered
+            .iter()
+            .map(|(_, _, idx)| self.patterns[*idx].name.clone())
+            .collect();
+
+        let mut redacted_content = content_str.to_string();
+        for (start, end, pattern_idx) in filtered {
+            let pattern = &self.patterns[pattern_idx];
+            let matched_value = &redacted_content[start..end];
+            let counter = counters
+                .entry(pattern.placeholder_prefix.clone())
+                .or_insert(0);
+            *counter += 1;
+            let placeholder = format!(
+                "{{{{{}_{}_{}}}}}",
+                pattern.placeholder_prefix, salt_hex, counter
+            );
+            replacements.insert(placeholder.clone(), matched_value.to_string());
+            redacted_content.replace_range(start..end, &placeholder);
+        }
+
+        if !redacted_pattern_names.is_empty() {
+            tracing::debug!(
+                patterns = ?redacted_pattern_names,
+                count = redacted_pattern_names.len(),
+                origin = log_origin,
+                "PII redacted"
+            );
+        }
+
+        redacted_content
     }
 
     /// Restore placeholders in the response content back to original PII values.
@@ -754,5 +803,33 @@ mod tests {
     fn stream_restore_multiple_placeholders_same_chunk() {
         let out = restore_whole(&["a {{EMAIL_abc123_1}} b {{PHONE_def456_1}} c"]);
         assert_eq!(out, "a alice@example.com b 13812345678 c");
+    }
+
+    /// Multimodal user messages (OpenAI vision / Anthropic images)
+    /// carry content as an array of typed parts. Without explicit
+    /// support, every text segment in such a message bypassed the
+    /// redactor — the bug this test pins.
+    #[test]
+    fn redact_multimodal_text_part() {
+        let redactor = PiiRedactor::new();
+        let messages = vec![ChatMessage {
+            role: "user".to_string(),
+            content: serde_json::json!([
+                { "type": "text", "text": "Email me at alice@example.com" },
+                { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } },
+            ]),
+        }];
+        let (redacted, ctx) = redactor.redact_messages(&messages);
+
+        let parts = redacted[0].content.as_array().expect("array preserved");
+        assert_eq!(parts.len(), 2);
+        let text = parts[0]["text"].as_str().unwrap();
+        assert!(text.contains("EMAIL"), "got: {text}");
+        assert!(!text.contains("alice@example.com"));
+        // Non-text parts pass through unchanged.
+        assert_eq!(parts[1]["type"], "image_url");
+        // Placeholder is recorded so the response restorer can reverse it.
+        let ph = find_placeholder(&ctx, "alice@example.com");
+        assert!(ph.starts_with("{{EMAIL_"));
     }
 }

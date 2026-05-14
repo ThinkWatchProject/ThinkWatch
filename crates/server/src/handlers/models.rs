@@ -297,6 +297,12 @@ pub async fn create_model(
             .detail(serde_json::json!({ "model_id": &req.model_id })),
     );
 
+    // Invalidate the shared weight cache so subsequent gateway requests
+    // pick up the new model's weights immediately — otherwise the
+    // limits engine and cost tracker run on stale cache misses until
+    // the 5-min TTL elapses.
+    state.weight_cache.invalidate_all().await;
+
     Ok(Json(model))
 }
 
@@ -511,6 +517,10 @@ pub async fn update_model(
     // for the change to hit live traffic. Cheap (a single SELECT pass).
     crate::app::rebuild_gateway_router(&state).await;
 
+    // Drop the per-model weight cache so updated input/output weights
+    // take effect immediately on the next gateway request.
+    state.weight_cache.invalidate_all().await;
+
     Ok(Json(updated))
 }
 
@@ -552,6 +562,7 @@ pub async fn delete_model(
             .resource_id(id.to_string())
             .detail(serde_json::json!({ "model_id": model_id })),
     );
+    state.weight_cache.invalidate_all().await;
     Ok(Json(serde_json::json!({"status": "deleted"})))
 }
 
@@ -678,6 +689,7 @@ pub async fn bulk_delete_models(
     );
 
     crate::app::rebuild_gateway_router(&state).await;
+    state.weight_cache.invalidate_all().await;
 
     Ok(Json(serde_json::json!({ "deleted": deleted })))
 }

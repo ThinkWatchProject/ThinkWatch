@@ -1,5 +1,5 @@
 use crate::providers::traits::ChatMessage;
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 
 /// What to do when a rule matches.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,8 +123,20 @@ impl ContentFilter {
             .iter()
             .filter_map(|c| {
                 let match_type = parse_match_type(&c.match_type);
+                // Cap NFA + DFA size to 1 MiB each. The regex crate
+                // defaults are 10 MiB / 2 MiB which let a privileged
+                // operator with `content_filter:write` save a
+                // pathological pattern (e.g. `(a|aa){200}`) that takes
+                // seconds to compile and fires on every gateway
+                // request. 1 MiB is comfortably enough for realistic
+                // deny rules.
                 let compiled_regex = match match_type {
-                    MatchType::Regex => match Regex::new(&format!("(?i){}", c.pattern)) {
+                    MatchType::Regex => match RegexBuilder::new(&c.pattern)
+                        .case_insensitive(true)
+                        .size_limit(1 << 20)
+                        .dfa_size_limit(1 << 20)
+                        .build()
+                    {
                         Ok(re) => Some(re),
                         Err(e) => {
                             tracing::warn!("Invalid content filter regex '{}': {e}", c.pattern);

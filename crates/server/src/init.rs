@@ -42,6 +42,17 @@ pub async fn init_state(
         .await
         .context("persisted rate-limit / weight rows fail validation")?;
 
+    // Idempotent at-rest encryption backfill: re-wrap any provider
+    // header values or AWS secrets still stored in plaintext under
+    // `providers.config_json`. Runs once per boot; no-op once every
+    // row is in the `{"$enc": "<b64>"}` shape.
+    if let Err(e) = app::backfill_provider_secrets(&pool, &config.encryption_key).await {
+        // Don't block startup if backfill fails — the read path still
+        // handles legacy plaintext (with a warn). The next admin
+        // re-save will encrypt the row.
+        tracing::error!("Provider secret backfill failed (continuing): {e}");
+    }
+
     // ClickHouse tables. Same bounded retry as production but without
     // the metrics counter (recorder is not installed in tests).
     if ch_client.is_some() {
@@ -128,6 +139,7 @@ pub async fn init_state(
         )),
         http_client: Arc::new(arc_swap::ArcSwap::from_pointee(init_http_client)),
         gateway_router,
+        weight_cache: think_watch_common::limits::weight::WeightCache::new(),
         user_token_resolver,
         url_validator: crate::app::production_url_validator(),
     };

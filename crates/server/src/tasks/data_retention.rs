@@ -123,22 +123,34 @@ pub async fn run_retention_cleanup(
     // instead. The query is one DELETE per kind with a NOT EXISTS
     // anti-join — runs in milliseconds even at high cardinality
     // because both sides are indexed on UUID.
+    // Only two subject_kind values are valid per the schema CHECK
+    // constraint (db/schema.sql:646, :694): 'user' and
+    // 'api_key_lineage'. The previous queries targeted 'api_key',
+    // 'team', 'provider', 'mcp_server' which can never appear here
+    // (CHECK would reject them), so the orphan sweep ran but matched
+    // nothing — real orphans for 'user' (purged after delete_account)
+    // and 'api_key_lineage' (every key in a lineage hard-deleted)
+    // accumulated indefinitely.
+    //
+    // For 'api_key_lineage' an entry is an orphan when no `api_keys`
+    // row (live OR archived — the column allows revoked rows) carries
+    // that lineage_id.
     let orphan_rules = sqlx::query(
         r#"DELETE FROM rate_limit_rules
-           WHERE (subject_kind = 'user'        AND NOT EXISTS (SELECT 1 FROM users        u WHERE u.id  = subject_id))
-              OR (subject_kind = 'api_key'    AND NOT EXISTS (SELECT 1 FROM api_keys     k WHERE k.id  = subject_id))
-              OR (subject_kind = 'provider'   AND NOT EXISTS (SELECT 1 FROM providers    p WHERE p.id  = subject_id))
-              OR (subject_kind = 'mcp_server' AND NOT EXISTS (SELECT 1 FROM mcp_servers  s WHERE s.id  = subject_id))"#,
+           WHERE (subject_kind = 'user'
+                  AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = subject_id))
+              OR (subject_kind = 'api_key_lineage'
+                  AND NOT EXISTS (SELECT 1 FROM api_keys k WHERE k.lineage_id = subject_id))"#,
     )
     .execute(db)
     .await?;
 
     let orphan_caps = sqlx::query(
         r#"DELETE FROM budget_caps
-           WHERE (subject_kind = 'user'      AND NOT EXISTS (SELECT 1 FROM users     u WHERE u.id  = subject_id))
-              OR (subject_kind = 'api_key'  AND NOT EXISTS (SELECT 1 FROM api_keys  k WHERE k.id  = subject_id))
-              OR (subject_kind = 'team'     AND NOT EXISTS (SELECT 1 FROM teams     t WHERE t.id  = subject_id))
-              OR (subject_kind = 'provider' AND NOT EXISTS (SELECT 1 FROM providers p WHERE p.id  = subject_id))"#,
+           WHERE (subject_kind = 'user'
+                  AND NOT EXISTS (SELECT 1 FROM users u WHERE u.id = subject_id))
+              OR (subject_kind = 'api_key_lineage'
+                  AND NOT EXISTS (SELECT 1 FROM api_keys k WHERE k.lineage_id = subject_id))"#,
     )
     .execute(db)
     .await?;
