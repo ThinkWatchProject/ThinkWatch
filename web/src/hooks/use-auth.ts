@@ -51,6 +51,21 @@ export function useAuth() {
 
   useEffect(() => { fetchUser(); }, [fetchUser]);
 
+  // Listen for cross-tab logout broadcasts so this tab drops its
+  // React user state (and the admin UI unmounts) immediately,
+  // instead of waiting for the next request to 401. The broadcast
+  // origin is api.ts's BroadcastChannel handler; it also clears the
+  // signing key + permission cache, but the React tree only resets
+  // when we flip `user` to null here.
+  useEffect(() => {
+    const handler = () => {
+      setUser(null);
+      clearCachedPermissions();
+    };
+    window.addEventListener('thinkwatch:logged-out', handler);
+    return () => window.removeEventListener('thinkwatch:logged-out', handler);
+  }, []);
+
   const login = async (
     email: string,
     password: string,

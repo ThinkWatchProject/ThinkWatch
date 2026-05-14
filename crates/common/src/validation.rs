@@ -111,9 +111,14 @@ pub fn validate_url(url_str: &str) -> Result<(), AppError> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(AppError::BadRequest("URL must use http or https".into()));
     }
-    let host = parsed
+    let raw_host = parsed
         .host_str()
         .ok_or_else(|| AppError::BadRequest("URL must contain a host".into()))?;
+    // Strip a single trailing dot before the blocklist compare —
+    // `http://localhost./x` parses to host_str() == "localhost." which
+    // is a different string from "localhost" and would bypass the
+    // exact-match check. DNS resolves both forms identically.
+    let host = raw_host.trim_end_matches('.');
 
     // Block well-known loopback / metadata hostnames.
     let blocked_hosts = [
@@ -265,6 +270,15 @@ mod tests {
     fn validate_url_accepts_public_https() {
         assert!(validate_url("https://api.openai.com/v1").is_ok());
         assert!(validate_url("https://generativelanguage.googleapis.com").is_ok());
+    }
+
+    #[test]
+    fn validate_url_rejects_localhost_with_trailing_dot() {
+        // `localhost.` parses as a distinct host_str from `localhost`
+        // but resolves identically. The blocklist must normalise.
+        assert!(validate_url("http://localhost./admin").is_err());
+        assert!(validate_url("http://LOCALHOST./x").is_err());
+        assert!(validate_url("http://metadata.google.internal./x").is_err());
     }
 
     #[test]

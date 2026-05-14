@@ -141,8 +141,14 @@ if (authChannel) {
     if (ev.data?.type === 'logged-out') {
       import('./crypto-store').then(m => m.clearSigningKey());
       clearCachedPermissions();
-      // Don't redirect inside the message handler — let the existing
-      // 401 path handle it the next time this tab makes a request.
+      // Notify the auth hook so the React `user` state resets and
+      // sensitive UI (analytics, member lists, etc.) unmounts
+      // immediately. Without this the previous tab would keep
+      // rendering admin data until its next request 401s, which on
+      // an idle tab could be indefinitely.
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('thinkwatch:logged-out'));
+      }
     }
   };
 }

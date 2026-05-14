@@ -823,27 +823,11 @@ pub async fn refresh(
     let blacklist_key = format!("refresh_blacklist:{token_hash}");
 
     use fred::interfaces::KeysInterface;
-    // Fail-closed on Redis errors: if we can't verify the blacklist or
-    // password epoch, we MUST refuse to mint a new session — otherwise
-    // a Redis outage silently re-enables every revoked refresh token
-    // and every pre-password-change token.
-    let already_used: Option<String> = state.redis.get(&blacklist_key).await.map_err(|e| {
-        tracing::error!(error = %e, "Redis unavailable during refresh-token blacklist check");
-        metrics::counter!("auth_refresh_redis_error_total", "op" => "blacklist_get").increment(1);
-        AppError::Unauthorized
-    })?;
-    if already_used.is_some() {
-        tracing::warn!(
-            user_id = %claims.sub,
-            "refresh token replay detected — token already in blacklist"
-        );
-        metrics::counter!("auth_refresh_replay_total").increment(1);
-        return Err(AppError::Unauthorized);
-    }
-
     // Reject refresh tokens issued before the last password change.
     // pw_epoch:{user_id} is set by change_password and has a TTL
-    // equal to the refresh token lifetime so it auto-expires.
+    // equal to the refresh token lifetime so it auto-expires. Done
+    // BEFORE the blacklist claim so a Redis hiccup on the pw_epoch
+    // read doesn't permanently blacklist an otherwise-valid token.
     let epoch_key = format!("pw_epoch:{}", claims.sub);
     let pw_epoch: Option<String> = state.redis.get(&epoch_key).await.map_err(|e| {
         tracing::error!(error = %e, "Redis unavailable during refresh-token pw_epoch check");
@@ -865,28 +849,41 @@ pub async fn refresh(
         return Err(AppError::Unauthorized);
     }
 
-    // Set the blacklist entry to expire when the OLD token would
-    // have expired naturally — anything past that is a no-op anyway.
-    // If this write fails, refresh-token rotation is broken (the old
-    // token would still be usable), so we must surface the failure.
+    // Atomic claim: SET NX EX. The previous code did a separate GET
+    // then SET, which let two concurrent /refresh calls with the same
+    // refresh token both see `None` from GET and both proceed to mint
+    // a session — a legit double-tab refresh could mint TWO valid
+    // access+refresh pairs out of one source token. SET NX returns
+    // "OK" if the caller claimed the key first, or Nil if another
+    // caller already did; the latter is the replay case (either an
+    // attacker re-using a captured token, or the losing side of a
+    // double-tab race).
     let now = chrono::Utc::now().timestamp();
     let remaining_secs = (claims.exp - now).max(60);
-    state
+    let claimed: Option<String> = state
         .redis
-        .set::<(), _, _>(
+        .set(
             &blacklist_key,
             "1",
             Some(fred::types::Expiration::EX(remaining_secs)),
-            None,
+            Some(fred::types::SetOptions::NX),
             false,
         )
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, "Redis unavailable while writing refresh-token blacklist");
+            tracing::error!(error = %e, "Redis unavailable while claiming refresh-token blacklist");
             metrics::counter!("auth_refresh_redis_error_total", "op" => "blacklist_set")
                 .increment(1);
             AppError::Unauthorized
         })?;
+    if claimed.is_none() {
+        tracing::warn!(
+            user_id = %claims.sub,
+            "refresh token replay detected — token already claimed"
+        );
+        metrics::counter!("auth_refresh_replay_total").increment(1);
+        return Err(AppError::Unauthorized);
+    }
 
     // Reload roles + permissions + assignments from the DB rather
     // than trusting the refresh token's snapshot. Critical: if an
