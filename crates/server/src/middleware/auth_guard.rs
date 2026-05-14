@@ -650,8 +650,12 @@ pub async fn require_auth(
     use fred::interfaces::KeysInterface;
     match state.redis.get::<Option<String>, _>(&epoch_key).await {
         Ok(Some(epoch_str)) => {
+            // `<=` not `<` — JWT `iat` is whole-seconds. An access token
+            // minted in the same second a password change / force-logout
+            // / account-delete fired must also be refused; the refresh
+            // handler uses the same comparison for the same reason.
             if let Ok(epoch) = epoch_str.parse::<i64>()
-                && claims.iat < epoch
+                && claims.iat <= epoch
             {
                 return Err(StatusCode::UNAUTHORIZED);
             }

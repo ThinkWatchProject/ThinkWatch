@@ -97,15 +97,9 @@ pub fn clear_auth_cookies() -> [String; 2] {
     ]
 }
 
-/// Extract a named cookie value from the request's `Cookie` header.
-pub fn extract_cookie(
-    request: &axum::http::Request<axum::body::Body>,
-    name: &str,
-) -> Option<String> {
-    let cookie_header = request
-        .headers()
-        .get("cookie")
-        .and_then(|v| v.to_str().ok())?;
+/// Extract a named cookie value from a `Cookie` header map.
+pub fn extract_cookie_from_headers(headers: &axum::http::HeaderMap, name: &str) -> Option<String> {
+    let cookie_header = headers.get("cookie").and_then(|v| v.to_str().ok())?;
     let prefix = format!("{name}=");
     for cookie in cookie_header.split(';') {
         let cookie = cookie.trim();
@@ -116,6 +110,14 @@ pub fn extract_cookie(
         }
     }
     None
+}
+
+/// Extract a named cookie value from the request's `Cookie` header.
+pub fn extract_cookie(
+    request: &axum::http::Request<axum::body::Body>,
+    name: &str,
+) -> Option<String> {
+    extract_cookie_from_headers(request.headers(), name)
 }
 
 /// Middleware that verifies ECDSA P-256 request signatures.

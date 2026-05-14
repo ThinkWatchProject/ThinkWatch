@@ -917,6 +917,7 @@ pub async fn refresh(
 pub async fn logout(
     auth_user: AuthUser,
     State(state): State<AppState>,
+    request_headers: axum::http::HeaderMap,
 ) -> axum::response::Response {
     use axum::http::header::SET_COOKIE;
 
@@ -924,6 +925,35 @@ pub async fn logout(
     let pubkey_key = format!("signing_pubkey:{}", auth_user.claims.sub);
     let _: Result<(), _> =
         fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &pubkey_key).await;
+
+    // Blacklist the refresh token attached to this request so the
+    // captured cookie can't mint new access tokens after logout. Without
+    // this, /logout only killed the signing-key path; a copy of the
+    // refresh cookie (e.g. captured before clicking logout) would still
+    // round-trip through /api/auth/refresh until natural TTL expiry.
+    if let Some(presented) = verify_signature::extract_cookie_from_headers(
+        &request_headers,
+        verify_signature::REFRESH_COOKIE_NAME,
+    ) && let Ok(claims) = state.jwt.verify_token(&presented)
+        && claims.token_type == "refresh"
+    {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(presented.as_bytes());
+        let token_hash = hex::encode(hasher.finalize());
+        let blacklist_key = format!("refresh_blacklist:{token_hash}");
+        let now = chrono::Utc::now().timestamp();
+        let remaining_secs = (claims.exp - now).max(60) as u64;
+        let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+            &state.redis,
+            &blacklist_key,
+            "1",
+            Some(fred::types::Expiration::EX(remaining_secs as i64)),
+            None,
+            false,
+        )
+        .await;
+    }
 
     let mut response = Json(serde_json::json!({"status": "ok"})).into_response();
     let headers = response.headers_mut();
@@ -1076,9 +1106,72 @@ pub async fn change_password(
         .as_ref()
         .ok_or(AppError::BadRequest("This account uses SSO login".into()))?;
 
-    if !password::verify_password(&req.old_password, current_hash)? {
+    // Same progressive lockout the login handler uses, but keyed on
+    // the authenticated user id. Without this an attacker who already
+    // has the session cookie (a temporarily-borrowed laptop is the
+    // canonical example) can grind old_password offline-speed against
+    // Argon2, bypassing /login's 5/8/10 lockout. Counter expires after
+    // 15 min of no failures.
+    let pwchange_fail_key = format!("pwchange_fails:{}", user.id);
+    let lockout_key = format!("pwchange_locked:{}", user.id);
+    let still_locked: Option<String> =
+        fred::interfaces::KeysInterface::get(&state.redis, &lockout_key)
+            .await
+            .map_err(|e| {
+                tracing::error!("Redis pwchange-lockout check failed (fail-closed): {e}");
+                AppError::Internal(anyhow::anyhow!("Service temporarily unavailable"))
+            })?;
+    if still_locked.is_some() {
         return Err(AppError::Unauthorized);
     }
+
+    if !password::verify_password(&req.old_password, current_hash)? {
+        let _: () = fred::interfaces::KeysInterface::set(
+            &state.redis,
+            &pwchange_fail_key,
+            "0",
+            Some(fred::types::Expiration::EX(900)),
+            Some(fred::types::SetOptions::NX),
+            false,
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Redis pwchange-fail counter init failed (fail-closed): {e}");
+            AppError::Internal(anyhow::anyhow!("Service temporarily unavailable"))
+        })?;
+        let fails: u64 =
+            fred::interfaces::KeysInterface::incr_by(&state.redis, &pwchange_fail_key, 1)
+                .await
+                .map_err(|e| {
+                    tracing::error!("Redis pwchange-fail counter incr failed (fail-closed): {e}");
+                    AppError::Internal(anyhow::anyhow!("Service temporarily unavailable"))
+                })?;
+        let lockout_secs: Option<i64> = if fails >= 10 {
+            Some(900)
+        } else if fails >= 8 {
+            Some(300)
+        } else if fails >= 5 {
+            Some(60)
+        } else {
+            None
+        };
+        if let Some(secs) = lockout_secs {
+            let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+                &state.redis,
+                &lockout_key,
+                "1",
+                Some(fred::types::Expiration::EX(secs)),
+                None,
+                false,
+            )
+            .await;
+        }
+        return Err(AppError::Unauthorized);
+    }
+
+    // Successful old-password verify clears the fail counter.
+    let _: Result<(), _> =
+        fred::interfaces::KeysInterface::del::<(), _>(&state.redis, &pwchange_fail_key).await;
 
     let new_hash = password::hash_password(&req.new_password)?;
     sqlx::query("UPDATE users SET password_hash = $1, password_change_required = false, updated_at = now() WHERE id = $2")
@@ -1154,6 +1247,13 @@ pub async fn delete_account(
             "Failed to revoke signing_pubkey in Redis during account deletion"
         );
     }
+
+    // Bump pw_epoch so any unexpired access/refresh token issued before
+    // the delete stops authenticating. Without this, a token already in
+    // flight would keep working until natural TTL expiry (default 15
+    // min for access tokens) even though the account is soft-deleted.
+    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
+    invalidate_refresh_tokens(&state.redis, user_id, refresh_ttl_days).await;
 
     state
         .audit

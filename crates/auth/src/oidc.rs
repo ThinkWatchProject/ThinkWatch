@@ -212,6 +212,18 @@ impl OidcManager {
             (standard_email, standard_name)
         };
 
+        // Drop the email if the IdP explicitly signals it is unverified.
+        // In multi-tenant IdPs a user can set their account's email to
+        // any string they like; provisioning a local user keyed on that
+        // unverified value would let one tenant forge another's
+        // identity. When `email_verified` is missing entirely we keep
+        // the email — OIDC providers that never emit the claim are
+        // common, and the subject+issuer pair still anchors identity.
+        let email = match claims.email_verified() {
+            Some(false) => None,
+            _ => email,
+        };
+
         Ok(OidcUserInfo {
             subject,
             email,
