@@ -100,6 +100,31 @@ impl AuthUser {
     // loaded at request time into AuthUser.permissions.
     // ------------------------------------------------------------------------
 
+    /// `require_permission` + `assert_scope_global` in a single call.
+    ///
+    /// Every admin handler for a global-only resource used to do
+    ///
+    /// ```ignore
+    /// auth_user.require_permission("X")?;
+    /// auth_user.assert_scope_global(&state.db, "X").await?;
+    /// ```
+    ///
+    /// where the same permission string was repeated twice and the
+    /// scope check could quietly be forgotten when adding a new
+    /// handler (which is exactly the regression a recent audit
+    /// caught in the log handlers — see `a674934`). This helper
+    /// collapses both into one call so missing the scope check
+    /// requires actively writing the wrong helper, not just
+    /// forgetting to add a line.
+    pub async fn require_global_permission(
+        &self,
+        pool: &sqlx::PgPool,
+        perm: &str,
+    ) -> Result<(), AppError> {
+        self.require_permission(perm)?;
+        self.assert_scope_global(pool, perm).await
+    }
+
     /// Assert the caller has `perm` at GLOBAL scope.
     ///
     /// Used for platform-wide resources that no team manager should

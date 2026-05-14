@@ -80,9 +80,8 @@ pub async fn update_platform_pricing(
     State(state): State<AppState>,
     Json(req): Json<UpdatePlatformPricingRequest>,
 ) -> Result<Json<PlatformPricing>, AppError> {
-    auth_user.require_permission("settings:write")?;
     auth_user
-        .assert_scope_global(&state.db, "settings:write")
+        .require_global_permission(&state.db, "settings:write")
         .await?;
 
     if let Some(v) = req.input_price_per_token

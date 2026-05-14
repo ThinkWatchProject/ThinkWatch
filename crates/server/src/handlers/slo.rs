@@ -54,9 +54,8 @@ pub async fn get_slo_snapshot(
     State(state): State<AppState>,
     Query(q): Query<SloQuery>,
 ) -> Result<Json<SloSnapshot>, AppError> {
-    auth_user.require_permission("analytics:read_all")?;
     auth_user
-        .assert_scope_global(&state.db, "analytics:read_all")
+        .require_global_permission(&state.db, "analytics:read_all")
         .await?;
 
     // Bound the window so a typo ("hours=99999") doesn't trigger a

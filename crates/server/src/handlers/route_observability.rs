@@ -39,9 +39,8 @@ pub async fn list_route_health(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<Json<Vec<RouteHealthEntry>>, AppError> {
-    auth_user.require_permission("models:read")?;
     auth_user
-        .assert_scope_global(&state.db, "models:read")
+        .require_global_permission(&state.db, "models:read")
         .await?;
 
     #[derive(sqlx::FromRow)]

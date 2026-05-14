@@ -84,9 +84,8 @@ pub async fn list_outbox(
     State(state): State<AppState>,
     Query(q): Query<ListOutboxQuery>,
 ) -> Result<Json<WebhookOutboxListResponse>, AppError> {
-    auth_user.require_permission("log_forwarders:write")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:write")
+        .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
 
     // `$1::uuid IS NULL OR o.forwarder_id = $1` lets one prepared
@@ -147,9 +146,8 @@ pub async fn outbox_counts(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<WebhookOutboxCount>>, AppError> {
-    auth_user.require_permission("log_forwarders:write")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:write")
+        .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
     // Cap at 500 forwarder rows so a deployment with hundreds of dead
     // endpoints can't return a multi-megabyte JSON body. Sorted by
@@ -197,9 +195,8 @@ pub async fn delete_outbox_row(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("log_forwarders:write")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:write")
+        .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
 
     let result = sqlx::query("DELETE FROM webhook_outbox WHERE id = $1")
@@ -244,9 +241,8 @@ pub async fn retry_outbox_row(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("log_forwarders:write")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:write")
+        .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
 
     let result = sqlx::query("UPDATE webhook_outbox SET next_attempt_at = now() WHERE id = $1")

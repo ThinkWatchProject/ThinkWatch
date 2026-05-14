@@ -104,9 +104,8 @@ pub async fn list_models(
     State(state): State<AppState>,
     Query(query): Query<ModelListQuery>,
 ) -> Result<Json<ModelListResponse>, AppError> {
-    auth_user.require_permission("models:read")?;
     auth_user
-        .assert_scope_global(&state.db, "models:read")
+        .require_global_permission(&state.db, "models:read")
         .await?;
 
     let page_size = query.page_size.unwrap_or(50).clamp(1, 200);
@@ -241,9 +240,8 @@ pub async fn create_model(
     State(state): State<AppState>,
     Json(req): Json<CreateModelRequest>,
 ) -> Result<Json<Model>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
     if req.model_id.trim().is_empty() || req.display_name.trim().is_empty() {
         return Err(AppError::BadRequest(
@@ -413,9 +411,8 @@ pub async fn update_model(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateModelRequest>,
 ) -> Result<Json<Model>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
     let existing = sqlx::query_as::<_, Model>(
         r#"SELECT id, model_id, display_name, input_weight, output_weight,
@@ -543,9 +540,8 @@ pub async fn delete_model(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
     let model_id: Option<String> = sqlx::query_scalar("SELECT model_id FROM models WHERE id = $1")
         .bind(id)
@@ -587,9 +583,8 @@ pub async fn list_model_ids(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ModelIdRow>>, AppError> {
-    auth_user.require_permission("models:read")?;
     auth_user
-        .assert_scope_global(&state.db, "models:read")
+        .require_global_permission(&state.db, "models:read")
         .await?;
 
     let rows = sqlx::query_as::<_, ModelIdRow>(
@@ -617,9 +612,8 @@ pub async fn delete_unrouted_models(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Value>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
 
     let result = sqlx::query(
@@ -662,9 +656,8 @@ pub async fn bulk_delete_models(
     State(state): State<AppState>,
     Json(req): Json<BulkDeleteModelsRequest>,
 ) -> Result<Json<Value>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
 
     if req.ids.is_empty() {
@@ -713,9 +706,8 @@ pub async fn bulk_set_enabled_models(
     State(state): State<AppState>,
     Json(req): Json<BulkSetEnabledModelsRequest>,
 ) -> Result<Json<Value>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
 
     if req.ids.is_empty() {
@@ -785,9 +777,8 @@ pub async fn list_model_routes(
     State(state): State<AppState>,
     Path(model_id): Path<String>,
 ) -> Result<Json<Vec<ModelRouteRow>>, AppError> {
-    auth_user.require_permission("models:read")?;
     auth_user
-        .assert_scope_global(&state.db, "models:read")
+        .require_global_permission(&state.db, "models:read")
         .await?;
 
     // Order by creation time so the routes table and the traffic-share
@@ -842,9 +833,8 @@ pub async fn create_model_route(
     Path(model_id): Path<String>,
     Json(req): Json<CreateModelRouteRequest>,
 ) -> Result<Json<ModelRouteRow>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
 
     // Verify model exists
@@ -974,9 +964,8 @@ pub async fn update_model_route(
     Path(route_id): Path<Uuid>,
     Json(req): Json<UpdateModelRouteRequest>,
 ) -> Result<Json<ModelRouteRow>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
 
     let upstream_value = req
@@ -1065,9 +1054,8 @@ pub async fn delete_model_route(
     State(state): State<AppState>,
     Path(route_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
 
     let result = sqlx::query("DELETE FROM model_routes WHERE id = $1")
@@ -1122,9 +1110,8 @@ pub async fn list_all_routes(
     State(state): State<AppState>,
     Query(q): Query<RouteListQuery>,
 ) -> Result<Json<RouteListResponse>, AppError> {
-    auth_user.require_permission("models:read")?;
     auth_user
-        .assert_scope_global(&state.db, "models:read")
+        .require_global_permission(&state.db, "models:read")
         .await?;
 
     let page_size = q.page_size.unwrap_or(50).clamp(1, 200);
@@ -1241,9 +1228,8 @@ pub async fn batch_create_routes(
     State(state): State<AppState>,
     Json(req): Json<BatchCreateRoutesRequest>,
 ) -> Result<Json<Value>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
 
     if req.items.is_empty() {
@@ -1397,9 +1383,8 @@ pub async fn batch_delete_routes(
     State(state): State<AppState>,
     Json(req): Json<BatchRouteIdsRequest>,
 ) -> Result<Json<Value>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
 
     if req.ids.is_empty() {
@@ -1462,9 +1447,8 @@ pub async fn batch_update_route_weights(
     State(state): State<AppState>,
     Json(req): Json<BatchWeightsRequest>,
 ) -> Result<Json<Value>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
 
     if req.updates.is_empty() {
@@ -1553,9 +1537,8 @@ pub async fn get_route_history(
     Path(_model_id): Path<String>,
     Query(q): Query<RouteHistoryQuery>,
 ) -> Result<Json<RouteHistoryResponse>, AppError> {
-    auth_user.require_permission("models:read")?;
     auth_user
-        .assert_scope_global(&state.db, "models:read")
+        .require_global_permission(&state.db, "models:read")
         .await?;
 
     let Some(ch) = state.clickhouse.as_ref() else {
@@ -1627,9 +1610,8 @@ pub async fn batch_update_routes(
     State(state): State<AppState>,
     Json(req): Json<BatchUpdateRoutesRequest>,
 ) -> Result<Json<Value>, AppError> {
-    auth_user.require_permission("models:write")?;
     auth_user
-        .assert_scope_global(&state.db, "models:write")
+        .require_global_permission(&state.db, "models:write")
         .await?;
 
     if req.ids.is_empty() {

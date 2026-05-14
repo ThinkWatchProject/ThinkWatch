@@ -60,9 +60,8 @@ pub async fn get_trace(
     State(state): State<AppState>,
     Path(trace_id): Path<String>,
 ) -> Result<Json<TraceResponse>, AppError> {
-    auth_user.require_permission("analytics:read_all")?;
     auth_user
-        .assert_scope_global(&state.db, "analytics:read_all")
+        .require_global_permission(&state.db, "analytics:read_all")
         .await?;
 
     // Per-admin rate limit: 60 lookups/min. Generous enough that the

@@ -110,9 +110,8 @@ pub async fn test_mcp_server(
     State(state): State<AppState>,
     Json(req): Json<TestMcpServerRequest>,
 ) -> Result<Json<TestMcpServerResponse>, AppError> {
-    auth_user.require_permission("mcp_servers:create")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:create")
+        .require_global_permission(&state.db, "mcp_servers:create")
         .await?;
     // The test endpoint makes arbitrary outbound HTTP requests, so
     // cap per-user calls at 5/min to prevent abuse as a port scanner.
@@ -175,9 +174,8 @@ pub async fn list_servers(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<McpServer>>, AppError> {
-    auth_user.require_permission("mcp_servers:read")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:read")
+        .require_global_permission(&state.db, "mcp_servers:read")
         .await?;
     let mut servers = sqlx::query_as::<_, McpServer>(
         r#"SELECT s.*, COALESCE(t.cnt, 0) AS tools_count
@@ -289,9 +287,8 @@ pub async fn create_server(
     State(state): State<AppState>,
     Json(req): Json<CreateMcpServerRequest>,
 ) -> Result<Json<McpServer>, AppError> {
-    auth_user.require_permission("mcp_servers:create")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:create")
+        .require_global_permission(&state.db, "mcp_servers:create")
         .await?;
     if req.name.is_empty() || req.endpoint_url.is_empty() {
         return Err(AppError::BadRequest(
@@ -828,9 +825,8 @@ pub async fn update_server(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateMcpServerRequest>,
 ) -> Result<Json<McpServer>, AppError> {
-    auth_user.require_permission("mcp_servers:update")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:update")
+        .require_global_permission(&state.db, "mcp_servers:update")
         .await?;
     let existing = sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1")
         .bind(id)
@@ -1193,9 +1189,8 @@ pub async fn get_server(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<McpServer>, AppError> {
-    auth_user.require_permission("mcp_servers:read")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:read")
+        .require_global_permission(&state.db, "mcp_servers:read")
         .await?;
     let server = sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1")
         .bind(id)
@@ -1226,9 +1221,8 @@ pub async fn delete_server(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("mcp_servers:delete")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:delete")
+        .require_global_permission(&state.db, "mcp_servers:delete")
         .await?;
 
     let mut tx = state.db.begin().await?;
@@ -1343,9 +1337,8 @@ pub async fn bulk_delete_servers(
     State(state): State<AppState>,
     Json(req): Json<BulkDeleteMcpServersRequest>,
 ) -> Result<Json<BulkDeleteMcpServersResponse>, AppError> {
-    auth_user.require_permission("mcp_servers:delete")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:delete")
+        .require_global_permission(&state.db, "mcp_servers:delete")
         .await?;
 
     if req.server_ids.is_empty() {

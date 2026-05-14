@@ -472,14 +472,13 @@ pub async fn create_user(
     State(state): State<AppState>,
     Json(req): Json<CreateUserByAdminRequest>,
 ) -> Result<Json<CreateUserByAdminResponse>, AppError> {
-    auth_user.require_permission("users:create")?;
     // Creating a brand-new user is a global operation: the user
     // doesn't yet belong to any team, so a team-scoped admin has
     // nowhere to put them. Team managers add existing users to
     // their team via the team_members API instead. SSO JIT
     // provisioning is the other way new users enter the system.
     auth_user
-        .assert_scope_global(&state.db, "users:create")
+        .require_global_permission(&state.db, "users:create")
         .await?;
 
     if !req.email.contains('@') || !req.email.contains('.') {
@@ -741,9 +740,8 @@ pub async fn update_user(
     // this avoids holding row locks while doing additional DB reads for
     // caller-role lookups.
     let authorized_role_assignments = if let Some(ref assignments) = req.role_assignments {
-        auth_user.require_permission("roles:update")?;
         auth_user
-            .assert_scope_global(&state.db, "roles:update")
+            .require_global_permission(&state.db, "roles:update")
             .await?;
         let caller_roles =
             think_watch_auth::rbac::load_user_role_names(&state.db, auth_user.claims.sub)
@@ -1067,9 +1065,8 @@ pub async fn get_system_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<SystemInfo>, AppError> {
-    auth_user.require_permission("settings:read")?;
     auth_user
-        .assert_scope_global(&state.db, "settings:read")
+        .require_global_permission(&state.db, "settings:read")
         .await?;
     let uptime = chrono::Utc::now() - state.started_at;
     let dc = &state.dynamic_config;
@@ -1182,9 +1179,8 @@ pub async fn get_oidc_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<OidcSettingsResponse>, AppError> {
-    auth_user.require_permission("settings:read")?;
     auth_user
-        .assert_scope_global(&state.db, "settings:read")
+        .require_global_permission(&state.db, "settings:read")
         .await?;
     let dc = &state.dynamic_config;
 
@@ -1297,9 +1293,8 @@ pub async fn update_oidc_draft(
     State(state): State<AppState>,
     Json(req): Json<UpdateOidcDraftRequest>,
 ) -> Result<Json<OidcDraftSnapshot>, AppError> {
-    auth_user.require_permission("system:configure_oidc")?;
     auth_user
-        .assert_scope_global(&state.db, "system:configure_oidc")
+        .require_global_permission(&state.db, "system:configure_oidc")
         .await?;
 
     if let Some(ref issuer) = req.issuer_url
@@ -1390,9 +1385,8 @@ pub async fn delete_oidc_draft(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<axum::http::StatusCode, AppError> {
-    auth_user.require_permission("system:configure_oidc")?;
     auth_user
-        .assert_scope_global(&state.db, "system:configure_oidc")
+        .require_global_permission(&state.db, "system:configure_oidc")
         .await?;
     sqlx::query("DELETE FROM system_settings WHERE key = 'oidc.draft'")
         .execute(&state.db)
@@ -1426,9 +1420,8 @@ pub async fn discover_oidc_draft(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("system:configure_oidc")?;
     auth_user
-        .assert_scope_global(&state.db, "system:configure_oidc")
+        .require_global_permission(&state.db, "system:configure_oidc")
         .await?;
 
     let draft_value = state
@@ -1497,9 +1490,8 @@ pub async fn start_oidc_test_login(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<StartOidcTestLoginResponse>, AppError> {
-    auth_user.require_permission("system:configure_oidc")?;
     auth_user
-        .assert_scope_global(&state.db, "system:configure_oidc")
+        .require_global_permission(&state.db, "system:configure_oidc")
         .await?;
 
     let draft_value = state
@@ -1565,9 +1557,8 @@ pub async fn activate_oidc_draft(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("system:configure_oidc")?;
     auth_user
-        .assert_scope_global(&state.db, "system:configure_oidc")
+        .require_global_permission(&state.db, "system:configure_oidc")
         .await?;
 
     let test = read_test_result(&state.redis).await;
@@ -1692,9 +1683,8 @@ pub async fn toggle_oidc_active(
     State(state): State<AppState>,
     Json(req): Json<DisableOidcRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("system:configure_oidc")?;
     auth_user
-        .assert_scope_global(&state.db, "system:configure_oidc")
+        .require_global_permission(&state.db, "system:configure_oidc")
         .await?;
 
     let dc = &state.dynamic_config;
@@ -1776,9 +1766,8 @@ pub async fn get_audit_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<AuditConfigResponse>, AppError> {
-    auth_user.require_permission("settings:read")?;
     auth_user
-        .assert_scope_global(&state.db, "settings:read")
+        .require_global_permission(&state.db, "settings:read")
         .await?;
     let connected = if let Some(ref ch) = state.clickhouse {
         ch.query("SELECT 1").fetch_one::<u8>().await.is_ok()
@@ -1809,9 +1798,8 @@ pub async fn get_all_settings(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<HashMap<String, Vec<SettingEntry>>>, AppError> {
-    auth_user.require_permission("settings:read")?;
     auth_user
-        .assert_scope_global(&state.db, "settings:read")
+        .require_global_permission(&state.db, "settings:read")
         .await?;
     let grouped = state.dynamic_config.get_all_grouped().await;
     Ok(Json(grouped))
@@ -1836,9 +1824,8 @@ pub async fn get_settings_by_category(
     State(state): State<AppState>,
     Path(category): Path<String>,
 ) -> Result<Json<Vec<SettingEntry>>, AppError> {
-    auth_user.require_permission("settings:read")?;
     auth_user
-        .assert_scope_global(&state.db, "settings:read")
+        .require_global_permission(&state.db, "settings:read")
         .await?;
     let settings = state.dynamic_config.get_by_category(&category).await;
     Ok(Json(settings))
@@ -1960,9 +1947,8 @@ pub async fn update_settings(
     State(state): State<AppState>,
     Json(req): Json<UpdateSettingsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("settings:write")?;
     auth_user
-        .assert_scope_global(&state.db, "settings:write")
+        .require_global_permission(&state.db, "settings:write")
         .await?;
     // Validate each setting
     for (key, value) in &req.settings {
@@ -2075,9 +2061,8 @@ pub async fn test_content_filter(
     State(state): State<AppState>,
     Json(req): Json<ContentFilterTestRequest>,
 ) -> Result<Json<ContentFilterTestResponse>, AppError> {
-    auth_user.require_permission("content_filter:read")?;
     auth_user
-        .assert_scope_global(&state.db, "content_filter:read")
+        .require_global_permission(&state.db, "content_filter:read")
         .await?;
     use think_watch_gateway::content_filter::ContentFilter;
     let filter = ContentFilter::from_config(&req.rules);
@@ -2117,9 +2102,8 @@ pub async fn list_content_filter_presets(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<ContentFilterPreset>>, AppError> {
-    auth_user.require_permission("content_filter:read")?;
     auth_user
-        .assert_scope_global(&state.db, "content_filter:read")
+        .require_global_permission(&state.db, "content_filter:read")
         .await?;
     let groups = think_watch_gateway::content_filter::presets()
         .into_iter()
@@ -2175,9 +2159,8 @@ pub async fn test_pii_redactor(
     State(state): State<AppState>,
     Json(req): Json<PiiRedactorTestRequest>,
 ) -> Result<Json<PiiRedactorTestResponse>, AppError> {
-    auth_user.require_permission("pii_redactor:read")?;
     auth_user
-        .assert_scope_global(&state.db, "pii_redactor:read")
+        .require_global_permission(&state.db, "pii_redactor:read")
         .await?;
     use think_watch_gateway::pii_redactor::PiiRedactor;
     use think_watch_gateway::providers::traits::ChatMessage;

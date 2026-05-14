@@ -228,9 +228,8 @@ pub async fn sync_registry(
     State(state): State<AppState>,
     Json(req): Json<SyncRegistryRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("settings:write")?;
     auth_user
-        .assert_scope_global(&state.db, "settings:write")
+        .require_global_permission(&state.db, "settings:write")
         .await?;
 
     let url = match req.registry_url {

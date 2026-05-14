@@ -1500,9 +1500,8 @@ pub async fn oauth_discover(
     State(state): State<AppState>,
     Json(req): Json<DiscoverRequest>,
 ) -> Result<Json<DiscoverResponse>, AppError> {
-    auth_user.require_permission("mcp_servers:create")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:create")
+        .require_global_permission(&state.db, "mcp_servers:create")
         .await?;
     if req.issuer.is_empty() {
         return Err(AppError::BadRequest("issuer is required".into()));
@@ -1675,9 +1674,8 @@ pub async fn oauth_probe(
     State(state): State<AppState>,
     Json(req): Json<ProbeRequest>,
 ) -> Result<Json<ProbeResponse>, AppError> {
-    auth_user.require_permission("mcp_servers:create")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:create")
+        .require_global_permission(&state.db, "mcp_servers:create")
         .await?;
 
     // Each probe makes 3-4 outbound HTTP requests against admin-supplied
@@ -2356,9 +2354,8 @@ pub async fn paste_shared_static_token(
     Path(server_id): Path<Uuid>,
     Json(req): Json<SharedStaticTokenRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("mcp_servers:update")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:update")
+        .require_global_permission(&state.db, "mcp_servers:update")
         .await?;
 
     if req.token.is_empty() {
@@ -2426,9 +2423,8 @@ pub async fn start_shared_authorize(
     State(state): State<AppState>,
     Path(server_id): Path<Uuid>,
 ) -> Result<Json<AuthorizeResponse>, AppError> {
-    auth_user.require_permission("mcp_servers:update")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:update")
+        .require_global_permission(&state.db, "mcp_servers:update")
         .await?;
 
     super::test_rate_limit::check_test_rate_limit(
@@ -2529,15 +2525,13 @@ pub async fn shared_credential_status(
     State(state): State<AppState>,
     Path(server_id): Path<Uuid>,
 ) -> Result<Json<SharedCredentialStatus>, AppError> {
-    auth_user.require_permission("mcp_servers:read")?;
-    // Match the rest of the shared-credential surface — the
-    // authorize / paste / delete endpoints all pair the permission
-    // check with `assert_scope_global`. Without the scope assertion
-    // a team-scoped reader could see configured / upstream_subject /
-    // configured_by metadata for shared credentials they have no
-    // business knowing about.
+    // Match the rest of the shared-credential surface — every
+    // authorize/paste/delete endpoint goes through the global gate.
+    // Without it a team-scoped reader could see configured /
+    // upstream_subject / configured_by metadata for shared
+    // credentials they have no business knowing about.
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:read")
+        .require_global_permission(&state.db, "mcp_servers:read")
         .await?;
 
     #[derive(sqlx::FromRow)]
@@ -2585,9 +2579,8 @@ pub async fn revoke_shared_credential(
     State(state): State<AppState>,
     Path(server_id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("mcp_servers:update")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:update")
+        .require_global_permission(&state.db, "mcp_servers:update")
         .await?;
 
     let revoked = best_effort_revoke_shared_upstream(&state, server_id).await?;
@@ -2701,9 +2694,8 @@ pub async fn start_wizard_authorize(
     State(state): State<AppState>,
     Json(req): Json<WizardAuthorizeRequest>,
 ) -> Result<Json<AuthorizeResponse>, AppError> {
-    auth_user.require_permission("mcp_servers:create")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:create")
+        .require_global_permission(&state.db, "mcp_servers:create")
         .await?;
 
     super::test_rate_limit::check_test_rate_limit(
@@ -2819,9 +2811,8 @@ pub async fn wizard_credential_status(
     State(state): State<AppState>,
     Path(wizard_session_id): Path<String>,
 ) -> Result<Json<WizardCredentialStatus>, AppError> {
-    auth_user.require_permission("mcp_servers:create")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:create")
+        .require_global_permission(&state.db, "mcp_servers:create")
         .await?;
 
     let stored: Option<String> = fred::interfaces::KeysInterface::get(
@@ -2861,9 +2852,8 @@ pub async fn discard_wizard_credential(
     State(state): State<AppState>,
     Path(wizard_session_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("mcp_servers:create")?;
     auth_user
-        .assert_scope_global(&state.db, "mcp_servers:create")
+        .require_global_permission(&state.db, "mcp_servers:create")
         .await?;
 
     let _: Option<String> = fred::interfaces::KeysInterface::getdel(

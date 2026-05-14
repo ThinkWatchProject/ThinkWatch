@@ -82,9 +82,8 @@ pub async fn get_cost_forecast(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<CostForecast>, AppError> {
-    auth_user.require_permission("analytics:read_all")?;
     auth_user
-        .assert_scope_global(&state.db, "analytics:read_all")
+        .require_global_permission(&state.db, "analytics:read_all")
         .await?;
 
     let now = Utc::now();

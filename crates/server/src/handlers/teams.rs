@@ -275,9 +275,8 @@ pub async fn create_team(
     State(state): State<AppState>,
     Json(req): Json<CreateTeamRequest>,
 ) -> Result<Json<Team>, AppError> {
-    auth_user.require_permission("teams:create")?;
     auth_user
-        .assert_scope_global(&state.db, "teams:create")
+        .require_global_permission(&state.db, "teams:create")
         .await?;
     let name = req.name.trim();
     if name.is_empty() {
@@ -423,9 +422,8 @@ pub async fn delete_team(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("teams:delete")?;
     auth_user
-        .assert_scope_global(&state.db, "teams:delete")
+        .require_global_permission(&state.db, "teams:delete")
         .await?;
 
     let name: Option<String> = sqlx::query_scalar("SELECT name FROM teams WHERE id = $1")

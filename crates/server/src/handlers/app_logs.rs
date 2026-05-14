@@ -66,9 +66,8 @@ pub async fn list_app_logs(
     State(state): State<AppState>,
     Query(params): Query<AppLogsQuery>,
 ) -> Result<Json<AppLogsResponse>, AppError> {
-    auth_user.require_permission("logs:read_all")?;
     auth_user
-        .assert_scope_global(&state.db, "logs:read_all")
+        .require_global_permission(&state.db, "logs:read_all")
         .await?;
     if !ch_available(&state) {
         return Ok(Json(AppLogsResponse {

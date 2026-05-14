@@ -127,9 +127,8 @@ pub async fn get_usage_license(
 ) -> Result<Json<UsageLicenseResponse>, AppError> {
     // Only operators who already see global analytics should see the
     // license-volume figures — they are a legal-relevance number.
-    auth_user.require_permission("analytics:read_all")?;
     auth_user
-        .assert_scope_global(&state.db, "analytics:read_all")
+        .require_global_permission(&state.db, "analytics:read_all")
         .await?;
 
     let now = chrono::Utc::now();

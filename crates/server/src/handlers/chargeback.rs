@@ -56,9 +56,8 @@ pub async fn export_chargeback_csv(
     State(state): State<AppState>,
     Query(q): Query<ChargebackQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    auth_user.require_permission("analytics:read_all")?;
     auth_user
-        .assert_scope_global(&state.db, "analytics:read_all")
+        .require_global_permission(&state.db, "analytics:read_all")
         .await?;
 
     let now = Utc::now();

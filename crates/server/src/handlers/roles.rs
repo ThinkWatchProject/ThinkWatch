@@ -352,9 +352,8 @@ pub async fn list_roles(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<RolesListResponse>, AppError> {
-    auth_user.require_permission("roles:read")?;
     auth_user
-        .assert_scope_global(&state.db, "roles:read")
+        .require_global_permission(&state.db, "roles:read")
         .await?;
     // System rows first, then alphabetical. Permissions and counts are
     // pulled in two more queries (no N+1) and merged in Rust.
@@ -416,9 +415,8 @@ pub async fn create_role(
     State(state): State<AppState>,
     Json(payload): Json<CreateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
-    auth_user.require_permission("roles:create")?;
     auth_user
-        .assert_scope_global(&state.db, "roles:create")
+        .require_global_permission(&state.db, "roles:create")
         .await?;
     let name = payload.name.trim();
     if name.is_empty() || name.len() > 100 {
@@ -504,9 +502,8 @@ pub async fn update_role(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateRoleRequest>,
 ) -> Result<Json<RoleResponse>, AppError> {
-    auth_user.require_permission("roles:update")?;
     auth_user
-        .assert_scope_global(&state.db, "roles:update")
+        .require_global_permission(&state.db, "roles:update")
         .await?;
     let existing =
         sqlx::query_as::<_, (bool, String)>("SELECT is_system, name FROM rbac_roles WHERE id = $1")
@@ -525,9 +522,8 @@ pub async fn update_role(
     //     ("super_admin", "developer", ...). The UI hides the name field
     //     for system rows; the SQL clause below enforces it on the wire.
     if is_system {
-        auth_user.require_permission("roles:edit_system")?;
         auth_user
-            .assert_scope_global(&state.db, "roles:edit_system")
+            .require_global_permission(&state.db, "roles:edit_system")
             .await?;
         if payload.name.is_some() {
             return Err(AppError::BadRequest("Cannot rename system roles".into()));
@@ -617,9 +613,8 @@ pub async fn reset_role(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RoleResponse>, AppError> {
-    auth_user.require_permission("roles:edit_system")?;
     auth_user
-        .assert_scope_global(&state.db, "roles:edit_system")
+        .require_global_permission(&state.db, "roles:edit_system")
         .await?;
 
     let existing =
@@ -708,9 +703,8 @@ pub async fn delete_role(
     Path(id): Path<Uuid>,
     axum::extract::Query(query): axum::extract::Query<DeleteRoleQuery>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("roles:delete")?;
     auth_user
-        .assert_scope_global(&state.db, "roles:delete")
+        .require_global_permission(&state.db, "roles:delete")
         .await?;
     let existing =
         sqlx::query_as::<_, (bool, String)>("SELECT is_system, name FROM rbac_roles WHERE id = $1")
@@ -839,9 +833,8 @@ pub async fn list_role_members(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RoleMembersResponse>, AppError> {
-    auth_user.require_permission("roles:read")?;
     auth_user
-        .assert_scope_global(&state.db, "roles:read")
+        .require_global_permission(&state.db, "roles:read")
         .await?;
     let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM rbac_roles WHERE id = $1)")
         .bind(id)
@@ -911,9 +904,8 @@ pub async fn list_permissions(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<PermissionDef>>, AppError> {
-    auth_user.require_permission("roles:read")?;
     auth_user
-        .assert_scope_global(&state.db, "roles:read")
+        .require_global_permission(&state.db, "roles:read")
         .await?;
     Ok(Json(PERMISSIONS.to_vec()))
 }
@@ -972,9 +964,8 @@ pub async fn list_role_history(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<RoleHistoryResponse>, AppError> {
-    auth_user.require_permission("roles:read")?;
     auth_user
-        .assert_scope_global(&state.db, "roles:read")
+        .require_global_permission(&state.db, "roles:read")
         .await?;
 
     // 404 if the role doesn't exist — same shape as list_role_members.

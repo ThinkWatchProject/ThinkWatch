@@ -26,9 +26,8 @@ pub async fn list_forwarders(
     auth_user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<Vec<LogForwarder>>, AppError> {
-    auth_user.require_permission("log_forwarders:read")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:read")
+        .require_global_permission(&state.db, "log_forwarders:read")
         .await?;
     let forwarders =
         sqlx::query_as::<_, LogForwarder>("SELECT * FROM log_forwarders ORDER BY created_at DESC")
@@ -69,9 +68,8 @@ pub async fn create_forwarder(
     State(state): State<AppState>,
     Json(req): Json<CreateForwarderRequest>,
 ) -> Result<Json<LogForwarder>, AppError> {
-    auth_user.require_permission("log_forwarders:write")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:write")
+        .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
     // S3 / Splunk live as webhook forwarders today: both accept HTTP
     // POST with a JSON or NDJSON body, which is what the existing
@@ -161,9 +159,8 @@ pub async fn update_forwarder(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateForwarderRequest>,
 ) -> Result<Json<LogForwarder>, AppError> {
-    auth_user.require_permission("log_forwarders:write")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:write")
+        .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
     let existing = sqlx::query_as::<_, LogForwarder>("SELECT * FROM log_forwarders WHERE id = $1")
         .bind(id)
@@ -233,9 +230,8 @@ pub async fn delete_forwarder(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    auth_user.require_permission("log_forwarders:write")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:write")
+        .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
     let result = sqlx::query("DELETE FROM log_forwarders WHERE id = $1")
         .bind(id)
@@ -279,9 +275,8 @@ pub async fn toggle_forwarder(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<LogForwarder>, AppError> {
-    auth_user.require_permission("log_forwarders:write")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:write")
+        .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
     let updated = sqlx::query_as::<_, LogForwarder>(
         r#"UPDATE log_forwarders SET enabled = NOT enabled, updated_at = now()
@@ -330,9 +325,8 @@ pub async fn reset_stats(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<LogForwarder>, AppError> {
-    auth_user.require_permission("log_forwarders:write")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:write")
+        .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
     let updated = sqlx::query_as::<_, LogForwarder>(
         r#"UPDATE log_forwarders SET sent_count = 0, error_count = 0, last_error = NULL, updated_at = now()
@@ -374,9 +368,8 @@ pub async fn test_forwarder(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TestResult>, AppError> {
-    auth_user.require_permission("log_forwarders:write")?;
     auth_user
-        .assert_scope_global(&state.db, "log_forwarders:write")
+        .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
     // Test endpoint fires outbound HTTP — cap at 5 calls/min/user to
     // prevent abuse as a network probe.
