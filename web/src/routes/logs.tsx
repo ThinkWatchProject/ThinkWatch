@@ -420,6 +420,13 @@ export function UnifiedLogsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
+  // Monotonic id stamped on every fetch so a slow response from the
+  // previous category can't overwrite the latest result. Without this,
+  // switching from "访问日志" (14k rows) to "网关日志" (4 rows) shows
+  // 543 access-log-shaped rows under gateway column headers for the
+  // duration of the in-flight access request — the exact "the data
+  // doesn't match the label" bug operators hit.
+  const fetchTokenRef = useRef(0);
 
   // Mirror the active query into a ref so we can sync the input *only*
   // when the URL truly changes from somewhere else (browser back/forward,
@@ -463,6 +470,13 @@ export function UnifiedLogsPage() {
   );
 
   const fetchLogs = useCallback(async () => {
+    // Stamp this attempt and clear stale rows BEFORE the network call
+    // so the skeleton — not the previous category's data — bridges the
+    // request window.
+    const myToken = ++fetchTokenRef.current;
+    setLogs([]);
+    setTotal(0);
+    setExpandedRow(null);
     setLoading(true);
     setError('');
     try {
@@ -486,16 +500,20 @@ export function UnifiedLogsPage() {
       const qs = params.toString();
       const url = `${CATEGORY_API[category]}${qs ? `?${qs}` : ''}`;
       const res = await api<LogsResponse>(url);
+      // Drop a stale response if the user has since switched categories
+      // or fired another search — the newer fetch is now authoritative.
+      if (fetchTokenRef.current !== myToken) return;
       setLogs(res.items ?? []);
       setTotal(res.total ?? 0);
     } catch (err) {
+      if (fetchTokenRef.current !== myToken) return;
       setError(err instanceof Error ? err.message : t('common.error'));
       setLogs([]);
       setTotal(0);
     } finally {
-      setLoading(false);
+      if (fetchTokenRef.current === myToken) setLoading(false);
     }
-  }, [category, activeQuery, from, to, page]);
+  }, [category, activeQuery, from, to, page, t]);
 
   useEffect(() => { fetchLogs(); }, [fetchLogs]);
 
@@ -563,13 +581,27 @@ export function UnifiedLogsPage() {
   const columns = getColumns(category, t);
   const timeKey = getTimeKey(category);
 
-  const placeholders: Record<LogCategory, string> = {
-    gateway: 'model:gpt-4o provider:openai upstream_model:gpt-4o-2024-08-06 status_code:200  (or just: gpt-4o)',
-    mcp: 'tool_name:search status:error  (or just: search)',
-    audit: 'action:provider.created resource:provider user_id:xxx',
-    access: 'method:POST path:/api/admin status_code:500  (or just: /admin)',
-    app: 'level:error target:auth  (or any text from the message)',
+  // Hint lives below the input as a tertiary, italicized example so the
+  // input itself shows a neutral "Search…" — the previous full-syntax
+  // placeholder looked indistinguishable from an applied filter and led
+  // operators to chase "why is 101 in my status:200 results?" when in
+  // fact no filter was applied.
+  const syntaxHints: Record<LogCategory, string> = {
+    gateway: 'model:gpt-4o provider:openai status_code:200',
+    mcp: 'tool_name:search status:error',
+    audit: 'action:provider.created resource:provider',
+    access: 'method:POST path:/api/admin status_code:500',
+    app: 'level:error target:auth',
   };
+
+  // Count chips so we can tell the user explicitly when nothing is
+  // narrowing the result set — silent "0 chips" + a non-empty results
+  // table is the exact failure mode that triggered this fix.
+  const parsedActive = parseQuery(searchInput);
+  const activeFilterCount =
+    Object.keys(parsedActive.params).filter((k) => k !== 'q').length +
+    parsedActive.excludes.length +
+    (parsedActive.params.q ? 1 : 0);
 
   return (
     <div className="flex flex-col flex-1 min-h-0">
@@ -598,7 +630,7 @@ export function UnifiedLogsPage() {
           </SelectContent>
         </Select>
         <Input
-          placeholder={placeholders[category]}
+          placeholder={t('logs.searchPlaceholder', 'Search…')}
           value={searchInput}
           onChange={(e) => setSearchInput(e.target.value)}
           onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
@@ -617,7 +649,28 @@ export function UnifiedLogsPage() {
         </Button>
       </div>
 
-      <p className="text-[10px] text-muted-foreground -mt-1 mb-1">{t('logs.utcNotice')}</p>
+      <div className="-mt-1 mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+        <span>{t('logs.utcNotice')}</span>
+        <span className="opacity-70">
+          {t('logs.syntaxHintLabel', 'Try')}: <code className="font-mono">{syntaxHints[category]}</code>
+        </span>
+        {activeFilterCount === 0 ? (
+          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 font-medium text-amber-700 dark:text-amber-300">
+            {t('logs.noFilterShowingAll', 'No filter — showing all logs')}
+            {total > 0 && ` · ${total.toLocaleString()} ${t('logs.totalCountSuffix', 'results')}`}
+          </span>
+        ) : (
+          // When filters ARE active, surface a one-line summary so the
+          // user can confirm "yes, my filter applied, and it matched N
+          // out of the time window" without scrolling to the pagination.
+          <span className="rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 font-medium text-primary">
+            {t('logs.filterSummary', {
+              count: activeFilterCount,
+              matches: total.toLocaleString(),
+            })}
+          </span>
+        )}
+      </div>
 
       <QueryTokenChips input={searchInput} onChange={setSearchInput} />
 

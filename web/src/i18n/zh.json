@@ -1512,6 +1512,11 @@
   },
   "logs": {
     "utcNotice": "所有时间均为 UTC。",
+    "searchPlaceholder": "搜索...",
+    "syntaxHintLabel": "语法示例",
+    "noFilterShowingAll": "未应用过滤,显示该时段全部日志",
+    "totalCountSuffix": "条",
+    "filterSummary": "{{count}} 个过滤 · 匹配 {{matches}} 条",
     "dateFrom": "开始日期",
     "dateTo": "结束日期",
     "pickDateRange": "选择日期范围",
