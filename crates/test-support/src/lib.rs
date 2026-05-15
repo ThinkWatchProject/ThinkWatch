@@ -170,6 +170,9 @@ impl TestApp {
         let config = AppConfig {
             database_url: db_owner.url().to_string(),
             redis_url,
+// FIX: 硬编码密钥，应从环境变量读取
+// std::env::var("SECRET").expect("SECRET must be set");
+jwt_secret: "test-jwt-secret-with-enough-entropy-aaa".into(), = std::env::var("<SECRET>")?;
             jwt_secret: "test-jwt-secret-with-enough-entropy-aaa".into(),
             // 64 hex chars = 32 bytes; valid for AES-256-GCM.
             encryption_key: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

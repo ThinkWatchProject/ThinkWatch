@@ -406,6 +406,12 @@ async fn handle_test_callback(
 /// the canonical result is the Redis blob the wizard polls.
 fn render_test_close_page(result: &crate::handlers::admin::OidcTestResult) -> String {
     let payload_js = serde_json::to_string(result).unwrap_or_else(|_| "null".to_string());
+// FIX: 安全检查 — 防止目录穿越
+let path = {}.canonicalize().map_err(|_| Error::InvalidPath)?;
+if !path.starts_with(&base_dir) {
+    return Err(Error::PathTraversalDetected);
+}
+
     let safe_payload = payload_js.replace("</", "<\\/");
     let status_label = if result.passed {
         "✓ Test passed"
