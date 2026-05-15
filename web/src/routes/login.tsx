@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label';
 import { AlertCircle } from 'lucide-react';
 import { ThinkWatchMark } from '@/components/brand/think-watch-mark';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { API_BASE } from '@/lib/api';
+import { API_BASE, ApiError, describeApiError } from '@/lib/api';
 import { useSsoStatus } from '@/hooks/use-sso-status';
 import { usePowChallenge, type PowSolution } from '@/hooks/use-pow-challenge';
 import { PowIndicator } from '@/components/auth/pow-indicator';
@@ -61,7 +61,17 @@ export function LoginPage({ onLogin }: LoginPageProps) {
         pow.refresh();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : t('common.error'));
+      // 401 on the login endpoint means "wrong email/password" —
+      // describeApiError's generic 401 string ("session expired,
+      // please log in again") is wrong here, since you're already on
+      // the login page. Show a credentials-specific message instead.
+      // Server doesn't distinguish wrong-email vs wrong-password on
+      // purpose (avoids account enumeration), so we don't either.
+      if (err instanceof ApiError && err.status === 401) {
+        setError(t('auth.invalidCredentials'));
+      } else {
+        setError(describeApiError(err, t));
+      }
       // Failed login consumed the PoW; mint a new one so the next
       // attempt isn't artificially delayed.
       pow.refresh();

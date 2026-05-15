@@ -189,6 +189,7 @@
     "signInWith": "Sign in with SSO",
     "signingIn": "Signing in...",
     "powStillVerifying": "Verification still running. Try again in a moment.",
+    "invalidCredentials": "Invalid email or password",
     "pow": {
       "fetching": "Anti-bot shield · preparing challenge…",
       "grinding": "Anti-bot shield · computing proof",
