@@ -71,14 +71,10 @@ export const LiveLogRowSchema = z.object({
   count: z.number(),
 });
 
-export const DashboardLiveSchema = z.object({
-  providers: z.array(ProviderHealthSchema),
-  rpm_buckets: z.array(z.number()),
-  recent_logs: z.array(LiveLogRowSchema),
-  max_rpm_limit: z.number().nullable(),
-});
-
 // --- /api/dashboard/top-users ----------------------------------------------
+// Defined ahead of DashboardLiveSchema because the live snapshot now
+// embeds the leaderboard so it refreshes on the same WS tick as the
+// rest of the dashboard tiles.
 
 export const TopActiveUserSchema = z.object({
   user_id: z.string(),
@@ -98,6 +94,14 @@ export const TopActiveUsersResponseSchema = z.object({
   /** Distinct active users in the selected window. May exceed
    *  `users.length` when the server-side cap clips the leaderboard. */
   total: z.number(),
+});
+
+export const DashboardLiveSchema = z.object({
+  providers: z.array(ProviderHealthSchema),
+  rpm_buckets: z.array(z.number()),
+  recent_logs: z.array(LiveLogRowSchema),
+  max_rpm_limit: z.number().nullable(),
+  top_users: TopActiveUsersResponseSchema,
 });
 
 export type TopActiveUser = z.infer<typeof TopActiveUserSchema>;

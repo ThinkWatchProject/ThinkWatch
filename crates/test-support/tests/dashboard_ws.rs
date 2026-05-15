@@ -93,12 +93,30 @@ async fn ws_first_push_carries_full_dashboardlive_envelope() {
     // Pin the DashboardLive envelope. Each field is consumed by name
     // from the React layer — a silent rename here white-screens the
     // dashboard without a test signal.
-    for k in ["providers", "rpm_buckets", "recent_logs", "max_rpm_limit"] {
+    for k in [
+        "providers",
+        "rpm_buckets",
+        "recent_logs",
+        "max_rpm_limit",
+        "top_users",
+    ] {
         assert!(
             body.get(k).is_some(),
             "DashboardLive missing field {k}: {body}"
         );
     }
+    // top_users is itself an envelope — `{ users, total }`. Pin both
+    // sub-fields so a server-side rename doesn't silently break the
+    // leaderboard panel.
+    let tu = &body["top_users"];
+    assert!(
+        tu.get("users").is_some_and(|v| v.is_array()),
+        "top_users.users must be an array: {body}"
+    );
+    assert!(
+        tu.get("total").is_some_and(|v| v.is_number()),
+        "top_users.total must be a number: {body}"
+    );
 
     let buckets = body["rpm_buckets"]
         .as_array()

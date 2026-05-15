@@ -30,7 +30,6 @@ import { StatusIndicator } from '@/components/ui/status-indicator';
 import { ServiceLogo } from '@/components/ui/service-logo';
 import {
   DashboardLiveSchema,
-  TopActiveUsersResponseSchema,
   WsTicketSchema,
   type DashboardLive,
   type LiveLogRow,
@@ -124,7 +123,7 @@ function useCounter(target: number, duration = 1200) {
 // can't connect (e.g. behind a proxy that doesn't speak the upgrade).
 // ----------------------------------------------------------------------------
 
-function useLiveDashboard() {
+function useLiveDashboard(range: string) {
   const [live, setLive] = useState<DashboardLive | null>(null);
   const [connected, setConnected] = useState(false);
   // Ref mirror so the WS callbacks can read "have we ever received data?"
@@ -186,8 +185,13 @@ function useLiveDashboard() {
 
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const apiBase = import.meta.env.VITE_API_BASE ?? '';
+      // Range goes on the WS URL so the server-side snapshot loop
+      // knows which window the leaderboard should cover. The effect
+      // re-runs when `range` changes, dropping and re-establishing
+      // the socket — that's cheap (ticket mint + WS upgrade) and
+      // happens only when the operator toggles 24h / 7d / 30d.
       const httpUrl = new URL(
-        `${apiBase}/api/dashboard/ws?ticket=${encodeURIComponent(ticket)}`,
+        `${apiBase}/api/dashboard/ws?ticket=${encodeURIComponent(ticket)}&range=${encodeURIComponent(range)}`,
         window.location.origin,
       );
       const wsUrl = `${proto}://${httpUrl.host}${httpUrl.pathname}${httpUrl.search}`;
@@ -222,7 +226,9 @@ function useLiveDashboard() {
         // immediately even if WS is unavailable. Reads via ref so it
         // sees the latest state, not a stale closure capture.
         if (liveRef.current === null) {
-          api<DashboardLive>('/api/dashboard/live', { schema: DashboardLiveSchema })
+          api<DashboardLive>(`/api/dashboard/live?range=${encodeURIComponent(range)}`, {
+            schema: DashboardLiveSchema,
+          })
             .then(setLive)
             .catch((err) => {
               // The WS closed and HTTP fallback also failed — the user
@@ -273,7 +279,7 @@ function useLiveDashboard() {
       ws = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [range]);
 
   return { live, connected };
 }
@@ -712,15 +718,17 @@ export function DashboardPage() {
   const { t, i18n } = useTranslation();
   // Map i18next language code → BCP 47 locale for Intl.NumberFormat.
   const locale = i18n.language === 'zh' ? 'zh-CN' : 'en-US';
-  const { live, connected } = useLiveDashboard();
 
   // Global time-range filter. Selecting a different range remounts the
   // three Suspense cards (see `key={range}` below), which mints fresh
-  // promises for the new window.
+  // promises for the new window. The live WS also reconnects with the
+  // new range so its embedded top-users leaderboard tracks the same
+  // window.
   const [range, setRange] = useState<TimeRange>(() => {
     const cached = typeof window !== 'undefined' ? window.localStorage.getItem('dashboard.range.v1') : null;
     return cached && (TIME_RANGES as readonly string[]).includes(cached) ? (cached as TimeRange) : '24h';
   });
+  const { live, connected } = useLiveDashboard(range);
   useEffect(() => {
     try {
       window.localStorage.setItem('dashboard.range.v1', range);
@@ -782,21 +790,6 @@ export function DashboardPage() {
       ),
     [range, compareQs],
   );
-  // Range-keyed top-users leaderboard. Compare mode doesn't apply —
-  // the panel shows current-window rankings only, not deltas — so
-  // the promise rebuilds only when `range` itself changes.
-  const topUsersPromise = useMemo(
-    () =>
-      withTimeout(
-        api<TopActiveUsersResponse>(`/api/dashboard/top-users?range=${range}`, {
-          schema: TopActiveUsersResponseSchema,
-        }),
-        DASHBOARD_CARD_TIMEOUT_MS,
-        'dashboard.top-users',
-      ),
-    [range],
-  );
-
   // Toast-on-rejection is still useful — keep the "something failed"
   // signal but out-of-band from the render path (ErrorBoundaries below
   // catch the actual throw and render an error affordance).
@@ -1010,19 +1003,9 @@ export function DashboardPage() {
           <Section
             eyebrow={t('dashboard.activeUsersEyebrow')}
             className="flex min-h-0 flex-1 flex-col"
-            action={
-              <ErrorBoundary fallback={null}>
-                <Suspense fallback={null}>
-                  <TopUsersTotalBadge promise={topUsersPromise} locale={locale} />
-                </Suspense>
-              </ErrorBoundary>
-            }
+            action={<TopUsersTotalBadge data={live?.top_users ?? null} locale={locale} />}
           >
-            <ErrorBoundary fallback={<TopUsersPanelError />}>
-              <Suspense fallback={<TopUsersPanelSkeleton />}>
-                <TopUsersPanel promise={topUsersPromise} locale={locale} />
-              </Suspense>
-            </ErrorBoundary>
+            <TopUsersPanel data={live?.top_users ?? null} locale={locale} />
           </Section>
         </div>
       </div>
@@ -1495,22 +1478,20 @@ function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
 // (24h / 7d / 30d). Scrollable vertical list, ranked by request count.
 // ----------------------------------------------------------------------------
 
-/// Small "N 人" badge for the active-users eyebrow. Reuses the same
-/// promise as the panel body — React 19's `use()` deduplicates the
-/// fetch, so this isn't a second round-trip. Renders nothing while
-/// the promise is pending (the panel skeleton already signals
-/// loading state) and nothing on error (the body's error fallback
-/// covers it).
+/// Small "N 人" badge for the active-users eyebrow. Reads from the
+/// live snapshot's `top_users` envelope — no separate fetch — so the
+/// badge ticks at the same cadence as the panel body. Renders nothing
+/// while the live socket is still warming up or when the window is
+/// empty.
 function TopUsersTotalBadge({
-  promise,
+  data,
   locale,
 }: {
-  promise: Promise<TopActiveUsersResponse>;
+  data: TopActiveUsersResponse | null;
   locale: string;
 }) {
   const { t } = useTranslation();
-  const data = use(promise);
-  if (data.total === 0) return null;
+  if (data === null || data.total === 0) return null;
   return (
     <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
       {t('dashboard.totalUsers', {
@@ -1521,88 +1502,58 @@ function TopUsersTotalBadge({
   );
 }
 
-function TopUsersPanelSkeleton() {
-  return (
-    <Card size="sm" className="flex h-full min-h-0 flex-col gap-0 py-0">
-      <CardContent className="flex flex-col gap-2 px-3 py-3">
-        {Array.from({ length: 5 }).map((_, i) => (
-          <div key={i} className="flex items-center gap-2">
-            <Skeleton className="h-4 w-6" />
-            <Skeleton className="h-4 flex-1" />
-            <Skeleton className="h-4 w-12" />
-          </div>
-        ))}
-      </CardContent>
-    </Card>
-  );
-}
-
-function TopUsersPanelError() {
-  const { t } = useTranslation();
-  return (
-    <Card size="sm" className="flex h-full min-h-0 flex-col gap-0 py-0">
-      <CardContent className="flex flex-1 items-center justify-center px-3 text-center text-xs text-muted-foreground">
-        {t('dashboard.loadFailedShort', 'Failed to load')}
-      </CardContent>
-    </Card>
-  );
-}
-
 function TopUsersPanel({
-  promise,
+  data,
   locale,
 }: {
-  promise: Promise<TopActiveUsersResponse>;
+  data: TopActiveUsersResponse | null;
   locale: string;
 }) {
   const { t } = useTranslation();
-  const data = use(promise);
-  const users = data.users;
+  const users = data?.users ?? null;
 
-  if (users.length === 0) {
-    return (
-      <Card size="sm" className="flex h-full min-h-0 flex-col gap-0 py-0">
-        <CardContent className="flex flex-1 flex-col items-center justify-center gap-2 px-3 text-center text-muted-foreground">
+  // Layout mirrors LiveLogPanel: column header sits flush at the top
+  // of the Card (sibling of the scroll list, not inside a CardContent
+  // wrapper) so the panel's top edge IS the header's top edge — no
+  // visible Card frame floating above the labels. `border-b` on the
+  // header doubles as the divider between labels and rows.
+  return (
+    <Card className="flex h-full min-h-0 flex-col gap-0 py-0">
+      <div className="flex shrink-0 items-center gap-2.5 border-b px-3 py-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+        <span className="w-4 shrink-0" aria-hidden="true" />
+        <span className="min-w-0 flex-1" aria-hidden="true" />
+        <span className="w-12 shrink-0 text-right font-mono tabular-nums">
+          {t('dashboard.statApi', 'API')}
+        </span>
+        <span className="w-12 shrink-0 text-right font-mono tabular-nums">
+          {t('dashboard.statTokens', 'TOK')}
+        </span>
+        <span className="w-12 shrink-0 text-right font-mono tabular-nums">
+          {t('dashboard.statMcp', 'MCP')}
+        </span>
+      </div>
+      {users === null ? (
+        <div className="flex flex-col gap-2 px-3 py-3">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <Skeleton className="h-4 w-6" />
+              <Skeleton className="h-4 flex-1" />
+              <Skeleton className="h-4 w-12" />
+            </div>
+          ))}
+        </div>
+      ) : users.length === 0 ? (
+        <div className="flex flex-1 flex-col items-center justify-center gap-2 px-3 text-center text-muted-foreground">
           <Inbox className="h-8 w-8" strokeWidth={1.25} />
           <span className="text-xs">{t('dashboard.noActiveUsers')}</span>
-        </CardContent>
-      </Card>
-    );
-  }
-
-  // `h-full` (not `flex-1`) because the Section's inner wrapper is
-  // sized but not a flex container — same trick ProviderHealthPanel
-  // uses to fill its half of the right column. CardContent owns the
-  // scroll so a long top-50 list never pushes the upstream-health
-  // panel out of view.
-  // The column-header strip sits inside the scroll area but with
-  // `position: sticky; top: 0` so it floats at the top while the
-  // list scrolls underneath. Labels appear once instead of repeating
-  // on every row — readable at any list length.
-  return (
-    <Card size="sm" className="flex h-full min-h-0 flex-col gap-0 py-0">
-      <CardContent className="min-h-0 flex-1 overflow-y-auto px-0 py-0">
-        <div
-          className="sticky top-0 z-10 flex h-5 items-center gap-2.5 border-b bg-card/95 px-3 text-[9px] uppercase leading-none tracking-wider text-muted-foreground backdrop-blur"
-        >
-          <span className="w-4 shrink-0" aria-hidden="true" />
-          <span className="min-w-0 flex-1" aria-hidden="true" />
-          <span className="w-12 shrink-0 text-right font-mono tabular-nums">
-            {t('dashboard.statApi', 'API')}
-          </span>
-          <span className="w-12 shrink-0 text-right font-mono tabular-nums">
-            {t('dashboard.statTokens', 'TOK')}
-          </span>
-          <span className="w-12 shrink-0 text-right font-mono tabular-nums">
-            {t('dashboard.statMcp', 'MCP')}
-          </span>
         </div>
-        <ul className="divide-y divide-border/40">
+      ) : (
+        <ul className="min-h-0 flex-1 divide-y divide-border/40 overflow-y-auto">
           {users.map((u, i) => (
             <TopUserRow key={u.user_id} rank={i + 1} user={u} locale={locale} />
           ))}
         </ul>
-      </CardContent>
+      )}
     </Card>
   );
 }

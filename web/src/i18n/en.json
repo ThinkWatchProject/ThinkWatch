@@ -283,7 +283,6 @@
     "statTokens": "Tokens",
     "statMcp": "MCP",
     "noActiveUsers": "No user activity in this time range",
-    "loadFailedShort": "Failed to load",
     "live": "live",
     "reconnecting": "reconnecting",
     "providerHealth": "Provider health",

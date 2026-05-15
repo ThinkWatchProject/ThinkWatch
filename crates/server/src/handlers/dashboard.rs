@@ -559,6 +559,10 @@ pub struct DashboardLive {
     /// Highest configured per-key RPM limit across active API keys, if any.
     /// Used as a reference line on the request-rate chart.
     pub max_rpm_limit: Option<i32>,
+    /// Top callers over the caller-selected window (24h / 7d / 30d).
+    /// Folded into the WS snapshot so the leaderboard refreshes on the
+    /// same cadence as the other live tiles — no separate REST poll.
+    pub top_users: TopActiveUsersResponse,
 }
 
 /// Resolve the caller's "which user_ids should be visible" filter
@@ -644,6 +648,7 @@ async fn resolve_dashboard_user_filter(
 async fn build_live_snapshot(
     state: &AppState,
     user_filter: Option<&[String]>,
+    top_users_range: crate::handlers::time_range::TimeRange,
 ) -> Result<DashboardLive, AppError> {
     // --- Postgres queries: parallel via tokio::try_join! --------------------
     // Errors propagate so the dashboard surfaces a real failure instead of
@@ -736,6 +741,10 @@ async fn build_live_snapshot(
             rpm_buckets: vec![0; 30],
             recent_logs: vec![],
             max_rpm_limit,
+            top_users: TopActiveUsersResponse {
+                users: vec![],
+                total: 0,
+            },
         });
     }
     let ch = ch_client(state)?;
@@ -758,6 +767,10 @@ async fn build_live_snapshot(
             rpm_buckets: vec![0; 30],
             recent_logs: vec![],
             max_rpm_limit,
+            top_users: TopActiveUsersResponse {
+                users: vec![],
+                total: 0,
+            },
         });
     }
 
@@ -1112,11 +1125,20 @@ async fn build_live_snapshot(
         }
     }
 
+    // Top-users runs serially after the snapshot try_join — its query
+    // takes ~50-200ms on warm CH, and the snapshot pushes on a 4s tick,
+    // so we don't bother folding it into the parallel block (the error
+    // types diverge and the saved latency wouldn't be visible to the
+    // operator). Caller-selected range is plumbed through from the WS
+    // query string.
+    let top_users = fetch_top_active_users(state, user_filter, top_users_range).await?;
+
     Ok(DashboardLive {
         providers,
         rpm_buckets,
         recent_logs,
         max_rpm_limit,
+        top_users,
     })
 }
 
@@ -1134,10 +1156,13 @@ async fn build_live_snapshot(
 pub async fn get_dashboard_live(
     auth_user: AuthUser,
     State(state): State<AppState>,
+    Query(rq): Query<crate::handlers::time_range::RangeQuery>,
 ) -> Result<Json<DashboardLive>, AppError> {
+    use crate::handlers::time_range::TimeRange;
+    let range = TimeRange::parse(rq.range.as_deref());
     let user_filter = resolve_dashboard_user_filter(&state.db, auth_user.claims.sub).await?;
     Ok(Json(
-        build_live_snapshot(&state, user_filter.as_deref()).await?,
+        build_live_snapshot(&state, user_filter.as_deref(), range).await?,
     ))
 }
 
@@ -1216,23 +1241,36 @@ pub async fn get_top_active_users(
 ) -> Result<Json<TopActiveUsersResponse>, AppError> {
     use crate::handlers::time_range::TimeRange;
     let range = TimeRange::parse(rq.range.as_deref());
-    let window_start = range.window_start(chrono::Utc::now());
     let user_filter = resolve_dashboard_user_filter(&state.db, auth_user.claims.sub).await?;
+    Ok(Json(
+        fetch_top_active_users(&state, user_filter.as_deref(), range).await?,
+    ))
+}
 
-    if !ch_available(&state) {
-        return Ok(Json(TopActiveUsersResponse {
+/// Shared implementation behind both `/api/dashboard/top-users` (REST)
+/// and the live WebSocket snapshot. Folds the empty-CH / empty-scope
+/// short-circuits in one place so the two call sites can't drift.
+pub(super) async fn fetch_top_active_users(
+    state: &AppState,
+    user_filter: Option<&[String]>,
+    range: crate::handlers::time_range::TimeRange,
+) -> Result<TopActiveUsersResponse, AppError> {
+    let window_start = range.window_start(chrono::Utc::now());
+
+    if !ch_available(state) {
+        return Ok(TopActiveUsersResponse {
             users: vec![],
             total: 0,
-        }));
+        });
     }
     // Empty team scope short-circuit, same as build_live_snapshot.
-    if matches!(user_filter.as_deref(), Some([])) {
-        return Ok(Json(TopActiveUsersResponse {
+    if matches!(user_filter, Some([])) {
+        return Ok(TopActiveUsersResponse {
             users: vec![],
             total: 0,
-        }));
+        });
     }
-    let ch = ch_client(&state)?;
+    let ch = ch_client(state)?;
     let from = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
 
     // Explicit `cast(... AS String)` peels the LowCardinality + Nullable
@@ -1259,7 +1297,7 @@ pub async fn get_top_active_users(
                 + Send,
         >,
     >;
-    let rows_fut: RowsFut = match user_filter.as_deref() {
+    let rows_fut: RowsFut = match user_filter {
         None => Box::pin(
             ch.query(
                 "SELECT \
@@ -1347,7 +1385,7 @@ pub async fn get_top_active_users(
     // ORDER+LIMIT and counting the grouped rows.
     type TotalFut =
         Pin<Box<dyn std::future::Future<Output = clickhouse::error::Result<u64>> + Send>>;
-    let total_fut: TotalFut = match user_filter.as_deref() {
+    let total_fut: TotalFut = match user_filter {
         None => Box::pin(
             ch.query(
                 "SELECT toUInt64(count()) FROM ( \
@@ -1393,7 +1431,7 @@ pub async fn get_top_active_users(
             last_active: r.last_active,
         })
         .collect();
-    Ok(Json(TopActiveUsersResponse { users, total }))
+    Ok(TopActiveUsersResponse { users, total })
 }
 
 // ============================================================================
@@ -1462,6 +1500,10 @@ pub async fn create_dashboard_ws_ticket(
 #[derive(Debug, Deserialize)]
 pub struct WsAuthQuery {
     pub ticket: Option<String>,
+    /// Caller-selected leaderboard window (24h / 7d / 30d). Folded
+    /// into every snapshot's `top_users` field. Unrecognised values
+    /// silently fall back to 24h, matching the REST handler.
+    pub range: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1561,6 +1603,8 @@ pub async fn dashboard_ws(
     State(state): State<AppState>,
     Query(q): Query<WsAuthQuery>,
 ) -> Result<Response, axum::http::StatusCode> {
+    use crate::handlers::time_range::TimeRange;
+    let range = TimeRange::parse(q.range.as_deref());
     // Atomically consume the ticket. Using fred's GETDEL means a replay
     // attempt always fails — the second consumer sees an empty string.
     let ticket = q.ticket.ok_or(axum::http::StatusCode::UNAUTHORIZED)?;
@@ -1585,7 +1629,7 @@ pub async fn dashboard_ws(
         return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
 
-    Ok(ws.on_upgrade(move |socket| dashboard_ws_loop(socket, state, user_id)))
+    Ok(ws.on_upgrade(move |socket| dashboard_ws_loop(socket, state, user_id, range)))
 }
 
 /// Redis key set by `auth.revoke_sessions` to forcibly close all live
@@ -1644,7 +1688,12 @@ impl Drop for WsSlotGuard {
     }
 }
 
-async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid::Uuid) {
+async fn dashboard_ws_loop(
+    mut socket: WebSocket,
+    state: AppState,
+    user_id: uuid::Uuid,
+    top_users_range: crate::handlers::time_range::TimeRange,
+) {
     let _slot = WsSlotGuard(user_id);
 
     // Per-frame I/O ceiling. Without this a slow / dead client can hang
@@ -1672,7 +1721,15 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
 
     // Push an initial snapshot immediately so the client never sees an
     // empty UI on connect.
-    if let Err(e) = push_snapshot(&mut socket, &state, user_filter.as_deref(), io_timeout).await {
+    if let Err(e) = push_snapshot(
+        &mut socket,
+        &state,
+        user_filter.as_deref(),
+        top_users_range,
+        io_timeout,
+    )
+    .await
+    {
         tracing::debug!("dashboard ws closed during initial push: {e}");
         return;
     }
@@ -1694,52 +1751,55 @@ async fn dashboard_ws_loop(mut socket: WebSocket, state: AppState, user_id: uuid
 
     loop {
         tokio::select! {
-            _ = revoke_ticker.tick() => {
-                let revoked: u8 = fred::interfaces::KeysInterface::exists(&state.redis, &revoke_key)
-                    .await
-                    .unwrap_or(0);
-                if revoked > 0 {
-                    tracing::info!(%user_id, "dashboard ws closing: user revoked");
-                    let _ = tokio::time::timeout(
-                        io_timeout,
-                        socket.send(Message::Close(None)),
-                    )
-                    .await;
-                    return;
-                }
-                // Refresh the team/user filter. A role un-assignment or
-                // team membership change between two revoke ticks
-                // tightens the visible-user set on the next snapshot.
-                // A Redis hiccup on the revoke check above is fail-soft
-                // (continue serving); a Postgres hiccup here is the
-                // same — keep the previous filter rather than break
-                // the connection over a transient error.
-                match resolve_dashboard_user_filter(&state.db, user_id).await {
-                    Ok(f) => user_filter = f,
-                    Err(e) => tracing::warn!(%user_id, "dashboard scope re-resolve failed (keeping stale filter): {e}"),
-                }
-            }
-            _ = ticker.tick() => {
-                if let Err(e) = push_snapshot(&mut socket, &state, user_filter.as_deref(), io_timeout).await {
-                    tracing::debug!("dashboard ws push failed: {e}");
-                    return;
-                }
-            }
-            msg = socket.recv() => {
-                match msg {
-                    Some(Ok(Message::Close(_))) | None => return,
-                    Some(Ok(Message::Ping(p))) => {
-                        // Respect the same per-frame timeout for pings.
-                        match tokio::time::timeout(io_timeout, socket.send(Message::Pong(p))).await {
-                            Ok(Ok(())) => {}
-                            _ => return,
-                        }
+                _ = revoke_ticker.tick() => {
+                    let revoked: u8 = fred::interfaces::KeysInterface::exists(&state.redis, &revoke_key)
+                        .await
+                        .unwrap_or(0);
+                    if revoked > 0 {
+                        tracing::info!(%user_id, "dashboard ws closing: user revoked");
+                        let _ = tokio::time::timeout(
+                            io_timeout,
+                            socket.send(Message::Close(None)),
+                        )
+                        .await;
+                        return;
                     }
-                    Some(Err(_)) => return,
-                    _ => {} // ignore client text/binary frames
+                    // Refresh the team/user filter. A role un-assignment or
+                    // team membership change between two revoke ticks
+                    // tightens the visible-user set on the next snapshot.
+                    // A Redis hiccup on the revoke check above is fail-soft
+                    // (continue serving); a Postgres hiccup here is the
+                    // same — keep the previous filter rather than break
+                    // the connection over a transient error.
+                    match resolve_dashboard_user_filter(&state.db, user_id).await {
+                        Ok(f) => user_filter = f,
+                        Err(e) => tracing::warn!(%user_id, "dashboard scope re-resolve failed (keeping stale filter): {e}"),
+                    }
+                }
+                _ = ticker.tick() => {
+                    if let Err(e) =
+            push_snapshot(&mut socket, &state, user_filter.as_deref(), top_users_range, io_timeout)
+                .await
+        {
+                        tracing::debug!("dashboard ws push failed: {e}");
+                        return;
+                    }
+                }
+                msg = socket.recv() => {
+                    match msg {
+                        Some(Ok(Message::Close(_))) | None => return,
+                        Some(Ok(Message::Ping(p))) => {
+                            // Respect the same per-frame timeout for pings.
+                            match tokio::time::timeout(io_timeout, socket.send(Message::Pong(p))).await {
+                                Ok(Ok(())) => {}
+                                _ => return,
+                            }
+                        }
+                        Some(Err(_)) => return,
+                        _ => {} // ignore client text/binary frames
+                    }
                 }
             }
-        }
     }
 }
 
@@ -1747,9 +1807,10 @@ async fn push_snapshot(
     socket: &mut WebSocket,
     state: &AppState,
     user_filter: Option<&[String]>,
+    top_users_range: crate::handlers::time_range::TimeRange,
     io_timeout: Duration,
 ) -> Result<(), String> {
-    let snap = build_live_snapshot(state, user_filter)
+    let snap = build_live_snapshot(state, user_filter, top_users_range)
         .await
         .map_err(|e| format!("snapshot build failed: {e}"))?;
     // Build a compact serialisation (no whitespace) so each tick ships
