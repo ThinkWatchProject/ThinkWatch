@@ -1500,7 +1500,7 @@ function TopUsersPanel({
     <Card size="sm" className="flex h-full min-h-0 flex-col gap-0 py-0">
       <CardContent className="min-h-0 flex-1 overflow-y-auto px-0 py-0">
         <div
-          className="sticky top-0 z-10 flex items-center gap-2.5 border-b bg-card/95 px-3 py-1.5 text-[9px] uppercase tracking-wider text-muted-foreground backdrop-blur"
+          className="sticky top-0 z-10 flex items-center gap-2.5 border-b bg-card/95 px-3 py-1 text-[9px] uppercase leading-none tracking-wider text-muted-foreground backdrop-blur"
         >
           <span className="w-4 shrink-0" aria-hidden="true" />
           <span className="min-w-0 flex-1" aria-hidden="true" />
