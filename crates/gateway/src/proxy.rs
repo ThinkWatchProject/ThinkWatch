@@ -271,21 +271,12 @@ fn resolve_session_id(headers: &axum::http::HeaderMap) -> Option<String> {
         .filter(|s| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| !c.is_control()))
 }
 
-/// Map a `GatewayError` to the HTTP status we'll actually return so
-/// the error-path `gateway_logs` row carries the same status code the
-/// client saw. Keep in sync with `GatewayErrorResponse::into_response`
-/// below — drift there would make traces misleading.
+/// Thin wrapper kept for call-site readability; delegates to
+/// `GatewayError::status_code` so the error-path `gateway_logs` row,
+/// the streaming `StreamOutcome::UpstreamError` log row, and
+/// `GatewayErrorResponse::into_response` all share one mapping.
 fn gateway_error_status(err: &GatewayError) -> i64 {
-    match err {
-        GatewayError::ProviderError(_) => 502,
-        GatewayError::ProviderHttpError { status, .. } => i64::from(*status),
-        GatewayError::ProviderTimeout(_) => 504,
-        GatewayError::ProviderInvalidResponse(_) => 502,
-        GatewayError::TransformError(_) => 400,
-        GatewayError::NetworkError(_) => 502,
-        GatewayError::UpstreamRateLimited | GatewayError::LocalRateLimited(_) => 429,
-        GatewayError::UpstreamAuthError => 401,
-    }
+    err.status_code()
 }
 
 /// Emit a single `gateway_logs` row for a failed request. The detail
@@ -899,7 +890,7 @@ fn is_retryable(err: &GatewayError) -> bool {
         GatewayError::NetworkError(_)
         | GatewayError::ProviderError(_)
         | GatewayError::ProviderTimeout(_)
-        | GatewayError::UpstreamRateLimited => true,
+        | GatewayError::UpstreamRateLimited { .. } => true,
         GatewayError::ProviderHttpError { status, .. } => *status >= 500 || *status == 408,
         _ => false,
     }
@@ -1352,32 +1343,10 @@ pub async fn proxy_chat_completion(
                     .map(|u| (u.prompt_tokens, u.completion_tokens))
                     .unwrap_or((0, 0));
                 let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
-                // Pick the recorded status + an extra detail blob from
-                // the structured outcome so the gateway_logs row says
-                // exactly why the stream ended:
-                //   * Natural          → 200, no extra detail
-                //   * UpstreamError    → 502 with error_type + message
-                //   * ClientCancelled  → 499 (Nginx convention) marker
-                let (logged_status, error_detail) = match &result.outcome {
-                    crate::streaming::StreamOutcome::Natural => (200i64, None),
-                    crate::streaming::StreamOutcome::UpstreamError {
-                        error_type,
-                        message,
-                    } => (
-                        502i64,
-                        Some(serde_json::json!({
-                            "error_type": error_type,
-                            "error_message": message,
-                            "stream_outcome": "upstream_error",
-                        })),
-                    ),
-                    crate::streaming::StreamOutcome::ClientCancelled => (
-                        499i64,
-                        Some(serde_json::json!({
-                            "stream_outcome": "client_cancelled",
-                        })),
-                    ),
-                };
+                // Single classifier — Natural → 200, UpstreamError →
+                // the underlying GatewayError's canonical status (not
+                // the old 502 blanket), ClientCancelled → 499.
+                let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
                 emit_gateway_log_with_extra(
                     &audit_for_done,
                     &trace_id_for_done,
@@ -1807,7 +1776,8 @@ pub async fn proxy_anthropic_messages(
                     .map(|u| (u.prompt_tokens, u.completion_tokens))
                     .unwrap_or((0, 0));
                 let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
-                emit_gateway_log(
+                let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
+                emit_gateway_log_with_extra(
                     &audit_for_done,
                     &trace_id_for_done,
                     session_id_for_done.as_deref(),
@@ -1822,7 +1792,8 @@ pub async fn proxy_anthropic_messages(
                     ct,
                     cost,
                     started.elapsed().as_millis() as i64,
-                    200,
+                    logged_status,
+                    error_detail,
                 );
                 let stream_success = matches!(
                     result.outcome,
@@ -2211,7 +2182,8 @@ pub async fn proxy_responses(
                     .map(|u| (u.prompt_tokens, u.completion_tokens))
                     .unwrap_or((0, 0));
                 let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
-                emit_gateway_log(
+                let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
+                emit_gateway_log_with_extra(
                     &audit_for_done,
                     &trace_id_for_done,
                     session_id_for_done.as_deref(),
@@ -2226,7 +2198,8 @@ pub async fn proxy_responses(
                     ct,
                     cost,
                     started.elapsed().as_millis() as i64,
-                    200,
+                    logged_status,
+                    error_detail,
                 );
                 let stream_success = matches!(
                     result.outcome,
@@ -2409,25 +2382,24 @@ impl From<GatewayError> for GatewayErrorResponse {
 
 impl IntoResponse for GatewayErrorResponse {
     fn into_response(self) -> axum::response::Response {
-        use axum::http::StatusCode;
+        use axum::http::{HeaderValue, StatusCode, header};
 
-        let (status, error_type) = match &self.0 {
-            GatewayError::ProviderError(_) => (StatusCode::BAD_GATEWAY, "provider_error"),
-            GatewayError::ProviderHttpError { status, .. } => (
-                StatusCode::from_u16(*status).unwrap_or(StatusCode::BAD_GATEWAY),
-                "provider_http_error",
-            ),
-            GatewayError::ProviderTimeout(_) => (StatusCode::GATEWAY_TIMEOUT, "provider_timeout"),
-            GatewayError::ProviderInvalidResponse(_) => {
-                (StatusCode::BAD_GATEWAY, "provider_invalid_response")
+        let status =
+            StatusCode::from_u16(self.0.status_code() as u16).unwrap_or(StatusCode::BAD_GATEWAY);
+        let error_type = match &self.0 {
+            GatewayError::ProviderError(_) => "provider_error",
+            GatewayError::ProviderHttpError { .. } => "provider_http_error",
+            GatewayError::ProviderTimeout(_) => "provider_timeout",
+            GatewayError::ProviderInvalidResponse(_) => "provider_invalid_response",
+            GatewayError::TransformError(_) => "transform_error",
+            GatewayError::NetworkError(_) => "network_error",
+            GatewayError::UpstreamRateLimited { .. } | GatewayError::LocalRateLimited(_) => {
+                "rate_limited"
             }
-            GatewayError::TransformError(_) => (StatusCode::BAD_REQUEST, "transform_error"),
-            GatewayError::NetworkError(_) => (StatusCode::BAD_GATEWAY, "network_error"),
-            GatewayError::UpstreamRateLimited => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
-            GatewayError::LocalRateLimited(_) => (StatusCode::TOO_MANY_REQUESTS, "rate_limited"),
-            GatewayError::UpstreamAuthError => (StatusCode::UNAUTHORIZED, "auth_error"),
+            GatewayError::UpstreamAuthError => "auth_error",
         };
 
+        let retry_after = self.0.retry_after_secs();
         let body = serde_json::json!({
             "error": {
                 "message": self.0.to_string(),
@@ -2435,7 +2407,17 @@ impl IntoResponse for GatewayErrorResponse {
             }
         });
 
-        (status, Json(body)).into_response()
+        let mut response = (status, Json(body)).into_response();
+        // Echo the upstream's Retry-After (or our local default) so
+        // well-behaved clients back off the right amount instead of
+        // burning quota with tight 3× retries that all hit the same
+        // open window.
+        if let Some(secs) = retry_after
+            && let Ok(v) = HeaderValue::from_str(&secs.to_string())
+        {
+            response.headers_mut().insert(header::RETRY_AFTER, v);
+        }
+        response
     }
 }
 
@@ -2453,18 +2435,184 @@ mod helper_tests {
     fn gateway_error_status_matches_response_status() {
         for (err, expected) in [
             (GatewayError::ProviderError("x".into()), 502),
+            (
+                GatewayError::ProviderHttpError {
+                    status: 418,
+                    message: "teapot".into(),
+                },
+                418,
+            ),
+            (GatewayError::ProviderTimeout("x".into()), 504),
+            (GatewayError::ProviderInvalidResponse("x".into()), 502),
             (GatewayError::TransformError("x".into()), 400),
             (GatewayError::NetworkError("x".into()), 502),
-            (GatewayError::UpstreamRateLimited, 429),
+            (
+                GatewayError::UpstreamRateLimited {
+                    retry_after_secs: None,
+                },
+                429,
+            ),
+            (
+                GatewayError::UpstreamRateLimited {
+                    retry_after_secs: Some(45),
+                },
+                429,
+            ),
             (GatewayError::LocalRateLimited("rule".into()), 429),
             (GatewayError::UpstreamAuthError, 401),
         ] {
             assert_eq!(
                 gateway_error_status(&err),
                 expected,
-                "status mismatch for {err:?}"
+                "gateway_error_status mismatch for {err:?}"
+            );
+            // The wire-status path goes through IntoResponse — exercise
+            // it so the two stay in lock-step even after either side is
+            // refactored.
+            let wire_status = GatewayErrorResponse::from(err)
+                .into_response()
+                .status()
+                .as_u16() as i64;
+            assert_eq!(
+                wire_status, expected,
+                "IntoResponse wire status disagrees with gateway_error_status"
             );
         }
+    }
+
+    /// The streaming on_done path historically hard-coded 502 for any
+    /// mid-stream upstream failure, so a 429 from OpenRouter would
+    /// land in gateway_logs as 502 and the dashboard would paint a
+    /// healthy-but-throttled upstream red. Lock in that
+    /// `StreamOutcome::UpstreamError` carries the underlying
+    /// GatewayError's canonical status verbatim.
+    #[test]
+    fn stream_outcome_upstream_error_preserves_status() {
+        use crate::streaming::StreamOutcome;
+        for err in [
+            GatewayError::UpstreamRateLimited {
+                retry_after_secs: Some(12),
+            },
+            GatewayError::UpstreamAuthError,
+            GatewayError::ProviderTimeout("slow".into()),
+            GatewayError::ProviderError("boom".into()),
+            GatewayError::ProviderHttpError {
+                status: 503,
+                message: "down".into(),
+            },
+        ] {
+            let expected = err.status_code();
+            let outcome = StreamOutcome::UpstreamError {
+                error_type: err.error_tag().to_string(),
+                message: err.to_string(),
+                status_code: err.status_code(),
+            };
+            let (logged_status, detail) = outcome.logged_status_and_detail();
+            assert_eq!(
+                logged_status, expected,
+                "stream-path status drift for {err:?}: got {logged_status}, expected {expected}"
+            );
+            assert!(
+                detail.as_ref().and_then(|v| v.get("error_type")).is_some(),
+                "stream outcome detail must carry error_type label"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_outcome_natural_and_cancelled_have_canonical_status() {
+        use crate::streaming::StreamOutcome;
+        assert_eq!(StreamOutcome::Natural.logged_status_and_detail().0, 200);
+        assert_eq!(
+            StreamOutcome::ClientCancelled.logged_status_and_detail().0,
+            499
+        );
+    }
+
+    /// 429 responses MUST carry a `Retry-After` header. Without one,
+    /// naive SDKs (the field-observed case that triggered this fix)
+    /// retry tightly and re-burn quota that was about to refill —
+    /// turning a brief throttle into sustained pain. The upstream's
+    /// own value wins; we fall back to a conservative default for
+    /// local-limited responses.
+    #[test]
+    fn rate_limit_responses_carry_retry_after_header() {
+        // Upstream provided a hint — echo it.
+        let resp = GatewayErrorResponse::from(GatewayError::UpstreamRateLimited {
+            retry_after_secs: Some(45),
+        })
+        .into_response();
+        assert_eq!(resp.status().as_u16(), 429);
+        assert_eq!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("45")
+        );
+
+        // Upstream silent — we still echo nothing, because we don't
+        // know when the quota window opens. (The local-default only
+        // applies to OUR own rate limiter, where we DO know.)
+        let resp = GatewayErrorResponse::from(GatewayError::UpstreamRateLimited {
+            retry_after_secs: None,
+        })
+        .into_response();
+        assert!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .is_none(),
+            "no header when upstream didn't tell us — guessing would mislead clients"
+        );
+
+        // Local limit — we set our own conservative default so SDKs
+        // see a number instead of immediately retrying.
+        let resp = GatewayErrorResponse::from(GatewayError::LocalRateLimited("budget".into()))
+            .into_response();
+        assert_eq!(resp.status().as_u16(), 429);
+        assert!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .is_some(),
+            "local rate-limit must carry a Retry-After default"
+        );
+
+        // Non-429 responses must NOT carry Retry-After — would
+        // confuse SDKs that special-case the header.
+        let resp =
+            GatewayErrorResponse::from(GatewayError::ProviderError("boom".into())).into_response();
+        assert_eq!(resp.status().as_u16(), 502);
+        assert!(
+            resp.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn retry_after_parser_handles_delta_seconds_and_garbage() {
+        use crate::providers::traits::parse_retry_after_seconds;
+        assert_eq!(parse_retry_after_seconds("30"), Some(30));
+        assert_eq!(parse_retry_after_seconds("  45  "), Some(45));
+        assert_eq!(parse_retry_after_seconds("0"), Some(0));
+        // HTTP-date form — intentionally unsupported (rare in practice
+        // for LLM providers). Treated as "no hint".
+        assert_eq!(
+            parse_retry_after_seconds("Wed, 21 Oct 2025 07:28:00 GMT"),
+            None
+        );
+        assert_eq!(parse_retry_after_seconds(""), None);
+        assert_eq!(parse_retry_after_seconds("abc"), None);
+    }
+
+    #[test]
+    fn upstream_rate_limit_hint_is_capped() {
+        // An upstream that claims "retry in 2 hours" mostly means "we
+        // gave up estimating" — capping at one hour keeps the header
+        // useful for retries while not promising to come back in 24h.
+        let err = GatewayError::UpstreamRateLimited {
+            retry_after_secs: Some(7200),
+        };
+        assert_eq!(err.retry_after_secs(), Some(3600));
     }
 
     #[test]

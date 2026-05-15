@@ -271,7 +271,7 @@ impl FailoverProvider {
             err,
             GatewayError::NetworkError(_)
                 | GatewayError::UpstreamAuthError
-                | GatewayError::UpstreamRateLimited
+                | GatewayError::UpstreamRateLimited { .. }
         )
     }
 }
@@ -557,7 +557,14 @@ mod tests {
             &GatewayError::UpstreamAuthError
         ));
         assert!(FailoverProvider::is_retryable(
-            &GatewayError::UpstreamRateLimited
+            &GatewayError::UpstreamRateLimited {
+                retry_after_secs: None
+            }
+        ));
+        assert!(FailoverProvider::is_retryable(
+            &GatewayError::UpstreamRateLimited {
+                retry_after_secs: Some(7)
+            }
         ));
         // ProviderError represents a content-level failure (model-specific),
         // not transport-level — retrying the same upstream would just

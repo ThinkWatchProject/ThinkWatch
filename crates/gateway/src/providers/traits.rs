@@ -108,8 +108,14 @@ pub enum GatewayError {
     TransformError(String),
     #[error("Network error: {0}")]
     NetworkError(String),
+    /// Upstream returned 429. `retry_after_secs` captures the value
+    /// parsed off the upstream's `Retry-After` header (delta-seconds
+    /// form per RFC 7231) so we can echo it to our client and stop
+    /// clients spinning into a tight retry loop while quota is still
+    /// burning. `None` means the upstream didn't tell us — we pick a
+    /// conservative default downstream.
     #[error("Rate limited by upstream")]
-    UpstreamRateLimited,
+    UpstreamRateLimited { retry_after_secs: Option<u32> },
     #[error("Authentication failed with upstream")]
     UpstreamAuthError,
     /// Local rate limit / budget cap was hit. The String is the rule
@@ -118,6 +124,73 @@ pub enum GatewayError {
     /// "monthly budget"). Maps to 429 in `IntoResponse`.
     #[error("Rate limited: {0}")]
     LocalRateLimited(String),
+}
+
+impl GatewayError {
+    /// Canonical HTTP status code for this error variant. Single source
+    /// of truth shared between the response wire status
+    /// (`GatewayErrorResponse::into_response`), the non-streaming log
+    /// row writer, and the streaming `StreamOutcome::UpstreamError`
+    /// path — drift between any of these would make the gateway_logs
+    /// `status_code` field disagree with what the client saw, leading
+    /// operators to chase phantom 502s for what was actually a 429.
+    pub fn status_code(&self) -> i64 {
+        match self {
+            GatewayError::ProviderError(_) => 502,
+            GatewayError::ProviderHttpError { status, .. } => i64::from(*status),
+            GatewayError::ProviderTimeout(_) => 504,
+            GatewayError::ProviderInvalidResponse(_) => 502,
+            GatewayError::TransformError(_) => 400,
+            GatewayError::NetworkError(_) => 502,
+            GatewayError::UpstreamRateLimited { .. } | GatewayError::LocalRateLimited(_) => 429,
+            GatewayError::UpstreamAuthError => 401,
+        }
+    }
+
+    /// Short stable tag derived from the variant name. Used as a
+    /// dashboard-friendly label (Prometheus value, gateway_logs
+    /// `error_type` field). Never localize — operators grep on these.
+    pub fn error_tag(&self) -> &'static str {
+        match self {
+            GatewayError::ProviderError(_) => "ProviderError",
+            GatewayError::ProviderHttpError { .. } => "ProviderHttpError",
+            GatewayError::ProviderTimeout(_) => "ProviderTimeout",
+            GatewayError::ProviderInvalidResponse(_) => "ProviderInvalidResponse",
+            GatewayError::TransformError(_) => "TransformError",
+            GatewayError::NetworkError(_) => "NetworkError",
+            GatewayError::UpstreamRateLimited { .. } => "UpstreamRateLimited",
+            GatewayError::LocalRateLimited(_) => "LocalRateLimited",
+            GatewayError::UpstreamAuthError => "UpstreamAuthError",
+        }
+    }
+
+    /// Hint, in seconds, for `Retry-After` on a 429 response. For
+    /// upstream limits we echo the upstream's own header when present;
+    /// for local limits we fall back to a conservative 30s so naive
+    /// clients don't spin into a tight retry loop while the bucket is
+    /// still refilling. Capped at one hour to keep the header sane
+    /// even when an upstream returns an absurd value.
+    pub fn retry_after_secs(&self) -> Option<u32> {
+        const HARD_CAP_SECS: u32 = 3600;
+        const LOCAL_DEFAULT_SECS: u32 = 30;
+        match self {
+            GatewayError::UpstreamRateLimited { retry_after_secs } => {
+                retry_after_secs.map(|s| s.min(HARD_CAP_SECS))
+            }
+            GatewayError::LocalRateLimited(_) => Some(LOCAL_DEFAULT_SECS),
+            _ => None,
+        }
+    }
+}
+
+/// Parse RFC 7231 `Retry-After` (delta-seconds form). HTTP-date is
+/// intentionally not supported — the absolute-time variant is
+/// effectively unused by upstream LLM providers and would require
+/// dragging in a date parser plus clock-skew handling for a vanishingly
+/// rare path. Bad input silently maps to None, mirroring how a missing
+/// header is treated; a malformed header is no better than no header.
+pub fn parse_retry_after_seconds(value: &str) -> Option<u32> {
+    value.trim().parse::<u32>().ok()
 }
 
 /// Shared base for all AI providers. Holds the HTTP client, base URL,
@@ -219,7 +292,16 @@ impl ProviderBase {
     ) -> Result<reqwest::Response, GatewayError> {
         let status = resp.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            return Err(GatewayError::UpstreamRateLimited);
+            // Snag the upstream's own `Retry-After` (if it sent one)
+            // so we can echo it to our client; without this, a client
+            // with naive 3× retry policies just hammers the upstream
+            // through the same quota window — observed in the field.
+            let retry_after_secs = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(parse_retry_after_seconds);
+            return Err(GatewayError::UpstreamRateLimited { retry_after_secs });
         }
         if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
             return Err(GatewayError::UpstreamAuthError);

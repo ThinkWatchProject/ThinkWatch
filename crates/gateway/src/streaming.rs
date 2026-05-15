@@ -25,6 +25,14 @@ pub enum StreamOutcome {
         error_type: String,
         /// Operator-facing description, truncated.
         message: String,
+        /// Canonical HTTP status (via `GatewayError::status_code()`)
+        /// the wire would have carried if this error had occurred
+        /// *before* SSE headers were flushed. The streaming on_done
+        /// callbacks log this to gateway_logs so a 429 stays a 429 and
+        /// a 504 stays a 504 — historically every streaming-mid error
+        /// was logged as 502, which painted healthy-but-throttled
+        /// upstreams as broken on the dashboard.
+        status_code: i64,
     },
     /// Consumer dropped the stream future before completion. Signals
     /// "the user closed the tab" or "axum dropped the connection";
@@ -36,6 +44,40 @@ pub enum StreamOutcome {
 impl StreamOutcome {
     pub fn is_natural(&self) -> bool {
         matches!(self, StreamOutcome::Natural)
+    }
+
+    /// `(logged_status, optional_detail_blob)` for the audit row the
+    /// streaming on_done callback emits. Centralizing this lets the
+    /// three handler-format on_done sites (OpenAI / Anthropic /
+    /// Responses) share one mapping instead of each one hand-rolling
+    /// their own — historically two of them ignored the outcome and
+    /// always logged 200, silently masking mid-stream failures.
+    ///
+    /// Nginx 499 for client-cancelled is intentional; the standard
+    /// HTTP catalogue has no slot for "consumer left," and 499 is the
+    /// de-facto convention dashboards already filter on.
+    pub fn logged_status_and_detail(&self) -> (i64, Option<serde_json::Value>) {
+        match self {
+            StreamOutcome::Natural => (200, None),
+            StreamOutcome::UpstreamError {
+                error_type,
+                message,
+                status_code,
+            } => (
+                *status_code,
+                Some(serde_json::json!({
+                    "error_type": error_type,
+                    "error_message": message,
+                    "stream_outcome": "upstream_error",
+                })),
+            ),
+            StreamOutcome::ClientCancelled => (
+                499,
+                Some(serde_json::json!({
+                    "stream_outcome": "client_cancelled",
+                })),
+            ),
+        }
     }
 }
 
@@ -206,11 +248,12 @@ where
                 }
                 Err(e) => {
                     tracing::warn!("Stream error, forwarding as SSE error event: {e}");
-                    // Capture the error type tag (variant prefix) so the
-                    // outcome reaches on_done with structured info, not
-                    // just "the stream wasn't natural".
-                    let error_type =
-                        format!("{e:?}").split('(').next().unwrap_or("Error").to_string();
+                    // Pull the canonical status + label off the
+                    // GatewayError so on_done logs the actual cause
+                    // (429 stays a 429, 504 stays a 504) instead of
+                    // the old blanket 502.
+                    let error_type = e.error_tag().to_string();
+                    let status_code = e.status_code();
                     let message = e.to_string();
                     let error_json = serde_json::json!({
                         "error": {
@@ -231,6 +274,7 @@ where
                         let _ = tx.send(StreamOutcome::UpstreamError {
                             error_type,
                             message,
+                            status_code,
                         });
                     }
                     break;
