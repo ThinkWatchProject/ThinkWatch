@@ -36,12 +36,31 @@ export function ServiceLogo({ service, className }: ServiceLogoProps) {
 }
 
 function resolve(key: string): { letter: string; className: string } | null {
-  // AI providers
+  // AI providers — first-party APIs
   if (key.includes('openai') || key === 'gpt') return { letter: 'O', className: 'bg-emerald-500/15 text-emerald-500' };
   if (key.includes('anthropic') || key.includes('claude')) return { letter: 'A', className: 'bg-amber-500/15 text-amber-500' };
   if (key.includes('google') || key.includes('gemini')) return { letter: 'G', className: 'bg-blue-500/15 text-blue-500' };
   if (key.includes('azure')) return { letter: 'Az', className: 'bg-cyan-500/15 text-cyan-500' };
   if (key.includes('bedrock') || key.includes('aws')) return { letter: 'A', className: 'bg-violet-500/15 text-violet-500' };
+
+  // AI providers — aggregators + open-weight gateways. Listed before
+  // the "Dev tooling" block so e.g. "openrouter" doesn't accidentally
+  // match a future "open*" rule.
+  if (key.includes('openrouter')) return { letter: 'OR', className: 'bg-rose-500/15 text-rose-500' };
+  if (key.includes('deepseek')) return { letter: 'DS', className: 'bg-blue-600/15 text-blue-600' };
+  if (key.includes('moonshot') || key.includes('kimi')) return { letter: 'K', className: 'bg-violet-500/15 text-violet-500' };
+  if (key.includes('mistral')) return { letter: 'Mi', className: 'bg-orange-500/15 text-orange-500' };
+  if (key.includes('groq')) return { letter: 'Gq', className: 'bg-red-500/15 text-red-500' };
+  if (key.includes('perplexity')) return { letter: 'Pp', className: 'bg-teal-500/15 text-teal-500' };
+  if (key.includes('fireworks')) return { letter: 'Fw', className: 'bg-amber-600/15 text-amber-600' };
+  if (key.includes('together')) return { letter: 'Tg', className: 'bg-blue-500/15 text-blue-500' };
+  if (key.includes('xai') || key.includes('grok')) return { letter: 'X', className: 'bg-neutral-500/15 text-foreground' };
+  if (key.includes('cohere')) return { letter: 'Co', className: 'bg-pink-500/15 text-pink-500' };
+
+  // MCP servers — search / retrieval
+  if (key.includes('exa')) return { letter: 'Ex', className: 'bg-indigo-500/15 text-indigo-500' };
+  if (key.includes('brave')) return { letter: 'Bv', className: 'bg-orange-500/15 text-orange-500' };
+  if (key.includes('tavily')) return { letter: 'Tv', className: 'bg-cyan-500/15 text-cyan-500' };
 
   // Dev tooling
   if (key.includes('github')) return { letter: 'GH', className: 'bg-neutral-500/15 text-foreground' };
@@ -49,12 +68,16 @@ function resolve(key: string): { letter: string; className: string } | null {
   if (key.includes('linear')) return { letter: 'L', className: 'bg-indigo-500/15 text-indigo-500' };
   if (key.includes('sentry')) return { letter: 'S', className: 'bg-purple-500/15 text-purple-500' };
   if (key.includes('jira') || key.includes('atlassian')) return { letter: 'J', className: 'bg-blue-600/15 text-blue-600' };
+  if (key.includes('vercel')) return { letter: 'V', className: 'bg-neutral-500/15 text-foreground' };
+  if (key.includes('figma')) return { letter: 'Fg', className: 'bg-fuchsia-500/15 text-fuchsia-500' };
+  if (key.includes('stripe')) return { letter: 'St', className: 'bg-violet-500/15 text-violet-500' };
 
   // Data stores
   if (key.includes('postgres')) return { letter: 'Pg', className: 'bg-sky-500/15 text-sky-500' };
   if (key.includes('mysql')) return { letter: 'My', className: 'bg-orange-600/15 text-orange-600' };
   if (key.includes('redis')) return { letter: 'R', className: 'bg-red-500/15 text-red-500' };
   if (key.includes('mongo')) return { letter: 'M', className: 'bg-green-500/15 text-green-500' };
+  if (key.includes('supabase')) return { letter: 'Sb', className: 'bg-emerald-500/15 text-emerald-500' };
 
   // Messaging
   if (key.includes('slack')) return { letter: 'Sl', className: 'bg-fuchsia-500/15 text-fuchsia-500' };
