@@ -934,18 +934,24 @@ async fn build_live_snapshot(
     // avg latency. ORDER BY max(created_at) keeps the most recently
     // active groups on top — matches the original stream's "newest
     // first" ordering.
+    // Inner subquery aliases `created_at` → `row_at` so the outer
+    // SELECT's `toString(max(...)) AS created_at` alias can't shadow
+    // the column inside `argMax(id, created_at)` / `argMax(status,
+    // created_at)`. CH resolves alias-vs-column ambiguously when both
+    // share a name (the alias wins, which means argMax received an
+    // aggregate as its second argument and bailed with ILLEGAL_AGGREGATION).
     let recent_q: ChFut<LiveLogRow> = match user_filter {
         None => Box::pin(
             ch.query(
                 "SELECT \
                     kind, \
-                    cast(argMax(id, created_at) AS String) AS id, \
+                    cast(argMax(id, row_at) AS String) AS id, \
                     cast(user_id AS String) AS user_id, \
                     cast(subject AS String) AS subject, \
-                    cast(argMax(status, created_at) AS String) AS status, \
+                    cast(argMax(status, row_at) AS String) AS status, \
                     toInt64(round(avg(latency_ms))) AS latency_ms, \
                     toInt64(sum(tokens)) AS tokens, \
-                    toString(max(created_at)) AS created_at, \
+                    toString(max(row_at)) AS created_at, \
                     toUInt64(count()) AS count \
                  FROM ( \
                     SELECT \
@@ -956,7 +962,7 @@ async fn build_live_snapshot(
                         toString(ifNull(status_code, 0)) AS status, \
                         ifNull(latency_ms, 0) AS latency_ms, \
                         toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
-                        created_at \
+                        created_at AS row_at \
                     FROM gateway_logs \
                     PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                     UNION ALL \
@@ -968,12 +974,12 @@ async fn build_live_snapshot(
                         ifNull(status, '') AS status, \
                         ifNull(duration_ms, 0) AS latency_ms, \
                         toInt64(0) AS tokens, \
-                        created_at \
+                        created_at AS row_at \
                     FROM mcp_logs \
                     PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                  ) \
                  GROUP BY kind, user_id, subject \
-                 ORDER BY max(created_at) DESC \
+                 ORDER BY max(row_at) DESC \
                  LIMIT 16",
             )
             .fetch_all::<LiveLogRow>(),
@@ -982,13 +988,13 @@ async fn build_live_snapshot(
             ch.query(
                 "SELECT \
                     kind, \
-                    cast(argMax(id, created_at) AS String) AS id, \
+                    cast(argMax(id, row_at) AS String) AS id, \
                     cast(user_id AS String) AS user_id, \
                     cast(subject AS String) AS subject, \
-                    cast(argMax(status, created_at) AS String) AS status, \
+                    cast(argMax(status, row_at) AS String) AS status, \
                     toInt64(round(avg(latency_ms))) AS latency_ms, \
                     toInt64(sum(tokens)) AS tokens, \
-                    toString(max(created_at)) AS created_at, \
+                    toString(max(row_at)) AS created_at, \
                     toUInt64(count()) AS count \
                  FROM ( \
                     SELECT \
@@ -999,7 +1005,7 @@ async fn build_live_snapshot(
                         toString(ifNull(status_code, 0)) AS status, \
                         ifNull(latency_ms, 0) AS latency_ms, \
                         toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
-                        created_at \
+                        created_at AS row_at \
                     FROM gateway_logs \
                     PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                       AND has(?, user_id) \
@@ -1012,13 +1018,13 @@ async fn build_live_snapshot(
                         ifNull(status, '') AS status, \
                         ifNull(duration_ms, 0) AS latency_ms, \
                         toInt64(0) AS tokens, \
-                        created_at \
+                        created_at AS row_at \
                     FROM mcp_logs \
                     PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                       AND has(?, user_id) \
                  ) \
                  GROUP BY kind, user_id, subject \
-                 ORDER BY max(created_at) DESC \
+                 ORDER BY max(row_at) DESC \
                  LIMIT 16",
             )
             .bind(ids)
