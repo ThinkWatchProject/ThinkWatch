@@ -170,3 +170,21 @@
 .glow-pulse {
     animation: tw-glow-pulse 2s ease-in-out infinite;
 }
+
+/* Brief green flash on growing values (e.g. live-log tokens cell).
+   Starts visible + tinted, fades back to neutral. The element keeps
+   its layout — only background + text color animate — so neighbouring
+   columns don't shift mid-tick. */
+@keyframes tw-token-flash {
+    0% {
+        background-color: oklch(0.78 0.18 152 / 0.35);
+        color: oklch(0.78 0.18 152);
+    }
+    100% {
+        background-color: transparent;
+        color: inherit;
+    }
+}
+.animate-token-flash {
+    animation: tw-token-flash 700ms ease-out;
+}

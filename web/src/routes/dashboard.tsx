@@ -1131,6 +1131,40 @@ function ProviderFilterTabs({
 // are unchanged. Memoizing by row object identity skips the bulk of the
 // re-render work. `i` (used only for fade opacity) is a prop so it too
 // participates in memo equality.
+/// Tokens cell with a brief flash when the value grows. The
+/// `flashId` prop is a counter the parent bumps on each grow event;
+/// re-keying the inner span on that counter forces the CSS
+/// `animation` to re-fire (CSS only triggers an animation when it's
+/// first applied — re-applying the same class on the same element
+/// is a no-op without a key change).
+function TokensCell({
+  kind,
+  tokens,
+  flashId,
+}: {
+  kind: 'api' | 'mcp';
+  tokens: number;
+  flashId: number;
+}) {
+  if (kind !== 'api') {
+    return <div className="hidden text-right tabular-nums lg:block">—</div>;
+  }
+  return (
+    <div className="hidden text-right tabular-nums lg:block">
+      <span
+        key={flashId}
+        className={
+          flashId > 0
+            ? 'inline-block animate-token-flash rounded px-1'
+            : 'inline-block'
+        }
+      >
+        {tokens.toLocaleString()}
+      </span>
+    </div>
+  );
+}
+
 const LiveLogRowItem = memo(function LiveLogRowItem({
   r,
   i,
@@ -1140,6 +1174,20 @@ const LiveLogRowItem = memo(function LiveLogRowItem({
   i: number;
   cols: string;
 }) {
+  // Flash the tokens cell green for ~700ms whenever the value grows
+  // — operators told us they wanted a feedback signal that a row was
+  // *just* hit, since the aggregated feed otherwise looks frozen
+  // between WS frames. We never flash on decrease (tokens is a sum
+  // over a 15-min window; a drop would mean an older event aged out
+  // and isn't an "activity" event).
+  const prevTokens = useRef(r.tokens);
+  const [flashId, setFlashId] = useState(0);
+  useEffect(() => {
+    if (r.tokens > prevTokens.current) {
+      setFlashId((n) => n + 1);
+    }
+    prevTokens.current = r.tokens;
+  }, [r.tokens]);
   return (
     <li
       className={`grid gap-3 border-b px-4 py-2 last:border-b-0 hover:bg-muted/30 lg:items-center ${cols}`}
@@ -1167,9 +1215,7 @@ const LiveLogRowItem = memo(function LiveLogRowItem({
           </span>
         )}
       </div>
-      <div className="hidden text-right tabular-nums lg:block">
-        {r.kind === 'api' ? r.tokens.toLocaleString() : '—'}
-      </div>
+      <TokensCell kind={r.kind} tokens={r.tokens} flashId={flashId} />
       <div className="hidden text-right tabular-nums text-muted-foreground lg:block">
         {r.latency_ms || '—'}
       </div>
@@ -1278,7 +1324,18 @@ function LiveLogPanel({
       ) : (
         <ul className="min-h-0 flex-1 overflow-y-auto font-mono text-xs">
           {displayed.map((r, i) => (
-            <LiveLogRowItem key={r.id} r={r} i={i} cols={cols} />
+            // Composite key by aggregation tuple, NOT r.id —
+            // `argMax(id)` rotates each time a new event lands in
+            // the group, which would force React to unmount/remount
+            // the row on every tick and cancel any in-flight
+            // animations. Stable identity = animation can detect
+            // "this row's tokens just grew."
+            <LiveLogRowItem
+              key={`${r.kind}-${r.user_id}-${r.subject}`}
+              r={r}
+              i={i}
+              cols={cols}
+            />
           ))}
         </ul>
       )}
