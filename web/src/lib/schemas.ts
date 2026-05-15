@@ -42,7 +42,15 @@ export const ProviderHealthSchema = z.object({
   provider: z.string(),
   requests: z.number(),
   avg_latency_ms: z.number(),
-  success_rate: z.number(),
+  /** % of non-throttled requests that succeeded. 429s are excluded so a
+   *  quota-throttled-but-responsive upstream still reads as healthy.
+   *  `null` when no traffic in the window — render as "—", NOT 100%,
+   *  since "no data" and "all calls succeeded" must not look identical. */
+  success_rate: z.number().nullable(),
+  /** % of total requests rejected with 429. Distinct from success_rate —
+   *  signals "fix your quota," not "upstream is broken." `null` when no
+   *  traffic in the window. */
+  throttled_rate: z.number().nullable(),
   cb_state: z.string(),
 });
 

@@ -479,7 +479,20 @@ pub struct ProviderHealth {
     pub provider: String,
     pub requests: u64,
     pub avg_latency_ms: f64,
-    pub success_rate: f64,
+    /// Percent of non-throttled requests that did not error. 429
+    /// responses are excluded from BOTH numerator and denominator so a
+    /// quota-throttled-but-otherwise-healthy upstream reads as
+    /// "responsive" instead of "down".
+    ///
+    /// `None` when there's been no traffic in the window — the
+    /// dashboard renders this as "—" instead of a misleading 100%,
+    /// which otherwise looks identical to "all calls succeeded."
+    pub success_rate: Option<f64>,
+    /// Percent of total requests rejected with 429 by the upstream.
+    /// Separate signal from `success_rate` — a high `throttled_rate`
+    /// means "fix your quota / billing tier," not "upstream is broken."
+    /// `None` when there's been no traffic in the window.
+    pub throttled_rate: Option<f64>,
     /// Real circuit-breaker state from the gateway runtime.
     /// One of "Closed" / "HalfOpen" / "Open" — both AI providers and MCP
     /// servers write into the same `cb_registry`, so this reflects whichever
@@ -493,6 +506,7 @@ struct ProviderHealthRow {
     requests: u64,
     avg_latency_ms: f64,
     success_rate: f64,
+    throttled_rate: f64,
 }
 
 #[derive(Debug, Serialize, clickhouse::Row, Deserialize, utoipa::ToSchema)]
@@ -651,15 +665,23 @@ async fn build_live_snapshot(
         provider: name.to_string(),
         requests: 0,
         avg_latency_ms: 0.0,
-        success_rate: 100.0,
+        // Zero traffic == no signal. Leaving None lets the frontend
+        // render "—" so operators don't read it as "all calls
+        // succeeded" — the old 100% default was indistinguishable
+        // from a healthy-but-active upstream.
+        success_rate: None,
+        throttled_rate: None,
         cb_state: cb_states
             .get(name)
             .map(|c| c.as_str().to_string())
             .unwrap_or_else(|| "Closed".to_string()),
     };
-    // MCP servers surface health from `mcp_servers.status` when there's no
-    // traffic — a disconnected server should appear red on the dashboard
-    // even if its gateway circuit breaker hasn't tripped.
+    // MCP servers are a special case: when `mcp_servers.status` says
+    // "disconnected" we DO want the row to read as down even with zero
+    // traffic, because the registry knows the server is unreachable
+    // independent of recent log data. For any other status with zero
+    // traffic we still surface None so "no recent calls" doesn't
+    // masquerade as "all calls succeeded."
     let seed_mcp = |name: &str, status: &str| {
         let cb_state = if status == "disconnected" {
             "Open".to_string()
@@ -674,7 +696,14 @@ async fn build_live_snapshot(
             provider: name.to_string(),
             requests: 0,
             avg_latency_ms: 0.0,
-            success_rate: if status == "disconnected" { 0.0 } else { 100.0 },
+            success_rate: if status == "disconnected" {
+                Some(0.0)
+            } else {
+                None
+            },
+            // MCP protocol has no rate-limit class; only AI providers
+            // populate this.
+            throttled_rate: None,
             cb_state,
         }
     };
@@ -757,14 +786,22 @@ async fn build_live_snapshot(
             // user-scoped arm below still hits the raw table because
             // the rollup aggregates user_id out.
             ch.query(
+                // success_rate divides by (total - throttled) so 429s
+                // don't drag a responsive upstream below 100%.
+                // throttled_rate stays on total — operators want to see
+                // "what fraction of attempts got rate-limited".
                 "SELECT \
                     provider, \
                     toUInt64(sum(total_requests)) AS requests, \
                     if(sum(requests_latency) > 0, \
                        sum(sum_latency_ms) / sum(requests_latency), 0) AS avg_latency_ms, \
+                    if(sum(total_requests) - sum(throttled_requests) > 0, \
+                       (sum(total_requests) - sum(throttled_requests) - sum(error_requests)) \
+                       / (sum(total_requests) - sum(throttled_requests)) * 100, \
+                       100) AS success_rate, \
                     if(sum(total_requests) > 0, \
-                       (sum(total_requests) - sum(error_requests)) / sum(total_requests) * 100, \
-                       100) AS success_rate \
+                       sum(throttled_requests) / sum(total_requests) * 100, \
+                       0) AS throttled_rate \
                  FROM provider_health_5m \
                  WHERE bucket_5m >= now() - INTERVAL 15 MINUTE \
                  GROUP BY provider \
@@ -775,11 +812,18 @@ async fn build_live_snapshot(
         ),
         Some(ids) => Box::pin(
             ch.query(
+                // Same shape as the global arm, computed directly from
+                // gateway_logs because the rollup aggregates user_id out.
                 "SELECT \
                     ifNull(provider, 'unknown') AS provider, \
                     count() AS requests, \
                     avg(ifNull(latency_ms, 0)) AS avg_latency_ms, \
-                    (countIf(status_code < 400) / count()) * 100 AS success_rate \
+                    if(countIf(status_code != 429) > 0, \
+                       (countIf(status_code < 400) / countIf(status_code != 429)) * 100, \
+                       100) AS success_rate, \
+                    if(count() > 0, \
+                       (countIf(status_code = 429) / count()) * 100, \
+                       0) AS throttled_rate \
                  FROM gateway_logs \
                  PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                    AND has(?, user_id) \
@@ -799,7 +843,8 @@ async fn build_live_snapshot(
                     ifNull(server_name, 'unknown') AS provider, \
                     count() AS requests, \
                     avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
-                    (countIf(status = 'success') / count()) * 100 AS success_rate \
+                    (countIf(status = 'success') / count()) * 100 AS success_rate, \
+                    toFloat64(0) AS throttled_rate \
                  FROM mcp_logs \
                  PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                  GROUP BY server_name \
@@ -814,7 +859,8 @@ async fn build_live_snapshot(
                     ifNull(server_name, 'unknown') AS provider, \
                     count() AS requests, \
                     avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
-                    (countIf(status = 'success') / count()) * 100 AS success_rate \
+                    (countIf(status = 'success') / count()) * 100 AS success_rate, \
+                    toFloat64(0) AS throttled_rate \
                  FROM mcp_logs \
                  PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                    AND has(?, user_id) \
@@ -945,6 +991,12 @@ async fn build_live_snapshot(
 
     // Merge real CB state into each AI row, then ensure every configured AI
     // provider AND MCP server is represented even with zero traffic.
+    // CH returns the SQL fallback (success_rate=100, throttled_rate=0)
+    // for a no-traffic bucket — collapse that to None so the wire
+    // shape stays honest: "no data" and "perfect score" must not
+    // serialize identically.
+    let optionalize =
+        |requests: u64, rate: f64| -> Option<f64> { if requests == 0 { None } else { Some(rate) } };
     let mut providers: Vec<ProviderHealth> = provider_rows
         .into_iter()
         .map(|r| ProviderHealth {
@@ -954,9 +1006,10 @@ async fn build_live_snapshot(
                 .map(|c| c.as_str().to_string())
                 .unwrap_or_else(|| "Closed".to_string()),
             provider: r.provider,
+            success_rate: optionalize(r.requests, r.success_rate),
+            throttled_rate: optionalize(r.requests, r.throttled_rate),
             requests: r.requests,
             avg_latency_ms: r.avg_latency_ms,
-            success_rate: r.success_rate,
         })
         .collect();
     for r in mcp_rows {
@@ -967,9 +1020,13 @@ async fn build_live_snapshot(
                 .map(|c| c.as_str().to_string())
                 .unwrap_or_else(|| "Closed".to_string()),
             provider: r.provider,
+            success_rate: optionalize(r.requests, r.success_rate),
+            // MCP path doesn't model 429 separately — None on the wire,
+            // not 0, so the shape mirrors the AI rows and the frontend
+            // doesn't render a misleading "0% throttled" badge.
+            throttled_rate: optionalize(r.requests, r.throttled_rate),
             requests: r.requests,
             avg_latency_ms: r.avg_latency_ms,
-            success_rate: r.success_rate,
         });
     }
     for (name,) in &configured_providers {

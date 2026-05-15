@@ -1222,14 +1222,26 @@ function ProviderRowImpl({
   downLabel: string;
 }) {
   const cbReal = row.cb_state || '';
+  // success_rate may be null (no traffic in the window). When it is,
+  // the inferred CB state defaults to Closed so a quiet-but-configured
+  // upstream still reads as "healthy" — the real signal then comes
+  // from the registry's cb_state if it's been opened by the gateway.
   const inferred: 'Closed' | 'HalfOpen' | 'Open' =
-    row.success_rate >= 99 ? 'Closed' : row.success_rate >= 90 ? 'HalfOpen' : 'Open';
+    row.success_rate === null || row.success_rate >= 99
+      ? 'Closed'
+      : row.success_rate >= 90
+        ? 'HalfOpen'
+        : 'Open';
   const cb = (cbReal || inferred) as 'Closed' | 'HalfOpen' | 'Open';
   const status: 'healthy' | 'degraded' | 'down' =
     cb === 'Closed' ? 'healthy' : cb === 'HalfOpen' ? 'degraded' : 'down';
   const statusLabel =
     status === 'healthy' ? healthyLabel : status === 'degraded' ? degradedLabel : downLabel;
   const latency = Math.round(row.avg_latency_ms);
+  // Only badge when the throttled rate clears 5% — below that it's
+  // probably one-off 429s buried in noise. Null (no traffic) skips
+  // the badge entirely.
+  const throttled = row.throttled_rate !== null && row.throttled_rate >= 5;
   return (
     <li className="flex items-center gap-2.5 px-3 py-2 text-xs hover:bg-muted/30">
       <ServiceLogo service={row.provider} className="shrink-0" />
@@ -1239,8 +1251,16 @@ function ProviderRowImpl({
           {row.kind} · {row.requests.toLocaleString()} req · {latency}ms
         </span>
       </div>
+      {throttled && row.throttled_rate !== null && (
+        <span
+          className="shrink-0 rounded bg-amber-500/15 px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-amber-600 dark:text-amber-400"
+          title={`${row.throttled_rate.toFixed(0)}% throttled (429)`}
+        >
+          {row.throttled_rate.toFixed(0)}% 429
+        </span>
+      )}
       <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
-        {row.success_rate.toFixed(0)}%
+        {row.success_rate === null ? '—' : `${row.success_rate.toFixed(0)}%`}
       </span>
       <StatusIndicator status={status} label={statusLabel} pulse />
     </li>
@@ -1263,6 +1283,7 @@ const ProviderRow = memo(ProviderRowImpl, (prev, next) => {
     a.kind === b.kind &&
     a.requests === b.requests &&
     a.success_rate === b.success_rate &&
+    a.throttled_rate === b.throttled_rate &&
     a.avg_latency_ms === b.avg_latency_ms &&
     (a.cb_state || '') === (b.cb_state || '')
   );

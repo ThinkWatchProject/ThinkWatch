@@ -257,26 +257,44 @@ WHERE server_id IS NOT NULL;
 -- 5-minute rollup of gateway_logs by provider for the dashboard
 -- "provider health" widget. Latency is stored as sum + count so callers
 -- can compute a weighted average over any time window with one GROUP BY.
+--
+-- `throttled_requests` (429) is tracked separately from `error_requests`
+-- (other 4xx / 5xx) — rate-limiting means the upstream is *responsive
+-- and refusing*, not *down*, and conflating the two paints a healthy
+-- provider red whenever the caller exceeds their quota. Surfaced
+-- independently on the dashboard so operators can tell "upstream broke"
+-- from "upstream is throttling us".
 CREATE TABLE IF NOT EXISTS provider_health_5m (
-    bucket_5m        DateTime CODEC(DoubleDelta, ZSTD(1)),
-    provider         LowCardinality(String),
-    total_requests   UInt64,
-    error_requests   UInt64,
-    sum_latency_ms   Int64,
-    requests_latency UInt64
+    bucket_5m          DateTime CODEC(DoubleDelta, ZSTD(1)),
+    provider           LowCardinality(String),
+    total_requests     UInt64,
+    error_requests     UInt64,
+    throttled_requests UInt64,
+    sum_latency_ms     Int64,
+    requests_latency   UInt64
 ) ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(bucket_5m)
 ORDER BY (provider, bucket_5m);
 
+-- Migration for existing deployments — the column is appended after
+-- error_requests so a fresh CREATE and an upgraded table converge.
+ALTER TABLE provider_health_5m ADD COLUMN IF NOT EXISTS throttled_requests UInt64 AFTER error_requests;
+
+-- Replace the MV so new gateway_logs rows route into the right bucket.
+-- Existing aggregates already in provider_health_5m keep their old
+-- error_requests counts (which lumped 429 in), but the dashboard's
+-- 15-minute window washes those out within one window.
+DROP VIEW IF EXISTS provider_health_5m_mv;
 CREATE MATERIALIZED VIEW IF NOT EXISTS provider_health_5m_mv
 TO provider_health_5m AS
 SELECT
-    toStartOfFiveMinutes(created_at)                 AS bucket_5m,
-    provider                                         AS provider,
-    toUInt64(1)                                      AS total_requests,
-    toUInt64(if(status_code >= 400, 1, 0))           AS error_requests,
-    ifNull(latency_ms, 0)                            AS sum_latency_ms,
-    toUInt64(if(latency_ms IS NOT NULL, 1, 0))       AS requests_latency
+    toStartOfFiveMinutes(created_at)                            AS bucket_5m,
+    provider                                                    AS provider,
+    toUInt64(1)                                                 AS total_requests,
+    toUInt64(if(status_code >= 400 AND status_code != 429, 1, 0)) AS error_requests,
+    toUInt64(if(status_code = 429, 1, 0))                       AS throttled_requests,
+    ifNull(latency_ms, 0)                                       AS sum_latency_ms,
+    toUInt64(if(latency_ms IS NOT NULL, 1, 0))                  AS requests_latency
 FROM gateway_logs
 WHERE provider IS NOT NULL;
 
