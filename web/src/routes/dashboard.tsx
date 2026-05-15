@@ -13,7 +13,7 @@ import { ErrorBoundary } from '@/components/error-boundary';
 import { GettingStartedCard } from '@/components/dashboard/getting-started-card';
 import { useTranslation } from 'react-i18next';
 import { Inbox, Pause, Play } from 'lucide-react';
-import { Area, AreaChart, CartesianGrid, ReferenceLine, YAxis } from 'recharts';
+import { Area, AreaChart } from 'recharts';
 import {
   Card,
   CardAction,
@@ -22,21 +22,20 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card';
-import {
-  ChartContainer,
-  ChartTooltip,
-  ChartTooltipContent,
-  type ChartConfig,
-} from '@/components/ui/chart';
+import { ChartContainer, type ChartConfig } from '@/components/ui/chart';
 import { api, apiPut } from '@/lib/api';
+import { Skeleton } from '@/components/ui/skeleton';
 import { StatusIndicator } from '@/components/ui/status-indicator';
 import { ServiceLogo } from '@/components/ui/service-logo';
 import {
   DashboardLiveSchema,
+  TopActiveUsersResponseSchema,
   WsTicketSchema,
   type DashboardLive,
   type LiveLogRow,
   type ProviderHealth,
+  type TopActiveUser,
+  type TopActiveUsersResponse,
 } from '@/lib/schemas';
 import { toast } from 'sonner';
 
@@ -782,6 +781,20 @@ export function DashboardPage() {
       ),
     [range, compareQs],
   );
+  // Range-keyed top-users leaderboard. Compare mode doesn't apply —
+  // the panel shows current-window rankings only, not deltas — so
+  // the promise rebuilds only when `range` itself changes.
+  const topUsersPromise = useMemo(
+    () =>
+      withTimeout(
+        api<TopActiveUsersResponse>(`/api/dashboard/top-users?range=${range}`, {
+          schema: TopActiveUsersResponseSchema,
+        }),
+        DASHBOARD_CARD_TIMEOUT_MS,
+        'dashboard.top-users',
+      ),
+    [range],
+  );
 
   // Toast-on-rejection is still useful — keep the "something failed"
   // signal but out-of-band from the render path (ErrorBoundaries below
@@ -802,12 +815,13 @@ export function DashboardPage() {
     });
   }, [t, statsPromise, usagePromise, costPromise]);
 
-  // Note: the top stat-card grid used to carry a 4th "RPM" card driven
-  // by `live.rpm_buckets`. It was dropped because the dedicated
-  // RpmWindowPanel at the bottom-right already renders the same data
-  // with more context (current/avg/peak/limit), so the top card was
-  // visual noise that confused operators into thinking they were
-  // looking at two different metrics.
+  // Top-grid RPM tile uses the last bucket of `rpm_buckets` for
+  // "current rate" and the whole array as a sparkline. The bottom-
+  // right panel renders a DIFFERENT metric now (active users), so
+  // the two are no longer redundant — top is "how fast", bottom is
+  // "who's calling".
+  const rpmSpark = useMemo(() => live?.rpm_buckets ?? Array(24).fill(0), [live]);
+  const currentRpm = live?.rpm_buckets?.[live.rpm_buckets.length - 1] ?? 0;
 
   // Upstream-health filter (all / ai / mcp). Counts come from the live
   // snapshot so the tab pills always show the current per-kind totals.
@@ -933,6 +947,22 @@ export function DashboardPage() {
                 />
               </SuspendedCard>
             ),
+            rpm: (
+              // RPM streams over WS — no Suspense needed, but it
+              // reads `live?.rpm_buckets` which stays null-safe
+              // until the first frame arrives. Distinct from the
+              // bottom-right active-users panel: this is request
+              // rate, that one is concurrent users.
+              <StatCard
+                label={t('dashboard.requestsPerMin')}
+                value={currentRpm}
+                format={(v) => fmtInt(Math.round(v), locale)}
+                delta={t('dashboard.live')}
+                spark={rpmSpark}
+                loading={!live}
+                chartIndex={4}
+              />
+            ),
           }}
         />
       </Section>
@@ -964,11 +994,12 @@ export function DashboardPage() {
           >
             <ProviderHealthPanel rows={filteredProviders} />
           </Section>
-          <Section eyebrow={t('dashboard.requestRate')} className="shrink-0">
-            <RpmWindowPanel
-              buckets={live?.rpm_buckets ?? null}
-              maxRpm={live?.max_rpm_limit ?? null}
-            />
+          <Section eyebrow={t('dashboard.activeUsersEyebrow')} className="shrink-0">
+            <ErrorBoundary fallback={<TopUsersPanelError />}>
+              <Suspense fallback={<TopUsersPanelSkeleton />}>
+                <TopUsersPanel promise={topUsersPromise} locale={locale} />
+              </Suspense>
+            </ErrorBoundary>
           </Section>
         </div>
       </div>
@@ -1320,109 +1351,105 @@ function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
 }
 
 // ----------------------------------------------------------------------------
-// Sliding-window RPM area chart (shadcn AreaChart)
+// Active-users leaderboard — top N callers over the dashboard's range
+// (24h / 7d / 30d). Scrollable vertical list, ranked by request count.
 // ----------------------------------------------------------------------------
 
-const rpmConfig = {
-  count: { label: 'Requests', color: 'var(--chart-1)' },
-} satisfies ChartConfig;
-
-function RpmWindowPanel({
-  buckets,
-  maxRpm,
-}: {
-  buckets: number[] | null;
-  maxRpm: number | null;
-}) {
-  const { t } = useTranslation();
-  const data = buckets ?? Array(30).fill(0);
-  const total = data.reduce((a, b) => a + b, 0);
-  const avg = Math.round(total / Math.max(1, data.length));
-  const last = data[data.length - 1] ?? 0;
-  const peak = Math.max(...data, 0);
-
-  const chartData = useMemo(
-    () =>
-      data.map((count, i) => ({
-        minute: `-${data.length - 1 - i}m`,
-        count,
-      })),
-    [data],
-  );
-
+function TopUsersPanelSkeleton() {
   return (
-    // Compact: header on one line (current rpm + avg/peak/total inline),
-    // small chart, no footer. Total height ~140px.
-    <Card size="sm" className="gap-2">
-      <CardHeader className="flex-row items-baseline justify-between gap-3 pb-0">
-        <div className="flex items-baseline gap-2 min-w-0">
-          <span className="font-mono text-xl tabular-nums leading-none">
-            {last.toLocaleString()}
-          </span>
-          <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
-            {t('dashboard.unitPerMin')}
-          </span>
-        </div>
-        <div className="flex items-baseline gap-3 text-[10px] text-muted-foreground">
-          <span>
-            <span className="uppercase tracking-wider">{t('dashboard.avgPerMin')} </span>
-            <span className="font-mono tabular-nums text-foreground">{avg}</span>
-          </span>
-          <span>
-            <span className="uppercase tracking-wider">{t('dashboard.peak')} </span>
-            <span className="font-mono tabular-nums text-foreground">{peak}</span>
-          </span>
-          {maxRpm != null && (
-            <span>
-              <span className="uppercase tracking-wider">{t('dashboard.limit')} </span>
-              <span className="font-mono tabular-nums text-foreground">{maxRpm}</span>
-            </span>
-          )}
-        </div>
-      </CardHeader>
-      <CardContent className="px-2 pb-2">
-        <ChartContainer config={rpmConfig} className="aspect-auto h-20 w-full">
-          <AreaChart data={chartData} margin={{ left: 4, right: 4, top: 4, bottom: 0 }}>
-            <defs>
-              <linearGradient id="rpm-fill" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="var(--color-count)" stopOpacity={0.45} />
-                <stop offset="95%" stopColor="var(--color-count)" stopOpacity={0.05} />
-              </linearGradient>
-              <filter id="rpm-glow" x="-20%" y="-20%" width="140%" height="140%">
-                <feGaussianBlur stdDeviation="2" result="blur" />
-                <feMerge>
-                  <feMergeNode in="blur" />
-                  <feMergeNode in="SourceGraphic" />
-                </feMerge>
-              </filter>
-            </defs>
-            <CartesianGrid vertical={false} stroke="var(--border)" strokeOpacity={0.4} />
-            <YAxis hide domain={[0, 'dataMax']} />
-            <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="line" />} />
-            <Area
-              dataKey="count"
-              // Same reason as the StatCard sparkline: `natural`
-              // overshoots the troughs on sparse data and draws the
-              // line below the baseline. `monotone` honors the
-              // y >= 0 floor that the data actually has.
-              type="monotone"
-              stroke="var(--color-count)"
-              strokeWidth={2}
-              fill="url(#rpm-fill)"
-              filter="url(#rpm-glow)"
-              isAnimationActive={false}
-            />
-            {maxRpm != null && (
-              <ReferenceLine
-                y={maxRpm}
-                stroke="var(--destructive)"
-                strokeDasharray="4 4"
-                strokeWidth={1}
-              />
-            )}
-          </AreaChart>
-        </ChartContainer>
+    <Card size="sm" className="gap-0">
+      <CardContent className="flex flex-col gap-2 px-3 py-3">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <Skeleton className="h-4 w-6" />
+            <Skeleton className="h-4 flex-1" />
+            <Skeleton className="h-4 w-12" />
+          </div>
+        ))}
       </CardContent>
     </Card>
+  );
+}
+
+function TopUsersPanelError() {
+  const { t } = useTranslation();
+  return (
+    <Card size="sm" className="gap-0">
+      <CardContent className="px-3 py-6 text-center text-xs text-muted-foreground">
+        {t('dashboard.loadFailedShort', 'Failed to load')}
+      </CardContent>
+    </Card>
+  );
+}
+
+function TopUsersPanel({
+  promise,
+  locale,
+}: {
+  promise: Promise<TopActiveUsersResponse>;
+  locale: string;
+}) {
+  const { t } = useTranslation();
+  const data = use(promise);
+  const users = data.users;
+
+  if (users.length === 0) {
+    return (
+      <Card size="sm" className="gap-0">
+        <CardContent className="flex flex-col items-center justify-center gap-2 px-3 py-8 text-center text-muted-foreground">
+          <Inbox className="h-8 w-8" strokeWidth={1.25} />
+          <span className="text-xs">{t('dashboard.noActiveUsers')}</span>
+        </CardContent>
+      </Card>
+    );
+  }
+
+  // Scrollable list. Height matches the old chart panel (~140px) so
+  // the bottom-right column proportions stay the same.
+  return (
+    <Card size="sm" className="gap-0">
+      <CardContent className="max-h-[200px] overflow-y-auto px-0 py-1">
+        <ul className="divide-y divide-border/40">
+          {users.map((u, i) => (
+            <TopUserRow key={u.user_id} rank={i + 1} user={u} locale={locale} />
+          ))}
+        </ul>
+      </CardContent>
+    </Card>
+  );
+}
+
+function TopUserRow({
+  rank,
+  user,
+  locale,
+}: {
+  rank: number;
+  user: TopActiveUser;
+  locale: string;
+}) {
+  // Email present → primary label is email, secondary is short user_id.
+  // Email blank (pre-email-column rows / anonymous) → fall back to the
+  // user_id so the row never reads as "user with no name."
+  const label = user.user_email || user.user_id;
+  const subLabel = user.user_email ? user.user_id.slice(0, 8) : null;
+  return (
+    <li className="flex items-center gap-2.5 px-3 py-2 text-xs">
+      <span className="w-4 shrink-0 text-right font-mono tabular-nums text-[10px] text-muted-foreground">
+        {rank}
+      </span>
+      <div className="flex min-w-0 flex-1 flex-col">
+        <span className="truncate font-mono">{label}</span>
+        {subLabel && (
+          <span className="truncate text-[10px] text-muted-foreground">{subLabel}</span>
+        )}
+      </div>
+      <span
+        className="shrink-0 font-mono tabular-nums"
+        title={`${user.total_tokens.toLocaleString(locale)} tokens`}
+      >
+        {fmtCompact(user.request_count, locale)}
+      </span>
+    </li>
   );
 }

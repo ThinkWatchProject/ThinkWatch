@@ -1093,6 +1093,142 @@ pub async fn get_dashboard_live(
 }
 
 // ============================================================================
+// Top active users — leaderboard for the dashboard's bottom-right panel,
+// scoped by the same 24h / 7d / 30d range selector used by the stat cards.
+// ============================================================================
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TopActiveUserRow {
+    pub user_id: String,
+    /// Best-effort display label — `user_email` snapshotted at write
+    /// time on each `gateway_logs` row, falling back to empty when the
+    /// row predates the email column or the caller was unauthenticated.
+    pub user_email: String,
+    pub request_count: u64,
+    pub total_tokens: i64,
+    /// ISO-8601 UTC timestamp of the most recent gateway call from
+    /// this user in the window.
+    pub last_active: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TopActiveUsersResponse {
+    pub users: Vec<TopActiveUserRow>,
+}
+
+// Hard cap on the result set. The panel is scrollable, but we don't
+// want to ship a 10k-row payload for a 30-day window — operators
+// realistically care about the top tens, and beyond ~100 the panel
+// loses signal.
+const TOP_USERS_LIMIT: u32 = 50;
+
+#[derive(Debug, clickhouse::Row, Deserialize)]
+struct TopActiveUserChRow {
+    user_id: String,
+    user_email: String,
+    request_count: u64,
+    total_tokens: i64,
+    last_active: String,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/dashboard/top-users",
+    tag = "Dashboard",
+    params(
+        ("range" = Option<String>, Query, description = "24h | 7d | 30d (default 24h)"),
+    ),
+    responses(
+        (status = 200, description = "Top callers ranked by request count over the window", body = TopActiveUsersResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("bearer_token" = []))
+)]
+pub async fn get_top_active_users(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Query(rq): Query<crate::handlers::time_range::RangeQuery>,
+) -> Result<Json<TopActiveUsersResponse>, AppError> {
+    use crate::handlers::time_range::TimeRange;
+    let range = TimeRange::parse(rq.range.as_deref());
+    let window_start = range.window_start(chrono::Utc::now());
+    let user_filter = resolve_dashboard_user_filter(&state.db, auth_user.claims.sub).await?;
+
+    if !ch_available(&state) {
+        return Ok(Json(TopActiveUsersResponse { users: vec![] }));
+    }
+    // Empty team scope short-circuit, same as build_live_snapshot.
+    if matches!(user_filter.as_deref(), Some([])) {
+        return Ok(Json(TopActiveUsersResponse { users: vec![] }));
+    }
+    let ch = ch_client(&state)?;
+    let from = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // any(user_email) picks one snapshot of the email per user — they
+    // shouldn't differ across rows for a given user_id, but if a user
+    // changed their email in-window we surface whichever ClickHouse
+    // happens to see first. Good enough for a leaderboard.
+    let rows: Vec<TopActiveUserChRow> = match user_filter {
+        None => {
+            ch.query(
+                "SELECT \
+                    user_id AS user_id, \
+                    any(ifNull(user_email, '')) AS user_email, \
+                    count() AS request_count, \
+                    toInt64(sum(toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)))) AS total_tokens, \
+                    toString(max(created_at)) AS last_active \
+                 FROM gateway_logs \
+                 PREWHERE created_at >= toDateTime(?) \
+                   AND user_id IS NOT NULL \
+                 GROUP BY user_id \
+                 ORDER BY request_count DESC \
+                 LIMIT ?",
+            )
+            .bind(from)
+            .bind(TOP_USERS_LIMIT)
+            .fetch_all::<TopActiveUserChRow>()
+            .await
+        }
+        Some(ids) => {
+            ch.query(
+                "SELECT \
+                    user_id AS user_id, \
+                    any(ifNull(user_email, '')) AS user_email, \
+                    count() AS request_count, \
+                    toInt64(sum(toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)))) AS total_tokens, \
+                    toString(max(created_at)) AS last_active \
+                 FROM gateway_logs \
+                 PREWHERE created_at >= toDateTime(?) \
+                   AND user_id IS NOT NULL \
+                   AND has(?, user_id) \
+                 GROUP BY user_id \
+                 ORDER BY request_count DESC \
+                 LIMIT ?",
+            )
+            .bind(from)
+            .bind(&ids)
+            .bind(TOP_USERS_LIMIT)
+            .fetch_all::<TopActiveUserChRow>()
+            .await
+        }
+    }
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("top-users CH query: {e}")))?;
+
+    let users = rows
+        .into_iter()
+        .map(|r| TopActiveUserRow {
+            user_id: r.user_id,
+            user_email: r.user_email,
+            request_count: r.request_count,
+            total_tokens: r.total_tokens,
+            last_active: r.last_active,
+        })
+        .collect();
+    Ok(Json(TopActiveUsersResponse { users }))
+}
+
+// ============================================================================
 // WebSocket push channel for the dashboard
 //
 // Browsers can't send Authorization headers on a WS upgrade, and passing

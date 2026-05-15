@@ -178,6 +178,7 @@ use crate::handlers::{
         // Dashboard
         crate::handlers::dashboard::get_dashboard_stats,
         crate::handlers::dashboard::get_dashboard_live,
+        crate::handlers::dashboard::get_top_active_users,
         crate::handlers::dashboard::create_dashboard_ws_ticket,
         crate::handlers::dashboard::get_dashboard_layout,
         crate::handlers::dashboard::put_dashboard_layout,

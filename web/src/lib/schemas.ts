@@ -71,6 +71,23 @@ export const DashboardLiveSchema = z.object({
   recent_logs: z.array(LiveLogRowSchema),
   max_rpm_limit: z.number().nullable(),
 });
+
+// --- /api/dashboard/top-users ----------------------------------------------
+
+export const TopActiveUserSchema = z.object({
+  user_id: z.string(),
+  user_email: z.string(),
+  request_count: z.number(),
+  total_tokens: z.number(),
+  last_active: z.string(),
+});
+
+export const TopActiveUsersResponseSchema = z.object({
+  users: z.array(TopActiveUserSchema),
+});
+
+export type TopActiveUser = z.infer<typeof TopActiveUserSchema>;
+export type TopActiveUsersResponse = z.infer<typeof TopActiveUsersResponseSchema>;
 export type ProviderHealth = z.infer<typeof ProviderHealthSchema>;
 export type LiveLogRow = z.infer<typeof LiveLogRowSchema>;
 export type DashboardLive = z.infer<typeof DashboardLiveSchema>;

@@ -549,6 +549,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             get(handlers::dashboard::get_dashboard_live),
         )
         .route(
+            "/api/dashboard/top-users",
+            get(handlers::dashboard::get_top_active_users),
+        )
+        .route(
             "/api/dashboard/ws-ticket",
             post(handlers::dashboard::create_dashboard_ws_ticket),
         )
