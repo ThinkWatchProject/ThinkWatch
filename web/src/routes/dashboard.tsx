@@ -646,7 +646,12 @@ function StatCard({ label, value, format, delta, spark, loading, chartIndex, pre
             </defs>
             <Area
               dataKey="v"
-              type="natural"
+              // `monotone` clamps the spline so it never overshoots
+              // a data point — critical for sparse RPM-style data
+              // where `natural` would dip the curve below 0 at the
+              // troughs between peaks, drawing the line under the
+              // x-axis baseline.
+              type="monotone"
               stroke="var(--color-v)"
               strokeWidth={1.6}
               fill={`url(#stat-fill-${chartIndex})`}
@@ -797,8 +802,12 @@ export function DashboardPage() {
     });
   }, [t, statsPromise, usagePromise, costPromise]);
 
-  const rpmSpark = useMemo(() => live?.rpm_buckets ?? Array(24).fill(0), [live]);
-  const currentRpm = live?.rpm_buckets?.[live.rpm_buckets.length - 1] ?? 0;
+  // Note: the top stat-card grid used to carry a 4th "RPM" card driven
+  // by `live.rpm_buckets`. It was dropped because the dedicated
+  // RpmWindowPanel at the bottom-right already renders the same data
+  // with more context (current/avg/peak/limit), so the top card was
+  // visual noise that confused operators into thinking they were
+  // looking at two different metrics.
 
   // Upstream-health filter (all / ai / mcp). Counts come from the live
   // snapshot so the tab pills always show the current per-kind totals.
@@ -923,20 +932,6 @@ export function DashboardPage() {
                   label={t('dashboard.activeApiKeys')}
                 />
               </SuspendedCard>
-            ),
-            rpm: (
-              // RPM is already streaming over the WS channel — no
-              // Suspense needed, but it reads `live?.rpm_buckets` which
-              // stays null-safe until the first frame arrives.
-              <StatCard
-                label={t('dashboard.requestsPerMin')}
-                value={currentRpm}
-                format={(v) => fmtInt(Math.round(v), locale)}
-                delta={t('dashboard.live')}
-                spark={rpmSpark}
-                loading={!live}
-                chartIndex={4}
-              />
             ),
           }}
         />
@@ -1406,7 +1401,11 @@ function RpmWindowPanel({
             <ChartTooltip cursor={false} content={<ChartTooltipContent indicator="line" />} />
             <Area
               dataKey="count"
-              type="natural"
+              // Same reason as the StatCard sparkline: `natural`
+              // overshoots the troughs on sparse data and draws the
+              // line below the baseline. `monotone` honors the
+              // y >= 0 floor that the data actually has.
+              type="monotone"
               stroke="var(--color-count)"
               strokeWidth={2}
               fill="url(#rpm-fill)"

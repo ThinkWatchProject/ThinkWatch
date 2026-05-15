@@ -274,7 +274,6 @@
     "tokensUsedToday": "Token 用量",
     "costMtd": "花费",
     "activeApiKeys": "活跃 API 密钥",
-    "requestsPerMin": "请求 / 分钟",
     "live": "实时",
     "reconnecting": "重连中",
     "limit": "限额",
