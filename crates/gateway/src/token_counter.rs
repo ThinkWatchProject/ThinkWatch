@@ -89,10 +89,12 @@ mod tests {
             ChatMessage {
                 role: "user".to_string(),
                 content: serde_json::Value::String("Hello, how are you?".to_string()),
+                ..Default::default()
             },
             ChatMessage {
                 role: "assistant".to_string(),
                 content: serde_json::Value::String("I am fine, thank you!".to_string()),
+                ..Default::default()
             },
         ];
         let total = count_message_tokens(&messages);

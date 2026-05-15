@@ -157,6 +157,7 @@ fn convert_response(resp: GeminiResponse, model: &str) -> ChatCompletionResponse
             message: ChatMessage {
                 role: "assistant".to_string(),
                 content: serde_json::Value::String(text),
+                ..Default::default()
             },
             finish_reason,
         }],

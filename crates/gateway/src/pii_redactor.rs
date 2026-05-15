@@ -213,6 +213,7 @@ impl PiiRedactor {
                 ChatMessage {
                     role: msg.role.clone(),
                     content: new_content,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -430,6 +431,7 @@ mod tests {
         ChatMessage {
             role: "user".to_string(),
             content: serde_json::Value::String(content.to_string()),
+            ..Default::default()
         }
     }
 
@@ -437,6 +439,7 @@ mod tests {
         ChatMessage {
             role: "system".to_string(),
             content: serde_json::Value::String(content.to_string()),
+            ..Default::default()
         }
     }
 
@@ -451,6 +454,7 @@ mod tests {
                 message: ChatMessage {
                     role: "assistant".to_string(),
                     content: serde_json::Value::String(content.to_string()),
+                    ..Default::default()
                 },
                 finish_reason: Some("stop".to_string()),
             }],
@@ -810,6 +814,7 @@ mod tests {
                 { "type": "text", "text": "Email me at alice@example.com" },
                 { "type": "image_url", "image_url": { "url": "https://example.com/x.png" } },
             ]),
+            ..Default::default()
         }];
         let (redacted, ctx) = redactor.redact_messages(&messages);
 

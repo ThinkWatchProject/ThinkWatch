@@ -350,6 +350,7 @@ pub fn assemble_response(
                 message: crate::providers::traits::ChatMessage {
                     role: "assistant".to_string(),
                     content: serde_json::Value::String(content),
+                    ..Default::default()
                 },
                 finish_reason,
             },

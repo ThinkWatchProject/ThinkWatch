@@ -335,6 +335,7 @@ fn convert_from_bedrock(resp: BedrockConverseResponse, model: &str) -> ChatCompl
             message: ChatMessage {
                 role: "assistant".to_string(),
                 content: serde_json::Value::String(text),
+                ..Default::default()
             },
             finish_reason,
         }],
@@ -590,6 +591,7 @@ mod tests {
                 .map(|(role, text)| ChatMessage {
                     role: role.into(),
                     content: serde_json::Value::String(text.into()),
+                    ..Default::default()
                 })
                 .collect(),
             temperature: Some(0.7),
@@ -695,6 +697,7 @@ mod tests {
         r.messages.push(ChatMessage {
             role: "user".into(),
             content: json!([{"type": "text", "text": "hi"}]),
+            ..Default::default()
         });
         let out = convert_to_bedrock(&r);
         assert_eq!(out.messages.len(), 1);

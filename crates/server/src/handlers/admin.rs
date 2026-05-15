@@ -2169,6 +2169,7 @@ pub async fn test_pii_redactor(
     let messages = vec![ChatMessage {
         role: "user".to_string(),
         content: serde_json::Value::String(req.text.clone()),
+        ..Default::default()
     }];
     let (redacted, ctx) = redactor.redact_messages(&messages);
 

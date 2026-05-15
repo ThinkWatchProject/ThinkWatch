@@ -29,10 +29,32 @@ pub struct ChatCompletionRequest {
     pub trace_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: String,
     pub content: serde_json::Value,
+    /// Pass-through bucket for the rest of the OpenAI / Anthropic
+    /// message envelope: `tool_call_id` (required when `role: "tool"`),
+    /// `tool_calls` (assistant-side function invocations), `name`
+    /// (legacy function-call / multi-user labelling), `refusal`,
+    /// vendor annotations.
+    ///
+    /// Without this flatten, serde quietly drops anything we don't
+    /// declare — the gateway then forwards a stripped message and
+    /// the upstream 400s with `missing field "tool_call_id"` the
+    /// first time the conversation uses tools, with no signal that
+    /// the gateway ate the field on the way through.
+    ///
+    /// Construct with `..Default::default()` if only role + content
+    /// matter so future additions to this struct don't ripple across
+    /// every literal in the codebase.
+    #[serde(flatten, default, skip_serializing_if = "is_empty_extras")]
+    pub extra: serde_json::Value,
+}
+
+fn is_empty_extras(v: &serde_json::Value) -> bool {
+    matches!(v, serde_json::Value::Null)
+        || matches!(v, serde_json::Value::Object(o) if o.is_empty())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -338,4 +360,80 @@ pub trait AiProvider: Send + Sync {
         &self,
         request: ChatCompletionRequest,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>;
+}
+
+#[cfg(test)]
+mod chat_message_roundtrip_tests {
+    use super::ChatMessage;
+
+    /// Lock in the fix for "gateway eats `tool_call_id`". A `role:"tool"`
+    /// reply MUST round-trip with its `tool_call_id` intact — without
+    /// the `extra` flatten, serde silently drops the field and the
+    /// upstream then 400s with "missing field `tool_call_id`".
+    #[test]
+    fn tool_call_id_roundtrips_through_flatten_extras() {
+        let raw = serde_json::json!({
+            "role": "tool",
+            "tool_call_id": "call_abc123",
+            "content": "{\"result\":\"ok\"}"
+        });
+        let msg: ChatMessage = serde_json::from_value(raw).unwrap();
+        let out = serde_json::to_value(&msg).unwrap();
+        assert_eq!(out["role"], "tool");
+        assert_eq!(out["tool_call_id"], "call_abc123");
+        assert_eq!(out["content"], "{\"result\":\"ok\"}");
+    }
+
+    /// `assistant` messages with `tool_calls` (function-call style)
+    /// also need flattening: the array of `{id, type, function}`
+    /// triples must survive a round-trip so the upstream sees the
+    /// same conversation the client built.
+    #[test]
+    fn assistant_tool_calls_roundtrip() {
+        let raw = serde_json::json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": [{
+                "id": "call_abc123",
+                "type": "function",
+                "function": { "name": "search", "arguments": "{}" }
+            }]
+        });
+        let msg: ChatMessage = serde_json::from_value(raw.clone()).unwrap();
+        let out = serde_json::to_value(&msg).unwrap();
+        assert_eq!(out["role"], "assistant");
+        assert_eq!(out["tool_calls"], raw["tool_calls"]);
+    }
+
+    /// Plain `{role, content}` messages must serialize without a
+    /// stray empty `extra` blob — otherwise upstreams strict about
+    /// unknown fields would 400 on every vanilla user message.
+    #[test]
+    fn vanilla_message_has_no_extra_blob() {
+        let msg = ChatMessage {
+            role: "user".into(),
+            content: serde_json::Value::String("hi".into()),
+            ..Default::default()
+        };
+        let out = serde_json::to_value(&msg).unwrap();
+        let obj = out.as_object().unwrap();
+        assert_eq!(obj.len(), 2, "expected only role+content, got {obj:?}");
+        assert!(obj.contains_key("role"));
+        assert!(obj.contains_key("content"));
+    }
+
+    /// `name` (legacy function-call labelling, also used for
+    /// multi-user scenarios) is another field operators have hit;
+    /// pin it to the same passthrough.
+    #[test]
+    fn message_name_field_passes_through() {
+        let raw = serde_json::json!({
+            "role": "user",
+            "name": "alice",
+            "content": "hi"
+        });
+        let msg: ChatMessage = serde_json::from_value(raw).unwrap();
+        let out = serde_json::to_value(&msg).unwrap();
+        assert_eq!(out["name"], "alice");
+    }
 }

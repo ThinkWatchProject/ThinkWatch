@@ -239,6 +239,7 @@ mod tests {
         ChatMessage {
             role: "user".into(),
             content: serde_json::Value::String(content.into()),
+            ..Default::default()
         }
     }
 
@@ -246,6 +247,7 @@ mod tests {
         ChatMessage {
             role: "system".into(),
             content: serde_json::Value::String(content.into()),
+            ..Default::default()
         }
     }
 
@@ -278,6 +280,7 @@ mod tests {
                 {"type": "image_url", "image_url": {"url": "data:..."}},
                 {"type": "text", "text": "Part two."},
             ]),
+            ..Default::default()
         }]);
         assert_eq!(b.extract_prefix(&r), Some("Part one. Part two.".into()));
     }
@@ -291,6 +294,7 @@ mod tests {
             ChatMessage {
                 role: "user".into(),
                 content: serde_json::Value::String(String::new()),
+                ..Default::default()
             },
             user_msg("real question"),
         ]);

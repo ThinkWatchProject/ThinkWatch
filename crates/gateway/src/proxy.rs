@@ -1653,6 +1653,7 @@ pub async fn proxy_anthropic_messages(
                 Some(crate::providers::traits::ChatMessage {
                     role: m.get("role")?.as_str()?.to_string(),
                     content: m.get("content").cloned().unwrap_or(serde_json::Value::Null),
+                    ..Default::default()
                 })
             })
             .collect();
@@ -1694,6 +1695,7 @@ pub async fn proxy_anthropic_messages(
         messages.push(crate::providers::traits::ChatMessage {
             role: "system".to_string(),
             content: serde_json::Value::String(system.to_string()),
+            ..Default::default()
         });
     }
     if let Some(msg_array) = body.get("messages").and_then(|v| v.as_array()) {
@@ -1704,6 +1706,7 @@ pub async fn proxy_anthropic_messages(
                 messages.push(crate::providers::traits::ChatMessage {
                     role: role.to_string(),
                     content: content.clone(),
+                    ..Default::default()
                 });
             }
         }
@@ -2042,6 +2045,7 @@ pub async fn proxy_responses(
         messages.push(crate::providers::traits::ChatMessage {
             role: "system".to_string(),
             content: serde_json::Value::String(instructions.to_string()),
+            ..Default::default()
         });
     }
 
@@ -2050,6 +2054,7 @@ pub async fn proxy_responses(
             messages.push(crate::providers::traits::ChatMessage {
                 role: "user".to_string(),
                 content: serde_json::Value::String(s.clone()),
+                ..Default::default()
             });
         }
         Some(serde_json::Value::Array(arr)) => {
@@ -2059,6 +2064,7 @@ pub async fn proxy_responses(
                     messages.push(crate::providers::traits::ChatMessage {
                         role: "user".to_string(),
                         content: serde_json::Value::String(s.to_string()),
+                        ..Default::default()
                     });
                 } else if let (Some(role), Some(content)) = (
                     item.get("role").and_then(|v| v.as_str()),
@@ -2067,6 +2073,7 @@ pub async fn proxy_responses(
                     messages.push(crate::providers::traits::ChatMessage {
                         role: role.to_string(),
                         content: content.clone(),
+                        ..Default::default()
                     });
                 }
             }

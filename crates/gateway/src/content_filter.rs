@@ -406,6 +406,7 @@ mod tests {
         ChatMessage {
             role: "user".into(),
             content: json!(text),
+            ..Default::default()
         }
     }
 
@@ -474,6 +475,7 @@ mod tests {
         let msg = ChatMessage {
             role: "system".into(),
             content: json!("jailbreak"),
+            ..Default::default()
         };
         assert!(f.check(&[msg]).is_none());
     }

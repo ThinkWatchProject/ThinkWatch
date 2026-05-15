@@ -94,6 +94,7 @@ mod tests {
                 message: ChatMessage {
                     role: "assistant".into(),
                     content: serde_json::Value::String(content.into()),
+                    ..Default::default()
                 },
                 finish_reason: None,
             }],
@@ -153,6 +154,7 @@ mod tests {
                 message: ChatMessage {
                     role: "assistant".into(),
                     content: serde_json::json!([{"type": "tool_use"}]),
+                    ..Default::default()
                 },
                 finish_reason: None,
             }],
@@ -176,6 +178,7 @@ mod tests {
                     message: ChatMessage {
                         role: "assistant".into(),
                         content: serde_json::Value::String("x".repeat(60)),
+                        ..Default::default()
                     },
                     finish_reason: None,
                 })

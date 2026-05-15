@@ -200,6 +200,7 @@ mod tests {
             messages: vec![ChatMessage {
                 role: "user".to_string(),
                 content: serde_json::Value::String(prompt.to_string()),
+                ..Default::default()
             }],
             temperature: Some(0.0),
             max_tokens: Some(1024),
