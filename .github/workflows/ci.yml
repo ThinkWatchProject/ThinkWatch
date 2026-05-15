@@ -47,6 +47,18 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+
+      # The default ubuntu-latest runner ships with ~14GB free, which
+      # the workspace compile + 40+ test-binary link step regularly
+      # exhausts ("rustc-LLVM ERROR: No space left on device" during
+      # test-support linking). Drop preinstalled toolchains we don't
+      # use to reclaim ~30GB before cargo touches the disk.
+      - name: Reclaim runner disk
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          df -h /
+
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
