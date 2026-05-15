@@ -84,6 +84,9 @@ export const TopActiveUserSchema = z.object({
 
 export const TopActiveUsersResponseSchema = z.object({
   users: z.array(TopActiveUserSchema),
+  /** Distinct active users in the selected window. May exceed
+   *  `users.length` when the server-side cap clips the leaderboard. */
+  total: z.number(),
 });
 
 export type TopActiveUser = z.infer<typeof TopActiveUserSchema>;

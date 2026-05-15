@@ -276,6 +276,7 @@
     "activeApiKeys": "Active API keys",
     "requestsPerMin": "Requests / min",
     "activeUsersEyebrow": "Active users · top callers",
+    "totalUsers": "{{countStr}} total",
     "noActiveUsers": "No user activity in this time range",
     "loadFailedShort": "Failed to load",
     "live": "live",

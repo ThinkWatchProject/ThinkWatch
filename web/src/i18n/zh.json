@@ -276,6 +276,7 @@
     "activeApiKeys": "活跃 API 密钥",
     "requestsPerMin": "请求 / 分钟",
     "activeUsersEyebrow": "活跃用户 · 排行榜",
+    "totalUsers": "共 {{countStr}} 人",
     "noActiveUsers": "选定时间范围内暂无用户活动",
     "loadFailedShort": "加载失败",
     "live": "实时",

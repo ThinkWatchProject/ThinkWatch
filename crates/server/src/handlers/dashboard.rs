@@ -1114,6 +1114,10 @@ pub struct TopActiveUserRow {
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TopActiveUsersResponse {
     pub users: Vec<TopActiveUserRow>,
+    /// Distinct active users in the window (NOT capped to `users.len()`).
+    /// Surfaced on the panel header so operators can tell "50 / 50"
+    /// (cap hit, full data not shown) from "8 / 8" (all visible).
+    pub total: u64,
 }
 
 // Hard cap on the result set. The panel is scrollable, but we don't
@@ -1156,25 +1160,51 @@ pub async fn get_top_active_users(
     let user_filter = resolve_dashboard_user_filter(&state.db, auth_user.claims.sub).await?;
 
     if !ch_available(&state) {
-        return Ok(Json(TopActiveUsersResponse { users: vec![] }));
+        return Ok(Json(TopActiveUsersResponse {
+            users: vec![],
+            total: 0,
+        }));
     }
     // Empty team scope short-circuit, same as build_live_snapshot.
     if matches!(user_filter.as_deref(), Some([])) {
-        return Ok(Json(TopActiveUsersResponse { users: vec![] }));
+        return Ok(Json(TopActiveUsersResponse {
+            users: vec![],
+            total: 0,
+        }));
     }
     let ch = ch_client(&state)?;
     let from = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
 
+    // Explicit `cast(... AS String)` peels the LowCardinality + Nullable
+    // wrappers off `user_id` / `user_email`: the `clickhouse` Rust crate
+    // decodes a column by its declared wire type, not by what the
+    // PREWHERE guarantees about its values, so a bare `SELECT user_id`
+    // ships LowCardinality(Nullable(String)) encoding into a plain
+    // `String` struct field and errors with "string is not valid utf8".
+    //
     // any(user_email) picks one snapshot of the email per user — they
     // shouldn't differ across rows for a given user_id, but if a user
     // changed their email in-window we surface whichever ClickHouse
     // happens to see first. Good enough for a leaderboard.
-    let rows: Vec<TopActiveUserChRow> = match user_filter {
-        None => {
+    //
+    // Two queries fired in parallel: the bounded leaderboard (limit 50)
+    // and a count of all distinct active users in the window. The
+    // total exists so the panel header can say "showing 50 of N", not
+    // "showing 50 of ?", when the cap clips real data.
+    // Box::pin to unify the two match arms (each `fetch_all` returns a
+    // different anonymous Future type at the call site).
+    type RowsFut = Pin<
+        Box<
+            dyn std::future::Future<Output = clickhouse::error::Result<Vec<TopActiveUserChRow>>>
+                + Send,
+        >,
+    >;
+    let rows_fut: RowsFut = match user_filter.as_deref() {
+        None => Box::pin(
             ch.query(
                 "SELECT \
-                    user_id AS user_id, \
-                    any(ifNull(user_email, '')) AS user_email, \
+                    cast(user_id AS String) AS user_id, \
+                    cast(any(ifNull(user_email, '')) AS String) AS user_email, \
                     count() AS request_count, \
                     toInt64(sum(toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)))) AS total_tokens, \
                     toString(max(created_at)) AS last_active \
@@ -1185,16 +1215,15 @@ pub async fn get_top_active_users(
                  ORDER BY request_count DESC \
                  LIMIT ?",
             )
-            .bind(from)
+            .bind(from.clone())
             .bind(TOP_USERS_LIMIT)
-            .fetch_all::<TopActiveUserChRow>()
-            .await
-        }
-        Some(ids) => {
+            .fetch_all::<TopActiveUserChRow>(),
+        ),
+        Some(ids) => Box::pin(
             ch.query(
                 "SELECT \
-                    user_id AS user_id, \
-                    any(ifNull(user_email, '')) AS user_email, \
+                    cast(user_id AS String) AS user_id, \
+                    cast(any(ifNull(user_email, '')) AS String) AS user_email, \
                     count() AS request_count, \
                     toInt64(sum(toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)))) AS total_tokens, \
                     toString(max(created_at)) AS last_active \
@@ -1206,14 +1235,35 @@ pub async fn get_top_active_users(
                  ORDER BY request_count DESC \
                  LIMIT ?",
             )
-            .bind(from)
-            .bind(&ids)
+            .bind(from.clone())
+            .bind(ids)
             .bind(TOP_USERS_LIMIT)
-            .fetch_all::<TopActiveUserChRow>()
-            .await
-        }
-    }
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("top-users CH query: {e}")))?;
+            .fetch_all::<TopActiveUserChRow>(),
+        ),
+    };
+    let total_fut: Pin<
+        Box<dyn std::future::Future<Output = clickhouse::error::Result<u64>> + Send>,
+    > = match user_filter.as_deref() {
+        None => Box::pin(
+            ch.query(
+                "SELECT uniqExact(user_id) FROM gateway_logs \
+                 PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL",
+            )
+            .bind(from.clone())
+            .fetch_one::<u64>(),
+        ),
+        Some(ids) => Box::pin(
+            ch.query(
+                "SELECT uniqExact(user_id) FROM gateway_logs \
+                 PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL AND has(?, user_id)",
+            )
+            .bind(from.clone())
+            .bind(ids)
+            .fetch_one::<u64>(),
+        ),
+    };
+    let (rows, total) = tokio::try_join!(rows_fut, total_fut)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("top-users CH query: {e}")))?;
 
     let users = rows
         .into_iter()
@@ -1225,7 +1275,7 @@ pub async fn get_top_active_users(
             last_active: r.last_active,
         })
         .collect();
-    Ok(Json(TopActiveUsersResponse { users }))
+    Ok(Json(TopActiveUsersResponse { users, total }))
 }
 
 // ============================================================================

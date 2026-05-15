@@ -826,6 +826,9 @@ export function DashboardPage() {
   // Upstream-health filter (all / ai / mcp). Counts come from the live
   // snapshot so the tab pills always show the current per-kind totals.
   const [providerFilter, setProviderFilter] = useState<ProviderFilter>('all');
+  // Live-log pause state lifted from the panel so the toggle can live
+  // in the Section eyebrow alongside the title.
+  const [livePaused, setLivePaused] = useState(false);
   const allProviders = live?.providers ?? [];
   const providerCounts = useMemo(
     () => ({
@@ -974,8 +977,14 @@ export function DashboardPage() {
         <Section
           eyebrow={t('dashboard.logsEyebrow')}
           className="flex min-h-0 flex-col"
+          action={
+            <LiveLogPauseButton
+              paused={livePaused}
+              onToggle={() => setLivePaused((p) => !p)}
+            />
+          }
         >
-          <LiveLogPanel rows={live?.recent_logs ?? null} />
+          <LiveLogPanel rows={live?.recent_logs ?? null} paused={livePaused} />
         </Section>
 
         <div className="flex min-h-0 flex-col gap-4">
@@ -1000,6 +1009,13 @@ export function DashboardPage() {
           <Section
             eyebrow={t('dashboard.activeUsersEyebrow')}
             className="flex min-h-0 flex-1 flex-col"
+            action={
+              <ErrorBoundary fallback={null}>
+                <Suspense fallback={null}>
+                  <TopUsersTotalBadge promise={topUsersPromise} locale={locale} />
+                </Suspense>
+              </ErrorBoundary>
+            }
           >
             <ErrorBoundary fallback={<TopUsersPanelError />}>
               <Suspense fallback={<TopUsersPanelSkeleton />}>
@@ -1164,20 +1180,60 @@ const LiveLogRowItem = memo(function LiveLogRowItem({
   );
 });
 
-function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
+/// Pause/resume toggle for the live-log eyebrow `action` slot. Lifting
+/// the button up there mirrors how `ProviderFilterTabs` lives on the
+/// provider-health eyebrow — keeps the panel card free of a redundant
+/// header row, and operators get a consistent "controls live in the
+/// eyebrow" mental model.
+function LiveLogPauseButton({
+  paused,
+  onToggle,
+}: {
+  paused: boolean;
+  onToggle: () => void;
+}) {
   const { t } = useTranslation();
-  // When paused, `snapshot` freezes the rows at the moment the user
-  // clicked pause so new WS frames don't scroll the list out from under
-  // them. Releasing pause drops the snapshot and live rows flow again.
-  const [paused, setPaused] = useState(false);
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider transition-colors ${
+        paused
+          ? 'border-primary/60 bg-primary/10 text-primary'
+          : 'border-border bg-muted/30 text-muted-foreground hover:text-foreground'
+      }`}
+      aria-pressed={paused}
+      title={paused ? t('dashboard.resume') : t('dashboard.pause')}
+    >
+      {paused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
+      {paused ? t('dashboard.resume') : t('dashboard.pause')}
+    </button>
+  );
+}
+
+function LiveLogPanel({
+  rows,
+  paused,
+}: {
+  rows: LiveLogRow[] | null;
+  // Pause toggle lives on the Section's eyebrow now (sibling control
+  // pattern, like upstream-health's filter tabs). The panel still
+  // owns the freeze logic — snapshot the rows when `paused` flips on,
+  // forget the snapshot when it flips off — so live frames stop
+  // scrolling the visible list out from under the operator.
+  paused: boolean;
+}) {
+  const { t } = useTranslation();
   const [snapshot, setSnapshot] = useState<LiveLogRow[] | null>(null);
-  const togglePause = () => {
-    setPaused((p) => {
-      const next = !p;
-      setSnapshot(next ? rows : null);
-      return next;
-    });
-  };
+  useEffect(() => {
+    if (paused) {
+      setSnapshot(rows);
+    } else {
+      setSnapshot(null);
+    }
+    // Intentionally ignore `rows` — we only snapshot on the pause edge.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paused]);
   const displayed = paused ? snapshot : rows;
 
   // Mirror what the row layout will be so headers and rows align perfectly.
@@ -1187,22 +1243,6 @@ function LiveLogPanel({ rows }: { rows: LiveLogRow[] | null }) {
     // `min-h-0` lets this card shrink inside the flex parent so the row
     // list scrolls internally instead of pushing the page.
     <Card className="flex h-full min-h-0 flex-col gap-0 py-0">
-      <div className="flex shrink-0 items-center justify-end border-b px-3 py-1.5">
-        <button
-          type="button"
-          onClick={togglePause}
-          className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wider transition-colors ${
-            paused
-              ? 'border-primary/60 bg-primary/10 text-primary'
-              : 'border-border bg-muted/30 text-muted-foreground hover:text-foreground'
-          }`}
-          aria-pressed={paused}
-          title={paused ? t('dashboard.resume') : t('dashboard.pause')}
-        >
-          {paused ? <Play className="h-3 w-3" /> : <Pause className="h-3 w-3" />}
-          {paused ? t('dashboard.resume') : t('dashboard.pause')}
-        </button>
-      </div>
       <div
         className={`hidden shrink-0 gap-3 border-b px-4 py-2 text-[10px] uppercase tracking-wider text-muted-foreground lg:grid ${cols}`}
       >
@@ -1360,6 +1400,32 @@ function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
 // Active-users leaderboard — top N callers over the dashboard's range
 // (24h / 7d / 30d). Scrollable vertical list, ranked by request count.
 // ----------------------------------------------------------------------------
+
+/// Small "N 人" badge for the active-users eyebrow. Reuses the same
+/// promise as the panel body — React 19's `use()` deduplicates the
+/// fetch, so this isn't a second round-trip. Renders nothing while
+/// the promise is pending (the panel skeleton already signals
+/// loading state) and nothing on error (the body's error fallback
+/// covers it).
+function TopUsersTotalBadge({
+  promise,
+  locale,
+}: {
+  promise: Promise<TopActiveUsersResponse>;
+  locale: string;
+}) {
+  const { t } = useTranslation();
+  const data = use(promise);
+  if (data.total === 0) return null;
+  return (
+    <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
+      {t('dashboard.totalUsers', {
+        count: data.total,
+        countStr: data.total.toLocaleString(locale),
+      })}
+    </span>
+  );
+}
 
 function TopUsersPanelSkeleton() {
   return (
