@@ -522,17 +522,30 @@ pub struct RpmBucket {
 pub struct LiveLogRow {
     /// "api" for gateway requests, "mcp" for MCP tool calls.
     pub kind: String,
+    /// `id` of the MOST RECENT row in the aggregated group — used as
+    /// a stable React key, NOT a single-event identifier (the row
+    /// represents N events, see `count`).
     pub id: String,
     pub user_id: String,
     /// model_id for "api", tool_name for "mcp".
     pub subject: String,
-    /// Numeric HTTP status for "api" (e.g. "200"), or string status for
-    /// "mcp" (e.g. "success" / "error").
+    /// Status of the most recent event in the group. Numeric HTTP
+    /// status for "api" (e.g. "200"), or string status for "mcp"
+    /// (e.g. "success" / "error"). Mixed-status groups surface only
+    /// the latest; the count column tells the operator that more
+    /// events are folded in.
     pub status: String,
+    /// Average latency across the group's events, rounded to ms.
     pub latency_ms: i64,
-    /// Total tokens for "api" (input+output), 0 for "mcp".
+    /// Sum of tokens across the group's events. "mcp" rows are
+    /// summed-zero since the protocol doesn't expose tokens.
     pub tokens: i64,
+    /// Timestamp of the latest event in the group.
     pub created_at: String,
+    /// How many raw events this row aggregates over the 15-minute
+    /// window. `1` means a singleton (no folding); larger values
+    /// surface as a `×N` chip next to the subject.
+    pub count: u64,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -909,10 +922,32 @@ async fn build_live_snapshot(
     // many" facility. The bind takes `impl Serialize` so passing
     // the same `&[String]` slice twice is fine; each call writes
     // its own copy into the SQL during query construction.
+    // Aggregate the live feed by (kind, user_id, subject) over the
+    // last 15 minutes. Operators reported the raw stream became
+    // unreadable when a single user retried the same model 10× in
+    // a row — every event got its own line and crowded out activity
+    // from other callers. Collapsing to one row per "who×what" tuple
+    // with a `count` chip surfaces the same information at a glance.
+    //
+    // `argMax(status, created_at)` and `argMax(id, created_at)` pull
+    // the LATEST event's status + id into the group; sum tokens,
+    // avg latency. ORDER BY max(created_at) keeps the most recently
+    // active groups on top — matches the original stream's "newest
+    // first" ordering.
     let recent_q: ChFut<LiveLogRow> = match user_filter {
         None => Box::pin(
             ch.query(
-                "SELECT * FROM ( \
+                "SELECT \
+                    kind, \
+                    cast(argMax(id, created_at) AS String) AS id, \
+                    cast(user_id AS String) AS user_id, \
+                    cast(subject AS String) AS subject, \
+                    cast(argMax(status, created_at) AS String) AS status, \
+                    toInt64(round(avg(latency_ms))) AS latency_ms, \
+                    toInt64(sum(tokens)) AS tokens, \
+                    toString(max(created_at)) AS created_at, \
+                    toUInt64(count()) AS count \
+                 FROM ( \
                     SELECT \
                         'api' AS kind, \
                         id, \
@@ -921,10 +956,9 @@ async fn build_live_snapshot(
                         toString(ifNull(status_code, 0)) AS status, \
                         ifNull(latency_ms, 0) AS latency_ms, \
                         toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
-                        toString(created_at) AS created_at \
+                        created_at \
                     FROM gateway_logs \
-                    ORDER BY created_at DESC \
-                    LIMIT 20 \
+                    PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                     UNION ALL \
                     SELECT \
                         'mcp' AS kind, \
@@ -934,19 +968,29 @@ async fn build_live_snapshot(
                         ifNull(status, '') AS status, \
                         ifNull(duration_ms, 0) AS latency_ms, \
                         toInt64(0) AS tokens, \
-                        toString(created_at) AS created_at \
+                        created_at \
                     FROM mcp_logs \
-                    ORDER BY created_at DESC \
-                    LIMIT 20 \
+                    PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
                  ) \
-                 ORDER BY created_at DESC \
+                 GROUP BY kind, user_id, subject \
+                 ORDER BY max(created_at) DESC \
                  LIMIT 16",
             )
             .fetch_all::<LiveLogRow>(),
         ),
         Some(ids) => Box::pin(
             ch.query(
-                "SELECT * FROM ( \
+                "SELECT \
+                    kind, \
+                    cast(argMax(id, created_at) AS String) AS id, \
+                    cast(user_id AS String) AS user_id, \
+                    cast(subject AS String) AS subject, \
+                    cast(argMax(status, created_at) AS String) AS status, \
+                    toInt64(round(avg(latency_ms))) AS latency_ms, \
+                    toInt64(sum(tokens)) AS tokens, \
+                    toString(max(created_at)) AS created_at, \
+                    toUInt64(count()) AS count \
+                 FROM ( \
                     SELECT \
                         'api' AS kind, \
                         id, \
@@ -955,11 +999,10 @@ async fn build_live_snapshot(
                         toString(ifNull(status_code, 0)) AS status, \
                         ifNull(latency_ms, 0) AS latency_ms, \
                         toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS tokens, \
-                        toString(created_at) AS created_at \
+                        created_at \
                     FROM gateway_logs \
-                    WHERE has(?, user_id) \
-                    ORDER BY created_at DESC \
-                    LIMIT 20 \
+                    PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
+                      AND has(?, user_id) \
                     UNION ALL \
                     SELECT \
                         'mcp' AS kind, \
@@ -969,13 +1012,13 @@ async fn build_live_snapshot(
                         ifNull(status, '') AS status, \
                         ifNull(duration_ms, 0) AS latency_ms, \
                         toInt64(0) AS tokens, \
-                        toString(created_at) AS created_at \
+                        created_at \
                     FROM mcp_logs \
-                    WHERE has(?, user_id) \
-                    ORDER BY created_at DESC \
-                    LIMIT 20 \
+                    PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
+                      AND has(?, user_id) \
                  ) \
-                 ORDER BY created_at DESC \
+                 GROUP BY kind, user_id, subject \
+                 ORDER BY max(created_at) DESC \
                  LIMIT 16",
             )
             .bind(ids)

@@ -59,10 +59,16 @@ export const LiveLogRowSchema = z.object({
   id: z.string(),
   user_id: z.string(),
   subject: z.string(),
+  /** Latest status in the aggregated group. */
   status: z.string(),
+  /** Average latency across the group's events, ms. */
   latency_ms: z.number(),
+  /** Sum of tokens across the group's events. */
   tokens: z.number(),
+  /** Latest event timestamp. */
   created_at: z.string(),
+  /** Raw events folded into this row (≥1). >1 surfaces as a ×N chip. */
+  count: z.number(),
 });
 
 export const DashboardLiveSchema = z.object({

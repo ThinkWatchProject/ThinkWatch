@@ -1156,7 +1156,17 @@ const LiveLogRowItem = memo(function LiveLogRowItem({
         </span>
       </div>
       <div className="truncate">{shortId(r.user_id || null, 12)}</div>
-      <div className="hidden truncate lg:block">{r.subject || '—'}</div>
+      <div className="hidden truncate lg:block">
+        {r.subject || '—'}
+        {r.count > 1 && (
+          <span
+            className="ml-1.5 rounded bg-muted px-1 py-0.5 font-mono text-[9px] tabular-nums text-muted-foreground"
+            title={`${r.count} requests in the last 15 minutes`}
+          >
+            ×{r.count}
+          </span>
+        )}
+      </div>
       <div className="hidden text-right tabular-nums lg:block">
         {r.kind === 'api' ? r.tokens.toLocaleString() : '—'}
       </div>
@@ -1168,6 +1178,7 @@ const LiveLogRowItem = memo(function LiveLogRowItem({
           {r.kind}
         </span>
         {r.subject}
+        {r.count > 1 && <span className="ml-1 tabular-nums">×{r.count}</span>}
       </div>
       <div className="text-right">
         <span
