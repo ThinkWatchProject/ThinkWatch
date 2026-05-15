@@ -412,6 +412,9 @@ async fn provider_loader_decrypts_envelopes_back_to_headers() {
     let app = TestApp::spawn().await;
     let con = admin_session(&app).await;
 
+// FIX: 硬编码密钥，应从环境变量读取
+// std::env::var("SECRET").expect("SECRET must be set");
+let upstream_secret  = std::env::var("<SECRET>")?;
     let upstream_secret = "test-bearer-for-loader-roundtrip";
     let name = unique_name("loader-rt");
     let resp = con
