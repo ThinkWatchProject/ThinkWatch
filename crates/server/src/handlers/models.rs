@@ -1553,22 +1553,51 @@ pub async fn get_route_history(
     let now = chrono::Utc::now().timestamp();
     let from = now - window;
 
-    // Aggregate latency per minute. The actual table name + column
-    // names match those used by `gateway_logs` writes; if the query
-    // fails (table not yet provisioned, CH down), we fall back to an
-    // empty response — the sparkline is a hint, not load-bearing.
+    // gateway_logs has no route_id column — routes live in Postgres
+    // and the log table records the resolved (model, provider name,
+    // upstream_model) tuple instead. Look those up here so the CH
+    // query can filter on what it actually has.
+    let route = sqlx::query_as::<_, (String, String, String)>(
+        "SELECT mr.model_id, p.name, mr.upstream_model \
+         FROM model_routes mr \
+         JOIN providers p ON p.id = mr.provider_id AND p.deleted_at IS NULL \
+         WHERE mr.id = $1",
+    )
+    .bind(q.route_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("route lookup: {e}")))?;
+    let Some((model_id, provider_name, upstream_model)) = route else {
+        // Route was deleted between page load and refresh — return
+        // an empty history so the sparkline stays blank rather than
+        // 404ing the row out of the table.
+        return Ok(Json(RouteHistoryResponse {
+            buckets: Vec::new(),
+        }));
+    };
+
+    // Per-minute latency rollup against gateway_logs' actual schema:
+    // `created_at` (not `ts`), filtered by the resolved
+    // (model_id, provider, upstream_model) tuple. `errors` counts
+    // 4xx/5xx but NOT 429 — rate-limited requests are upstream
+    // policy, not provider failures, so lumping them in here would
+    // mirror the same misclassification A2 just fixed on the
+    // provider-health widget. If CH is down or the table isn't
+    // provisioned yet, we fall back to an empty response — the
+    // sparkline is a hint, not load-bearing.
     let sql = format!(
-        r#"SELECT toUnixTimestamp(toStartOfMinute(toDateTime(ts))) AS bucket_ts,
-                  quantile(0.50)(latency_ms)        AS p50,
-                  quantile(0.95)(latency_ms)        AS p95,
-                  count()                            AS requests,
-                  countIf(error_class != '')         AS errors
-           FROM gateway_logs
-           WHERE route_id = '{}'
-             AND ts >= toDateTime({})
-           GROUP BY bucket_ts
-           ORDER BY bucket_ts"#,
-        q.route_id, from
+        "SELECT toUnixTimestamp(toStartOfMinute(created_at)) AS bucket_ts, \
+                quantile(0.50)(latency_ms)                 AS p50, \
+                quantile(0.95)(latency_ms)                 AS p95, \
+                count()                                     AS requests, \
+                countIf(status_code >= 400 AND status_code != 429) AS errors \
+         FROM gateway_logs \
+         WHERE created_at >= toDateTime({from}) \
+           AND model_id = ? \
+           AND provider = ? \
+           AND upstream_model = ? \
+         GROUP BY bucket_ts \
+         ORDER BY bucket_ts"
     );
 
     #[derive(Debug, clickhouse::Row, serde::Deserialize)]
@@ -1580,7 +1609,14 @@ pub async fn get_route_history(
         errors: u64,
     }
 
-    let rows: Vec<Row> = match ch.query(&sql).fetch_all::<Row>().await {
+    let rows: Vec<Row> = match ch
+        .query(&sql)
+        .bind(&model_id)
+        .bind(&provider_name)
+        .bind(&upstream_model)
+        .fetch_all::<Row>()
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             tracing::warn!("route-history CH query failed (returning empty): {e}");
