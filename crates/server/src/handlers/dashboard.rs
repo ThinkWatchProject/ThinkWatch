@@ -1144,13 +1144,23 @@ pub async fn get_dashboard_live(
 pub struct TopActiveUserRow {
     pub user_id: String,
     /// Best-effort display label — `user_email` snapshotted at write
-    /// time on each `gateway_logs` row, falling back to empty when the
-    /// row predates the email column or the caller was unauthenticated.
+    /// time on each `gateway_logs` / `mcp_logs` row, falling back to
+    /// empty when the row predates the email column or the caller was
+    /// unauthenticated.
     pub user_email: String,
+    /// AI gateway requests from this user in the window
+    /// (`gateway_logs.count()`).
     pub request_count: u64,
+    /// Sum of input+output tokens across this user's AI requests in
+    /// the window. MCP calls don't carry token counts.
     pub total_tokens: i64,
-    /// ISO-8601 UTC timestamp of the most recent gateway call from
-    /// this user in the window.
+    /// MCP tool calls from this user in the window
+    /// (`mcp_logs.count()`). Distinct from `request_count` so
+    /// dashboards can size each lane independently — a user who
+    /// only triggers MCP traffic shouldn't read as "inactive."
+    pub mcp_call_count: u64,
+    /// ISO-8601 UTC timestamp of the most recent gateway OR mcp
+    /// activity from this user in the window.
     pub last_active: String,
 }
 
@@ -1175,6 +1185,7 @@ struct TopActiveUserChRow {
     user_email: String,
     request_count: u64,
     total_tokens: i64,
+    mcp_call_count: u64,
     last_active: String,
 }
 
@@ -1225,17 +1236,17 @@ pub async fn get_top_active_users(
     // ships LowCardinality(Nullable(String)) encoding into a plain
     // `String` struct field and errors with "string is not valid utf8".
     //
-    // any(user_email) picks one snapshot of the email per user — they
-    // shouldn't differ across rows for a given user_id, but if a user
-    // changed their email in-window we surface whichever ClickHouse
-    // happens to see first. Good enough for a leaderboard.
+    // The inner UNION ALL turns each row from either table into a
+    // partial-credit tally (1 in one of the count columns, 0 in the
+    // other) keyed by user_id. The outer GROUP BY then folds both
+    // tables' contribution into a single row per user — so a caller
+    // who hit ONLY MCP still ranks correctly, and a caller who hit
+    // both contributes to both lanes without needing a JOIN.
     //
-    // Two queries fired in parallel: the bounded leaderboard (limit 50)
-    // and a count of all distinct active users in the window. The
-    // total exists so the panel header can say "showing 50 of N", not
-    // "showing 50 of ?", when the cap clips real data.
-    // Box::pin to unify the two match arms (each `fetch_all` returns a
-    // different anonymous Future type at the call site).
+    // Three queries fire in parallel: the bounded leaderboard (limit
+    // 50) and a uniqExact count from each of gateway_logs and
+    // mcp_logs, merged with `groupArray` semantics on the Rust side
+    // so `total` reflects distinct users across both kinds.
     type RowsFut = Pin<
         Box<
             dyn std::future::Future<Output = clickhouse::error::Result<Vec<TopActiveUserChRow>>>
@@ -1247,17 +1258,37 @@ pub async fn get_top_active_users(
             ch.query(
                 "SELECT \
                     cast(user_id AS String) AS user_id, \
-                    cast(any(ifNull(user_email, '')) AS String) AS user_email, \
-                    count() AS request_count, \
-                    toInt64(sum(toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)))) AS total_tokens, \
-                    toString(max(created_at)) AS last_active \
-                 FROM gateway_logs \
-                 PREWHERE created_at >= toDateTime(?) \
-                   AND user_id IS NOT NULL \
+                    cast(any(user_email) AS String) AS user_email, \
+                    toUInt64(sum(api_count)) AS request_count, \
+                    toInt64(sum(token_total)) AS total_tokens, \
+                    toUInt64(sum(mcp_count)) AS mcp_call_count, \
+                    toString(max(last_active)) AS last_active \
+                 FROM ( \
+                    SELECT \
+                        user_id AS user_id, \
+                        ifNull(user_email, '') AS user_email, \
+                        toUInt64(1) AS api_count, \
+                        toUInt64(0) AS mcp_count, \
+                        toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS token_total, \
+                        created_at AS last_active \
+                    FROM gateway_logs \
+                    PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL \
+                    UNION ALL \
+                    SELECT \
+                        user_id AS user_id, \
+                        ifNull(user_email, '') AS user_email, \
+                        toUInt64(0) AS api_count, \
+                        toUInt64(1) AS mcp_count, \
+                        toInt64(0) AS token_total, \
+                        created_at AS last_active \
+                    FROM mcp_logs \
+                    PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL \
+                 ) \
                  GROUP BY user_id \
-                 ORDER BY request_count DESC \
+                 ORDER BY (request_count + mcp_call_count) DESC \
                  LIMIT ?",
             )
+            .bind(from.clone())
             .bind(from.clone())
             .bind(TOP_USERS_LIMIT)
             .fetch_all::<TopActiveUserChRow>(),
@@ -1266,40 +1297,77 @@ pub async fn get_top_active_users(
             ch.query(
                 "SELECT \
                     cast(user_id AS String) AS user_id, \
-                    cast(any(ifNull(user_email, '')) AS String) AS user_email, \
-                    count() AS request_count, \
-                    toInt64(sum(toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)))) AS total_tokens, \
-                    toString(max(created_at)) AS last_active \
-                 FROM gateway_logs \
-                 PREWHERE created_at >= toDateTime(?) \
-                   AND user_id IS NOT NULL \
-                   AND has(?, user_id) \
+                    cast(any(user_email) AS String) AS user_email, \
+                    toUInt64(sum(api_count)) AS request_count, \
+                    toInt64(sum(token_total)) AS total_tokens, \
+                    toUInt64(sum(mcp_count)) AS mcp_call_count, \
+                    toString(max(last_active)) AS last_active \
+                 FROM ( \
+                    SELECT \
+                        user_id AS user_id, \
+                        ifNull(user_email, '') AS user_email, \
+                        toUInt64(1) AS api_count, \
+                        toUInt64(0) AS mcp_count, \
+                        toInt64(ifNull(input_tokens, 0)) + toInt64(ifNull(output_tokens, 0)) AS token_total, \
+                        created_at AS last_active \
+                    FROM gateway_logs \
+                    PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL AND has(?, user_id) \
+                    UNION ALL \
+                    SELECT \
+                        user_id AS user_id, \
+                        ifNull(user_email, '') AS user_email, \
+                        toUInt64(0) AS api_count, \
+                        toUInt64(1) AS mcp_count, \
+                        toInt64(0) AS token_total, \
+                        created_at AS last_active \
+                    FROM mcp_logs \
+                    PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL AND has(?, user_id) \
+                 ) \
                  GROUP BY user_id \
-                 ORDER BY request_count DESC \
+                 ORDER BY (request_count + mcp_call_count) DESC \
                  LIMIT ?",
             )
+            .bind(from.clone())
+            .bind(ids)
             .bind(from.clone())
             .bind(ids)
             .bind(TOP_USERS_LIMIT)
             .fetch_all::<TopActiveUserChRow>(),
         ),
     };
-    let total_fut: Pin<
-        Box<dyn std::future::Future<Output = clickhouse::error::Result<u64>> + Send>,
-    > = match user_filter.as_deref() {
+
+    // `total` is the count of distinct users active in EITHER table
+    // — same inner shape as the leaderboard query, but skipping the
+    // ORDER+LIMIT and counting the grouped rows.
+    type TotalFut =
+        Pin<Box<dyn std::future::Future<Output = clickhouse::error::Result<u64>> + Send>>;
+    let total_fut: TotalFut = match user_filter.as_deref() {
         None => Box::pin(
             ch.query(
-                "SELECT uniqExact(user_id) FROM gateway_logs \
-                 PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL",
+                "SELECT toUInt64(count()) FROM ( \
+                    SELECT user_id FROM gateway_logs \
+                    PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL \
+                    UNION DISTINCT \
+                    SELECT user_id FROM mcp_logs \
+                    PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL \
+                 )",
             )
+            .bind(from.clone())
             .bind(from.clone())
             .fetch_one::<u64>(),
         ),
         Some(ids) => Box::pin(
             ch.query(
-                "SELECT uniqExact(user_id) FROM gateway_logs \
-                 PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL AND has(?, user_id)",
+                "SELECT toUInt64(count()) FROM ( \
+                    SELECT user_id FROM gateway_logs \
+                    PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL AND has(?, user_id) \
+                    UNION DISTINCT \
+                    SELECT user_id FROM mcp_logs \
+                    PREWHERE created_at >= toDateTime(?) AND user_id IS NOT NULL AND has(?, user_id) \
+                 )",
             )
+            .bind(from.clone())
+            .bind(ids)
             .bind(from.clone())
             .bind(ids)
             .fetch_one::<u64>(),
@@ -1315,6 +1383,7 @@ pub async fn get_top_active_users(
             user_email: r.user_email,
             request_count: r.request_count,
             total_tokens: r.total_tokens,
+            mcp_call_count: r.mcp_call_count,
             last_active: r.last_active,
         })
         .collect();

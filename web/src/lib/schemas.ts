@@ -83,8 +83,13 @@ export const DashboardLiveSchema = z.object({
 export const TopActiveUserSchema = z.object({
   user_id: z.string(),
   user_email: z.string(),
+  /** Gateway requests in the window. */
   request_count: z.number(),
+  /** Sum of input+output tokens across the user's gateway requests. */
   total_tokens: z.number(),
+  /** MCP tool invocations in the window. Counted independently of
+   *  `request_count` so MCP-only callers aren't hidden. */
+  mcp_call_count: z.number(),
   last_active: z.string(),
 });
 

@@ -1517,8 +1517,14 @@ function TopUserRow({
   // Email present → primary label is email, secondary is short user_id.
   // Email blank (pre-email-column rows / anonymous) → fall back to the
   // user_id so the row never reads as "user with no name."
+  const { t } = useTranslation();
   const label = user.user_email || user.user_id;
   const subLabel = user.user_email ? user.user_id.slice(0, 8) : null;
+  // Three stats per row: API requests, tokens used, MCP calls. Labels
+  // sit above each number so an operator can't mistake e.g. an MCP
+  // power user for an API spammer. Each metric is dim when 0 — an
+  // MCP-only caller has 0 API/tokens, an API-only caller has 0 MCP,
+  // and the visual hierarchy follows.
   return (
     <li className="flex items-center gap-2.5 px-3 py-2 text-xs">
       <span className="w-4 shrink-0 text-right font-mono tabular-nums text-[10px] text-muted-foreground">
@@ -1530,12 +1536,45 @@ function TopUserRow({
           <span className="truncate text-[10px] text-muted-foreground">{subLabel}</span>
         )}
       </div>
-      <span
-        className="shrink-0 font-mono tabular-nums"
-        title={`${user.total_tokens.toLocaleString(locale)} tokens`}
-      >
-        {fmtCompact(user.request_count, locale)}
-      </span>
+      <div className="flex shrink-0 items-center gap-3 font-mono tabular-nums text-[11px]">
+        <TopUserStat
+          label={t('dashboard.statApi', 'API')}
+          value={user.request_count}
+          locale={locale}
+        />
+        <TopUserStat
+          label={t('dashboard.statTokens', 'TOK')}
+          value={user.total_tokens}
+          locale={locale}
+        />
+        <TopUserStat
+          label={t('dashboard.statMcp', 'MCP')}
+          value={user.mcp_call_count}
+          locale={locale}
+        />
+      </div>
     </li>
+  );
+}
+
+function TopUserStat({
+  label,
+  value,
+  locale,
+}: {
+  label: string;
+  value: number;
+  locale: string;
+}) {
+  const zero = value === 0;
+  return (
+    <div className="flex w-12 flex-col items-end leading-tight">
+      <span className="text-[9px] uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
+      <span className={zero ? 'text-muted-foreground/60' : ''}>
+        {fmtCompact(value, locale)}
+      </span>
+    </div>
   );
 }
