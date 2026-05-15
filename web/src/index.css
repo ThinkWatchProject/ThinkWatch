@@ -171,20 +171,28 @@
     animation: tw-glow-pulse 2s ease-in-out infinite;
 }
 
-/* Brief green flash on growing values (e.g. live-log tokens cell).
-   Starts visible + tinted, fades back to neutral. The element keeps
-   its layout — only background + text color animate — so neighbouring
-   columns don't shift mid-tick. */
-@keyframes tw-token-flash {
+/* Flip-clock style "value just changed" effect for live-log tokens.
+   The new number slides down from above into place with a soft
+   overshoot — reads as "the digit just turned over" rather than a
+   color flash, and stays monochrome so neighbouring columns don't
+   get drawn into the change. Layout-stable: `display: inline-block`
+   on the animated child keeps the cell width to its content; the
+   outer cell already has tabular-nums so the column doesn't jitter
+   when digit counts change. */
+@keyframes tw-token-flip {
     0% {
-        background-color: oklch(0.78 0.18 152 / 0.35);
-        color: oklch(0.78 0.18 152);
+        transform: translateY(-55%);
+        opacity: 0;
+    }
+    60% {
+        opacity: 1;
     }
     100% {
-        background-color: transparent;
-        color: inherit;
+        transform: translateY(0);
+        opacity: 1;
     }
 }
-.animate-token-flash {
-    animation: tw-token-flash 700ms ease-out;
+.animate-token-flip {
+    display: inline-block;
+    animation: tw-token-flip 420ms cubic-bezier(0.34, 1.4, 0.64, 1);
 }

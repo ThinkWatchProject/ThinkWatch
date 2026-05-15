@@ -1153,11 +1153,7 @@ function TokensCell({
     <div className="hidden text-right tabular-nums lg:block">
       <span
         key={flashId}
-        className={
-          flashId > 0
-            ? 'inline-block animate-token-flash rounded px-1'
-            : 'inline-block'
-        }
+        className={flashId > 0 ? 'animate-token-flip' : 'inline-block'}
       >
         {tokens.toLocaleString()}
       </span>
