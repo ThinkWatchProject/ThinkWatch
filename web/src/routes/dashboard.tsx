@@ -979,8 +979,11 @@ export function DashboardPage() {
         </Section>
 
         <div className="flex min-h-0 flex-col gap-4">
-          {/* Upstream health takes whatever vertical space is left after
-              the (compact, fixed) RPM panel below. */}
+          {/* Upstream health and the active-users leaderboard split the
+              right column 50/50. Both panels are list-shaped and
+              scrollable internally, so equal flex-basis + min-h-0
+              lets either grow to fill its half regardless of how many
+              rows it contains. */}
           <Section
             eyebrow={t('dashboard.providerHealth')}
             className="flex min-h-0 flex-1 flex-col"
@@ -994,7 +997,10 @@ export function DashboardPage() {
           >
             <ProviderHealthPanel rows={filteredProviders} />
           </Section>
-          <Section eyebrow={t('dashboard.activeUsersEyebrow')} className="shrink-0">
+          <Section
+            eyebrow={t('dashboard.activeUsersEyebrow')}
+            className="flex min-h-0 flex-1 flex-col"
+          >
             <ErrorBoundary fallback={<TopUsersPanelError />}>
               <Suspense fallback={<TopUsersPanelSkeleton />}>
                 <TopUsersPanel promise={topUsersPromise} locale={locale} />
@@ -1395,8 +1401,8 @@ function TopUsersPanel({
 
   if (users.length === 0) {
     return (
-      <Card size="sm" className="gap-0">
-        <CardContent className="flex flex-col items-center justify-center gap-2 px-3 py-8 text-center text-muted-foreground">
+      <Card size="sm" className="flex min-h-0 flex-1 flex-col gap-0">
+        <CardContent className="flex flex-1 flex-col items-center justify-center gap-2 px-3 text-center text-muted-foreground">
           <Inbox className="h-8 w-8" strokeWidth={1.25} />
           <span className="text-xs">{t('dashboard.noActiveUsers')}</span>
         </CardContent>
@@ -1404,11 +1410,13 @@ function TopUsersPanel({
     );
   }
 
-  // Scrollable list. Height matches the old chart panel (~140px) so
-  // the bottom-right column proportions stay the same.
+  // Card fills its half of the right column (Section above is
+  // `flex-1 min-h-0 flex-col`); CardContent owns the scroll so a
+  // long top-50 list never pushes the upstream-health panel out of
+  // view.
   return (
-    <Card size="sm" className="gap-0">
-      <CardContent className="max-h-[200px] overflow-y-auto px-0 py-1">
+    <Card size="sm" className="flex min-h-0 flex-1 flex-col gap-0">
+      <CardContent className="min-h-0 flex-1 overflow-y-auto px-0 py-1">
         <ul className="divide-y divide-border/40">
           {users.map((u, i) => (
             <TopUserRow key={u.user_id} rank={i + 1} user={u} locale={locale} />
