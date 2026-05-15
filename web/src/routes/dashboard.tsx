@@ -1492,9 +1492,28 @@ function TopUsersPanel({
   // uses to fill its half of the right column. CardContent owns the
   // scroll so a long top-50 list never pushes the upstream-health
   // panel out of view.
+  // The column-header strip sits inside the scroll area but with
+  // `position: sticky; top: 0` so it floats at the top while the
+  // list scrolls underneath. Labels appear once instead of repeating
+  // on every row — readable at any list length.
   return (
     <Card size="sm" className="flex h-full min-h-0 flex-col gap-0 py-0">
-      <CardContent className="min-h-0 flex-1 overflow-y-auto px-0 py-1">
+      <CardContent className="min-h-0 flex-1 overflow-y-auto px-0 py-0">
+        <div
+          className="sticky top-0 z-10 flex items-center gap-2.5 border-b bg-card/95 px-3 py-1.5 text-[9px] uppercase tracking-wider text-muted-foreground backdrop-blur"
+        >
+          <span className="w-4 shrink-0" aria-hidden="true" />
+          <span className="min-w-0 flex-1" aria-hidden="true" />
+          <span className="w-12 shrink-0 text-right font-mono tabular-nums">
+            {t('dashboard.statApi', 'API')}
+          </span>
+          <span className="w-12 shrink-0 text-right font-mono tabular-nums">
+            {t('dashboard.statTokens', 'TOK')}
+          </span>
+          <span className="w-12 shrink-0 text-right font-mono tabular-nums">
+            {t('dashboard.statMcp', 'MCP')}
+          </span>
+        </div>
         <ul className="divide-y divide-border/40">
           {users.map((u, i) => (
             <TopUserRow key={u.user_id} rank={i + 1} user={u} locale={locale} />
@@ -1517,64 +1536,39 @@ function TopUserRow({
   // Email present → primary label is email, secondary is short user_id.
   // Email blank (pre-email-column rows / anonymous) → fall back to the
   // user_id so the row never reads as "user with no name."
-  const { t } = useTranslation();
   const label = user.user_email || user.user_id;
   const subLabel = user.user_email ? user.user_id.slice(0, 8) : null;
-  // Three stats per row: API requests, tokens used, MCP calls. Labels
-  // sit above each number so an operator can't mistake e.g. an MCP
-  // power user for an API spammer. Each metric is dim when 0 — an
-  // MCP-only caller has 0 API/tokens, an API-only caller has 0 MCP,
-  // and the visual hierarchy follows.
+  // Three right-aligned numbers — labels live in the sticky header
+  // up top so the rows themselves stay scannable. Zero values dim so
+  // operators can tell "MCP-only" callers from "API-only" at a glance
+  // without reading every digit.
   return (
-    <li className="flex items-center gap-2.5 px-3 py-2 text-xs">
+    <li className="flex items-center gap-2.5 px-3 py-1.5 text-xs">
       <span className="w-4 shrink-0 text-right font-mono tabular-nums text-[10px] text-muted-foreground">
         {rank}
       </span>
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col leading-tight">
         <span className="truncate font-mono">{label}</span>
         {subLabel && (
           <span className="truncate text-[10px] text-muted-foreground">{subLabel}</span>
         )}
       </div>
-      <div className="flex shrink-0 items-center gap-3 font-mono tabular-nums text-[11px]">
-        <TopUserStat
-          label={t('dashboard.statApi', 'API')}
-          value={user.request_count}
-          locale={locale}
-        />
-        <TopUserStat
-          label={t('dashboard.statTokens', 'TOK')}
-          value={user.total_tokens}
-          locale={locale}
-        />
-        <TopUserStat
-          label={t('dashboard.statMcp', 'MCP')}
-          value={user.mcp_call_count}
-          locale={locale}
-        />
-      </div>
+      <TopUserStat value={user.request_count} locale={locale} />
+      <TopUserStat value={user.total_tokens} locale={locale} />
+      <TopUserStat value={user.mcp_call_count} locale={locale} />
     </li>
   );
 }
 
-function TopUserStat({
-  label,
-  value,
-  locale,
-}: {
-  label: string;
-  value: number;
-  locale: string;
-}) {
+function TopUserStat({ value, locale }: { value: number; locale: string }) {
   const zero = value === 0;
   return (
-    <div className="flex w-12 flex-col items-end leading-tight">
-      <span className="text-[9px] uppercase tracking-wider text-muted-foreground">
-        {label}
-      </span>
-      <span className={zero ? 'text-muted-foreground/60' : ''}>
-        {fmtCompact(value, locale)}
-      </span>
-    </div>
+    <span
+      className={`w-12 shrink-0 text-right font-mono tabular-nums text-[11px] ${
+        zero ? 'text-muted-foreground/50' : ''
+      }`}
+    >
+      {fmtCompact(value, locale)}
+    </span>
   );
 }
