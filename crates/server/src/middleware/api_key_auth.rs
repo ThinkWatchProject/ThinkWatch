@@ -209,6 +209,17 @@ pub fn require_api_key(
                 None
             };
 
+            // Resolve client IP once, share across both identities so
+            // gateway_logs and mcp_logs see the same value the rest
+            // of the auth stack uses (honours client_ip_source +
+            // trusted_proxies via auth_guard::extract_client_ip).
+            let client_ip = crate::middleware::auth_guard::extract_client_ip(
+                &state,
+                request.headers(),
+                request.extensions(),
+            )
+            .await;
+
             let gateway_identity = GatewayRequestIdentity {
                 user_id: row.user_id.map(|u| u.to_string()),
                 user_email,
@@ -216,6 +227,7 @@ pub fn require_api_key(
                 api_key_lineage_id: Some(row.lineage_id.to_string()),
                 allowed_models: merged_models.clone(),
                 surface_constraints: surface_constraints.clone(),
+                ip_address: client_ip.clone(),
             };
 
             // The MCP transport handlers expect their own typed
@@ -244,6 +256,7 @@ pub fn require_api_key(
                     surface_constraints: surface_constraints.clone(),
                     allowed_mcp_tools: merged_mcp_tools.clone(),
                     mcp_account_overrides: row.mcp_account_overrides.clone(),
+                    ip_address: client_ip.clone(),
                 };
                 request.extensions_mut().insert(mcp_identity);
             }

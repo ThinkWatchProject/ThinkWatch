@@ -29,6 +29,7 @@ pub struct McpLogsQuery {
 pub struct McpLogEntry {
     pub id: String,
     pub user_id: Option<String>,
+    pub user_email: Option<String>,
     pub server_id: Option<String>,
     pub server_name: Option<String>,
     pub tool_name: Option<String>,
@@ -144,7 +145,7 @@ pub async fn list_mcp_logs(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
     let data_sql = format!(
-        "SELECT id, user_id, server_id, server_name, tool_name, duration_ms, status, error_message, ip_address, toString(created_at) as created_at \
+        "SELECT id, user_id, user_email, server_id, server_name, tool_name, duration_ms, status, error_message, ip_address, toString(created_at) as created_at \
          FROM mcp_logs {wc} ORDER BY {ob} LIMIT {limit} OFFSET {offset}"
     );
     let mut q = ch.query(&data_sql);

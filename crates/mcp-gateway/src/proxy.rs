@@ -132,6 +132,8 @@ pub struct RequestContext<'a> {
     /// — `{ "<server_uuid>": "<account_label>" }`. Empty `{}` ⇒ the
     /// resolver always picks the user's `is_default` credential.
     pub mcp_account_overrides: &'a serde_json::Value,
+    /// Resolved client IP, snapshotted onto every `mcp_logs` row.
+    pub ip_address: Option<&'a str>,
 }
 
 /// Read the account_label routed to a specific server from the API
@@ -996,6 +998,9 @@ impl McpProxy {
                 "error_message": error_message,
             }));
         entry = entry.user_id(user_id).user_email(user_email);
+        if let Some(ip) = ctx.ip_address {
+            entry = entry.ip_address(ip);
+        }
         self.audit.log(entry);
 
         response

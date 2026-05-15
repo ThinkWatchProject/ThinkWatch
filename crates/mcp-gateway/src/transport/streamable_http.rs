@@ -48,6 +48,11 @@ pub struct McpRequestIdentity {
     /// API key (`api_keys.mcp_account_overrides`). The pool resolver
     /// consults this before falling back to the user's default credential.
     pub mcp_account_overrides: serde_json::Value,
+    /// Resolved client IP (honours `client_ip_source` + `trusted_proxies`).
+    /// Populated by the API-key middleware via `extract_client_ip` so
+    /// every `mcp_logs` row carries it without each transport reading
+    /// headers themselves. `None` only if extraction failed.
+    pub ip_address: Option<String>,
 }
 
 /// Header name used to carry the MCP session identifier.
@@ -115,6 +120,7 @@ pub async fn handle_post(
         allowed_mcp_tools: identity.allowed_mcp_tools.as_deref(),
         trace_id: &trace_id,
         mcp_account_overrides: &identity.mcp_account_overrides,
+        ip_address: identity.ip_address.as_deref(),
     };
     let response = state.proxy.handle_request(&ctx, request).await;
 

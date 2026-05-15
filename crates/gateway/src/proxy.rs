@@ -94,6 +94,11 @@ pub struct GatewayRequestIdentity {
     /// and consumed directly here — no side-table lookups on the
     /// hot path.
     pub surface_constraints: SurfaceConstraints,
+    /// Resolved client IP (honours `client_ip_source` + `trusted_proxies`).
+    /// Populated by the API-key middleware via `extract_client_ip` so
+    /// every `gateway_logs` row carries it without each handler reading
+    /// headers themselves. `None` only if extraction failed.
+    pub ip_address: Option<String>,
 }
 
 /// Materialize the merged surface constraints into `RateLimitRule`
@@ -206,6 +211,7 @@ struct LogCtx<'a> {
     user_email: Option<String>,
     api_key_id: Option<String>,
     api_key_lineage_id: Option<String>,
+    ip_address: Option<String>,
     /// May be "(unknown)" when the failure happens before the model
     /// has been resolved (e.g. transform errors on malformed bodies).
     model: String,
@@ -230,6 +236,7 @@ impl LogCtx<'_> {
             self.user_email.as_deref(),
             self.api_key_id.as_deref(),
             self.api_key_lineage_id.as_deref(),
+            self.ip_address.as_deref(),
             &self.model,
             None,
             self.started.elapsed().as_millis() as i64,
@@ -292,6 +299,7 @@ fn emit_gateway_error_log(
     user_email: Option<&str>,
     api_key_id: Option<&str>,
     api_key_lineage_id: Option<&str>,
+    ip_address: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
     latency_ms: i64,
@@ -340,6 +348,9 @@ fn emit_gateway_error_log(
     {
         entry = entry.api_key_lineage_id(u);
     }
+    if let Some(ip) = ip_address {
+        entry = entry.ip_address(ip);
+    }
     audit.log(entry);
 }
 
@@ -356,6 +367,7 @@ fn emit_gateway_log_with_extra(
     user_email: Option<&str>,
     api_key_id: Option<&str>,
     api_key_lineage_id: Option<&str>,
+    ip_address: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
     upstream_model: Option<&str>,
@@ -407,6 +419,9 @@ fn emit_gateway_log_with_extra(
     {
         entry = entry.api_key_lineage_id(u);
     }
+    if let Some(ip) = ip_address {
+        entry = entry.ip_address(ip);
+    }
     audit.log(entry);
 }
 
@@ -419,6 +434,7 @@ fn emit_gateway_log(
     user_email: Option<&str>,
     api_key_id: Option<&str>,
     api_key_lineage_id: Option<&str>,
+    ip_address: Option<&str>,
     model_id: &str,
     provider: Option<&str>,
     upstream_model: Option<&str>,
@@ -460,6 +476,9 @@ fn emit_gateway_log(
         && let Ok(u) = uuid::Uuid::parse_str(lid)
     {
         entry = entry.api_key_lineage_id(u);
+    }
+    if let Some(ip) = ip_address {
+        entry = entry.ip_address(ip);
     }
     audit.log(entry);
 }
@@ -1094,6 +1113,7 @@ pub async fn proxy_chat_completion(
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
         api_key_lineage_id: identity.api_key_lineage_id.clone(),
+        ip_address: identity.ip_address.clone(),
         model: request.model.clone(),
         started: request_started_at,
     };
@@ -1325,6 +1345,7 @@ pub async fn proxy_chat_completion(
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
         let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
+        let ip_address_for_done = identity.ip_address.clone();
         let model_for_log = original_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
         let upstream_model_for_done = entry.upstream_model.clone();
@@ -1355,6 +1376,7 @@ pub async fn proxy_chat_completion(
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
                     api_key_lineage_id_for_done.as_deref(),
+                    ip_address_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
                     upstream_model_for_done.as_deref(),
@@ -1427,6 +1449,7 @@ pub async fn proxy_chat_completion(
                         identity.user_email.as_deref(),
                         identity.api_key_id.as_deref(),
                         identity.api_key_lineage_id.as_deref(),
+                        identity.ip_address.as_deref(),
                         &original_model,
                         None,
                         request_started_at.elapsed().as_millis() as i64,
@@ -1518,6 +1541,7 @@ pub async fn proxy_chat_completion(
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
             identity.api_key_lineage_id.as_deref(),
+            identity.ip_address.as_deref(),
             &original_model,
             Some(chosen_entry.provider_name.as_str()),
             chosen_entry.upstream_model.as_deref(),
@@ -1608,6 +1632,7 @@ pub async fn proxy_anthropic_messages(
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
         api_key_lineage_id: identity.api_key_lineage_id.clone(),
+        ip_address: identity.ip_address.clone(),
         model: "(unknown)".into(),
         started: request_started_at,
     };
@@ -1634,6 +1659,7 @@ pub async fn proxy_anthropic_messages(
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
         api_key_lineage_id: identity.api_key_lineage_id.clone(),
+        ip_address: identity.ip_address.clone(),
         model: mapped_model.clone(),
         started: request_started_at,
     };
@@ -1764,6 +1790,7 @@ pub async fn proxy_anthropic_messages(
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
         let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
+        let ip_address_for_done = identity.ip_address.clone();
         let model_for_log = mapped_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
         let upstream_model_for_done = entry.upstream_model.clone();
@@ -1788,6 +1815,7 @@ pub async fn proxy_anthropic_messages(
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
                     api_key_lineage_id_for_done.as_deref(),
+                    ip_address_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
                     upstream_model_for_done.as_deref(),
@@ -1843,6 +1871,7 @@ pub async fn proxy_anthropic_messages(
                         identity.user_email.as_deref(),
                         identity.api_key_id.as_deref(),
                         identity.api_key_lineage_id.as_deref(),
+                        identity.ip_address.as_deref(),
                         &mapped_model,
                         None,
                         request_started_at.elapsed().as_millis() as i64,
@@ -1905,6 +1934,7 @@ pub async fn proxy_anthropic_messages(
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
             identity.api_key_lineage_id.as_deref(),
+            identity.ip_address.as_deref(),
             &mapped_model,
             Some(chosen_entry.provider_name.as_str()),
             chosen_entry.upstream_model.as_deref(),
@@ -2002,6 +2032,7 @@ pub async fn proxy_responses(
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
         api_key_lineage_id: identity.api_key_lineage_id.clone(),
+        ip_address: identity.ip_address.clone(),
         model: "(unknown)".into(),
         started: request_started_at,
     };
@@ -2027,6 +2058,7 @@ pub async fn proxy_responses(
         user_email: identity.user_email.clone(),
         api_key_id: identity.api_key_id.clone(),
         api_key_lineage_id: identity.api_key_lineage_id.clone(),
+        ip_address: identity.ip_address.clone(),
         model: mapped_model.clone(),
         started: request_started_at,
     };
@@ -2174,6 +2206,7 @@ pub async fn proxy_responses(
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
         let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
+        let ip_address_for_done = identity.ip_address.clone();
         let model_for_log = mapped_model.clone();
         let provider_name_for_done = entry.provider_name.clone();
         let upstream_model_for_done = entry.upstream_model.clone();
@@ -2198,6 +2231,7 @@ pub async fn proxy_responses(
                     user_email_for_done.as_deref(),
                     api_key_id_for_done.as_deref(),
                     api_key_lineage_id_for_done.as_deref(),
+                    ip_address_for_done.as_deref(),
                     &model_for_log,
                     Some(provider_name_for_done.as_str()),
                     upstream_model_for_done.as_deref(),
@@ -2256,6 +2290,7 @@ pub async fn proxy_responses(
                         identity.user_email.as_deref(),
                         identity.api_key_id.as_deref(),
                         identity.api_key_lineage_id.as_deref(),
+                        identity.ip_address.as_deref(),
                         &mapped_model,
                         None,
                         request_started_at.elapsed().as_millis() as i64,
@@ -2314,6 +2349,7 @@ pub async fn proxy_responses(
             identity.user_email.as_deref(),
             identity.api_key_id.as_deref(),
             identity.api_key_lineage_id.as_deref(),
+            identity.ip_address.as_deref(),
             &mapped_model,
             Some(chosen_entry.provider_name.as_str()),
             chosen_entry.upstream_model.as_deref(),
