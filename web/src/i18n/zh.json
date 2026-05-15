@@ -276,6 +276,8 @@
     "activeApiKeys": "活跃 API 密钥",
     "requestsPerMin": "请求 / 分钟",
     "activeUsersEyebrow": "活跃用户 · 排行榜",
+    "noTrafficInWindow": "时间窗口内无流量 — 暂无健康信号",
+    "successRateTooltip": "{{rate}}% 成功(已排除 429 限流)",
     "totalUsers": "共 {{countStr}} 人",
     "statApi": "API",
     "statTokens": "Token",

@@ -276,6 +276,8 @@
     "activeApiKeys": "Active API keys",
     "requestsPerMin": "Requests / min",
     "activeUsersEyebrow": "Active users · top callers",
+    "noTrafficInWindow": "No traffic in window — no health signal",
+    "successRateTooltip": "{{rate}}% successful (excludes 429 throttling)",
     "totalUsers": "{{countStr}} total",
     "statApi": "API",
     "statTokens": "Tokens",

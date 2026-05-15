@@ -2,6 +2,7 @@ import {
   memo,
   Suspense,
   use,
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -1351,11 +1352,15 @@ function ProviderRowImpl({
   healthyLabel,
   degradedLabel,
   downLabel,
+  noTrafficTooltip,
+  successRateTooltipFormat,
 }: {
   row: ProviderHealth;
   healthyLabel: string;
   degradedLabel: string;
   downLabel: string;
+  noTrafficTooltip: string;
+  successRateTooltipFormat: (rate: number) => string;
 }) {
   const cbReal = row.cb_state || '';
   // success_rate may be null (no traffic in the window). When it is,
@@ -1395,7 +1400,14 @@ function ProviderRowImpl({
           {row.throttled_rate.toFixed(0)}% 429
         </span>
       )}
-      <span className="shrink-0 font-mono tabular-nums text-muted-foreground">
+      <span
+        className="shrink-0 font-mono tabular-nums text-muted-foreground"
+        title={
+          row.success_rate === null
+            ? noTrafficTooltip
+            : successRateTooltipFormat(row.success_rate)
+        }
+      >
         {row.success_rate === null ? '—' : `${row.success_rate.toFixed(0)}%`}
       </span>
       <StatusIndicator status={status} label={statusLabel} pulse />
@@ -1412,6 +1424,11 @@ const ProviderRow = memo(ProviderRowImpl, (prev, next) => {
   if (prev.healthyLabel !== next.healthyLabel) return false;
   if (prev.degradedLabel !== next.degradedLabel) return false;
   if (prev.downLabel !== next.downLabel) return false;
+  if (prev.noTrafficTooltip !== next.noTrafficTooltip) return false;
+  // Identity check on the formatter is sufficient — the parent
+  // memoizes it across renders so a stable reference means stable
+  // output for a given input.
+  if (prev.successRateTooltipFormat !== next.successRateTooltipFormat) return false;
   const a = prev.row;
   const b = next.row;
   return (
@@ -1433,6 +1450,17 @@ function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
   const healthyLabel = t('common.healthy');
   const degradedLabel = t('dashboard.degraded');
   const downLabel = t('dashboard.down');
+  const noTrafficTooltip = t(
+    'dashboard.noTrafficInWindow',
+    'No traffic in window — no health signal',
+  );
+  const successRateTooltipFormat = useCallback(
+    (rate: number) =>
+      t('dashboard.successRateTooltip', '{{rate}}% successful (excludes 429 throttling)', {
+        rate: rate.toFixed(0),
+      }),
+    [t],
+  );
   return (
     <Card className="flex h-full min-h-0 flex-col gap-0 py-0">
       {rows === null ? (
@@ -1452,6 +1480,8 @@ function ProviderHealthPanel({ rows }: { rows: ProviderHealth[] | null }) {
               healthyLabel={healthyLabel}
               degradedLabel={degradedLabel}
               downLabel={downLabel}
+              noTrafficTooltip={noTrafficTooltip}
+              successRateTooltipFormat={successRateTooltipFormat}
             />
           ))}
         </ul>
