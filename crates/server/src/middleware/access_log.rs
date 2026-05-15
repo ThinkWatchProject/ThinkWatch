@@ -45,6 +45,53 @@ pub struct AccessLogUserSlot(pub Arc<OnceLock<AccessLogUserInfo>>);
 #[allow(dead_code)] // read by handlers that tag audit entries with .trace_id()
 pub struct RequestTraceId(pub String);
 
+/// Should the path/status pair be excluded from access_logs entirely?
+///
+/// Background: the dashboard self-poll alone generates ~280 access_log
+/// rows/hour just from being open in a browser tab, and the log query
+/// page becomes unreadable when 99% of rows are infra noise. Three
+/// classes are filtered:
+///
+/// * `/api/health` (and any sub-path) — pure infra probe, no audit
+///   value, hits ~55×/h from container orchestrators alone.
+/// * `101 Switching Protocols` — WebSocket / HTTP upgrade handshakes,
+///   not business requests; the WS session itself isn't auditable
+///   through this layer anyway.
+/// * Dashboard/analytics read-only stats endpoints — the live
+///   observability surface the dashboard polls. These are GETs over
+///   already-aggregated rollups, carry no user-supplied data beyond
+///   `range`, and are not security-relevant. With three of them
+///   running on a ~45s cadence per open tab, they dominate access_logs
+///   on any deployment that has the dashboard open.
+///
+/// Kept intentionally narrow — every other endpoint, including auth
+/// failures and other infra calls, still flows through so we don't
+/// quietly drop attacker recon or buggy clients. Only GET requests on
+/// the matching paths are filtered; if any of these ever gains a POST
+/// variant it stays auditable.
+pub fn is_access_log_noise(method: &str, path: &str, status_code: u16) -> bool {
+    if status_code == 101 {
+        return true;
+    }
+    if path == "/api/health" || path.starts_with("/api/health/") {
+        return true;
+    }
+    if method == "GET"
+        && matches!(
+            path,
+            "/api/dashboard/stats"
+                | "/api/dashboard/live"
+                | "/api/dashboard/ws-ticket"
+                | "/api/dashboard/layout"
+                | "/api/analytics/usage/stats"
+                | "/api/analytics/costs/stats"
+        )
+    {
+        return true;
+    }
+    false
+}
+
 /// Layer that logs HTTP requests to ClickHouse.
 #[derive(Clone)]
 pub struct AccessLogLayer {
@@ -150,6 +197,14 @@ where
             let latency_ms = start.elapsed().as_millis() as i64;
             let status_code = response.status().as_u16();
 
+            // Skip pure infrastructure noise (health probes, protocol
+            // upgrades, dashboard self-poll) before resolving IP /
+            // building the entry — the skip filter dominates write
+            // traffic on busy dashboards.
+            if is_access_log_noise(&method, &path, status_code) {
+                return Ok(response);
+            }
+
             // Resolve client IP using the same logic as auth_guard
             let ip = match dc.client_ip_source().await.as_str() {
                 "xff" => {
@@ -203,5 +258,69 @@ where
 
             Ok(response)
         })
+    }
+}
+
+#[cfg(test)]
+mod noise_filter_tests {
+    use super::is_access_log_noise;
+
+    #[test]
+    fn health_probe_paths_are_skipped() {
+        assert!(is_access_log_noise("GET", "/api/health", 200));
+        assert!(is_access_log_noise("GET", "/api/health/", 200));
+        assert!(is_access_log_noise("GET", "/api/health/ready", 503));
+    }
+
+    #[test]
+    fn websocket_upgrades_are_skipped_regardless_of_path() {
+        // The 101 case is the one that drives operators batty — a real
+        // status leaking through "status_code:200" filters because the
+        // upgrade returns 101.
+        assert!(is_access_log_noise("GET", "/api/dashboard/ws", 101));
+        assert!(is_access_log_noise("GET", "/anything/at/all", 101));
+    }
+
+    #[test]
+    fn dashboard_self_poll_endpoints_are_skipped_on_get() {
+        // The three stat endpoints + their live/layout/ws-ticket
+        // siblings dominate access_logs on any deployment with the
+        // dashboard open — ~280 rows/hour per open tab.
+        for path in [
+            "/api/dashboard/stats",
+            "/api/dashboard/live",
+            "/api/dashboard/ws-ticket",
+            "/api/dashboard/layout",
+            "/api/analytics/usage/stats",
+            "/api/analytics/costs/stats",
+        ] {
+            assert!(
+                is_access_log_noise("GET", path, 200),
+                "expected GET {path} to be filtered"
+            );
+        }
+    }
+
+    #[test]
+    fn non_get_on_polling_paths_is_kept() {
+        // Defensive: if any of these paths ever gains a POST/PATCH/etc
+        // it should stay auditable. Only GETs are infra noise.
+        assert!(!is_access_log_noise("POST", "/api/dashboard/stats", 200));
+        assert!(!is_access_log_noise("DELETE", "/api/dashboard/layout", 200));
+    }
+
+    #[test]
+    fn ordinary_traffic_is_kept() {
+        assert!(!is_access_log_noise("GET", "/api/keys", 200));
+        assert!(!is_access_log_noise("POST", "/api/keys", 201));
+        assert!(!is_access_log_noise("GET", "/api/admin/access-logs", 401));
+        // healthz lookalikes that aren't ours — don't accidentally
+        // swallow a route a future handler adds.
+        assert!(!is_access_log_noise("GET", "/healthz", 200));
+        assert!(!is_access_log_noise(
+            "GET",
+            "/api/something/health-check",
+            200
+        ));
     }
 }
