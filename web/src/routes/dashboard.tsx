@@ -196,7 +196,13 @@ function useLiveDashboard(range: string) {
         scheduleReconnect();
         return;
       }
-      if (cancelled) return;
+      // Re-check visibility AND cancellation after the ticket await.
+      // The pre-await `document.hidden` guard misses the window where
+      // the tab flips hidden mid-mint: `onVis` runs its closeQuietly
+      // on a still-null `ws`, then we continue and create a WebSocket
+      // in the now-hidden tab with no listener to clean it up until
+      // the next visibility transition.
+      if (cancelled || document.hidden) return;
 
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
       const apiBase = import.meta.env.VITE_API_BASE ?? '';
