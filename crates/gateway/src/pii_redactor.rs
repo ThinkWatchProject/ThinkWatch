@@ -210,10 +210,16 @@ impl PiiRedactor {
                     other => other.clone(),
                 };
 
+                // Preserve `extra` — it carries `name` (OpenAI multi-user
+                // chat labels) on user messages, plus any vendor
+                // annotations. Replacing only `content` was the bug:
+                // `..Default::default()` zeroed the flatten bucket so
+                // a name-tagged user prompt got stripped on the way
+                // through the redactor.
                 ChatMessage {
                     role: msg.role.clone(),
                     content: new_content,
-                    ..Default::default()
+                    extra: msg.extra.clone(),
                 }
             })
             .collect();
@@ -828,5 +834,30 @@ mod tests {
         // Placeholder is recorded so the response restorer can reverse it.
         let ph = find_placeholder(&ctx, "alice@example.com");
         assert!(ph.starts_with("{{EMAIL_"));
+    }
+
+    /// `ChatMessage::extra` is a flatten bucket that carries OpenAI
+    /// fields the gateway doesn't model explicitly — `name`,
+    /// `tool_call_id`, `tool_calls`, vendor annotations. The redactor
+    /// rebuilds user messages, and an earlier `..Default::default()`
+    /// silently zeroed this bucket, stripping `name` from named user
+    /// turns on the way through. Pin the round-trip so the regression
+    /// is impossible to reintroduce without breaking this test.
+    #[test]
+    fn preserves_extra_fields_on_user_messages() {
+        let redactor = PiiRedactor::new();
+        let mut msg = user_msg("Contact me at alice@example.com");
+        msg.extra = serde_json::json!({ "name": "alice" });
+        let (redacted, _) = redactor.redact_messages(&[msg]);
+
+        assert_eq!(
+            redacted[0].extra.get("name").and_then(|v| v.as_str()),
+            Some("alice"),
+            "redactor must preserve the OpenAI `name` field on user turns"
+        );
+        // Content is still redacted — preserving extra didn't disable the body pass.
+        let content = redacted[0].content.as_str().unwrap();
+        assert!(content.contains("EMAIL"), "body got: {content}");
+        assert!(!content.contains("alice@example.com"));
     }
 }
