@@ -132,6 +132,15 @@ function useLiveDashboard(range: string) {
   liveRef.current = live;
 
   useEffect(() => {
+    // Clear the previous range's snapshot so the panels (especially
+    // the top-users leaderboard, which is range-scoped) show their
+    // skeleton during the reconnect handshake instead of rendering
+    // old-window data under the new range's eyebrow. The ticket mint
+    // + WS upgrade + first frame round-trip is typically <500ms but
+    // can stretch on a cold-start; without this the UI would show a
+    // mismatched window for that interval with no loading signal.
+    setLive(null);
+
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
