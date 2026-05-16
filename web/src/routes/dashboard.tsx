@@ -164,6 +164,12 @@ function useLiveDashboard(range: string) {
 
     const connect = async () => {
       if (cancelled) return;
+      // Don't open a fresh socket while the tab is hidden — otherwise
+      // a range toggle (which re-runs this effect) would start a new
+      // WS stream in the background with no visibility transition to
+      // close it. The visibilitychange handler re-invokes `connect`
+      // when the tab becomes visible again.
+      if (document.hidden) return;
       // If a previous socket is still around (e.g. an errored one
       // whose onclose hasn't fired yet), detach it so its delayed
       // close can't queue another reconnect on top of this one.
@@ -845,7 +851,10 @@ export function DashboardPage() {
     if (live === null) return null;
     if (providerFilter === 'all') return allProviders;
     return allProviders.filter((p) => p.kind === providerFilter);
-  }, [live, allProviders, providerFilter]);
+    // `allProviders` is derived from `live` on the same render, so
+    // including both as deps would be redundant — `allProviders`
+    // alone reflects the live-state change.
+  }, [allProviders, providerFilter]);
 
   return (
     // Full-viewport layout — the entire dashboard fits on one screen with
@@ -1277,9 +1286,20 @@ function LiveLogPanel({
     } else {
       setSnapshot(null);
     }
-    // Intentionally ignore `rows` — we only snapshot on the pause edge.
+    // Intentionally ignore `rows` here — we only snapshot on the
+    // pause edge. The `rows === null` reset below handles the case
+    // where the upstream `live` state gets cleared (range toggle).
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [paused]);
+  // If the live stream is reset mid-pause (range change clears `live`),
+  // drop the snapshot too so the panel doesn't keep showing old-window
+  // rows under the new range's eyebrow. Re-pause on the next WS frame
+  // re-captures from the new window.
+  useEffect(() => {
+    if (paused && rows === null) {
+      setSnapshot(null);
+    }
+  }, [paused, rows]);
   const displayed = paused ? snapshot : rows;
 
   // Mirror what the row layout will be so headers and rows align perfectly.
@@ -1504,7 +1524,10 @@ function TopUsersTotalBadge({
   return (
     <span className="text-[10px] uppercase tracking-wider text-muted-foreground">
       {t('dashboard.totalUsers', {
-        count: data.total,
+        // No `count` here — neither en.json nor zh.json defines
+        // _one / _other plural variants for this key, so passing it
+        // would have no effect. If we want "1 user / 5 users" later,
+        // add the plural variants and reintroduce the count arg.
         countStr: data.total.toLocaleString(locale),
       })}
     </span>
@@ -1557,7 +1580,10 @@ function TopUsersPanel({
           <span className="text-xs">{t('dashboard.noActiveUsers')}</span>
         </div>
       ) : (
-        <ul className="min-h-0 flex-1 divide-y divide-border/40 overflow-y-auto">
+        <ul
+          className="min-h-0 flex-1 divide-y divide-border/40 overflow-y-auto"
+          aria-label={t('dashboard.activeUsersEyebrow')}
+        >
           {users.map((u, i) => (
             <TopUserRow key={u.user_id} rank={i + 1} user={u} locale={locale} />
           ))}
@@ -1567,7 +1593,13 @@ function TopUsersPanel({
   );
 }
 
-function TopUserRow({
+// `memo` because the WS tick (4 s) is more frequent than the
+// server-side top-users cache TTL (15 s) — 3 of every 4 ticks
+// produce identical rows. Without memo, all 50 row instances
+// re-render on each frame; with it, only the structural rebuilds
+// (sort order change, new user appearing) cost render work.
+// Parity with LiveLogRowItem which uses the same pattern.
+const TopUserRow = memo(function TopUserRow({
   rank,
   user,
   locale,
@@ -1601,7 +1633,7 @@ function TopUserRow({
       <TopUserStat value={user.mcp_call_count} locale={locale} />
     </li>
   );
-}
+});
 
 function TopUserStat({ value, locale }: { value: number; locale: string }) {
   const zero = value === 0;

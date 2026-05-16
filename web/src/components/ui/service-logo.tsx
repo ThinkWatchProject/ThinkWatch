@@ -42,8 +42,9 @@ function resolve(key: string): { letter: string; className: string } | null {
   // future "hexagon" MCP server as Exa, or "awsm-mcp" as Bedrock —
   // the segments around the brand keyword would mask the false
   // positive. Token-set lookups make every rule a `===` check
-  // without ballooning the rule list.
-  const tokens = new Set(key.split(/[^a-z0-9]+/i).filter(Boolean));
+  // without ballooning the rule list. `key` is already lowercased by
+  // the caller, so the regex doesn't need an `i` flag.
+  const tokens = new Set(key.split(/[^a-z0-9]+/).filter(Boolean));
   const has = (...names: string[]) => names.some((n) => tokens.has(n));
 
   // AI providers — first-party APIs
