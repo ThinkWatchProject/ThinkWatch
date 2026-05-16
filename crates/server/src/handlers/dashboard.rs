@@ -1345,8 +1345,14 @@ pub(super) async fn fetch_top_active_users(
             // hit, anything older is dead weight. Insertion is rare
             // (once per (scope, range) per 15s), so an O(n) scan over
             // a tiny map is fine.
-            let cutoff = std::time::Instant::now() - (TOP_USERS_TTL * 2);
-            guard.retain(|_, (stored_at, _)| *stored_at >= cutoff);
+            //
+            // `elapsed()` predicate instead of `now() - max_age`:
+            // `Instant - Duration` panics if the result would predate
+            // the platform zero instant, which can fire on cold-start
+            // hosts where CLOCK_MONOTONIC is small. `elapsed()` is
+            // saturating and safe at all uptimes.
+            let max_age = TOP_USERS_TTL * 2;
+            guard.retain(|_, (stored_at, _)| stored_at.elapsed() < max_age);
             guard.insert(key, (std::time::Instant::now(), resp.clone()));
         }
         Err(e) => tracing::warn!("top_users_cache mutex poisoned on insert; skipping store: {e}"),
