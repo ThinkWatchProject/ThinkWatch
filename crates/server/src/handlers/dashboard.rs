@@ -1286,11 +1286,16 @@ fn user_filter_hash(filter: Option<&[String]>) -> u64 {
         None => 0u8.hash(&mut h),
         Some(ids) => {
             1u8.hash(&mut h);
-            // `resolve_dashboard_user_filter` returns rows from PG
-            // in a stable order for the same membership set, so we
-            // don't pre-sort. A spurious miss on reordered input
-            // costs one extra CH query — still correct.
-            for id in ids {
+            // Sort before hashing — PG doesn't guarantee row order
+            // without an explicit ORDER BY (the query in
+            // `resolve_dashboard_user_filter` has none), so a plan
+            // change could reorder the same membership and produce
+            // a fresh cache miss every 32 s revoke tick. Sorting a
+            // tiny Vec (at most a few hundred UUIDs) keeps the hash
+            // deterministic for the same set regardless of order.
+            let mut sorted: Vec<&str> = ids.iter().map(|s| s.as_str()).collect();
+            sorted.sort_unstable();
+            for id in sorted {
                 id.hash(&mut h);
             }
         }
@@ -2023,5 +2028,17 @@ mod tests {
         let a = vec!["x".to_string(), "y".to_string()];
         let b = vec!["x".to_string(), "z".to_string()];
         assert_ne!(user_filter_hash(Some(&a)), user_filter_hash(Some(&b)));
+    }
+
+    #[test]
+    fn user_filter_hash_is_order_insensitive() {
+        // PG returns rows from `resolve_dashboard_user_filter` without
+        // an ORDER BY; a plan change could reorder the same membership.
+        // Without internal sort the hash would flap and invalidate the
+        // cache on every revoke-tick re-resolve. Pin the invariant
+        // here so a future refactor can't silently regress it.
+        let asc = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let desc = vec!["c".to_string(), "b".to_string(), "a".to_string()];
+        assert_eq!(user_filter_hash(Some(&asc)), user_filter_hash(Some(&desc)));
     }
 }
