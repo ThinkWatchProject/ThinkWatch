@@ -546,35 +546,23 @@ async fn post_flight_account(
                     // the existing forwarder pipeline (FEAT-01 done
                     // = "wire crossings to webhooks", which lives
                     // here).
+                    use think_watch_common::audit::{AuditActor, GatewayActor};
+                    let actor = GatewayActor {
+                        user_id: actor_user_id.as_deref(),
+                        user_email: actor_user_email.as_deref(),
+                        api_key_id: actor_api_key_id.as_deref(),
+                        ip: actor_ip_address.as_deref(),
+                    };
                     for crossing in &crossings {
-                        let mut entry =
-                            think_watch_common::audit::AuditEntry::new("budget.threshold_crossed")
+                        audit.log(
+                            actor
+                                .audit("budget.threshold_crossed")
                                 .resource(format!("budget_cap:{}", crossing.cap_id))
                                 .detail(
                                     serde_json::to_value(crossing)
                                         .unwrap_or(serde_json::Value::Null),
-                                );
-                        // The audit builder's `user_id` / `api_key_id`
-                        // take `Uuid`, so parse on the way in. A bad
-                        // string is treated like "unknown" — the field
-                        // stays absent rather than corrupting the row.
-                        if let Some(uid) = actor_user_id.as_deref()
-                            && let Ok(u) = uuid::Uuid::parse_str(uid)
-                        {
-                            entry = entry.user_id(u);
-                        }
-                        if let Some(email) = actor_user_email.as_deref() {
-                            entry = entry.user_email(email);
-                        }
-                        if let Some(kid) = actor_api_key_id.as_deref()
-                            && let Ok(k) = uuid::Uuid::parse_str(kid)
-                        {
-                            entry = entry.api_key_id(k);
-                        }
-                        if let Some(ip) = actor_ip_address.as_deref() {
-                            entry = entry.ip_address(ip);
-                        }
-                        audit.log(entry);
+                                ),
+                        );
                     }
                 }
                 Ok(_) => {}

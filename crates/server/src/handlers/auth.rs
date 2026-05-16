@@ -6,7 +6,7 @@ use utoipa::ToSchema;
 
 use think_watch_auth::password;
 use think_watch_auth::pow;
-use think_watch_common::audit::AuditEntry;
+use think_watch_common::audit::AuditActor;
 use think_watch_common::dto::{
     CreateUserRequest, LoginRequest, PowChallengeResponse, PowSolution, RefreshRequest,
     UserResponse,
@@ -390,16 +390,25 @@ pub async fn login(
             crate::services::auth_lockout::apply_lockout(&state.redis, &lockout_key, secs).await?;
         }
 
-        // Log failed attempt
-        let mut entry = AuditEntry::new("auth.login_failed")
-            .resource("auth")
-            .user_email(&req.email)
-            .ip_address(&client_ip)
-            .detail(serde_json::json!({"email": req.email}));
-        if let Some(ref ua) = user_agent {
-            entry = entry.user_agent(ua);
-        }
-        state.audit.log(entry);
+        // Log failed attempt — `AnonymousActor` pre-fills IP / UA /
+        // email since the user isn't authenticated yet (no AuthUser).
+        // `user_id` stays None: we may not have resolved the user row
+        // yet (e.g. wrong email) and even if we did, surfacing the
+        // resolved id on a "failed" event without TOTP verification
+        // would link a failed attempt to a real account at the row
+        // level — leave that for the rate-limit / lockout machinery.
+        let actor = think_watch_common::audit::AnonymousActor {
+            ip: Some(&client_ip),
+            user_agent: user_agent.as_deref(),
+            user_email: Some(&req.email),
+            user_id: None,
+        };
+        state.audit.log(
+            actor
+                .audit("auth.login_failed")
+                .resource("auth")
+                .detail(serde_json::json!({"email": req.email})),
+        );
         return Err(AppError::Unauthorized);
     }
     let user = user.unwrap(); // Safe: checked above
@@ -459,27 +468,35 @@ pub async fn login(
                         .rows_affected();
                         if rows == 1 {
                             recovery_used = true;
-                            state.audit.log(
-                                AuditEntry::new("auth.totp_recovery_used")
-                                    .user_id(user.id)
-                                    .user_email(&user.email)
-                                    .resource("auth")
-                                    .ip_address(&client_ip),
-                            );
+                            // Actor is identified (credentials passed)
+                            // but the session isn't fully authenticated
+                            // yet — `AnonymousActor` carries user_id +
+                            // email plus IP/UA in one place.
+                            let actor = think_watch_common::audit::AnonymousActor {
+                                ip: Some(&client_ip),
+                                user_agent: user_agent.as_deref(),
+                                user_email: Some(&user.email),
+                                user_id: Some(user.id),
+                            };
+                            state
+                                .audit
+                                .log(actor.audit("auth.totp_recovery_used").resource("auth"));
                         }
                     }
 
                     if !recovery_used {
-                        let mut entry = AuditEntry::new("auth.totp_failed")
-                            .user_id(user.id)
-                            .user_email(&user.email)
-                            .resource("auth")
-                            .ip_address(&client_ip)
-                            .detail(serde_json::json!({"email": req.email}));
-                        if let Some(ref ua) = user_agent {
-                            entry = entry.user_agent(ua);
-                        }
-                        state.audit.log(entry);
+                        let actor = think_watch_common::audit::AnonymousActor {
+                            ip: Some(&client_ip),
+                            user_agent: user_agent.as_deref(),
+                            user_email: Some(&user.email),
+                            user_id: Some(user.id),
+                        };
+                        state.audit.log(
+                            actor
+                                .audit("auth.totp_failed")
+                                .resource("auth")
+                                .detail(serde_json::json!({"email": req.email})),
+                        );
                         return Err(AppError::Unauthorized);
                     }
                 }
@@ -504,15 +521,15 @@ pub async fn login(
         let within_grandfather = user.updated_at
             > chrono::Utc::now() - chrono::Duration::seconds(TEMP_PASSWORD_TTL_SECS);
         if !marker_exists && !within_grandfather {
-            let mut entry = AuditEntry::new("auth.temp_password_expired")
-                .user_id(user.id)
-                .user_email(&user.email)
-                .resource("auth")
-                .ip_address(&client_ip);
-            if let Some(ref ua) = user_agent {
-                entry = entry.user_agent(ua);
-            }
-            state.audit.log(entry);
+            let actor = think_watch_common::audit::AnonymousActor {
+                ip: Some(&client_ip),
+                user_agent: user_agent.as_deref(),
+                user_email: Some(&user.email),
+                user_id: Some(user.id),
+            };
+            state
+                .audit
+                .log(actor.audit("auth.temp_password_expired").resource("auth"));
             return Err(AppError::Unauthorized);
         }
     }
@@ -522,15 +539,13 @@ pub async fn login(
     crate::services::auth_lockout::clear(&state.redis, &[&rate_key, &lockout_key, &email_fail_key])
         .await;
 
-    let mut entry = AuditEntry::new("auth.login")
-        .user_id(user.id)
-        .user_email(&user.email)
-        .resource("auth")
-        .ip_address(&client_ip);
-    if let Some(ref ua) = user_agent {
-        entry = entry.user_agent(ua);
-    }
-    state.audit.log(entry);
+    let actor = think_watch_common::audit::AnonymousActor {
+        ip: Some(&client_ip),
+        user_agent: user_agent.as_deref(),
+        user_email: Some(&user.email),
+        user_id: Some(user.id),
+    };
+    state.audit.log(actor.audit("auth.login").resource("auth"));
 
     let session = issue_auth_session(&state, user.id, &user.email, Some(&client_ip)).await?;
     Ok(session.into_login_response(user.password_change_required))
@@ -617,6 +632,12 @@ pub async fn register(
     )
     .await
     .unwrap_or_else(|| "unknown".into());
+    let user_agent = request
+        .headers()
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let req: CreateUserRequest = parse_json_body(request, 1024 * 1024).await?;
 
@@ -681,13 +702,15 @@ pub async fn register(
 
     tx.commit().await?;
 
-    state.audit.log(
-        AuditEntry::new("auth.register")
-            .user_id(user.id)
-            .user_email(&user.email)
-            .resource("auth")
-            .ip_address(&client_ip),
-    );
+    let actor = think_watch_common::audit::AnonymousActor {
+        ip: Some(&client_ip),
+        user_agent: user_agent.as_deref(),
+        user_email: Some(&user.email),
+        user_id: Some(user.id),
+    };
+    state
+        .audit
+        .log(actor.audit("auth.register").resource("auth"));
 
     // Auto-login: issue tokens + cookies so the user is immediately
     // authenticated — same flow as the login handler.

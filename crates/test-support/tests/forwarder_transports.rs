@@ -20,6 +20,8 @@
 //! TCP newline terminator (UDP doesn't need one — datagram boundaries
 //! are the framing).
 
+#![allow(deprecated)] // Tests synthesize audit entries to exercise the pipeline — bare AuditEntry::new is intentional here.
+
 use think_watch_common::audit::AuditEntry;
 use think_watch_test_support::prelude::*;
 use tokio::io::AsyncReadExt;

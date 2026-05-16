@@ -10,7 +10,7 @@ use tower::{Layer, Service};
 use uuid::Uuid;
 
 use std::sync::Arc;
-use think_watch_common::audit::{AuditEntry, AuditLogger, LogType};
+use think_watch_common::audit::{AuditActor, AuditLogger, LogType};
 use think_watch_common::dynamic_config::DynamicConfig;
 
 /// Identity published by the auth middleware into the access log's
@@ -234,28 +234,34 @@ where
                 _ => connection_ip,
             };
 
-            let mut entry = AuditEntry::new("http.request")
-                .log_type(LogType::Access)
-                .detail(serde_json::json!({
-                    "method": method,
-                    "path": path,
-                    "status_code": status_code,
-                    "latency_ms": latency_ms,
-                    "port": port,
-                }));
-            if let Some(info) = user_slot.0.get() {
-                entry = entry.user_id(info.user_id);
-                if let Some(ref email) = info.user_email {
-                    entry = entry.user_email(email);
-                }
-            }
-            if let Some(ip) = ip {
-                entry = entry.ip_address(ip);
-            }
-            if let Some(ua) = user_agent {
-                entry = entry.user_agent(ua);
-            }
-            audit.log(entry);
+            // Build the access-log entry through `AnonymousActor`:
+            // even though some requests are authenticated, this
+            // middleware doesn't have an `AuthUser` extractor in scope —
+            // the per-request user_id slot is filled by the auth
+            // middleware *after* this `before_response` closure was
+            // captured. Use the actor for IP/UA/email and chain
+            // user_id manually from the slot when present. `.log_type`
+            // overrides the actor's default LogType::Audit since this
+            // is the access-log table, not the audit-log table.
+            let user_info = user_slot.0.get();
+            let actor = think_watch_common::audit::AnonymousActor {
+                ip: ip.as_deref(),
+                user_agent: user_agent.as_deref(),
+                user_email: user_info.and_then(|i| i.user_email.as_deref()),
+                user_id: user_info.map(|i| i.user_id),
+            };
+            audit.log(
+                actor
+                    .audit("http.request")
+                    .log_type(LogType::Access)
+                    .detail(serde_json::json!({
+                        "method": method,
+                        "path": path,
+                        "status_code": status_code,
+                        "latency_ms": latency_ms,
+                        "port": port,
+                    })),
+            );
 
             Ok(response)
         })

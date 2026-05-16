@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-use think_watch_common::audit::AuditEntry;
+use think_watch_common::audit::AuditActor;
 use think_watch_common::config::AppConfig;
 use think_watch_common::crypto::parse_encryption_key;
 use think_watch_common::errors::AppError;
@@ -271,9 +271,18 @@ async fn handle_live_callback(
             .jwt
             .create_refresh_token_with_ttl(user.id, &user.email, refresh_ttl_days)?;
 
+    // OIDC callback: user_id resolved from the verified token, but the
+    // handler doesn't currently take a headers extractor — IP/UA stay
+    // None for now. Mirrors mcp_oauth's callback pattern; a follow-up
+    // can plumb headers if forensics on the SSO path matters.
+    let actor = think_watch_common::audit::OAuthCallbackActor {
+        user_id: user.id,
+        ip: None,
+        user_agent: None,
+    };
     state.audit.log(
-        AuditEntry::new("auth.sso_login")
-            .user_id(user.id)
+        actor
+            .audit("auth.sso_login")
             .resource("auth")
             .detail(serde_json::json!({
                 "oidc_issuer": user_info.issuer,
@@ -384,17 +393,22 @@ async fn handle_test_callback(
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
 
+    // SSO config-test event — the triggering admin isn't in scope at
+    // this callback path. Record as a system event; the wizard-level
+    // initiation audit (auth.sso_test_started, when added) would
+    // capture admin attribution.
     state.audit.log(
-        AuditEntry::new(if result.passed {
-            "auth.sso_test_passed"
-        } else {
-            "auth.sso_test_failed"
-        })
-        .resource("oidc")
-        .detail(serde_json::json!({
-            "passed": result.passed,
-            "error": result.error,
-        })),
+        think_watch_common::audit::SystemActor
+            .audit(if result.passed {
+                "auth.sso_test_passed"
+            } else {
+                "auth.sso_test_failed"
+            })
+            .resource("oidc")
+            .detail(serde_json::json!({
+                "passed": result.passed,
+                "error": result.error,
+            })),
     );
 
     let body = render_test_close_page(&result);

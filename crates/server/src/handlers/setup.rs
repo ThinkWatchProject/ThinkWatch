@@ -2,7 +2,7 @@ use axum::Json;
 use axum::extract::State;
 use serde::{Deserialize, Serialize};
 use think_watch_auth::{api_key, password};
-use think_watch_common::audit::AuditEntry;
+use think_watch_common::audit::AuditActor;
 use think_watch_common::dynamic_config;
 use think_watch_common::errors::AppError;
 use think_watch_common::validation::validate_password;
@@ -86,6 +86,12 @@ pub async fn setup_initialize(
     )
     .await
     .unwrap_or_else(|| "unknown".into());
+    let user_agent = request
+        .headers()
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     let req: SetupInitRequest = super::auth::parse_json_body(request, 1024 * 1024).await?;
     // Check if already initialized (fast path from cache). Done BEFORE
@@ -204,9 +210,15 @@ pub async fn setup_initialize(
     let _ = state.dynamic_config.reload().await;
     dynamic_config::notify_config_changed(&state.redis).await;
 
+    let actor = think_watch_common::audit::AnonymousActor {
+        ip: Some(&client_ip),
+        user_agent: user_agent.as_deref(),
+        user_email: Some(&admin_user.1),
+        user_id: Some(admin_user.0),
+    };
     state.audit.log(
-        AuditEntry::new("setup.initialize")
-            .user_id(admin_user.0)
+        actor
+            .audit("setup.initialize")
             .resource("system")
             .detail(serde_json::json!({
                 "admin_email": req.admin.email,

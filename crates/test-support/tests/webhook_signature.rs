@@ -19,6 +19,8 @@
 //!   - The `custom_headers` config and the signature coexist — adding
 //!     a signing secret must not silently drop user-defined headers.
 
+#![allow(deprecated)] // Tests synthesize audit entries to exercise the pipeline — bare AuditEntry::new is intentional here.
+
 use hmac::{Hmac, Mac, digest::KeyInit};
 use sha2::Sha256;
 use think_watch_common::audit::AuditEntry;

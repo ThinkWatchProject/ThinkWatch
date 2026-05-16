@@ -273,6 +273,20 @@ fn detail_cost_usd(detail: &Option<serde_json::Value>) -> Option<i64> {
 }
 
 impl AuditEntry {
+    /// Bare constructor — no actor attribution. Prefer an `AuditActor`
+    /// impl (`AuthUser`, `AnonymousActor`, `OAuthCallbackActor`,
+    /// `SystemActor`, `GatewayActor`) so the right ip / user_id /
+    /// user_agent / etc. land by construction. Direct use is reserved
+    /// for: (a) the actor impls themselves, (b) tests synthesizing
+    /// entries to exercise the audit pipeline. The `#[deprecated]`
+    /// attribute turns "I forgot to attribute this event" from a
+    /// silent forensic gap into a compile-time warning — see the
+    /// six review passes that chased this exact class of bug into
+    /// the design of `AuditActor`.
+    #[doc(hidden)]
+    #[deprecated(
+        note = "Use an AuditActor impl (auth_user.audit(\"…\"), SystemActor.audit(\"…\"), AnonymousActor { … }.audit(\"…\"), etc.) so actor fields are filled by construction. If you genuinely need a bare entry (actor impl body, test fixture), allow(deprecated) explicitly."
+    )]
     pub fn new(action: impl Into<String>) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
@@ -295,6 +309,7 @@ impl AuditEntry {
 
     /// Create entry for gateway request logs.
     pub fn gateway(action: impl Into<String>) -> Self {
+        #[allow(deprecated)]
         let mut entry = Self::new(action);
         entry.log_type = LogType::Gateway;
         entry
@@ -302,6 +317,7 @@ impl AuditEntry {
 
     /// Create entry for MCP tool invocation logs.
     pub fn mcp(action: impl Into<String>) -> Self {
+        #[allow(deprecated)]
         let mut entry = Self::new(action);
         entry.log_type = LogType::Mcp;
         entry
@@ -374,7 +390,153 @@ impl AuditEntry {
     }
 }
 
+// ============================================================================
+// AuditActor — actor-shaped builders for audit entries.
+//
+// Every audit emission has an "actor" with attribution requirements:
+//   - Authenticated handler  → user_id + email + ip + user_agent
+//   - Pre-auth login attempt → email + ip + user_agent (no user_id yet)
+//   - OAuth callback         → user_id (from state cookie) + ip + ua
+//   - System / background    → no actor (action only)
+//   - Gateway request        → user_id + email + api_key_id + ip
+//
+// Without this trait, every handler reaches for `AuditEntry::new(action)`
+// and remembers to attach the right fields. Across ~40 emission sites
+// that "remember" leaks routinely — a class of recurring bugs across
+// six review passes. The trait moves attribution to one declaration
+// per actor type: `actor.audit(action)` is the only path for every
+// non-test caller, and the right fields land by construction.
+//
+// `AuditEntry::new` stays public for the synthesizing-in-tests path,
+// but is marked `#[doc(hidden)]` so production handlers find the
+// trait API first.
+// ============================================================================
+
+pub trait AuditActor {
+    /// Build an audit entry with actor attribution prefilled. Caller
+    /// chains `.resource(...)`, `.detail(...)`, etc. on the returned
+    /// builder, then logs via `AuditLogger::log`.
+    fn audit(&self, action: impl Into<String>) -> AuditEntry;
+}
+
+/// Pre-authentication request actor — login attempts, TOTP steps,
+/// registration, password-reset request. IP and user_agent come
+/// from the request; email and user_id are filled when the caller
+/// has identified the actor:
+///   - `auth.login_failed` (email known, user_id not resolved):
+///     set email only
+///   - `auth.totp_failed` (credentials passed, TOTP step failed):
+///     set both email AND user_id — the actor is identified at
+///     this point, just hasn't completed all factors
+///   - POW challenge mint (truly anonymous): leave email + user_id None
+pub struct AnonymousActor<'a> {
+    pub ip: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+    pub user_email: Option<&'a str>,
+    pub user_id: Option<Uuid>,
+}
+
+impl AuditActor for AnonymousActor<'_> {
+    fn audit(&self, action: impl Into<String>) -> AuditEntry {
+        // Actor impls legitimately call the bare constructor — it's
+        // the only path to a fresh AuditEntry. `#[allow(deprecated)]`
+        // is the explicit opt-out the doc on `::new` calls out.
+        #[allow(deprecated)]
+        let mut e = AuditEntry::new(action);
+        if let Some(uid) = self.user_id {
+            e = e.user_id(uid);
+        }
+        if let Some(ip) = self.ip {
+            e = e.ip_address(ip);
+        }
+        if let Some(ua) = self.user_agent {
+            e = e.user_agent(ua);
+        }
+        if let Some(em) = self.user_email {
+            e = e.user_email(em);
+        }
+        e
+    }
+}
+
+/// OAuth callback actor — user_id is known (resolved from the state
+/// cookie before the OAuth provider redirected back), but there's no
+/// `AuthUser` extractor because this endpoint runs without a JWT.
+pub struct OAuthCallbackActor<'a> {
+    pub user_id: Uuid,
+    pub ip: Option<&'a str>,
+    pub user_agent: Option<&'a str>,
+}
+
+impl AuditActor for OAuthCallbackActor<'_> {
+    fn audit(&self, action: impl Into<String>) -> AuditEntry {
+        #[allow(deprecated)]
+        let mut e = AuditEntry::new(action).user_id(self.user_id);
+        if let Some(ip) = self.ip {
+            e = e.ip_address(ip);
+        }
+        if let Some(ua) = self.user_agent {
+            e = e.user_agent(ua);
+        }
+        e
+    }
+}
+
+/// System / background-task actor — startup hooks, scheduled cleanup,
+/// data-retention sweeps. No human caller, so no actor attribution
+/// fields. Distinct from "we forgot to attribute" via the explicit
+/// type — `grep AuditEntry::new` in production code becomes a strong
+/// signal that someone bypassed the discipline.
+pub struct SystemActor;
+
+impl AuditActor for SystemActor {
+    fn audit(&self, action: impl Into<String>) -> AuditEntry {
+        #[allow(deprecated)]
+        AuditEntry::new(action)
+    }
+}
+
+/// Gateway request actor — used by `gateway_logs` writers + the
+/// `budget.threshold_crossed` audit fired on the request path.
+/// Doesn't depend on the server crate's `AuthUser` so the gateway
+/// crate can construct it from `GatewayRequestIdentity` directly.
+pub struct GatewayActor<'a> {
+    pub user_id: Option<&'a str>,
+    pub user_email: Option<&'a str>,
+    pub api_key_id: Option<&'a str>,
+    pub ip: Option<&'a str>,
+}
+
+impl AuditActor for GatewayActor<'_> {
+    fn audit(&self, action: impl Into<String>) -> AuditEntry {
+        #[allow(deprecated)]
+        let mut e = AuditEntry::new(action);
+        // user_id / api_key_id are stored as Uuid in AuditEntry; the
+        // gateway's identity carries them as strings (they came off
+        // the wire that way). Parse on the way in — a malformed
+        // string drops the field rather than corrupting the row.
+        if let Some(uid) = self.user_id
+            && let Ok(u) = uid.parse::<Uuid>()
+        {
+            e = e.user_id(u);
+        }
+        if let Some(em) = self.user_email {
+            e = e.user_email(em);
+        }
+        if let Some(kid) = self.api_key_id
+            && let Ok(k) = kid.parse::<Uuid>()
+        {
+            e = e.api_key_id(k);
+        }
+        if let Some(ip) = self.ip {
+            e = e.ip_address(ip);
+        }
+        e
+    }
+}
+
 #[cfg(test)]
+#[allow(deprecated)] // Tests synthesize audit entries; bare ::new is fine here.
 mod tests {
     use super::*;
 
@@ -1094,7 +1256,12 @@ async fn drain_once(
             // straight to whichever forwarders are subscribed to
             // `audit` log_type. We don't go through AuditLogger::log
             // because we only have access to the registry here, not
-            // the channel.
+            // the channel. Bare entry is intentional — this fires from
+            // the outbox monitor with no actor in scope (the SystemActor
+            // pattern would work, but this code path doesn't import the
+            // trait and adding the import to the monitor module is more
+            // noise than it's worth for a single self-emitted alert).
+            #[allow(deprecated)]
             let entry = AuditEntry::new("alert.outbox_depth_high")
                 .resource("webhook_outbox")
                 .detail(serde_json::json!({

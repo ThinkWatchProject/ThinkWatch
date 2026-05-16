@@ -176,8 +176,10 @@ async fn build_oidc(config: &AppConfig, dc: &DynamicConfig) -> Option<OidcManage
 pub fn install_cb_listener(state: &AppState) {
     let audit_for_cb = state.audit.clone();
     think_watch_common::cb_registry::set_open_listener(move |key, kind| {
+        use think_watch_common::audit::{AuditActor, SystemActor};
         audit_for_cb.log(
-            think_watch_common::audit::AuditEntry::new("provider.circuit_open")
+            SystemActor
+                .audit("provider.circuit_open")
                 .resource(format!("{kind}_provider:{key}"))
                 .detail(serde_json::json!({
                     "kind": kind,

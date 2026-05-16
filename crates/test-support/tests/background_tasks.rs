@@ -6,6 +6,8 @@
 //! not exercised — they're trivial wrappers and would force a 10
 //! min / 24 h sleep.
 
+#![allow(deprecated)] // Tests synthesize audit entries to exercise the pipeline — bare AuditEntry::new is intentional here.
+
 use chrono::{Duration, Utc};
 use serde_json::Value;
 use think_watch_server::tasks::{api_key_lifecycle, data_retention};

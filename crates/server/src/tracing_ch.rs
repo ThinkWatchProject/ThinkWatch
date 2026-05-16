@@ -6,7 +6,7 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::layer::Context;
 use tracing_subscriber::registry::LookupSpan;
 
-use think_watch_common::audit::{AuditEntry, AuditLogger, LogType};
+use think_watch_common::audit::{AuditActor, AuditLogger, LogType, SystemActor};
 
 /// A tracing [`Layer`] that forwards events to ClickHouse `app_logs`.
 pub struct ClickHouseLayer {
@@ -57,7 +57,13 @@ where
         //   resource_id → message
         //   detail      → fields JSON
         //   user_agent  → span chain
-        let mut entry = AuditEntry::new(level).log_type(LogType::App);
+        // The tracing-CH bridge converts structured tracing events to
+        // App-log entries — no actor in scope (it's a process-wide
+        // tracing pipeline, not a request handler). SystemActor lands
+        // a bare entry; `.log_type(LogType::App)` overrides the
+        // default LogType::Audit since this writes to the app-log
+        // table, not the audit-log table.
+        let mut entry = SystemActor.audit(level).log_type(LogType::App);
         entry = entry.resource(target);
         entry = entry.resource_id(message);
         if let Some(f) = fields {

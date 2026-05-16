@@ -138,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
     // Touch unused symbols imported by the binary face only — keeps a
     // single import list so the lib + bin share their `audit`
     // dependency without a "warning: unused import" in either.
-    let _ = audit::AuditEntry::new("noop");
+    let _ = audit::SystemActor;
 
     Ok(())
 }

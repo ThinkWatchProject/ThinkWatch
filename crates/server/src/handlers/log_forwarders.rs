@@ -295,8 +295,8 @@ pub async fn toggle_forwarder(
         "log_forwarder.paused"
     };
     state.audit.log(
-        think_watch_common::audit::AuditEntry::new(action)
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit(action)
             .resource(format!("log_forwarder:{id}")),
     );
 

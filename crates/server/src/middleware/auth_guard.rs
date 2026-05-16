@@ -45,12 +45,28 @@ pub struct AuthUser {
     >,
 }
 
+/// Authenticated-user audit attribution. The trait body lives in
+/// `common::audit::AuditActor`; this impl is what makes `AuthUser`
+/// fit the actor abstraction shared with `AnonymousActor`,
+/// `SystemActor`, etc. Forensic context (ip / user_agent / email)
+/// is captured at middleware time and replayed here.
+impl think_watch_common::audit::AuditActor for AuthUser {
+    fn audit(&self, action: impl Into<String>) -> AuditEntry {
+        self.audit_impl(action.into())
+    }
+}
+
 impl AuthUser {
-    /// Build an audit entry pre-filled with user_id, user_email,
-    /// ip_address, and user_agent. The forensic-context fields all
-    /// land in one place so callers can't accidentally emit an
-    /// account-security event missing actor attribution.
+    /// Inherent shim: `auth_user.audit("...")` resolves without
+    /// requiring `use think_watch_common::audit::AuditActor;` at
+    /// every call site. Same body as the trait impl — Rust picks
+    /// the inherent method when both are visible.
     pub fn audit(&self, action: impl Into<String>) -> AuditEntry {
+        self.audit_impl(action.into())
+    }
+
+    fn audit_impl(&self, action: String) -> AuditEntry {
+        #[allow(deprecated)]
         let mut e = AuditEntry::new(action)
             .user_id(self.claims.sub)
             .user_email(&self.claims.email);

@@ -26,6 +26,8 @@
 //! `LogType::App` — same code path the future tracing layer will
 //! use, just triggered by the test instead of by `tracing::info!`.
 
+#![allow(deprecated)] // Tests synthesize audit entries to exercise the pipeline — bare AuditEntry::new is intentional here.
+
 use serde_json::Value;
 use think_watch_common::audit::{AuditEntry, LogType};
 use think_watch_test_support::prelude::*;

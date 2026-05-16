@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 use std::sync::Arc;
-use think_watch_common::audit::{AuditEntry, AuditLogger};
+use think_watch_common::audit::{AuditActor, AuditLogger, SystemActor};
 use think_watch_common::dynamic_config::DynamicConfig;
 
 /// Background task that manages API key lifecycle:
@@ -170,7 +170,11 @@ pub async fn run_lifecycle_check(
     .await?;
 
     for w in warnings {
-        let mut entry = AuditEntry::new("key.expiry_warning")
+        // System task — no human actor. `user_id` is the *subject* of
+        // the warning (whose key is expiring), not the actor, so it's
+        // chained on after `SystemActor.audit(...)`.
+        let mut entry = SystemActor
+            .audit("key.expiry_warning")
             .resource(format!("api_key:{}", w.id))
             .detail(serde_json::json!({
                 "api_key_id": w.id.to_string(),

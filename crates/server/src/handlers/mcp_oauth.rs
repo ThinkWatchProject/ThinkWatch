@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use think_watch_common::audit::AuditEntry;
+use think_watch_common::audit::AuditActor;
 use think_watch_common::crypto::{self, parse_encryption_key};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::McpServer;
@@ -576,9 +576,20 @@ pub async fn oauth_callback(
                 server.auth_value_template.clone(),
                 token.access_token.clone(),
             );
+            // OAuth callback handler signature doesn't expose headers,
+            // so IP/UA are None for now — sets up the actor scaffolding
+            // without behavior change; a follow-up can plumb headers
+            // through if forensics on the callback path becomes
+            // relevant. The `user_id` resolved from the state cookie
+            // is the load-bearing attribution here.
+            let actor = think_watch_common::audit::OAuthCallbackActor {
+                user_id: *user_id,
+                ip: None,
+                user_agent: None,
+            };
             state.audit.log(
-                AuditEntry::new("mcp.connection.authorized")
-                    .user_id(*user_id)
+                actor
+                    .audit("mcp.connection.authorized")
                     .resource("mcp_server")
                     .resource_id(server_id.to_string())
                     .detail(serde_json::json!({
@@ -621,9 +632,14 @@ pub async fn oauth_callback(
                 server.clone(),
                 token.access_token.clone(),
             );
+            let actor = think_watch_common::audit::OAuthCallbackActor {
+                user_id: *configured_by,
+                ip: None,
+                user_agent: None,
+            };
             state.audit.log(
-                AuditEntry::new("mcp.shared_credential.authorized")
-                    .user_id(*configured_by)
+                actor
+                    .audit("mcp.shared_credential.authorized")
                     .resource("mcp_server")
                     .resource_id(server_id.to_string())
                     .detail(serde_json::json!({ "scopes": scopes })),
@@ -668,9 +684,14 @@ pub async fn oauth_callback(
             .await
             .map_err(|e| AppError::Internal(anyhow::anyhow!("Redis error: {e}")))?;
 
+            let actor = think_watch_common::audit::OAuthCallbackActor {
+                user_id: *configured_by,
+                ip: None,
+                user_agent: None,
+            };
             state.audit.log(
-                AuditEntry::new("mcp.wizard.shared_credential_authorized")
-                    .user_id(*configured_by)
+                actor
+                    .audit("mcp.wizard.shared_credential_authorized")
                     .resource("mcp_wizard")
                     .resource_id(wizard_session_id.clone())
                     .detail(serde_json::json!({ "scopes": scopes })),

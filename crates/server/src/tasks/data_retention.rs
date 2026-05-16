@@ -1,6 +1,6 @@
 use sqlx::PgPool;
 use std::sync::Arc;
-use think_watch_common::audit::{AuditEntry, AuditLogger};
+use think_watch_common::audit::{AuditActor, AuditLogger, SystemActor};
 use think_watch_common::dynamic_config::DynamicConfig;
 
 // DynamicConfig is still threaded through from the call site but
@@ -76,7 +76,8 @@ pub async fn run_retention_cleanup(
             SOFT_DELETE_RETENTION_DAYS
         );
         audit.log(
-            AuditEntry::new("data.gdpr_purge")
+            SystemActor
+                .audit("data.gdpr_purge")
                 .resource("data_retention")
                 .detail(serde_json::json!({
                     "retention_days": SOFT_DELETE_RETENTION_DAYS,

@@ -6,6 +6,8 @@
 //! the drain reschedules it with exponential backoff, and after
 //! `MAX_OUTBOX_ATTEMPTS` (24) the row is finally retired.
 
+#![allow(deprecated)] // Tests synthesize audit entries to exercise the pipeline — bare AuditEntry::new is intentional here.
+
 use chrono::{Duration, Utc};
 use serde_json::json;
 use think_watch_common::audit::AuditEntry;
