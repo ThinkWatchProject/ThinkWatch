@@ -218,7 +218,8 @@ pub async fn login(
         .headers()
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     // Parse body
     let req: LoginRequest = parse_json_body(request, 1024 * 1024).await?;

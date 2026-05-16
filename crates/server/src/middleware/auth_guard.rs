@@ -714,11 +714,17 @@ pub async fn require_auth(
     }
 
     let ip = extract_client_ip(&state, request.headers(), request.extensions()).await;
+    // Mirror the empty-string filter that `extract_client_ip` applies
+    // (commit 10ee89d): a `User-Agent:` header with an empty or
+    // whitespace-only value passes `to_str()` but would land as
+    // `Some("")` in the audit row — same "present but blank" failure
+    // mode as the IP path.
     let user_agent = request
         .headers()
         .get(axum::http::header::USER_AGENT)
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
 
     // Load permissions from Redis cache (60s TTL) → DB fallback.
     let (permissions, denied_permissions) = load_user_permissions_cached(&state, claims.sub)
@@ -888,10 +894,25 @@ async fn auth_via_api_key(
             });
     }
 
+    // Populate IP + UA on the API-key path too — `.audit()` is now
+    // the canonical audit-emission helper, and the commit message of
+    // fac2538 promised "correct forensic attribution by construction"
+    // for every caller. Without these the promise breaks silently
+    // for API-key-authenticated console actions (admin operations,
+    // service-to-service callers), which are exactly the surface
+    // forensics needs to cover for programmatic abuse.
+    let ip = extract_client_ip(state, request.headers(), request.extensions()).await;
+    let user_agent = request
+        .headers()
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     request.extensions_mut().insert(AuthUser {
         claims,
-        ip: None,
-        user_agent: None,
+        ip,
+        user_agent,
         permissions,
         denied_permissions,
         scope_cache: std::sync::Arc::new(
