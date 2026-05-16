@@ -531,7 +531,7 @@ pub struct LiveLogRow {
     pub subject: String,
     /// Status of the most recent event in the group. Numeric HTTP
     /// status for "api" (e.g. "200"), or string status for "mcp"
-    /// (e.g. "success" / "error"). Mixed-status groups surface only
+    /// (e.g. "ok" / "error"). Mixed-status groups surface only
     /// the latest; the count column tells the operator that more
     /// events are folded in.
     pub status: String,
@@ -1171,7 +1171,7 @@ pub async fn get_dashboard_live(
 // scoped by the same 24h / 7d / 30d range selector used by the stat cards.
 // ============================================================================
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct TopActiveUserRow {
     pub user_id: String,
     /// Best-effort display label — `user_email` snapshotted at write
@@ -1195,7 +1195,7 @@ pub struct TopActiveUserRow {
     pub last_active: String,
 }
 
-#[derive(Debug, Serialize, utoipa::ToSchema)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct TopActiveUsersResponse {
     pub users: Vec<TopActiveUserRow>,
     /// Distinct active users in the window (NOT capped to `users.len()`).
@@ -1247,10 +1247,90 @@ pub async fn get_top_active_users(
     ))
 }
 
+/// Short-TTL process-local cache fronting the top-users CH query.
+///
+/// The live snapshot pushes every 4 s per connected dashboard user;
+/// without this, every tick hit ClickHouse with two scans across
+/// `gateway_logs ∪ mcp_logs` over the full 24h / 7d / 30d window.
+/// 15 s is short enough that a new caller appearing in the top 50
+/// becomes visible within 3-4 WS ticks, and long enough that a busy
+/// operator dashboard collapses to one CH round-trip per minute
+/// instead of 15.
+const TOP_USERS_TTL: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct TopUsersCacheKey {
+    /// Fingerprint of the caller's RBAC scope. Distinct sets ⇒
+    /// distinct results, so they must not share cache slots.
+    filter_hash: u64,
+    range: crate::handlers::time_range::TimeRange,
+}
+
+type TopUsersCache = std::sync::Mutex<
+    std::collections::HashMap<TopUsersCacheKey, (std::time::Instant, TopActiveUsersResponse)>,
+>;
+
+fn top_users_cache() -> &'static TopUsersCache {
+    static CACHE: std::sync::OnceLock<TopUsersCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn user_filter_hash(filter: Option<&[String]>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    match filter {
+        // Tag the variant so `None` and `Some(&[])` hash to different
+        // slots — the empty-scope short-circuit yields an empty
+        // result while `None` (global read_all) yields the platform-
+        // wide leaderboard; they must not share cache lines.
+        None => 0u8.hash(&mut h),
+        Some(ids) => {
+            1u8.hash(&mut h);
+            // `resolve_dashboard_user_filter` returns rows from PG
+            // in a stable order for the same membership set, so we
+            // don't pre-sort. A spurious miss on reordered input
+            // costs one extra CH query — still correct.
+            for id in ids {
+                id.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
 /// Shared implementation behind both `/api/dashboard/top-users` (REST)
-/// and the live WebSocket snapshot. Folds the empty-CH / empty-scope
-/// short-circuits in one place so the two call sites can't drift.
+/// and the live WebSocket snapshot. Cached for 15 s per (filter, range)
+/// so a busy operator dashboard doesn't pin a CH worker on every WS
+/// tick. Folds the empty-CH / empty-scope short-circuits in one place
+/// so the two call sites can't drift.
 pub(super) async fn fetch_top_active_users(
+    state: &AppState,
+    user_filter: Option<&[String]>,
+    range: crate::handlers::time_range::TimeRange,
+) -> Result<TopActiveUsersResponse, AppError> {
+    let key = TopUsersCacheKey {
+        filter_hash: user_filter_hash(user_filter),
+        range,
+    };
+
+    // Fast path: serve from cache if the slot is still fresh. The
+    // lock is released before any await — no holding across yields.
+    if let Ok(guard) = top_users_cache().lock()
+        && let Some((stored_at, cached)) = guard.get(&key)
+        && stored_at.elapsed() < TOP_USERS_TTL
+    {
+        return Ok(cached.clone());
+    }
+
+    let resp = fetch_top_active_users_uncached(state, user_filter, range).await?;
+
+    if let Ok(mut guard) = top_users_cache().lock() {
+        guard.insert(key, (std::time::Instant::now(), resp.clone()));
+    }
+    Ok(resp)
+}
+
+async fn fetch_top_active_users_uncached(
     state: &AppState,
     user_filter: Option<&[String]>,
     range: crate::handlers::time_range::TimeRange,
@@ -1916,5 +1996,32 @@ mod tests {
         // which saturates at 0. Re-acquire to confirm we're at 0.
         assert!(try_acquire_ws_slot(user, 1));
         release_ws_slot(user);
+    }
+
+    // ---- top-users cache key ---------------------------------------
+    // The cache fronting the top-users CH query is keyed on a hash of
+    // the RBAC filter. The hashing rules here are correctness-critical:
+    // collide two distinct scopes and a global-read user sees a
+    // team-scoped result (or vice versa).
+
+    #[test]
+    fn user_filter_hash_distinguishes_none_from_empty_slice() {
+        // `None` ⇒ global analytics:read_all (no SQL filter, full
+        // leaderboard). `Some(&[])` ⇒ empty team scope, short-circuits
+        // to an empty response. The cache MUST not conflate them.
+        assert_ne!(user_filter_hash(None), user_filter_hash(Some(&[])));
+    }
+
+    #[test]
+    fn user_filter_hash_is_deterministic_for_same_members() {
+        let ids = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        assert_eq!(user_filter_hash(Some(&ids)), user_filter_hash(Some(&ids)));
+    }
+
+    #[test]
+    fn user_filter_hash_distinguishes_different_membership() {
+        let a = vec!["x".to_string(), "y".to_string()];
+        let b = vec!["x".to_string(), "z".to_string()];
+        assert_ne!(user_filter_hash(Some(&a)), user_filter_hash(Some(&b)));
     }
 }

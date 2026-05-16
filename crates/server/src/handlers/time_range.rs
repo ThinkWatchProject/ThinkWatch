@@ -30,7 +30,7 @@ pub struct RangeQuery {
     pub team_id: Option<uuid::Uuid>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimeRange {
     /// 24 hourly buckets.
     Day,
