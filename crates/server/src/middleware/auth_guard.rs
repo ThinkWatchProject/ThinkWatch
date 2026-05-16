@@ -22,6 +22,11 @@ pub struct ApiKeyAuthenticated;
 pub struct AuthUser {
     pub claims: Claims,
     pub ip: Option<String>,
+    /// User-Agent header captured at middleware time. Populated
+    /// alongside `ip` for forensic attribution on audit entries —
+    /// account-takeover signatures (TOTP toggle, sessions revoked,
+    /// password change) want both the IP and the browser fingerprint.
+    pub user_agent: Option<String>,
     /// Flat union of every role's permissions — loaded at request time
     /// from Redis cache (60s TTL) or DB fallback. Never from the JWT.
     pub permissions: Vec<String>,
@@ -41,13 +46,19 @@ pub struct AuthUser {
 }
 
 impl AuthUser {
-    /// Build an audit entry pre-filled with user_id, user_email, and ip_address.
+    /// Build an audit entry pre-filled with user_id, user_email,
+    /// ip_address, and user_agent. The forensic-context fields all
+    /// land in one place so callers can't accidentally emit an
+    /// account-security event missing actor attribution.
     pub fn audit(&self, action: impl Into<String>) -> AuditEntry {
         let mut e = AuditEntry::new(action)
             .user_id(self.claims.sub)
             .user_email(&self.claims.email);
         if let Some(ref ip) = self.ip {
             e = e.ip_address(ip.clone());
+        }
+        if let Some(ref ua) = self.user_agent {
+            e = e.user_agent(ua.clone());
         }
         e
     }
@@ -703,6 +714,11 @@ pub async fn require_auth(
     }
 
     let ip = extract_client_ip(&state, request.headers(), request.extensions()).await;
+    let user_agent = request
+        .headers()
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     // Load permissions from Redis cache (60s TTL) → DB fallback.
     let (permissions, denied_permissions) = load_user_permissions_cached(&state, claims.sub)
@@ -724,6 +740,7 @@ pub async fn require_auth(
     request.extensions_mut().insert(AuthUser {
         claims,
         ip,
+        user_agent,
         permissions,
         denied_permissions,
         scope_cache: std::sync::Arc::new(
@@ -874,6 +891,7 @@ async fn auth_via_api_key(
     request.extensions_mut().insert(AuthUser {
         claims,
         ip: None,
+        user_agent: None,
         permissions,
         denied_permissions,
         scope_cache: std::sync::Arc::new(

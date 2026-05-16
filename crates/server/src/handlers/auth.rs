@@ -34,32 +34,6 @@ pub(crate) async fn parse_json_body<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&body).map_err(|e| AppError::BadRequest(e.to_string()))
 }
 
-/// Extract (client_ip, user_agent) for audit attribution from a
-/// `HeaderMap`. Factored out so the account-security mutators
-/// (password change, TOTP toggle, sessions revoke, account deletion)
-/// can attach forensic context to their audit entries in one line.
-///
-/// Note: `extract_client_ip` reads connection_ip from request
-/// `Extensions`, which we don't pass through here. The trusted-
-/// proxy fallback "connection IP when source=xff but request isn't
-/// from a trusted proxy" therefore returns `None` instead of the
-/// connection IP. Acceptable for audit attribution — headers-based
-/// extraction (xff / x-real-ip) covers the production reverse-proxy
-/// case, which is the path that matters for forensics.
-pub(crate) async fn extract_audit_actor(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> (Option<String>, Option<String>) {
-    let extensions = axum::http::Extensions::new();
-    let client_ip =
-        crate::middleware::auth_guard::extract_client_ip(state, headers, &extensions).await;
-    let user_agent = headers
-        .get(axum::http::header::USER_AGENT)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
-    (client_ip, user_agent)
-}
-
 // Session + temp-password plumbing moved to
 // `crate::services::session_service`. Re-export at the crate-local
 // paths everything else in this file (and admin.rs / setup.rs) used
@@ -1032,12 +1006,8 @@ async fn fetch_user_role_assignments(
 pub async fn change_password(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
     Json(req): Json<ChangePasswordRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    // Capture IP + UA from headers for the audit entry below —
-    // account-takeover forensics needs both fields.
-    let (client_ip, user_agent) = extract_audit_actor(&state, &headers).await;
     validate_password(&req.new_password)?;
 
     let user = sqlx::query_as::<_, User>(
@@ -1100,16 +1070,12 @@ pub async fn change_password(
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
     invalidate_refresh_tokens(&state.redis, user.id, refresh_ttl_days).await;
 
-    let mut entry = AuditEntry::new("auth.password_changed")
-        .user_id(user.id)
-        .resource("auth");
-    if let Some(ip) = client_ip.as_deref() {
-        entry = entry.ip_address(ip);
-    }
-    if let Some(ua) = user_agent.as_deref() {
-        entry = entry.user_agent(ua);
-    }
-    state.audit.log(entry);
+    // `auth_user.audit()` carries user_id, user_email, ip_address,
+    // and user_agent pre-filled by the auth middleware — no need to
+    // re-extract from headers here.
+    state
+        .audit
+        .log(auth_user.audit("auth.password_changed").resource("auth"));
 
     Ok(Json(serde_json::json!({"status": "password_changed"})))
 }
@@ -1126,10 +1092,8 @@ pub async fn change_password(
 pub async fn delete_account(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user_id = auth_user.claims.sub;
-    let (client_ip, user_agent) = extract_audit_actor(&state, &headers).await;
 
     // Soft-delete in a transaction: mark keys + user as deleted atomically
     let mut tx = state.db.begin().await?;
@@ -1167,14 +1131,7 @@ pub async fn delete_account(
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
     invalidate_refresh_tokens(&state.redis, user_id, refresh_ttl_days).await;
 
-    let mut entry = AuditEntry::new("user.account_deleted").user_id(user_id);
-    if let Some(ip) = client_ip.as_deref() {
-        entry = entry.ip_address(ip);
-    }
-    if let Some(ua) = user_agent.as_deref() {
-        entry = entry.user_agent(ua);
-    }
-    state.audit.log(entry);
+    state.audit.log(auth_user.audit("user.account_deleted"));
 
     Ok(Json(serde_json::json!({"status": "deleted"})))
 }
@@ -1192,10 +1149,8 @@ pub async fn delete_account(
 pub async fn revoke_sessions(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
 ) -> Result<Json<serde_json::Value>, AppError> {
     let user_id = auth_user.claims.sub;
-    let (client_ip, user_agent) = extract_audit_actor(&state, &headers).await;
 
     // Delete signing public key (invalidates all signed requests)
     let _: () =
@@ -1226,16 +1181,9 @@ pub async fn revoke_sessions(
     .await
     .unwrap_or(());
 
-    let mut entry = AuditEntry::new("auth.sessions_revoked")
-        .user_id(user_id)
-        .resource("auth");
-    if let Some(ip) = client_ip.as_deref() {
-        entry = entry.ip_address(ip);
-    }
-    if let Some(ua) = user_agent.as_deref() {
-        entry = entry.user_agent(ua);
-    }
-    state.audit.log(entry);
+    state
+        .audit
+        .log(auth_user.audit("auth.sessions_revoked").resource("auth"));
 
     Ok(Json(serde_json::json!({"status": "all_sessions_revoked"})))
 }
@@ -1334,10 +1282,8 @@ pub struct TotpVerifyRequest {
 pub async fn totp_verify_setup(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
     Json(req): Json<TotpVerifyRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let (client_ip, user_agent) = extract_audit_actor(&state, &headers).await;
     use think_watch_auth::totp;
 
     let user_id = auth_user.claims.sub;
@@ -1397,16 +1343,9 @@ pub async fn totp_verify_setup(
         .await
         .unwrap_or(0);
 
-    let mut entry = AuditEntry::new("auth.totp_enabled")
-        .user_id(user_id)
-        .resource("auth");
-    if let Some(ip) = client_ip.as_deref() {
-        entry = entry.ip_address(ip);
-    }
-    if let Some(ua) = user_agent.as_deref() {
-        entry = entry.user_agent(ua);
-    }
-    state.audit.log(entry);
+    state
+        .audit
+        .log(auth_user.audit("auth.totp_enabled").resource("auth"));
 
     Ok(Json(serde_json::json!({"status": "totp_enabled"})))
 }
@@ -1426,10 +1365,8 @@ pub async fn totp_verify_setup(
 pub async fn totp_disable(
     auth_user: AuthUser,
     State(state): State<AppState>,
-    headers: axum::http::HeaderMap,
     Json(req): Json<DisableTotpRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
-    let (client_ip, user_agent) = extract_audit_actor(&state, &headers).await;
     let user = sqlx::query_as::<_, User>(
         "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
     )
@@ -1457,16 +1394,9 @@ pub async fn totp_disable(
     .execute(&state.db)
     .await?;
 
-    let mut entry = AuditEntry::new("auth.totp_disabled")
-        .user_id(user.id)
-        .resource("auth");
-    if let Some(ip) = client_ip.as_deref() {
-        entry = entry.ip_address(ip);
-    }
-    if let Some(ua) = user_agent.as_deref() {
-        entry = entry.user_agent(ua);
-    }
-    state.audit.log(entry);
+    state
+        .audit
+        .log(auth_user.audit("auth.totp_disabled").resource("auth"));
 
     Ok(Json(serde_json::json!({"status": "totp_disabled"})))
 }
