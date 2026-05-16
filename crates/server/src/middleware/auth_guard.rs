@@ -494,13 +494,22 @@ pub async fn extract_client_ip(
                         let i = depth - 1;
                         if i < parts.len() { Some(i) } else { None }
                     };
-                    idx.and_then(|i| parts.get(i)).map(|s| s.to_string())
+                    // A malformed header like ", 1.2.3.4" trims to an
+                    // empty leading slot — drop it so the audit row
+                    // doesn't read as "we had an IP" with no payload.
+                    idx.and_then(|i| parts.get(i))
+                        .map(|s| s.to_string())
+                        .filter(|s| !s.is_empty())
                 })
         }
         "x-real-ip" => headers
             .get("x-real-ip")
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.trim().to_string()),
+            .map(|s| s.trim().to_string())
+            // An empty-or-whitespace header value passes the to_str
+            // check but yields a blank string after trim — same
+            // "present but absent" failure mode as the xff branch.
+            .filter(|s| !s.is_empty()),
         // "connection" — use TCP peer address from ConnectInfo
         _ => connection_ip,
     }
