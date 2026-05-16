@@ -1593,47 +1593,59 @@ function TopUsersPanel({
   );
 }
 
-// `memo` because the WS tick (4 s) is more frequent than the
-// server-side top-users cache TTL (15 s) — 3 of every 4 ticks
-// produce identical rows. Without memo, all 50 row instances
-// re-render on each frame; with it, only the structural rebuilds
-// (sort order change, new user appearing) cost render work.
-// Parity with LiveLogRowItem which uses the same pattern.
-const TopUserRow = memo(function TopUserRow({
-  rank,
-  user,
-  locale,
-}: {
-  rank: number;
-  user: TopActiveUser;
-  locale: string;
-}) {
-  // Email present → primary label is email, secondary is short user_id.
-  // Email blank (pre-email-column rows / anonymous) → fall back to the
-  // user_id so the row never reads as "user with no name."
-  const label = user.user_email || user.user_id;
-  const subLabel = user.user_email ? user.user_id.slice(0, 8) : null;
-  // Three right-aligned numbers — labels live in the sticky header
-  // up top so the rows themselves stay scannable. Zero values dim so
-  // operators can tell "MCP-only" callers from "API-only" at a glance
-  // without reading every digit.
-  return (
-    <li className="flex items-center gap-2.5 px-3 py-1.5 text-xs">
-      <span className="w-4 shrink-0 text-right font-mono tabular-nums text-[10px] text-muted-foreground">
-        {rank}
-      </span>
-      <div className="flex min-w-0 flex-1 flex-col leading-tight">
-        <span className="truncate font-mono">{label}</span>
-        {subLabel && (
-          <span className="truncate text-[10px] text-muted-foreground">{subLabel}</span>
-        )}
-      </div>
-      <TopUserStat value={user.request_count} locale={locale} />
-      <TopUserStat value={user.total_tokens} locale={locale} />
-      <TopUserStat value={user.mcp_call_count} locale={locale} />
-    </li>
-  );
-});
+// `memo` with a CUSTOM comparator because the `user` prop is a fresh
+// object each WS tick — `live.top_users` comes from `JSON.parse` on
+// every inbound frame, so default shallow compare (`Object.is`) always
+// returns false on the object identity even when contents are equal,
+// and the wrapper does nothing. The WS tick (4 s) is more frequent
+// than the server-side top-users cache TTL (15 s), so 3 of every 4
+// ticks produce identical rows — compare load-bearing scalars to
+// skip the rebuild when nothing observable changed.
+const TopUserRow = memo(
+  function TopUserRow({
+    rank,
+    user,
+    locale,
+  }: {
+    rank: number;
+    user: TopActiveUser;
+    locale: string;
+  }) {
+    // Email present → primary label is email, secondary is short user_id.
+    // Email blank (pre-email-column rows / anonymous) → fall back to the
+    // user_id so the row never reads as "user with no name."
+    const label = user.user_email || user.user_id;
+    const subLabel = user.user_email ? user.user_id.slice(0, 8) : null;
+    // Three right-aligned numbers — labels live in the sticky header
+    // up top so the rows themselves stay scannable. Zero values dim so
+    // operators can tell "MCP-only" callers from "API-only" at a glance
+    // without reading every digit.
+    return (
+      <li className="flex items-center gap-2.5 px-3 py-1.5 text-xs">
+        <span className="w-4 shrink-0 text-right font-mono tabular-nums text-[10px] text-muted-foreground">
+          {rank}
+        </span>
+        <div className="flex min-w-0 flex-1 flex-col leading-tight">
+          <span className="truncate font-mono">{label}</span>
+          {subLabel && (
+            <span className="truncate text-[10px] text-muted-foreground">{subLabel}</span>
+          )}
+        </div>
+        <TopUserStat value={user.request_count} locale={locale} />
+        <TopUserStat value={user.total_tokens} locale={locale} />
+        <TopUserStat value={user.mcp_call_count} locale={locale} />
+      </li>
+    );
+  },
+  (prev, next) =>
+    prev.rank === next.rank &&
+    prev.locale === next.locale &&
+    prev.user.user_id === next.user.user_id &&
+    prev.user.user_email === next.user.user_email &&
+    prev.user.request_count === next.user.request_count &&
+    prev.user.total_tokens === next.user.total_tokens &&
+    prev.user.mcp_call_count === next.user.mcp_call_count,
+);
 
 function TopUserStat({ value, locale }: { value: number; locale: string }) {
   const zero = value === 0;
