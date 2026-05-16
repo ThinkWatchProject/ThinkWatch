@@ -118,8 +118,8 @@ pub async fn create_forwarder(
     state.audit.reload_forwarders().await;
 
     state.audit.log(
-        think_watch_common::audit::AuditEntry::new("log_forwarder.created")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("log_forwarder.created")
             .resource(format!("log_forwarder:{}", forwarder.id)),
     );
 
@@ -245,8 +245,8 @@ pub async fn delete_forwarder(
     state.audit.reload_forwarders().await;
 
     state.audit.log(
-        think_watch_common::audit::AuditEntry::new("log_forwarder.deleted")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("log_forwarder.deleted")
             .resource(format!("log_forwarder:{id}")),
     );
 
@@ -386,8 +386,8 @@ pub async fn test_forwarder(
         .await?
         .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;
 
-    let test_entry = think_watch_common::audit::AuditEntry::new("log_forwarder.test")
-        .user_id(auth_user.claims.sub)
+    let test_entry = auth_user
+        .audit("log_forwarder.test")
         .resource(format!("log_forwarder:{id}"));
 
     // Reuse the shared HTTP client (timeouts + connection pool +

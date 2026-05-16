@@ -169,7 +169,8 @@ where
             .headers()
             .get(axum::http::header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
         let connection_ip = request
             .extensions()
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()

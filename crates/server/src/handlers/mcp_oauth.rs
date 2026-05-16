@@ -921,8 +921,8 @@ pub async fn revoke_connection(
         .await;
 
     state.audit.log(
-        AuditEntry::new("mcp.connection.revoked")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("mcp.connection.revoked")
             .resource("mcp_server")
             .resource_id(server_id.to_string())
             .detail(serde_json::json!({ "account_label": account_label })),
@@ -1000,8 +1000,8 @@ pub async fn set_default_connection(
         .await;
 
     state.audit.log(
-        AuditEntry::new("mcp.connection.default_set")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("mcp.connection.default_set")
             .resource("mcp_server")
             .resource_id(server_id.to_string())
             .detail(serde_json::json!({ "account_label": account_label })),
@@ -1102,8 +1102,8 @@ pub async fn paste_static_token(
     );
 
     state.audit.log(
-        AuditEntry::new("mcp.connection.authorized")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("mcp.connection.authorized")
             .resource("mcp_server")
             .resource_id(server_id.to_string())
             .detail(serde_json::json!({
@@ -1297,8 +1297,8 @@ pub async fn test_connection(
     .await;
 
     state.audit.log(
-        AuditEntry::new("mcp.connection.tested")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("mcp.connection.tested")
             .resource("mcp_server")
             .resource_id(server_id.to_string())
             .detail(serde_json::json!({
@@ -2403,8 +2403,8 @@ pub async fn paste_shared_static_token(
     );
 
     state.audit.log(
-        AuditEntry::new("mcp.shared_credential.token_set")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("mcp.shared_credential.token_set")
             .resource("mcp_server")
             .resource_id(server_id.to_string()),
     );
@@ -2603,8 +2603,8 @@ pub async fn revoke_shared_credential(
         .await;
 
     state.audit.log(
-        AuditEntry::new("mcp.shared_credential.revoked")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("mcp.shared_credential.revoked")
             .resource("mcp_server")
             .resource_id(server_id.to_string()),
     );

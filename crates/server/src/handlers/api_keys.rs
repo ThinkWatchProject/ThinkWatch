@@ -7,7 +7,6 @@ use uuid::Uuid;
 use super::serde_util::deserialize_some;
 
 use think_watch_auth::{api_key, rbac};
-use think_watch_common::audit::AuditEntry;
 use think_watch_common::dto::{CreateApiKeyRequest, CreateApiKeyResponse, PaginatedResponse};
 use think_watch_common::errors::AppError;
 use think_watch_common::models::ApiKey;
@@ -537,8 +536,8 @@ pub async fn revoke_key(
     }
 
     state.audit.log(
-        AuditEntry::new("api_key.revoke")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("api_key.revoke")
             .resource(format!("api_key:{id}")),
     );
 
@@ -618,8 +617,8 @@ pub async fn force_revoke_key(
     }
 
     state.audit.log(
-        AuditEntry::new("api_key.force_revoke")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("api_key.force_revoke")
             .resource(format!("api_key:{id}"))
             .detail(serde_json::json!({ "reason": reason })),
     );
@@ -878,8 +877,8 @@ pub async fn update_key(
         );
     }
     state.audit.log(
-        AuditEntry::new("api_key.update")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("api_key.update")
             .resource(format!("api_key:{id}"))
             .detail(serde_json::Value::Object(changes)),
     );
@@ -997,8 +996,8 @@ pub async fn rotate_key(
     tx.commit().await?;
 
     state.audit.log(
-        AuditEntry::new("api_key.rotate")
-            .user_id(auth_user.claims.sub)
+        auth_user
+            .audit("api_key.rotate")
             .resource(format!("api_key:{id}"))
             .detail(serde_json::json!({
                 "new_key_id": new_key.id,
