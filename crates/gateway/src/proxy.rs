@@ -494,6 +494,17 @@ async fn post_flight_account(
     completion_tokens: u32,
     request_rules: Vec<limits::RateLimitRule>,
     budget_caps: Vec<BudgetCap>,
+    // Actor attribution for `budget.threshold_crossed` audit entries.
+    // Without these the crossing log carries only `cap_id`, and the
+    // cap's `subject_id` may be a team/role — operators investigating
+    // a 100 %-cross had to time-join against gateway_logs to find the
+    // user who pushed it over. Cloned in the streaming path (the
+    // tokio task moves owned values) and inlined in the non-streaming
+    // path; passing `Option<String>` keeps both call shapes flat.
+    actor_user_id: Option<String>,
+    actor_user_email: Option<String>,
+    actor_api_key_id: Option<String>,
+    actor_ip_address: Option<String>,
     audit: think_watch_common::audit::AuditLogger,
 ) {
     let mult = weight_cache.get(&db, &model).await;
@@ -536,14 +547,34 @@ async fn post_flight_account(
                     // = "wire crossings to webhooks", which lives
                     // here).
                     for crossing in &crossings {
-                        audit.log(
+                        let mut entry =
                             think_watch_common::audit::AuditEntry::new("budget.threshold_crossed")
                                 .resource(format!("budget_cap:{}", crossing.cap_id))
                                 .detail(
                                     serde_json::to_value(crossing)
                                         .unwrap_or(serde_json::Value::Null),
-                                ),
-                        );
+                                );
+                        // The audit builder's `user_id` / `api_key_id`
+                        // take `Uuid`, so parse on the way in. A bad
+                        // string is treated like "unknown" — the field
+                        // stays absent rather than corrupting the row.
+                        if let Some(uid) = actor_user_id.as_deref()
+                            && let Ok(u) = uuid::Uuid::parse_str(uid)
+                        {
+                            entry = entry.user_id(u);
+                        }
+                        if let Some(email) = actor_user_email.as_deref() {
+                            entry = entry.user_email(email);
+                        }
+                        if let Some(kid) = actor_api_key_id.as_deref()
+                            && let Ok(k) = uuid::Uuid::parse_str(kid)
+                        {
+                            entry = entry.api_key_id(k);
+                        }
+                        if let Some(ip) = actor_ip_address.as_deref() {
+                            entry = entry.ip_address(ip);
+                        }
+                        audit.log(entry);
                     }
                 }
                 Ok(_) => {}
@@ -1423,6 +1454,10 @@ pub async fn proxy_chat_completion(
                     u.completion_tokens,
                     request_rules_for_done,
                     budget_caps.clone(),
+                    user_id_for_done,
+                    user_email_for_done,
+                    api_key_id_for_done,
+                    ip_address_for_done,
                     audit_for_done,
                 )
                 .await;
@@ -1509,6 +1544,10 @@ pub async fn proxy_chat_completion(
                 usage.completion_tokens,
                 request_rules.clone(),
                 budgets_for_ai_gateway(&identity),
+                identity.user_id.clone(),
+                identity.user_email.clone(),
+                identity.api_key_id.clone(),
+                identity.ip_address.clone(),
                 state.audit.clone(),
             )
             .await;
@@ -1845,6 +1884,10 @@ pub async fn proxy_anthropic_messages(
                     u.completion_tokens,
                     request_rules_for_done,
                     budget_caps.clone(),
+                    user_id_for_done,
+                    user_email_for_done,
+                    api_key_id_for_done,
+                    ip_address_for_done,
                     audit_for_done,
                 )
                 .await;
@@ -1911,6 +1954,10 @@ pub async fn proxy_anthropic_messages(
                 usage.completion_tokens,
                 request_rules.clone(),
                 budgets_for_ai_gateway(&identity),
+                identity.user_id.clone(),
+                identity.user_email.clone(),
+                identity.api_key_id.clone(),
+                identity.ip_address.clone(),
                 state.audit.clone(),
             )
             .await;
@@ -2261,6 +2308,10 @@ pub async fn proxy_responses(
                     u.completion_tokens,
                     request_rules_for_done,
                     budget_caps.clone(),
+                    user_id_for_done,
+                    user_email_for_done,
+                    api_key_id_for_done,
+                    ip_address_for_done,
                     audit_for_done,
                 )
                 .await;
@@ -2327,6 +2378,10 @@ pub async fn proxy_responses(
                 usage.completion_tokens,
                 request_rules.clone(),
                 budgets_for_ai_gateway(&identity),
+                identity.user_id.clone(),
+                identity.user_email.clone(),
+                identity.api_key_id.clone(),
+                identity.ip_address.clone(),
                 state.audit.clone(),
             )
             .await;
