@@ -1320,17 +1320,36 @@ pub(super) async fn fetch_top_active_users(
 
     // Fast path: serve from cache if the slot is still fresh. The
     // lock is released before any await — no holding across yields.
-    if let Ok(guard) = top_users_cache().lock()
-        && let Some((stored_at, cached)) = guard.get(&key)
-        && stored_at.elapsed() < TOP_USERS_TTL
-    {
-        return Ok(cached.clone());
+    // A poisoned mutex falls through to the uncached path *and*
+    // logs once so the silent degradation has a signal.
+    match top_users_cache().lock() {
+        Ok(guard) => {
+            if let Some((stored_at, cached)) = guard.get(&key)
+                && stored_at.elapsed() < TOP_USERS_TTL
+            {
+                return Ok(cached.clone());
+            }
+        }
+        Err(e) => tracing::warn!("top_users_cache mutex poisoned on read; bypassing cache: {e}"),
     }
 
     let resp = fetch_top_active_users_uncached(state, user_filter, range).await?;
 
-    if let Ok(mut guard) = top_users_cache().lock() {
-        guard.insert(key, (std::time::Instant::now(), resp.clone()));
+    match top_users_cache().lock() {
+        Ok(mut guard) => {
+            // Opportunistic prune on insert: the cache key is
+            // (filter_hash, range), and filter_hash varies per RBAC
+            // scope. Without eviction the map grows with every
+            // distinct scope ever observed. Sweep entries older than
+            // 2×TTL — anything fresher MIGHT still be a fast-path
+            // hit, anything older is dead weight. Insertion is rare
+            // (once per (scope, range) per 15s), so an O(n) scan over
+            // a tiny map is fine.
+            let cutoff = std::time::Instant::now() - (TOP_USERS_TTL * 2);
+            guard.retain(|_, (stored_at, _)| *stored_at >= cutoff);
+            guard.insert(key, (std::time::Instant::now(), resp.clone()));
+        }
+        Err(e) => tracing::warn!("top_users_cache mutex poisoned on insert; skipping store: {e}"),
     }
     Ok(resp)
 }
