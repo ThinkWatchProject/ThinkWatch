@@ -704,6 +704,21 @@ fn validate_setting(key: &str, value: &Value) -> anyhow::Result<()> {
             if !s.is_empty() && !s.starts_with("https://") && !s.starts_with("http://") {
                 anyhow::bail!("{key}: must be a valid http/https URL");
             }
+            // Allow plaintext for dev / on-prem-loopback scenarios, but
+            // warn loudly because OIDC discovery + JWKS fetched over
+            // http:// means every login can be MITM'd: an attacker on
+            // path can swap the JWKS to keys they control and mint
+            // arbitrary id_tokens for any user. Operators sometimes
+            // misconfigure this when migrating from a private network;
+            // the warn gives them a fighting chance to notice before
+            // the first real user logs in.
+            if s.starts_with("http://") {
+                tracing::warn!(
+                    issuer_url = %s,
+                    "OIDC issuer_url is plaintext http:// — login flow is vulnerable to MITM. \
+                     Use https:// in any non-loopback deployment."
+                );
+            }
         }
         "oidc.client_id" | "oidc.redirect_url" => {
             value
