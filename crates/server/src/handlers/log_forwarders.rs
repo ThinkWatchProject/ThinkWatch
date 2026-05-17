@@ -29,10 +29,17 @@ pub async fn list_forwarders(
     auth_user
         .require_global_permission(&state.db, "log_forwarders:read")
         .await?;
-    let forwarders =
-        sqlx::query_as::<_, LogForwarder>("SELECT * FROM log_forwarders ORDER BY created_at DESC")
-            .fetch_all(&state.db)
-            .await?;
+    // Hard cap at 500. Log forwarders are global infrastructure rows
+    // (handful per deployment, max), so 500 is well beyond any
+    // legitimate operational config — but without a cap a misconfig
+    // or test fixture leak that creates thousands of rows would
+    // serialize a multi-MB JSON payload synchronously and risk OOM.
+    // Add tiebreaker on id so the truncation is at least stable.
+    let forwarders = sqlx::query_as::<_, LogForwarder>(
+        "SELECT * FROM log_forwarders ORDER BY created_at DESC, id DESC LIMIT 500",
+    )
+    .fetch_all(&state.db)
+    .await?;
 
     Ok(Json(forwarders))
 }

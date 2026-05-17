@@ -100,13 +100,17 @@ pub async fn get_dashboard_stats(
         None => None,
         Some(team_ids) => {
             let team_ids_vec: Vec<uuid::Uuid> = team_ids.iter().copied().collect();
+            // Filter out soft-deleted users from the usage scope so a
+            // team manager doesn't see analytics rows for accounts that
+            // have been removed from the org (those rows linger in CH
+            // for the 30-day GDPR retention window).
             let rows: Vec<(String,)> = sqlx::query_as(
                 "SELECT DISTINCT u.id::text FROM users u \
-                 WHERE u.id = $1 \
+                 WHERE u.deleted_at IS NULL AND (u.id = $1 \
                     OR EXISTS ( \
                         SELECT 1 FROM team_members tm \
                          WHERE tm.user_id = u.id AND tm.team_id = ANY($2) \
-                    )",
+                    ))",
             )
             .bind(caller_id)
             .bind(&team_ids_vec)
@@ -219,13 +223,16 @@ pub async fn get_dashboard_stats(
             None => None,
             Some(team_ids) => {
                 let team_ids_vec: Vec<uuid::Uuid> = team_ids.iter().copied().collect();
+                // Same soft-delete filter as the usage scope above —
+                // keep the two in lockstep so active-key counts and
+                // usage rollups display a consistent population.
                 let rows: Vec<(String,)> = sqlx::query_as(
                     "SELECT DISTINCT u.id::text FROM users u \
-                     WHERE u.id = $1 \
+                     WHERE u.deleted_at IS NULL AND (u.id = $1 \
                         OR EXISTS ( \
                             SELECT 1 FROM team_members tm \
                              WHERE tm.user_id = u.id AND tm.team_id = ANY($2) \
-                        )",
+                        ))",
                 )
                 .bind(caller_id)
                 .bind(&team_ids_vec)
@@ -624,7 +631,8 @@ async fn resolve_dashboard_user_filter(
     let user_id_strs: Vec<(String,)> = sqlx::query_as(
         "SELECT DISTINCT u.id::text
            FROM users u
-          WHERE u.id = $1
+          WHERE u.deleted_at IS NULL
+            AND (u.id = $1
              OR EXISTS (
                  SELECT 1 FROM team_members tm
                    JOIN rbac_role_assignments ra ON ra.scope_kind = 'team'
@@ -641,7 +649,7 @@ async fn resolve_dashboard_user_filter(
                                OR (stmt->'Action' @> '\"analytics:read_team\"'::jsonb)
                                OR (stmt->'Action' @> '\"analytics:read_all\"'::jsonb))
                     )
-             )",
+             ))",
     )
     .bind(caller_id)
     .fetch_all(pool)

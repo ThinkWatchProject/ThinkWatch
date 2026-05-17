@@ -45,10 +45,17 @@ async fn assert_owner_or_admin(
     pool: &sqlx::PgPool,
     key_id: Uuid,
 ) -> Result<(), AppError> {
-    let owner: Option<Uuid> = sqlx::query_scalar("SELECT user_id FROM api_keys WHERE id = $1")
-        .bind(key_id)
-        .fetch_optional(pool)
-        .await?;
+    // Treat soft-deleted keys as if they don't exist — a 404 here is
+    // the right answer (callers can't operate on a key in the GDPR
+    // retention window). Without the filter, the auth check succeeded
+    // and the downstream UPDATE no-op'd because it carried its own
+    // `AND deleted_at IS NULL` guard, but an audit entry still fired
+    // claiming the operation happened.
+    let owner: Option<Uuid> =
+        sqlx::query_scalar("SELECT user_id FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
+            .bind(key_id)
+            .fetch_optional(pool)
+            .await?;
     let owner = owner.ok_or_else(|| AppError::NotFound("API key not found".into()))?;
     if auth_user.claims.sub == owner {
         return Ok(());

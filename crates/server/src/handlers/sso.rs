@@ -326,6 +326,17 @@ async fn handle_live_callback(
     .await?;
 
     let user = match user {
+        Some(u) if u.deleted_at.is_some() => {
+            // Soft-deleted user matched the OIDC subject. The `is_active`
+            // gate below catches this for accounts where soft-delete also
+            // flipped is_active (which every documented delete path does),
+            // but defense-in-depth: refuse explicitly here with a clear
+            // 403 instead of relying on a sibling field. Falling through
+            // to the None branch would also break — the (oidc_subject,
+            // oidc_issuer) UNIQUE constraint would cause the INSERT to
+            // fail with a confusing 500 instead of a clean 403.
+            return Err(AppError::Forbidden("Account has been deleted".into()));
+        }
         Some(u) => u,
         None => {
             let email = user_info.email.as_deref().unwrap_or(&user_info.subject);
