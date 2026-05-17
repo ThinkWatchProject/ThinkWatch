@@ -496,17 +496,14 @@ async fn post_flight_account(
         {
             match limits::budget::add_weighted_tokens(&redis, &caps, weighted).await {
                 Ok((_statuses, crossings)) if !crossings.is_empty() => {
-                    // Emit one `budget.threshold_crossed` platform-log
-                    // entry per crossing — `LogType::Platform` is the
-                    // namespace forwarders subscribe to for "operator
-                    // should know about this", and the action is
-                    // namespaced under `budget.*` so subscribers can
-                    // filter cleanly. Crosses fire at 50 / 80 / 95 /
-                    // 100 % (see ALERT_THRESHOLDS_PCT in
-                    // common::limits::budget); webhook delivery rides
-                    // the existing forwarder pipeline (FEAT-01 done
-                    // = "wire crossings to webhooks", which lives
-                    // here).
+                    // Emit one `budget.threshold_crossed` audit-log
+                    // entry per crossing. The action is namespaced
+                    // under `budget.*` so webhook forwarders can
+                    // subscribe cleanly to the LogType::Audit stream
+                    // and filter by action prefix. Crosses fire at
+                    // 50 / 80 / 95 / 100 % (see ALERT_THRESHOLDS_PCT
+                    // in common::limits::budget); webhook delivery
+                    // rides the existing forwarder pipeline.
                     use think_watch_common::audit::{AuditActor, GatewayActor};
                     let actor = GatewayActor {
                         user_id: actor_user_id.as_deref(),

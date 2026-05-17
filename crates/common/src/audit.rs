@@ -906,18 +906,47 @@ mod tests {
         // Mirrors the production "bad string from wire = absent field,
         // not corrupt row" contract — pin so a future refactor that
         // panics on parse failure (or substitutes a zero Uuid) breaks
-        // this test.
+        // this test. Covers all three Uuid-typed fields the actor
+        // parses (user_id / api_key_id / api_key_lineage_id) so a
+        // regression on any one of them surfaces here.
         let actor = GatewayActor {
             user_id: Some("not-a-uuid"),
             user_email: None,
             api_key_id: Some("also-not-a-uuid"),
-            api_key_lineage_id: None,
+            api_key_lineage_id: Some("definitely-not-a-uuid"),
             ip: None,
             session_id: None,
         };
         let e = actor.audit("chat.completion");
         assert!(e.user_id.is_none());
         assert!(e.api_key_id.is_none());
+        assert!(e.api_key_lineage_id.is_none());
+    }
+
+    #[test]
+    fn gateway_actor_with_no_inputs_produces_log_type_only_entry() {
+        // Floor case — the migrated emit_* paths hit this when a
+        // request lands entirely without identity (untyped surface,
+        // probe, etc). Verify no field is invented and `log_type`
+        // is the actor's declared default.
+        let actor = GatewayActor {
+            user_id: None,
+            user_email: None,
+            api_key_id: None,
+            api_key_lineage_id: None,
+            ip: None,
+            session_id: None,
+        };
+        let e = actor.audit("chat.completion");
+        assert_eq!(e.action, "chat.completion");
+        assert!(matches!(e.log_type, LogType::Gateway));
+        assert!(e.user_id.is_none());
+        assert!(e.user_email.is_none());
+        assert!(e.api_key_id.is_none());
+        assert!(e.api_key_lineage_id.is_none());
+        assert!(e.ip_address.is_none());
+        assert!(e.user_agent.is_none());
+        assert!(e.session_id.is_none());
     }
 
     #[test]
