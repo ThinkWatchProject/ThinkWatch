@@ -641,11 +641,15 @@ pub async fn register_key(
 
     let client_ip = auth_user.ip.as_deref();
 
+    // Match the refresh-token lifetime so the pubkey stays usable for
+    // the entire session, not just the first 24 hours.
+    let ttl_secs = state.dynamic_config.jwt_refresh_ttl_days().await * 86_400;
     verify_signature::store_public_key(
         &state.redis,
         &auth_user.claims.sub,
         &pubkey_json,
         client_ip,
+        ttl_secs,
     )
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to store public key: {e}")))?;

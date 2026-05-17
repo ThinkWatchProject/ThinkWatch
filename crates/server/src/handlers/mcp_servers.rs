@@ -454,34 +454,20 @@ pub async fn create_server(
         config
     };
 
-    // One transaction: optional template lock + optional wizard
-    // claim + server INSERT + optional shared-credential INSERT +
-    // optional store-install audit row. Failures of any step roll
-    // back the others so we never end up with an orphan server, a
-    // dangling credential, or a count drift on
-    // `mcp_store_templates.install_count`.
-    let mut tx = state.db.begin().await?;
-
-    // Wizard-session lock: when `wizard_session_id` is present,
-    // serialize concurrent POSTs with the same session id so two
-    // tabs can't each peek-and-insert the same blob into two
-    // server rows. The actual claim (GETDEL on Redis) happens just
-    // below; the lock guards the read-modify-write window.
-    if let Some(id) = req.wizard_session_id.as_deref()
-        && !id.is_empty()
-    {
-        let lock_key = format!("mcp_wizard_session:{id}");
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-            .bind(&lock_key)
-            .execute(&mut *tx)
-            .await?;
-    }
-
-    // Claim the wizard credential blob inside the TX (GETDEL — atomic
-    // consume). On rollback the blob is gone and the admin must
-    // re-run OAuth, but the lock above + pre-TX validation make
-    // rollback narrow enough to accept; double-spend on concurrent
-    // submits is the bigger risk.
+    // Claim the wizard credential blob FIRST, before opening the
+    // Postgres transaction. The previous shape did `tx.begin()` →
+    // `pg_advisory_xact_lock` → Redis GETDEL → PG inserts, which
+    // held a pooled PG connection across the Redis round-trip;
+    // under any Redis latency blip every concurrent install would
+    // tie up the connection pool and serialise on the advisory
+    // lock. The advisory lock was justified as guarding a "read-
+    // modify-write window" but Redis GETDEL is itself atomic and
+    // single-use — concurrent submits already lose the second
+    // claim. Hoisting the claim out of the tx keeps the PG path
+    // pure SQL, and the original rollback property holds: on PG
+    // failure the Redis blob is already gone (admin re-runs OAuth)
+    // exactly as it was before, because Redis GETDEL has never
+    // been transactional with PG.
     let wizard_cred = match req.wizard_session_id.as_deref() {
         Some(id) if !id.is_empty() => {
             let claimed =
@@ -496,6 +482,13 @@ pub async fn create_server(
         }
         _ => None,
     };
+
+    // One transaction: optional template lock + server INSERT +
+    // optional shared-credential INSERT + optional store-install
+    // audit row. Failures of any step roll back the others so we
+    // never end up with an orphan server, a dangling credential,
+    // or a count drift on `mcp_store_templates.install_count`.
+    let mut tx = state.db.begin().await?;
 
     // Template-install path: when `template_slug` is present, take
     // a process-wide advisory lock so two concurrent installs of

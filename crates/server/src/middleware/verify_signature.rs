@@ -15,19 +15,29 @@ const HEADER_SIGNATURE: &str = "x-signature";
 /// Store a client-provided ECDSA P-256 public key (JWK JSON) in Redis,
 /// keyed by user_id. Also stores the client IP for session binding.
 /// Called from the `POST /api/auth/register-key` handler after login.
+///
+/// `ttl_secs` should match the session's refresh-token lifetime
+/// (`jwt_refresh_ttl_days`) so the pubkey stays available for the
+/// life of the session. Previously this was hard-coded to 86400 with
+/// a comment claiming it "roughly matches" refresh — but refresh
+/// defaults to 7 days, and after 24h the pubkey would silently
+/// disappear from Redis. The verify middleware's grace branch
+/// (no headers + no key → allow) then let unsigned requests through
+/// unchecked, collapsing the signature-binding security model for
+/// any session older than a day.
 pub async fn store_public_key(
     redis: &fred::clients::Client,
     user_id: &uuid::Uuid,
     pubkey_jwk_json: &str,
     client_ip: Option<&str>,
+    ttl_secs: i64,
 ) -> anyhow::Result<()> {
     let redis_key = format!("signing_pubkey:{user_id}");
-    // Store with 24h TTL (matches refresh token lifetime roughly)
     fred::interfaces::KeysInterface::set::<(), _, _>(
         redis,
         &redis_key,
         pubkey_jwk_json,
-        Some(fred::types::Expiration::EX(86400)),
+        Some(fred::types::Expiration::EX(ttl_secs)),
         None,
         false,
     )
@@ -40,7 +50,7 @@ pub async fn store_public_key(
             redis,
             &ip_key,
             ip,
-            Some(fred::types::Expiration::EX(86400)),
+            Some(fred::types::Expiration::EX(ttl_secs)),
             None,
             false,
         )
@@ -160,15 +170,24 @@ pub async fn verify_signature(
     }
 
     // Extract auth user from extensions (set by require_auth middleware)
-    let user_id = request
+    let (user_id, token_iat) = request
         .extensions()
         .get::<super::auth_guard::AuthUser>()
-        .map(|u| u.claims.sub)
+        .map(|u| (u.claims.sub, u.claims.iat))
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
     // If no signature headers: check whether a public key is registered.
-    // - No key registered → grace window (login just happened, register-key in flight)
-    // - Key registered but no signature → reject (attacker stripping headers)
+    // - No key registered + token freshly minted → grace window (login
+    //   just happened, register-key is in flight)
+    // - No key registered + token older than the grace window →
+    //   reject. The pubkey TTL matches refresh lifetime, so a missing
+    //   key on an aged session is "key expired or evicted", not
+    //   "bootstrap in progress." The old grace branch let unsigned
+    //   requests through unconditionally — combined with the prior
+    //   24h pubkey TTL on 7-day refresh tokens, every session
+    //   silently lost signature enforcement after a day.
+    // - Key registered but no signature → reject (attacker stripping)
+    const REGISTER_KEY_GRACE_SECS: i64 = 120;
     let has_sig_headers = request.headers().contains_key(HEADER_SIGNATURE);
     if !has_sig_headers {
         let has_pubkey: bool = fred::interfaces::KeysInterface::exists::<bool, _>(
@@ -183,7 +202,18 @@ pub async fn verify_signature(
             );
             return Err(StatusCode::UNAUTHORIZED);
         }
-        // No key registered yet — allow through (grace window)
+        let now = chrono::Utc::now().timestamp();
+        let age = now.saturating_sub(token_iat);
+        if age > REGISTER_KEY_GRACE_SECS {
+            tracing::warn!(
+                user_id = %user_id,
+                age_secs = age,
+                "Signature missing and pubkey expired/evicted past grace window — rejecting"
+            );
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        // Within bootstrap grace window — register-key may still
+        // be in flight. Allow through.
         return Ok(next.run(request).await);
     }
 
@@ -332,6 +362,26 @@ pub async fn verify_signature(
             tracing::warn!("ECDSA signature verification failed for user {user_id}");
             StatusCode::UNAUTHORIZED
         })?;
+
+    // Refresh the pubkey TTL on every successful verify — active
+    // sessions extend the key alongside their refresh-token usage.
+    // Without this, the initial TTL set at register-key time would
+    // still cap key lifetime at the refresh-TTL window even for
+    // continuously-active sessions; nothing extends it. Fire-and-
+    // forget: a Redis hiccup here doesn't fail an otherwise-valid
+    // request. `EXPIRE` is a single round-trip O(1) op.
+    let pubkey_key = format!("signing_pubkey:{user_id}");
+    let refresh_ttl_secs = state.dynamic_config.jwt_refresh_ttl_days().await * 86_400;
+    if let Err(e) = fred::interfaces::KeysInterface::expire::<bool, _>(
+        &state.redis,
+        &pubkey_key,
+        refresh_ttl_secs,
+        None,
+    )
+    .await
+    {
+        tracing::debug!("Failed to refresh signing_pubkey TTL for user {user_id} (non-fatal): {e}");
+    }
 
     // Reconstruct request with buffered body
     let request = Request::from_parts(parts, axum::body::Body::from(body_bytes));
