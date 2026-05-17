@@ -193,11 +193,27 @@ function RootComponent() {
   // Allow the register route to render via <Outlet /> when not logged in
   // AND registration is enabled. Otherwise show the login page.
   if (!user && pathname === '/register' && registrationOpen) {
-    return <Outlet />;
+    // Wrap in ErrorBoundary so a render crash in the registration
+    // form doesn't blank the entire app — without this, a malformed
+    // env var or transient i18n load failure on the unauth path
+    // leaves the user with no UI and no path to recovery.
+    return (
+      <ErrorBoundary>
+        <Outlet />
+      </ErrorBoundary>
+    );
   }
 
   if (!user) {
-    return <LoginPage onLogin={login} />;
+    // Same reasoning as the register branch above: if LoginPage
+    // itself crashes on render, no other UI is available — the user
+    // literally cannot log in to recover. A boundary here gives them
+    // at least the retry button to attempt a fresh render.
+    return (
+      <ErrorBoundary>
+        <LoginPage onLogin={login} />
+      </ErrorBoundary>
+    );
   }
 
   return (
