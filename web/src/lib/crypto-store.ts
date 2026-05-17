@@ -11,8 +11,21 @@
 const DB_NAME = 'thinkwatch-keys';
 const STORE_NAME = 'signing';
 const KEY_ID = 'current';
-/** Key lifetime matches the server-side Redis TTL (24 hours). */
-const KEY_TTL_MS = 24 * 60 * 60 * 1000;
+/**
+ * Key lifetime matches the server's default refresh-token TTL
+ * (`jwt_refresh_ttl_days`, default 7 days). The previous 24-hour
+ * value lied — server stored the public key for the full refresh
+ * lifetime, so after 24h the frontend silently discarded the
+ * private key, every signed mutation went out unsigned, got 401,
+ * triggered a refresh + register-key cycle, then retried. Worked
+ * but added one wasted round-trip on each first action after a
+ * day-long idle. The 401-retry path is still load-bearing as a
+ * safety net (if server TTL is dialed below 7d in config, or the
+ * key is evicted from Redis for any other reason), so widening
+ * the frontend TTL doesn't remove the fallback — just stops
+ * triggering it on the common case.
+ */
+const KEY_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface StoredEntry {
   privateKey: CryptoKey;
