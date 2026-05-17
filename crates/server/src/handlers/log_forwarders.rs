@@ -257,7 +257,19 @@ pub async fn delete_forwarder(
     Ok(Json(serde_json::json!({"status": "deleted"})))
 }
 
-// --- Toggle (pause / resume) ---
+// --- Pause / resume ---
+
+/// Body for the pause/resume endpoint. Explicit `enabled` field makes
+/// the operation idempotent: a double-POST (network retry, double-
+/// click, SDK auto-retry) produces the same final state instead of
+/// silently flipping it back. The previous shape ("toggle") returned
+/// inverted state on each call AND emitted opposite audit rows
+/// (`log_forwarder.resumed` then `log_forwarder.paused`), which made
+/// retried requests look like deliberate flapping.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct SetForwarderEnabledRequest {
+    pub enabled: bool,
+}
 
 #[utoipa::path(
     post,
@@ -266,8 +278,9 @@ pub async fn delete_forwarder(
     params(
         ("id" = uuid::Uuid, Path, description = "Log forwarder ID"),
     ),
+    request_body = SetForwarderEnabledRequest,
     responses(
-        (status = 200, description = "Forwarder with toggled enabled state"),
+        (status = 200, description = "Forwarder with the requested enabled state"),
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Forbidden"),
         (status = 404, description = "Not found"),
@@ -278,15 +291,20 @@ pub async fn toggle_forwarder(
     auth_user: AuthUser,
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
+    Json(req): Json<SetForwarderEnabledRequest>,
 ) -> Result<Json<LogForwarder>, AppError> {
     auth_user
         .require_global_permission(&state.db, "log_forwarders:write")
         .await?;
+    // Idempotent: SET enabled = $2, not NOT enabled. A retry of the
+    // same request leaves the row in the same final state and emits
+    // the same audit action.
     let updated = sqlx::query_as::<_, LogForwarder>(
-        r#"UPDATE log_forwarders SET enabled = NOT enabled, updated_at = now()
+        r#"UPDATE log_forwarders SET enabled = $2, updated_at = now()
            WHERE id = $1 RETURNING *"#,
     )
     .bind(id)
+    .bind(req.enabled)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| AppError::NotFound("Forwarder not found".into()))?;

@@ -1101,13 +1101,18 @@ pub async fn change_password(
 ) -> Result<Json<serde_json::Value>, AppError> {
     validate_password(&req.new_password)?;
 
+    // Return Unauthorized (not NotFound) when the user row is gone —
+    // the caller already proved a valid JWT, so the only way to land
+    // here without a matching row is a deleted/disabled account on
+    // a still-valid token. 404 leaks existence info AND contradicted
+    // the OpenAPI contract (only 200/400/401 were documented).
     let user = sqlx::query_as::<_, User>(
         "SELECT * FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
     )
     .bind(auth_user.claims.sub)
     .fetch_optional(&state.db)
     .await?
-    .ok_or(AppError::NotFound("User not found".into()))?;
+    .ok_or(AppError::Unauthorized)?;
 
     let current_hash = user
         .password_hash

@@ -231,9 +231,14 @@ export function LogForwardersPage() {
     }
   };
 
-  const handleToggle = async (id: string) => {
+  const handleToggle = async (id: string, currentlyEnabled: boolean) => {
     try {
-      await apiPost(`/api/admin/log-forwarders/${id}/toggle`, {});
+      // Server now takes explicit `enabled` (was `NOT enabled` before).
+      // Idempotent: a retry of the same request produces the same
+      // final state. We compute the desired state client-side.
+      await apiPost(`/api/admin/log-forwarders/${id}/toggle`, {
+        enabled: !currentlyEnabled,
+      });
       loadForwarders();
       toast.success(t('logForwarders.toast.toggled'));
     } catch (err) {
@@ -625,7 +630,7 @@ export function LogForwardersPage() {
                           variant="ghost"
                           size="icon"
                           title={f.enabled ? t('logForwarders.pause') : t('logForwarders.resume')}
-                          onClick={() => handleToggle(f.id)}
+                          onClick={() => handleToggle(f.id, f.enabled)}
                           disabled={!hasPermission('log_forwarders:write')}
                         >
                           {f.enabled ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4" />}

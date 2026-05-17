@@ -303,15 +303,24 @@ impl utoipa::Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         if let Some(components) = openapi.components.as_mut() {
             use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
-            components.add_security_scheme(
-                "bearerAuth",
-                SecurityScheme::Http(
-                    HttpBuilder::new()
-                        .scheme(HttpAuthScheme::Bearer)
-                        .bearer_format("JWT or tw- API key")
-                        .build(),
-                ),
+            // Register three aliases for the same HTTP-Bearer scheme.
+            // Handler annotations across the codebase reference all
+            // three names (`bearer_token` × 74, `BearerAuth` × 38,
+            // `bearerAuth` × 0 today). Previously only `bearerAuth`
+            // was registered, so OpenAPI 3.1 consumers (Swagger UI's
+            // Authorize button included) saw "no auth required" for
+            // every documented endpoint because no `security` ref
+            // resolved. Rather than rename 112 call sites, register
+            // the names that are already in use as aliases.
+            let scheme = SecurityScheme::Http(
+                HttpBuilder::new()
+                    .scheme(HttpAuthScheme::Bearer)
+                    .bearer_format("JWT or tw- API key")
+                    .build(),
             );
+            components.add_security_scheme("bearer_token", scheme.clone());
+            components.add_security_scheme("BearerAuth", scheme.clone());
+            components.add_security_scheme("bearerAuth", scheme);
         }
     }
 }
