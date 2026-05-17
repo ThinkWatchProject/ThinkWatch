@@ -297,6 +297,16 @@ pub async fn sync_registry(
         .await
         .map_err(|e| AppError::BadRequest(format!("Invalid registry JSON: {e}")))?;
 
+    // Wrap the whole sync (upserts + post-loop cleanup DELETE) in a
+    // single transaction. Previously each `INSERT ... ON CONFLICT
+    // DO UPDATE` ran on its own pooled connection, so a mid-batch
+    // failure (PG hiccup, bad row #50 out of 100) left the catalog
+    // in a half-synced state: rows 1..49 carried the new revision,
+    // 50+ carried the old, and the trailing cleanup DELETE then
+    // either ran against the half-state (orphaning slugs that were
+    // about to be re-upserted) or failed too. One TX = atomic
+    // catalog revision swap.
+    let mut tx = state.db.begin().await?;
     let mut synced = 0u32;
     for t in &registry.templates {
         let auth_header_name = t
@@ -394,7 +404,7 @@ pub async fn sync_registry(
         .bind(&t.homepage_url)
         .bind(&t.repo_url)
         .bind(t.featured.unwrap_or(false))
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
         synced += 1;
     }
@@ -411,8 +421,9 @@ pub async fn sync_registry(
            SELECT COUNT(*) FROM deleted"#,
     )
     .bind(&registry_slugs)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await?;
+    tx.commit().await?;
 
     state.audit.log(
         auth_user
