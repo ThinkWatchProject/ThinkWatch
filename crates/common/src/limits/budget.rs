@@ -207,11 +207,32 @@ pub async fn add_weighted_tokens(
             cap.period.as_str(),
             now,
         );
-        let new_total: Result<i64, _> = redis.incr_by(&key, weighted_tokens).await;
+        // Atomic INCRBY + EXPIRE via Lua. Previously these were two
+        // separate round-trips: INCRBY first, then EXPIRE below at
+        // line ~270. If the EXPIRE round-trip failed (Redis hiccup,
+        // connection drop) the COUNTER existed in Redis with NO TTL
+        // — meaning a stale counter for a long-past billing period
+        // could survive forever and incorrectly accumulate against
+        // the next period's budget. Pipelining as a Lua script
+        // guarantees both happen or neither. Removed the trailing
+        // `expire` call below since it's now part of this op.
+        const LUA_INCR_AND_EXPIRE: &str = r#"
+            local n = redis.call('INCRBY', KEYS[1], ARGV[1])
+            redis.call('EXPIRE', KEYS[1], ARGV[2])
+            return n
+        "#;
+        let ttl_secs = period_ttl_secs(cap.period.as_str());
+        let new_total: Result<i64, _> = fred::interfaces::LuaInterface::eval(
+            redis,
+            LUA_INCR_AND_EXPIRE,
+            vec![key.as_str()],
+            vec![weighted_tokens.to_string(), ttl_secs.to_string()],
+        )
+        .await;
         let new_total = match new_total {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!("budget INCRBY failed for {key}: {e}; failing open");
+                tracing::warn!("budget INCRBY+EXPIRE failed for {key}: {e}; failing open");
                 metrics::counter!("gateway_budget_fail_open_total").increment(1);
                 continue;
             }
@@ -249,11 +270,10 @@ pub async fn add_weighted_tokens(
                 current_tokens: new_total,
             });
         }
-        // Refresh TTL on every write — cheap and keeps the key
-        // alive across restarts so a forgotten counter never lingers.
-        let _: Result<(), _> = redis
-            .expire(&key, period_ttl_secs(cap.period.as_str()), None)
-            .await;
+        // TTL is now refreshed inside `LUA_INCR_AND_EXPIRE` above —
+        // separate `EXPIRE` call removed to eliminate the race where
+        // INCRBY succeeded but EXPIRE failed (counter would persist
+        // beyond its period boundary).
         out.push(CapStatus {
             cap_id: cap.id,
             subject_kind: cap.subject_kind,

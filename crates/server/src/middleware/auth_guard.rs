@@ -171,9 +171,17 @@ impl AuthUser {
                     AND EXISTS (
                         SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
                         WHERE stmt->>'Effect' = 'Allow'
-                          AND (stmt->>'Action' = '*'
-                               OR stmt->>'Action' = $2
-                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                          AND EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements_text(
+                                  CASE jsonb_typeof(stmt->'Action')
+                                      WHEN 'array' THEN stmt->'Action'
+                                      ELSE jsonb_build_array(stmt->'Action')
+                                  END
+                              ) AS act
+                              WHERE act = '*' OR act = $2
+                                 OR (act LIKE '%*%' AND $2 LIKE replace(act,'*','%'))
+                          )
                     )
                  UNION ALL
                  SELECT 1 FROM team_members tm
@@ -183,9 +191,17 @@ impl AuthUser {
                     AND EXISTS (
                         SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
                         WHERE stmt->>'Effect' = 'Allow'
-                          AND (stmt->>'Action' = '*'
-                               OR stmt->>'Action' = $2
-                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                          AND EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements_text(
+                                  CASE jsonb_typeof(stmt->'Action')
+                                      WHEN 'array' THEN stmt->'Action'
+                                      ELSE jsonb_build_array(stmt->'Action')
+                                  END
+                              ) AS act
+                              WHERE act = '*' OR act = $2
+                                 OR (act LIKE '%*%' AND $2 LIKE replace(act,'*','%'))
+                          )
                     )
              )",
         )
@@ -225,8 +241,17 @@ impl AuthUser {
                     AND EXISTS (
                         SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
                         WHERE stmt->>'Effect' = 'Allow'
-                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
-                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                          AND EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements_text(
+                                  CASE jsonb_typeof(stmt->'Action')
+                                      WHEN 'array' THEN stmt->'Action'
+                                      ELSE jsonb_build_array(stmt->'Action')
+                                  END
+                              ) AS act
+                              WHERE act = '*' OR act = $2
+                                 OR (act LIKE '%*%' AND $2 LIKE replace(act,'*','%'))
+                          )
                     )
                     AND (
                         ra.scope_kind = 'global'
@@ -243,8 +268,17 @@ impl AuthUser {
                     AND EXISTS (
                         SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
                         WHERE stmt->>'Effect' = 'Allow'
-                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
-                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                          AND EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements_text(
+                                  CASE jsonb_typeof(stmt->'Action')
+                                      WHEN 'array' THEN stmt->'Action'
+                                      ELSE jsonb_build_array(stmt->'Action')
+                                  END
+                              ) AS act
+                              WHERE act = '*' OR act = $2
+                                 OR (act LIKE '%*%' AND $2 LIKE replace(act,'*','%'))
+                          )
                     )
              )",
         )
@@ -283,8 +317,17 @@ impl AuthUser {
                     AND EXISTS (
                         SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
                         WHERE stmt->>'Effect' = 'Allow'
-                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
-                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                          AND EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements_text(
+                                  CASE jsonb_typeof(stmt->'Action')
+                                      WHEN 'array' THEN stmt->'Action'
+                                      ELSE jsonb_build_array(stmt->'Action')
+                                  END
+                              ) AS act
+                              WHERE act = '*' OR act = $2
+                                 OR (act LIKE '%*%' AND $2 LIKE replace(act,'*','%'))
+                          )
                     )
                     AND (
                         ra.scope_kind = 'global'
@@ -298,8 +341,17 @@ impl AuthUser {
                     AND EXISTS (
                         SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
                         WHERE stmt->>'Effect' = 'Allow'
-                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
-                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                          AND EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements_text(
+                                  CASE jsonb_typeof(stmt->'Action')
+                                      WHEN 'array' THEN stmt->'Action'
+                                      ELSE jsonb_build_array(stmt->'Action')
+                                  END
+                              ) AS act
+                              WHERE act = '*' OR act = $2
+                                 OR (act LIKE '%*%' AND $2 LIKE replace(act,'*','%'))
+                          )
                     )
              )",
         )
@@ -374,8 +426,17 @@ impl AuthUser {
                     AND EXISTS (
                         SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
                         WHERE stmt->>'Effect' = 'Allow'
-                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
-                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                          AND EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements_text(
+                                  CASE jsonb_typeof(stmt->'Action')
+                                      WHEN 'array' THEN stmt->'Action'
+                                      ELSE jsonb_build_array(stmt->'Action')
+                                  END
+                              ) AS act
+                              WHERE act = '*' OR act = $2
+                                 OR (act LIKE '%*%' AND $2 LIKE replace(act,'*','%'))
+                          )
                     )
                  UNION ALL
                  SELECT 1 FROM team_members tm
@@ -385,8 +446,17 @@ impl AuthUser {
                     AND EXISTS (
                         SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
                         WHERE stmt->>'Effect' = 'Allow'
-                          AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
-                               OR (stmt->'Action' @> to_jsonb($2::text)))
+                          AND EXISTS (
+                              SELECT 1
+                              FROM jsonb_array_elements_text(
+                                  CASE jsonb_typeof(stmt->'Action')
+                                      WHEN 'array' THEN stmt->'Action'
+                                      ELSE jsonb_build_array(stmt->'Action')
+                                  END
+                              ) AS act
+                              WHERE act = '*' OR act = $2
+                                 OR (act LIKE '%*%' AND $2 LIKE replace(act,'*','%'))
+                          )
                     )
              )",
         )
@@ -412,8 +482,17 @@ impl AuthUser {
                 AND EXISTS (
                     SELECT 1 FROM jsonb_array_elements(r.policy_document->'Statement') AS stmt
                     WHERE stmt->>'Effect' = 'Allow'
-                      AND (stmt->>'Action' = '*' OR stmt->>'Action' = $2
-                           OR (stmt->'Action' @> to_jsonb($2::text)))
+                      AND EXISTS (
+                          SELECT 1
+                          FROM jsonb_array_elements_text(
+                              CASE jsonb_typeof(stmt->'Action')
+                                  WHEN 'array' THEN stmt->'Action'
+                                  ELSE jsonb_build_array(stmt->'Action')
+                              END
+                          ) AS act
+                          WHERE act = '*' OR act = $2
+                             OR (act LIKE '%*%' AND $2 LIKE replace(act,'*','%'))
+                      )
                 )",
         )
         .bind(self.claims.sub)
