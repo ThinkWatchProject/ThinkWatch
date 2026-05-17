@@ -28,20 +28,24 @@ pub struct ClientError {
 
 const MAX_FIELD_LEN: usize = 4_000;
 
+fn truncate_inplace(v: &mut String) {
+    if v.len() > MAX_FIELD_LEN {
+        // `String::truncate` panics if the cut isn't on a char
+        // boundary — for a UTF-8 string whose Nth byte falls
+        // mid-codepoint we'd crash the server on an inbound report.
+        // Walk back to the nearest boundary at or below MAX_FIELD_LEN.
+        let mut cut = MAX_FIELD_LEN;
+        while !v.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        v.truncate(cut);
+        v.push_str("…[truncated]");
+    }
+}
+
 fn truncate(s: Option<String>) -> Option<String> {
     s.map(|mut v| {
-        if v.len() > MAX_FIELD_LEN {
-            // `String::truncate` panics if the cut isn't on a char
-            // boundary — for a UTF-8 string whose Nth byte falls
-            // mid-codepoint we'd crash the server on an inbound report.
-            // Walk back to the nearest boundary at or below MAX_FIELD_LEN.
-            let mut cut = MAX_FIELD_LEN;
-            while !v.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            v.truncate(cut);
-            v.push_str("…[truncated]");
-        }
+        truncate_inplace(&mut v);
         v
     })
 }
@@ -52,11 +56,13 @@ pub async fn report_client_error(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let report = ClientError {
         message: {
+            // Was: `m.truncate(MAX_FIELD_LEN)` direct — that panics
+            // if byte MAX_FIELD_LEN falls mid-codepoint, which the
+            // sibling `truncate()` helper already handles via
+            // char-boundary walk-back. Reuse it so a Chinese / emoji
+            // crash message can't take the server down with a 500.
             let mut m = report.message;
-            if m.len() > MAX_FIELD_LEN {
-                m.truncate(MAX_FIELD_LEN);
-                m.push_str("…[truncated]");
-            }
+            truncate_inplace(&mut m);
             m
         },
         stack: truncate(report.stack),
@@ -80,7 +86,20 @@ pub async fn report_client_error(
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_FIELD_LEN, truncate};
+    use super::{MAX_FIELD_LEN, truncate, truncate_inplace};
+
+    #[test]
+    fn truncate_inplace_handles_mid_codepoint_boundary() {
+        // Same pinned regression case as `truncate_walks_back_to_char_boundary_no_panic`
+        // but exercising the in-place helper used directly by the
+        // `message` field path. Previously `message` called
+        // `String::truncate(MAX_FIELD_LEN)` raw and would panic here.
+        let mut s = "a".repeat(MAX_FIELD_LEN - 2);
+        s.push('💥');
+        truncate_inplace(&mut s);
+        assert!(s.ends_with("…[truncated]"));
+        assert!(s.is_char_boundary(s.len()));
+    }
 
     #[test]
     fn truncate_passes_through_none() {
