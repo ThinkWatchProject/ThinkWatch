@@ -1502,12 +1502,28 @@ async fn drain_once(
         attempts: i32,
     }
 
+    // Atomic claim + 5-minute lease in one statement. Without this,
+    // two server replicas' drain loops would both pick up the same
+    // due rows and POST duplicates to the receiver. The inner
+    // `FOR UPDATE SKIP LOCKED` skips rows another worker is in the
+    // middle of claiming; the outer UPDATE bumps `next_attempt_at`
+    // to "5 min from now" as a lease, so even if THIS worker crashes
+    // between claim and successful dispatch, the row becomes
+    // re-available in 5 min for any worker to retry. On successful
+    // dispatch we DELETE the row; on transient failure we UPDATE
+    // `next_attempt_at` to the backoff time — either path overrides
+    // the lease. RETURNING gives us the columns we'd have selected.
     let due: Vec<OutboxRow> = sqlx::query_as(
-        "SELECT id, forwarder_id, payload, attempts \
-           FROM webhook_outbox \
-          WHERE next_attempt_at <= now() \
-          ORDER BY next_attempt_at ASC \
-          LIMIT 100",
+        "UPDATE webhook_outbox \
+         SET next_attempt_at = now() + interval '5 minutes' \
+         WHERE id IN ( \
+             SELECT id FROM webhook_outbox \
+             WHERE next_attempt_at <= now() \
+             ORDER BY next_attempt_at ASC \
+             LIMIT 100 \
+             FOR UPDATE SKIP LOCKED \
+         ) \
+         RETURNING id, forwarder_id, payload, attempts",
     )
     .fetch_all(db)
     .await?;
@@ -1764,65 +1780,67 @@ async fn send_webhook(
     // with `sha256=<hex>` over the body bytes. Receivers can verify by
     // recomputing with the same secret; a mismatch means the payload
     // was tampered with in transit (or arrived via a different sender).
+    // HMAC-SHA256 signature includes a timestamp to prevent replay.
+    // The receiver verifies by recomputing `sha256(timestamp + "." +
+    // body)` with the same secret AND rejecting deliveries where
+    // `|now - timestamp| > N seconds` (5 minutes is the recommended
+    // window). Without the timestamp in the signed input, a captured
+    // payload was replayable forever with the same signature.
     let signing_secret = config
         .config
         .get("signing_secret")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
-    let signature = signing_secret.map(|secret| hmac_sha256_hex(secret.as_bytes(), &body));
+    let timestamp = chrono::Utc::now().timestamp().to_string();
+    let signature = signing_secret.map(|secret| {
+        let mut signed = timestamp.clone().into_bytes();
+        signed.push(b'.');
+        signed.extend_from_slice(&body);
+        hmac_sha256_hex(secret.as_bytes(), &signed)
+    });
 
-    // Retry policy: 3 attempts, exponential backoff (200ms, 400ms,
-    // 800ms). A 2xx or explicit 4xx terminates — 4xx is a config
-    // problem at the receiver, retrying would just amplify noise.
-    // Network errors and 5xx retry up to the attempt cap.
-    let mut last_err = String::new();
-    for attempt in 0..3u32 {
-        if attempt > 0 {
-            let delay_ms = 200u64 * (1u64 << (attempt - 1)); // 200, 400, 800
-            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-        }
+    // Single attempt — failure parks in `webhook_outbox` for the
+    // drain loop to retry with proper exponential backoff (up to 1h,
+    // 24-attempt cap). The original 3x inline retry (200/400/800ms)
+    // blocked the single audit_worker mpsc consumer for up to 1.4s
+    // per entry on a dead receiver, saturating the bounded audit
+    // channel and dropping legitimate audit emissions upstream. The
+    // outbox already does retry, so the inline loop was both
+    // backpressure-fragile and redundant.
+    let mut req = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .body(body);
 
-        let mut req = client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .body(body.clone());
-
-        // Custom headers (new format: JSON object stored as string)
-        if let Some(headers_val) = config.config.get("custom_headers") {
-            let headers_str = headers_val.as_str().unwrap_or("");
-            if let Ok(headers) =
-                serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(headers_str)
-            {
-                for (k, v) in headers {
-                    if let Some(v_str) = v.as_str() {
-                        req = req.header(k.as_str(), v_str);
-                    }
+    // Custom headers (new format: JSON object stored as string)
+    if let Some(headers_val) = config.config.get("custom_headers") {
+        let headers_str = headers_val.as_str().unwrap_or("");
+        if let Ok(headers) =
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(headers_str)
+        {
+            for (k, v) in headers {
+                if let Some(v_str) = v.as_str() {
+                    req = req.header(k.as_str(), v_str);
                 }
-            }
-        }
-
-        if let Some(ref sig) = signature {
-            req = req.header("x-signature", format!("sha256={sig}"));
-        }
-
-        match req.send().await {
-            Ok(resp) if resp.status().is_success() => return Ok(()),
-            Ok(resp) => {
-                let status = resp.status();
-                let rtext = resp.text().await.unwrap_or_default();
-                last_err = format!("Webhook returned {status}: {rtext}");
-                if status.is_client_error() {
-                    // 4xx — no point retrying, the receiver rejected
-                    // the payload shape itself.
-                    return Err(last_err);
-                }
-            }
-            Err(e) => {
-                last_err = format!("Webhook request failed: {e}");
             }
         }
     }
-    Err(last_err)
+
+    if let Some(ref sig) = signature {
+        req = req
+            .header("x-signature", format!("sha256={sig}"))
+            .header("x-signature-timestamp", &timestamp);
+    }
+
+    match req.send().await {
+        Ok(resp) if resp.status().is_success() => Ok(()),
+        Ok(resp) => {
+            let status = resp.status();
+            let rtext = resp.text().await.unwrap_or_default();
+            Err(format!("Webhook returned {status}: {rtext}"))
+        }
+        Err(e) => Err(format!("Webhook request failed: {e}")),
+    }
 }
 
 /// Hex-encoded HMAC-SHA256. Kept local to this module so the forwarder
