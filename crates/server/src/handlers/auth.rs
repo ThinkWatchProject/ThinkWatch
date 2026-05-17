@@ -845,7 +845,13 @@ pub async fn refresh(
         .map_err(|_| AppError::Unauthorized)?;
 
     if claims.token_type != "refresh" {
-        return Err(AppError::BadRequest("Invalid token type".into()));
+        // 401 not 400 — passing an access (or any non-refresh) token
+        // to /api/auth/refresh is a credential-validity issue per
+        // RFC 7235, not a request-format error. The handler's own
+        // utoipa spec only documents 401 for "invalid or expired
+        // refresh token" — keep the wire shape consistent so SDK
+        // clients aren't surprised by an undocumented 400.
+        return Err(AppError::Unauthorized);
     }
 
     // Refresh-token rotation. Without this, a stolen refresh token
