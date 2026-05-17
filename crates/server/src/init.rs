@@ -217,30 +217,57 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
             tracing::warn!("Filter reload subscriber failed: {e}");
             return;
         }
-        while let Ok(msg) = rx.recv().await {
-            if msg.channel == "config:changed" {
-                if let Err(e) = dc_clone.reload().await {
-                    tracing::warn!("Failed to reload dynamic config: {e}");
-                    continue;
+        // `while let Ok(...)` would silently kill this task on the
+        // first broadcast `Lagged` or transient `Closed` — filters /
+        // HTTP / MCP-pool hot-reload would silently break until
+        // restart. Loop forever, treat Lagged as "reload now to catch
+        // up", exit cleanly only on a final Closed.
+        let do_reload = async |dc: &Arc<DynamicConfig>,
+                               cf: &arc_swap::ArcSwap<
+            think_watch_gateway::content_filter::ContentFilter,
+        >,
+                               pii: &arc_swap::ArcSwap<
+            think_watch_gateway::pii_redactor::PiiRedactor,
+        >,
+                               http: &arc_swap::ArcSwap<reqwest::Client>,
+                               pool: &arc_swap::ArcSwap<
+            think_watch_mcp_gateway::pool::ConnectionPool,
+        >| {
+            if let Err(e) = dc.reload().await {
+                tracing::warn!("Failed to reload dynamic config: {e}");
+                return;
+            }
+            let new_filter = app::load_content_filter(dc).await;
+            cf.store(Arc::new(new_filter));
+            let new_pii = app::load_pii_redactor(dc).await;
+            pii.store(Arc::new(new_pii));
+            let http_secs = dc.perf_http_client_secs().await as u64;
+            let new_http = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(http_secs))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+            http.store(Arc::new(new_http));
+            let pool_secs = dc.perf_mcp_pool_secs().await as u64;
+            let new_pool = think_watch_mcp_gateway::pool::ConnectionPool::with_timeout(pool_secs);
+            pool.store(Arc::new(new_pool));
+            tracing::info!("Hot-reloaded filters, HTTP client, and MCP pool");
+        };
+
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    if msg.channel == "config:changed" {
+                        do_reload(&dc_clone, &cf_clone, &pii_clone, &http_clone, &pool_clone).await;
+                    }
                 }
-                let new_filter = app::load_content_filter(&dc_clone).await;
-                cf_clone.store(Arc::new(new_filter));
-                let new_pii = app::load_pii_redactor(&dc_clone).await;
-                pii_clone.store(Arc::new(new_pii));
-
-                let http_secs = dc_clone.perf_http_client_secs().await as u64;
-                let new_http = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(http_secs))
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new());
-                http_clone.store(Arc::new(new_http));
-
-                let pool_secs = dc_clone.perf_mcp_pool_secs().await as u64;
-                let new_pool =
-                    think_watch_mcp_gateway::pool::ConnectionPool::with_timeout(pool_secs);
-                pool_clone.store(Arc::new(new_pool));
-
-                tracing::info!("Hot-reloaded filters, HTTP client, and MCP pool");
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("filter reload subscriber lagged by {n} messages; reloading");
+                    do_reload(&dc_clone, &cf_clone, &pii_clone, &http_clone, &pool_clone).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!("filter reload subscriber channel closed; exiting task");
+                    return;
+                }
             }
         }
     });

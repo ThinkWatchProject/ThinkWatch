@@ -1276,8 +1276,22 @@ async fn audit_worker(
                 let batch = batches.entry(table).or_insert_with(|| Vec::with_capacity(64));
                 batch.push(entry);
                 if batch.len() >= 50 {
+                    // `flush_to_clickhouse` now retains entries on
+                    // error (capped at CH_RETAIN_CAP). Take the batch
+                    // out, flush, and put back any entries the flush
+                    // failed to deliver so the next tick retries
+                    // them. Without the put-back, a CH outage at the
+                    // size-trigger path would drop the entries even
+                    // though the flush function preserved them.
                     let mut b = std::mem::take(batch);
                     flush_to_clickhouse(&ch, table, &mut b).await;
+                    if !b.is_empty() {
+                        // Prepend retained entries so arrival order
+                        // is preserved against any new entries that
+                        // accumulate before the next flush.
+                        b.append(batch);
+                        *batch = b;
+                    }
                 }
             }
             _ = flush_interval.tick() => {
@@ -1895,12 +1909,26 @@ fn is_secret_key_name(key: &str) -> bool {
         || lower.contains("credential")
 }
 
+/// Upper bound on how many entries we retain after a flush error.
+/// At the default 50-entry / 2-second flush cadence this is ~40s of
+/// buffering — long enough to ride out a typical CH restart, bounded
+/// enough that a permanent CH outage doesn't grow audit memory
+/// unboundedly. Oldest entries get dropped first on overflow; recent
+/// ones are typically more valuable for incident response.
+const CH_RETAIN_CAP: usize = 1000;
+
 async fn flush_to_clickhouse(
     ch: &Option<clickhouse::Client>,
     table: &str,
     batch: &mut Vec<AuditEntry>,
 ) {
     let Some(client) = ch else {
+        // No CH configured — entries can never be flushed; drop with
+        // a metric so the operator knows we're losing audit data.
+        if !batch.is_empty() {
+            metrics::counter!("audit_ch_dropped_total", "reason" => "no_client")
+                .increment(batch.len() as u64);
+        }
         batch.clear();
         return;
     };
@@ -1922,12 +1950,30 @@ async fn flush_to_clickhouse(
     };
 
     match result {
-        Ok(()) => tracing::debug!("Flushed {count} entries to ClickHouse table {table}"),
+        Ok(()) => {
+            tracing::debug!("Flushed {count} entries to ClickHouse table {table}");
+            batch.clear();
+        }
         Err(e) => {
-            tracing::error!("ClickHouse insert failed for {table}: {e} — dropped {count} entries")
+            // Retain on error so the next tick retries. Previously
+            // we cleared unconditionally — a transient CH outage
+            // dropped every in-flight audit entry irrecoverably.
+            tracing::error!(
+                "ClickHouse insert failed for {table}: {e} — retaining {count} entries for retry"
+            );
+            metrics::counter!("audit_ch_flush_failed_total", "table" => table.to_string())
+                .increment(1);
+            if batch.len() > CH_RETAIN_CAP {
+                // Bounded retention: drop oldest, keep newest. Surface
+                // the drop count so a sustained CH outage is loud, not
+                // silent.
+                let drop = batch.len() - CH_RETAIN_CAP;
+                metrics::counter!("audit_ch_dropped_total", "reason" => "retention_cap")
+                    .increment(drop as u64);
+                batch.drain(..drop);
+            }
         }
     }
-    batch.clear();
 }
 
 async fn flush_app(

@@ -415,6 +415,16 @@ pub async fn login(
 
     // --- TOTP two-factor check ---
     if user.totp_enabled {
+        // Check the TOTP-specific lockout before doing any TOTP work.
+        // Without this, a previously-applied lockout from grinding
+        // codes would expire silently — attacker bypasses it just
+        // by waiting. The lockout key matches what the failure
+        // branch below sets.
+        let totp_lock_key = format!("auth_totp_locked:{}", user.id);
+        if crate::services::auth_lockout::is_locked(&state.redis, &totp_lock_key).await? {
+            return Err(AppError::Unauthorized);
+        }
+
         match &req.totp_code {
             None => {
                 // First step: password valid but TOTP needed
@@ -485,6 +495,30 @@ pub async fn login(
                     }
 
                     if !recovery_used {
+                        // Apply the same progressive lockout ladder the
+                        // password-mismatch path uses. Without this, an
+                        // attacker holding correct credentials can grind
+                        // the 6-digit TOTP space (1M combinations) limited
+                        // only by per-IP soft rate limits — the password
+                        // check passed so `auth_lockout` was never armed.
+                        // Key on user_id since TOTP is per-user (not
+                        // per-email like the credentials lockout).
+                        let totp_fail_key = format!("auth_totp_fails:{}", user.id);
+                        let totp_lock_key = format!("auth_totp_locked:{}", user.id);
+                        let fails = crate::services::auth_lockout::record_failure(
+                            &state.redis,
+                            &totp_fail_key,
+                        )
+                        .await?;
+                        if let Some(secs) = crate::services::auth_lockout::ladder_secs(fails) {
+                            crate::services::auth_lockout::apply_lockout(
+                                &state.redis,
+                                &totp_lock_key,
+                                secs,
+                            )
+                            .await?;
+                        }
+
                         let actor = think_watch_common::audit::AnonymousActor {
                             ip: Some(&client_ip),
                             user_agent: user_agent.as_deref(),
@@ -534,10 +568,24 @@ pub async fn login(
         }
     }
 
-    // Clear rate limit, lockout, and email-failure keys on successful login
+    // Clear rate limit, lockout, and email-failure keys on successful login.
+    // Also clears the TOTP-specific counter/lock so a real user whose
+    // previous attempts tripped the lockout gets a clean slate after
+    // successfully completing the second factor.
     let email_fail_key = format!("auth_email_fails:{}", req.email);
-    crate::services::auth_lockout::clear(&state.redis, &[&rate_key, &lockout_key, &email_fail_key])
-        .await;
+    let totp_fail_key = format!("auth_totp_fails:{}", user.id);
+    let totp_lock_key = format!("auth_totp_locked:{}", user.id);
+    crate::services::auth_lockout::clear(
+        &state.redis,
+        &[
+            &rate_key,
+            &lockout_key,
+            &email_fail_key,
+            &totp_fail_key,
+            &totp_lock_key,
+        ],
+    )
+    .await;
 
     let actor = think_watch_common::audit::AnonymousActor {
         ip: Some(&client_ip),

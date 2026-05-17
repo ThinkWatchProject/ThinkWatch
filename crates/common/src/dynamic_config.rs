@@ -482,11 +482,36 @@ pub fn spawn_config_subscriber(redis: fred::clients::SubscriberClient, config: A
             return;
         }
 
-        while let Ok(msg) = rx.recv().await {
-            if msg.channel == "config:changed" {
-                tracing::info!("Config change notification received, reloading");
-                if let Err(e) = config.reload().await {
-                    tracing::error!("Failed to reload config: {e}");
+        // The `while let Ok(...)` shape we used to have exited the
+        // task permanently on the first `Err(Lagged(_))` (broadcast
+        // channel fell behind by N messages) and the first transient
+        // `Err(Closed)` — leaving multi-instance config sync silently
+        // dead until process restart. Loop forever, log + continue on
+        // Lagged, and tear down only on a clean Closed (which fires
+        // when fred unsubscribes during shutdown).
+        loop {
+            match rx.recv().await {
+                Ok(msg) => {
+                    if msg.channel == "config:changed" {
+                        tracing::info!("Config change notification received, reloading");
+                        if let Err(e) = config.reload().await {
+                            tracing::error!("Failed to reload config: {e}");
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    // Consumer fell behind. Trigger a reload anyway —
+                    // any of the missed messages was a "config changed"
+                    // signal, so reloading once catches up to whatever
+                    // state the publishers left us in.
+                    tracing::warn!("config:changed subscriber lagged by {n} messages; reloading");
+                    if let Err(e) = config.reload().await {
+                        tracing::error!("Failed to reload config after lag: {e}");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!("config:changed subscriber channel closed; exiting task");
+                    return;
                 }
             }
         }
