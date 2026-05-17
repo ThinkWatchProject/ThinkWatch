@@ -1230,6 +1230,17 @@ pub async fn delete_server(
     state.mcp_registry.unregister(id).await;
     state.mcp_pool.load().remove(id).await;
 
+    // Wipe response cache for this server across every user. The
+    // request path resolves through the registry first (which we just
+    // unregistered) so a stale cache entry could never actually be
+    // served — but leaving the Redis keys to expire on their own TTL
+    // is a slow memory leak proportional to traffic on the deleted
+    // server. Same `invalidate_server_lane` call we already make on
+    // update_server (mcp_servers.rs:~1108) for the same reason.
+    think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+        .invalidate_server_lane(&id)
+        .await;
+
     state.audit.log(
         auth_user
             .audit("mcp_server.deleted")
@@ -1381,9 +1392,14 @@ pub async fn bulk_delete_servers(
     // emit that briefly blocks on the forwarder pool can't roll back
     // the delete. One audit entry per server preserves
     // resource-level granularity in `/api/admin/audit`.
+    let cache = think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone());
     for (id, name) in &deleted_pairs {
         state.mcp_registry.unregister(*id).await;
         state.mcp_pool.load().remove(*id).await;
+        // Same cache wipe the single-delete path performs — without
+        // this, bulk-deleting N servers leaves N×K Redis keys lying
+        // around to expire on their own TTL.
+        cache.invalidate_server_lane(id).await;
         state.audit.log(
             auth_user
                 .audit("mcp_server.deleted")
