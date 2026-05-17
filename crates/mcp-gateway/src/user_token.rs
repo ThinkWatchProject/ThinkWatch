@@ -827,15 +827,45 @@ impl UserTokenResolver {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            // Only treat actually-irrecoverable grant rejections as
+            // Permanent — the original "any 4xx → Permanent" rule
+            // would delete a live admin-shared credential on a
+            // single 429 (rate limit), 408 (request timeout), or
+            // 423 (locked) hiccup, forcing the entire org to
+            // re-authorize. Permanent triggers credential row
+            // deletion in `refresh_locked`; reserve it for cases
+            // where the grant itself is dead.
+            //
+            // RFC 6749 §5.2 says `invalid_grant` is THE permanent
+            // signal — refresh token revoked, expired, or no longer
+            // valid for this client. Parse the JSON `error` field
+            // before classifying. 401 we treat as Permanent too
+            // (auth failed against the token endpoint itself).
             let msg = format!("token_endpoint returned {status}: {text}");
-            return Err(if status.is_client_error() {
+            let permanent = if status == reqwest::StatusCode::UNAUTHORIZED {
+                true
+            } else if status == reqwest::StatusCode::BAD_REQUEST {
+                serde_json::from_str::<serde_json::Value>(&text)
+                    .ok()
+                    .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+                    .as_deref()
+                    == Some("invalid_grant")
+            } else {
+                false
+            };
+            return Err(if permanent {
                 OAuthRefreshFailure::Permanent(msg)
             } else {
                 OAuthRefreshFailure::Transient(msg)
             });
         }
-        let parsed: TokenResponse = serde_json::from_str(&text)
-            .map_err(|e| OAuthRefreshFailure::Permanent(format!("parse: {e}: {text}")))?;
+        let parsed: TokenResponse = serde_json::from_str(&text).map_err(|e| {
+            // Drop `text` from the message — a malformed-but-token-
+            // bearing response (rare misbehaving servers) would
+            // leak bearer values through the error path. The serde
+            // position info in `{e}` is enough to triage.
+            OAuthRefreshFailure::Permanent(format!("parse: {e}"))
+        })?;
         Ok(parsed)
     }
 

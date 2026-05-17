@@ -727,6 +727,28 @@ pub async fn require_auth(
         }
     }
 
+    // Defense against Redis flush + stale JWT for a disabled or
+    // deleted user. The pw_epoch check above is the fast path —
+    // when set, it correctly rejects the token. But pw_epoch lives
+    // in Redis; after a flush / restart the key vanishes while
+    // existing access JWTs survive their natural TTL (up to 15 min
+    // default). A user disabled or soft-deleted before the flush
+    // would silently start authenticating again until expiry. One
+    // indexed PK lookup per request closes the gap — cost is sub-ms
+    // and only on the auth path.
+    let user_active: Option<bool> =
+        sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(claims.sub)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "DB check for users.is_active failed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    if !matches!(user_active, Some(true)) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     let ip = extract_client_ip(&state, request.headers(), request.extensions()).await;
     // Mirror the empty-string filter that `extract_client_ip` applies
     // (commit 10ee89d): a `User-Agent:` header with an empty or

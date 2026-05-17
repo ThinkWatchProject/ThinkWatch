@@ -865,6 +865,21 @@ pub async fn refresh(
         return Err(AppError::Unauthorized);
     }
 
+    // Defense against Redis flush + stale refresh token for a disabled
+    // or deleted user. pw_epoch covers the steady-state case; this DB
+    // check covers the cold-start / flushed-Redis case. Without it, a
+    // disabled-then-cache-cleared user can mint fresh access tokens
+    // for up to refresh_ttl_days (default 7).
+    let user_active: Option<bool> =
+        sqlx::query_scalar("SELECT is_active FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(claims.sub)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|_| AppError::Unauthorized)?;
+    if !matches!(user_active, Some(true)) {
+        return Err(AppError::Unauthorized);
+    }
+
     // Atomic claim: SET NX EX via the shared helper. The previous
     // code hand-rolled this here AND in logout, which let the two
     // sites drift on atomicity. `AlreadyClaimed` is the replay path

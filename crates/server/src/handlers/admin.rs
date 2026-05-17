@@ -1557,6 +1557,12 @@ pub async fn start_oidc_test_login(
         nonce.secret(),
         crate::handlers::sso::SessionMode::Test,
         Some(snapshot),
+        // Test mode runs from an admin path (this handler) and the
+        // callback is opened in the admin's popup — login-CSRF doesn't
+        // apply because there's no end-user session to steal. Leave
+        // browser_binding None; sso_callback skips the check for
+        // SessionMode::Test.
+        None,
     )
     .await?;
 

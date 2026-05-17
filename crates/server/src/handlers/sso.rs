@@ -2,7 +2,7 @@ use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use hmac::{Hmac, Mac, digest::KeyInit};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 
 use think_watch_common::audit::AuditActor;
@@ -15,6 +15,21 @@ use crate::app::AppState;
 
 const OIDC_STATE_KEY_PREFIX: &str = "oidc:state:";
 const OIDC_STATE_TTL_SECS: i64 = 600;
+
+/// Browser-binding cookie for OIDC state. The plaintext token sits in
+/// the user's browser; its SHA-256 hash sits in Redis with the state
+/// blob. On callback we compare the cookie's hash against the stored
+/// hash — without this, the OIDC state binding was server-side-only
+/// (HMAC over server-known fields), which a classic OAuth login-CSRF
+/// can replay: attacker completes IdP login, lures the victim to the
+/// callback URL with attacker's `code+state`, victim's browser passes
+/// the server-side check and ends up holding the attacker's session.
+/// Binding to a cookie the attacker can't set in the victim's browser
+/// closes the loop. `__Host-` prefix + SameSite=Lax + Secure +
+/// HttpOnly + Path=/ — Lax (not Strict) is required so the cookie
+/// rides along on the IdP's top-level redirect back to us.
+const SSO_BROWSER_COOKIE: &str = "__Host-sso_browser_token";
+const SSO_BROWSER_TOKEN_BYTES: usize = 32;
 const OIDC_TEST_RESULT_KEY: &str = "oidc:test:result";
 const OIDC_TEST_RESULT_TTL_SECS: i64 = 1800;
 
@@ -55,6 +70,16 @@ pub struct TestConfigSnapshot {
 pub(crate) struct OidcSessionData {
     pub(crate) nonce: String,
     pub(crate) binding: String,
+    /// SHA-256 hex of the `__Host-sso_browser_token` cookie set on
+    /// the same response as the IdP redirect. Browser-pinning closes
+    /// the OAuth login-CSRF: attacker can't set the cookie in the
+    /// victim's browser, so a replayed `code+state` from the attacker
+    /// fails this check even though the server-side HMAC binding
+    /// matches. Optional for graceful upgrade — pre-existing
+    /// in-flight sessions written before this field don't carry it;
+    /// the callback rejects them defensively in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) browser_binding: Option<String>,
     /// Defaults to `Live` for sessions written before this field
     /// existed (graceful upgrade — pre-existing in-flight logins
     /// still work after deploy).
@@ -87,8 +112,18 @@ pub(crate) async fn store_oidc_session(
     state_token: &str,
     nonce: &str,
     mode: SessionMode,
+    browser_binding: Option<String>,
 ) -> Result<(), AppError> {
-    store_oidc_session_with_snapshot(redis, config, state_token, nonce, mode, None).await
+    store_oidc_session_with_snapshot(
+        redis,
+        config,
+        state_token,
+        nonce,
+        mode,
+        None,
+        browser_binding,
+    )
+    .await
 }
 
 pub(crate) async fn store_oidc_session_with_snapshot(
@@ -98,6 +133,7 @@ pub(crate) async fn store_oidc_session_with_snapshot(
     nonce: &str,
     mode: SessionMode,
     snapshot: Option<TestConfigSnapshot>,
+    browser_binding: Option<String>,
 ) -> Result<(), AppError> {
     let enc_key = parse_encryption_key(&config.encryption_key)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
@@ -105,6 +141,7 @@ pub(crate) async fn store_oidc_session_with_snapshot(
     let session = OidcSessionData {
         nonce: nonce.to_string(),
         binding,
+        browser_binding,
         mode,
         test_snapshot: snapshot,
     };
@@ -125,7 +162,10 @@ pub(crate) async fn store_oidc_session_with_snapshot(
 
 /// GET /api/auth/sso/authorize — redirect to OIDC provider.
 #[tracing::instrument(skip_all, fields(handler = "sso.authorize"))]
-pub async fn sso_authorize(State(state): State<AppState>) -> Result<Redirect, AppError> {
+pub async fn sso_authorize(
+    State(state): State<AppState>,
+) -> Result<axum::response::Response, AppError> {
+    use axum::response::IntoResponse;
     let oidc_guard = state.oidc.read().await;
     let oidc = oidc_guard
         .as_ref()
@@ -133,16 +173,43 @@ pub async fn sso_authorize(State(state): State<AppState>) -> Result<Redirect, Ap
 
     let (auth_url, csrf_token, nonce) = oidc.authorize_url();
 
+    // Browser-binding: mint a random token, hash it for storage,
+    // ship the plaintext to the user's browser as a __Host- cookie.
+    // The callback compares hashes — an attacker who initiated the
+    // SSO flow can't set this cookie in the victim's browser, so a
+    // replay of their `code+state` fails before we mint cookies.
+    let mut raw = [0u8; SSO_BROWSER_TOKEN_BYTES];
+    rand::fill(&mut raw);
+    let browser_token = data_encoding::BASE64URL_NOPAD.encode(&raw);
+    let browser_binding_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(browser_token.as_bytes());
+        hex::encode(hasher.finalize())
+    };
+
     store_oidc_session(
         &state.redis,
         &state.config,
         csrf_token.secret(),
         nonce.secret(),
         SessionMode::Live,
+        Some(browser_binding_hash),
     )
     .await?;
 
-    Ok(Redirect::temporary(&auth_url))
+    // SameSite=Lax (not Strict) so the IdP's top-level GET redirect
+    // back to /sso/callback carries the cookie. Path=/ + Secure are
+    // required by the __Host- prefix.
+    let cookie = format!(
+        "{SSO_BROWSER_COOKIE}={browser_token}; HttpOnly; Secure; SameSite=Lax; Path=/; Max-Age={OIDC_STATE_TTL_SECS}"
+    );
+    let mut response = Redirect::temporary(&auth_url).into_response();
+    response.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        axum::http::HeaderValue::from_str(&cookie)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("cookie header build: {e}")))?,
+    );
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -157,6 +224,7 @@ pub struct SsoCallbackParams {
 #[tracing::instrument(skip_all, fields(handler = "sso.callback"))]
 pub async fn sso_callback(
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<SsoCallbackParams>,
 ) -> Result<Response, AppError> {
     // Atomic retrieve + delete — enforces one-time use of the state and
@@ -170,6 +238,39 @@ pub async fn sso_callback(
 
     let session: OidcSessionData =
         serde_json::from_str(&stored).map_err(|_| AppError::BadRequest("Invalid state".into()))?;
+
+    // Browser binding: cookie set on `sso_authorize` must match the
+    // hash stored in the Redis blob. Stops OAuth login-CSRF where an
+    // attacker completes the IdP login themselves and lures the
+    // victim to the callback URL with `code+state` — the victim's
+    // browser doesn't have the attacker's cookie, the hashes don't
+    // match, we reject. Optional in the session blob for graceful
+    // upgrade, but for live mode we require it (test mode runs on
+    // an admin path so the CSRF angle doesn't apply).
+    if matches!(session.mode, SessionMode::Live) {
+        let expected_hash = session.browser_binding.as_deref().ok_or_else(|| {
+            // Pre-existing in-flight sessions from a deploy of this
+            // change carry no browser_binding; reject defensively
+            // rather than allow a bypass while the window drains.
+            AppError::BadRequest("SSO session missing browser binding — start a fresh login".into())
+        })?;
+        let cookie_token = crate::middleware::verify_signature::extract_cookie_from_headers(
+            &headers,
+            SSO_BROWSER_COOKIE,
+        )
+        .ok_or_else(|| AppError::BadRequest("SSO browser binding cookie missing".into()))?;
+        let actual_hash = {
+            let mut hasher = Sha256::new();
+            hasher.update(cookie_token.as_bytes());
+            hex::encode(hasher.finalize())
+        };
+        if !bool::from(actual_hash.as_bytes().ct_eq(expected_hash.as_bytes())) {
+            tracing::warn!("SSO browser binding mismatch on callback");
+            return Err(AppError::BadRequest(
+                "SSO browser binding mismatch — start a fresh login".into(),
+            ));
+        }
+    }
 
     // Re-derive the HMAC from (state, stored nonce) and constant-time
     // compare with the binding we stored at authorize time.
