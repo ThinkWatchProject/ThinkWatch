@@ -123,6 +123,14 @@ pub async fn load_pii_redactor(dc: &DynamicConfig) -> PiiRedactor {
     PiiRedactor::from_config(&configs)
 }
 
+/// Redis pub/sub channel that sibling replicas subscribe to so a
+/// router rebuild on instance A fans out to B, C, … Without this,
+/// only the local replica's `ArcSwap<ModelRouter>` got the new
+/// catalog after a provider/model CRUD operation — siblings kept
+/// routing on the stale router until process restart. Mirrors the
+/// `config:changed` pattern in `dynamic_config.rs`.
+pub const GATEWAY_ROUTER_CHANGED_CHANNEL: &str = "gateway_router:changed";
+
 /// Rebuild the gateway model router from the database and hot-swap it in.
 /// Called by provider/model CRUD handlers after changes.
 pub async fn rebuild_gateway_router(state: &AppState) {
@@ -133,6 +141,16 @@ pub async fn rebuild_gateway_router(state: &AppState) {
     }
     state.gateway_router.store(Arc::new(new_router));
     tracing::info!("Gateway router hot-reloaded");
+
+    // Notify sibling replicas so they reload too. Fire-and-forget:
+    // a Redis hiccup means siblings stay stale until the next reload
+    // (or until the next provider/model CRUD republishes), not that
+    // this request fails.
+    use fred::interfaces::PubsubInterface;
+    let _: Result<(), _> = state
+        .redis
+        .publish(GATEWAY_ROUTER_CHANGED_CHANNEL, "reload")
+        .await;
 }
 
 /// Common security layers applied to both servers.
@@ -1125,7 +1143,7 @@ fn default_model_prefixes(provider_type: &str) -> Vec<&'static str> {
 
 /// Load all active providers from the database, instantiate the appropriate
 /// provider implementation, and register them in the model router.
-async fn load_providers_into_router(
+pub(crate) async fn load_providers_into_router(
     state: &AppState,
     router: &mut ModelRouter,
 ) -> anyhow::Result<()> {

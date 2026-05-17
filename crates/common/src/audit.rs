@@ -1357,24 +1357,36 @@ async fn forward_to_all(
                     .await;
                 }
                 Err(ref err_msg) => {
+                    // Counter semantics:
+                    //   - `sent_count`  = successful deliveries (inline or
+                    //                     via outbox replay)
+                    //   - `error_count` = PERMANENT failures (outbox replay
+                    //                     exhausted retry budget)
+                    // A transient inline failure that successfully enqueues
+                    // for retry no longer bumps `error_count` here — that
+                    // happens only when the drain loop gives up after
+                    // MAX_OUTBOX_ATTEMPTS. Without this split, the same
+                    // entry that fails inline AND then succeeds via outbox
+                    // contributed +1 to both totals, so
+                    // `sent_count + error_count > attempts` on any
+                    // transient failure. `last_error` still updates so
+                    // operators see the most recent failure message.
                     let _ = sqlx::query(
-                        "UPDATE log_forwarders SET error_count = error_count + 1, last_error = $2, updated_at = now() WHERE id = $1"
+                        "UPDATE log_forwarders SET last_error = $2, updated_at = now() \
+                         WHERE id = $1",
                     )
                     .bind(id)
                     .bind(err_msg)
                     .execute(pool)
                     .await;
-                    // Failed deliveries park in `webhook_outbox` so the
-                    // background drain worker can keep trying after the
-                    // inline 3x retry exhausted. Originally webhook-only;
-                    // syslog and kafka transports also benefit from a
-                    // safety net — a transient TCP RST or broker
-                    // reconnect shouldn't silently lose the audit row,
-                    // and the same drain pipeline already dispatches
-                    // by forwarder_type so non-webhook entries replay
-                    // through the right transport on retry.
+                    // Park in outbox for the drain worker to retry through
+                    // the right transport (the drain now dispatches by
+                    // forwarder_type, matching the inline path). If the
+                    // insert itself fails, the audit row is genuinely
+                    // lost — bump `error_count` as the permanent-failure
+                    // path so operators see SOMETHING.
                     if let Ok(payload_json) = serde_json::to_value(entry) {
-                        let _ = sqlx::query(
+                        let insert_result = sqlx::query(
                             "INSERT INTO webhook_outbox (forwarder_id, payload, last_error) \
                              VALUES ($1, $2, $3)",
                         )
@@ -1383,11 +1395,24 @@ async fn forward_to_all(
                         .bind(err_msg)
                         .execute(pool)
                         .await;
-                        metrics::counter!(
-                            "forwarder_deadletter_total",
-                            "transport" => runtime.config.forwarder_type.clone(),
-                        )
-                        .increment(1);
+                        if insert_result.is_ok() {
+                            metrics::counter!(
+                                "forwarder_deadletter_total",
+                                "transport" => runtime.config.forwarder_type.clone(),
+                            )
+                            .increment(1);
+                        } else {
+                            // Outbox insert failed — this is the only path
+                            // where the inline failure becomes permanent
+                            // without the drain getting a chance.
+                            let _ = sqlx::query(
+                                "UPDATE log_forwarders SET error_count = error_count + 1 \
+                                 WHERE id = $1",
+                            )
+                            .bind(id)
+                            .execute(pool)
+                            .await;
+                        }
                     }
                 }
             }
@@ -1576,7 +1601,23 @@ async fn drain_once(
             }
         };
 
-        match send_webhook(http, &runtime.config, &entry).await {
+        // Dispatch by forwarder type, matching the inline path
+        // (`forward_to_all`). The previous shape hard-coded
+        // `send_webhook` regardless of the forwarder's actual
+        // transport, so any `udp_syslog` / `tcp_syslog` / `kafka`
+        // delivery that landed in the outbox got retried as a webhook
+        // POST against whatever URL `send_webhook` could scrape from
+        // the syslog/kafka config (`url` key absent → instant "Missing
+        // 'url'" error, infinite-retry until 24-attempt cap). The doc
+        // comment above already described this fix as the intent.
+        let dispatch_result = match runtime.config.forwarder_type.as_str() {
+            "udp_syslog" => send_udp_syslog(runtime, &entry),
+            "tcp_syslog" => send_tcp_syslog(runtime, &entry).await,
+            "kafka" => send_kafka(http, &runtime.config, &entry).await,
+            "webhook" => send_webhook(http, &runtime.config, &entry).await,
+            other => Err(format!("Unknown forwarder type for outbox replay: {other}")),
+        };
+        match dispatch_result {
             Ok(()) => {
                 let _ = sqlx::query("DELETE FROM webhook_outbox WHERE id = $1")
                     .bind(row.id)
@@ -1597,13 +1638,28 @@ async fn drain_once(
                 if next_attempts >= MAX_OUTBOX_ATTEMPTS {
                     // Give up — drop the row and surface a metric so
                     // the operator can investigate without an
-                    // ever-growing table.
+                    // ever-growing table. Also bump `error_count` on
+                    // the forwarder row: this is THE permanent-failure
+                    // path, so the counter semantics from
+                    // `forward_to_all` are completed here (transient
+                    // inline failures no longer bump error_count;
+                    // only this exhaustion does).
                     metrics::counter!("audit_log_dropped_total", "kind" => "webhook_outbox_exhausted")
                         .increment(1);
                     let _ = sqlx::query("DELETE FROM webhook_outbox WHERE id = $1")
                         .bind(row.id)
                         .execute(db)
                         .await;
+                    let _ = sqlx::query(
+                        "UPDATE log_forwarders SET error_count = error_count + 1, \
+                                                    last_error = $2, \
+                                                    updated_at = now() \
+                         WHERE id = $1",
+                    )
+                    .bind(row.forwarder_id)
+                    .bind(&err_msg)
+                    .execute(db)
+                    .await;
                     tracing::error!(
                         forwarder_id = %row.forwarder_id,
                         attempts = next_attempts,

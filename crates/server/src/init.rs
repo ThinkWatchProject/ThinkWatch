@@ -281,6 +281,68 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
             }
         }
     });
+
+    // Gateway router cross-instance reload. Provider / model / route
+    // CRUD on any replica publishes on this channel; every other
+    // replica's subscriber rebuilds its local `ArcSwap<ModelRouter>`.
+    // Without this, multi-instance deployments had per-replica stale
+    // routers between CRUD time and the next process restart.
+    let sub_router_cfg = fred::types::config::Config::from_url(&state.config.redis_url)?;
+    let sub_router: fred::clients::SubscriberClient =
+        Builder::from_config(sub_router_cfg).build_subscriber_client()?;
+    sub_router.init().await?;
+    let router_state = state.clone();
+    tokio::spawn(async move {
+        use fred::interfaces::{EventInterface, PubsubInterface};
+        let mut rx = sub_router.message_rx();
+        if let Err(e) = sub_router
+            .subscribe(app::GATEWAY_ROUTER_CHANGED_CHANNEL)
+            .await
+        {
+            tracing::warn!("Gateway-router reload subscriber failed: {e}");
+            return;
+        }
+        loop {
+            match rx.recv().await {
+                Ok(msg) if msg.channel == app::GATEWAY_ROUTER_CHANGED_CHANNEL => {
+                    // Build a new router locally; don't re-publish so a
+                    // single CRUD doesn't fan out into a publish storm.
+                    let mut new_router = think_watch_gateway::router::ModelRouter::new();
+                    if let Err(e) =
+                        app::load_providers_into_router(&router_state, &mut new_router).await
+                    {
+                        tracing::error!(
+                            "Failed to rebuild gateway router after pub/sub notify: {e}"
+                        );
+                        continue;
+                    }
+                    router_state.gateway_router.store(Arc::new(new_router));
+                    tracing::info!("Gateway router hot-reloaded via pub/sub");
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!(
+                        "gateway_router:changed subscriber lagged by {n}; reloading anyway"
+                    );
+                    let mut new_router = think_watch_gateway::router::ModelRouter::new();
+                    if let Err(e) =
+                        app::load_providers_into_router(&router_state, &mut new_router).await
+                    {
+                        tracing::error!("Failed to rebuild gateway router on lag: {e}");
+                        continue;
+                    }
+                    router_state.gateway_router.store(Arc::new(new_router));
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                    tracing::info!(
+                        "gateway_router:changed subscriber channel closed; exiting task"
+                    );
+                    return;
+                }
+            }
+        }
+    });
+
     Ok(())
 }
 
