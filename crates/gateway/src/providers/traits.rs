@@ -337,8 +337,41 @@ impl ProviderBase {
         }
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            // Upstream error bodies sometimes carry sensitive operational
+            // detail (internal stack traces on 500, AWS request-ids /
+            // account-ids on Bedrock, full debug strings on Vertex AI).
+            // Previously we forwarded the body verbatim into the client-
+            // facing JSON `error.message` field, turning the gateway into
+            // a leak vector for whatever the upstream chose to surface.
+            //
+            // Log the full body server-side at WARN so operators can still
+            // debug, but truncate the client-facing copy to a length that
+            // captures the standard `{"error": {"message": "...", ...}}`
+            // shape from OpenAI / Anthropic / Gemini without leaking
+            // multi-page debug payloads.
+            const CLIENT_MAX: usize = 512;
+            tracing::warn!(
+                provider = provider_label,
+                status = %status,
+                body = %body,
+                "upstream provider returned non-2xx"
+            );
+            let truncated = if body.len() > CLIENT_MAX {
+                // Char-boundary safe truncation — `body.split_at(N)`
+                // would panic if N lands inside a multibyte UTF-8
+                // sequence, and provider errors regularly include
+                // non-ASCII (i18n'd messages from Bedrock, Chinese
+                // model-name errors from Tongyi, etc.).
+                let mut end = CLIENT_MAX;
+                while end > 0 && !body.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}…[truncated]", &body[..end])
+            } else {
+                body
+            };
             return Err(GatewayError::ProviderError(format!(
-                "{provider_label} returned {status}: {body}"
+                "{provider_label} returned {status}: {truncated}"
             )));
         }
         Ok(resp)
