@@ -929,17 +929,42 @@ impl McpProxy {
                         .await;
                 }
 
-                // JSON-RPC error responses still count as failures so the
-                // breaker reflects upstream tool errors, not just transport
-                // errors. We treat any `error` field as a failure.
+                // JSON-RPC error responses count toward the breaker
+                // ONLY when the upstream returned a server-side failure
+                // code. The previous "any error trips the breaker"
+                // rule punished every user on a shared server for one
+                // user's bad input — e.g. five INVALID_PARAMS or
+                // METHOD_NOT_FOUND replies from a single misbehaving
+                // client opened the breaker and denied every other
+                // user for the full cooldown.
+                //
+                // JSON-RPC 2.0 error code ranges (server-side):
+                //   -32603             — Internal error
+                //   -32000 .. -32099   — Implementation-defined server errors
+                // Everything else (-32600 invalid request, -32601 method
+                // not found, -32602 invalid params, -32700 parse error,
+                // and our own custom application codes like
+                // NEEDS_USER_CREDENTIALS = -32050) is caller-attributable
+                // and must NOT count toward the breaker.
                 //
                 // The `record_cb_with_kind` call inside the breaker fires
                 // the global OPEN_LISTENER installed by the server, which
                 // emits `provider.circuit_open` audit events uniformly
                 // for AI and MCP backends — no per-call emission here.
-                if resp.error.is_some() {
+                let is_server_failure = resp
+                    .error
+                    .as_ref()
+                    .map(|err| {
+                        let c = err.code;
+                        c == INTERNAL_ERROR || (-32099..=-32000).contains(&c)
+                    })
+                    .unwrap_or(false);
+                if is_server_failure {
                     self.circuit_breakers.record_failure(&server_name).await;
                 } else {
+                    // Success OR caller-side error — both indicate the
+                    // upstream is reachable and responsive, so credit
+                    // the half-open probe / reset the failure counter.
                     self.circuit_breakers.record_success(&server_name).await;
                 }
                 resp
