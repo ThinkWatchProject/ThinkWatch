@@ -1391,11 +1391,18 @@ pub async fn proxy_chat_completion(
         let on_done = move |result: crate::streaming::StreamResult|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
-                let (pt, ct) = result
-                    .usage
-                    .as_ref()
-                    .map(|u| (u.prompt_tokens, u.completion_tokens))
-                    .unwrap_or((0, 0));
+                // Use the same token-resolution helper for the log row
+                // AND the budget increment (computed once below for
+                // both call sites). Previously the log row read raw
+                // `result.usage` which is None on ClientCancelled
+                // before the final usage chunk arrived — producing
+                // gateway_logs rows with pt=0, ct=0, cost=0 even though
+                // the upstream HAD generated and billed tokens. The
+                // budget already used the estimate path; the log was
+                // out of sync, breaking cost analytics for cancelled
+                // streams.
+                let (pt, ct) =
+                    stream_usage_or_estimate(&result, &request_for_cache.messages);
                 let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
                 // Single classifier — Natural → 200, UpstreamError →
                 // the underlying GatewayError's canonical status (not
@@ -1443,16 +1450,20 @@ pub async fn proxy_chat_completion(
                         .await;
                 }
 
-                let (prompt_tokens, completion_tokens) =
-                    stream_usage_or_estimate(&result, &request_for_cache.messages);
+                // Reuse the (pt, ct) computed above for the log row so
+                // budget enforcement and cost analytics agree on the
+                // token count — without this, a cancelled stream would
+                // bill the budget for the estimated tokens but the
+                // gateway_logs row would show 0 tokens and 0 cost,
+                // making the two views permanently inconsistent.
                 post_flight_account(
                     db,
                     redis,
                     dynamic_config,
                     weight_cache,
                     model,
-                    prompt_tokens,
-                    completion_tokens,
+                    pt,
+                    ct,
                     request_rules_for_done,
                     budget_caps.clone(),
                     user_id_for_done,
@@ -1844,11 +1855,11 @@ pub async fn proxy_anthropic_messages(
         let on_done = move |result: crate::streaming::StreamResult|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
-                let (pt, ct) = result
-                    .usage
-                    .as_ref()
-                    .map(|u| (u.prompt_tokens, u.completion_tokens))
-                    .unwrap_or((0, 0));
+                // Resolve tokens once via the estimator (handles the
+                // ClientCancelled / no-final-usage case) and share the
+                // result between the log row and the budget update so
+                // the two views agree.
+                let (pt, ct) = stream_usage_or_estimate(&result, &messages_for_done);
                 let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
                 let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
                 emit_gateway_log_with_extra(
@@ -1876,16 +1887,14 @@ pub async fn proxy_anthropic_messages(
                         | crate::streaming::StreamOutcome::ClientCancelled
                 );
                 finalize_health(&state_for_done, sel_record, stream_success).await;
-                let (prompt_tokens, completion_tokens) =
-                    stream_usage_or_estimate(&result, &messages_for_done);
                 post_flight_account(
                     db,
                     redis,
                     dynamic_config,
                     weight_cache,
                     model_for_done,
-                    prompt_tokens,
-                    completion_tokens,
+                    pt,
+                    ct,
                     request_rules_for_done,
                     budget_caps.clone(),
                     user_id_for_done,
@@ -2271,11 +2280,11 @@ pub async fn proxy_responses(
         let on_done = move |result: crate::streaming::StreamResult|
             -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
             Box::pin(async move {
-                let (pt, ct) = result
-                    .usage
-                    .as_ref()
-                    .map(|u| (u.prompt_tokens, u.completion_tokens))
-                    .unwrap_or((0, 0));
+                // Resolve tokens once via the estimator (handles the
+                // ClientCancelled / no-final-usage case) and share the
+                // result between the log row and the budget update so
+                // the two views agree.
+                let (pt, ct) = stream_usage_or_estimate(&result, &messages_for_done);
                 let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
                 let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
                 emit_gateway_log_with_extra(
@@ -2303,16 +2312,14 @@ pub async fn proxy_responses(
                         | crate::streaming::StreamOutcome::ClientCancelled
                 );
                 finalize_health(&state_for_done, sel_record, stream_success).await;
-                let (prompt_tokens, completion_tokens) =
-                    stream_usage_or_estimate(&result, &messages_for_done);
                 post_flight_account(
                     db,
                     redis,
                     dynamic_config,
                     weight_cache,
                     model_for_done,
-                    prompt_tokens,
-                    completion_tokens,
+                    pt,
+                    ct,
                     request_rules_for_done,
                     budget_caps.clone(),
                     user_id_for_done,
