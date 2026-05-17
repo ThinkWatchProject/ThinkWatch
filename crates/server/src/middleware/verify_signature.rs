@@ -253,7 +253,7 @@ pub async fn verify_signature(
     // generates a fresh nonce each time, so legitimate requests never
     // collide. Replaying an intercepted request is rejected here.
     let nonce_key = format!("nonce:{user_id}:{nonce}");
-    let was_set: bool = fred::interfaces::KeysInterface::set(
+    let set_result: Result<bool, _> = fred::interfaces::KeysInterface::set(
         &state.redis,
         &nonce_key,
         "1",
@@ -261,12 +261,34 @@ pub async fn verify_signature(
         Some(fred::types::SetOptions::NX),
         false,
     )
-    .await
-    .unwrap_or(false);
+    .await;
 
-    if !was_set {
-        tracing::warn!("Duplicate nonce detected: {nonce}");
-        return Err(StatusCode::UNAUTHORIZED);
+    match set_result {
+        Ok(true) => {
+            // Nonce was new — fall through and verify the signature.
+        }
+        Ok(false) => {
+            // NX returned false → key already existed. This IS a real
+            // replay attempt (or a buggy client reusing nonces).
+            tracing::warn!("Duplicate nonce detected: {nonce}");
+            return Err(StatusCode::UNAUTHORIZED);
+        }
+        Err(e) => {
+            // Redis itself failed. Previously we collapsed this into
+            // `unwrap_or(false)` which logged the misleading "Duplicate
+            // nonce detected" message and sent operators chasing a
+            // non-existent replay attack instead of the actual outage.
+            // Fail-closed (still 401) is correct for replay safety —
+            // an attacker who can DOS Redis must NOT bypass the replay
+            // check — but the LOG and METRIC need to identify the real
+            // cause so the alerting story works.
+            metrics::counter!("signature_replay_check_redis_err_total").increment(1);
+            tracing::warn!(
+                error = %e,
+                "Replay-check Redis SET NX failed; refusing request to fail-closed"
+            );
+            return Err(StatusCode::UNAUTHORIZED);
+        }
     }
 
     // Get public key JWK from Redis (the single source of truth)
