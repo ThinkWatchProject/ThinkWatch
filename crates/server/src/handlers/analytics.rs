@@ -340,6 +340,13 @@ pub struct AnalyticsQuery {
     /// Narrow rows to a specific team (only members visible to the
     /// caller are kept; cross-team requests collapse to empty).
     pub team_id: Option<uuid::Uuid>,
+    /// Time window: `24h` / `7d` / `30d` / `mtd` (month-to-date).
+    /// Defaults to `30d` if absent — without this default, the
+    /// query scans the entire CH retention window (~90 days) per
+    /// page request, costing more for callers that don't care
+    /// about ancient data. `get_costs` already had this knob;
+    /// `get_usage` was the asymmetric path.
+    pub range: Option<String>,
 }
 
 #[utoipa::path(
@@ -365,6 +372,26 @@ pub async fn get_usage(
     if matches!(user_filter, Some(ref v) if v.is_empty()) {
         return Ok(Json(Vec::new()));
     }
+
+    // Mirrors `get_costs` — default to `30d` so pagination doesn't
+    // scan the full retention window on every page. `mtd` matches the
+    // cost-breakdown page's default; `24h` / `7d` / `30d` align with
+    // the dashboard range selector. Unknown values fall through to
+    // the default rather than 400ing.
+    let now = chrono::Utc::now();
+    let window_start = match params.range.as_deref().unwrap_or("30d") {
+        "24h" => TimeRange::Day.window_start(now),
+        "7d" => TimeRange::Week.window_start(now),
+        "mtd" => now
+            .date_naive()
+            .with_day(1)
+            .unwrap_or(now.date_naive())
+            .and_hms_opt(0, 0, 0)
+            .expect("valid hms")
+            .and_utc(),
+        _ => TimeRange::Month.window_start(now),
+    };
+    let from = window_start.format("%Y-%m-%d %H:%M:%S").to_string();
 
     // `total_cost` here is the raw i128 ClickHouse returns for
     // `sum(Decimal(18, 10))` (widened to Decimal(38, 10) under
@@ -393,10 +420,12 @@ pub async fn get_usage(
                     toUInt64(sum(ifNull(output_tokens, 0))) AS output_tokens, \
                     sum(ifNull(cost_usd, 0)) AS total_cost \
                  FROM gateway_logs \
+                 PREWHERE created_at >= toDateTime(?) \
                  GROUP BY date, model_id \
                  ORDER BY date DESC \
                  LIMIT ? OFFSET ?",
             )
+            .bind(from.clone())
             .bind(limit)
             .bind(offset)
             .fetch_all::<UsageRowCh>()
@@ -412,11 +441,12 @@ pub async fn get_usage(
                     toUInt64(sum(ifNull(output_tokens, 0))) AS output_tokens, \
                     sum(ifNull(cost_usd, 0)) AS total_cost \
                  FROM gateway_logs \
-                 PREWHERE has(?, user_id) \
+                 PREWHERE created_at >= toDateTime(?) AND has(?, user_id) \
                  GROUP BY date, model_id \
                  ORDER BY date DESC \
                  LIMIT ? OFFSET ?",
             )
+            .bind(from)
             .bind(ids)
             .bind(limit)
             .bind(offset)
