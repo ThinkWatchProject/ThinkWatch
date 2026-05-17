@@ -12,17 +12,22 @@ services:
     expose:
       - "3001"   # Console — only accessible within docker network
     environment:
-      DATABASE_URL: postgres://${DB_USER:-thinkwatch}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-think_watch}
-      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379
-      JWT_SECRET: ${JWT_SECRET}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      DATABASE_URL: postgres://${DB_USER:-thinkwatch}:${DB_PASSWORD:?DB_PASSWORD is required}@postgres:5432/${DB_NAME:-think_watch}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?REDIS_PASSWORD is required}@redis:6379
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?ENCRYPTION_KEY is required}
       GATEWAY_PORT: "3000"
       CONSOLE_PORT: "3001"
-      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost}
+      # No safe default for CORS_ORIGINS in prod: a localhost default
+      # silently shipped a config that broke real-domain frontends AND,
+      # if the operator was confused enough to relax it, could allow
+      # cross-origin reads from any tab. Fail-fast so misconfig is
+      # visible at boot, not at the first browser request.
+      CORS_ORIGINS: ${CORS_ORIGINS:?CORS_ORIGINS is required (comma-separated list of frontend origins)}
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_DB: think_watch
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-thinkwatch}
-      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
       RUST_LOG: ${RUST_LOG:-info,think_watch=info}
     depends_on:
       postgres:
@@ -150,12 +155,20 @@ services:
 
   redis:
     image: redis:8-alpine
-    command: redis-server /etc/redis/redis.conf --requirepass ${REDIS_PASSWORD:-}
+    # `${VAR:-}` (empty default) silently shipped Redis with NO
+    # password requirement if the operator forgot to set the env.
+    # `${VAR:?msg}` fails compose-up immediately so the misconfig
+    # is visible at deploy time, matching docker-compose.dev.yml.
+    command: redis-server /etc/redis/redis.conf --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     volumes:
       - ./data/redis:/data
       - ./redis/redis.conf:/etc/redis/redis.conf:ro
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      # `redis-cli ping` against a password-protected server returns
+      # NOAUTH and the healthcheck reports unhealthy. The dev compose
+      # already passes `-a $REDIS_PASSWORD`; matching here so the
+      # service actually transitions to healthy.
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 5s
       timeout: 5s
       retries: 5
