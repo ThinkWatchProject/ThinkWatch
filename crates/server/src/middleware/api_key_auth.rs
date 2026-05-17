@@ -89,19 +89,29 @@ pub fn require_api_key(
                 .dynamic_config
                 .api_keys_inactivity_timeout_days()
                 .await;
+            // Defense-in-depth `users` join: even if `update_user` /
+            // `delete_user` ever miss the api_keys cascade, a key for
+            // a disabled or deleted user is rejected here. The
+            // console-facing `auth_via_api_key` path (auth_guard.rs)
+            // already has this join — the gateway path used to omit
+            // it and trusted the cascade. Mirror the same predicate.
             let row = sqlx::query_as::<_, think_watch_common::models::ApiKey>(
-                r#"SELECT * FROM api_keys
-                   WHERE key_hash = $1
-                     AND deleted_at IS NULL
+                r#"SELECT api_keys.* FROM api_keys
+                   JOIN users ON users.id = api_keys.user_id
+                   WHERE api_keys.key_hash = $1
+                     AND api_keys.deleted_at IS NULL
+                     AND users.is_active = true
+                     AND users.deleted_at IS NULL
                      AND (
-                         is_active = true
-                         OR (grace_period_ends_at IS NOT NULL AND grace_period_ends_at > now())
+                         api_keys.is_active = true
+                         OR (api_keys.grace_period_ends_at IS NOT NULL
+                             AND api_keys.grace_period_ends_at > now())
                      )
                      AND (
-                         last_used_at IS NULL
-                         OR last_used_at > now() - CASE
-                             WHEN COALESCE(inactivity_timeout_days, 0) > 0
-                                 THEN make_interval(days => inactivity_timeout_days::int)
+                         api_keys.last_used_at IS NULL
+                         OR api_keys.last_used_at > now() - CASE
+                             WHEN COALESCE(api_keys.inactivity_timeout_days, 0) > 0
+                                 THEN make_interval(days => api_keys.inactivity_timeout_days::int)
                              WHEN $2::bigint > 0
                                  THEN make_interval(days => $2::int)
                              ELSE interval '999999 days'

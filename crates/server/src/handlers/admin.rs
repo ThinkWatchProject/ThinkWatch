@@ -834,12 +834,38 @@ pub async fn update_user(
     // Post-commit side effects: Redis session/permission invalidation.
     // These can race with concurrent requests but are idempotent.
     if req.is_active == Some(false) {
+        // Same credential-invalidation chain `delete_user` runs —
+        // without these, disabling a user leaves their existing
+        // gateway API keys + access JWTs working until natural TTL.
+        // Specifically: api_keys had no `users.is_active` join in
+        // the gateway auth path, so a deactivated user kept spending
+        // org quota on /v1/* indefinitely; JWTs survived ~15 min.
+        let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
+        super::auth::invalidate_refresh_tokens(&state.redis, user_id, refresh_ttl_days).await;
+        invalidate_user_perms(&state.redis, user_id).await;
         let _: () = fred::interfaces::KeysInterface::del(
             &state.redis,
             &format!("signing_pubkey:{user_id}"),
         )
         .await
         .unwrap_or(());
+        // Cascade-disable every API key the user owns. Mirrors the
+        // `delete_user` cascade but uses `disabled_reason='user_disabled'`
+        // so the audit trail distinguishes "admin disabled" from
+        // "user deleted." Failure is logged but doesn't abort —
+        // the gateway-side users-join (api_key_auth.rs) is the
+        // ultimate guarantee.
+        if let Err(e) = sqlx::query(
+            "UPDATE api_keys \
+             SET is_active = false, deleted_at = now(), disabled_reason = 'user_disabled' \
+             WHERE user_id = $1 AND deleted_at IS NULL",
+        )
+        .bind(user_id)
+        .execute(&state.db)
+        .await
+        {
+            tracing::warn!(%user_id, "failed to cascade api_keys disable on user deactivation: {e}");
+        }
     }
     if req.role_assignments.is_some() {
         invalidate_user_perms(&state.redis, user_id).await;

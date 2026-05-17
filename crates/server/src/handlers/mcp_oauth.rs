@@ -492,7 +492,12 @@ pub async fn oauth_callback(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
     let expected = state_binding(&enc_key, &state_token, &blob.code_verifier);
     if !bool::from(expected.as_bytes().ct_eq(blob.binding.as_bytes())) {
-        tracing::warn!("MCP OAuth state binding mismatch for state {state_token}");
+        // Don't log the state token — it's the bearer credential
+        // for this callback. Single-use via GETDEL above so replay
+        // is impossible, but if logs reach a less-trusted
+        // destination (forwarder, downstream SIEM) the value would
+        // leak unnecessarily.
+        tracing::warn!("MCP OAuth state binding mismatch");
         return Err(AppError::BadRequest(
             "OAuth session binding failed; please retry".into(),
         ));
