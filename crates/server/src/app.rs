@@ -175,10 +175,6 @@ fn security_layers<S: Clone + Send + Sync + 'static>(router: Router<S>) -> Route
 // ---------------------------------------------------------------------------
 
 pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow::Result<Router> {
-    // Load dynamic config values for gateway initialization
-    let dc = &state.dynamic_config;
-    let cache_ttl = dc.cache_ttl_secs().await;
-
     // AI Gateway: /v1/*
     // Load providers from database. Failure is logged loudly but
     // does NOT abort startup — that would block the chicken-and-egg
@@ -209,7 +205,10 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         // Share the hot-swappable filter handles with the gateway state.
         content_filter: state.content_filter.clone(),
         quota: Arc::new(QuotaManager::new(state.redis.clone())),
-        cache: Arc::new(ResponseCache::new(state.redis.clone(), cache_ttl)),
+        cache: Arc::new(ResponseCache::new(
+            state.redis.clone(),
+            state.dynamic_config.clone(),
+        )),
         pii_redactor: state.pii_redactor.clone(),
         cost_tracker: Arc::new(think_watch_gateway::cost_tracker::CostTracker::new(
             state.db.clone(),

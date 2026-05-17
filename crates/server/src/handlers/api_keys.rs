@@ -412,9 +412,32 @@ pub async fn create_key(
 
     let generated = api_key::generate_api_key();
 
-    let expires_at = req
-        .expires_in_days
-        .map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
+    // Global defaults the admin UI exposes under "API key settings".
+    // Without this lookup, `api_keys.default_expiry_days` and
+    // `api_keys.rotation_period_days` were silently write-only: the
+    // operator could change them via /api/admin/settings, but
+    // create_api_key never read either, so newly minted keys kept
+    // the column-default (NULL = no expiry, NULL = no rotation).
+    let default_expiry_days = state.dynamic_config.api_keys_default_expiry_days().await;
+    let default_rotation_period_days = state.dynamic_config.api_keys_rotation_period_days().await;
+
+    // Request body wins; setting is the fallback. 0 on the setting
+    // means "no default" — leave expires_at NULL so the key never
+    // expires. Same convention `inactivity_timeout_days` already
+    // uses (see api_key_lifecycle.rs).
+    let default_expiry_override = (default_expiry_days > 0).then_some(default_expiry_days as i32);
+    let effective_expiry_days = req.expires_in_days.or(default_expiry_override);
+    let expires_at =
+        effective_expiry_days.map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
+    // CreateApiKeyRequest doesn't expose a per-key rotation override
+    // today, so the global setting is the only source. Stored as
+    // Some(N) when N > 0, None when disabled — matches how the
+    // update path treats 0/NULL as equivalent.
+    let rotation_period_days = if default_rotation_period_days > 0 {
+        Some(default_rotation_period_days as i32)
+    } else {
+        None
+    };
 
     let cost_center = validate_cost_center(req.cost_center.as_deref())?;
     let mcp_account_overrides = validate_mcp_account_overrides(
@@ -434,8 +457,9 @@ pub async fn create_key(
     let id = uuid::Uuid::new_v4();
     let row = sqlx::query_as::<_, ApiKey>(
         r#"INSERT INTO api_keys (id, lineage_id, key_prefix, key_hash, name, user_id, surfaces,
-                allowed_models, allowed_mcp_tools, mcp_account_overrides, expires_at, cost_center)
-           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *"#,
+                allowed_models, allowed_mcp_tools, mcp_account_overrides, expires_at,
+                cost_center, rotation_period_days)
+           VALUES ($1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING *"#,
     )
     .bind(id)
     .bind(&generated.prefix)
@@ -448,6 +472,7 @@ pub async fn create_key(
     .bind(&mcp_account_overrides)
     .bind(expires_at)
     .bind(cost_center.as_deref())
+    .bind(rotation_period_days)
     .fetch_one(&state.db)
     .await?;
 

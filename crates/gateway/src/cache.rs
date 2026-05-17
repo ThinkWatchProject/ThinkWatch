@@ -1,6 +1,8 @@
 use crate::providers::traits::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
 use fred::clients::Client;
 use fred::interfaces::KeysInterface;
+use std::sync::Arc;
+use think_watch_common::dynamic_config::DynamicConfig;
 use xxhash_rust::xxh3::xxh3_128;
 
 /// Redis-based exact-match cache for LLM responses.
@@ -15,18 +17,47 @@ use xxhash_rust::xxh3::xxh3_128;
 #[derive(Clone)]
 pub struct ResponseCache {
     redis: Client,
-    /// Default TTL in seconds for cached entries.
-    default_ttl: u64,
+    /// Source of the default TTL — read live on each `set` so admin
+    /// edits to `gateway.cache_ttl_secs` take effect on the next
+    /// cache write without a process restart. Previously this was a
+    /// `u64` captured at boot, which silently ignored later edits
+    /// while the sibling `mcp.cache_ttl_secs` setting was already
+    /// read per-request. `Option` so tests can construct a cache
+    /// without spinning up a DynamicConfig.
+    ttl_source: TtlSource,
+}
+
+/// Either a live config handle or a fixed value. Production wires
+/// the live handle; tests and the `with_default_ttl` constructor
+/// pin a constant.
+#[derive(Clone)]
+enum TtlSource {
+    Dynamic(Arc<DynamicConfig>),
+    Fixed(u64),
 }
 
 impl ResponseCache {
-    pub fn new(redis: Client, default_ttl: u64) -> Self {
-        Self { redis, default_ttl }
+    pub fn new(redis: Client, dynamic_config: Arc<DynamicConfig>) -> Self {
+        Self {
+            redis,
+            ttl_source: TtlSource::Dynamic(dynamic_config),
+        }
     }
 
-    /// Create a cache with the default 1-hour TTL.
+    /// Create a cache with the default 1-hour TTL. Used by tests and
+    /// any caller that doesn't have a `DynamicConfig` to thread in.
     pub fn with_default_ttl(redis: Client) -> Self {
-        Self::new(redis, 3600)
+        Self {
+            redis,
+            ttl_source: TtlSource::Fixed(3600),
+        }
+    }
+
+    async fn default_ttl(&self) -> u64 {
+        match &self.ttl_source {
+            TtlSource::Dynamic(dc) => dc.cache_ttl_secs().await,
+            TtlSource::Fixed(v) => *v,
+        }
     }
 
     /// Whether this request is cacheable (deterministic).
@@ -167,7 +198,10 @@ return total
         ttl: Option<u64>,
     ) {
         let key = Self::cache_key_for(model, messages, max_tokens);
-        let ttl_secs = ttl.unwrap_or(self.default_ttl);
+        let ttl_secs = match ttl {
+            Some(v) => v,
+            None => self.default_ttl().await,
+        };
 
         let json = match serde_json::to_string(response) {
             Ok(j) => j,
