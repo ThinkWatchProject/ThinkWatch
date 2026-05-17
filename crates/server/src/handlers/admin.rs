@@ -939,6 +939,21 @@ pub async fn delete_user(
     if rows == 0 {
         return Err(AppError::NotFound("User not found".into()));
     }
+    // Soft-delete the user's API keys inside the SAME transaction.
+    // Previously this UPDATE ran AFTER tx.commit() with its error
+    // swallowed by `let _ = …`: if the keys UPDATE failed (PG blip,
+    // connection drop), the user row was marked deleted but their
+    // API keys stayed active for the full 30-day retention window,
+    // letting them keep authenticating against the gateway. Pull it
+    // into the TX so a failure rolls back the user delete too — both
+    // succeed or neither does.
+    sqlx::query(
+        "UPDATE api_keys SET is_active = false, deleted_at = now(), disabled_reason = 'user_deleted' \
+         WHERE user_id = $1 AND deleted_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
     // Validate the post-mutation invariant. If this delete took out the
     // last active super admin, we haven't committed yet — the Err short-
     // circuits and the tx rolls back on drop.
@@ -951,10 +966,10 @@ pub async fn delete_user(
     //     `claims.iat` against the epoch).
     //   - perm cache drop forces the next request to hit the DB.
     //   - signing pubkey delete closes the HMAC signing channel.
-    //   - API keys are soft-deleted so the key-auth surface (which
-    //     also checks `users.deleted_at` separately) refuses them.
     // Without these, a deleted user keeps a working session until the
-    // refresh TTL (7 days) expires naturally.
+    // refresh TTL (7 days) expires naturally. These run post-commit so
+    // a TX rollback above doesn't strand the cache wipe against a
+    // still-active user.
     let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
     super::auth::invalidate_refresh_tokens(&state.redis, user_id, refresh_ttl_days).await;
     crate::middleware::auth_guard::invalidate_user_perms(&state.redis, user_id).await;
@@ -962,13 +977,6 @@ pub async fn delete_user(
         fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_pubkey:{user_id}"))
             .await
             .unwrap_or(());
-    let _ = sqlx::query(
-        "UPDATE api_keys SET is_active = false, deleted_at = now(), disabled_reason = 'user_deleted' \
-         WHERE user_id = $1 AND deleted_at IS NULL",
-    )
-    .bind(user_id)
-    .execute(&state.db)
-    .await;
 
     state.audit.log(
         auth_user
