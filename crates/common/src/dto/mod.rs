@@ -343,7 +343,15 @@ impl PaginationParams {
     pub fn offset(&self) -> u32 {
         let page = self.page.unwrap_or(1).max(1);
         let per_page = self.per_page();
-        (page - 1) * per_page
+        // `(page - 1) * per_page` overflows u32 for large page
+        // values (page is unbounded by deserialization). In release
+        // builds the wrap silently returned a small offset, letting
+        // an attacker bypass intended pagination by passing
+        // `?page=42949673` and landing back near the start of the
+        // table. saturating_mul caps at u32::MAX so the query
+        // returns an empty page instead, which is the right answer
+        // for "you asked for page eleventy".
+        (page - 1).saturating_mul(per_page)
     }
 
     pub fn per_page(&self) -> u32 {

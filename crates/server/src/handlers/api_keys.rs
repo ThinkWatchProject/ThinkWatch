@@ -427,6 +427,17 @@ pub async fn create_key(
     // operator could change them via /api/admin/settings, but
     // create_api_key never read either, so newly minted keys kept
     // the column-default (NULL = no expiry, NULL = no rotation).
+    // Reject negative request input upfront — without this, a body
+    // of `{"expires_in_days": -100}` was silently turned into a
+    // chrono::Duration of -100 days and the key was created already
+    // expired, which violates the basic "newly created key works"
+    // contract and is almost certainly a client bug or injection
+    // attempt worth surfacing rather than masking.
+    if let Some(d) = req.expires_in_days
+        && d < 0
+    {
+        return Err(AppError::BadRequest("expires_in_days must be >= 0".into()));
+    }
     let default_expiry_days = state.dynamic_config.api_keys_default_expiry_days().await;
     let default_rotation_period_days = state.dynamic_config.api_keys_rotation_period_days().await;
 
@@ -436,8 +447,9 @@ pub async fn create_key(
     // uses (see api_key_lifecycle.rs).
     let default_expiry_override = (default_expiry_days > 0).then_some(default_expiry_days as i32);
     let effective_expiry_days = req.expires_in_days.or(default_expiry_override);
-    let expires_at =
-        effective_expiry_days.map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
+    let expires_at = effective_expiry_days
+        .filter(|&d| d > 0)
+        .map(|days| chrono::Utc::now() + chrono::Duration::days(days as i64));
     // CreateApiKeyRequest doesn't expose a per-key rotation override
     // today, so the global setting is the only source. Stored as
     // Some(N) when N > 0, None when disabled — matches how the
@@ -731,6 +743,26 @@ pub async fn update_key(
 ) -> Result<Json<ApiKey>, AppError> {
     auth_user.require_permission("api_keys:update")?;
     assert_owner_or_admin(&auth_user, &state.db, id).await?;
+    // Reject negative day fields up front. Previously a PATCH with
+    // `{"expires_in_days": -100}` hit the `if days > 0 { Some } else
+    // { None }` branch below, silently CLEARING the expiry instead of
+    // setting it — i.e. negative input quietly extended the key's
+    // lifetime indefinitely, the opposite of the operator's intent.
+    // Rotation / inactivity periods get the same treatment — both
+    // are stored as-is and interpreted as TTLs downstream, so a
+    // negative value would either panic on a duration subtract or
+    // wrap to a huge number.
+    for (name, value) in [
+        ("expires_in_days", req.expires_in_days),
+        ("rotation_period_days", req.rotation_period_days),
+        ("inactivity_timeout_days", req.inactivity_timeout_days),
+    ] {
+        if let Some(v) = value
+            && v < 0
+        {
+            return Err(AppError::BadRequest(format!("{name} must be >= 0")));
+        }
+    }
     let key =
         sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = $1 AND deleted_at IS NULL")
             .bind(id)
@@ -1077,7 +1109,11 @@ pub async fn list_expiring_keys(
     Query(query): Query<ExpiringKeysQuery>,
 ) -> Result<Json<Vec<ApiKey>>, AppError> {
     auth_user.require_permission("api_keys:read")?;
-    let days = query.days.unwrap_or(7);
+    // Clamp to [0, 365]. Negative days would have inverted the
+    // window — `?days=-365` made the endpoint return keys that
+    // expired up to a YEAR AGO, which makes no sense for an
+    // expiring-soon dashboard. Cap at 365 to bound query cost.
+    let days = query.days.unwrap_or(7).clamp(0, 365);
     let threshold = chrono::Utc::now() + chrono::Duration::days(days as i64);
     let caller_id = auth_user.claims.sub;
 
