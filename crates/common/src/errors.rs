@@ -1,6 +1,14 @@
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
+
+/// Default Retry-After (seconds) advertised on 429 / 503 responses
+/// when the caller didn't provide a more specific value. Picked at
+/// 60s to bias clients toward longer backoff than the typical 1-5s
+/// exponential ramp — these errors usually come from upstream
+/// quota windows or transient infra outages that don't recover in
+/// under a minute.
+const DEFAULT_RETRY_AFTER_SECS: u32 = 60;
 
 /// Application-facing error.
 ///
@@ -107,7 +115,19 @@ impl IntoResponse for AppError {
             },
         };
 
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        // RFC 6585 §4 (429) and RFC 7231 §6.6.4 (503) both recommend a
+        // Retry-After hint so clients can back off appropriately
+        // instead of guessing. Without this, well-behaved SDKs default
+        // to a tight 1-5s exponential ramp that hammers the same
+        // quota window the rate limiter is trying to drain.
+        if status == StatusCode::TOO_MANY_REQUESTS || status == StatusCode::SERVICE_UNAVAILABLE {
+            response.headers_mut().insert(
+                header::RETRY_AFTER,
+                HeaderValue::from(DEFAULT_RETRY_AFTER_SECS),
+            );
+        }
+        response
     }
 }
 
