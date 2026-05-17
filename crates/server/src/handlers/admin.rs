@@ -481,9 +481,12 @@ pub async fn create_user(
         .require_global_permission(&state.db, "users:create")
         .await?;
 
-    if !req.email.contains('@') || !req.email.contains('.') {
-        return Err(AppError::BadRequest("Invalid email format".into()));
-    }
+    // Use the canonical validator — `register` and `setup_initialize`
+    // both call `validate_email`; the admin create path was laxer
+    // (`contains('@') && contains('.')` admitted shapes like `..@x.`).
+    // Threat-model-wise the admin path being the laxest is backwards:
+    // it's the only one that doesn't go through public POW + lockout.
+    think_watch_common::validation::validate_email(&req.email)?;
 
     let (raw_password, force_change) = match &req.password {
         Some(p) => {

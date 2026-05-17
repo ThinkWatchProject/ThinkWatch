@@ -1745,6 +1745,9 @@ async fn send_kafka(
         .and_then(|v| v.as_str())
         .ok_or("Missing 'topic' in kafka config")?;
 
+    // DNS rebind defense — same reasoning as `send_webhook`.
+    crate::validation::validate_url(broker_url).map_err(|e| format!("URL validation: {e}"))?;
+
     let payload = serde_json::json!({
         "records": [{
             "value": entry
@@ -1778,6 +1781,16 @@ async fn send_webhook(
         .get("url")
         .and_then(|v| v.as_str())
         .ok_or("Missing 'url' in webhook config")?;
+
+    // DNS rebind defense: re-resolve and re-validate per dispatch.
+    // The URL passed validate_url at save time but the hostname is
+    // re-resolved on every send — an attacker who controls DNS can
+    // flip a benign public A record to 127.0.0.1 / 169.254.169.254
+    // between save and any of the up-to-24 retry attempts. Mirrors
+    // the test-endpoint pattern. `validate_url` is a no-op DNS
+    // hit + CIDR check (sub-ms in steady state) so paying it per
+    // delivery is cheap compared to the HTTP round-trip itself.
+    crate::validation::validate_url(url).map_err(|e| format!("URL validation: {e}"))?;
 
     // Serialize the body once so the HMAC signs exactly what goes over
     // the wire — avoids any field-ordering or whitespace divergence

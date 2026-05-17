@@ -74,8 +74,18 @@ impl ConnectionPool {
     /// Used by the server crate to wire `Timeouts.mcp_pool_secs` through
     /// from `AppConfig` so the timeout is operator-tunable.
     pub fn with_timeout(timeout_secs: u64) -> Self {
+        // SSRF defense: don't auto-follow redirects on the MCP hot
+        // path. An admin-registered MCP server's `validate_url` check
+        // happens at create time — the runtime fetch then dials the
+        // saved URL. Without an explicit redirect policy the default
+        // 10-redirect follow lets a 302 from the upstream steer
+        // traffic into internal infra (loopback, link-local
+        // metadata, RFC1918 ranges) after the save-time check
+        // passed. Pass 20 covered the AppState http_client; the
+        // dedicated MCP pool client was missed.
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_else(|_| Client::new());
 

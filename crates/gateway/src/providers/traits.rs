@@ -233,9 +233,16 @@ impl ProviderBase {
         // is generous enough for slow LLM completions but cuts off
         // truly stuck calls; the 10s connect timeout is short because
         // a healthy upstream resolves and TCPs in well under that.
+        // SSRF defense: don't follow upstream redirects on the LLM
+        // gateway hot path. `base_url` is admin-supplied; a malicious
+        // (or compromised) provider returning `302 Location: http://
+        // 169.254.169.254/...` would silently steer traffic into
+        // internal infra. Same reasoning as the MCP pool client and
+        // the shared http_client in init.rs.
         let client = reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(10))
             .timeout(std::time::Duration::from_secs(300))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("reqwest client builder cannot fail on stable inputs");
         Self {
