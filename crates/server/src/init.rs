@@ -19,6 +19,7 @@ use think_watch_auth::oidc::OidcManager;
 use think_watch_common::audit::{self, AuditConfig, AuditLogger};
 use think_watch_common::config::AppConfig;
 use think_watch_common::dynamic_config::{self, DynamicConfig};
+use think_watch_common::tasks::supervise;
 
 use crate::app::{self, AppState};
 use crate::handlers;
@@ -230,7 +231,16 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
     let pii_clone = state.pii_redactor.clone();
     let http_clone = state.http_client.clone();
     let pool_clone = state.mcp_pool.clone();
-    tokio::spawn(async move {
+    // Wrap in `supervise()` so a panic inside the reload (e.g.
+    // load_content_filter blowing up on a malformed
+    // system_settings.value blob) emits a metric +
+    // `supervised_task_panics_total{task=…}` instead of silently
+    // killing multi-instance config sync until the pod restarts.
+    // Full re-spawn isn't trivial here because the closure moves
+    // ownership of the SubscriberClient — the supervisor would need
+    // a fresh subscription per attempt — so this is panic-observability
+    // only, not auto-recovery. Restart is still the operator's job.
+    supervise("config_filter_reload_subscriber", async move {
         use fred::interfaces::{EventInterface, PubsubInterface};
         let mut rx = sub_filters.message_rx();
         if let Err(e) = sub_filters.subscribe("config:changed").await {
@@ -303,7 +313,11 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
         Builder::from_config(sub_router_cfg).build_subscriber_client()?;
     sub_router.init().await?;
     let router_state = state.clone();
-    tokio::spawn(async move {
+    // Same `supervise()` rationale as the filter subscriber above: a
+    // panic inside the router rebuild (malformed provider row,
+    // bad ModelRouter::insert input) would otherwise silently kill
+    // cross-instance routing sync.
+    supervise("config_router_reload_subscriber", async move {
         use fred::interfaces::{EventInterface, PubsubInterface};
         let mut rx = sub_router.message_rx();
         if let Err(e) = sub_router
