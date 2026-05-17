@@ -46,4 +46,5 @@ pub mod retry;
 pub mod crypto;
 pub mod json_secret;
 pub mod regex_util;
+pub mod tasks; // supervised_spawn — panic-isolated background tasks
 pub mod validation;

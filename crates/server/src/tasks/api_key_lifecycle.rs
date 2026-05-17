@@ -2,6 +2,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use think_watch_common::audit::{AuditActor, AuditLogger, SystemActor};
 use think_watch_common::dynamic_config::DynamicConfig;
+use think_watch_common::tasks::supervise_restart;
 
 /// Background task that manages API key lifecycle:
 /// - Disables expired keys
@@ -16,12 +17,22 @@ use think_watch_common::dynamic_config::DynamicConfig;
 /// `is_active` / `disabled_reason` in sync and fires the expiry-
 /// warning audit events on the 7 / 3 / 1-day thresholds.
 pub fn spawn_api_key_lifecycle_task(db: PgPool, config: Arc<DynamicConfig>, audit: AuditLogger) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
-        loop {
-            interval.tick().await;
-            if let Err(e) = run_lifecycle_check(&db, &config, &audit).await {
-                tracing::error!("API key lifecycle check failed: {e}");
+    // Wrapped in supervise_restart: a panic inside this loop would
+    // silently stop disabling expired/inactive keys and stop firing
+    // expiry-warning audit events — a real compliance gap that
+    // operators wouldn't notice until a customer reported being
+    // unable to log in (or worse, AFTER an expired key was used).
+    supervise_restart("api_key_lifecycle", move || {
+        let db = db.clone();
+        let config = config.clone();
+        let audit = audit.clone();
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(600));
+            loop {
+                interval.tick().await;
+                if let Err(e) = run_lifecycle_check(&db, &config, &audit).await {
+                    tracing::error!("API key lifecycle check failed: {e}");
+                }
             }
         }
     });

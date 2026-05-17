@@ -9,6 +9,7 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use uuid::Uuid;
 
 use crate::models::LogForwarder;
+use crate::tasks::supervise_restart;
 
 // ---------------------------------------------------------------------------
 // Log types — each maps to a distinct ClickHouse table
@@ -1104,28 +1105,80 @@ impl AuditLogger {
             );
             let dc = dc.clone();
             let bps = sample_rate_bps.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                loop {
-                    interval.tick().await;
-                    let rate = dc.audit_sample_rate().await;
-                    bps.store(
-                        (rate.clamp(0.0, 1.0) * 10_000.0).round() as u32,
-                        std::sync::atomic::Ordering::Relaxed,
-                    );
+            // Sample-rate poller — survives panics so a misbehaving
+            // dynamic_config call can't silently freeze the audit
+            // sampling rate at its last value.
+            supervise_restart("audit_sample_rate_poller", move || {
+                let dc = dc.clone();
+                let bps = bps.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+                    loop {
+                        interval.tick().await;
+                        let rate = dc.audit_sample_rate().await;
+                        bps.store(
+                            (rate.clamp(0.0, 1.0) * 10_000.0).round() as u32,
+                            std::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
                 }
             });
         }
 
-        // Spawn the background worker
-        tokio::spawn(audit_worker(ch, rx, db.clone(), registry.clone()));
+        // Audit worker. This is the load-bearing pipeline for every
+        // compliance event in the system; if it dies silently, ALL
+        // audit entries get queued into the mpsc until the channel
+        // fills, then `audit_log_dropped_total` starts incrementing
+        // (an indirect signal at best). Wrap in supervise_restart so
+        // a panic logs, bumps the metric, and respawns — the channel
+        // receiver is moved in, so respawn requires reconstructing
+        // the worker; we approximate that here by spawning a fresh
+        // copy of the registry/db handles. The mpsc receiver itself
+        // is single-consumer, so on restart the previously-spawned
+        // worker will have already dropped it. Capture the receiver
+        // inside an Arc<Mutex<Option<_>>> so the factory closure can
+        // take ownership exactly once and subsequent restarts panic
+        // cleanly (the audit pipeline is single-instance per process).
+        {
+            let ch = ch.clone();
+            let db_w = db.clone();
+            let reg_w = registry.clone();
+            let rx_cell = Arc::new(Mutex::new(Some(rx)));
+            supervise_restart("audit_worker", move || {
+                let ch = ch.clone();
+                let db_w = db_w.clone();
+                let reg_w = reg_w.clone();
+                let rx_cell = rx_cell.clone();
+                async move {
+                    let rx_opt = {
+                        let mut guard = rx_cell.lock().await;
+                        guard.take()
+                    };
+                    let Some(rx) = rx_opt else {
+                        // After the first panic the receiver is gone
+                        // — we can't reattach, so log and exit. The
+                        // supervisor records this as a clean exit.
+                        tracing::error!(
+                            "audit_worker cannot restart: mpsc receiver consumed by prior \
+                             incarnation; audit pipeline is offline until process restart"
+                        );
+                        return;
+                    };
+                    audit_worker(ch, rx, db_w, reg_w).await;
+                }
+            });
+        }
 
         // Spawn periodic forwarder reload (every 10s)
         if let Some(pool) = &db {
             let reload_pool = pool.clone();
             let reload_reg = registry.clone();
-            tokio::spawn(async move {
-                reload_forwarders_loop(reload_pool, reload_reg).await;
+            supervise_restart("audit_forwarder_reload", move || {
+                let reload_pool = reload_pool.clone();
+                let reload_reg = reload_reg.clone();
+                async move {
+                    reload_forwarders_loop(reload_pool, reload_reg).await;
+                }
             });
 
             // Durable webhook redelivery — drains rows the inline
@@ -1134,8 +1187,12 @@ impl AuditLogger {
             // the admin UI without a restart.
             let drain_pool = pool.clone();
             let drain_reg = registry.clone();
-            tokio::spawn(async move {
-                webhook_outbox_drain_loop(drain_pool, drain_reg).await;
+            supervise_restart("audit_webhook_outbox_drain", move || {
+                let drain_pool = drain_pool.clone();
+                let drain_reg = drain_reg.clone();
+                async move {
+                    webhook_outbox_drain_loop(drain_pool, drain_reg).await;
+                }
             });
         }
 
@@ -1147,15 +1204,18 @@ impl AuditLogger {
         // ClickHouse / forwarders are getting behind.
         {
             let tx_for_gauge = tx.clone();
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
-                loop {
-                    interval.tick().await;
-                    // `tokio::sync::mpsc::Sender` doesn't expose
-                    // current length directly; capacity() returns
-                    // the REMAINING capacity, so depth = total - capacity.
-                    let depth = AUDIT_CHANNEL_CAPACITY.saturating_sub(tx_for_gauge.capacity());
-                    metrics::gauge!("audit_log_queue_depth").set(depth as f64);
+            supervise_restart("audit_queue_depth_gauge", move || {
+                let tx_for_gauge = tx_for_gauge.clone();
+                async move {
+                    let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+                    loop {
+                        interval.tick().await;
+                        // `tokio::sync::mpsc::Sender` doesn't expose
+                        // current length directly; capacity() returns
+                        // the REMAINING capacity, so depth = total - capacity.
+                        let depth = AUDIT_CHANNEL_CAPACITY.saturating_sub(tx_for_gauge.capacity());
+                        metrics::gauge!("audit_log_queue_depth").set(depth as f64);
+                    }
                 }
             });
         }

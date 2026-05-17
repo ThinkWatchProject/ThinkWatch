@@ -2,6 +2,7 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use think_watch_common::audit::{AuditActor, AuditLogger, SystemActor};
 use think_watch_common::dynamic_config::DynamicConfig;
+use think_watch_common::tasks::supervise_restart;
 
 // DynamicConfig is still threaded through from the call site but
 // `run_retention_cleanup` no longer reads any values off it — every
@@ -20,12 +21,21 @@ const SOFT_DELETE_RETENTION_DAYS: i64 = 30;
 /// Background task that cleans up old data based on retention policies.
 /// Runs daily.
 pub fn spawn_data_retention_task(db: PgPool, config: Arc<DynamicConfig>, audit: AuditLogger) {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
-        loop {
-            interval.tick().await;
-            if let Err(e) = run_retention_cleanup(&db, &config, &audit).await {
-                tracing::error!("Data retention cleanup failed: {e}");
+    // Wrapped in supervise_restart: a panic here would silently
+    // stop GDPR hard-deletes, webhook_outbox garbage collection,
+    // and the orphan-limits sweep. The first two are compliance
+    // critical — auditors expect retention to actually run.
+    supervise_restart("data_retention", move || {
+        let db = db.clone();
+        let config = config.clone();
+        let audit = audit.clone();
+        async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(86400));
+            loop {
+                interval.tick().await;
+                if let Err(e) = run_retention_cleanup(&db, &config, &audit).await {
+                    tracing::error!("Data retention cleanup failed: {e}");
+                }
             }
         }
     });
