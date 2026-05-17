@@ -123,13 +123,25 @@ pub(crate) async fn issue_auth_session(
 
 /// Store the password-change epoch in Redis so the refresh handler
 /// rejects refresh tokens issued before this moment. Used by
-/// `change_password` and admin `force_logout_user`.
+/// `change_password`, admin `force_logout_user`, and admin
+/// `delete_user`.
+///
+/// **Failure mode:** Redis SET errors are surfaced via the
+/// `session_invalidate_failures_total` counter and an ERROR log,
+/// but the function still returns `()` rather than propagating the
+/// error to the caller. The rationale is that every caller is
+/// either already past the point of no return (password row
+/// updated in PG, admin already saw "you did this") or is in a
+/// best-effort revocation path (delete_user post-commit cleanup).
+/// If a caller cares about strict invalidation it should preflight
+/// Redis health; the metric lets operators alert when this happens
+/// at scale.
 pub(crate) async fn invalidate_refresh_tokens(
     redis: &fred::clients::Client,
     user_id: uuid::Uuid,
     refresh_ttl_days: i64,
 ) {
-    let _: Result<(), _> = fred::interfaces::KeysInterface::set(
+    let result: Result<(), _> = fred::interfaces::KeysInterface::set(
         redis,
         &format!("pw_epoch:{user_id}"),
         &chrono::Utc::now().timestamp().to_string(),
@@ -138,6 +150,23 @@ pub(crate) async fn invalidate_refresh_tokens(
         false,
     )
     .await;
+    if let Err(e) = result {
+        // Previously this was `let _: Result<(), _> = …` — a Redis
+        // outage during a password change silently left the OLD
+        // refresh tokens valid for up to refresh_ttl_days, so a
+        // leaked refresh token from before the change kept working.
+        // The user assumed (correctly, per UX) that changing their
+        // password locked out other sessions; the reality was the
+        // opposite. Operators alert on this metric and chase the
+        // Redis incident.
+        metrics::counter!("session_invalidate_failures_total").increment(1);
+        tracing::error!(
+            user_id = %user_id,
+            error = %e,
+            "Failed to set pw_epoch — old refresh tokens for this user remain valid \
+             until their natural exp ({refresh_ttl_days} days). Likely Redis outage."
+        );
+    }
 }
 
 /// How long an admin-issued temporary password remains usable.
