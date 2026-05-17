@@ -81,8 +81,15 @@ pub fn find_recovery_code(codes: &[String], candidate: &str) -> Option<usize> {
 
     for (i, stored) in codes.iter().enumerate() {
         let stored_padded = pad_to_fixed(stored.as_bytes());
-        // Both length and content are compared in constant time
-        let len_match = (stored.len() as u8).ct_eq(&(candidate_len as u8));
+        // Both length and content are compared in constant time. Use u32
+        // for the length compare so it stays correct even if FIXED_LEN
+        // ever grows past 255 — `as u8` truncation would mod the length
+        // by 256 and turn e.g. a 0-byte input into a match for a 256-byte
+        // stored code. Current codes are exactly 9 chars so this is
+        // defensive, not load-bearing, but keeps the intent ("the length
+        // compare leaks no timing info AND is correct for all sizes")
+        // honest.
+        let len_match = (stored.len() as u32).ct_eq(&(candidate_len as u32));
         let content_match = stored_padded.ct_eq(&candidate_padded);
         if (len_match & content_match).into() {
             found_idx = Some(i);
