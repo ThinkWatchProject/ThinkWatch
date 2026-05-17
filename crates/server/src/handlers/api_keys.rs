@@ -274,6 +274,7 @@ impl ListKeysParams {
         (status = 200, description = "Paginated list of API keys visible to the caller"),
         (status = 401, description = "Unauthorized"),
     ),
+    security(("bearer_token" = []))
 )]
 pub async fn list_keys(
     auth_user: AuthUser,
@@ -394,6 +395,7 @@ fn normalize_surfaces(input: &[String]) -> Result<Vec<String>, AppError> {
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Missing api_keys:create permission"),
     ),
+    security(("bearer_token" = []))
 )]
 #[tracing::instrument(skip_all, fields(handler = "api_keys.create_key"))]
 pub async fn create_key(
@@ -504,6 +506,7 @@ pub async fn create_key(
         (status = 403, description = "Forbidden — caller is not the owner and lacks global scope"),
         (status = 404, description = "API key not found"),
     ),
+    security(("bearer_token" = []))
 )]
 pub async fn get_key(
     auth_user: AuthUser,
@@ -535,6 +538,7 @@ pub async fn get_key(
         (status = 403, description = "Forbidden"),
         (status = 404, description = "API key not found"),
     ),
+    security(("bearer_token" = []))
 )]
 #[tracing::instrument(skip_all, fields(handler = "api_keys.revoke_key"))]
 pub async fn revoke_key(
@@ -605,6 +609,7 @@ pub struct ForceRevokeRequest {
         (status = 403, description = "Forbidden — requires global api_keys:delete"),
         (status = 404, description = "API key not found"),
     ),
+    security(("bearer_token" = []))
 )]
 #[tracing::instrument(skip_all, fields(handler = "api_keys.force_revoke_key"))]
 pub async fn force_revoke_key(
