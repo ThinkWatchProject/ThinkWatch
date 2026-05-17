@@ -639,7 +639,24 @@ pub async fn register_key(
     p256::PublicKey::from_jwk_str(&pubkey_json)
         .map_err(|e| AppError::BadRequest(format!("Invalid ECDSA P-256 public key JWK: {e}")))?;
 
-    let client_ip = auth_user.ip.as_deref();
+    // The signature verification middleware fails-closed if a request
+    // arrives with no bound IP for the signing key
+    // (verify_signature.rs:326-330 returns 401 with "session must be
+    // re-issued"). Previously `store_public_key` SKIPPED the IP write
+    // when client_ip was None — so if `extract_client_ip` happened to
+    // return None at registration time (e.g. axum ConnectInfo
+    // extension missing in a test harness, or trusted_proxies
+    // misconfig causing fall-through to None), the pubkey was stored
+    // but the binding wasn't, and every subsequent signed request
+    // 401'd with no path to recovery short of re-login. Reject upfront
+    // here so the failure mode is "register-key returned 400" instead
+    // of "every mutation 401s and the user has no idea why".
+    let client_ip = auth_user.ip.as_deref().ok_or_else(|| {
+        AppError::BadRequest(
+            "Cannot determine client IP for signing-key binding — check trusted_proxies config"
+                .into(),
+        )
+    })?;
 
     // Match the refresh-token lifetime so the pubkey stays usable for
     // the entire session, not just the first 24 hours.
@@ -648,7 +665,7 @@ pub async fn register_key(
         &state.redis,
         &auth_user.claims.sub,
         &pubkey_json,
-        client_ip,
+        Some(client_ip),
         ttl_secs,
     )
     .await
