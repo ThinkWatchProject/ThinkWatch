@@ -95,7 +95,7 @@ pub async fn run_lifecycle_check(
 
     if !expired.is_empty() {
         tracing::info!("Disabled {} expired API keys", expired.len());
-        emit_disable_audits(audit, "api_key.disabled", &expired, "expired");
+        emit_disable_audits(audit, "api_key.disable", &expired, "expired");
     }
 
     // 2. Disable inactive keys
@@ -122,7 +122,7 @@ pub async fn run_lifecycle_check(
                 inactive.len(),
                 global_inactivity_days
             );
-            emit_disable_audits(audit, "api_key.disabled", &inactive, "inactive_global");
+            emit_disable_audits(audit, "api_key.disable", &inactive, "inactive_global");
         }
     }
 
@@ -148,7 +148,7 @@ pub async fn run_lifecycle_check(
         );
         emit_disable_audits(
             audit,
-            "api_key.disabled",
+            "api_key.disable",
             &per_key_inactive,
             "inactive_per_key",
         );
@@ -172,9 +172,14 @@ pub async fn run_lifecycle_check(
             "Revoked {} rotated API keys past grace period",
             grace_expired.len()
         );
+        // Use the same `api_key.revoke` action the manual revoke
+        // handler emits — dashboards filtering on that action should
+        // see grace-period-driven revocations alongside operator-
+        // initiated ones (the `disabled_reason` detail distinguishes
+        // them when needed).
         emit_disable_audits(
             audit,
-            "api_key.revoked",
+            "api_key.revoke",
             &grace_expired,
             "grace_period_expired",
         );
