@@ -2,6 +2,7 @@ import React, { Fragment, useEffect, useMemo, useState, useCallback, useRef } fr
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearch } from '@tanstack/react-router';
 import { subHours, format } from 'date-fns';
+import Decimal from 'decimal.js';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -160,7 +161,10 @@ function getColumns(cat: LogCategory, t: (key: string) => string): ColDef[] {
         { key: 'upstream_model', label: T('upstream'), mono: true, filterKey: 'upstream_model' },
         { key: 'input_tokens', label: T('in'), align: 'right' },
         { key: 'output_tokens', label: T('out'), align: 'right' },
-        { key: 'cost_usd', label: T('cost'), align: 'right', render: (v) => `$${parseFloat(String(v || 0)).toFixed(4)}` },
+        // cost_usd arrives as a Decimal string from CH; parseFloat
+        // would silently round long fractional values. Use Decimal.js
+        // so the displayed number matches the audit trail bit-for-bit.
+        { key: 'cost_usd', label: T('cost'), align: 'right', render: (v) => `$${new Decimal(String(v ?? 0)).toFixed(4)}` },
         { key: 'latency_ms', label: T('latency'), align: 'right', render: (v) => v != null ? `${v}ms` : '—' },
         { key: 'status_code', label: T('status'), render: (v) => statusBadge(v), filterKey: 'status_code' },
       ];
@@ -278,7 +282,7 @@ function formatBackendTimestamp(raw: string): string {
 
 function formatDetailValue(key: string, raw: unknown): React.ReactNode {
   if (raw === null || raw === undefined || raw === '') return <span className="text-muted-foreground">—</span>;
-  if (key === 'cost_usd') return `$${parseFloat(String(raw)).toFixed(6)}`;
+  if (key === 'cost_usd') return `$${new Decimal(String(raw)).toFixed(6)}`;
   if (key === 'latency_ms' || key === 'duration_ms') return `${raw}ms`;
   if (key === 'created_at' || key === 'timestamp') return formatBackendTimestamp(String(raw));
   // Audit `detail` is a structured who-changed-what-from-X-to-Y blob. A flat

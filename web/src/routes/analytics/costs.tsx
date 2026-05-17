@@ -108,7 +108,7 @@ export function CostsPage() {
     [selectedTeam, selectedDimensions, timeRange],
   );
 
-  const fetchData = useCallback(() => {
+  const fetchData = useCallback((signal?: AbortSignal) => {
     setLoading(true);
     // Cost-stats endpoint accepts `range=24h|7d|30d` (anything else
     // — including `mtd` — falls back to 24h server-side). Forward the
@@ -122,19 +122,35 @@ export function CostsPage() {
     }
     const statsQs = statsParams.toString();
     Promise.all([
-      api<{ items: CostRow[]; total: { request_count: number; input_tokens: number; output_tokens: number; total_cost: string } }>(`/api/analytics/costs${queryString()}`),
-      api<CostStats>(`/api/analytics/costs/stats${statsQs ? `?${statsQs}` : ''}`),
+      api<{ items: CostRow[]; total: { request_count: number; input_tokens: number; output_tokens: number; total_cost: string } }>(`/api/analytics/costs${queryString()}`, { signal }),
+      api<CostStats>(`/api/analytics/costs/stats${statsQs ? `?${statsQs}` : ''}`, { signal }),
     ])
       .then(([costData, statsData]) => {
+        if (signal?.aborted) return;
         setRows(costData.items);
         setStats(statsData);
       })
-      .catch((err) => setError(err instanceof Error ? err.message : t('common.error')))
-      .finally(() => setLoading(false));
+      .catch((err) => {
+        // Swallow aborts — the next effect tick will refetch with
+        // the new params. Surface real errors only.
+        if (err instanceof DOMException && err.name === 'AbortError') return;
+        if (signal?.aborted) return;
+        setError(err instanceof Error ? err.message : t('common.error'));
+      })
+      .finally(() => {
+        if (signal?.aborted) return;
+        setLoading(false);
+      });
   }, [queryString, selectedTeam, timeRange, t]);
 
   useEffect(() => {
-    fetchData();
+    // Cancel the in-flight pair when params change OR the page
+    // unmounts. Without this, rapid toggling (e.g. clicking time-
+    // range chips fast) lets a stale Promise.all settle last and
+    // overwrite the fresher data with older numbers.
+    const controller = new AbortController();
+    fetchData(controller.signal);
+    return () => controller.abort();
   }, [fetchData]);
 
   const handleExport = useCallback(async () => {
