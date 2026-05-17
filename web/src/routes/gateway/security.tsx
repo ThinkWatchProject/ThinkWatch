@@ -679,8 +679,20 @@ export function GatewaySecurityPage() {
               cfPresets.map((preset) => (
                 <div
                   key={preset.id}
+                  // `role="button"` + `tabIndex={0}` + `onKeyDown`
+                  // make this card reachable and actionable for
+                  // keyboard and screen-reader users. The original
+                  // `<div onClick>` was only callable via mouse.
+                  role="button"
+                  tabIndex={0}
                   className="border rounded-md p-3 hover:bg-muted/50 cursor-pointer"
                   onClick={() => applyPreset(preset)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      applyPreset(preset);
+                    }
+                  }}
                 >
                   <div className="flex items-center justify-between mb-1">
                     <h4 className="text-sm font-semibold">{t(`settings.contentFilter.preset.${preset.id}.name`)}</h4>

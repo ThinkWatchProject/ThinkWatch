@@ -1058,8 +1058,13 @@ impl AuditLogger {
         let Some(db) = &self.db else {
             return Ok(());
         };
+        // `redirect::Policy::none()` so a webhook receiver can't 302
+        // us into an internal service after the admin saved a benign
+        // public URL — the audit forwarder explicitly delivers to
+        // admin-supplied URLs and is a prime SSRF surface.
         let http = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
         let mut over: Option<std::time::Instant> = None;
@@ -1260,7 +1265,13 @@ async fn audit_worker(
     db: Option<PgPool>,
     registry: ForwarderRegistry,
 ) {
-    let http_client = reqwest::Client::new();
+    // `redirect::Policy::none()` SSRF defense — same reasoning as
+    // `drain_webhook_outbox_once`: webhook deliveries can be 302'd
+    // into internal services if redirects are followed automatically.
+    let http_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap_or_default();
 
     // Separate batches per log type for routing to correct ClickHouse table
     let mut batches: HashMap<&'static str, Vec<AuditEntry>> = HashMap::new();
@@ -1389,8 +1400,10 @@ async fn forward_to_all(
 /// attempt count + reschedules on failure. Caps backoff at one hour
 /// and gives up after 24 attempts (~1 day worth of redelivery).
 async fn webhook_outbox_drain_loop(db: PgPool, registry: ForwarderRegistry) {
+    // SSRF defense: don't auto-follow redirects on webhook delivery.
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_default();
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));

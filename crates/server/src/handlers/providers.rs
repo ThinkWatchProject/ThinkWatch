@@ -411,11 +411,13 @@ pub async fn test_provider(
     auth_user
         .require_global_permission(&state.db, "providers:create")
         .await?;
-    run_provider_test(req).await
+    let http_client = (**state.http_client.load()).clone();
+    run_provider_test(req, http_client).await
 }
 
 pub(crate) async fn run_provider_test(
     req: TestProviderRequest,
+    client: reqwest::Client,
 ) -> Result<Json<TestProviderResponse>, AppError> {
     if req.base_url.is_empty() {
         return Err(AppError::BadRequest("base_url is required".into()));
@@ -431,10 +433,11 @@ pub(crate) async fn run_provider_test(
         _ => format!("{}/v1/models", req.base_url.trim_end_matches('/')),
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to build HTTP client: {e}")))?;
+    // `client` is now passed in from `test_provider` — uses the
+    // shared http_client so this endpoint inherits the central
+    // `redirect::Policy::none()` SSRF defense and the
+    // `perf.http_client_secs` timeout knob — building a fresh
+    // client here used to bypass both.
 
     let mut builder = client.get(&url);
     // Apply all headers directly — auth is now part of the unified headers list

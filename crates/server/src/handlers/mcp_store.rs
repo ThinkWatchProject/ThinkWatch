@@ -247,8 +247,20 @@ pub async fn sync_registry(
         ));
     }
 
+    // SSRF defense: the URL comes from admin input (either the saved
+    // setting or a per-request override). Block private CIDRs +
+    // metadata endpoints + reject `http://` to avoid downgrade. The
+    // `settings:write` permission is a broad-scope knob and not a
+    // sufficient gate against an internal-fetch primitive.
+    think_watch_common::validation::validate_url(&url)?;
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
+        // Don't follow redirects — a registry host returning
+        // `302 Location: http://169.254.169.254/...` would silently
+        // bypass the validate_url check above. Force callers to
+        // surface redirects explicitly if they ever become needed.
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("HTTP client error: {e}")))?;
 

@@ -1709,7 +1709,8 @@ pub async fn list_remote_models(
         headers,
     };
 
-    let Json(resp) = super::providers::run_provider_test(test_req).await?;
+    let http_client = (**state.http_client.load()).clone();
+    let Json(resp) = super::providers::run_provider_test(test_req, http_client).await?;
     if !resp.success {
         return Err(AppError::BadRequest(format!(
             "Provider unreachable: {}",

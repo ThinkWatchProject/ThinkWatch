@@ -109,8 +109,17 @@ pub async fn init_state(
 
     let crypto_key = think_watch_common::crypto::parse_encryption_key(&config.encryption_key)
         .map_err(|e| anyhow::anyhow!("invalid ENCRYPTION_KEY: {e}"))?;
+    // `redirect::Policy::none()` is the SSRF defense — without it
+    // reqwest follows up to 10 redirects, which silently bypasses
+    // any validate_url call we did at save time: admin saves a
+    // safe-looking https://attacker.example.com URL, attacker
+    // returns `302 Location: http://169.254.169.254/...`, we
+    // follow into the AWS metadata endpoint. Force callers to
+    // handle redirects explicitly (and re-validate each hop) by
+    // disabling automatic follow.
     let init_http_client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(init_http_secs))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
     let user_token_resolver = think_watch_mcp_gateway::user_token::UserTokenResolver::new(
@@ -244,6 +253,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
             let http_secs = dc.perf_http_client_secs().await as u64;
             let new_http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(http_secs))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new());
             http.store(Arc::new(new_http));

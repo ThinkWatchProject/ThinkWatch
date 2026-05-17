@@ -2375,10 +2375,23 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             }
         }
 
-        "auth.default_role" | "mcp_store.registry_url" => {
+        "auth.default_role" => {
             value
                 .as_str()
                 .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
+        }
+
+        "mcp_store.registry_url" => {
+            let s = value
+                .as_str()
+                .ok_or_else(|| AppError::BadRequest(format!("{key} must be a string")))?;
+            // Block save-time SSRF in addition to the fetch-time
+            // check in `sync_registry`: catching it here gives the
+            // admin an immediate error instead of a "saved but
+            // sync fails" mystery.
+            if !s.is_empty() {
+                think_watch_common::validation::validate_url(s)?;
+            }
         }
 
         // Client IP resolution
