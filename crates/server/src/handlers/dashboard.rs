@@ -1696,7 +1696,10 @@ pub async fn put_dashboard_layout(
     }
     let name = if req.name.is_empty() {
         "default".to_owned()
-    } else if req.name.len() > 64 {
+    } else if req.name.chars().count() > 64 {
+        // Count codepoints, not bytes — the message says "chars" and
+        // a 64-codepoint CJK / emoji name would be 192+ bytes and
+        // hit the byte-length check after only ~21 characters.
         return Err(AppError::BadRequest("name must be ≤ 64 chars".into()));
     } else {
         req.name
@@ -1750,6 +1753,14 @@ pub async fn dashboard_ws(
         return Err(axum::http::StatusCode::TOO_MANY_REQUESTS);
     }
 
+    // Cap inbound frame size. The dashboard WS protocol is server →
+    // client snapshots; the client only sends Close + Ping frames
+    // (already documented at the WS loop). axum/tungstenite default
+    // allows ~64 MiB per message — a malicious authenticated client
+    // could pump that much per frame to amplify memory pressure even
+    // though we never parse the payload. 64 KiB is far more than any
+    // legitimate Ping/Close needs.
+    let ws = ws.max_message_size(64 * 1024).max_frame_size(64 * 1024);
     Ok(ws.on_upgrade(move |socket| dashboard_ws_loop(socket, state, user_id, range)))
 }
 

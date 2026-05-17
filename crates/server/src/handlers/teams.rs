@@ -146,14 +146,21 @@ pub async fn list_teams(
 ) -> Result<Json<Vec<TeamWithCount>>, AppError> {
     auth_user.require_permission("teams:read")?;
 
-    // Determine if caller has global read scope.
-    let global = auth_user
+    // Visible team set:
+    //   - Global `teams:read` scope → every team.
+    //   - Otherwise the union of (a) teams the caller is a MEMBER of
+    //     and (b) teams the caller has `teams:read` scoped TO via a
+    //     direct or team-inherited role assignment. Previously only
+    //     (a) was returned, so a user granted scoped `teams:read` for
+    //     team X (without membership in X) could `GET /teams/{X}`
+    //     successfully but couldn't see X in the listing — confusing
+    //     UX and a real visibility bug for org-admin shapes.
+    let scope = auth_user
         .owned_team_scope_for_perm(&state.db, "teams:read")
-        .await?
-        .is_none();
+        .await?;
 
-    let rows: Vec<TeamWithCount> = if global {
-        sqlx::query_as::<_, TeamWithCountRow>(
+    let rows: Vec<TeamWithCount> = match scope {
+        None => sqlx::query_as::<_, TeamWithCountRow>(
             "SELECT t.id, t.name, t.description, t.created_at, \
                     COALESCE(c.cnt, 0) AS member_count \
                FROM teams t \
@@ -166,25 +173,31 @@ pub async fn list_teams(
         .await?
         .into_iter()
         .map(Into::into)
-        .collect()
-    } else {
-        sqlx::query_as::<_, TeamWithCountRow>(
-            "SELECT t.id, t.name, t.description, t.created_at, \
-                    COALESCE(c.cnt, 0) AS member_count \
-               FROM teams t \
-               JOIN team_members tm ON tm.team_id = t.id \
-          LEFT JOIN ( \
-               SELECT team_id, COUNT(*) AS cnt FROM team_members GROUP BY team_id \
-          ) c ON c.team_id = t.id \
-              WHERE tm.user_id = $1 \
-              ORDER BY t.name ASC",
-        )
-        .bind(auth_user.claims.sub)
-        .fetch_all(&state.db)
-        .await?
-        .into_iter()
-        .map(Into::into)
-        .collect()
+        .collect(),
+        Some(scoped_team_ids) => {
+            // Convert the HashSet to a Vec for binding to ANY($2).
+            let scoped: Vec<uuid::Uuid> = scoped_team_ids.iter().copied().collect();
+            sqlx::query_as::<_, TeamWithCountRow>(
+                "SELECT t.id, t.name, t.description, t.created_at, \
+                        COALESCE(c.cnt, 0) AS member_count \
+                   FROM teams t \
+              LEFT JOIN ( \
+                   SELECT team_id, COUNT(*) AS cnt FROM team_members GROUP BY team_id \
+              ) c ON c.team_id = t.id \
+                  WHERE EXISTS ( \
+                      SELECT 1 FROM team_members tm \
+                       WHERE tm.team_id = t.id AND tm.user_id = $1 \
+                  ) OR t.id = ANY($2) \
+                  ORDER BY t.name ASC",
+            )
+            .bind(auth_user.claims.sub)
+            .bind(&scoped)
+            .fetch_all(&state.db)
+            .await?
+            .into_iter()
+            .map(Into::into)
+            .collect()
+        }
     };
 
     Ok(Json(rows))
@@ -282,7 +295,11 @@ pub async fn create_team(
     if name.is_empty() {
         return Err(AppError::BadRequest("Team name is required".into()));
     }
-    if name.len() > 255 {
+    // Count Unicode scalars, not bytes — `.len()` would reject a
+    // 64-character Chinese name as "too long" because each codepoint
+    // is 3 bytes (CJK Unified). The UI error message says "characters",
+    // so the bound should match user expectation.
+    if name.chars().count() > 255 {
         return Err(AppError::BadRequest("Team name too long".into()));
     }
     let team = sqlx::query_as::<_, Team>(
@@ -350,12 +367,21 @@ pub async fn update_team(
     .await?
     .ok_or_else(|| AppError::NotFound("Team not found".into()))?;
 
-    let new_name = req
-        .name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&existing.name);
+    // Distinguish absent (preserve current) from empty (reject).
+    // The previous shape silently fell back to `existing.name` on
+    // whitespace input — so a client sending `{ "name": "   " }`
+    // saw a 200 OK with the name unchanged, which is the opposite of
+    // create_team's strict rejection. Now consistent with create_team:
+    // absent field → preserve, present-but-empty → 400.
+    let new_name = match req.name.as_deref().map(str::trim) {
+        None => existing.name.as_str(),
+        Some("") => {
+            return Err(AppError::BadRequest(
+                "Team name cannot be empty or whitespace".into(),
+            ));
+        }
+        Some(s) => s,
+    };
     // None = absent (preserve), Some(None) = clear, Some(Some(s)) = set.
     // Treat empty / whitespace-only strings as "clear" for parity with
     // the previous unwrap-empty-then-fallback behaviour the UI relied
