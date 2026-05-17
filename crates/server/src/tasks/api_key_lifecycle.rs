@@ -38,6 +38,31 @@ pub fn spawn_api_key_lifecycle_task(db: PgPool, config: Arc<DynamicConfig>, audi
     });
 }
 
+/// One row's worth of "this key just changed state" — fed into the
+/// audit-emission loop so every disable/revoke leaves a compliance
+/// trail, not just a `tracing::info!` line.
+#[derive(sqlx::FromRow)]
+struct DisabledKeyRow {
+    id: uuid::Uuid,
+    user_id: Option<uuid::Uuid>,
+}
+
+fn emit_disable_audits(audit: &AuditLogger, action: &str, rows: &[DisabledKeyRow], reason: &str) {
+    for row in rows {
+        let mut entry = SystemActor
+            .audit(action)
+            .resource(format!("api_key:{}", row.id))
+            .detail(serde_json::json!({
+                "api_key_id": row.id.to_string(),
+                "disabled_reason": reason,
+            }));
+        if let Some(uid) = row.user_id {
+            entry = entry.user_id(uid);
+        }
+        audit.log(entry);
+    }
+}
+
 /// Single deterministic pass of the lifecycle loop. `pub` so
 /// integration tests can drive it without `tokio::time::pause`-ing
 /// the whole 10-minute interval.
@@ -48,51 +73,61 @@ pub async fn run_lifecycle_check(
 ) -> anyhow::Result<()> {
     let now = chrono::Utc::now();
 
-    // 1. Disable expired keys
-    let expired = sqlx::query(
+    // 1. Disable expired keys. Previously this query used `.execute()`
+    //    and `tracing::info!`'d the count; the actual state changes
+    //    landed in PG with NO audit trail, so security teams investigating
+    //    "why did this key stop working" had to cross-reference application
+    //    logs against the DB and hope they hadn't rotated. RETURNING +
+    //    audit emit closes the gap. Same change applied to all four
+    //    disable/revoke queries below.
+    let expired: Vec<DisabledKeyRow> = sqlx::query_as(
         r#"UPDATE api_keys
            SET is_active = false, disabled_reason = 'expired'
            WHERE is_active = true
              AND expires_at IS NOT NULL
              AND expires_at < $1
-             AND disabled_reason IS NULL"#,
+             AND disabled_reason IS NULL
+           RETURNING id, user_id"#,
     )
     .bind(now)
-    .execute(db)
+    .fetch_all(db)
     .await?;
 
-    if expired.rows_affected() > 0 {
-        tracing::info!("Disabled {} expired API keys", expired.rows_affected());
+    if !expired.is_empty() {
+        tracing::info!("Disabled {} expired API keys", expired.len());
+        emit_disable_audits(audit, "api_key.disabled", &expired, "expired");
     }
 
     // 2. Disable inactive keys
     let global_inactivity_days = config.api_keys_inactivity_timeout_days().await;
     if global_inactivity_days > 0 {
         let inactive_threshold = now - chrono::Duration::days(global_inactivity_days);
-        let inactive = sqlx::query(
+        let inactive: Vec<DisabledKeyRow> = sqlx::query_as(
             r#"UPDATE api_keys
                SET is_active = false, disabled_reason = 'inactive'
                WHERE is_active = true
                  AND last_used_at IS NOT NULL
                  AND last_used_at < $1
                  AND disabled_reason IS NULL
-                 AND (inactivity_timeout_days IS NULL OR inactivity_timeout_days = 0)"#,
+                 AND (inactivity_timeout_days IS NULL OR inactivity_timeout_days = 0)
+               RETURNING id, user_id"#,
         )
         .bind(inactive_threshold)
-        .execute(db)
+        .fetch_all(db)
         .await?;
 
-        if inactive.rows_affected() > 0 {
+        if !inactive.is_empty() {
             tracing::info!(
                 "Disabled {} inactive API keys (global timeout: {} days)",
-                inactive.rows_affected(),
+                inactive.len(),
                 global_inactivity_days
             );
+            emit_disable_audits(audit, "api_key.disabled", &inactive, "inactive_global");
         }
     }
 
     // Per-key inactivity timeout
-    let per_key_inactive = sqlx::query(
+    let per_key_inactive: Vec<DisabledKeyRow> = sqlx::query_as(
         r#"UPDATE api_keys
            SET is_active = false, disabled_reason = 'inactive'
            WHERE is_active = true
@@ -100,34 +135,48 @@ pub async fn run_lifecycle_check(
              AND inactivity_timeout_days > 0
              AND last_used_at IS NOT NULL
              AND last_used_at < now() - (inactivity_timeout_days || ' days')::interval
-             AND disabled_reason IS NULL"#,
+             AND disabled_reason IS NULL
+           RETURNING id, user_id"#,
     )
-    .execute(db)
+    .fetch_all(db)
     .await?;
 
-    if per_key_inactive.rows_affected() > 0 {
+    if !per_key_inactive.is_empty() {
         tracing::info!(
             "Disabled {} inactive API keys (per-key timeout)",
-            per_key_inactive.rows_affected()
+            per_key_inactive.len()
+        );
+        emit_disable_audits(
+            audit,
+            "api_key.disabled",
+            &per_key_inactive,
+            "inactive_per_key",
         );
     }
 
     // 3. Revoke rotated keys past grace period
-    let grace_expired = sqlx::query(
+    let grace_expired: Vec<DisabledKeyRow> = sqlx::query_as(
         r#"UPDATE api_keys
            SET is_active = false
            WHERE is_active = true
              AND grace_period_ends_at IS NOT NULL
-             AND grace_period_ends_at < $1"#,
+             AND grace_period_ends_at < $1
+           RETURNING id, user_id"#,
     )
     .bind(now)
-    .execute(db)
+    .fetch_all(db)
     .await?;
 
-    if grace_expired.rows_affected() > 0 {
+    if !grace_expired.is_empty() {
         tracing::info!(
             "Revoked {} rotated API keys past grace period",
-            grace_expired.rows_affected()
+            grace_expired.len()
+        );
+        emit_disable_audits(
+            audit,
+            "api_key.revoked",
+            &grace_expired,
+            "grace_period_expired",
         );
     }
 
