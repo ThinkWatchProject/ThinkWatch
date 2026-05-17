@@ -220,8 +220,20 @@ where
                         *g = chunk.usage.clone();
                     }
 
-                    // Collect a clone of each chunk for post-flight cache assembly.
-                    if let Ok(mut g) = collected_chunks.lock() {
+                    // Collect a clone of each chunk for post-flight
+                    // cache assembly — but cap retention so a 32k-token
+                    // completion doesn't hold 32k cloned chunks in
+                    // memory for the stream's lifetime. Beyond the cap
+                    // we stop collecting; `assemble_response` (and
+                    // the cache write that depends on it) becomes a
+                    // no-op for over-long responses, which is the
+                    // intended trade-off — the cache hit rate on
+                    // truly large completions is low enough that the
+                    // memory cliff isn't worth it.
+                    const MAX_CACHED_CHUNKS: usize = 2048;
+                    if let Ok(mut g) = collected_chunks.lock()
+                        && g.len() < MAX_CACHED_CHUNKS
+                    {
                         g.push(chunk.clone());
                     }
 

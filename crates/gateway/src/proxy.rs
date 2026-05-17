@@ -444,6 +444,45 @@ fn emit_gateway_log(
     );
 }
 
+/// Resolve `(prompt_tokens, completion_tokens)` from a streaming
+/// result. Returns the upstream-reported usage when present; falls
+/// back to a conservative estimate when the upstream didn't emit a
+/// usage chunk (the OpenAI surface only does so when the client opts
+/// in via `stream_options.include_usage: true`, and many clients
+/// don't ask). Without this fallback, streaming requests from
+/// non-include_usage clients hit `let Some(u) = result.usage else
+/// { return; };` and silently bypass quota / budget / rate-limit
+/// accounting — free streaming for anyone who sends `stream: true`
+/// without the option.
+///
+/// The estimate over-approximates by design (`token_counter` already
+/// over-estimates), so rate limits stay conservative. Operators can
+/// distinguish exact vs estimated rows by the `stream_usage_estimated`
+/// counter we bump on the fallback path.
+fn stream_usage_or_estimate(
+    result: &crate::streaming::StreamResult,
+    request_messages: &[crate::providers::traits::ChatMessage],
+) -> (u32, u32) {
+    if let Some(ref u) = result.usage {
+        return (u.prompt_tokens, u.completion_tokens);
+    }
+    metrics::counter!("gateway_stream_usage_estimated_total").increment(1);
+    let prompt_tokens = crate::token_counter::count_message_tokens(request_messages);
+    // `delta` is a free-form JSON Value (varies across providers);
+    // pull the canonical `content` string when present and skip
+    // anything else (tool_calls, refusal, vendor extensions).
+    let mut completion_text = String::new();
+    for chunk in &result.chunks {
+        for choice in &chunk.choices {
+            if let Some(content) = choice.delta.get("content").and_then(|v| v.as_str()) {
+                completion_text.push_str(content);
+            }
+        }
+    }
+    let completion_tokens = crate::token_counter::estimate_tokens(&completion_text);
+    (prompt_tokens, completion_tokens)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn post_flight_account(
     db: sqlx::PgPool,
@@ -1395,17 +1434,16 @@ pub async fn proxy_chat_completion(
                         .await;
                 }
 
-                let Some(u) = result.usage else {
-                    return;
-                };
+                let (prompt_tokens, completion_tokens) =
+                    stream_usage_or_estimate(&result, &request_for_cache.messages);
                 post_flight_account(
                     db,
                     redis,
                     dynamic_config,
                     weight_cache,
                     model,
-                    u.prompt_tokens,
-                    u.completion_tokens,
+                    prompt_tokens,
+                    completion_tokens,
                     request_rules_for_done,
                     budget_caps.clone(),
                     user_id_for_done,
@@ -1779,6 +1817,10 @@ pub async fn proxy_anthropic_messages(
         let cost_tracker = state.cost_tracker.clone();
         let trace_id_for_done = trace_id.clone();
         let session_id_for_done = session_id.clone();
+        // Capture the prompt messages for usage estimation when the
+        // upstream stream doesn't surface a usage chunk — see
+        // `stream_usage_or_estimate` for the budget-bypass context.
+        let messages_for_done = request.messages.clone();
         let user_id_for_done = identity.user_id.clone();
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
@@ -1825,17 +1867,16 @@ pub async fn proxy_anthropic_messages(
                         | crate::streaming::StreamOutcome::ClientCancelled
                 );
                 finalize_health(&state_for_done, sel_record, stream_success).await;
-                let Some(u) = result.usage else {
-                    return;
-                };
+                let (prompt_tokens, completion_tokens) =
+                    stream_usage_or_estimate(&result, &messages_for_done);
                 post_flight_account(
                     db,
                     redis,
                     dynamic_config,
                     weight_cache,
                     model_for_done,
-                    u.prompt_tokens,
-                    u.completion_tokens,
+                    prompt_tokens,
+                    completion_tokens,
                     request_rules_for_done,
                     budget_caps.clone(),
                     user_id_for_done,
@@ -2203,6 +2244,10 @@ pub async fn proxy_responses(
         let cost_tracker = state.cost_tracker.clone();
         let trace_id_for_done = trace_id.clone();
         let session_id_for_done = session_id.clone();
+        // Capture the prompt messages for usage estimation when the
+        // upstream stream doesn't surface a usage chunk — see
+        // `stream_usage_or_estimate` for the budget-bypass context.
+        let messages_for_done = request.messages.clone();
         let user_id_for_done = identity.user_id.clone();
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
@@ -2249,17 +2294,16 @@ pub async fn proxy_responses(
                         | crate::streaming::StreamOutcome::ClientCancelled
                 );
                 finalize_health(&state_for_done, sel_record, stream_success).await;
-                let Some(u) = result.usage else {
-                    return;
-                };
+                let (prompt_tokens, completion_tokens) =
+                    stream_usage_or_estimate(&result, &messages_for_done);
                 post_flight_account(
                     db,
                     redis,
                     dynamic_config,
                     weight_cache,
                     model_for_done,
-                    u.prompt_tokens,
-                    u.completion_tokens,
+                    prompt_tokens,
+                    completion_tokens,
                     request_rules_for_done,
                     budget_caps.clone(),
                     user_id_for_done,

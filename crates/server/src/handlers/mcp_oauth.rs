@@ -864,8 +864,16 @@ async fn oauth_token_exchange(
              ask an administrator to verify them at /mcp/servers."
         )));
     }
-    serde_json::from_str(&resp_text)
-        .map_err(|e| AppError::BadRequest(format!("Token response not JSON: {e}: {resp_text}")))
+    serde_json::from_str(&resp_text).map_err(|e| {
+        // Don't surface `resp_text` to the client — on a malformed-
+        // but-token-bearing OAuth response (rare misbehaving servers)
+        // the body would carry `access_token` / `refresh_token` /
+        // vendor `_debug_*` fields and we'd leak them in the 400.
+        // The serde error already carries position info, which is
+        // enough to triage from logs.
+        tracing::warn!(error = %e, body_len = resp_text.len(), "MCP OAuth token response was not JSON");
+        AppError::BadRequest(format!("Token response not JSON: {e}"))
+    })
 }
 
 // ---------------------------------------------------------------------------
