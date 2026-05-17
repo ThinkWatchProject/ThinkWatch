@@ -278,10 +278,13 @@ pub async fn sso_callback(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
     let expected = state_nonce_binding(&enc_key, &params.state, &session.nonce);
     if !bool::from(expected.as_bytes().ct_eq(session.binding.as_bytes())) {
-        tracing::warn!(
-            "OIDC state/nonce binding mismatch for state {}",
-            params.state
-        );
+        // Don't log `params.state` verbatim — it's 32 bytes of CSRF-
+        // binding randomness that uniquely identifies the in-flight
+        // login attempt and would correlate to the IdP's audit log
+        // if exfiltrated. The take_pkce_session GETDEL above already
+        // consumed it so replay isn't a risk, but operators trying
+        // to debug a CSRF event don't need the secret to do so.
+        tracing::warn!("OIDC state/nonce binding mismatch");
         return Err(AppError::BadRequest(
             "SSO session binding failed; please retry".into(),
         ));

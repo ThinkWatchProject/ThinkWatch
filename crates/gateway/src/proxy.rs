@@ -1178,9 +1178,15 @@ pub async fn proxy_chat_completion(
     // 4. Content filter — check for prompt injection
     let content_filter = state.content_filter.load();
     if let Some(m) = content_filter.check(&request.messages) {
+        // Log lines use `log_summary()` (no matched snippet) so user
+        // prompt content doesn't tunnel into the centralized log
+        // pipeline. The client-facing error still uses the full
+        // Display form so the caller can see what triggered the rule
+        // and adjust their prompt — that surface is the user's own
+        // request body, so showing it back is not a leak.
         match m.action {
             Action::Block => {
-                tracing::warn!("Content filter blocked request: {m}");
+                tracing::warn!("Content filter blocked request: {}", m.log_summary());
                 return Err(ctx
                     .emit(GatewayError::TransformError(format!(
                         "Request blocked by content filter: {m}"
@@ -1188,10 +1194,13 @@ pub async fn proxy_chat_completion(
                     .into());
             }
             Action::Warn => {
-                tracing::warn!("Content filter warning (request allowed): {m}");
+                tracing::warn!(
+                    "Content filter warning (request allowed): {}",
+                    m.log_summary()
+                );
             }
             Action::Log => {
-                tracing::info!("Content filter log: {m}");
+                tracing::info!("Content filter log: {}", m.log_summary());
             }
         }
     }

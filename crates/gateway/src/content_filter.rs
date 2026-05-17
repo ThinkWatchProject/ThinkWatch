@@ -64,10 +64,28 @@ pub struct ContentFilterMatch {
 
 impl std::fmt::Display for ContentFilterMatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // INCLUDES the matched snippet — designed for the client-
+        // facing 400 response so the caller can see what triggered
+        // the rule and fix their prompt. Do NOT use this in tracing
+        // logs: the snippet is user prompt content and we have no
+        // business shipping it to centralized log aggregators by
+        // default. Use `log_summary()` instead at log sites.
         write!(
             f,
             "[{}] rule '{}' ({}) matched: \"{}\"",
             self.action, self.name, self.match_type, self.matched_snippet,
+        )
+    }
+}
+
+impl ContentFilterMatch {
+    /// Log-safe summary that omits the matched user-text snippet.
+    /// Use this in `tracing::*!` calls; reserve the full `Display`
+    /// form for the response body the matched user explicitly sees.
+    pub fn log_summary(&self) -> String {
+        format!(
+            "[{}] rule '{}' ({}) matched (snippet redacted)",
+            self.action, self.name, self.match_type
         )
     }
 }
