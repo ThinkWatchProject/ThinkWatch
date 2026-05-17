@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { format } from 'date-fns';
+import { safeExternalHref } from '@/lib/utils';
 
 interface ConnectionAccount {
   account_label: string;
@@ -373,16 +374,24 @@ export function ConnectionsPage() {
                     </code>
                   </div>
                 )}
-                {addTarget?.static_token_help_url && (
-                  <a
-                    href={addTarget.static_token_help_url}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="text-xs text-primary inline-flex items-center gap-1"
-                  >
-                    {t('connections.howToGetToken')} <ExternalLink className="h-3 w-3" />
-                  </a>
-                )}
+                {/* `static_token_help_url` is admin-supplied free
+                    text, so a `javascript:` href would execute in
+                    the user's session when clicked. `rel` flags don't
+                    block that — only scheme validation does. Render
+                    no link if the value isn't a real http(s) URL. */}
+                {(() => {
+                  const safe = safeExternalHref(addTarget?.static_token_help_url);
+                  return safe ? (
+                    <a
+                      href={safe}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs text-primary inline-flex items-center gap-1"
+                    >
+                      {t('connections.howToGetToken')} <ExternalLink className="h-3 w-3" />
+                    </a>
+                  ) : null;
+                })()}
               </div>
             )}
           </div>

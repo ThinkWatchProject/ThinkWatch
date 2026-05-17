@@ -472,10 +472,21 @@ pub async fn get_dashboard_stats(
 //   - WS   /api/dashboard/ws    — pushes a new snapshot every 4 s
 // ============================================================================
 
+/// Canonical wire shape for `ProviderHealth.kind`. Defined as a real
+/// enum so the wire contract is enforced by the type system — adding
+/// a third variant requires updating the enum (and the frontend's
+/// matching Zod literal union breaks loudly on compile, not at
+/// runtime when an unexpected value reaches the dashboard).
+#[derive(Debug, Clone, Copy, Serialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    Ai,
+    Mcp,
+}
+
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct ProviderHealth {
-    /// "ai" for AI providers, "mcp" for MCP servers.
-    pub kind: String,
+    pub kind: ProviderKind,
     pub provider: String,
     pub requests: u64,
     pub avg_latency_ms: f64,
@@ -678,8 +689,8 @@ async fn build_live_snapshot(
     // provider row with its real state below.
     let cb_states = think_watch_common::cb_registry::snapshot_cb_states();
 
-    let seed_provider = |kind: &str, name: &str| ProviderHealth {
-        kind: kind.to_string(),
+    let seed_provider = |kind: ProviderKind, name: &str| ProviderHealth {
+        kind,
         provider: name.to_string(),
         requests: 0,
         avg_latency_ms: 0.0,
@@ -710,7 +721,7 @@ async fn build_live_snapshot(
                 .unwrap_or_else(|| "Closed".to_string())
         };
         ProviderHealth {
-            kind: "mcp".to_string(),
+            kind: ProviderKind::Mcp,
             provider: name.to_string(),
             requests: 0,
             avg_latency_ms: 0.0,
@@ -729,7 +740,7 @@ async fn build_live_snapshot(
     if !ch_available(state) {
         let mut providers: Vec<ProviderHealth> = configured_providers
             .iter()
-            .map(|(name,)| seed_provider("ai", name))
+            .map(|(name,)| seed_provider(ProviderKind::Ai, name))
             .collect();
         providers.extend(
             configured_mcp_servers
@@ -757,7 +768,7 @@ async fn build_live_snapshot(
         return Ok(DashboardLive {
             providers: configured_providers
                 .iter()
-                .map(|(name,)| seed_provider("ai", name))
+                .map(|(name,)| seed_provider(ProviderKind::Ai, name))
                 .chain(
                     configured_mcp_servers
                         .iter()
@@ -1062,7 +1073,7 @@ async fn build_live_snapshot(
     let mut providers: Vec<ProviderHealth> = provider_rows
         .into_iter()
         .map(|r| ProviderHealth {
-            kind: "ai".to_string(),
+            kind: ProviderKind::Ai,
             cb_state: cb_states
                 .get(&r.provider)
                 .map(|c| c.as_str().to_string())
@@ -1076,7 +1087,7 @@ async fn build_live_snapshot(
         .collect();
     for r in mcp_rows {
         providers.push(ProviderHealth {
-            kind: "mcp".to_string(),
+            kind: ProviderKind::Mcp,
             cb_state: cb_states
                 .get(&r.provider)
                 .map(|c| c.as_str().to_string())
@@ -1094,15 +1105,15 @@ async fn build_live_snapshot(
     for (name,) in &configured_providers {
         if !providers
             .iter()
-            .any(|p| p.kind == "ai" && &p.provider == name)
+            .any(|p| matches!(p.kind, ProviderKind::Ai) && &p.provider == name)
         {
-            providers.push(seed_provider("ai", name));
+            providers.push(seed_provider(ProviderKind::Ai, name));
         }
     }
     for (name, status) in &configured_mcp_servers {
         if !providers
             .iter()
-            .any(|p| p.kind == "mcp" && &p.provider == name)
+            .any(|p| matches!(p.kind, ProviderKind::Mcp) && &p.provider == name)
         {
             providers.push(seed_mcp(name, status));
         }

@@ -279,6 +279,23 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
         signal: options.signal,
       });
       if (retryRes.ok) return validate(path, await retryRes.json(), options.schema);
+      // After a successful refresh, the retry can still legitimately
+      // return non-401 statuses — a 403 means "session is fine, but
+      // this user can't do that"; a 500 means upstream broke. Don't
+      // evict the session on those — only an actual 401 here implies
+      // the refresh path itself is unusable. Fall through to the
+      // standard error-body handler below for any other status.
+      if (retryRes.status !== 401) {
+        const body = await retryRes.json().catch(() => ({}));
+        const errorBody = body?.error;
+        const serverMessage =
+          typeof errorBody === 'string'
+            ? errorBody
+            : errorBody?.message ?? body?.message ?? retryRes.statusText;
+        const errorType: string | undefined =
+          typeof errorBody === 'object' ? errorBody?.type : undefined;
+        throw new ApiError(serverMessage || 'Request failed', retryRes.status, errorType);
+      }
     }
     // Skip eviction for probe calls like /api/auth/me on mount —
     // a 401 there means "not logged in yet", not "session expired".
