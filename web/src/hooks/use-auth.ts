@@ -118,5 +118,5 @@ export function useAuth() {
     await fetchUser();
   }, [fetchUser]);
 
-  return { user, loading, login, logout, handleSsoCallback };
+  return { user, loading, login, logout, handleSsoCallback, fetchUser };
 }
