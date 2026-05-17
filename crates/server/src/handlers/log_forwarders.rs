@@ -48,7 +48,11 @@ pub struct CreateForwarderRequest {
     pub log_types: Option<Vec<String>>,
 }
 
-const VALID_LOG_TYPES: &[&str] = &["access", "app", "audit", "gateway", "mcp", "platform"];
+// `platform` was a separate LogType variant once but was collapsed
+// into `audit` when the schemas turned out to be identical. Listing
+// it here would let an operator save a forwarder filtered to a
+// log_type that NO row ever emits — silent misconfiguration.
+const VALID_LOG_TYPES: &[&str] = &["access", "app", "audit", "gateway", "mcp"];
 
 #[utoipa::path(
     post,
