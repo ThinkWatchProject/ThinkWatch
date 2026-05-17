@@ -46,26 +46,13 @@ pub struct AuthUser {
 }
 
 /// Authenticated-user audit attribution. The trait body lives in
-/// `common::audit::AuditActor`; this impl is what makes `AuthUser`
-/// fit the actor abstraction shared with `AnonymousActor`,
-/// `SystemActor`, etc. Forensic context (ip / user_agent / email)
-/// is captured at middleware time and replayed here.
+/// `common::audit::AuditActor`; this impl is the single source of
+/// truth for what `auth_user.audit("...")` populates. The inherent
+/// method below delegates here so they can't diverge — a future
+/// change (e.g. adding `session_id`) lands once and reaches every
+/// call site automatically.
 impl think_watch_common::audit::AuditActor for AuthUser {
     fn audit(&self, action: impl Into<String>) -> AuditEntry {
-        self.audit_impl(action.into())
-    }
-}
-
-impl AuthUser {
-    /// Inherent shim: `auth_user.audit("...")` resolves without
-    /// requiring `use think_watch_common::audit::AuditActor;` at
-    /// every call site. Same body as the trait impl — Rust picks
-    /// the inherent method when both are visible.
-    pub fn audit(&self, action: impl Into<String>) -> AuditEntry {
-        self.audit_impl(action.into())
-    }
-
-    fn audit_impl(&self, action: String) -> AuditEntry {
         #[allow(deprecated)]
         let mut e = AuditEntry::new(action)
             .user_id(self.claims.sub)
@@ -77,6 +64,17 @@ impl AuthUser {
             e = e.user_agent(ua.clone());
         }
         e
+    }
+}
+
+impl AuthUser {
+    /// Inherent shim: `auth_user.audit("...")` resolves without
+    /// requiring `use think_watch_common::audit::AuditActor;` at
+    /// every call site. Delegates to the trait impl so the two
+    /// can't drift — Rust picks the inherent method when both are
+    /// visible, but they produce identical output.
+    pub fn audit(&self, action: impl Into<String>) -> AuditEntry {
+        <Self as think_watch_common::audit::AuditActor>::audit(self, action)
     }
 
     /// Authorization gate: require the JWT to carry the given permission

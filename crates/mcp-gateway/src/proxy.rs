@@ -986,22 +986,27 @@ impl McpProxy {
         // shaped keys are redacted by sanitize_detail downstream
         // (recursive walk over the JSON tree, see common::audit).
         let logged_arguments = params.get("arguments").cloned();
-        let mut entry = think_watch_common::audit::AuditEntry::mcp("tools.call")
-            .trace_id(call_trace_id)
-            .detail(serde_json::json!({
-                "server_id": server_id.to_string(),
-                "server_name": server_name,
-                "tool_name": tool_name,
-                "arguments": logged_arguments,
-                "duration_ms": started.elapsed().as_millis() as i64,
-                "status": status,
-                "error_message": error_message,
-            }));
-        entry = entry.user_id(user_id).user_email(user_email);
-        if let Some(ip) = ctx.ip_address {
-            entry = entry.ip_address(ip);
-        }
-        self.audit.log(entry);
+        use think_watch_common::audit::{AuditActor, McpActor};
+        let actor = McpActor {
+            user_id,
+            user_email,
+            ip: ctx.ip_address,
+        };
+        self.audit
+            .log(
+                actor
+                    .audit("tools.call")
+                    .trace_id(call_trace_id)
+                    .detail(serde_json::json!({
+                        "server_id": server_id.to_string(),
+                        "server_name": server_name,
+                        "tool_name": tool_name,
+                        "arguments": logged_arguments,
+                        "duration_ms": started.elapsed().as_millis() as i64,
+                        "status": status,
+                        "error_message": error_message,
+                    })),
+            );
 
         response
     }

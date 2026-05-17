@@ -308,6 +308,16 @@ impl AuditEntry {
     }
 
     /// Create entry for gateway request logs.
+    ///
+    /// Bare constructor — same deprecation reasoning as `::new`. Use
+    /// `GatewayActor.audit(action)` instead; it sets `LogType::Gateway`
+    /// automatically AND pre-fills user/api_key/ip/session fields by
+    /// construction, so handlers can't ship a gateway log row with
+    /// missing actor attribution.
+    #[doc(hidden)]
+    #[deprecated(
+        note = "Use GatewayActor.audit(\"…\") — sets LogType::Gateway and pre-fills actor fields."
+    )]
     pub fn gateway(action: impl Into<String>) -> Self {
         #[allow(deprecated)]
         let mut entry = Self::new(action);
@@ -316,6 +326,13 @@ impl AuditEntry {
     }
 
     /// Create entry for MCP tool invocation logs.
+    ///
+    /// Bare constructor — same deprecation reasoning as `::new`. Use
+    /// `McpActor.audit(action)` instead.
+    #[doc(hidden)]
+    #[deprecated(
+        note = "Use McpActor.audit(\"…\") — sets LogType::Mcp and pre-fills actor fields."
+    )]
     pub fn mcp(action: impl Into<String>) -> Self {
         #[allow(deprecated)]
         let mut entry = Self::new(action);
@@ -496,25 +513,29 @@ impl AuditActor for SystemActor {
     }
 }
 
-/// Gateway request actor — used by `gateway_logs` writers + the
-/// `budget.threshold_crossed` audit fired on the request path.
-/// Doesn't depend on the server crate's `AuthUser` so the gateway
-/// crate can construct it from `GatewayRequestIdentity` directly.
+/// Gateway request actor — used for every `gateway_logs` row plus
+/// the `budget.threshold_crossed` audit on the request path. Doesn't
+/// depend on the server crate's `AuthUser` so the gateway crate can
+/// construct it directly from `GatewayRequestIdentity`. `.audit()`
+/// sets `LogType::Gateway` so callers don't have to chain it.
 pub struct GatewayActor<'a> {
     pub user_id: Option<&'a str>,
     pub user_email: Option<&'a str>,
     pub api_key_id: Option<&'a str>,
+    pub api_key_lineage_id: Option<&'a str>,
     pub ip: Option<&'a str>,
+    pub session_id: Option<&'a str>,
 }
 
 impl AuditActor for GatewayActor<'_> {
     fn audit(&self, action: impl Into<String>) -> AuditEntry {
+        // user_id / api_key_id / lineage_id are stored as Uuid in
+        // AuditEntry; the gateway's identity carries them as strings
+        // (they came off the wire that way). Parse on the way in —
+        // a malformed string drops the field rather than corrupting
+        // the row.
         #[allow(deprecated)]
-        let mut e = AuditEntry::new(action);
-        // user_id / api_key_id are stored as Uuid in AuditEntry; the
-        // gateway's identity carries them as strings (they came off
-        // the wire that way). Parse on the way in — a malformed
-        // string drops the field rather than corrupting the row.
+        let mut e = AuditEntry::new(action).log_type(LogType::Gateway);
         if let Some(uid) = self.user_id
             && let Ok(u) = uid.parse::<Uuid>()
         {
@@ -528,6 +549,39 @@ impl AuditActor for GatewayActor<'_> {
         {
             e = e.api_key_id(k);
         }
+        if let Some(lid) = self.api_key_lineage_id
+            && let Ok(l) = lid.parse::<Uuid>()
+        {
+            e = e.api_key_lineage_id(l);
+        }
+        if let Some(ip) = self.ip {
+            e = e.ip_address(ip);
+        }
+        if let Some(sid) = self.session_id {
+            e = e.session_id(sid);
+        }
+        e
+    }
+}
+
+/// MCP gateway request actor — same role as `GatewayActor` for the
+/// MCP path. Distinct from `GatewayActor` because the MCP gateway's
+/// identity carries `user_id` as a typed `Uuid` (not a string),
+/// `LogType::Mcp` is what `.audit()` sets, and MCP doesn't model
+/// api_key_id / session_id / lineage at the request log layer.
+pub struct McpActor<'a> {
+    pub user_id: Uuid,
+    pub user_email: &'a str,
+    pub ip: Option<&'a str>,
+}
+
+impl AuditActor for McpActor<'_> {
+    fn audit(&self, action: impl Into<String>) -> AuditEntry {
+        #[allow(deprecated)]
+        let mut e = AuditEntry::new(action)
+            .log_type(LogType::Mcp)
+            .user_id(self.user_id)
+            .user_email(self.user_email);
         if let Some(ip) = self.ip {
             e = e.ip_address(ip);
         }
@@ -759,6 +813,126 @@ mod tests {
         assert_eq!(decoded.resource, original.resource);
         assert_eq!(decoded.trace_id, original.trace_id);
         assert_eq!(decoded.detail, original.detail);
+    }
+
+    // ---- AuditActor impls --------------------------------------------------
+    // These actors are the foundation the whole audit-attribution
+    // discipline rests on. A refactor that reorders if-let chains or
+    // forgets a field would silently drop forensic context on every
+    // emitted row. Pin each actor's contract here so the next change
+    // gets a test signal.
+
+    #[test]
+    fn anonymous_actor_populates_all_present_fields() {
+        let uid = Uuid::new_v4();
+        let actor = AnonymousActor {
+            ip: Some("203.0.113.7"),
+            user_agent: Some("Mozilla/5.0"),
+            user_email: Some("alice@example.com"),
+            user_id: Some(uid),
+        };
+        let e = actor.audit("auth.login_failed");
+        assert_eq!(e.action, "auth.login_failed");
+        assert_eq!(e.ip_address.as_deref(), Some("203.0.113.7"));
+        assert_eq!(e.user_agent.as_deref(), Some("Mozilla/5.0"));
+        assert_eq!(e.user_email.as_deref(), Some("alice@example.com"));
+        assert_eq!(e.user_id.as_deref(), Some(uid.to_string().as_str()));
+        assert!(matches!(e.log_type, LogType::Audit));
+    }
+
+    #[test]
+    fn anonymous_actor_truly_anonymous_omits_optional_fields() {
+        // POW challenge mint case — only IP is known.
+        let actor = AnonymousActor {
+            ip: Some("203.0.113.7"),
+            user_agent: None,
+            user_email: None,
+            user_id: None,
+        };
+        let e = actor.audit("auth.pow_challenge");
+        assert_eq!(e.ip_address.as_deref(), Some("203.0.113.7"));
+        assert!(e.user_agent.is_none());
+        assert!(e.user_email.is_none());
+        assert!(e.user_id.is_none());
+    }
+
+    #[test]
+    fn oauth_callback_actor_user_id_is_mandatory_and_log_type_is_audit() {
+        let uid = Uuid::new_v4();
+        let actor = OAuthCallbackActor {
+            user_id: uid,
+            ip: None,
+            user_agent: None,
+        };
+        let e = actor.audit("mcp.connection.authorized");
+        assert_eq!(e.user_id.as_deref(), Some(uid.to_string().as_str()));
+        assert!(matches!(e.log_type, LogType::Audit));
+    }
+
+    #[test]
+    fn system_actor_carries_no_attribution() {
+        let e = SystemActor.audit("data.gdpr_purge");
+        assert!(e.user_id.is_none());
+        assert!(e.user_email.is_none());
+        assert!(e.ip_address.is_none());
+        assert!(e.user_agent.is_none());
+        assert!(e.api_key_id.is_none());
+    }
+
+    #[test]
+    fn gateway_actor_sets_log_type_gateway_and_parses_uuid_strings() {
+        let uid = Uuid::new_v4().to_string();
+        let kid = Uuid::new_v4().to_string();
+        let lid = Uuid::new_v4().to_string();
+        let actor = GatewayActor {
+            user_id: Some(&uid),
+            user_email: Some("alice@example.com"),
+            api_key_id: Some(&kid),
+            api_key_lineage_id: Some(&lid),
+            ip: Some("203.0.113.7"),
+            session_id: Some("sess-abc"),
+        };
+        let e = actor.audit("chat.completion");
+        assert!(matches!(e.log_type, LogType::Gateway));
+        assert_eq!(e.user_id.as_deref(), Some(uid.as_str()));
+        assert_eq!(e.api_key_id.as_deref(), Some(kid.as_str()));
+        assert_eq!(e.api_key_lineage_id.as_deref(), Some(lid.as_str()));
+        assert_eq!(e.session_id.as_deref(), Some("sess-abc"));
+        assert_eq!(e.ip_address.as_deref(), Some("203.0.113.7"));
+    }
+
+    #[test]
+    fn gateway_actor_drops_malformed_uuid_strings_silently() {
+        // Mirrors the production "bad string from wire = absent field,
+        // not corrupt row" contract — pin so a future refactor that
+        // panics on parse failure (or substitutes a zero Uuid) breaks
+        // this test.
+        let actor = GatewayActor {
+            user_id: Some("not-a-uuid"),
+            user_email: None,
+            api_key_id: Some("also-not-a-uuid"),
+            api_key_lineage_id: None,
+            ip: None,
+            session_id: None,
+        };
+        let e = actor.audit("chat.completion");
+        assert!(e.user_id.is_none());
+        assert!(e.api_key_id.is_none());
+    }
+
+    #[test]
+    fn mcp_actor_sets_log_type_mcp() {
+        let uid = Uuid::new_v4();
+        let actor = McpActor {
+            user_id: uid,
+            user_email: "alice@example.com",
+            ip: Some("203.0.113.7"),
+        };
+        let e = actor.audit("tools.call");
+        assert!(matches!(e.log_type, LogType::Mcp));
+        assert_eq!(e.user_id.as_deref(), Some(uid.to_string().as_str()));
+        assert_eq!(e.user_email.as_deref(), Some("alice@example.com"));
+        assert_eq!(e.ip_address.as_deref(), Some("203.0.113.7"));
     }
 }
 

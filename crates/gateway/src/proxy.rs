@@ -324,34 +324,21 @@ fn emit_gateway_error_log(
     // drops the action when it writes ChGatewayRow, so the trace
     // endpoint distinguishes errors via `status_code` (>= 400) instead.
     // Detail carries error_type + error_message for the drill-down.
-    let mut entry = think_watch_common::audit::AuditEntry::gateway("chat.completion")
-        .trace_id(trace_id.to_string())
-        .detail(detail);
-    if let Some(sid) = session_id {
-        entry = entry.session_id(sid);
-    }
-    if let Some(uid) = user_id
-        && let Ok(u) = uuid::Uuid::parse_str(uid)
-    {
-        entry = entry.user_id(u);
-    }
-    if let Some(email) = user_email {
-        entry = entry.user_email(email);
-    }
-    if let Some(kid) = api_key_id
-        && let Ok(u) = uuid::Uuid::parse_str(kid)
-    {
-        entry = entry.api_key_id(u);
-    }
-    if let Some(lid) = api_key_lineage_id
-        && let Ok(u) = uuid::Uuid::parse_str(lid)
-    {
-        entry = entry.api_key_lineage_id(u);
-    }
-    if let Some(ip) = ip_address {
-        entry = entry.ip_address(ip);
-    }
-    audit.log(entry);
+    use think_watch_common::audit::{AuditActor, GatewayActor};
+    let actor = GatewayActor {
+        user_id,
+        user_email,
+        api_key_id,
+        api_key_lineage_id,
+        ip: ip_address,
+        session_id,
+    };
+    audit.log(
+        actor
+            .audit("chat.completion")
+            .trace_id(trace_id.to_string())
+            .detail(detail),
+    );
 }
 
 /// Same as `emit_gateway_log` but with an optional `extra` JSON object
@@ -395,34 +382,21 @@ fn emit_gateway_log_with_extra(
             detail_map.insert(k, v);
         }
     }
-    let mut entry = think_watch_common::audit::AuditEntry::gateway("chat.completion")
-        .trace_id(trace_id.to_string())
-        .detail(detail);
-    if let Some(sid) = session_id {
-        entry = entry.session_id(sid);
-    }
-    if let Some(uid) = user_id
-        && let Ok(u) = uuid::Uuid::parse_str(uid)
-    {
-        entry = entry.user_id(u);
-    }
-    if let Some(email) = user_email {
-        entry = entry.user_email(email);
-    }
-    if let Some(kid) = api_key_id
-        && let Ok(u) = uuid::Uuid::parse_str(kid)
-    {
-        entry = entry.api_key_id(u);
-    }
-    if let Some(lid) = api_key_lineage_id
-        && let Ok(u) = uuid::Uuid::parse_str(lid)
-    {
-        entry = entry.api_key_lineage_id(u);
-    }
-    if let Some(ip) = ip_address {
-        entry = entry.ip_address(ip);
-    }
-    audit.log(entry);
+    use think_watch_common::audit::{AuditActor, GatewayActor};
+    let actor = GatewayActor {
+        user_id,
+        user_email,
+        api_key_id,
+        api_key_lineage_id,
+        ip: ip_address,
+        session_id,
+    };
+    audit.log(
+        actor
+            .audit("chat.completion")
+            .trace_id(trace_id.to_string())
+            .detail(detail),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -444,43 +418,30 @@ fn emit_gateway_log(
     latency_ms: i64,
     status_code: i64,
 ) {
-    let mut entry = think_watch_common::audit::AuditEntry::gateway("chat.completion")
-        .trace_id(trace_id.to_string())
-        .detail(serde_json::json!({
-            "model_id": model_id,
-            "provider": provider,
-            "upstream_model": upstream_model,
-            "input_tokens": prompt_tokens as i64,
-            "output_tokens": completion_tokens as i64,
-            "cost_usd": cost_usd.to_string(),
-            "latency_ms": latency_ms,
-            "status_code": status_code,
-        }));
-    if let Some(sid) = session_id {
-        entry = entry.session_id(sid);
-    }
-    if let Some(uid) = user_id
-        && let Ok(u) = uuid::Uuid::parse_str(uid)
-    {
-        entry = entry.user_id(u);
-    }
-    if let Some(email) = user_email {
-        entry = entry.user_email(email);
-    }
-    if let Some(kid) = api_key_id
-        && let Ok(u) = uuid::Uuid::parse_str(kid)
-    {
-        entry = entry.api_key_id(u);
-    }
-    if let Some(lid) = api_key_lineage_id
-        && let Ok(u) = uuid::Uuid::parse_str(lid)
-    {
-        entry = entry.api_key_lineage_id(u);
-    }
-    if let Some(ip) = ip_address {
-        entry = entry.ip_address(ip);
-    }
-    audit.log(entry);
+    use think_watch_common::audit::{AuditActor, GatewayActor};
+    let actor = GatewayActor {
+        user_id,
+        user_email,
+        api_key_id,
+        api_key_lineage_id,
+        ip: ip_address,
+        session_id,
+    };
+    audit.log(
+        actor
+            .audit("chat.completion")
+            .trace_id(trace_id.to_string())
+            .detail(serde_json::json!({
+                "model_id": model_id,
+                "provider": provider,
+                "upstream_model": upstream_model,
+                "input_tokens": prompt_tokens as i64,
+                "output_tokens": completion_tokens as i64,
+                "cost_usd": cost_usd.to_string(),
+                "latency_ms": latency_ms,
+                "status_code": status_code,
+            })),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -551,12 +512,20 @@ async fn post_flight_account(
                         user_id: actor_user_id.as_deref(),
                         user_email: actor_user_email.as_deref(),
                         api_key_id: actor_api_key_id.as_deref(),
+                        api_key_lineage_id: None,
                         ip: actor_ip_address.as_deref(),
+                        session_id: None,
                     };
                     for crossing in &crossings {
+                        // `.log_type(LogType::Audit)` overrides
+                        // `GatewayActor`'s default LogType::Gateway —
+                        // budget.threshold_crossed lands in the audit
+                        // log (forwarders subscribe to it), not the
+                        // gateway log table.
                         audit.log(
                             actor
                                 .audit("budget.threshold_crossed")
+                                .log_type(think_watch_common::audit::LogType::Audit)
                                 .resource(format!("budget_cap:{}", crossing.cap_id))
                                 .detail(
                                     serde_json::to_value(crossing)

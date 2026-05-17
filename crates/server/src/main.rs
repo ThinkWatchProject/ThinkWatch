@@ -1,6 +1,5 @@
 use fred::prelude::*;
 use fred::types::Builder;
-use think_watch_common::audit;
 use think_watch_common::config::AppConfig;
 use think_watch_common::db;
 use think_watch_server::{app, handlers, init, tracing_ch};
@@ -134,11 +133,6 @@ async fn main() -> anyhow::Result<()> {
 
     let _ = tokio::join!(gateway_handle, console_handle);
     tracing::info!("Both servers stopped, exiting");
-
-    // Touch unused symbols imported by the binary face only — keeps a
-    // single import list so the lib + bin share their `audit`
-    // dependency without a "warning: unused import" in either.
-    let _ = audit::SystemActor;
 
     Ok(())
 }
