@@ -101,6 +101,12 @@ pub struct AppState {
     /// variant via `SpawnOptions::url_validator` so wiremock instances
     /// on 127.0.0.1 are reachable.
     pub url_validator: UrlValidator,
+
+    /// CostTracker handle shared with the gateway. The platform-pricing
+    /// PATCH handler calls `invalidate_baseline()` on this so the
+    /// editing process picks the new baseline up immediately rather
+    /// than waiting for the 60s TTL to expire.
+    pub cost_tracker: Arc<think_watch_gateway::cost_tracker::CostTracker>,
 }
 
 /// Build a `ContentFilter` from the current `system_settings` value.
@@ -228,10 +234,13 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
             state.dynamic_config.clone(),
         )),
         pii_redactor: state.pii_redactor.clone(),
-        cost_tracker: Arc::new(think_watch_gateway::cost_tracker::CostTracker::new(
-            state.db.clone(),
-            weight_cache.clone(),
-        )),
+        // Share AppState's cost tracker so the platform-pricing PATCH
+        // handler's `invalidate_baseline()` call is observed by THIS
+        // process's hot path (gateway request handling) — without the
+        // share, the PATCH would invalidate a different CostTracker
+        // instance and the gateway would keep using the stale 60s-TTL
+        // baseline for up to a minute on the editing process.
+        cost_tracker: state.cost_tracker.clone(),
         rate_limiter: Arc::new(think_watch_gateway::rate_limiter::RateLimiter::new(
             state.redis.clone(),
         )),

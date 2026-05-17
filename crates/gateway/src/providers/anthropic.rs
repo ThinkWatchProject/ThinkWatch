@@ -76,7 +76,16 @@ struct MessageStartEvent {
 struct MessageStartMessage {
     id: String,
     model: String,
-    _usage: Option<AnthropicUsage>,
+    // The Anthropic SSE protocol carries `input_tokens` here in the
+    // very first event of a stream — prior code prefixed this with
+    // `_` and discarded it, then the `message_delta` handler hard-
+    // coded `prompt_tokens: 0`. That forced the downstream
+    // estimator to invent prompt tokens from the request body and
+    // over-billed every Anthropic streaming request. We now capture
+    // the value, carry it through the stream loop, and merge it
+    // into the final usage chunk so streaming reports the same
+    // prompt-token count as the non-streaming code path.
+    usage: Option<AnthropicUsage>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,9 +277,14 @@ impl AiProvider for AnthropicProvider {
 
             let mut event_stream = resp.bytes_stream().sse_events();
 
-            // Track message-level state from message_start
+            // Track message-level state from message_start. The
+            // input_tokens value lives ONLY in the first message_start
+            // event — subsequent `message_delta` chunks only carry
+            // running output_tokens — so we have to thread it through
+            // the loop to attach to the final usage chunk.
             let mut message_id = String::new();
             let mut model = String::new();
+            let mut input_tokens: u32 = 0;
 
             while let Some(event_result) = event_stream.next().await {
                 match event_result {
@@ -287,6 +301,9 @@ impl AiProvider for AnthropicProvider {
                                 if let Ok(ev) = serde_json::from_str::<MessageStartEvent>(&data) {
                                     message_id = ev.message.id.clone();
                                     model = ev.message.model.clone();
+                                    if let Some(u) = ev.message.usage {
+                                        input_tokens = u.input_tokens;
+                                    }
 
                                     // Emit an initial chunk with role delta
                                     let chunk = ChatCompletionChunk {
@@ -329,9 +346,10 @@ impl AiProvider for AnthropicProvider {
                                         .map(map_anthropic_stop_reason);
 
                                     let usage = ev.usage.map(|u| Usage {
-                                        prompt_tokens: 0,
+                                        prompt_tokens: input_tokens,
                                         completion_tokens: u.output_tokens,
-                                        total_tokens: u.output_tokens,
+                                        total_tokens: input_tokens
+                                            .saturating_add(u.output_tokens),
                                     });
 
                                     let chunk = ChatCompletionChunk {

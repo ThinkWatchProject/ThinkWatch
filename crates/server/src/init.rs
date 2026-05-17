@@ -129,6 +129,16 @@ pub async fn init_state(
         think_watch_mcp_gateway::cache::McpResponseCache::new(redis.clone()),
     );
 
+    // Build the cost tracker once and share it between AppState
+    // (so the platform-pricing PATCH handler can invalidate the
+    // baseline cache on edit) and the GatewayState assembled in
+    // `build_gateway_state` (the actual cost-attribution hot path).
+    let weight_cache = think_watch_common::limits::weight::WeightCache::new();
+    let cost_tracker = Arc::new(think_watch_gateway::cost_tracker::CostTracker::new(
+        pool.clone(),
+        weight_cache.clone(),
+    ));
+
     let state = AppState {
         db: pool,
         redis,
@@ -148,9 +158,10 @@ pub async fn init_state(
         )),
         http_client: Arc::new(arc_swap::ArcSwap::from_pointee(init_http_client)),
         gateway_router,
-        weight_cache: think_watch_common::limits::weight::WeightCache::new(),
+        weight_cache,
         user_token_resolver,
         url_validator: crate::app::production_url_validator(),
+        cost_tracker,
     };
 
     Ok(state)

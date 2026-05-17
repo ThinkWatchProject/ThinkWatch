@@ -125,10 +125,14 @@ pub async fn update_platform_pricing(
             })),
     );
 
-    // The CostTracker has a 60s baseline TTL, so new prices take
-    // effect on every process within a minute without restart. If we
-    // need instant propagation later, share the CostTracker handle on
-    // `AppState` and call `invalidate_baseline()` here.
+    // Drop the local CostTracker baseline cache so the next request
+    // on THIS process reloads the new prices from PG. Other server
+    // processes still pick the change up within the 60s TTL — but
+    // without this call, the very process that just ACK'd the PATCH
+    // would keep billing at the old baseline for up to a minute,
+    // which is the worst place to see staleness (the admin who
+    // changed it expects "immediate" semantics).
+    state.cost_tracker.invalidate_baseline().await;
 
     Ok(Json(updated))
 }
