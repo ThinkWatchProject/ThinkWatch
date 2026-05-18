@@ -93,6 +93,38 @@ pub fn err_response(
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Body-capture truncation + PII redaction hook for `mcp_logs.
+/// tool_arguments` / `tool_result`. Mirrors the gateway-side
+/// `post_process_body` so both audit pipelines share char-boundary-
+/// safe truncation; we don't share a helper because the gateway's
+/// PiiRedactor lives in a separate crate and pulling it into
+/// mcp-gateway would invert the dep graph.
+///
+/// `redact_pii` is currently a no-op (mcp-side PII redaction is not
+/// implemented yet). When enabled the body is left raw — operators
+/// see the toggle's intent reflected via the `audit.body_redact_pii`
+/// setting but the redaction itself is a follow-up.
+fn apply_mcp_body_capture(
+    s: String,
+    max_bytes: usize,
+    _redact_pii: bool,
+    truncated_flag: &mut bool,
+) -> String {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    *truncated_flag = true;
+    let budget = max_bytes.saturating_sub(3);
+    let mut end = budget.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + 3);
+    out.push_str(&s[..end]);
+    out.push_str("...");
+    out
+}
+
 /// Build a human label for a rate-limit rule. Same shape the AI
 /// gateway uses (`subject:metric/window`) so log scrapers see one
 /// consistent format across surfaces.
@@ -1017,21 +1049,76 @@ impl McpProxy {
             user_email,
             ip: ctx.ip_address,
         };
-        self.audit
-            .log(
-                actor
-                    .audit("tools.call")
-                    .trace_id(call_trace_id)
-                    .detail(serde_json::json!({
-                        "server_id": server_id.to_string(),
-                        "server_name": server_name,
-                        "tool_name": tool_name,
-                        "arguments": logged_arguments,
-                        "duration_ms": started.elapsed().as_millis() as i64,
-                        "status": status,
-                        "error_message": error_message,
-                    })),
-            );
+
+        // Body capture for audit. arguments + upstream result land in
+        // dedicated `mcp_logs.tool_arguments` / `mcp_logs.tool_result`
+        // columns (separate from the metadata-only `detail` JSON) so
+        // auditors can query them without parsing JSON per row. Gated
+        // by `audit.capture_tool_arguments` / `audit.capture_tool_results`
+        // with the same `audit.body_max_bytes` truncation contract
+        // the gateway side uses; defaults ON (the bastion positioning
+        // requires it). PII redaction follows `audit.body_redact_pii`
+        // — applied at write time, not in-flight.
+        let dc = &self.dynamic_config;
+        let capture_args = dc.audit_capture_tool_arguments().await;
+        let capture_result = dc.audit_capture_tool_results().await;
+        let body_max = dc.audit_body_max_bytes().await as usize;
+        let redact = dc.audit_body_redact_pii().await;
+        let (arg_str, result_str, capture_status) = if !capture_args && !capture_result {
+            (None, None, Some("disabled".to_owned()))
+        } else {
+            let mut truncated = false;
+            let arg_str = if capture_args {
+                logged_arguments.as_ref().map(|v| {
+                    let raw =
+                        serde_json::to_string(v).unwrap_or_else(|_| "[serialize_error]".to_owned());
+                    apply_mcp_body_capture(raw, body_max, redact, &mut truncated)
+                })
+            } else {
+                None
+            };
+            let result_str = if capture_result {
+                response.result.as_ref().map(|v| {
+                    let raw =
+                        serde_json::to_string(v).unwrap_or_else(|_| "[serialize_error]".to_owned());
+                    apply_mcp_body_capture(raw, body_max, redact, &mut truncated)
+                })
+            } else {
+                None
+            };
+            let status = if arg_str.is_none() && result_str.is_none() {
+                "disabled"
+            } else if truncated {
+                "truncated"
+            } else {
+                "captured"
+            };
+            (arg_str, result_str, Some(status.to_owned()))
+        };
+
+        let mut entry =
+            actor
+                .audit("tools.call")
+                .trace_id(call_trace_id)
+                .detail(serde_json::json!({
+                    "server_id": server_id.to_string(),
+                    "server_name": server_name,
+                    "tool_name": tool_name,
+                    "arguments": logged_arguments,
+                    "duration_ms": started.elapsed().as_millis() as i64,
+                    "status": status,
+                    "error_message": error_message,
+                }));
+        if let Some(a) = arg_str {
+            entry = entry.request_body(a);
+        }
+        if let Some(r) = result_str {
+            entry = entry.response_body(r);
+        }
+        if let Some(s) = capture_status {
+            entry = entry.body_capture_status(s);
+        }
+        self.audit.log(entry);
 
         response
     }

@@ -110,6 +110,25 @@ pub struct AuditEntry {
     /// them back out of JSONB and deserialises without failing.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Captured request body (serialized JSON for gateway, raw JSON
+    /// for MCP `tools/call` arguments). `None` when capture is
+    /// disabled via `audit.capture_request_bodies` / `audit.
+    /// capture_tool_arguments`, or when no body applies (admin
+    /// actions). On gateway rows this lands in `gateway_logs.
+    /// request_body`; on MCP rows it lands in `mcp_logs.tool_arguments`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body: Option<String>,
+    /// Captured response body (serialized completion for gateway,
+    /// JSON-RPC `result` for MCP). Same gating as `request_body`.
+    /// Lands in `gateway_logs.response_body` / `mcp_logs.tool_result`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body: Option<String>,
+    /// One of: "captured" / "truncated" / "disabled" / "from_cache"
+    /// / "error". Lets auditors distinguish "we never captured this"
+    /// from "the body was bigger than the max and we cut it" from
+    /// "this hit the response cache so no upstream payload existed".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_capture_status: Option<String>,
     pub created_at: String,
 }
 
@@ -183,6 +202,15 @@ struct ChGatewayRow {
     // names columns in the INSERT by struct field order, so keep
     // them aligned.
     session_id: Option<String>,
+    // Body capture columns appended after session_id by the ALTER
+    // TABLE in 01_init.sql. Order MUST match the SQL `AFTER` chain:
+    // request_body → response_body → request_body_bytes →
+    // response_body_bytes → body_capture_status, then created_at.
+    request_body: Option<String>,
+    response_body: Option<String>,
+    request_body_bytes: Option<u32>,
+    response_body_bytes: Option<u32>,
+    body_capture_status: Option<String>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
     created_at: chrono::DateTime<Utc>,
 }
@@ -202,6 +230,15 @@ struct ChMcpRow {
     error_message: Option<String>,
     ip_address: Option<String>,
     detail: Option<String>,
+    // Body capture columns appended after `detail` by the ALTER
+    // TABLE in 01_init.sql. Same ordering contract as ChGatewayRow:
+    // tool_arguments → tool_result → arguments_bytes → result_bytes
+    // → body_capture_status, BEFORE trace_id.
+    tool_arguments: Option<String>,
+    tool_result: Option<String>,
+    arguments_bytes: Option<u32>,
+    result_bytes: Option<u32>,
+    body_capture_status: Option<String>,
     trace_id: Option<String>,
     #[serde(with = "clickhouse::serde::chrono::datetime64::millis")]
     created_at: chrono::DateTime<Utc>,
@@ -304,6 +341,9 @@ impl AuditEntry {
             user_agent: None,
             trace_id: None,
             session_id: None,
+            request_body: None,
+            response_body: None,
+            body_capture_status: None,
             created_at: Utc::now().to_rfc3339(),
         }
     }
@@ -388,6 +428,29 @@ impl AuditEntry {
 
     pub fn user_agent(mut self, ua: impl Into<String>) -> Self {
         self.user_agent = Some(ua.into());
+        self
+    }
+
+    /// Attach a captured request body. The string is treated as
+    /// opaque: serialization, truncation, and optional PII redaction
+    /// are the caller's responsibility, and whatever they hand in
+    /// lands verbatim in ClickHouse.
+    pub fn request_body(mut self, body: impl Into<String>) -> Self {
+        self.request_body = Some(body.into());
+        self
+    }
+
+    /// Attach a captured response body. Same opaque-string contract
+    /// as `request_body`.
+    pub fn response_body(mut self, body: impl Into<String>) -> Self {
+        self.response_body = Some(body.into());
+        self
+    }
+
+    /// Mark how the body fields were populated. See `AuditEntry::
+    /// body_capture_status` for the canonical value list.
+    pub fn body_capture_status(mut self, status: impl Into<String>) -> Self {
+        self.body_capture_status = Some(status.into());
         self
     }
 
@@ -2242,6 +2305,11 @@ async fn flush_gateway(
             detail: detail_str(&mut entry.detail),
             trace_id: entry.trace_id,
             session_id: entry.session_id,
+            request_body_bytes: entry.request_body.as_ref().map(|s| s.len() as u32),
+            response_body_bytes: entry.response_body.as_ref().map(|s| s.len() as u32),
+            request_body: entry.request_body,
+            response_body: entry.response_body,
+            body_capture_status: entry.body_capture_status,
             created_at: ts,
         };
         insert.write(&row).await?;
@@ -2269,6 +2337,11 @@ async fn flush_mcp(
             error_message: detail_field(&entry.detail, "error_message"),
             ip_address: entry.ip_address,
             detail: detail_str(&mut entry.detail),
+            arguments_bytes: entry.request_body.as_ref().map(|s| s.len() as u32),
+            result_bytes: entry.response_body.as_ref().map(|s| s.len() as u32),
+            tool_arguments: entry.request_body,
+            tool_result: entry.response_body,
+            body_capture_status: entry.body_capture_status,
             trace_id: entry.trace_id,
             created_at: ts,
         };

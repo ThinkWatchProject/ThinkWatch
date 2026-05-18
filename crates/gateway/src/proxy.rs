@@ -241,6 +241,11 @@ impl LogCtx<'_> {
             None,
             self.started.elapsed().as_millis() as i64,
             &err,
+            // Pre-route-selection failures don't have a parsed request
+            // we can safely serialize (transform errors, malformed JSON,
+            // etc. land here). Body capture for these paths is a follow-
+            // up; for now the row writes through with NULL bodies.
+            BodyCapture::default(),
         );
         err
     }
@@ -286,6 +291,161 @@ fn gateway_error_status(err: &GatewayError) -> i64 {
     err.status_code()
 }
 
+// ---------------------------------------------------------------------------
+// Body capture
+// ---------------------------------------------------------------------------
+//
+// Full request/response payload snapshots for the enterprise audit
+// trail. Gating + truncation + optional PII redaction happens once
+// per request inside `prepare_body_capture`; the resulting struct is
+// passed verbatim into every `emit_gateway_log*` call site so the
+// success / streaming / error / cache-hit paths all carry the same
+// payload semantics.
+
+/// Body capture status values written into the
+/// `gateway_logs.body_capture_status` column. Kept as `&'static str`
+/// constants so a typo can't desync the producer side from the
+/// audit-query side.
+const BODY_CAPTURED: &str = "captured";
+const BODY_TRUNCATED: &str = "truncated";
+const BODY_DISABLED: &str = "disabled";
+const BODY_FROM_CACHE: &str = "from_cache";
+
+/// Captured payload snapshot. Cheap to construct + clone — the
+/// strings are already truncated / redacted / serialized by
+/// `prepare_body_capture` so the per-call-site cost is just two
+/// `Option<String>` clones.
+#[derive(Default, Clone)]
+struct BodyCapture {
+    request: Option<String>,
+    response: Option<String>,
+    status: Option<&'static str>,
+}
+
+impl BodyCapture {
+    fn disabled() -> Self {
+        Self {
+            request: None,
+            response: None,
+            status: Some(BODY_DISABLED),
+        }
+    }
+
+    /// Attach the captured strings + status to an `AuditEntry`. No-op
+    /// when all three fields are empty.
+    fn apply(
+        self,
+        mut entry: think_watch_common::audit::AuditEntry,
+    ) -> think_watch_common::audit::AuditEntry {
+        if let Some(r) = self.request {
+            entry = entry.request_body(r);
+        }
+        if let Some(r) = self.response {
+            entry = entry.response_body(r);
+        }
+        if let Some(s) = self.status {
+            entry = entry.body_capture_status(s);
+        }
+        entry
+    }
+}
+
+/// Walk a request body + optional response through the
+/// dynamic-config-driven capture pipeline:
+///   1. capture-enabled gate (per-field)
+///   2. optional PII redaction (when `audit.body_redact_pii` is on)
+///   3. byte-cap truncation (UTF-8 char-boundary safe)
+///
+/// `messages` is the post-PII-redaction set the gateway already
+/// passes to upstream; for the audit blob we want the version users
+/// actually authored. The caller hands us the original
+/// pre-redaction slice when both forms exist (`prepare_body_capture`
+/// itself does not know which was sent upstream).
+async fn prepare_body_capture(
+    dynamic_config: &DynamicConfig,
+    pii_redactor: &PiiRedactor,
+    messages: &[crate::providers::traits::ChatMessage],
+    response: Option<&crate::providers::traits::ChatCompletionResponse>,
+) -> BodyCapture {
+    let capture_req = dynamic_config.audit_capture_request_bodies().await;
+    let capture_resp = dynamic_config.audit_capture_response_bodies().await;
+    if !capture_req && !capture_resp {
+        return BodyCapture::disabled();
+    }
+    let max_bytes = dynamic_config.audit_body_max_bytes().await as usize;
+    let redact_pii = dynamic_config.audit_body_redact_pii().await;
+
+    let mut truncated_flag = false;
+    let request = if capture_req {
+        let raw =
+            serde_json::to_string(messages).unwrap_or_else(|_| "[serialize_error]".to_owned());
+        Some(post_process_body(
+            raw,
+            max_bytes,
+            redact_pii,
+            pii_redactor,
+            &mut truncated_flag,
+        ))
+    } else {
+        None
+    };
+    let response_body = match (capture_resp, response) {
+        (true, Some(resp)) => {
+            let raw =
+                serde_json::to_string(resp).unwrap_or_else(|_| "[serialize_error]".to_owned());
+            Some(post_process_body(
+                raw,
+                max_bytes,
+                redact_pii,
+                pii_redactor,
+                &mut truncated_flag,
+            ))
+        }
+        _ => None,
+    };
+    let status = if request.is_none() && response_body.is_none() {
+        BODY_DISABLED
+    } else if truncated_flag {
+        BODY_TRUNCATED
+    } else {
+        BODY_CAPTURED
+    };
+    BodyCapture {
+        request,
+        response: response_body,
+        status: Some(status),
+    }
+}
+
+fn post_process_body(
+    mut s: String,
+    max_bytes: usize,
+    redact_pii: bool,
+    pii_redactor: &PiiRedactor,
+    truncated_flag: &mut bool,
+) -> String {
+    if redact_pii {
+        s = pii_redactor.redact_blob(&s);
+    }
+    if s.len() <= max_bytes {
+        return s;
+    }
+    *truncated_flag = true;
+    // Leave room for the ellipsis sentinel and walk back to the
+    // nearest UTF-8 char boundary — provider names / model tokens /
+    // user prompts routinely include non-ASCII (CJK, emoji), and a
+    // naive byte slice would panic mid-codepoint.
+    let budget = max_bytes.saturating_sub(3);
+    let mut end = budget.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + 3);
+    out.push_str(&s[..end]);
+    out.push_str("...");
+    out
+}
+
 /// Emit a single `gateway_logs` row for a failed request. The detail
 /// blob mirrors the success-path shape but also carries `error_type`
 /// and `error_message` so operators can drill down without joining
@@ -304,6 +464,7 @@ fn emit_gateway_error_log(
     provider: Option<&str>,
     latency_ms: i64,
     err: &GatewayError,
+    bodies: BodyCapture,
 ) {
     let status = gateway_error_status(err);
     let detail = serde_json::json!({
@@ -333,12 +494,11 @@ fn emit_gateway_error_log(
         ip: ip_address,
         session_id,
     };
-    audit.log(
-        actor
-            .audit("chat.completion")
-            .trace_id(trace_id.to_string())
-            .detail(detail),
-    );
+    let entry = actor
+        .audit("chat.completion")
+        .trace_id(trace_id.to_string())
+        .detail(detail);
+    audit.log(bodies.apply(entry));
 }
 
 /// Same as `emit_gateway_log` but with an optional `extra` JSON object
@@ -364,6 +524,7 @@ fn emit_gateway_log_with_extra(
     latency_ms: i64,
     status_code: i64,
     extra: Option<serde_json::Value>,
+    bodies: BodyCapture,
 ) {
     let mut detail = serde_json::json!({
         "model_id": model_id,
@@ -391,12 +552,11 @@ fn emit_gateway_log_with_extra(
         ip: ip_address,
         session_id,
     };
-    audit.log(
-        actor
-            .audit("chat.completion")
-            .trace_id(trace_id.to_string())
-            .detail(detail),
-    );
+    let entry = actor
+        .audit("chat.completion")
+        .trace_id(trace_id.to_string())
+        .detail(detail);
+    audit.log(bodies.apply(entry));
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -417,6 +577,7 @@ fn emit_gateway_log(
     cost_usd: Decimal,
     latency_ms: i64,
     status_code: i64,
+    bodies: BodyCapture,
 ) {
     use think_watch_common::audit::{AuditActor, GatewayActor};
     let actor = GatewayActor {
@@ -427,21 +588,20 @@ fn emit_gateway_log(
         ip: ip_address,
         session_id,
     };
-    audit.log(
-        actor
-            .audit("chat.completion")
-            .trace_id(trace_id.to_string())
-            .detail(serde_json::json!({
-                "model_id": model_id,
-                "provider": provider,
-                "upstream_model": upstream_model,
-                "input_tokens": prompt_tokens as i64,
-                "output_tokens": completion_tokens as i64,
-                "cost_usd": cost_usd.to_string(),
-                "latency_ms": latency_ms,
-                "status_code": status_code,
-            })),
-    );
+    let entry = actor
+        .audit("chat.completion")
+        .trace_id(trace_id.to_string())
+        .detail(serde_json::json!({
+            "model_id": model_id,
+            "provider": provider,
+            "upstream_model": upstream_model,
+            "input_tokens": prompt_tokens as i64,
+            "output_tokens": completion_tokens as i64,
+            "cost_usd": cost_usd.to_string(),
+            "latency_ms": latency_ms,
+            "status_code": status_code,
+        }));
+    audit.log(bodies.apply(entry));
 }
 
 /// Resolve `(prompt_tokens, completion_tokens)` from a streaming
@@ -1221,6 +1381,16 @@ pub async fn proxy_chat_completion(
     //    on restoration — symmetric and correct because upstream
     //    only ever saw the placeholder.
     let pii_redactor = state.pii_redactor.load();
+    // Snapshot the pre-redaction messages so the audit pipeline can
+    // capture what the user actually authored. Upstream sees the
+    // redacted form, but the audit row is the legal record of
+    // intent: "user X asked Y, gateway sent placeholder-substituted
+    // form upstream". If we logged the post-redaction shape, the
+    // audit trail would be sanitized in a way the auditor can't
+    // un-sanitize (placeholders use stable salts shared by every
+    // caller with the same prompt). The clone is per-request and
+    // bounded by `audit.body_max_bytes`.
+    let messages_for_audit = request.messages.clone();
     let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&request.messages);
     request.messages = redacted_messages;
 
@@ -1287,6 +1457,53 @@ pub async fn proxy_chat_completion(
         // context. The cached response carries opaque placeholders;
         // each consumer paints in their own values.
         pii_redactor.restore_response(&mut cached, &redaction_ctx);
+
+        // Cache hits previously bypassed `gateway_logs` entirely, so
+        // the bastion's audit story had a hole — "user X called model
+        // Y" showed nothing for any deterministic prompt repeat. Emit
+        // a gateway row with status `from_cache` so the audit timeline
+        // is complete; cost is 0 because no upstream tokens were
+        // spent (the original miss already booked them, the cache hit
+        // is free). Request body is the user's actual prompt; response
+        // is the cached completion.
+        let (cached_pt, cached_ct) = cached
+            .usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens, u.completion_tokens))
+            .unwrap_or((0, 0));
+        let cached_request_body = if state.dynamic_config.audit_capture_request_bodies().await {
+            serde_json::to_string(&messages_for_audit).ok()
+        } else {
+            None
+        };
+        let cached_response_body = if state.dynamic_config.audit_capture_response_bodies().await {
+            serde_json::to_string(&cached).ok()
+        } else {
+            None
+        };
+        emit_gateway_log(
+            &state.audit,
+            &metadata.request_id,
+            session_id.as_deref(),
+            identity.user_id.as_deref(),
+            identity.user_email.as_deref(),
+            identity.api_key_id.as_deref(),
+            identity.api_key_lineage_id.as_deref(),
+            identity.ip_address.as_deref(),
+            &request.model,
+            None,
+            None,
+            cached_pt,
+            cached_ct,
+            Decimal::ZERO,
+            request_started_at.elapsed().as_millis() as i64,
+            200,
+            BodyCapture {
+                request: cached_request_body,
+                response: cached_response_body,
+                status: Some(BODY_FROM_CACHE),
+            },
+        );
 
         if is_stream {
             // Re-emit as SSE: one data chunk with the full response + [DONE]
@@ -1426,6 +1643,7 @@ pub async fn proxy_chat_completion(
                     started.elapsed().as_millis() as i64,
                     logged_status,
                     error_detail,
+                    BodyCapture::default(),
                 );
 
                 // Health: Natural and ClientCancelled count as
@@ -1501,6 +1719,7 @@ pub async fn proxy_chat_completion(
                         None,
                         request_started_at.elapsed().as_millis() as i64,
                         &e,
+                        BodyCapture::default(),
                     );
                     GatewayErrorResponse::from(e)
                 })?;
@@ -1584,6 +1803,13 @@ pub async fn proxy_chat_completion(
             .cost_tracker
             .calculate_cost(&original_model, prompt_tokens, completion_tokens)
             .await;
+        let body_capture = prepare_body_capture(
+            &state.dynamic_config,
+            &pii_redactor,
+            &messages_for_audit,
+            Some(&response),
+        )
+        .await;
         emit_gateway_log(
             &state.audit,
             &metadata.request_id,
@@ -1601,6 +1827,7 @@ pub async fn proxy_chat_completion(
             cost_usd,
             request_started_at.elapsed().as_millis() as i64,
             200,
+            body_capture,
         );
 
         finalize_health(&state, sel_record, true).await;
@@ -1791,6 +2018,10 @@ pub async fn proxy_anthropic_messages(
 
     // PII redaction
     let pii_redactor = state.pii_redactor.load();
+    // Snapshot pre-redaction messages for the audit body-capture
+    // pipeline. Same reasoning as the chat-completions handler: the
+    // audit row needs to show what the user actually wrote.
+    let messages_for_audit = messages.clone();
     let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&messages);
 
     let request = crate::providers::traits::ChatCompletionRequest {
@@ -1880,6 +2111,7 @@ pub async fn proxy_anthropic_messages(
                     started.elapsed().as_millis() as i64,
                     logged_status,
                     error_detail,
+                    BodyCapture::default(),
                 );
                 let stream_success = matches!(
                     result.outcome,
@@ -1932,6 +2164,7 @@ pub async fn proxy_anthropic_messages(
                         None,
                         request_started_at.elapsed().as_millis() as i64,
                         &e,
+                        BodyCapture::default(),
                     );
                     GatewayErrorResponse::from(e)
                 })?;
@@ -1986,6 +2219,13 @@ pub async fn proxy_anthropic_messages(
             .cost_tracker
             .calculate_cost(&mapped_model, pt, ct)
             .await;
+        let body_capture = prepare_body_capture(
+            &state.dynamic_config,
+            &pii_redactor,
+            &messages_for_audit,
+            Some(&response),
+        )
+        .await;
         emit_gateway_log(
             &state.audit,
             &trace_id,
@@ -2003,6 +2243,7 @@ pub async fn proxy_anthropic_messages(
             cost,
             request_started_at.elapsed().as_millis() as i64,
             200,
+            body_capture,
         );
 
         finalize_health(&state, sel_record, true).await;
@@ -2203,6 +2444,7 @@ pub async fn proxy_responses(
     // restoration runs against the converted response right before we
     // hand it back to the client.
     let pii_redactor = state.pii_redactor.load();
+    let messages_for_audit = messages.clone();
     let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&messages);
 
     let max_tokens = body
@@ -2305,6 +2547,7 @@ pub async fn proxy_responses(
                     started.elapsed().as_millis() as i64,
                     logged_status,
                     error_detail,
+                    BodyCapture::default(),
                 );
                 let stream_success = matches!(
                     result.outcome,
@@ -2360,6 +2603,7 @@ pub async fn proxy_responses(
                         None,
                         request_started_at.elapsed().as_millis() as i64,
                         &e,
+                        BodyCapture::default(),
                     );
                     GatewayErrorResponse::from(e)
                 })?;
@@ -2410,6 +2654,13 @@ pub async fn proxy_responses(
             .cost_tracker
             .calculate_cost(&mapped_model, pt, ct)
             .await;
+        let body_capture = prepare_body_capture(
+            &state.dynamic_config,
+            &pii_redactor,
+            &messages_for_audit,
+            Some(&response),
+        )
+        .await;
         emit_gateway_log(
             &state.audit,
             &trace_id,
@@ -2427,6 +2678,7 @@ pub async fn proxy_responses(
             cost,
             request_started_at.elapsed().as_millis() as i64,
             200,
+            body_capture,
         );
 
         finalize_health(&state, sel_record, true).await;

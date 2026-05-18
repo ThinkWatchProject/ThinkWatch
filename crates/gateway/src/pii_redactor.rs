@@ -304,6 +304,51 @@ impl PiiRedactor {
             }
         }
     }
+
+    /// Apply redaction patterns to an arbitrary serialized blob (e.g.
+    /// a JSON string going into the audit log). Drops the per-match
+    /// restoration context — the result is write-only audit data,
+    /// never round-tripped back to a caller, so we replace with the
+    /// pattern name alone instead of a position-salted placeholder.
+    ///
+    /// Used by the body-capture pipeline when an operator sets
+    /// `audit.body_redact_pii = true`. Distinct from
+    /// `redact_messages` which is the in-flight redactor that DOES
+    /// need a restoration context so the user's own response can be
+    /// painted with the original PII.
+    pub fn redact_blob(&self, input: &str) -> String {
+        if self.patterns.is_empty() {
+            return input.to_string();
+        }
+        // Gather all matches first so overlapping patterns get a
+        // deterministic non-overlapping resolution (longest match
+        // wins on tie) — same algorithm as `redact_text` to keep the
+        // in-flight and at-rest redaction story consistent.
+        let mut all_matches: Vec<(usize, usize, usize)> = Vec::new();
+        for (pattern_idx, pattern) in self.patterns.iter().enumerate() {
+            for m in pattern.regex.find_iter(input) {
+                all_matches.push((m.start(), m.end(), pattern_idx));
+            }
+        }
+        if all_matches.is_empty() {
+            return input.to_string();
+        }
+        all_matches.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| (b.1 - b.0).cmp(&(a.1 - a.0))));
+        let mut filtered: Vec<(usize, usize, usize)> = Vec::new();
+        for m in &all_matches {
+            if filtered.iter().all(|f| m.0 >= f.1 || m.1 <= f.0) {
+                filtered.push(*m);
+            }
+        }
+        filtered.sort_by_key(|b| std::cmp::Reverse(b.0));
+
+        let mut result = input.to_string();
+        for (start, end, pattern_idx) in filtered {
+            let replacement = format!("{{{{REDACTED_{}}}}}", self.patterns[pattern_idx].name);
+            result.replace_range(start..end, &replacement);
+        }
+        result
+    }
 }
 
 /// Stateful restorer for streaming responses. Placeholders have the

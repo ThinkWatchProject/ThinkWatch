@@ -280,6 +280,24 @@ dc_getters_bool! {
     allow_registration,      "auth.allow_registration",         false;
     oidc_enabled,            "oidc.enabled",                    false;
     cb_enabled,              "gateway.cb_enabled",              true;
+    // Full-body capture for enterprise audit. Defaults ON: the
+    // bastion / jump-server positioning is undercut by "we only
+    // logged metadata" answers, so unreleased deployments start
+    // capturing by default and operators opt OUT via the admin
+    // settings if storage / privacy posture requires it.
+    //
+    // `audit_body_redact_pii` defaults OFF — auditors typically
+    // need the original payload as primary evidence; PII obligations
+    // are met by the access-control gate on read-body endpoints
+    // (`audit:read_bodies` permission, default super-admin only) +
+    // the "view-body" event itself being logged for second-order
+    // attribution. Flip ON to swap to redacted-at-write semantics
+    // when the deployment can't satisfy that gate.
+    audit_capture_request_bodies,  "audit.capture_request_bodies",  true;
+    audit_capture_response_bodies, "audit.capture_response_bodies", true;
+    audit_capture_tool_arguments,  "audit.capture_tool_arguments",  true;
+    audit_capture_tool_results,    "audit.capture_tool_results",    true;
+    audit_body_redact_pii,         "audit.body_redact_pii",         false;
 }
 
 dc_getters_string! {
@@ -293,6 +311,13 @@ dc_getters_string! {
 dc_getters_u64_from_i64! {
     cache_ttl_secs,     "gateway.cache_ttl_secs",  3600;
     mcp_cache_ttl_secs, "mcp.cache_ttl_secs",      0;
+    // Single body upper bound (gateway + mcp share it). 256 KiB is
+    // well above the 2-10 KB typical chat-completions prompt but
+    // small enough that an attacker flooding the gateway with
+    // multi-megabyte prompts can't blow up CH inserts. Past the
+    // cap the audit writer truncates and stamps
+    // `body_capture_status = "truncated"`.
+    audit_body_max_bytes, "audit.body_max_bytes", 262144;
 }
 
 // Performance tuning — dynamically adjustable via Admin > Settings.

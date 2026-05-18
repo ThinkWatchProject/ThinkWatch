@@ -189,6 +189,19 @@ ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_latency (
     SELECT * ORDER BY latency_ms, created_at
 );
 
+-- Full request/response body capture for enterprise audit.
+-- ZSTD(6) trades a bit more CPU on insert for ~3-4x compression on
+-- JSON payloads; auditors typically search bodies infrequently and
+-- compression dominates the cold-storage footprint. Sit AFTER
+-- session_id so the existing column order is preserved and new
+-- deployments + upgraded ones converge on the same shape.
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS request_body  Nullable(String) CODEC(ZSTD(6)) AFTER session_id;
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS response_body Nullable(String) CODEC(ZSTD(6)) AFTER request_body;
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS request_body_bytes  Nullable(UInt32) AFTER response_body;
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS response_body_bytes Nullable(UInt32) AFTER request_body_bytes;
+-- 'captured' | 'truncated' | 'disabled' | 'from_cache' | 'error'
+ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS body_capture_status LowCardinality(Nullable(String)) AFTER response_body_bytes;
+
 CREATE TABLE IF NOT EXISTS mcp_logs (
     id               String,
     user_id          LowCardinality(Nullable(String)),
@@ -227,6 +240,17 @@ ALTER TABLE mcp_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloo
 ALTER TABLE mcp_logs ADD PROJECTION IF NOT EXISTS proj_by_duration (
     SELECT * ORDER BY duration_ms, created_at
 );
+
+-- Tool call body capture for audit. `tool_arguments` was previously
+-- only embedded in the detail JSON (with secret-shaped keys redacted
+-- by sanitize_detail); promote both arguments and the upstream result
+-- to first-class columns so audit queries don't have to JSON-parse on
+-- every row. Same ZSTD(6) trade-off as gateway_logs.
+ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS tool_arguments     Nullable(String) CODEC(ZSTD(6)) AFTER detail;
+ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS tool_result        Nullable(String) CODEC(ZSTD(6)) AFTER tool_arguments;
+ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS arguments_bytes    Nullable(UInt32) AFTER tool_result;
+ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS result_bytes       Nullable(UInt32) AFTER arguments_bytes;
+ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS body_capture_status LowCardinality(Nullable(String)) AFTER result_bytes;
 
 -- platform_logs used to live here as a separate table for management
 -- operations. Its schema was a strict subset of audit_logs (no
