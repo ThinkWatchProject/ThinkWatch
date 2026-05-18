@@ -1602,6 +1602,11 @@ pub async fn proxy_chat_completion(
         let started = request_started_at;
         // Clone request for cache write — the original is moved into the provider.
         let request_for_cache = request.clone();
+        // Snapshot the PRE-redaction messages into the on_done closure
+        // so audit-time body capture sees what the user actually wrote
+        // (request_for_cache holds the redacted form because it was
+        // cloned AFTER the pii_redactor mutated request.messages).
+        let messages_for_audit_for_done = messages_for_audit.clone();
         let cache_for_done = state.cache.clone();
         let state_for_done = state.clone();
         let stream = entry.provider.stream_chat_completion(request);
@@ -1625,6 +1630,29 @@ pub async fn proxy_chat_completion(
                 // the underlying GatewayError's canonical status (not
                 // the old 502 blanket), ClientCancelled → 499.
                 let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
+
+                // Assemble the streamed chunks into the canonical
+                // response shape ONCE — used both as the audit body
+                // and (when the stream ran to natural completion) as
+                // the cache fill below. Previously assemble_response
+                // only ran on the cache-fill side, so the audit row
+                // had no response payload to attach. Assembling for
+                // every outcome (natural, error, cancelled) lets the
+                // audit pipeline capture partial completions too,
+                // which is exactly what auditors need for
+                // mid-conversation incidents.
+                let assembled_for_audit = crate::streaming::assemble_response(
+                    &result.chunks,
+                    result.usage.clone(),
+                );
+                let stream_body_capture = prepare_body_capture(
+                    &state_for_done.dynamic_config,
+                    &state_for_done.pii_redactor.load(),
+                    &messages_for_audit_for_done,
+                    assembled_for_audit.as_ref(),
+                )
+                .await;
+
                 emit_gateway_log_with_extra(
                     &audit_for_done,
                     &trace_id_for_done,
@@ -1643,7 +1671,7 @@ pub async fn proxy_chat_completion(
                     started.elapsed().as_millis() as i64,
                     logged_status,
                     error_detail,
-                    BodyCapture::default(),
+                    stream_body_capture,
                 );
 
                 // Health: Natural and ClientCancelled count as
@@ -1656,15 +1684,16 @@ pub async fn proxy_chat_completion(
                 );
                 finalize_health(&state_for_done, sel_record, stream_success).await;
 
-                // Assemble and cache the complete response when the
-                // stream ran to natural completion (partial streams
-                // from client disconnects are NOT cached).
+                // Cache the assembled response when the stream ran to
+                // natural completion (partial streams from client
+                // disconnects are NOT cached). Reuses
+                // `assembled_for_audit` so we don't pay the assembly
+                // cost twice for a successful stream.
                 if result.natural_completion
-                    && let Some(assembled) =
-                        crate::streaming::assemble_response(&result.chunks, result.usage.clone())
+                    && let Some(ref assembled) = assembled_for_audit
                 {
                     cache_for_done
-                        .set(&request_for_cache, &assembled, None)
+                        .set(&request_for_cache, assembled, None)
                         .await;
                 }
 
@@ -1699,6 +1728,17 @@ pub async fn proxy_chat_completion(
         // Non-streaming: full failover with retry across healthy candidates
         let sel_ctx =
             build_selection_ctx(&state, &original_model, identity.user_id.as_deref()).await;
+        // Prepare the error-path body capture BEFORE select_route_with_failover
+        // so the (synchronous) map_err closure can move it in without
+        // needing to await. Error paths capture the request body only —
+        // there's no response from any upstream that succeeded.
+        let error_path_capture = prepare_body_capture(
+            &state.dynamic_config,
+            &pii_redactor,
+            &messages_for_audit,
+            None,
+        )
+        .await;
         let (chosen_entry, mut response, sel_record) =
             select_route_with_failover(routes, &request, &sel_ctx)
                 .await
@@ -1719,7 +1759,7 @@ pub async fn proxy_chat_completion(
                         None,
                         request_started_at.elapsed().as_millis() as i64,
                         &e,
-                        BodyCapture::default(),
+                        error_path_capture,
                     );
                     GatewayErrorResponse::from(e)
                 })?;
@@ -2072,6 +2112,9 @@ pub async fn proxy_anthropic_messages(
         // upstream stream doesn't surface a usage chunk — see
         // `stream_usage_or_estimate` for the budget-bypass context.
         let messages_for_done = request.messages.clone();
+        // Pre-redaction snapshot for audit body capture (see the
+        // `messages_for_audit` clone at the top of the handler).
+        let messages_for_audit_for_done = messages_for_audit.clone();
         let user_id_for_done = identity.user_id.clone();
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
@@ -2093,6 +2136,21 @@ pub async fn proxy_anthropic_messages(
                 let (pt, ct) = stream_usage_or_estimate(&result, &messages_for_done);
                 let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
                 let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
+                // Assemble streamed chunks into a canonical response for
+                // body capture. Same logic as the chat-completions stream
+                // path; auditors get the user's actual prompt + the AI's
+                // (possibly partial) reply.
+                let assembled_for_audit = crate::streaming::assemble_response(
+                    &result.chunks,
+                    result.usage.clone(),
+                );
+                let stream_body_capture = prepare_body_capture(
+                    &state_for_done.dynamic_config,
+                    &state_for_done.pii_redactor.load(),
+                    &messages_for_audit_for_done,
+                    assembled_for_audit.as_ref(),
+                )
+                .await;
                 emit_gateway_log_with_extra(
                     &audit_for_done,
                     &trace_id_for_done,
@@ -2111,7 +2169,7 @@ pub async fn proxy_anthropic_messages(
                     started.elapsed().as_millis() as i64,
                     logged_status,
                     error_detail,
-                    BodyCapture::default(),
+                    stream_body_capture,
                 );
                 let stream_success = matches!(
                     result.outcome,
@@ -2147,6 +2205,16 @@ pub async fn proxy_anthropic_messages(
         Ok(http_response)
     } else {
         let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
+        // See chat-completions handler for rationale: pre-prepare the
+        // error-path body capture so the synchronous map_err closure
+        // can move it in.
+        let error_path_capture = prepare_body_capture(
+            &state.dynamic_config,
+            &pii_redactor,
+            &messages_for_audit,
+            None,
+        )
+        .await;
         let (chosen_entry, mut response, sel_record) =
             select_route_with_failover(routes, &request, &sel_ctx)
                 .await
@@ -2164,7 +2232,7 @@ pub async fn proxy_anthropic_messages(
                         None,
                         request_started_at.elapsed().as_millis() as i64,
                         &e,
-                        BodyCapture::default(),
+                        error_path_capture,
                     );
                     GatewayErrorResponse::from(e)
                 })?;
@@ -2508,6 +2576,9 @@ pub async fn proxy_responses(
         // upstream stream doesn't surface a usage chunk — see
         // `stream_usage_or_estimate` for the budget-bypass context.
         let messages_for_done = request.messages.clone();
+        // Pre-redaction snapshot for audit body capture (see the
+        // `messages_for_audit` clone at the top of the handler).
+        let messages_for_audit_for_done = messages_for_audit.clone();
         let user_id_for_done = identity.user_id.clone();
         let user_email_for_done = identity.user_email.clone();
         let api_key_id_for_done = identity.api_key_id.clone();
@@ -2529,6 +2600,21 @@ pub async fn proxy_responses(
                 let (pt, ct) = stream_usage_or_estimate(&result, &messages_for_done);
                 let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
                 let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
+                // Assemble streamed chunks into a canonical response for
+                // body capture. Same logic as the chat-completions stream
+                // path; auditors get the user's actual prompt + the AI's
+                // (possibly partial) reply.
+                let assembled_for_audit = crate::streaming::assemble_response(
+                    &result.chunks,
+                    result.usage.clone(),
+                );
+                let stream_body_capture = prepare_body_capture(
+                    &state_for_done.dynamic_config,
+                    &state_for_done.pii_redactor.load(),
+                    &messages_for_audit_for_done,
+                    assembled_for_audit.as_ref(),
+                )
+                .await;
                 emit_gateway_log_with_extra(
                     &audit_for_done,
                     &trace_id_for_done,
@@ -2547,7 +2633,7 @@ pub async fn proxy_responses(
                     started.elapsed().as_millis() as i64,
                     logged_status,
                     error_detail,
-                    BodyCapture::default(),
+                    stream_body_capture,
                 );
                 let stream_success = matches!(
                     result.outcome,
@@ -2586,6 +2672,16 @@ pub async fn proxy_responses(
         Ok(http_response)
     } else {
         let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
+        // See chat-completions handler for rationale: pre-prepare the
+        // error-path body capture so the synchronous map_err closure
+        // can move it in.
+        let error_path_capture = prepare_body_capture(
+            &state.dynamic_config,
+            &pii_redactor,
+            &messages_for_audit,
+            None,
+        )
+        .await;
         let (chosen_entry, mut response, sel_record) =
             select_route_with_failover(routes, &request, &sel_ctx)
                 .await
@@ -2603,7 +2699,7 @@ pub async fn proxy_responses(
                         None,
                         request_started_at.elapsed().as_millis() as i64,
                         &e,
-                        BodyCapture::default(),
+                        error_path_capture,
                     );
                     GatewayErrorResponse::from(e)
                 })?;
