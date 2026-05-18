@@ -89,7 +89,7 @@ export function invalidateSetupStatusCache() {
 
 function RootComponent() {
   const { t } = useTranslation();
-  const { user, loading, login, logout, handleSsoCallback, fetchUser } = useAuth();
+  const { user, loading, login, logout, handleSsoCallback } = useAuth();
   const [setupChecked, setSetupChecked] = useState(cachedSetupStatus !== null);
   const [needsSetup, setNeedsSetup] = useState(cachedSetupStatus?.needs_setup ?? false);
   const { allowRegistration: registrationOpen } = useSsoStatus();
@@ -118,38 +118,19 @@ function RootComponent() {
         });
     };
     if (cachedSetupStatus === null) check();
-    // Throttle visibility-driven re-checks. A user toggling between
-    // tabs every second shouldn't hammer /api/auth/me or
-    // /api/setup/status — once per 30s is enough to catch
-    // background revocations / completed-in-another-tab cases.
-    let lastVisCheck = 0;
-    const VIS_REFRESH_MIN_INTERVAL_MS = 30_000;
     const onVis = () => {
-      if (document.hidden) return;
-      const now = Date.now();
-      if (now - lastVisCheck < VIS_REFRESH_MIN_INTERVAL_MS) return;
-      lastVisCheck = now;
-      // Re-check setup status if we still need setup OR have no cache.
-      if (cachedSetupStatus === null || cachedSetupStatus.needs_setup) {
+      // When the tab becomes visible, re-check IF the cache was invalidated
+      // (or if we're still in needs_setup state — covers the case where the
+      // user just finished setup in this tab).
+      if (!document.hidden && (cachedSetupStatus === null || cachedSetupStatus.needs_setup)) {
         check();
       }
-      // Re-fetch the current user so the in-memory permission cache
-      // catches up to any admin-driven revocation that happened while
-      // the tab was hidden. Without this, a user whose role was
-      // narrowed in another browser/admin tab keeps seeing the now-
-      // forbidden UI elements until they manually reload — they'd
-      // just get a 403 on the next mutation, which is jarring.
-      void fetchUser();
     };
     document.addEventListener('visibilitychange', onVis);
     return () => {
       cancelled = true;
       document.removeEventListener('visibilitychange', onVis);
     };
-    // fetchUser is stable (useCallback with [] deps) — including it
-    // in deps would re-register the listener on every render that
-    // returned a new function identity, which it doesn't.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Handle SSO callback. Auth cookies were set on the redirect
