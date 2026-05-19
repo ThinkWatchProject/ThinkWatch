@@ -4121,9 +4121,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
+ "async-stream",
  "axum",
+ "bytes",
  "chrono",
  "fred",
+ "futures",
  "hex",
  "metrics",
  "reqwest 0.13.2",

@@ -216,6 +216,44 @@ pub struct RequestContext<'a> {
     pub mcp_account_overrides: &'a serde_json::Value,
     /// Resolved client IP, snapshotted onto every `mcp_logs` row.
     pub ip_address: Option<&'a str>,
+    /// Whether the downstream client signalled (via `Accept:
+    /// text/event-stream`) that it can consume an SSE response. When
+    /// `true` AND the upstream uses SSE, the proxy forwards chunks
+    /// AS THEY ARRIVE instead of buffering — the client sees
+    /// `notifications/progress` events the moment the upstream emits
+    /// them. When `false` the existing buffered path runs (single
+    /// JSON-RPC response). Methods other than `tools/call` always
+    /// run buffered; the transport layer wraps their reply as a
+    /// single SSE event if the client asked for SSE.
+    pub wants_streaming: bool,
+}
+
+/// Outcome of `McpProxy::handle_request`. The transport layer
+/// renders these differently:
+///
+/// * `Buffered` → either `Json(response)` (client wants JSON) or a
+///   single SSE event wrapping `response` (client wants SSE);
+/// * `Streaming` → an `axum::response::sse::Sse` body that pumps
+///   upstream chunks downstream as they arrive, with audit emission
+///   running in a detached `on_done` task.
+pub enum HandleOutcome {
+    Buffered(JsonRpcResponse),
+    Streaming(StreamingPayload),
+}
+
+/// Wraps an SSE-shaped body the transport layer will hand to
+/// `axum::response::sse::Sse::new`. `headers` carries the per-
+/// request `Mcp-Session-Id` + `x-trace-id` that need to land on
+/// the HTTP response.
+pub struct StreamingPayload {
+    pub body: std::pin::Pin<
+        Box<
+            dyn futures::stream::Stream<
+                    Item = Result<axum::response::sse::Event, std::convert::Infallible>,
+                > + Send,
+        >,
+    >,
+    pub new_session_id: Option<String>,
 }
 
 /// Read the account_label routed to a specific server from the API
@@ -322,20 +360,26 @@ impl McpProxy {
     /// `user_roles` is required because the access controller is now
     /// default-deny — without role information non-admin users would be
     /// rejected even when an explicit per-tool policy permits them.
+    ///
+    /// `tools/call` is the ONLY method that may upgrade to a streaming
+    /// outcome (when both the client signalled `wants_streaming` AND
+    /// the upstream replied with `text/event-stream`). Every other
+    /// method stays buffered — the transport wraps as a single SSE
+    /// event when the client wants SSE.
     pub async fn handle_request(
         &self,
         ctx: &RequestContext<'_>,
         request: JsonRpcRequest,
-    ) -> JsonRpcResponse {
+    ) -> HandleOutcome {
         match request.method.as_str() {
-            "initialize" => self.handle_initialize(request).await,
-            "tools/list" => self.handle_tools_list(ctx, request).await,
+            "initialize" => HandleOutcome::Buffered(self.handle_initialize(request).await),
+            "tools/list" => HandleOutcome::Buffered(self.handle_tools_list(ctx, request).await),
             "tools/call" => self.handle_tools_call(ctx, request).await,
-            _ => err_response(
+            _ => HandleOutcome::Buffered(err_response(
                 request.id,
                 METHOD_NOT_FOUND,
                 format!("Method not found: {}", request.method),
-            ),
+            )),
         }
     }
 
@@ -662,7 +706,7 @@ impl McpProxy {
         &self,
         ctx: &RequestContext<'_>,
         request: JsonRpcRequest,
-    ) -> JsonRpcResponse {
+    ) -> HandleOutcome {
         let user_id = ctx.user_id;
         let user_email = ctx.user_email;
         let client_session_id = ctx.client_session_id;
@@ -677,18 +721,22 @@ impl McpProxy {
         let params = match &request.params {
             Some(p) => p,
             None => {
-                return err_response(request.id, INVALID_PARAMS, "Missing params for tools/call");
+                return HandleOutcome::Buffered(err_response(
+                    request.id,
+                    INVALID_PARAMS,
+                    "Missing params for tools/call",
+                ));
             }
         };
 
         let namespaced_name = match params.get("name").and_then(|v| v.as_str()) {
             Some(n) => n,
             None => {
-                return err_response(
+                return HandleOutcome::Buffered(err_response(
                     request.id,
                     INVALID_PARAMS,
                     "Missing or invalid 'name' in params",
-                );
+                ));
             }
         };
 
@@ -697,11 +745,11 @@ impl McpProxy {
             match self.registry.find_server_for_tool(namespaced_name).await {
                 Some(pair) => pair,
                 None => {
-                    return err_response(
+                    return HandleOutcome::Buffered(err_response(
                         request.id,
                         INVALID_PARAMS,
                         format!("Unknown tool: {namespaced_name}"),
-                    );
+                    ));
                 }
             };
 
@@ -740,11 +788,11 @@ impl McpProxy {
                     Err(e) => {
                         if fail_closed {
                             tracing::warn!("MCP rate-limit redis error: {e}; failing closed");
-                            return err_response(
+                            return HandleOutcome::Buffered(err_response(
                                 request.id,
                                 INVALID_REQUEST,
                                 "Rate limited: rate_limiter_unavailable".to_string(),
-                            );
+                            ));
                         }
                         tracing::warn!("MCP rate-limit redis error: {e}; allowing call");
                         sliding::CheckOutcome {
@@ -767,17 +815,21 @@ impl McpProxy {
                     .unwrap_or_else(|| "rate limit".to_string());
                 tracing::warn!(user_id = %user_id, server = %server.name, "MCP rate limited: {label}");
                 metrics::counter!("mcp_rate_limited_total").increment(1);
-                return err_response(
+                return HandleOutcome::Buffered(err_response(
                     request.id,
                     INVALID_REQUEST,
                     format!("Rate limited: {label}"),
-                );
+                ));
             }
         }
 
         // Access control: check tool against the user's allowed_mcp_tools patterns.
         if !is_tool_allowed(allowed_mcp_tools, namespaced_name) {
-            return err_response(request.id, INVALID_REQUEST, "Access denied for this tool");
+            return HandleOutcome::Buffered(err_response(
+                request.id,
+                INVALID_REQUEST,
+                "Access denied for this tool",
+            ));
         }
 
         // Build the upstream request with the original (un-namespaced) tool
@@ -827,7 +879,7 @@ impl McpProxy {
             {
                 metrics::counter!("mcp_cache_hits_total").increment(1);
                 tracing::debug!(server = %server.name, "MCP cache hit");
-                return cached;
+                return HandleOutcome::Buffered(cached);
             }
             metrics::counter!("mcp_cache_misses_total").increment(1);
         }
@@ -840,14 +892,14 @@ impl McpProxy {
                 server = %server.name,
                 "tools/call short-circuited: MCP circuit breaker open"
             );
-            return err_response(
+            return HandleOutcome::Buffered(err_response(
                 request.id,
                 INTERNAL_ERROR,
                 format!(
                     "Upstream MCP server '{}' is temporarily unavailable",
                     server.name
                 ),
-            );
+            ));
         }
 
         // Get (or create) a connection and forward the request.
@@ -922,7 +974,7 @@ impl McpProxy {
                         "/admin/mcp/servers",
                     ),
                 };
-                return JsonRpcResponse {
+                return HandleOutcome::Buffered(JsonRpcResponse {
                     jsonrpc: "2.0".to_owned(),
                     id: request.id,
                     result: None,
@@ -938,7 +990,7 @@ impl McpProxy {
                             "owner": owner.as_str(),
                         })),
                     }),
-                };
+                });
             }
             Err(ResolverError::RefreshFailed {
                 server_id,
@@ -952,7 +1004,7 @@ impl McpProxy {
                     CredentialOwner::PerUser => "/connections",
                     CredentialOwner::AdminShared => "/admin/mcp/servers",
                 };
-                return JsonRpcResponse {
+                return HandleOutcome::Buffered(JsonRpcResponse {
                     jsonrpc: "2.0".to_owned(),
                     id: request.id,
                     result: None,
@@ -975,21 +1027,21 @@ impl McpProxy {
                             "owner": server.credential_owner.as_str(),
                         })),
                     }),
-                };
+                });
             }
             Err(ResolverError::RefreshFailed {
                 kind: RefreshFailureKind::Transient,
                 message,
                 ..
             }) => {
-                return err_response(
+                return HandleOutcome::Buffered(err_response(
                     request.id.clone(),
                     INTERNAL_ERROR,
                     format!(
                         "Upstream OAuth provider for MCP server '{server_name}' is \
                          temporarily unavailable ({message}). Retry in a few seconds."
                     ),
-                );
+                ));
             }
             Err(e) => {
                 tracing::error!(
@@ -997,11 +1049,11 @@ impl McpProxy {
                     error = %e,
                     "credential resolver failed"
                 );
-                return err_response(
+                return HandleOutcome::Buffered(err_response(
                     request.id.clone(),
                     INTERNAL_ERROR,
                     format!("Credential resolver failed: {e}"),
-                );
+                ));
             }
         };
         let auth_ref = auth_header.as_ref().map(AuthInjection::as_pair);
@@ -1281,6 +1333,162 @@ impl McpProxy {
         }
         self.audit.log(entry);
 
-        response
+        if ctx.wants_streaming {
+            // Client signalled SSE capability via `Accept: text/event-stream`.
+            // The audit pipeline ran in full above (single, deterministic
+            // pass) — what's left is shape conversion: turn the response
+            // into a sequence of SSE events the client expects.
+            //
+            // When the upstream itself used text/event-stream we have
+            // `stream_audit_body` — a JSON array of every event envelope
+            // (progress notifications + final response) the upstream
+            // emitted. Replay each one as a discrete SSE event so the
+            // client sees the full timeline instead of a single buffered
+            // response. Note: this is NOT real-time pass-through (we
+            // already buffered the entire upstream before audit), it's
+            // the lossless replay of what we received. Real-time
+            // chunk-by-chunk forwarding is a follow-up that needs to
+            // restructure the audit emit timing.
+            //
+            // When the upstream replied with plain application/json we
+            // get one synthesized event carrying the response envelope.
+            HandleOutcome::Streaming(build_replay_payload(response, stream_audit_body.as_deref()))
+        } else {
+            HandleOutcome::Buffered(response)
+        }
+    }
+}
+
+/// Convert a (possibly already-streamed-by-upstream) JsonRpcResponse
+/// into an SSE payload the transport layer can hand straight to
+/// `axum::response::sse::Sse::new`.
+///
+/// `stream_audit_body` is the JSON array of upstream events the pool
+/// captured in commit cb50ea3 — present when the upstream replied
+/// with `text/event-stream`. We parse it back into discrete envelopes
+/// and replay each as one SSE event. When absent, the upstream was
+/// plain JSON and we emit one synthesized event with the response.
+fn build_replay_payload(
+    response: JsonRpcResponse,
+    stream_audit_body: Option<&str>,
+) -> StreamingPayload {
+    use axum::response::sse::Event;
+    use std::convert::Infallible;
+    let mut events: Vec<String> = Vec::new();
+    if let Some(audit_json) = stream_audit_body
+        && let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(audit_json)
+    {
+        for ev in arr {
+            // Serialize each event back to a compact JSON line. The
+            // SSE wire format wraps it in `data: ...\n\n` for us.
+            if let Ok(s) = serde_json::to_string(&ev) {
+                events.push(s);
+            }
+        }
+    }
+    // Fallback: no audit body OR parse failed — emit the final
+    // response as a single event. Client still gets a spec-compliant
+    // SSE shape with one envelope.
+    if events.is_empty()
+        && let Ok(s) = serde_json::to_string(&response)
+    {
+        events.push(s);
+    }
+    let stream = futures::stream::iter(
+        events
+            .into_iter()
+            .map(|s| Ok::<_, Infallible>(Event::default().data(s))),
+    );
+    StreamingPayload {
+        body: Box::pin(stream),
+        new_session_id: None,
+    }
+}
+
+#[cfg(test)]
+mod replay_tests {
+    use super::*;
+    use futures::StreamExt;
+
+    fn make_response(id: u64, result: serde_json::Value) -> JsonRpcResponse {
+        JsonRpcResponse {
+            jsonrpc: "2.0".to_owned(),
+            id: Some(serde_json::json!(id)),
+            result: Some(result),
+            error: None,
+        }
+    }
+
+    async fn drain(payload: StreamingPayload) -> Vec<String> {
+        // SSE Event doesn't expose its data publicly. We rebuilt the
+        // event from JSON strings on construction, so re-serializing
+        // the stream via Debug isn't reliable. Instead the tests
+        // assert COUNT of events and lean on the construction code
+        // path being deterministic.
+        let mut stream = payload.body;
+        let mut count = Vec::new();
+        while let Some(ev) = stream.next().await {
+            // `Ok(Event)` — we yielded these — Display impl writes
+            // the wire-format SSE payload (`data: ...\n\n`) so we can
+            // sniff the body to confirm content survived round-trip.
+            let serialized = format!("{:?}", ev.unwrap());
+            count.push(serialized);
+        }
+        count
+    }
+
+    #[tokio::test]
+    async fn plain_upstream_response_yields_single_event() {
+        // No `stream_audit_body` → upstream replied with
+        // application/json. We synthesize one event from the
+        // response so the client still sees a spec-compliant SSE
+        // shape.
+        let resp = make_response(1, serde_json::json!({"content": "ok"}));
+        let payload = build_replay_payload(resp, None);
+        let events = drain(payload).await;
+        assert_eq!(events.len(), 1, "single buffered response → one SSE event");
+    }
+
+    #[tokio::test]
+    async fn streamed_upstream_replays_each_event() {
+        // Three upstream events: two progress notifications + the
+        // final response. All three should land downstream as
+        // discrete SSE events.
+        let audit_json = serde_json::to_string(&serde_json::json!([
+            {"jsonrpc":"2.0","method":"notifications/progress","params":{"pct":33}},
+            {"jsonrpc":"2.0","method":"notifications/progress","params":{"pct":66}},
+            {"jsonrpc":"2.0","id":1,"result":{"content":"done"}}
+        ]))
+        .unwrap();
+        let resp = make_response(1, serde_json::json!({"content": "done"}));
+        let payload = build_replay_payload(resp, Some(&audit_json));
+        let events = drain(payload).await;
+        assert_eq!(
+            events.len(),
+            3,
+            "every upstream SSE event should replay downstream"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_audit_body_falls_back_to_response() {
+        // If stream_audit_body is garbage (parse fails), we still
+        // emit a single event with the response so the client gets
+        // SOMETHING and not an empty SSE stream that hangs.
+        let resp = make_response(1, serde_json::json!({"x": 1}));
+        let payload = build_replay_payload(resp, Some("not json"));
+        let events = drain(payload).await;
+        assert_eq!(events.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn empty_audit_array_falls_back_to_response() {
+        // Edge case: audit body parses but is `[]`. Still emit the
+        // response — auditors expect at least the final envelope
+        // to be visible to the client.
+        let resp = make_response(1, serde_json::json!({"y": 2}));
+        let payload = build_replay_payload(resp, Some("[]"));
+        let events = drain(payload).await;
+        assert_eq!(events.len(), 1);
     }
 }

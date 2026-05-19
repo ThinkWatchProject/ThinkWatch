@@ -23,3 +23,6 @@ metrics = { workspace = true }
 xxhash-rust = { workspace = true }
 hex = { workspace = true }
 arc-swap = { workspace = true }
+futures = { workspace = true }
+async-stream = { workspace = true }
+bytes = { workspace = true }

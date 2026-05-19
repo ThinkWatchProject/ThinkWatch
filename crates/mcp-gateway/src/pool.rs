@@ -148,36 +148,31 @@ impl ConnectionPool {
     /// for plain `application/json` responses where the response
     /// envelope IS the entire payload and the proxy can serialize
     /// `response.result` directly.
+    /// Shared HTTP request builder for both `send_request` (buffered)
+    /// and `send_request_streaming` (pass-through). Carries all the
+    /// auth + session + custom-header decoration once, so the two
+    /// variants stay in lockstep when those rules change.
     #[allow(clippy::too_many_arguments)]
-    pub async fn send_request(
-        &self,
+    fn build_upstream_request(
         conn: &McpConnection,
         request: &JsonRpcRequest,
         auth_header: Option<(&str, &str)>,
         caller: Option<&CallerIdentity>,
         upstream_session_id: Option<&str>,
         trace_id: Option<&str>,
-    ) -> Result<(JsonRpcResponse, Option<String>, Option<String>), PoolError> {
+    ) -> reqwest::RequestBuilder {
         let mut builder = conn
             .client
             .post(&conn.endpoint_url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream");
 
-        // Attach the per-call resolved auth header (if any).
         if let Some((name, value)) = auth_header {
             builder = builder.header(name, value);
         }
-
-        // Forward the gateway-side trace id so the upstream MCP server
-        // can correlate its own log line with this single request.
         if let Some(t) = trace_id {
             builder = builder.header("x-trace-id", t);
         }
-
-        // Attach custom headers with template variable resolution.
-        // Values containing {{user_id}} or {{user_email}} are resolved
-        // per-request; plain values pass through as-is.
         for (key, template) in &conn.custom_headers {
             let value = if let Some(c) = caller {
                 template
@@ -188,13 +183,31 @@ impl ConnectionPool {
             };
             builder = builder.header(key.as_str(), value);
         }
-
-        // Attach the caller-supplied upstream session header, if any.
         if let Some(sid) = upstream_session_id {
             builder = builder.header("Mcp-Session-Id", sid);
         }
+        builder.json(request)
+    }
 
-        let resp = builder.json(request).send().await?;
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_request(
+        &self,
+        conn: &McpConnection,
+        request: &JsonRpcRequest,
+        auth_header: Option<(&str, &str)>,
+        caller: Option<&CallerIdentity>,
+        upstream_session_id: Option<&str>,
+        trace_id: Option<&str>,
+    ) -> Result<(JsonRpcResponse, Option<String>, Option<String>), PoolError> {
+        let builder = Self::build_upstream_request(
+            conn,
+            request,
+            auth_header,
+            caller,
+            upstream_session_id,
+            trace_id,
+        );
+        let resp = builder.send().await?;
 
         // Capture the upstream session ID from the response header so the
         // caller can persist it per-user.
@@ -252,6 +265,57 @@ impl ConnectionPool {
         }
 
         Ok((json_resp, new_session_id, stream_audit_body))
+    }
+
+    /// Streaming counterpart of `send_request`: doesn't consume the
+    /// response body, so the caller can forward upstream SSE chunks
+    /// to the downstream client AS THEY ARRIVE instead of buffering
+    /// the entire tool execution into memory first.
+    ///
+    /// Returns the raw `reqwest::Response` (caller pulls its
+    /// `bytes_stream` for chunk-by-chunk forwarding) plus the
+    /// upstream `Mcp-Session-Id` header (same persistence contract
+    /// as `send_request`). Non-2xx upstream responses are still
+    /// buffered into a `PoolError::UpstreamError` because once a
+    /// status indicates failure, body content is small + we want
+    /// the error message visible to the caller; only successful
+    /// responses are streamed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_request_streaming(
+        &self,
+        conn: &McpConnection,
+        request: &JsonRpcRequest,
+        auth_header: Option<(&str, &str)>,
+        caller: Option<&CallerIdentity>,
+        upstream_session_id: Option<&str>,
+        trace_id: Option<&str>,
+    ) -> Result<(reqwest::Response, Option<String>), PoolError> {
+        let builder = Self::build_upstream_request(
+            conn,
+            request,
+            auth_header,
+            caller,
+            upstream_session_id,
+            trace_id,
+        );
+        let resp = builder.send().await?;
+        let new_session_id = resp
+            .headers()
+            .get("mcp-session-id")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_owned());
+        let status = resp.status();
+        if !status.is_success() {
+            // Same error-surfacing contract as send_request — buffer
+            // the small error body so the caller can see the upstream
+            // diagnostic instead of an opaque "non-2xx".
+            let body = resp.text().await.unwrap_or_default();
+            return Err(PoolError::UpstreamError {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok((resp, new_session_id))
     }
 }
 

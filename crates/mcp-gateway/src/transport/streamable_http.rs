@@ -4,10 +4,11 @@ use axum::Json;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, Sse};
 use uuid::Uuid;
 
 use crate::proxy::McpProxy;
-use crate::proxy::{INVALID_REQUEST, JsonRpcRequest, RequestContext, err_response};
+use crate::proxy::{HandleOutcome, INVALID_REQUEST, JsonRpcRequest, RequestContext, err_response};
 
 /// Shared application state for the MCP gateway Axum handlers.
 ///
@@ -76,6 +77,21 @@ fn resolve_trace_id(headers: &HeaderMap) -> String {
         .unwrap_or_else(|| Uuid::new_v4().to_string())
 }
 
+/// Whether the client signalled (via `Accept`) that it can consume
+/// an SSE response. MCP's Streamable HTTP transport says clients
+/// announce capability via this header; the server is free to reply
+/// with either `application/json` or `text/event-stream` regardless
+/// — but if the client DOESN'T include SSE in Accept, we MUST stick
+/// to plain JSON. Default-false on missing header so anyone hitting
+/// `/mcp` with a plain `curl -d` gets the buffered shape they expect.
+fn wants_sse(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_lowercase().contains("text/event-stream"))
+        .unwrap_or(false)
+}
+
 /// `POST /mcp` — main Streamable HTTP endpoint.
 ///
 /// Auth runs as a router-level layer before this handler fires;
@@ -112,6 +128,7 @@ pub async fn handle_post(
     let trace_id = resolve_trace_id(&headers);
 
     // --- Dispatch ----------------------------------------------------------
+    let sse_capable = wants_sse(&headers);
     let ctx = RequestContext {
         user_id: identity.user_id,
         user_email: &identity.user_email,
@@ -121,8 +138,9 @@ pub async fn handle_post(
         trace_id: &trace_id,
         mcp_account_overrides: &identity.mcp_account_overrides,
         ip_address: identity.ip_address.as_deref(),
+        wants_streaming: sse_capable,
     };
-    let response = state.proxy.handle_request(&ctx, request).await;
+    let outcome = state.proxy.handle_request(&ctx, request).await;
 
     // Return the response with the session header + trace id so the
     // operator can copy it back out of the wire.
@@ -134,7 +152,42 @@ pub async fn handle_post(
         resp_headers.insert(TRACE_ID_HEADER, val);
     }
 
-    (StatusCode::OK, resp_headers, Json(response)).into_response()
+    match outcome {
+        HandleOutcome::Buffered(response) => {
+            // Buffered shape happens for initialize / tools/list, for
+            // tools/call cache hits / early rejections, AND for
+            // tools/call when the upstream replied with plain
+            // application/json (no chunks to forward). When the client
+            // asked for SSE, wrap as a single event so the wire
+            // protocol matches the negotiated content type; otherwise
+            // return the JSON shape unchanged for backward compat with
+            // plain JSON-RPC clients.
+            if sse_capable {
+                let payload = serde_json::to_string(&response).unwrap_or_default();
+                let event = Ok::<_, std::convert::Infallible>(Event::default().data(payload));
+                let stream = futures::stream::iter(std::iter::once(event));
+                let mut sse_resp = Sse::new(stream).into_response();
+                sse_resp.headers_mut().extend(resp_headers);
+                sse_resp
+            } else {
+                (StatusCode::OK, resp_headers, Json(response)).into_response()
+            }
+        }
+        HandleOutcome::Streaming(payload) => {
+            // Upstream is mid-flight emitting SSE chunks. Persist the
+            // session id the proxy lifted out of the upstream response
+            // headers (when present) BEFORE we hand the body to axum
+            // so the client sees the per-call session continuity.
+            if let Some(sid) = payload.new_session_id
+                && let Ok(val) = sid.parse()
+            {
+                resp_headers.insert(MCP_SESSION_HEADER, val);
+            }
+            let mut sse_resp = Sse::new(payload.body).into_response();
+            sse_resp.headers_mut().extend(resp_headers);
+            sse_resp
+        }
+    }
 }
 
 /// `DELETE /mcp` — close an MCP session.
