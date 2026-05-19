@@ -148,3 +148,77 @@ services:
       timeout: 3s
       retries: 10
 
+  # --- RustFS (S3-compatible object storage for audit body offload) ---
+  #
+  # Default backend for the audit body-offload pipeline (see
+  # crates/common/src/blob_store.rs). The server reads S3_* env vars at
+  # startup and points at this container when they're set; without them
+  # the offload pipeline runs InlineStore (truncation only). The bucket
+  # `audit-bodies` is created by the rustfs_init one-shot below using
+  # `mc` against the same RustFS endpoint — without it the first body
+  # PUT 404s on a missing bucket and falls back to truncation forever.
+  rustfs:
+    image: rustfs/rustfs:latest
+    command: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
+    environment:
+      # RustFS uses the MinIO-style root credential pair. Keep them in
+      # sync with S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY in .env so
+      # the server can authenticate against this bucket.
+      RUSTFS_ROOT_USER: ${S3_ACCESS_KEY_ID:?S3_ACCESS_KEY_ID is required (used both by rustfs root creds and the gateway)}
+      RUSTFS_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required}
+    ports:
+      - "9100:9000"   # S3 API — host port 9100 to avoid clashing with CH native 9000
+      - "9101:9001"   # Admin console (read-only browse for operators)
+    volumes:
+      - ./data/rustfs:/data
+    healthcheck:
+      # /minio/health/live is the lightweight liveness probe both MinIO
+      # and RustFS expose; doesn't require a bucket to exist.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # One-shot bucket bootstrap. Uses the official MinIO Client (`mc`)
+  # because RustFS speaks the MinIO admin API; runs to completion then
+  # exits 0. Idempotent — `mb --ignore-existing` makes the second-run
+  # case quiet.
+  rustfs_init:
+    image: minio/mc:latest
+    depends_on:
+      rustfs:
+        condition: service_healthy
+    environment:
+      S3_BUCKET: ${S3_BUCKET:-audit-bodies}
+      S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?}
+      S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        mc alias set local http://rustfs:9000 "$$S3_ACCESS_KEY_ID" "$$S3_SECRET_ACCESS_KEY"
+        mc mb --ignore-existing "local/$$S3_BUCKET"
+        # Set an object-lifecycle rule that expires audit bodies at 60d
+        # — a buffer over the default 30-day column TTL in CH so a
+        # late-arriving body fetch still hits the bucket for a couple
+        # weeks past the row's body NULL-out. Operators can override
+        # by editing this file or applying their own lifecycle policy
+        # against the bucket.
+        cat > /tmp/lifecycle.json <<EOF
+        {
+          "Rules": [
+            {
+              "ID": "expire-audit-bodies",
+              "Status": "Enabled",
+              "Expiration": { "Days": 60 },
+              "Filter": { "Prefix": "bodies/" }
+            }
+          ]
+        }
+        EOF
+        mc ilm import "local/$$S3_BUCKET" < /tmp/lifecycle.json || true
+        echo "rustfs bucket $$S3_BUCKET ready"
+    restart: "no"
+

@@ -25,9 +25,12 @@ dev: infra dev-backend dev-frontend
 $(DEV_RUN_DIR):
 	@mkdir -p $(DEV_RUN_DIR)
 
-# Start infrastructure (PG, Redis, ClickHouse, Zitadel)
+# Start infrastructure (PG, Redis, ClickHouse, Zitadel, RustFS).
+# The `--remove-orphans` is here because `rustfs_init` is intentionally
+# a one-shot — without the flag, every subsequent `make infra` would
+# warn about the exited container even though it's the design.
 infra:
-	docker compose -f deploy/docker-compose.dev.yml --env-file .env up -d
+	docker compose -f deploy/docker-compose.dev.yml --env-file .env up -d --remove-orphans
 
 infra-down:
 	docker compose -f deploy/docker-compose.dev.yml --env-file .env down
