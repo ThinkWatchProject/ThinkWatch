@@ -122,6 +122,14 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// Used by the body-viewer endpoints to render the original body
     /// when the audit row points at remote storage.
     async fn fetch(&self, url: &str) -> Result<Vec<u8>, BlobError>;
+
+    /// PUT + GET + DELETE a tiny marker object to confirm the backend
+    /// is reachable, credentials work, and the bucket exists. Used at
+    /// startup so misconfig surfaces in operator logs immediately
+    /// instead of silently degrading to truncation on first oversize
+    /// body. `InlineStore` returns `Ok(())` because there's nothing
+    /// to check.
+    async fn smoke_test(&self) -> Result<(), BlobError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -154,6 +162,10 @@ impl BlobStore for InlineStore {
         // from S3 → inline mid-flight, an old row can still carry
         // one. Surface the misconfig cleanly instead of panicking.
         Err(BlobError::NotConfigured)
+    }
+    async fn smoke_test(&self) -> Result<(), BlobError> {
+        // No backend to test. Inline-only by design — caller knows.
+        Ok(())
     }
 }
 
@@ -382,6 +394,44 @@ impl BlobStore for S3Store {
         let bytes = self.signed_request("GET", &object_url, b"").await?;
         metrics::counter!("blob_store_get_total").increment(1);
         Ok(bytes.to_vec())
+    }
+
+    async fn smoke_test(&self) -> Result<(), BlobError> {
+        // Marker object lives under a dedicated prefix so a bucket
+        // lifecycle rule that targets `bodies/` doesn't accidentally
+        // garbage-collect our smoke-test detritus. The instance id +
+        // unix epoch keep multiple replicas from colliding on the
+        // same key during a coordinated restart.
+        let key = format!(
+            "_smoke_test/{}-{}.txt",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0)
+        );
+        let object_url = self.object_url(&key)?;
+        let probe_body = b"thinkwatch-smoke-test";
+        // PUT — verifies write auth + bucket exists.
+        self.signed_request("PUT", &object_url, probe_body).await?;
+        // GET — verifies read auth + the bucket actually accepted what
+        // we wrote (some misconfigs accept the PUT but reject the GET).
+        let got = self.signed_request("GET", &object_url, b"").await?;
+        if got.as_ref() != probe_body {
+            return Err(BlobError::BadStatus {
+                status: 0,
+                body: format!(
+                    "smoke-test GET returned {} bytes, expected {}",
+                    got.len(),
+                    probe_body.len()
+                ),
+            });
+        }
+        // DELETE — best-effort cleanup; if it fails we still consider
+        // the test successful because the bucket lifecycle or
+        // `_smoke_test/` retention policy will sweep eventually.
+        let _ = self.signed_request("DELETE", &object_url, b"").await;
+        Ok(())
     }
 }
 

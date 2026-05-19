@@ -75,6 +75,26 @@ async fn main() -> anyhow::Result<()> {
     // defaults.
     handlers::admin::reconcile_clickhouse_ttls(&state).await;
 
+    // Smoke-test the body-offload backend so misconfig surfaces
+    // immediately in operator logs instead of waiting for the first
+    // oversize body to silently degrade to truncation. Fail-OPEN
+    // (server still starts) because S3 being transiently unreachable
+    // at boot shouldn't cascade into the AI gateway being down — but
+    // emit a loud WARN + a metric so an operator dashboard can
+    // alert on `blob_store_smoke_failed_total` separately from a
+    // genuine startup failure. InlineStore's smoke_test is a no-op,
+    // so deployments without offload pay nothing here.
+    if let Err(e) = state.blob_store.smoke_test().await {
+        tracing::warn!(
+            error = %e,
+            "blob-store smoke test failed at startup — body offload will likely fall back \
+             to truncation; check S3_ENDPOINT_URL / S3_ACCESS_KEY_ID / bucket existence"
+        );
+        metrics::counter!("blob_store_smoke_failed_total").increment(1);
+    } else if state.blob_store.can_offload() {
+        tracing::info!("blob-store smoke test passed (body offload ready)");
+    }
+
     // --- Start Gateway server (AI API + MCP) ---
     let gateway_app = app::create_gateway_app(&config, state.clone()).await?;
     let gateway_addr = config.gateway_addr();

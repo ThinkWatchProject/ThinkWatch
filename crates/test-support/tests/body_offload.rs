@@ -74,6 +74,11 @@ impl BlobStore for InMemoryBlobStore {
             .cloned()
             .ok_or_else(|| BlobError::BadUrl(format!("not stored: {url}")))
     }
+    async fn smoke_test(&self) -> Result<(), BlobError> {
+        // Always healthy — the in-memory store has no network surface
+        // to misconfigure, so smoke_test is a no-op success.
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize, clickhouse::Row)]
