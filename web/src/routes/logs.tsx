@@ -673,6 +673,7 @@ export function UnifiedLogsPage() {
 
   const category: LogCategory = isLogCategory(search.category) ? search.category : 'audit';
   const activeQuery = search.q ?? '';
+  const activeBodyQuery = search.body_q ?? '';
   const from = search.from ?? defaultFromLocal();
   const to = search.to ?? defaultToLocal();
   const page = search.page ?? 0;
@@ -680,6 +681,7 @@ export function UnifiedLogsPage() {
   // Local-only state: the search input box (committed to URL on Enter / click)
   // and the expanded-row toggle.
   const [searchInput, setSearchInput] = useState(activeQuery);
+  const [bodySearchInput, setBodySearchInput] = useState(activeBodyQuery);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -705,12 +707,22 @@ export function UnifiedLogsPage() {
       setSearchInput(activeQuery);
     }
   }, [activeQuery]);
+  // Same browser-back/forward sync pattern for body_q so a stale
+  // input value from a prior URL doesn't override an external nav.
+  const lastSyncedBodyRef = useRef(activeBodyQuery);
+  useEffect(() => {
+    if (activeBodyQuery !== lastSyncedBodyRef.current) {
+      lastSyncedBodyRef.current = activeBodyQuery;
+      setBodySearchInput(activeBodyQuery);
+    }
+  }, [activeBodyQuery]);
 
   const updateSearch = useCallback(
     (
       patch: Partial<{
         category: LogCategory;
         q: string;
+        body_q: string;
         from: string;
         to: string;
         page: number;
@@ -723,6 +735,7 @@ export function UnifiedLogsPage() {
           return {
             category: merged.category && merged.category !== 'audit' ? merged.category : undefined,
             q: merged.q || undefined,
+            body_q: merged.body_q || undefined,
             from: merged.from || undefined,
             to: merged.to || undefined,
             page: merged.page && merged.page > 0 ? merged.page : undefined,
@@ -762,6 +775,15 @@ export function UnifiedLogsPage() {
       if (utcTo) params.set('to', utcTo);
       params.set('limit', String(PAGE_SIZE));
       params.set('offset', String(page * PAGE_SIZE));
+      // Body search uses a dedicated `body_q` param so the backend
+      // can route it to the bloom-filter-indexed `position` lookup
+      // instead of the cheap `LIKE` on metadata columns. The server
+      // silently ignores the param if the caller doesn't hold
+      // `logs:read_bodies`, so the UI still works for users without
+      // the perm — they just don't see the input.
+      if (activeBodyQuery) {
+        params.set('body_q', activeBodyQuery);
+      }
       const qs = params.toString();
       const url = `${CATEGORY_API[category]}${qs ? `?${qs}` : ''}`;
       const res = await api<LogsResponse>(url);
@@ -778,12 +800,12 @@ export function UnifiedLogsPage() {
     } finally {
       if (fetchTokenRef.current === myToken) setLoading(false);
     }
-  }, [category, activeQuery, from, to, page, t]);
+  }, [category, activeQuery, activeBodyQuery, from, to, page, t]);
 
   useEffect(() => { fetchLogs(); }, [fetchLogs]);
 
   const handleSearch = () => {
-    updateSearch({ q: searchInput, page: 0 });
+    updateSearch({ q: searchInput, body_q: bodySearchInput, page: 0 });
   };
 
   /**
@@ -901,6 +923,22 @@ export function UnifiedLogsPage() {
           onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
           className="flex-1 font-mono text-sm"
         />
+        {(category === 'gateway' || category === 'mcp') && hasPermission('logs:read_bodies') && (
+          // Body substring search — only renders for gateway/mcp
+          // (only categories with body columns) AND only for users
+          // with `logs:read_bodies` (server-side enforcement is the
+          // authority; this just prevents UI noise). Server silently
+          // ignores `body_q` for users without the perm, so the URL
+          // stays safe even if shared across sessions.
+          <Input
+            placeholder={t('logs.bodies.searchPlaceholder')}
+            title={t('logs.bodies.searchHint')}
+            value={bodySearchInput}
+            onChange={(e) => setBodySearchInput(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
+            className="flex-1 font-mono text-sm"
+          />
+        )}
         <DateTimeRangePicker
           className="shrink-0"
           from={from}

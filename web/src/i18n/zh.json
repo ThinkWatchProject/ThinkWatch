@@ -1550,7 +1550,9 @@
       "sizeMb": "{{mb}} MB",
       "download": "下载",
       "viewWithSize": "查看完整内容（{{size}}）",
-      "viewMcpWithSize": "查看工具入参与返回（{{size}}）"
+      "viewMcpWithSize": "查看工具入参与返回（{{size}}）",
+      "searchPlaceholder": "在完整请求/响应内容中搜索…",
+      "searchHint": "走 bloom filter 索引；匹配 prompts + completions / 工具入参与返回。需要 logs:read_bodies，每次搜索本身也会被审计。"
     },
     "col": {
       "time": "时间",

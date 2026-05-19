@@ -23,6 +23,10 @@ pub struct McpLogsQuery {
     pub sort_by: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// Case-insensitive substring search inside captured tool
+    /// arguments / results. Same perm gate as the gateway endpoint:
+    /// `logs:read_bodies` required, silently ignored otherwise.
+    pub body_q: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, clickhouse::Row, utoipa::ToSchema)]
@@ -117,6 +121,27 @@ pub async fn list_mcp_logs(
             .replace('%', "\\%")
             .replace('_', "\\_");
         binds.push(format!("%{escaped}%"));
+    }
+    // Body substring search — same `logs:read_bodies` perm gate as
+    // the gateway endpoint. See gateway_logs.rs for the rationale.
+    if let Some(ref v) = params.body_q
+        && !v.is_empty()
+        && auth_user
+            .permissions
+            .iter()
+            .any(|p| p == "logs:read_bodies")
+        && !auth_user
+            .denied_permissions
+            .iter()
+            .any(|p| p == "logs:read_bodies")
+    {
+        conditions.push(
+            "(positionCaseInsensitive(ifNull(tool_arguments, ''), ?) > 0 \
+              OR positionCaseInsensitive(ifNull(tool_result, ''), ?) > 0)"
+                .into(),
+        );
+        binds.push(v.clone());
+        binds.push(v.clone());
     }
 
     for (frag, val) in parse_exclude_param(

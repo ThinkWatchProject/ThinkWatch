@@ -1550,7 +1550,9 @@
       "sizeMb": "{{mb}} MB",
       "download": "Download",
       "viewWithSize": "View bodies ({{size}})",
-      "viewMcpWithSize": "View tool args + result ({{size}})"
+      "viewMcpWithSize": "View tool args + result ({{size}})",
+      "searchPlaceholder": "Search inside captured bodies…",
+      "searchHint": "Bloom-filter-indexed; matches against prompts + completions / tool args + results. Audited via logs:read_bodies."
     },
     "col": {
       "time": "Time",

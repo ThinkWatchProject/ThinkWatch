@@ -33,6 +33,17 @@ pub struct GatewayLogsQuery {
     pub sort_by: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// Case-insensitive substring search inside the captured request /
+    /// response bodies. Uses the tokenbf_v1 bloom-filter index on the
+    /// body columns (see 01_init.sql) so it stays cheap on large
+    /// tables. STRICTLY gated by `logs:read_bodies` — narrowing rows
+    /// by body substring is a structurally-equivalent disclosure of
+    /// "row X mentions Y", so the same permission profile that
+    /// protects body READ also gates body SEARCH. The list response
+    /// still returns ONLY metadata (no body content), so search
+    /// without read-bodies can confirm a substring exists without
+    /// seeing it — which is itself the leak we want to prevent.
+    pub body_q: Option<String>,
 }
 
 /// Wire shape returned to the frontend — `cost_usd` is the friendly
@@ -188,6 +199,36 @@ pub async fn list_gateway_logs(
         params.from.as_deref(),
         params.to.as_deref(),
     )?;
+    // Body substring search — uses the tokenbf_v1 index on the body
+    // columns so the scan stays cheap on large tables. Gate is the
+    // same `logs:read_bodies` permission that protects body READ:
+    // narrowing the row set by body substring is equivalent to
+    // confirming "row X contains string Y", which is itself a body-
+    // content leak. Without the perm, the param is silently ignored
+    // (rather than erroring) so a stale UI doesn't 403 the whole
+    // list endpoint just because the operator opened a saved view
+    // that included a body filter from a previous session.
+    if let Some(ref v) = params.body_q
+        && !v.is_empty()
+        && auth_user
+            .permissions
+            .iter()
+            .any(|p| p == "logs:read_bodies")
+        && !auth_user
+            .denied_permissions
+            .iter()
+            .any(|p| p == "logs:read_bodies")
+    {
+        // positionCaseInsensitive returns 0 on no-match, > 0 on hit;
+        // ifNull() because the body columns are Nullable.
+        conditions.push(
+            "(positionCaseInsensitive(ifNull(request_body, ''), ?) > 0 \
+              OR positionCaseInsensitive(ifNull(response_body, ''), ?) > 0)"
+                .to_string(),
+        );
+        bind_values.push(v.clone());
+        bind_values.push(v.clone());
+    }
     // Free-text `q` searches model_id with case-insensitive substring match.
     // The user input is escaped for LIKE wildcards (% / _ / \) so they can
     // only match literal characters, not patterns.
