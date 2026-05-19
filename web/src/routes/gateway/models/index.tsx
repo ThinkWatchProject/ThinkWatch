@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useSearch, useNavigate } from '@tanstack/react-router';
 import { Card, CardContent } from '@/components/ui/card';
@@ -6,16 +6,7 @@ import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { Switch } from '@/components/ui/switch';
 import { Checkbox } from '@/components/ui/checkbox';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
 import {
   Select,
   SelectContent,
@@ -40,7 +31,7 @@ import {
 import { LatencySparkline } from '../routing/LatencySparkline';
 import { RoutingModeSection } from '../routing/RoutingModeSection';
 import { TrafficBar } from '../routing/TrafficBar';
-import { AlertCircle, Brain, Loader2, Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { AlertCircle, Brain, Pencil, Plus, Trash2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -50,20 +41,14 @@ import { toast } from 'sonner';
 import {
   AFFINITY_MODES,
   AUTO_TARGETS,
-  MAX_CHARS_CEILING,
   ROUTING_STRATEGIES,
-  emptyModelForm,
-  emptyRouteForm,
   modelStatus,
-  parseGuardrails,
   type AffinityMode,
   type BreakerState,
-  type ModelFormState,
   type ModelRow,
   type ModelStatus,
   type OutputGuardrail,
   type PlatformPricing,
-  type RouteFormState,
   type RouteHealth,
   type RouteHealthEntry,
   type RouteHistoryBucket,
@@ -73,7 +58,9 @@ import {
 } from './types';
 import { ModelRowCell } from './ModelRowCell';
 import { CostPreview } from './CostPreview';
-import { OutputGuardrailsCard } from './OutputGuardrailsCard';
+import { BatchImportDialog } from './BatchImportDialog';
+import { ModelEditorDialog } from './ModelEditorDialog';
+import { RouteEditorDialog } from './RouteEditorDialog';
 // Re-export the constants/types that other routes import from
 // `'./models'` (e.g. RoutingModeSection consumes AUTO_TARGETS +
 // RoutingStrategy). They live in `./models/types` now, but the
@@ -156,55 +143,31 @@ export function ModelsPage() {
   const [routeHealth, setRouteHealth] = useState<Record<string, RouteHealthEntry>>({});
 
   // Model create/edit
-  const [modelDialogOpen, setModelDialogOpen] = useState(false);
-  const [editingModel, setEditingModel] = useState<ModelRow | null>(null);
-  const [modelForm, setModelForm] = useState<ModelFormState>(emptyModelForm);
-  const [modelFormError, setModelFormError] = useState('');
-  const [modelSaving, setModelSaving] = useState(false);
+  // Model edit/create — ModelEditorDialog owns form state + saving;
+  // here we just track which mode it's in.
+  const [modelEditor, setModelEditor] = useState<{ open: boolean; model: ModelRow | null }>({
+    open: false,
+    model: null,
+  });
   const [deleteModel, setDeleteModel] = useState<ModelRow | null>(null);
 
-  // Route create (one-off via "+ Add Provider") / edit
-  const [routeDialogOpen, setRouteDialogOpen] = useState(false);
-  const [routeTargetModel, setRouteTargetModel] = useState<ModelRow | null>(null);
-  const [editingRoute, setEditingRoute] = useState<RouteRow | null>(null);
-  const [routeForm, setRouteForm] = useState<RouteFormState>(emptyRouteForm);
-  const [routeFormError, setRouteFormError] = useState('');
-  const [routeSaving, setRouteSaving] = useState(false);
+  // Route create (one-off via "+ Add Provider") / edit — RouteEditorDialog
+  // owns form state + remote-model fetch cache; we just pin which
+  // route or target model the dialog is keyed to.
+  const [routeEditor, setRouteEditor] = useState<{
+    open: boolean;
+    route: RouteRow | null;
+    targetModel: ModelRow | null;
+  }>({ open: false, route: null, targetModel: null });
   const [deleteRoute, setDeleteRoute] = useState<RouteRow | null>(null);
 
-  // Per-provider remote-model list, cached for the route dialog's
-  // upstream-model picker. `null` = not yet fetched, `[]` = fetched
-  // empty (provider has no /models endpoint, fall back to free input).
-  const [routeRemoteCache, setRouteRemoteCache] = useState<Record<string, string[] | null>>({});
-  const [routeRemoteLoading, setRouteRemoteLoading] = useState(false);
-
-  // Batch import — two-step dialog.
-  //
-  // Step 1: pick a provider, tick remote models from its catalog.
-  // Step 2: for each ticked model decide "new catalog entry" vs
-  //         "attach as route to an existing exposed model".
-  const [batchDialogOpen, setBatchDialogOpen] = useState(false);
-  const [batchStep, setBatchStep] = useState<1 | 2>(1);
-  const [batchProviderId, setBatchProviderId] = useState('');
-  const [remoteModels, setRemoteModels] = useState<string[]>([]);
-  const [remoteModelsLoading, setRemoteModelsLoading] = useState(false);
-  const [remoteModelsError, setRemoteModelsError] = useState('');
-  const [batchSelected, setBatchSelected] = useState<Set<string>>(new Set());
-  const [batchSearch, setBatchSearch] = useState('');
-  const [batchSaving, setBatchSaving] = useState(false);
-  const [existingModelIds, setExistingModelIds] = useState<Set<string>>(new Set());
-  // Picker source for the "attach" mode in step 2. Fetched once per
-  // dialog open from /api/admin/models/ids.
-  const [catalogModels, setCatalogModels] = useState<{ model_id: string; display_name: string }[]>(
-    [],
-  );
-  // Per-upstream decisions made in step 2. Key = upstream name.
-  // `new_model_id` is consulted only when `target_model_id` is null —
-  // it lets the admin alias the exposed id (e.g. expose
-  // "deepseek/deepseek-v4-flash" as just "deepseek-v4"). Empty ⇒ use
-  // the upstream name (server falls back to it server-side too).
-  type ImportDecision = { target_model_id: string | null; new_model_id?: string };
-  const [batchDecisions, setBatchDecisions] = useState<Record<string, ImportDecision>>({});
+  // Batch import — BatchImportDialog owns its 2-step flow. We track
+  // just open/initial-provider here so deeplink `?import=<pid>` can
+  // pre-select.
+  const [batchImport, setBatchImport] = useState<{
+    open: boolean;
+    initialProviderId: string | null;
+  }>({ open: false, initialProviderId: null });
 
   /* ---------- data fetching ---------- */
 
@@ -301,14 +264,13 @@ export function ModelsPage() {
 
   // Deeplink handler: when landed with `?import=<providerId>` and the
   // provider list has finished loading, auto-open the batch dialog
-  // pre-selected. Strip the param after firing so reopening the dialog
-  // manually doesn't get re-triggered by a refresh.
+  // pre-selected. Strip the param after firing so reopening the
+  // dialog manually doesn't get re-triggered by a refresh.
   useEffect(() => {
     if (!routeSearch.import || providers.length === 0) return;
     const pid = routeSearch.import;
     if (!providers.some((p) => p.id === pid)) return;
-    openBatchDialog();
-    void onBatchProviderChange(pid);
+    setBatchImport({ open: true, initialProviderId: pid });
     void navigate({
       to: '/gateway/models',
       search: { import: undefined },
@@ -333,26 +295,6 @@ export function ModelsPage() {
     setSelectedIds(new Set());
   }, [page, pageSize, debouncedSearch, statusFilter]);
 
-  // Pull the upstream-model picker options from the selected provider's
-  // remote catalog. Cached per provider so reopening the dialog or
-  // switching providers back-and-forth is instant.
-  useEffect(() => {
-    if (!routeDialogOpen) return;
-    const pid = routeForm.provider_id;
-    if (!pid) return;
-    if (routeRemoteCache[pid] !== undefined) return;
-    setRouteRemoteLoading(true);
-    void api<string[]>(`/api/admin/providers/${pid}/remote-models`)
-      .then((rows) => {
-        setRouteRemoteCache((c) => ({ ...c, [pid]: rows }));
-      })
-      .catch(() => {
-        // Provider with no /models endpoint, or temporary fetch
-        // failure — leave cache empty and fall back to free input.
-        setRouteRemoteCache((c) => ({ ...c, [pid]: null }));
-      })
-      .finally(() => setRouteRemoteLoading(false));
-  }, [routeDialogOpen, routeForm.provider_id, routeRemoteCache]);
 
   /* ---------- detail drawer ---------- */
 
@@ -393,95 +335,8 @@ export function ModelsPage() {
 
   /* ---------- model CRUD ---------- */
 
-  const openCreateModel = () => {
-    setEditingModel(null);
-    setModelForm(emptyModelForm);
-    setModelFormError('');
-    setModelDialogOpen(true);
-  };
-
-  const openEditModel = (m: ModelRow) => {
-    setEditingModel(m);
-    setModelForm({
-      model_id: m.model_id,
-      display_name: m.display_name,
-      input_weight: m.input_weight,
-      output_weight: m.output_weight,
-      routing_strategy: (m.routing_strategy ?? '') as ModelFormState['routing_strategy'],
-      affinity_mode: (m.affinity_mode ?? '') as ModelFormState['affinity_mode'],
-      affinity_ttl_secs:
-        m.affinity_ttl_secs == null ? '' : String(m.affinity_ttl_secs),
-      output_guardrails: parseGuardrails(m.output_guardrails),
-    });
-    setModelFormError('');
-    setModelDialogOpen(true);
-  };
-
-  const submitModel = async (e: FormEvent) => {
-    e.preventDefault();
-    setModelFormError('');
-    const inW = Number(modelForm.input_weight);
-    const outW = Number(modelForm.output_weight);
-    if (!Number.isFinite(inW) || inW <= 0 || !Number.isFinite(outW) || outW <= 0) {
-      setModelFormError(t('models.errors.weightMustBePositive'));
-      return;
-    }
-    // Routing overrides: empty string in the form ⇒ JSON null on the
-    // wire ⇒ "inherit global default" (PATCH semantics).
-    const ttl = modelForm.affinity_ttl_secs.trim();
-    const ttlNum = ttl ? Number(ttl) : null;
-    if (ttlNum != null && (!Number.isFinite(ttlNum) || ttlNum < 0 || ttlNum > 86400)) {
-      setModelFormError(t('models.errors.affinityTtlRange'));
-      return;
-    }
-    // Mirror the server's `validate_output_guardrails`: every
-    // max_length entry must be 1..=MAX_CHARS_CEILING. We could let
-    // the server reject but a client-side check gives a snappier
-    // error than a 400 round trip.
-    for (const g of modelForm.output_guardrails) {
-      if (g.type === 'max_length') {
-        if (!Number.isInteger(g.max_chars) || g.max_chars < 1 || g.max_chars > MAX_CHARS_CEILING) {
-          setModelFormError(
-            t('models.outputGuardrails.maxLengthRange', { max: MAX_CHARS_CEILING }),
-          );
-          return;
-        }
-      }
-    }
-    const body = {
-      display_name: modelForm.display_name.trim() || modelForm.model_id.trim(),
-      input_weight: inW,
-      output_weight: outW,
-      routing_strategy: modelForm.routing_strategy === '' ? null : modelForm.routing_strategy,
-      affinity_mode: modelForm.affinity_mode === '' ? null : modelForm.affinity_mode,
-      affinity_ttl_secs: ttlNum,
-      output_guardrails: modelForm.output_guardrails,
-    };
-    setModelSaving(true);
-    try {
-      if (editingModel) {
-        await apiPatch(`/api/admin/models/${editingModel.id}`, body);
-        toast.success(t('models.toast.updated'));
-      } else {
-        if (!modelForm.model_id.trim()) {
-          setModelFormError(t('models.field.modelId') + ' is required');
-          setModelSaving(false);
-          return;
-        }
-        await apiPost('/api/admin/models', {
-          ...body,
-          model_id: modelForm.model_id.trim(),
-        });
-        toast.success(t('models.toast.created'));
-      }
-      setModelDialogOpen(false);
-      await fetchModels();
-    } catch (err) {
-      setModelFormError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setModelSaving(false);
-    }
-  };
+  const openCreateModel = () => setModelEditor({ open: true, model: null });
+  const openEditModel = (m: ModelRow) => setModelEditor({ open: true, model: m });
 
   const confirmCleanup = async () => {
     setCleanupRunning(true);
@@ -549,98 +404,10 @@ export function ModelsPage() {
 
   /* ---------- route CRUD ---------- */
 
-  const openAddRoute = (model: ModelRow) => {
-    setRouteTargetModel(model);
-    setEditingRoute(null);
-    setRouteForm({ ...emptyRouteForm, upstream_model: model.model_id });
-    setRouteFormError('');
-    setRouteDialogOpen(true);
-  };
-
-  const openEditRoute = (route: RouteRow) => {
-    setRouteTargetModel(null);
-    setEditingRoute(route);
-    setRouteForm({
-      provider_id: route.provider_id,
-      upstream_model: route.upstream_model,
-      enabled: route.enabled,
-      label: route.label ?? '',
-      notes: route.notes ?? '',
-      rpm_cap: route.rpm_cap == null ? '' : String(route.rpm_cap),
-      tpm_cap: route.tpm_cap == null ? '' : String(route.tpm_cap),
-    });
-    setRouteFormError('');
-    setRouteDialogOpen(true);
-  };
-
-  const submitRoute = async (e: FormEvent) => {
-    e.preventDefault();
-    setRouteFormError('');
-    // Empty cap → null (unlimited). Non-empty must be a positive integer.
-    const parseCap = (s: string): number | null | 'invalid' => {
-      const v = s.trim();
-      if (!v) return null;
-      const n = Number(v);
-      if (!Number.isFinite(n) || n <= 0) return 'invalid';
-      return Math.floor(n);
-    };
-    const rpm = parseCap(routeForm.rpm_cap);
-    const tpm = parseCap(routeForm.tpm_cap);
-    if (rpm === 'invalid' || tpm === 'invalid') {
-      setRouteFormError(t('models.errors.capMustBePositive'));
-      return;
-    }
-    const upstream = routeForm.upstream_model.trim();
-    if (!upstream) {
-      setRouteFormError(t('models.col.upstreamModel') + ' is required');
-      return;
-    }
-    setRouteSaving(true);
-    try {
-      const label = routeForm.label.trim() || null;
-      const notes = routeForm.notes.trim() || null;
-      if (editingRoute) {
-        await apiPatch(`/api/admin/model-routes/${editingRoute.id}`, {
-          upstream_model: upstream,
-          enabled: routeForm.enabled,
-          label,
-          notes,
-          rpm_cap: rpm,
-          tpm_cap: tpm,
-        });
-        toast.success(t('models.toast.updated'));
-        await fetchRoutesFor(editingRoute.model_id);
-      } else if (routeTargetModel) {
-        if (!routeForm.provider_id) {
-          setRouteFormError(t('models.field.provider') + ' is required');
-          setRouteSaving(false);
-          return;
-        }
-        // model_id may contain '/' (e.g. `deepseek/deepseek-v4-flash`),
-        // so encode before injecting into the URL or axum's router will
-        // see four path segments and 404.
-        await apiPost(
-          `/api/admin/models/${encodeURIComponent(routeTargetModel.model_id)}/routes`,
-          {
-            provider_id: routeForm.provider_id,
-            upstream_model: upstream,
-            enabled: routeForm.enabled,
-            label,
-            notes,
-            rpm_cap: rpm,
-            tpm_cap: tpm,
-          },
-        );
-        toast.success(t('models.routeAdded'));
-        await fetchRoutesFor(routeTargetModel.model_id);
-      }
-      setRouteDialogOpen(false);
-    } catch (err) {
-      setRouteFormError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setRouteSaving(false);
-    }
-  };
+  const openAddRoute = (model: ModelRow) =>
+    setRouteEditor({ open: true, route: null, targetModel: model });
+  const openEditRoute = (route: RouteRow) =>
+    setRouteEditor({ open: true, route, targetModel: null });
 
   /// Flip every route on a model on/off in one shot. Post-batch-import
   /// users land with a pile of `enabled = false` routes; this is how
@@ -726,142 +493,6 @@ export function ModelsPage() {
     }
   };
 
-  /* ---------- batch import ---------- */
-
-  const openBatchDialog = () => {
-    setBatchStep(1);
-    setBatchProviderId('');
-    setRemoteModels([]);
-    setRemoteModelsError('');
-    setBatchSelected(new Set());
-    setBatchSearch('');
-    setExistingModelIds(new Set());
-    setBatchDecisions({});
-    setBatchDialogOpen(true);
-    // Catalog lookup powers step 2's "attach to existing" picker.
-    // Kicked off once per open so stepping back and forward is instant.
-    void api<{ model_id: string; display_name: string }[]>('/api/admin/models/ids')
-      .then(setCatalogModels)
-      .catch(() => setCatalogModels([]));
-  };
-
-  /// Heuristic for "did the admin probably mean to attach this to an
-  /// already-exposed model, or to make a new one?". Matches on exact
-  /// name, else substring, else defaults to "new". Run once when we
-  /// enter step 2 to pre-fill the decisions.
-  const suggestDecision = (
-    upstream: string,
-    catalog: { model_id: string }[],
-  ): ImportDecision => {
-    const exact = catalog.find((c) => c.model_id === upstream);
-    if (exact) return { target_model_id: exact.model_id };
-    const partial = catalog.find(
-      (c) => upstream.includes(c.model_id) || c.model_id.includes(upstream),
-    );
-    if (partial) return { target_model_id: partial.model_id };
-    return { target_model_id: null };
-  };
-
-  const goToStep2 = () => {
-    // Pre-fill one decision per selected upstream using the heuristic.
-    const next: Record<string, ImportDecision> = {};
-    for (const u of batchSelected) next[u] = suggestDecision(u, catalogModels);
-    setBatchDecisions(next);
-    setBatchStep(2);
-  };
-
-  const onBatchProviderChange = async (providerId: string) => {
-    setBatchProviderId(providerId);
-    setBatchSelected(new Set());
-    setBatchSearch('');
-    setRemoteModels([]);
-    setRemoteModelsError('');
-    setExistingModelIds(new Set());
-
-    if (!providerId) return;
-
-    setRemoteModelsLoading(true);
-    try {
-      const [rmodels, existing] = await Promise.all([
-        api<string[]>(`/api/admin/providers/${providerId}/remote-models`),
-        api<{ items: RouteRow[]; total: number }>(
-          `/api/admin/model-routes?provider_id=${providerId}&page=1&page_size=10000`,
-        ),
-      ]);
-      setRemoteModels(rmodels);
-      // A remote name counts as "already imported" when it appears as
-      // either a route's exposed model_id (new-catalog-entry imports) or
-      // its upstream_model (attach-to-existing imports — where model_id
-      // is the rename target, so a model_id-only check would miss it).
-      const seen = new Set<string>();
-      for (const r of existing.items) {
-        seen.add(r.model_id);
-        seen.add(r.upstream_model);
-      }
-      setExistingModelIds(seen);
-    } catch (err) {
-      setRemoteModelsError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setRemoteModelsLoading(false);
-    }
-  };
-
-  const filteredRemoteModels = useMemo(() => {
-    if (!batchSearch) return remoteModels;
-    const q = batchSearch.toLowerCase();
-    return remoteModels.filter((m) => m.toLowerCase().includes(q));
-  }, [remoteModels, batchSearch]);
-
-  const toggleBatchModel = (modelId: string) => {
-    if (existingModelIds.has(modelId)) return;
-    setBatchSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(modelId)) next.delete(modelId);
-      else next.add(modelId);
-      return next;
-    });
-  };
-
-  const toggleBatchSelectAll = () => {
-    const selectable = filteredRemoteModels.filter((m) => !existingModelIds.has(m));
-    const allSelected = selectable.length > 0 && selectable.every((m) => batchSelected.has(m));
-    setBatchSelected((prev) => {
-      const next = new Set(prev);
-      if (allSelected) for (const m of selectable) next.delete(m);
-      else for (const m of selectable) next.add(m);
-      return next;
-    });
-  };
-
-  const submitBatch = async () => {
-    if (!batchProviderId || batchSelected.size === 0) return;
-    setBatchSaving(true);
-    try {
-      const items = Array.from(batchSelected).map((upstream) => {
-        const d = batchDecisions[upstream] ?? { target_model_id: null };
-        const newId = d.new_model_id?.trim();
-        return {
-          upstream,
-          target_model_id: d.target_model_id,
-          new_model_id: d.target_model_id === null && newId ? newId : undefined,
-        };
-      });
-      const res = await apiPost<{ created: number }>('/api/admin/model-routes/batch', {
-        provider_id: batchProviderId,
-        items,
-      });
-      toast.success(t('models.batchSuccess', { count: res.created }));
-      setBatchDialogOpen(false);
-      await fetchModels();
-      // If the drawer is open on a model we just touched, refresh it.
-      if (detailModelId) void fetchRoutesFor(detailModelId);
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setBatchSaving(false);
-    }
-  };
-
   /* ---------- helpers ---------- */
 
   const providerLabel = (id: string): string => {
@@ -910,7 +541,7 @@ export function ModelsPage() {
         <div className="flex items-center gap-2">
           <Button
             variant="outline"
-            onClick={openBatchDialog}
+            onClick={() => setBatchImport({ open: true, initialProviderId: null })}
             disabled={providers.length === 0 || !hasPermission('models:write')}
           >
             <Plus className="mr-1 h-3.5 w-3.5" />
@@ -1076,623 +707,33 @@ export function ModelsPage() {
         </div>
       </Card>
 
-      {/* Create / Edit Model Dialog */}
-      <Dialog open={modelDialogOpen} onOpenChange={setModelDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <form onSubmit={submitModel}>
-            <DialogHeader>
-              <DialogTitle>
-                {editingModel ? t('models.editTitle') : t('models.createTitle')}
-              </DialogTitle>
-              <DialogDescription>{t('models.formHint')}</DialogDescription>
-            </DialogHeader>
-            <div className="space-y-4 py-4">
-              {!editingModel && (
-                <div className="space-y-2">
-                  <Label htmlFor="model_id">{t('models.field.modelId')}</Label>
-                  <Input
-                    id="model_id"
-                    value={modelForm.model_id}
-                    onChange={(e) => setModelForm({ ...modelForm, model_id: e.target.value })}
-                    placeholder="gpt-4o"
-                    required
-                  />
-                </div>
-              )}
-              <div className="space-y-2">
-                <Label htmlFor="model_display">{t('models.field.displayName')}</Label>
-                <Input
-                  id="model_display"
-                  value={modelForm.display_name}
-                  onChange={(e) => setModelForm({ ...modelForm, display_name: e.target.value })}
-                  placeholder={modelForm.model_id}
-                />
-              </div>
-              <p className="text-xs text-muted-foreground">{t('models.weightHint')}</p>
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label htmlFor="input_weight">{t('models.field.inputWeight')}</Label>
-                  <Input
-                    id="input_weight"
-                    value={modelForm.input_weight}
-                    onChange={(e) =>
-                      setModelForm({ ...modelForm, input_weight: e.target.value })
-                    }
-                    inputMode="decimal"
-                    required
-                  />
-                  <CostPreview
-                    weight={modelForm.input_weight}
-                    basePerToken={pricing?.input_price_per_token}
-                    currency={pricing?.currency}
-                    side="input"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="output_weight">{t('models.field.outputWeight')}</Label>
-                  <Input
-                    id="output_weight"
-                    value={modelForm.output_weight}
-                    onChange={(e) =>
-                      setModelForm({ ...modelForm, output_weight: e.target.value })
-                    }
-                    inputMode="decimal"
-                    required
-                  />
-                  <CostPreview
-                    weight={modelForm.output_weight}
-                    basePerToken={pricing?.output_price_per_token}
-                    currency={pricing?.currency}
-                    side="output"
-                  />
-                </div>
-              </div>
-              {/* Routing strategy + affinity overrides. Empty = inherit
-                  the global default from system_settings.gateway.*.
-                  Only useful when an operator wants to diverge from the
-                  fleet-wide policy for one model. */}
-              <div className="space-y-2 border-t pt-4">
-                <Label className="text-sm font-medium">
-                  {t('models.routingOverrideTitle')}
-                </Label>
-                <p className="text-xs text-muted-foreground">
-                  {t('models.routingOverrideHint')}
-                </p>
-              </div>
-              <div className="grid grid-cols-1 gap-3">
-                <div className="space-y-2">
-                  <Label>{t('models.field.routingStrategy')}</Label>
-                  <Select
-                    value={modelForm.routing_strategy === '' ? 'inherit' : modelForm.routing_strategy}
-                    onValueChange={(v) =>
-                      setModelForm({
-                        ...modelForm,
-                        routing_strategy: v === 'inherit' ? '' : (v as RoutingStrategy),
-                      })
-                    }
-                  >
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="inherit">{t('models.useGlobalDefault')}</SelectItem>
-                      {ROUTING_STRATEGIES.map((s) => (
-                        <SelectItem key={s} value={s}>
-                          {t(`models.strategy.${s}`)}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div className="space-y-2">
-                    <Label>{t('models.field.affinityMode')}</Label>
-                    <Select
-                      value={modelForm.affinity_mode === '' ? 'inherit' : modelForm.affinity_mode}
-                      onValueChange={(v) =>
-                        setModelForm({
-                          ...modelForm,
-                          affinity_mode: v === 'inherit' ? '' : (v as AffinityMode),
-                        })
-                      }
-                    >
-                      <SelectTrigger>
-                        <SelectValue />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="inherit">{t('models.useGlobalDefault')}</SelectItem>
-                        {AFFINITY_MODES.map((m) => (
-                          <SelectItem key={m} value={m}>
-                            {t(`models.affinity.${m}`)}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                  </div>
-                  <div className="space-y-2">
-                    <Label htmlFor="affinity_ttl">{t('models.field.affinityTtlSecs')}</Label>
-                    <Input
-                      id="affinity_ttl"
-                      value={modelForm.affinity_ttl_secs}
-                      onChange={(e) =>
-                        setModelForm({ ...modelForm, affinity_ttl_secs: e.target.value })
-                      }
-                      placeholder={t('models.useGlobalDefault')}
-                      inputMode="numeric"
-                    />
-                  </div>
-                </div>
-              </div>
-              {/* Output guardrails — per-model post-flight checks on
-                  the provider response. Today only "max_length" is
-                  wired; future variants (JSON schema, toxicity) slot
-                  in here behind their own add buttons. */}
-              <OutputGuardrailsCard
-                rules={modelForm.output_guardrails}
-                onChange={(next) =>
-                  setModelForm({ ...modelForm, output_guardrails: next })
-                }
-              />
-              {modelFormError && (
-                <Alert variant="destructive">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>{modelFormError}</AlertDescription>
-                </Alert>
-              )}
-            </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setModelDialogOpen(false)}>
-                {t('common.cancel')}
-              </Button>
-              <Button type="submit" disabled={modelSaving}>
-                {modelSaving ? t('common.saving') : t('common.save')}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      <ModelEditorDialog
+        open={modelEditor.open}
+        model={modelEditor.model}
+        pricing={pricing}
+        onClose={() => setModelEditor({ open: false, model: null })}
+        onSaved={fetchModels}
+      />
 
-      {/* Create / Edit Route Dialog */}
-      <Dialog open={routeDialogOpen} onOpenChange={setRouteDialogOpen}>
-        <DialogContent className="sm:max-w-md">
-          <form onSubmit={submitRoute}>
-            <DialogHeader>
-              <DialogTitle>
-                {editingRoute ? t('models.editRouteTitle') : t('models.addRouteTitle')}
-              </DialogTitle>
-              <DialogDescription>
-                {editingRoute
-                  ? editingRoute.model_id
-                  : routeTargetModel?.model_id ?? ''}
-              </DialogDescription>
-            </DialogHeader>
-            <div className="space-y-4 py-4">
-              {!editingRoute && (
-                <div className="space-y-2">
-                  <Label>{t('models.field.provider')}</Label>
-                  <Select
-                    value={routeForm.provider_id}
-                    onValueChange={(v) => setRouteForm({ ...routeForm, provider_id: v })}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder={t('models.selectProvider')} />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {providers.map((p) => (
-                        <SelectItem key={p.id} value={p.id}>
-                          {p.display_name || p.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )}
-              <div className="space-y-2">
-                <Label htmlFor="route_upstream">{t('models.col.upstreamModel')}</Label>
-                {(() => {
-                  const pid = routeForm.provider_id;
-                  const remote = pid ? routeRemoteCache[pid] : undefined;
-                  // Loading: provider picked, fetch in flight.
-                  if (pid && remote === undefined && routeRemoteLoading) {
-                    return (
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground h-9 px-3 border rounded-md">
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        {t('models.loadingModels')}
-                      </div>
-                    );
-                  }
-                  // Fetched a usable list → searchable select.
-                  if (remote && remote.length > 0) {
-                    return (
-                      <Select
-                        value={routeForm.upstream_model}
-                        onValueChange={(v) =>
-                          setRouteForm({ ...routeForm, upstream_model: v })
-                        }
-                      >
-                        <SelectTrigger id="route_upstream">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          {remote.map((m) => (
-                            <SelectItem key={m} value={m}>
-                              <span className="font-mono text-xs">{m}</span>
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                    );
-                  }
-                  // No provider chosen yet, or remote list unavailable
-                  // — fall back to free input so the user is never
-                  // blocked from saving a custom upstream name.
-                  return (
-                    <Input
-                      id="route_upstream"
-                      value={routeForm.upstream_model}
-                      onChange={(e) =>
-                        setRouteForm({ ...routeForm, upstream_model: e.target.value })
-                      }
-                      placeholder={t('models.upstreamModelHint')}
-                    />
-                  );
-                })()}
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="route_label">{t('models.routing.labelLabel')}</Label>
-                <Input
-                  id="route_label"
-                  value={routeForm.label}
-                  onChange={(e) => setRouteForm({ ...routeForm, label: e.target.value })}
-                  placeholder={t('models.routing.labelPlaceholder')}
-                  maxLength={64}
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="route_notes">{t('models.routing.notesLabel')}</Label>
-                <Input
-                  id="route_notes"
-                  value={routeForm.notes}
-                  onChange={(e) => setRouteForm({ ...routeForm, notes: e.target.value })}
-                  placeholder={t('models.routing.notesPlaceholder')}
-                />
-              </div>
-              <div className="flex items-center gap-2">
-                <Switch
-                  id="route_enabled"
-                  checked={routeForm.enabled}
-                  onCheckedChange={(v) => setRouteForm({ ...routeForm, enabled: v })}
-                />
-                <Label htmlFor="route_enabled">{t('models.field.active')}</Label>
-              </div>
-              {/* Per-route capacity caps. Empty = unlimited; both
-                  enforced via the same sliding-window engine that
-                  drives api-key/user RPM/TPM, just with a route key. */}
-              <div className="grid grid-cols-2 gap-3">
-                <div className="space-y-2">
-                  <Label htmlFor="rpm_cap">{t('models.field.rpmCap')}</Label>
-                  <Input
-                    id="rpm_cap"
-                    value={routeForm.rpm_cap}
-                    onChange={(e) => setRouteForm({ ...routeForm, rpm_cap: e.target.value })}
-                    placeholder={t('models.unlimited')}
-                    inputMode="numeric"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="tpm_cap">{t('models.field.tpmCap')}</Label>
-                  <Input
-                    id="tpm_cap"
-                    value={routeForm.tpm_cap}
-                    onChange={(e) => setRouteForm({ ...routeForm, tpm_cap: e.target.value })}
-                    placeholder={t('models.unlimited')}
-                    inputMode="numeric"
-                  />
-                </div>
-              </div>
-              {/* Live status — read-only signals for the route under
-                  edit. Only shown when editing (we have a route_id +
-                  health snapshot) — the add-flow can't show this yet. */}
-              {editingRoute && (
-                <div className="rounded-md border bg-muted/20 p-3 space-y-1.5 text-xs">
-                  <div className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-                    {t('models.routing.liveStatus')}
-                  </div>
-                  <dl className="grid grid-cols-[max-content_1fr] gap-x-4 gap-y-0.5">
-                    <dt className="text-muted-foreground">
-                      {t('models.col.health')}
-                    </dt>
-                    <dd>
-                      {(() => {
-                        const state =
-                          routeHealth[editingRoute.id]?.health?.state ?? 'closed';
-                        return t(`models.health.${state}`);
-                      })()}
-                    </dd>
-                    <dt className="text-muted-foreground">
-                      {t('models.col.p50')}
-                    </dt>
-                    <dd className="font-mono">
-                      {(() => {
-                        const ewma =
-                          routeHealth[editingRoute.id]?.health?.ewma_latency_ms;
-                        return ewma == null ? '—' : `${ewma.toFixed(0)} ms`;
-                      })()}
-                    </dd>
-                    <dt className="text-muted-foreground">
-                      {t('models.routing.errorPctLabel')}
-                    </dt>
-                    <dd className="font-mono">
-                      {(() => {
-                        const h = routeHealth[editingRoute.id]?.health;
-                        if (!h || h.total === 0) return '—';
-                        return `${h.error_pct.toFixed(1)}% (${h.errors}/${h.total})`;
-                      })()}
-                    </dd>
-                  </dl>
-                  {/* Cumulative all-time count — visually subordinate
-                      to the rolling-window stats above (smaller +
-                      muted) but always shown, even at 0, so operators
-                      can tell apart "never used" from "quiet now". */}
-                  <p className="text-[10px] text-muted-foreground">
-                    {t('models.routing.lifetimeLabel', {
-                      count:
-                        routeHealth[editingRoute.id]?.health?.lifetime_requests ?? 0,
-                      formatted: (
-                        routeHealth[editingRoute.id]?.health?.lifetime_requests ?? 0
-                      ).toLocaleString(),
-                    })}
-                  </p>
-                </div>
-              )}
-              {routeFormError && (
-                <Alert variant="destructive">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>{routeFormError}</AlertDescription>
-                </Alert>
-              )}
-            </div>
-            <DialogFooter>
-              <Button type="button" variant="outline" onClick={() => setRouteDialogOpen(false)}>
-                {t('common.cancel')}
-              </Button>
-              <Button type="submit" disabled={routeSaving}>
-                {routeSaving ? t('common.saving') : t('common.save')}
-              </Button>
-            </DialogFooter>
-          </form>
-        </DialogContent>
-      </Dialog>
+      <RouteEditorDialog
+        open={routeEditor.open}
+        route={routeEditor.route}
+        targetModel={routeEditor.targetModel}
+        providers={providers}
+        routeHealth={routeHealth}
+        onClose={() => setRouteEditor({ open: false, route: null, targetModel: null })}
+        onSaved={fetchRoutesFor}
+      />
 
-      {/* Batch Import Dialog — two-step:
-           1. Pick provider + tick remote models
-           2. Decide per-item: new exposed model vs route on an existing one */}
-      <Dialog open={batchDialogOpen} onOpenChange={setBatchDialogOpen}>
-        <DialogContent className="sm:max-w-2xl max-h-[85vh] flex flex-col">
-          <DialogHeader>
-            <DialogTitle>
-              {t('models.addRoutes')}{' '}
-              <span className="text-xs font-normal text-muted-foreground">
-                {t('models.stepOf', { current: batchStep, total: 2 })}
-              </span>
-            </DialogTitle>
-            <DialogDescription>
-              {batchStep === 1
-                ? t('models.batchImportHint')
-                : t('models.batchStep2Hint')}
-            </DialogDescription>
-          </DialogHeader>
-
-          {batchStep === 1 && (
-            <div className="space-y-4 py-2 flex flex-col min-h-0 flex-1">
-              <Alert>
-                <AlertCircle className="h-4 w-4" />
-                <AlertDescription className="text-xs">
-                  {t('models.batchImportWarning')}
-                </AlertDescription>
-              </Alert>
-              <div className="space-y-2">
-                <Label>{t('models.selectProvider')}</Label>
-                <Select value={batchProviderId} onValueChange={onBatchProviderChange}>
-                  <SelectTrigger>
-                    <SelectValue placeholder={t('models.selectProvider')} />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {providers.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        {p.display_name || p.name}
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-
-              {remoteModelsLoading && (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  {t('models.loadingModels')}
-                </div>
-              )}
-
-              {remoteModelsError && (
-                <Alert variant="destructive">
-                  <AlertCircle className="h-4 w-4" />
-                  <AlertDescription>{remoteModelsError}</AlertDescription>
-                </Alert>
-              )}
-
-              {!remoteModelsLoading && remoteModels.length > 0 && (
-                <>
-                  <div className="flex items-center gap-2">
-                    <div className="relative flex-1">
-                      <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
-                      <Input
-                        placeholder={t('models.searchPlaceholder')}
-                        value={batchSearch}
-                        onChange={(e) => setBatchSearch(e.target.value)}
-                        className="pl-9"
-                      />
-                    </div>
-                    <span className="text-sm text-muted-foreground whitespace-nowrap">
-                      {t('models.selected', { count: batchSelected.size })}
-                    </span>
-                    <Button type="button" variant="outline" size="sm" onClick={toggleBatchSelectAll}>
-                      {filteredRemoteModels.filter((m) => !existingModelIds.has(m)).length > 0 &&
-                      filteredRemoteModels
-                        .filter((m) => !existingModelIds.has(m))
-                        .every((m) => batchSelected.has(m))
-                        ? t('models.deselectAll')
-                        : t('models.selectAll')}
-                    </Button>
-                  </div>
-                  <div className="border rounded-md overflow-auto flex-1 min-h-0 max-h-[40vh]">
-                    {filteredRemoteModels.map((modelId) => {
-                      const exists = existingModelIds.has(modelId);
-                      const checked = exists || batchSelected.has(modelId);
-                      return (
-                        <label
-                          key={modelId}
-                          className="flex items-center gap-2 px-3 py-1.5 hover:bg-muted/50 cursor-pointer text-sm border-b last:border-b-0"
-                        >
-                          <Checkbox
-                            checked={checked}
-                            disabled={exists}
-                            onCheckedChange={() => toggleBatchModel(modelId)}
-                          />
-                          <span
-                            className={`font-mono text-xs truncate ${exists ? 'text-muted-foreground' : ''}`}
-                          >
-                            {modelId}
-                          </span>
-                          {exists && (
-                            <span className="text-xs text-muted-foreground ml-auto whitespace-nowrap">
-                              ({t('models.alreadyExists')})
-                            </span>
-                          )}
-                        </label>
-                      );
-                    })}
-                  </div>
-                </>
-              )}
-            </div>
-          )}
-
-          {batchStep === 2 && (
-            <div className="space-y-3 py-2 flex flex-col min-h-0 flex-1">
-              <div className="flex items-center gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    const next = { ...batchDecisions };
-                    for (const u of batchSelected) next[u] = { target_model_id: null };
-                    setBatchDecisions(next);
-                  }}
-                >
-                  {t('models.batchAllNew')}
-                </Button>
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    const next = { ...batchDecisions };
-                    for (const u of batchSelected) next[u] = suggestDecision(u, catalogModels);
-                    setBatchDecisions(next);
-                  }}
-                >
-                  {t('models.batchResetSuggestions')}
-                </Button>
-              </div>
-              <div className="border rounded-md overflow-auto flex-1 min-h-0 max-h-[50vh] divide-y">
-                {Array.from(batchSelected)
-                  .sort()
-                  .map((upstream) => {
-                    const decision = batchDecisions[upstream] ?? { target_model_id: null };
-                    const setDecision = (d: ImportDecision) =>
-                      setBatchDecisions({ ...batchDecisions, [upstream]: d });
-                    const isNew = decision.target_model_id === null;
-                    return (
-                      <div key={upstream} className="p-3 space-y-2">
-                        <div className="font-mono text-xs break-all">{upstream}</div>
-                        <div className="flex items-center gap-2 text-xs">
-                          <Select
-                            value={decision.target_model_id ?? '__new__'}
-                            onValueChange={(v) => {
-                              if (v === '__new__') {
-                                setDecision({
-                                  target_model_id: null,
-                                  new_model_id: decision.new_model_id,
-                                });
-                              } else {
-                                setDecision({ target_model_id: v });
-                              }
-                            }}
-                          >
-                            <SelectTrigger className="h-7 text-xs flex-1">
-                              <SelectValue />
-                            </SelectTrigger>
-                            <SelectContent>
-                              <SelectItem value="__new__">
-                                {t('models.batchModeNew')}
-                              </SelectItem>
-                              {catalogModels.map((c) => (
-                                <SelectItem key={c.model_id} value={c.model_id}>
-                                  {t('models.batchModeAttach', { target: c.model_id })}
-                                </SelectItem>
-                              ))}
-                            </SelectContent>
-                          </Select>
-                        </div>
-                        {isNew && (
-                          <Input
-                            className="h-7 text-xs font-mono"
-                            placeholder={upstream}
-                            value={decision.new_model_id ?? ''}
-                            onChange={(e) =>
-                              setDecision({
-                                target_model_id: null,
-                                new_model_id: e.target.value,
-                              })
-                            }
-                            aria-label={t('models.batchNewModelIdLabel')}
-                          />
-                        )}
-                      </div>
-                    );
-                  })}
-              </div>
-            </div>
-          )}
-
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setBatchDialogOpen(false)}>
-              {t('common.cancel')}
-            </Button>
-            {batchStep === 1 ? (
-              <Button
-                type="button"
-                disabled={batchSelected.size === 0}
-                onClick={goToStep2}
-              >
-                {t('models.batchNextStep', { count: batchSelected.size })}
-              </Button>
-            ) : (
-              <>
-                <Button type="button" variant="outline" onClick={() => setBatchStep(1)}>
-                  {t('common.previous')}
-                </Button>
-                <Button type="button" disabled={batchSaving} onClick={submitBatch}>
-                  {batchSaving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : null}
-                  {t('models.addNRoutes', { count: batchSelected.size })}
-                </Button>
-              </>
-            )}
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <BatchImportDialog
+        open={batchImport.open}
+        initialProviderId={batchImport.initialProviderId}
+        providers={providers}
+        detailModelId={detailModelId}
+        onClose={() => setBatchImport({ open: false, initialProviderId: null })}
+        onSaved={fetchModels}
+        onSavedForModel={fetchRoutesFor}
+      />
 
       {/* Delete confirms */}
       <ConfirmDialog
