@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -264,4 +264,127 @@ pub async fn list_gateway_logs(
         .collect();
 
     Ok(Json(GatewayLogsResponse { total, items }))
+}
+
+// ---------------------------------------------------------------------------
+// Body viewer — separate endpoint, separate permission
+// ---------------------------------------------------------------------------
+
+/// Wire shape returned by `GET /api/admin/gateway/logs/{id}/body`.
+/// The list endpoint NEVER includes these fields because the
+/// permission profile for "see a row" is strictly weaker than "see
+/// the user's prompt content".
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct GatewayLogBodyResponse {
+    pub id: String,
+    pub trace_id: Option<String>,
+    pub user_id: Option<String>,
+    pub model_id: Option<String>,
+    pub created_at: String,
+    /// JSON-serialized `messages` array as the user authored it
+    /// (pre-PII-redaction). `None` when the capture toggle was off
+    /// at write time or the request hit a pre-route-selection
+    /// failure path. Inspect `body_capture_status` for the reason.
+    pub request_body: Option<String>,
+    /// JSON-serialized completion. `None` for the same reasons as
+    /// `request_body`, plus error paths that produced no upstream
+    /// response.
+    pub response_body: Option<String>,
+    pub request_body_bytes: Option<u32>,
+    pub response_body_bytes: Option<u32>,
+    /// `captured` / `truncated` / `disabled` / `from_cache` / NULL.
+    pub body_capture_status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, clickhouse::Row)]
+struct GatewayLogBodyRow {
+    id: String,
+    trace_id: Option<String>,
+    user_id: Option<String>,
+    model_id: Option<String>,
+    created_at: String,
+    request_body: Option<String>,
+    response_body: Option<String>,
+    request_body_bytes: Option<u32>,
+    response_body_bytes: Option<u32>,
+    body_capture_status: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/gateway/logs/{id}/body",
+    tag = "Gateway Logs",
+    params(("id" = String, Path, description = "Gateway log row id (uuid string)")),
+    responses(
+        (status = 200, description = "Captured request + response bodies", body = GatewayLogBodyResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden — missing logs:read_bodies"),
+        (status = 404, description = "Row not found in ClickHouse retention window"),
+    ),
+    security(("bearer_token" = []))
+)]
+pub async fn get_gateway_log_body(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<GatewayLogBodyResponse>, AppError> {
+    // logs:read_bodies is a separate, dangerous-tier permission. It
+    // is NOT included in the seeded admin policy — only super_admin
+    // gets it via wildcard, plus any custom role an operator chose
+    // to grant it to (compliance, incident response). The list
+    // endpoint gates on logs:read_all; this one needs the stronger
+    // grant explicitly.
+    auth_user
+        .require_global_permission(&state.db, "logs:read_bodies")
+        .await?;
+    if !ch_available(&state) {
+        return Err(AppError::NotFound("ClickHouse not configured".into()));
+    }
+    let ch = ch_client(&state)?;
+    let row: Option<GatewayLogBodyRow> = ch
+        .query(
+            "SELECT id, trace_id, user_id, model_id, \
+                    formatDateTime(created_at, '%Y-%m-%dT%H:%M:%S.%fZ', 'UTC') AS created_at, \
+                    request_body, response_body, request_body_bytes, \
+                    response_body_bytes, body_capture_status \
+             FROM gateway_logs WHERE id = ? LIMIT 1",
+        )
+        .bind(&id)
+        .fetch_optional()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse body query: {e}")))?;
+    let row = row.ok_or_else(|| AppError::NotFound("Gateway log row not found".into()))?;
+
+    // Second-order audit: viewing a body IS itself a sensitive
+    // action and shows up in `audit_logs` so an operator can answer
+    // "who looked at this user's prompts" in the same way they can
+    // answer "who deleted this api key". The detail JSON carries the
+    // viewed row's id + trace_id + subject user so the audit row is
+    // self-contained without a join.
+    state.audit.log(
+        auth_user
+            .audit("audit.body_viewed")
+            .resource("gateway_logs")
+            .resource_id(row.id.clone())
+            .detail(serde_json::json!({
+                "log_kind": "gateway",
+                "log_id": row.id,
+                "trace_id": row.trace_id,
+                "subject_user_id": row.user_id,
+                "model_id": row.model_id,
+            })),
+    );
+
+    Ok(Json(GatewayLogBodyResponse {
+        id: row.id,
+        trace_id: row.trace_id,
+        user_id: row.user_id,
+        model_id: row.model_id,
+        created_at: row.created_at,
+        request_body: row.request_body,
+        response_body: row.response_body,
+        request_body_bytes: row.request_body_bytes,
+        response_body_bytes: row.response_body_bytes,
+        body_capture_status: row.body_capture_status,
+    }))
 }

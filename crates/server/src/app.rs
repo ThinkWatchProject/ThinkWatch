@@ -637,6 +637,20 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             "/api/admin/trace/{trace_id}",
             get(handlers::trace::get_trace),
         )
+        // Request/response body viewers. Live in admin_routes (not the
+        // user_routes that host /api/gateway/logs) because the perm
+        // story is strictly stronger: `logs:read_all` lets you see the
+        // metadata row, but only `logs:read_bodies` reveals the user's
+        // actual prompt + the AI's completion. Each call emits an
+        // `audit.body_viewed` row so the access itself is auditable.
+        .route(
+            "/api/admin/gateway/logs/{id}/body",
+            get(handlers::gateway_logs::get_gateway_log_body),
+        )
+        .route(
+            "/api/admin/mcp/logs/{id}/body",
+            get(handlers::mcp_logs::get_mcp_log_body),
+        )
         .route("/api/admin/slo", get(handlers::slo::get_slo_snapshot))
         .route(
             "/api/analytics/cost-forecast",

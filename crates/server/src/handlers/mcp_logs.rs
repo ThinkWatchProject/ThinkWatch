@@ -1,5 +1,5 @@
 use axum::Json;
-use axum::extract::{Query, State};
+use axum::extract::{Path, Query, State};
 use serde::{Deserialize, Serialize};
 
 use think_watch_common::errors::AppError;
@@ -158,4 +158,119 @@ pub async fn list_mcp_logs(
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
     Ok(Json(McpLogsResponse { total, items }))
+}
+
+// ---------------------------------------------------------------------------
+// Body viewer — same shape + permission story as the gateway version
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct McpLogBodyResponse {
+    pub id: String,
+    pub trace_id: Option<String>,
+    pub user_id: Option<String>,
+    pub server_id: Option<String>,
+    pub server_name: Option<String>,
+    pub tool_name: Option<String>,
+    pub created_at: String,
+    /// JSON of `tools/call.params.arguments` exactly as the caller
+    /// submitted (modulo secret-key sanitization on the detail
+    /// pipeline that runs orthogonally). `None` when the
+    /// `audit.capture_tool_arguments` toggle was off at write time.
+    pub tool_arguments: Option<String>,
+    /// JSON of the upstream JSON-RPC `result` field. `None` for
+    /// failures (the response carries `error` instead) or when
+    /// `audit.capture_tool_results` was off.
+    pub tool_result: Option<String>,
+    pub arguments_bytes: Option<u32>,
+    pub result_bytes: Option<u32>,
+    pub body_capture_status: Option<String>,
+}
+
+#[derive(Debug, Deserialize, clickhouse::Row)]
+struct McpLogBodyRow {
+    id: String,
+    trace_id: Option<String>,
+    user_id: Option<String>,
+    server_id: Option<String>,
+    server_name: Option<String>,
+    tool_name: Option<String>,
+    created_at: String,
+    tool_arguments: Option<String>,
+    tool_result: Option<String>,
+    arguments_bytes: Option<u32>,
+    result_bytes: Option<u32>,
+    body_capture_status: Option<String>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/api/admin/mcp/logs/{id}/body",
+    tag = "MCP Logs",
+    params(("id" = String, Path, description = "MCP log row id (uuid string)")),
+    responses(
+        (status = 200, description = "Captured tool arguments + result", body = McpLogBodyResponse),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Forbidden — missing logs:read_bodies"),
+        (status = 404, description = "Row not found in ClickHouse retention window"),
+    ),
+    security(("bearer_token" = []))
+)]
+pub async fn get_mcp_log_body(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<McpLogBodyResponse>, AppError> {
+    auth_user
+        .require_global_permission(&state.db, "logs:read_bodies")
+        .await?;
+    if !ch_available(&state) {
+        return Err(AppError::NotFound("ClickHouse not configured".into()));
+    }
+    let ch = ch_client(&state)?;
+    let row: Option<McpLogBodyRow> = ch
+        .query(
+            "SELECT id, trace_id, user_id, server_id, server_name, tool_name, \
+                    formatDateTime(created_at, '%Y-%m-%dT%H:%M:%S.%fZ', 'UTC') AS created_at, \
+                    tool_arguments, tool_result, arguments_bytes, result_bytes, \
+                    body_capture_status \
+             FROM mcp_logs WHERE id = ? LIMIT 1",
+        )
+        .bind(&id)
+        .fetch_optional()
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse body query: {e}")))?;
+    let row = row.ok_or_else(|| AppError::NotFound("MCP log row not found".into()))?;
+
+    // Second-order audit — same contract as the gateway body endpoint.
+    state.audit.log(
+        auth_user
+            .audit("audit.body_viewed")
+            .resource("mcp_logs")
+            .resource_id(row.id.clone())
+            .detail(serde_json::json!({
+                "log_kind": "mcp",
+                "log_id": row.id,
+                "trace_id": row.trace_id,
+                "subject_user_id": row.user_id,
+                "server_id": row.server_id,
+                "server_name": row.server_name,
+                "tool_name": row.tool_name,
+            })),
+    );
+
+    Ok(Json(McpLogBodyResponse {
+        id: row.id,
+        trace_id: row.trace_id,
+        user_id: row.user_id,
+        server_id: row.server_id,
+        server_name: row.server_name,
+        tool_name: row.tool_name,
+        created_at: row.created_at,
+        tool_arguments: row.tool_arguments,
+        tool_result: row.tool_result,
+        arguments_bytes: row.arguments_bytes,
+        result_bytes: row.result_bytes,
+        body_capture_status: row.body_capture_status,
+    }))
 }

@@ -12,7 +12,7 @@ use crate::handlers::{
         DashboardLayout, DashboardLive, DashboardStats, LiveLogRow, ProviderHealth, RpmBucket,
         WsTicketResponse,
     },
-    gateway_logs::{GatewayLogEntry, GatewayLogsResponse},
+    gateway_logs::{GatewayLogBodyResponse, GatewayLogEntry, GatewayLogsResponse},
     limits::{
         CapListResponse, CapRow, CapUsage, RuleListResponse, RuleRow, RuleUsage, UpsertCapRequest,
         UpsertRuleRequest, UsageResponse,
@@ -22,7 +22,7 @@ use crate::handlers::{
         BulkIdsRequest, BulkIdsResponse, BulkOutcome, SubjectRef,
     },
     log_forwarders::{CreateForwarderRequest, TestResult, UpdateForwarderRequest},
-    mcp_logs::{McpLogEntry, McpLogsResponse},
+    mcp_logs::{McpLogBodyResponse, McpLogEntry, McpLogsResponse},
     mcp_servers::{
         BulkDeleteMcpServersRequest, BulkDeleteMcpServersResponse, BulkDeleteSkip,
         UpdateMcpServerRequest,
@@ -185,7 +185,9 @@ use crate::handlers::{
         // Audit & Logs
         crate::handlers::audit::list_audit_logs,
         crate::handlers::gateway_logs::list_gateway_logs,
+        crate::handlers::gateway_logs::get_gateway_log_body,
         crate::handlers::mcp_logs::list_mcp_logs,
+        crate::handlers::mcp_logs::get_mcp_log_body,
         crate::handlers::access_logs::list_access_logs,
         crate::handlers::app_logs::list_app_logs,
         // MCP
@@ -242,8 +244,8 @@ use crate::handlers::{
             DashboardStats, ProviderHealth, RpmBucket, LiveLogRow, DashboardLive, WsTicketResponse,
             DashboardLayout,
             // Logs
-            GatewayLogEntry, GatewayLogsResponse,
-            McpLogEntry, McpLogsResponse,
+            GatewayLogEntry, GatewayLogsResponse, GatewayLogBodyResponse,
+            McpLogEntry, McpLogsResponse, McpLogBodyResponse,
             McpToolRow, McpToolListResponse,
             AccessLogEntry, AccessLogsResponse,
             AppLogEntryResponse, AppLogsResponse,

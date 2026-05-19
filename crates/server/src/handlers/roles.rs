@@ -155,6 +155,16 @@ pub const PERMISSIONS: &[PermissionDef] = &[
     p("logs:read_own", "logs", "read_own"),
     p("logs:read_team", "logs", "read_team"),
     d("logs:read_all", "logs", "read_all"),
+    // Reading the raw request/response payload (prompts, completions,
+    // tool arguments, tool results) is a strictly stronger right than
+    // reading the metadata row. The bastion captures bodies by default
+    // so an auditor / compliance engineer has the legal evidence on
+    // hand, but the access surface for it is intentionally narrower:
+    // a separate perm, marked dangerous, NOT included in the seeded
+    // admin policy. Each call to the body endpoints also emits an
+    // `audit.body_viewed` row so an operator can answer "who has
+    // looked at this user's prompts" out of audit_logs.
+    d("logs:read_bodies", "logs", "read_bodies"),
     p("log_forwarders:read", "log_forwarders", "read"),
     d("log_forwarders:write", "log_forwarders", "write"),
     // --- Webhooks (SSRF surface) ---
