@@ -244,6 +244,28 @@ function defaultToLocal(): string {
   return format(new Date(), "yyyy-MM-dd'T'HH:mm");
 }
 
+/// Add two `Option<number>` cells from a log row into a single
+/// total. Returns `null` only when BOTH inputs are absent — a single
+/// captured side is enough to surface the size hint.
+function sumNullable(a: unknown, b: unknown): number | null {
+  const num = (v: unknown): number => (typeof v === 'number' ? v : 0);
+  if (a == null && b == null) return null;
+  return num(a) + num(b);
+}
+
+/// Pick the right i18n unit for a byte count. Capped at MB because
+/// `audit.body_max_bytes` defaults to 256 KiB and 99% of captures
+/// sit well under 10 MB even with offload — no need for GB scale.
+function formatBytes(t: (key: string, opts?: Record<string, unknown>) => string, bytes: number): string {
+  if (bytes >= 1_000_000) {
+    return t('logs.bodies.sizeMb', { mb: (bytes / 1_000_000).toFixed(1) });
+  }
+  if (bytes >= 1_000) {
+    return t('logs.bodies.sizeKb', { kb: (bytes / 1_000).toFixed(1) });
+  }
+  return t('logs.bodies.size', { bytes: bytes.toLocaleString() });
+}
+
 // "Highlight" fields rendered above the raw JSON in the per-row expansion.
 // Order matters; the first listed fields show first.
 const DETAIL_HIGHLIGHTS: Record<LogCategory, string[]> = {
@@ -364,10 +386,18 @@ function LogDetail({
   // — render the viewer only on gateway/mcp rows for users that
   // actually hold the permission. Each fetch fires a server-side
   // `audit.body_viewed` row, so we want the user to think before
-  // clicking; that's why it's a button gated by a 24-char confirm
-  // string in the popover footer (not auto-loaded).
+  // clicking — surface the body size on the button label so the
+  // auditor knows whether they're about to fetch 5 KB or 5 MB.
   const showBodyViewer =
     (category === 'gateway' || category === 'mcp') && hasPermission('logs:read_bodies');
+  // Read the size hint from the list-row payload so the button can
+  // render "(2.3 MB)" before the auditor clicks. Falls back to no
+  // suffix when the row predates the column (NULL on old data).
+  const totalBodyBytes: number | null = showBodyViewer
+    ? (category === 'gateway'
+        ? sumNullable(log.request_body_bytes, log.response_body_bytes)
+        : sumNullable(log.arguments_bytes, log.result_bytes))
+    : null;
 
   return (
     <div className="space-y-3 p-3">
@@ -389,7 +419,13 @@ function LogDetail({
           <PrettyJsonBlock value={log.detail} />
         </div>
       )}
-      {showBodyViewer && <BodyViewer category={category} logId={String(log.id ?? '')} />}
+      {showBodyViewer && (
+        <BodyViewer
+          category={category}
+          logId={String(log.id ?? '')}
+          totalBytes={totalBodyBytes}
+        />
+      )}
       <Collapsible className="text-xs">
         <CollapsibleTrigger className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
           {t('logs.rawJson')}
@@ -446,7 +482,15 @@ type BodyState =
   | { kind: 'ok'; data: GatewayBodyResponse | McpBodyResponse }
   | { kind: 'err'; msg: string };
 
-function BodyViewer({ category, logId }: { category: 'gateway' | 'mcp'; logId: string }) {
+function BodyViewer({
+  category,
+  logId,
+  totalBytes,
+}: {
+  category: 'gateway' | 'mcp';
+  logId: string;
+  totalBytes: number | null;
+}) {
   const { t } = useTranslation();
   const [state, setState] = useState<BodyState>({ kind: 'idle' });
 
@@ -468,14 +512,20 @@ function BodyViewer({ category, logId }: { category: 'gateway' | 'mcp'; logId: s
   }, [category, logId, state.kind]);
 
   if (state.kind === 'idle') {
+    const sizeLabel = totalBytes != null ? formatBytes(t, totalBytes) : null;
+    const buttonLabel = sizeLabel
+      ? t(category === 'gateway' ? 'logs.bodies.viewWithSize' : 'logs.bodies.viewMcpWithSize', {
+          size: sizeLabel,
+        })
+      : t(category === 'gateway' ? 'logs.bodies.view' : 'logs.bodies.viewMcp');
     return (
       <div className="space-y-1 rounded border border-dashed border-muted-foreground/40 p-2">
         <Button
           size="sm"
           variant="outline"
           onClick={fetchBody}
-          aria-label={category === 'gateway' ? t('logs.bodies.view') : t('logs.bodies.viewMcp')}>
-          {category === 'gateway' ? t('logs.bodies.view') : t('logs.bodies.viewMcp')}
+          aria-label={buttonLabel}>
+          {buttonLabel}
         </Button>
         <p className="text-xs text-muted-foreground">{t('logs.bodies.permRequired')}</p>
       </div>
@@ -502,9 +552,11 @@ function BodyViewer({ category, logId }: { category: 'gateway' | 'mcp'; logId: s
           ? t('logs.bodies.statusDisabled')
           : status === 'from_cache'
             ? t('logs.bodies.statusFromCache')
-            : status === 'error'
-              ? t('logs.bodies.statusError')
-              : null;
+            : status === 'offloaded'
+              ? t('logs.bodies.statusOffloaded')
+              : status === 'error'
+                ? t('logs.bodies.statusError')
+                : null;
 
   const [reqLabel, respLabel, reqBody, respBody, reqBytes, respBytes] =
     category === 'gateway'
@@ -530,8 +582,8 @@ function BodyViewer({ category, logId }: { category: 'gateway' | 'mcp'; logId: s
       {statusLabel && (
         <div className="text-xs text-muted-foreground italic">{statusLabel}</div>
       )}
-      <BodyPanel label={reqLabel} body={reqBody} bytes={reqBytes} />
-      <BodyPanel label={respLabel} body={respBody} bytes={respBytes} />
+      <BodyPanel label={reqLabel} body={reqBody} bytes={reqBytes} downloadName={`${logId}-request.json`} />
+      <BodyPanel label={respLabel} body={respBody} bytes={respBytes} downloadName={`${logId}-response.json`} />
     </div>
   );
 }
@@ -540,10 +592,12 @@ function BodyPanel({
   label,
   body,
   bytes,
+  downloadName,
 }: {
   label: string;
   body: string | null;
   bytes: number | null;
+  downloadName: string;
 }) {
   const { t } = useTranslation();
   // Try to pretty-print as JSON; fall back to raw text if it's not parseable
@@ -556,15 +610,37 @@ function BodyPanel({
       // Keep raw — truncated bodies legitimately don't parse.
     }
   }
+  const handleDownload = useCallback(() => {
+    if (!body) return;
+    // Browser blob download. Use the RAW (un-pretty-printed) body so
+    // the saved file matches the audit row's stored content byte-for-
+    // byte — auditors taking evidence off the wire want bit-fidelity.
+    const blob = new Blob([body], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = downloadName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }, [body, downloadName]);
   return (
     <div className="space-y-1">
       <div className="flex items-baseline justify-between gap-2">
         <span className="text-xs uppercase tracking-wide text-muted-foreground">{label}</span>
-        {bytes != null && (
-          <span className="text-xs text-muted-foreground tabular-nums">
-            {t('logs.bodies.size', { bytes: bytes.toLocaleString() })}
-          </span>
-        )}
+        <div className="flex items-baseline gap-2">
+          {bytes != null && (
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {t('logs.bodies.size', { bytes: bytes.toLocaleString() })}
+            </span>
+          )}
+          {body && (
+            <Button size="sm" variant="ghost" className="h-6 px-2 text-xs" onClick={handleDownload}>
+              {t('logs.bodies.download')}
+            </Button>
+          )}
+        </div>
       </div>
       {body == null || body === '' ? (
         <div className="text-xs text-muted-foreground italic">{t('logs.bodies.noBody')}</div>

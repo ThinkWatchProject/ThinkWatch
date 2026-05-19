@@ -1540,11 +1540,17 @@
       "statusTruncated": "已截断 —— 内容超出配置上限",
       "statusDisabled": "写入时未启用记录",
       "statusFromCache": "命中响应缓存",
+      "statusOffloaded": "已上传至对象存储 (S3 / RustFS)",
       "statusError": "记录失败",
       "noBody": "该字段没有记录内容",
       "fetchFailed": "加载失败：{{msg}}",
       "permRequired": "需要 logs:read_bodies 权限。本次查看本身也会被审计。",
-      "size": "{{bytes}} 字节"
+      "size": "{{bytes}} 字节",
+      "sizeKb": "{{kb}} KB",
+      "sizeMb": "{{mb}} MB",
+      "download": "下载",
+      "viewWithSize": "查看完整内容（{{size}}）",
+      "viewMcpWithSize": "查看工具入参与返回（{{size}}）"
     },
     "col": {
       "time": "时间",

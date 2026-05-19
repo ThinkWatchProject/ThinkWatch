@@ -1540,11 +1540,17 @@
       "statusTruncated": "Truncated — body exceeded the configured byte cap",
       "statusDisabled": "Capture disabled at write time",
       "statusFromCache": "Served from response cache",
+      "statusOffloaded": "Stored in object storage (S3 / RustFS)",
       "statusError": "Capture failed",
       "noBody": "No body captured for this field",
       "fetchFailed": "Failed to load bodies: {{msg}}",
       "permRequired": "Requires logs:read_bodies permission. Access to this view is itself audited.",
-      "size": "{{bytes}} bytes"
+      "size": "{{bytes}} bytes",
+      "sizeKb": "{{kb}} KB",
+      "sizeMb": "{{mb}} MB",
+      "download": "Download",
+      "viewWithSize": "View bodies ({{size}})",
+      "viewMcpWithSize": "View tool args + result ({{size}})"
     },
     "col": {
       "time": "Time",

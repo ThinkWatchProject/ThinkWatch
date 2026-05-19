@@ -56,6 +56,16 @@ pub struct GatewayLogEntry {
     pub status_code: Option<i64>,
     pub ip_address: Option<String>,
     pub created_at: String,
+    /// Captured-body sizes + status surfaced in the list so the
+    /// frontend's "View bodies" button can show "(2.3 MB)" before
+    /// the auditor commits to a fetch (each fetch fires an
+    /// `audit.body_viewed` second-order audit row, so click-through
+    /// is a recordable event the auditor should think about). The
+    /// actual body content stays behind the `logs:read_bodies` perm
+    /// + the dedicated `/body` endpoint.
+    pub request_body_bytes: Option<i64>,
+    pub response_body_bytes: Option<i64>,
+    pub body_capture_status: Option<String>,
 }
 
 /// CH row shape — `cost_usd` is the raw i64 under a
@@ -76,6 +86,9 @@ struct GatewayLogRow {
     status_code: Option<i64>,
     ip_address: Option<String>,
     created_at: String,
+    request_body_bytes: Option<u32>,
+    response_body_bytes: Option<u32>,
+    body_capture_status: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -227,12 +240,16 @@ pub async fn list_gateway_logs(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse query failed: {e}")))?;
 
-    // Data query
+    // Data query — pulls the body-size + status columns (NOT the
+    // body content) so the frontend can show "(2.3 MB)" on the
+    // View bodies button. The actual prompts / completions stay
+    // behind the dedicated `/body` endpoint + `logs:read_bodies`.
     let data_sql = format!(
         "SELECT id, user_id, api_key_id, model_id, provider, upstream_model, \
          input_tokens, output_tokens, \
          cost_usd, latency_ms, status_code, ip_address, \
-         toString(created_at) as created_at \
+         toString(created_at) as created_at, \
+         request_body_bytes, response_body_bytes, body_capture_status \
          FROM gateway_logs {where_clause} ORDER BY {order_by} LIMIT {limit} OFFSET {offset}"
     );
     let mut data_query = ch.query(&data_sql);
@@ -260,6 +277,9 @@ pub async fn list_gateway_logs(
             status_code: r.status_code,
             ip_address: r.ip_address,
             created_at: r.created_at,
+            request_body_bytes: r.request_body_bytes.map(|v| v as i64),
+            response_body_bytes: r.response_body_bytes.map(|v| v as i64),
+            body_capture_status: r.body_capture_status,
         })
         .collect();
 

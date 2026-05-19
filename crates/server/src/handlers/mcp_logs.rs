@@ -38,6 +38,14 @@ pub struct McpLogEntry {
     pub error_message: Option<String>,
     pub ip_address: Option<String>,
     pub created_at: String,
+    /// Same body-size + capture-status surfacing as the gateway list
+    /// endpoint — lets the frontend show "(2.3 MB)" on the View
+    /// bodies button without leaking the actual tool arguments /
+    /// results (those still gate behind `logs:read_bodies` + the
+    /// dedicated `/body` endpoint).
+    pub arguments_bytes: Option<i64>,
+    pub result_bytes: Option<i64>,
+    pub body_capture_status: Option<String>,
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]
@@ -144,8 +152,16 @@ pub async fn list_mcp_logs(
         .await
         .map_err(|e| AppError::Internal(anyhow::anyhow!("ClickHouse: {e}")))?;
 
+    // Surface body sizes + status so the View bodies button can show
+    // "(N bytes)" without an extra round-trip. The actual content is
+    // still gated by `logs:read_bodies` on the dedicated /body endpoint.
+    // toInt64 because the underlying columns are UInt32 but the wire
+    // contract is Option<i64> for consistency with input_tokens etc.
     let data_sql = format!(
-        "SELECT id, user_id, user_email, server_id, server_name, tool_name, duration_ms, status, error_message, ip_address, toString(created_at) as created_at \
+        "SELECT id, user_id, user_email, server_id, server_name, tool_name, duration_ms, status, error_message, ip_address, toString(created_at) as created_at, \
+         toNullable(toInt64(arguments_bytes)) AS arguments_bytes, \
+         toNullable(toInt64(result_bytes)) AS result_bytes, \
+         body_capture_status \
          FROM mcp_logs {wc} ORDER BY {ob} LIMIT {limit} OFFSET {offset}"
     );
     let mut q = ch.query(&data_sql);
