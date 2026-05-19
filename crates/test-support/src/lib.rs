@@ -77,6 +77,12 @@ pub struct SpawnOptions {
     /// reject `169.254.169.254`) so the test surface area mirrors
     /// production semantics outside the loopback carve-out.
     pub url_validator: Option<think_watch_server::app::UrlValidator>,
+    /// Override the body-offload store. `None` = whatever
+    /// `init::init_state` builds from env (typically [`InlineStore`]
+    /// in test envs because S3_* vars aren't set). Tests that need
+    /// to exercise the offload path inject an in-memory store here
+    /// without standing up a real S3 backend.
+    pub blob_store: Option<std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>>,
 }
 
 impl TestApp {
@@ -189,6 +195,9 @@ impl TestApp {
         let mut state = init::init_state(config.clone(), db.clone(), redis, ch_client).await?;
         if let Some(v) = opts.url_validator {
             state.url_validator = v;
+        }
+        if let Some(store) = opts.blob_store {
+            state.blob_store = store;
         }
 
         // We deliberately skip:

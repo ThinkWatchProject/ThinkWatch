@@ -20,6 +20,7 @@ think-watch-auth = { workspace = true }
 think-watch-gateway = { workspace = true }
 think-watch-mcp-gateway = { workspace = true }
 
+async-trait = "0.1"
 axum = { workspace = true }
 tokio = { workspace = true }
 tower = { workspace = true }
