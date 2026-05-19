@@ -309,22 +309,14 @@ fn gateway_error_status(err: &GatewayError) -> i64 {
 // success / streaming / error / cache-hit paths all carry the same
 // payload semantics.
 
-/// Body capture status values written into the
-/// `gateway_logs.body_capture_status` column. Kept as `&'static str`
-/// constants so a typo can't desync the producer side from the
-/// audit-query side.
-const BODY_CAPTURED: &str = "captured";
-const BODY_TRUNCATED: &str = "truncated";
-const BODY_DISABLED: &str = "disabled";
-const BODY_FROM_CACHE: &str = "from_cache";
-/// One body (or both) exceeded the inline cap and was uploaded to the
-/// configured S3-compatible blob store. The corresponding body column
-/// holds an `s3://bucket/key` pointer instead of the raw payload; the
-/// body-viewer endpoint dereferences before returning it to the
-/// auditor. Distinct from "truncated" so an operator searching for
-/// audit gaps doesn't see oversize-but-preserved bodies grouped with
-/// the truly-lost truncated ones.
-const BODY_OFFLOADED: &str = "offloaded";
+// Body capture status values come from the shared
+// `think_watch_common::audit::BodyCaptureStatus` enum so the producer
+// side (this file + mcp-gateway) and consumer side (handlers, flush
+// mappers, tests, frontend) all agree on the wire spelling. The
+// previous gateway-local `BODY_*` constants drifted from the
+// mcp-gateway equivalents (typos / case variants) and let bugs through
+// silently — the centralized enum makes that impossible.
+use think_watch_common::audit::BodyCaptureStatus;
 
 /// Captured payload snapshot. Cheap to construct + clone — the
 /// strings are already truncated / redacted / serialized by
@@ -354,7 +346,7 @@ impl BodyCapture {
             response: None,
             request_bytes: None,
             response_bytes: None,
-            status: Some(BODY_DISABLED),
+            status: Some(BodyCaptureStatus::Disabled.as_str()),
         }
     }
 
@@ -466,18 +458,18 @@ async fn prepare_body_capture(
         _ => None,
     };
     let status = if request.is_none() && response_body.is_none() {
-        BODY_DISABLED
+        BodyCaptureStatus::Disabled.as_str()
     } else if offloaded_flag {
         // Offload + truncation are mutually exclusive per field, but a
         // single emit can carry one offloaded body and one truncated
         // body if e.g. request fit inline and response was huge. Pick
         // `offloaded` as the dominant status because it's the more
         // informative one — truncation would lose data, offload didn't.
-        BODY_OFFLOADED
+        BodyCaptureStatus::Offloaded.as_str()
     } else if truncated_flag {
-        BODY_TRUNCATED
+        BodyCaptureStatus::Truncated.as_str()
     } else {
-        BODY_CAPTURED
+        BodyCaptureStatus::Captured.as_str()
     };
     BodyCapture {
         request,
@@ -1627,7 +1619,7 @@ pub async fn proxy_chat_completion(
             Some(&cached),
         )
         .await;
-        cache_body_capture.status = Some(BODY_FROM_CACHE);
+        cache_body_capture.status = Some(BodyCaptureStatus::FromCache.as_str());
         emit_gateway_log(
             &state.audit,
             &metadata.request_id,

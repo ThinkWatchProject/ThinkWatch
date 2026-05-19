@@ -1128,9 +1128,16 @@ impl McpProxy {
             )
             .increment(1);
         }
+        use think_watch_common::audit::BodyCaptureStatus;
         let (arg_str, arg_bytes, result_str, result_bytes, capture_status) =
             if !capture_args && !capture_result {
-                (None, None, None, None, Some("disabled".to_owned()))
+                (
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(BodyCaptureStatus::Disabled.as_str().to_owned()),
+                )
             } else {
                 let mut truncated = false;
                 let mut offloaded = false;
@@ -1185,23 +1192,23 @@ impl McpProxy {
                     None
                 };
                 let status = if arg_str.is_none() && result_str.is_none() {
-                    "disabled"
+                    BodyCaptureStatus::Disabled
                 } else if offloaded {
                     // Same dominant-status rule as the AI gateway: a single
-                    // emit carrying one offloaded field reports "offloaded"
+                    // emit carrying one offloaded field reports `offloaded`
                     // even if another field was small enough to truncate.
-                    "offloaded"
+                    BodyCaptureStatus::Offloaded
                 } else if truncated {
-                    "truncated"
+                    BodyCaptureStatus::Truncated
                 } else {
-                    "captured"
+                    BodyCaptureStatus::Captured
                 };
                 (
                     arg_str,
                     arg_bytes,
                     result_str,
                     result_bytes,
-                    Some(status.to_owned()),
+                    Some(status.as_str().to_owned()),
                 )
             };
 

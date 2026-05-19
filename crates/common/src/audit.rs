@@ -68,6 +68,62 @@ fn default_log_type() -> LogType {
     LogType::Audit
 }
 
+/// Canonical values for `gateway_logs.body_capture_status` and
+/// `mcp_logs.body_capture_status`. Lives in `common` so producers
+/// (gateway proxy, mcp-gateway proxy), consumers (handlers, flush
+/// mappers), AND tests all reference the same source of truth — a
+/// typo on one side previously could land a body row with an
+/// unrecognised status that the dashboard then silently rendered
+/// without a badge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyCaptureStatus {
+    /// Body fit inline and was captured in full.
+    Captured,
+    /// Body exceeded `audit.body_max_bytes` AND no offload backend
+    /// was available — the cell holds the original text up to the
+    /// cap with a `...` sentinel appended.
+    Truncated,
+    /// Either `audit.capture_request_bodies` or
+    /// `audit.capture_response_bodies` (or the MCP equivalents) was
+    /// off at write time. Cells are NULL.
+    Disabled,
+    /// The row was emitted from the response-cache shortcut — the
+    /// body cell holds the cached completion, which the auditor
+    /// distinguishes from a fresh capture via this status alone.
+    FromCache,
+    /// Body offloaded to the configured S3-compatible blob store;
+    /// the cell holds an `s3://bucket/key` URL the body-viewer
+    /// endpoint dereferences at read time. Distinct from
+    /// `Truncated` so dashboards searching for evidence gaps can
+    /// filter the offloaded set out of the lost set.
+    Offloaded,
+    /// Capture itself failed (serialization error, offload error
+    /// past the truncation fallback, …). Cells may carry a
+    /// `[blob offload failed: …]` placeholder; treat as data loss.
+    Error,
+}
+
+impl BodyCaptureStatus {
+    /// The string written to ClickHouse and read back by handlers.
+    /// LowCardinality column, so the set is stable + small.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BodyCaptureStatus::Captured => "captured",
+            BodyCaptureStatus::Truncated => "truncated",
+            BodyCaptureStatus::Disabled => "disabled",
+            BodyCaptureStatus::FromCache => "from_cache",
+            BodyCaptureStatus::Offloaded => "offloaded",
+            BodyCaptureStatus::Error => "error",
+        }
+    }
+}
+
+impl std::fmt::Display for BodyCaptureStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Audit log entry sent to ClickHouse and dynamically configured forwarders.
 ///
 /// Deserialize is required because the durable webhook outbox round-
@@ -123,11 +179,10 @@ pub struct AuditEntry {
     /// Lands in `gateway_logs.response_body` / `mcp_logs.tool_result`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_body: Option<String>,
-    /// One of: "captured" / "truncated" / "disabled" / "from_cache"
-    /// / "offloaded" / "error". Lets auditors distinguish "we never
-    /// captured this" from "the body was bigger than the max and we
-    /// cut it" from "the body is sitting in object storage" from
-    /// "this hit the response cache so no upstream payload existed".
+    /// Persisted as a `LowCardinality(Nullable(String))` column;
+    /// [`BodyCaptureStatus::as_str`] is the canonical mapping
+    /// producers / consumers should use rather than typing the
+    /// strings inline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_capture_status: Option<String>,
     /// Original captured body size in bytes. Set explicitly by the
