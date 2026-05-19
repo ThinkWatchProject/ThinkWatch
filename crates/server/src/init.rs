@@ -140,6 +140,14 @@ pub async fn init_state(
         weight_cache.clone(),
     ));
 
+    // Body-offload store. `build_from_env` returns InlineStore when
+    // S3 vars are missing so the dev path works without RustFS; the
+    // bundled docker-compose ships the env so production deploys
+    // come up with offload enabled out of the box. Share the same
+    // reqwest client the rest of init uses so we get the same TLS
+    // config + connection pool reuse.
+    let blob_store = think_watch_common::blob_store::build_from_env(init_http_client.clone());
+
     let state = AppState {
         db: pool,
         redis,
@@ -163,6 +171,7 @@ pub async fn init_state(
         user_token_resolver,
         url_validator: crate::app::production_url_validator(),
         cost_tracker,
+        blob_store,
     };
 
     Ok(state)

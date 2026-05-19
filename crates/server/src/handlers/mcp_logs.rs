@@ -259,6 +259,12 @@ pub async fn get_mcp_log_body(
             })),
     );
 
+    // Same s3:// dereference contract as gateway/logs/{id}/body —
+    // reuse the helper so a single bug in offload-resolution can't
+    // diverge between the two endpoints.
+    let tool_arguments = super::gateway_logs::deref_body(&state, row.tool_arguments).await?;
+    let tool_result = super::gateway_logs::deref_body(&state, row.tool_result).await?;
+
     Ok(Json(McpLogBodyResponse {
         id: row.id,
         trace_id: row.trace_id,
@@ -267,8 +273,8 @@ pub async fn get_mcp_log_body(
         server_name: row.server_name,
         tool_name: row.tool_name,
         created_at: row.created_at,
-        tool_arguments: row.tool_arguments,
-        tool_result: row.tool_result,
+        tool_arguments,
+        tool_result,
         arguments_bytes: row.arguments_bytes,
         result_bytes: row.result_bytes,
         body_capture_status: row.body_capture_status,

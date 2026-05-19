@@ -70,6 +70,13 @@ pub struct GatewayState {
     /// strategy's weight calculation. Backed by Redis so all gateway
     /// replicas share the same view. See `crate::health` for details.
     pub health: Arc<HealthTracker>,
+    /// Body-offload store for the audit pipeline. Oversize request /
+    /// response bodies get uploaded to S3-compatible storage instead
+    /// of landing inline in CH; the audit row stores an `s3://...`
+    /// pointer that the body-viewer endpoints dereference. Defaults
+    /// to `InlineStore` (no-op) when no S3 backend is configured —
+    /// see `think_watch_common::blob_store` for the policy.
+    pub blob_store: Arc<dyn think_watch_common::blob_store::BlobStore>,
 }
 
 /// Identity information extracted from the auth middleware.
@@ -310,6 +317,14 @@ const BODY_CAPTURED: &str = "captured";
 const BODY_TRUNCATED: &str = "truncated";
 const BODY_DISABLED: &str = "disabled";
 const BODY_FROM_CACHE: &str = "from_cache";
+/// One body (or both) exceeded the inline cap and was uploaded to the
+/// configured S3-compatible blob store. The corresponding body column
+/// holds an `s3://bucket/key` pointer instead of the raw payload; the
+/// body-viewer endpoint dereferences before returning it to the
+/// auditor. Distinct from "truncated" so an operator searching for
+/// audit gaps doesn't see oversize-but-preserved bodies grouped with
+/// the truly-lost truncated ones.
+const BODY_OFFLOADED: &str = "offloaded";
 
 /// Captured payload snapshot. Cheap to construct + clone — the
 /// strings are already truncated / redacted / serialized by
@@ -354,16 +369,23 @@ impl BodyCapture {
 /// dynamic-config-driven capture pipeline:
 ///   1. capture-enabled gate (per-field)
 ///   2. optional PII redaction (when `audit.body_redact_pii` is on)
-///   3. byte-cap truncation (UTF-8 char-boundary safe)
+///   3. blob-store offload when oversize and a backend is configured
+///   4. byte-cap truncation when offload isn't available (fallback)
 ///
 /// `messages` is the post-PII-redaction set the gateway already
 /// passes to upstream; for the audit blob we want the version users
 /// actually authored. The caller hands us the original
 /// pre-redaction slice when both forms exist (`prepare_body_capture`
 /// itself does not know which was sent upstream).
+///
+/// `trace_id` is woven into the offload object key so an operator
+/// browsing the bucket can correlate objects back to the audit row
+/// without a CH query.
 async fn prepare_body_capture(
     dynamic_config: &DynamicConfig,
     pii_redactor: &PiiRedactor,
+    blob_store: &std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>,
+    trace_id: &str,
     messages: &[crate::providers::traits::ChatMessage],
     response: Option<&crate::providers::traits::ChatCompletionResponse>,
 ) -> BodyCapture {
@@ -374,18 +396,28 @@ async fn prepare_body_capture(
     }
     let max_bytes = dynamic_config.audit_body_max_bytes().await as usize;
     let redact_pii = dynamic_config.audit_body_redact_pii().await;
+    let can_offload = blob_store.can_offload();
 
     let mut truncated_flag = false;
+    let mut offloaded_flag = false;
     let request = if capture_req {
         let raw =
             serde_json::to_string(messages).unwrap_or_else(|_| "[serialize_error]".to_owned());
-        Some(post_process_body(
-            raw,
-            max_bytes,
-            redact_pii,
-            pii_redactor,
-            &mut truncated_flag,
-        ))
+        Some(
+            process_body(
+                raw,
+                max_bytes,
+                redact_pii,
+                pii_redactor,
+                blob_store,
+                can_offload,
+                trace_id,
+                "request",
+                &mut truncated_flag,
+                &mut offloaded_flag,
+            )
+            .await,
+        )
     } else {
         None
     };
@@ -393,18 +425,33 @@ async fn prepare_body_capture(
         (true, Some(resp)) => {
             let raw =
                 serde_json::to_string(resp).unwrap_or_else(|_| "[serialize_error]".to_owned());
-            Some(post_process_body(
-                raw,
-                max_bytes,
-                redact_pii,
-                pii_redactor,
-                &mut truncated_flag,
-            ))
+            Some(
+                process_body(
+                    raw,
+                    max_bytes,
+                    redact_pii,
+                    pii_redactor,
+                    blob_store,
+                    can_offload,
+                    trace_id,
+                    "response",
+                    &mut truncated_flag,
+                    &mut offloaded_flag,
+                )
+                .await,
+            )
         }
         _ => None,
     };
     let status = if request.is_none() && response_body.is_none() {
         BODY_DISABLED
+    } else if offloaded_flag {
+        // Offload + truncation are mutually exclusive per field, but a
+        // single emit can carry one offloaded body and one truncated
+        // body if e.g. request fit inline and response was huge. Pick
+        // `offloaded` as the dominant status because it's the more
+        // informative one — truncation would lose data, offload didn't.
+        BODY_OFFLOADED
     } else if truncated_flag {
         BODY_TRUNCATED
     } else {
@@ -417,18 +464,71 @@ async fn prepare_body_capture(
     }
 }
 
-fn post_process_body(
+#[allow(clippy::too_many_arguments)]
+async fn process_body(
     mut s: String,
     max_bytes: usize,
     redact_pii: bool,
     pii_redactor: &PiiRedactor,
+    blob_store: &std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>,
+    can_offload: bool,
+    trace_id: &str,
+    field: &'static str,
     truncated_flag: &mut bool,
+    offloaded_flag: &mut bool,
 ) -> String {
     if redact_pii {
         s = pii_redactor.redact_blob(&s);
     }
     if s.len() <= max_bytes {
         return s;
+    }
+    // Oversize. If a blob store is wired in, offload — auditors keep
+    // the full payload at the cost of one S3 round-trip. If not, fall
+    // back to char-boundary-safe truncation so we still record SOMETHING
+    // (a `truncated` row beats a NULL one for investigations).
+    if can_offload {
+        use think_watch_common::blob_store::{BlobDecision, BlobKeyHint};
+        let hint = BlobKeyHint {
+            table: "gateway_logs",
+            log_id: trace_id,
+            field,
+        };
+        match blob_store
+            .store_if_oversize(hint, std::mem::take(&mut s), max_bytes)
+            .await
+        {
+            Ok(BlobDecision::Offloaded { url, .. }) => {
+                *offloaded_flag = true;
+                return url;
+            }
+            Ok(BlobDecision::Inline(returned)) => {
+                // Shouldn't happen — store_if_oversize was called with
+                // a string already > max_bytes — but if a future store
+                // impl changes its mind, fall through to truncation.
+                s = returned;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    field,
+                    trace_id,
+                    error = %e,
+                    "blob offload failed; falling back to truncation"
+                );
+                metrics::counter!(
+                    "audit_body_offload_failed_total",
+                    "field" => field.to_string()
+                )
+                .increment(1);
+                // `s` was moved into store_if_oversize via take; we
+                // only get a fresh string on Inline/Err inside the
+                // closure. The Err arm above gives us nothing, so
+                // re-serialize from scratch — at worst we lose this
+                // body to truncation, which is the same outcome as
+                // having no store configured at all.
+                s = format!("[blob offload failed: {e}]");
+            }
+        }
     }
     *truncated_flag = true;
     // Leave room for the ellipsis sentinel and walk back to the
@@ -1648,6 +1748,8 @@ pub async fn proxy_chat_completion(
                 let stream_body_capture = prepare_body_capture(
                     &state_for_done.dynamic_config,
                     &state_for_done.pii_redactor.load(),
+                    &state_for_done.blob_store,
+                    &trace_id_for_done,
                     &messages_for_audit_for_done,
                     assembled_for_audit.as_ref(),
                 )
@@ -1735,6 +1837,8 @@ pub async fn proxy_chat_completion(
         let error_path_capture = prepare_body_capture(
             &state.dynamic_config,
             &pii_redactor,
+            &state.blob_store,
+            &metadata.request_id,
             &messages_for_audit,
             None,
         )
@@ -1846,6 +1950,8 @@ pub async fn proxy_chat_completion(
         let body_capture = prepare_body_capture(
             &state.dynamic_config,
             &pii_redactor,
+            &state.blob_store,
+            &metadata.request_id,
             &messages_for_audit,
             Some(&response),
         )
@@ -2147,6 +2253,8 @@ pub async fn proxy_anthropic_messages(
                 let stream_body_capture = prepare_body_capture(
                     &state_for_done.dynamic_config,
                     &state_for_done.pii_redactor.load(),
+                    &state_for_done.blob_store,
+                    &trace_id_for_done,
                     &messages_for_audit_for_done,
                     assembled_for_audit.as_ref(),
                 )
@@ -2211,6 +2319,8 @@ pub async fn proxy_anthropic_messages(
         let error_path_capture = prepare_body_capture(
             &state.dynamic_config,
             &pii_redactor,
+            &state.blob_store,
+            &trace_id,
             &messages_for_audit,
             None,
         )
@@ -2290,6 +2400,8 @@ pub async fn proxy_anthropic_messages(
         let body_capture = prepare_body_capture(
             &state.dynamic_config,
             &pii_redactor,
+            &state.blob_store,
+            &trace_id,
             &messages_for_audit,
             Some(&response),
         )
@@ -2611,6 +2723,8 @@ pub async fn proxy_responses(
                 let stream_body_capture = prepare_body_capture(
                     &state_for_done.dynamic_config,
                     &state_for_done.pii_redactor.load(),
+                    &state_for_done.blob_store,
+                    &trace_id_for_done,
                     &messages_for_audit_for_done,
                     assembled_for_audit.as_ref(),
                 )
@@ -2678,6 +2792,8 @@ pub async fn proxy_responses(
         let error_path_capture = prepare_body_capture(
             &state.dynamic_config,
             &pii_redactor,
+            &state.blob_store,
+            &trace_id,
             &messages_for_audit,
             None,
         )
@@ -2753,6 +2869,8 @@ pub async fn proxy_responses(
         let body_capture = prepare_body_capture(
             &state.dynamic_config,
             &pii_redactor,
+            &state.blob_store,
+            &trace_id,
             &messages_for_audit,
             Some(&response),
         )

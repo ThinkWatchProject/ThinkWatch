@@ -36,6 +36,7 @@ pub mod models;
 
 // --- Data-plane primitives (referenced by gateway / mcp-gateway) ---
 pub mod audit; // AuditEntry / AuditLogger — used by every ingest path
+pub mod blob_store; // S3-compatible body offload for the audit pipeline
 pub mod cb_registry;
 pub mod clickhouse_client;
 pub mod cost_decimal; // Decimal ↔ raw i64/i128 helpers for CH Decimal(18, 10) columns

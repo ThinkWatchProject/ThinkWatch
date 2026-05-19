@@ -213,6 +213,16 @@ ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS body_capture_status LowCardina
 ALTER TABLE gateway_logs MODIFY COLUMN request_body  TTL toDateTime(created_at) + INTERVAL 30 DAY;
 ALTER TABLE gateway_logs MODIFY COLUMN response_body TTL toDateTime(created_at) + INTERVAL 30 DAY;
 
+-- Substring search across captured bodies — auditors searching
+-- "which conversations mentioned API key XYZ" or "which tool calls
+-- referenced /etc/passwd" otherwise have to scan every row. tokenbf
+-- filters at 512 buckets / 3 hashes with granularity 4 cost ~50 KB
+-- per granule and reject the vast majority of rows for typical
+-- 3+-character substrings. ifNull() because the index expr can't
+-- handle a bare Nullable column.
+ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_request_body  ifNull(request_body, '')  TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4;
+ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_response_body ifNull(response_body, '') TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4;
+
 CREATE TABLE IF NOT EXISTS mcp_logs (
     id               String,
     user_id          LowCardinality(Nullable(String)),
@@ -266,6 +276,10 @@ ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS body_capture_status LowCardinality
 -- Same body-column TTL story as gateway_logs above; see comment there.
 ALTER TABLE mcp_logs MODIFY COLUMN tool_arguments TTL toDateTime(created_at) + INTERVAL 30 DAY;
 ALTER TABLE mcp_logs MODIFY COLUMN tool_result    TTL toDateTime(created_at) + INTERVAL 30 DAY;
+
+-- Same substring-search rationale as gateway_logs above.
+ALTER TABLE mcp_logs ADD INDEX IF NOT EXISTS idx_tool_arguments ifNull(tool_arguments, '') TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4;
+ALTER TABLE mcp_logs ADD INDEX IF NOT EXISTS idx_tool_result    ifNull(tool_result, '')    TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4;
 
 -- platform_logs used to live here as a separate table for management
 -- operations. Its schema was a strict subset of audit_logs (no

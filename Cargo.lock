@@ -4047,6 +4047,9 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
+ "async-trait",
+ "aws-credential-types",
+ "aws-sigv4",
  "axum",
  "bytes",
  "chrono",
@@ -4055,6 +4058,7 @@ dependencies = [
  "fred",
  "hex",
  "hmac 0.13.0",
+ "http 1.4.0",
  "metrics",
  "rand 0.10.0",
  "regex",

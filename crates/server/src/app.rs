@@ -107,6 +107,14 @@ pub struct AppState {
     /// editing process picks the new baseline up immediately rather
     /// than waiting for the 60s TTL to expire.
     pub cost_tracker: Arc<think_watch_gateway::cost_tracker::CostTracker>,
+
+    /// Body-offload store for the audit pipeline. Defaults to
+    /// `InlineStore` when no `S3_BUCKET` is configured so the dev /
+    /// minimal-deploy path works out of the box; production deploys
+    /// (and the bundled docker-compose) wire in an `S3Store` pointing
+    /// at the bundled RustFS container so oversize prompts /
+    /// completions land in object storage instead of bloating CH.
+    pub blob_store: Arc<dyn think_watch_common::blob_store::BlobStore>,
 }
 
 /// Build a `ContentFilter` from the current `system_settings` value.
@@ -241,6 +249,11 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         // instance and the gateway would keep using the stale 60s-TTL
         // baseline for up to a minute on the editing process.
         cost_tracker: state.cost_tracker.clone(),
+        // Share the same offload store the body-viewer endpoints read
+        // through so writes and reads go to the same bucket — without
+        // this the proxy would PUT into one configuration and the
+        // viewer would try to GET from another.
+        blob_store: state.blob_store.clone(),
         rate_limiter: Arc::new(think_watch_gateway::rate_limiter::RateLimiter::new(
             state.redis.clone(),
         )),
@@ -311,6 +324,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         state.dynamic_config.clone(),
         state.audit.clone(),
         state.user_token_resolver.clone(),
+        state.blob_store.clone(),
     );
     // Wire the shared CB registry into the proxy so per-server breakers
     // are visible to the dashboard handler.

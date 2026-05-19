@@ -93,25 +93,64 @@ pub fn err_response(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Body-capture truncation + PII redaction hook for `mcp_logs.
-/// tool_arguments` / `tool_result`. Mirrors the gateway-side
-/// `post_process_body` so both audit pipelines share char-boundary-
-/// safe truncation; we don't share a helper because the gateway's
-/// PiiRedactor lives in a separate crate and pulling it into
-/// mcp-gateway would invert the dep graph.
+/// Body-capture truncation + offload + PII redaction hook for
+/// `mcp_logs.tool_arguments` / `tool_result`. Mirrors the gateway-side
+/// `process_body` so both audit pipelines share char-boundary-safe
+/// truncation + the same blob-offload contract; we don't share the
+/// helper across crates because the gateway's PiiRedactor isn't in
+/// `common` and pulling it down would invert the dep graph.
 ///
-/// `redact_pii` is currently a no-op (mcp-side PII redaction is not
-/// implemented yet). When enabled the body is left raw — operators
-/// see the toggle's intent reflected via the `audit.body_redact_pii`
-/// setting but the redaction itself is a follow-up.
-fn apply_mcp_body_capture(
-    s: String,
+/// `redact_pii` is currently a no-op for mcp (no PII engine yet).
+/// When enabled the body is left raw and an operator sees the toggle's
+/// intent reflected via the `audit.body_redact_pii` setting but the
+/// redaction itself is a follow-up.
+#[allow(clippy::too_many_arguments)]
+async fn apply_mcp_body_capture(
+    mut s: String,
     max_bytes: usize,
     _redact_pii: bool,
+    blob_store: &std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>,
+    trace_id: &str,
+    field: &'static str,
     truncated_flag: &mut bool,
+    offloaded_flag: &mut bool,
 ) -> String {
     if s.len() <= max_bytes {
         return s;
+    }
+    if blob_store.can_offload() {
+        use think_watch_common::blob_store::{BlobDecision, BlobKeyHint};
+        let hint = BlobKeyHint {
+            table: "mcp_logs",
+            log_id: trace_id,
+            field,
+        };
+        match blob_store
+            .store_if_oversize(hint, std::mem::take(&mut s), max_bytes)
+            .await
+        {
+            Ok(BlobDecision::Offloaded { url, .. }) => {
+                *offloaded_flag = true;
+                return url;
+            }
+            Ok(BlobDecision::Inline(returned)) => {
+                s = returned;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    field,
+                    trace_id,
+                    error = %e,
+                    "MCP blob offload failed; falling back to truncation"
+                );
+                metrics::counter!(
+                    "audit_body_offload_failed_total",
+                    "field" => field.to_string()
+                )
+                .increment(1);
+                s = format!("[blob offload failed: {e}]");
+            }
+        }
     }
     *truncated_flag = true;
     let budget = max_bytes.saturating_sub(3);
@@ -225,6 +264,10 @@ pub struct McpProxy {
     /// the OAuth / static-token credential for the calling user-account
     /// pair before each `tools/call` reaches the upstream.
     pub user_tokens: UserTokenResolver,
+    /// Body-offload store. Oversize tool arguments / results land here
+    /// instead of inline `mcp_logs.tool_arguments` / `tool_result`
+    /// columns. Same backing store the AI gateway uses.
+    pub blob_store: std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>,
 }
 
 impl McpProxy {
@@ -238,6 +281,7 @@ impl McpProxy {
         dynamic_config: std::sync::Arc<think_watch_common::dynamic_config::DynamicConfig>,
         audit: think_watch_common::audit::AuditLogger,
         user_tokens: UserTokenResolver,
+        blob_store: std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>,
     ) -> Self {
         let cache = McpResponseCache::new(redis.clone());
         Self {
@@ -251,6 +295,7 @@ impl McpProxy {
             dynamic_config,
             audit,
             user_tokens,
+            blob_store,
         }
     }
 
@@ -1068,26 +1113,62 @@ impl McpProxy {
             (None, None, Some("disabled".to_owned()))
         } else {
             let mut truncated = false;
+            let mut offloaded = false;
             let arg_str = if capture_args {
-                logged_arguments.as_ref().map(|v| {
-                    let raw =
-                        serde_json::to_string(v).unwrap_or_else(|_| "[serialize_error]".to_owned());
-                    apply_mcp_body_capture(raw, body_max, redact, &mut truncated)
-                })
+                match logged_arguments.as_ref() {
+                    Some(v) => {
+                        let raw = serde_json::to_string(v)
+                            .unwrap_or_else(|_| "[serialize_error]".to_owned());
+                        Some(
+                            apply_mcp_body_capture(
+                                raw,
+                                body_max,
+                                redact,
+                                &self.blob_store,
+                                &call_trace_id,
+                                "arguments",
+                                &mut truncated,
+                                &mut offloaded,
+                            )
+                            .await,
+                        )
+                    }
+                    None => None,
+                }
             } else {
                 None
             };
             let result_str = if capture_result {
-                response.result.as_ref().map(|v| {
-                    let raw =
-                        serde_json::to_string(v).unwrap_or_else(|_| "[serialize_error]".to_owned());
-                    apply_mcp_body_capture(raw, body_max, redact, &mut truncated)
-                })
+                match response.result.as_ref() {
+                    Some(v) => {
+                        let raw = serde_json::to_string(v)
+                            .unwrap_or_else(|_| "[serialize_error]".to_owned());
+                        Some(
+                            apply_mcp_body_capture(
+                                raw,
+                                body_max,
+                                redact,
+                                &self.blob_store,
+                                &call_trace_id,
+                                "result",
+                                &mut truncated,
+                                &mut offloaded,
+                            )
+                            .await,
+                        )
+                    }
+                    None => None,
+                }
             } else {
                 None
             };
             let status = if arg_str.is_none() && result_str.is_none() {
                 "disabled"
+            } else if offloaded {
+                // Same dominant-status rule as the AI gateway: a single
+                // emit carrying one offloaded field reports "offloaded"
+                // even if another field was small enough to truncate.
+                "offloaded"
             } else if truncated {
                 "truncated"
             } else {

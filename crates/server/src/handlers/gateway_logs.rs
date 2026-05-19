@@ -375,16 +375,45 @@ pub async fn get_gateway_log_body(
             })),
     );
 
+    // Dereference s3:// pointers if the body was offloaded. The
+    // audit row carries either the raw payload OR an `s3://bucket/key`
+    // URL — auditors always want the actual content, so resolve here
+    // so the frontend doesn't need to know about offload at all.
+    let request_body = deref_body(&state, row.request_body).await?;
+    let response_body = deref_body(&state, row.response_body).await?;
+
     Ok(Json(GatewayLogBodyResponse {
         id: row.id,
         trace_id: row.trace_id,
         user_id: row.user_id,
         model_id: row.model_id,
         created_at: row.created_at,
-        request_body: row.request_body,
-        response_body: row.response_body,
+        request_body,
+        response_body,
         request_body_bytes: row.request_body_bytes,
         response_body_bytes: row.response_body_bytes,
         body_capture_status: row.body_capture_status,
     }))
+}
+
+/// Resolve a body cell back to its actual content. Inline cells pass
+/// through unchanged; `s3://bucket/key` URLs trigger a fetch against
+/// the configured blob store. Surfaces blob-store errors as 502s so
+/// auditors don't confuse "S3 backend down" with "no body captured".
+pub(crate) async fn deref_body(
+    state: &AppState,
+    cell: Option<String>,
+) -> Result<Option<String>, AppError> {
+    let Some(s) = cell else { return Ok(None) };
+    if !s.starts_with("s3://") {
+        return Ok(Some(s));
+    }
+    let bytes = state
+        .blob_store
+        .fetch(&s)
+        .await
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("offloaded body fetch failed: {e}")))?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("offloaded body not utf-8: {e}")))
 }
