@@ -3,9 +3,7 @@ import { useTranslation } from 'react-i18next';
 import { useSearch, useNavigate } from '@tanstack/react-router';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
-import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
   Select,
@@ -21,17 +19,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-} from '@/components/ui/sheet';
-import { LatencySparkline } from '../routing/LatencySparkline';
-import { RoutingModeSection } from '../routing/RoutingModeSection';
-import { TrafficBar } from '../routing/TrafficBar';
-import { AlertCircle, Brain, Pencil, Plus, Trash2 } from 'lucide-react';
+import { AlertCircle, Brain, Plus, Trash2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/confirm-dialog';
@@ -42,7 +30,6 @@ import {
   AFFINITY_MODES,
   AUTO_TARGETS,
   ROUTING_STRATEGIES,
-  modelStatus,
   type AffinityMode,
   type BreakerState,
   type ModelRow,
@@ -57,8 +44,8 @@ import {
   type RoutingStrategy,
 } from './types';
 import { ModelRowCell } from './ModelRowCell';
-import { CostPreview } from './CostPreview';
 import { BatchImportDialog } from './BatchImportDialog';
+import { ModelDetailSheet } from './ModelDetailSheet';
 import { ModelEditorDialog } from './ModelEditorDialog';
 import { RouteEditorDialog } from './RouteEditorDialog';
 // Re-export the constants/types that other routes import from
@@ -779,302 +766,24 @@ export function ModelsPage() {
         loading={bulkDeleting}
       />
 
-      {/* Model detail drawer — right-side Sheet with basics + routes. */}
-      <Sheet
-        open={detailModelId !== null}
-        onOpenChange={(o) => {
-          if (!o) setDetailModelId(null);
-        }}
-      >
-        <SheetContent className="w-full sm:max-w-xl overflow-y-auto">
-          {detailModelId &&
-            (() => {
-              const model = models.find((m) => m.model_id === detailModelId);
-              if (!model) return null;
-              const routes = routesByModel[detailModelId];
-              const rLoading = routesLoading.has(detailModelId);
-              const status = modelStatus(model);
-              return (
-                <>
-                  <SheetHeader>
-                    <SheetTitle className="font-mono text-base break-all">
-                      {model.model_id}
-                    </SheetTitle>
-                    <SheetDescription>
-                      {model.display_name}
-                      {' • '}
-                      <span className="inline-block align-middle">
-                        {status === 'active'
-                          ? t('models.status.active')
-                          : status === 'disabled'
-                            ? t('models.status.disabled')
-                            : t('models.status.unrouted')}
-                      </span>
-                    </SheetDescription>
-                  </SheetHeader>
-                  <div className="px-4 pb-4 space-y-6">
-                    {/* Basics */}
-                    <section className="space-y-2">
-                      <div className="flex items-center justify-between">
-                        <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                          {t('models.detail.basics')}
-                        </Label>
-                        <div className="flex items-center gap-1">
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 text-xs"
-                            onClick={() => openEditModel(model)}
-                          >
-                            <Pencil className="mr-1 h-3 w-3" />
-                            {t('common.edit')}
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 text-xs text-destructive hover:text-destructive"
-                            onClick={() => setDeleteModel(model)}
-                          >
-                            <Trash2 className="mr-1 h-3 w-3" />
-                            {t('common.delete')}
-                          </Button>
-                        </div>
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <div className="text-muted-foreground">
-                            {t('models.col.inputWeight')}
-                          </div>
-                          <div className="font-mono tabular-nums">{model.input_weight}</div>
-                        </div>
-                        <div>
-                          <div className="text-muted-foreground">
-                            {t('models.col.outputWeight')}
-                          </div>
-                          <div className="font-mono tabular-nums">{model.output_weight}</div>
-                        </div>
-                      </div>
-                      <CostPreview
-                        weight={model.input_weight}
-                        basePerToken={pricing?.input_price_per_token}
-                        currency={pricing?.currency}
-                        side="input"
-                      />
-                      <CostPreview
-                        weight={model.output_weight}
-                        basePerToken={pricing?.output_price_per_token}
-                        currency={pricing?.currency}
-                        side="output"
-                      />
-                    </section>
-
-                    {/* Routes */}
-                    <section className="space-y-3">
-                      {/* Strategy picker is meaningless when there's only one
-                          enabled upstream — nothing to balance. The bar
-                          inside the manual card uses the same gate. */}
-                      {(routes ?? []).filter((r) => r.enabled).length > 1 && (
-                        <RoutingModeSection
-                          modelStrategy={
-                            (model.routing_strategy as RoutingStrategy | null) ?? null
-                          }
-                          globalStrategy={globalStrategy}
-                          disabled={!hasPermission('models:write')}
-                          onChange={(next) => updateModelStrategy(model.model_id, next)}
-                          manualBar={(() => {
-                            const enabled = (routes ?? []).filter((r) => r.enabled);
-                            if (enabled.length === 0) return null;
-                            return (
-                              <TrafficBar
-                                segments={enabled.map((r) => ({
-                                  id: r.id,
-                                  label:
-                                    r.label ??
-                                    (r.upstream_model.split('/').pop() ?? r.upstream_model),
-                                  weight: r.weight,
-                                }))}
-                                disabled={!hasPermission('models:write')}
-                                onCommit={(updates) =>
-                                  batchUpdateWeights(model.model_id, updates)
-                                }
-                              />
-                            );
-                          })()}
-                        />
-                      )}
-                      <div className="flex items-center justify-between gap-2">
-                        <Label className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-                          {t('models.routes')} ({routes?.length ?? model.route_count})
-                        </Label>
-                        <div className="flex items-center gap-1">
-                          {/* Bulk enable/disable — most common post-import
-                              action since batch-import creates routes
-                              disabled by default. Shown only when there's
-                              something in the opposite state to flip. */}
-                          {routes && routes.some((r) => !r.enabled) && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-7 text-xs"
-                              onClick={() => setAllRoutesEnabled(model.model_id, true)}
-                            >
-                              {t('models.enableAllRoutes')}
-                            </Button>
-                          )}
-                          {routes && routes.some((r) => r.enabled) && (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              className="h-7 text-xs"
-                              onClick={() => setAllRoutesEnabled(model.model_id, false)}
-                            >
-                              {t('models.disableAllRoutes')}
-                            </Button>
-                          )}
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="h-7 text-xs"
-                            onClick={() => openAddRoute(model)}
-                          >
-                            <Plus className="mr-1 h-3 w-3" />
-                            {t('models.addRoute')}
-                          </Button>
-                        </div>
-                      </div>
-                      {rLoading ? (
-                        <Skeleton className="h-10 w-full" />
-                      ) : !routes || routes.length === 0 ? (
-                        <p className="text-xs italic text-muted-foreground py-2">
-                          {t('models.noRoutes')}
-                        </p>
-                      ) : (
-                        <div className="rounded-md border">
-                          <table className="w-full text-xs">
-                            <thead className="border-b bg-muted/30">
-                              <tr className="text-left text-muted-foreground">
-                                <th className="px-2 py-1.5 font-medium">
-                                  {t('models.col.provider')}
-                                </th>
-                                <th className="px-2 py-1.5 font-medium">
-                                  {t('models.col.upstreamModel')}
-                                </th>
-                                <th className="px-2 py-1.5 font-medium text-center">
-                                  {t('models.col.active')}
-                                </th>
-                                <th
-                                  className="px-2 py-1.5 font-medium text-center"
-                                  title={t('models.col.healthHint')}
-                                >
-                                  {t('models.col.health')}
-                                </th>
-                                <th className="px-2 py-1.5 font-medium text-right">
-                                  {t('models.col.p50')}
-                                </th>
-                                <th className="w-16" />
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y">
-                              {routes.map((r) => {
-                                  return (
-                                    <tr key={r.id}>
-                                      <td className="px-2 py-1.5">
-                                        <div className="flex flex-col gap-0.5">
-                                          <span>{providerLabel(r.provider_id)}</span>
-                                          {r.label && (
-                                            <span className="text-[10px] text-muted-foreground italic">
-                                              {r.label}
-                                            </span>
-                                          )}
-                                        </div>
-                                      </td>
-                                      <td
-                                        className="px-2 py-1.5 font-mono text-[11px] max-w-[180px] truncate"
-                                        title={r.upstream_model}
-                                      >
-                                        {r.upstream_model}
-                                      </td>
-                                      <td className="px-2 py-1.5 text-center">
-                                        {r.enabled ? (
-                                          <Badge variant="default" className="text-[10px]">
-                                            {t('common.yes')}
-                                          </Badge>
-                                        ) : (
-                                          <Badge variant="outline" className="text-[10px]">
-                                            {t('common.no')}
-                                          </Badge>
-                                        )}
-                                      </td>
-                                      <td className="px-2 py-1.5 text-center">
-                                        {(() => {
-                                          const h = routeHealth[r.id]?.health;
-                                          const state = h?.state ?? 'closed';
-                                          const variant =
-                                            state === 'closed'
-                                              ? 'outline'
-                                              : state === 'half_open'
-                                                ? 'secondary'
-                                                : 'destructive';
-                                          return (
-                                            <Badge variant={variant} className="text-[10px]">
-                                              {t(`models.health.${state}`)}
-                                            </Badge>
-                                          );
-                                        })()}
-                                      </td>
-                                      <td className="px-2 py-1.5 text-right font-mono text-[11px] tabular-nums">
-                                        <div className="flex items-center justify-end gap-1.5">
-                                          <LatencySparkline
-                                            modelId={r.model_id}
-                                            routeId={r.id}
-                                          />
-                                          {(() => {
-                                            const ewma =
-                                              routeHealth[r.id]?.health?.ewma_latency_ms;
-                                            return ewma == null ? (
-                                              <span className="text-muted-foreground">—</span>
-                                            ) : (
-                                              <span>{ewma.toFixed(0)} ms</span>
-                                            );
-                                          })()}
-                                        </div>
-                                      </td>
-                                      <td className="px-2 py-1.5 text-right whitespace-nowrap">
-                                        <Button
-                                          variant="ghost"
-                                          size="icon"
-                                          className="h-7 w-7"
-                                          onClick={() => openEditRoute(r)}
-                                          aria-label={t('common.edit')}
-                                          title={t('common.edit')}
-                                        >
-                                          <Pencil className="h-3.5 w-3.5" />
-                                        </Button>
-                                        <Button
-                                          variant="ghost"
-                                          size="icon"
-                                          className="h-7 w-7"
-                                          onClick={() => setDeleteRoute(r)}
-                                          aria-label={t('common.delete')}
-                                          title={t('common.delete')}
-                                        >
-                                          <Trash2 className="h-3.5 w-3.5 text-destructive" />
-                                        </Button>
-                                      </td>
-                                    </tr>
-                                  );
-                                })}
-                            </tbody>
-                          </table>
-                        </div>
-                      )}
-                    </section>
-                  </div>
-                </>
-              );
-            })()}
-        </SheetContent>
-      </Sheet>
+      <ModelDetailSheet
+        model={detailModelId ? models.find((m) => m.model_id === detailModelId) ?? null : null}
+        routes={detailModelId ? routesByModel[detailModelId] : undefined}
+        routesLoading={detailModelId ? routesLoading.has(detailModelId) : false}
+        routeHealth={routeHealth}
+        globalStrategy={globalStrategy}
+        pricing={pricing}
+        providerLabel={providerLabel}
+        onClose={() => setDetailModelId(null)}
+        onEditModel={openEditModel}
+        onDeleteModel={setDeleteModel}
+        onAddRoute={openAddRoute}
+        onEditRoute={openEditRoute}
+        onDeleteRoute={setDeleteRoute}
+        onSetAllRoutesEnabled={setAllRoutesEnabled}
+        onUpdateModelStrategy={updateModelStrategy}
+        onBatchUpdateWeights={batchUpdateWeights}
+      />
     </div>
   );
 }
