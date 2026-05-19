@@ -93,22 +93,22 @@ pub fn err_response(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Body-capture truncation + offload + PII redaction hook for
-/// `mcp_logs.tool_arguments` / `tool_result`. Mirrors the gateway-side
-/// `process_body` so both audit pipelines share char-boundary-safe
-/// truncation + the same blob-offload contract; we don't share the
-/// helper across crates because the gateway's PiiRedactor isn't in
-/// `common` and pulling it down would invert the dep graph.
+/// Body-capture truncation + offload hook for `mcp_logs.tool_arguments`
+/// / `tool_result`. Mirrors the gateway-side `process_body` for the
+/// truncation + blob-offload contract; we don't share the helper
+/// across crates because the gateway's PiiRedactor isn't in `common`
+/// and pulling it down would invert the dep graph.
 ///
-/// `redact_pii` is currently a no-op for mcp (no PII engine yet).
-/// When enabled the body is left raw and an operator sees the toggle's
-/// intent reflected via the `audit.body_redact_pii` setting but the
-/// redaction itself is a follow-up.
+/// MCP body capture does NOT honor `audit.body_redact_pii` — the
+/// gateway has a real PiiRedactor wired in, mcp-gateway doesn't (yet).
+/// The dead `_redact_pii` parameter was removed; if an operator turns
+/// PII redaction on without realising MCP is exempt, the call site
+/// emits `audit_body_redact_unsupported_total{subsystem=mcp}` so the
+/// gap is observable instead of silently broken.
 #[allow(clippy::too_many_arguments)]
 async fn apply_mcp_body_capture(
     mut s: String,
     max_bytes: usize,
-    _redact_pii: bool,
     blob_store: &std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>,
     trace_id: &str,
     field: &'static str,
@@ -153,6 +153,14 @@ async fn apply_mcp_body_capture(
         }
     }
     *truncated_flag = true;
+    // Same operator-facing truncation signal as the gateway side.
+    // Pair with `audit_body_offload_failed_total` in dashboards to
+    // distinguish "S3 down" from "no S3 configured".
+    metrics::counter!(
+        "audit_body_truncated_total",
+        "field" => field.to_string(),
+    )
+    .increment(1);
     let budget = max_bytes.saturating_sub(3);
     let mut end = budget.min(s.len());
     while end > 0 && !s.is_char_boundary(end) {
@@ -1102,80 +1110,100 @@ impl McpProxy {
         // by `audit.capture_tool_arguments` / `audit.capture_tool_results`
         // with the same `audit.body_max_bytes` truncation contract
         // the gateway side uses; defaults ON (the bastion positioning
-        // requires it). PII redaction follows `audit.body_redact_pii`
-        // — applied at write time, not in-flight.
+        // requires it). `audit.body_redact_pii` is NOT honored here
+        // (mcp-gateway has no PiiRedactor yet); the warn metric below
+        // makes that gap observable instead of silently broken.
         let dc = &self.dynamic_config;
         let capture_args = dc.audit_capture_tool_arguments().await;
         let capture_result = dc.audit_capture_tool_results().await;
         let body_max = dc.audit_body_max_bytes().await as usize;
-        let redact = dc.audit_body_redact_pii().await;
-        let (arg_str, result_str, capture_status) = if !capture_args && !capture_result {
-            (None, None, Some("disabled".to_owned()))
-        } else {
-            let mut truncated = false;
-            let mut offloaded = false;
-            let arg_str = if capture_args {
-                match logged_arguments.as_ref() {
-                    Some(v) => {
-                        let raw = serde_json::to_string(v)
-                            .unwrap_or_else(|_| "[serialize_error]".to_owned());
-                        Some(
-                            apply_mcp_body_capture(
-                                raw,
-                                body_max,
-                                redact,
-                                &self.blob_store,
-                                &call_trace_id,
-                                "arguments",
-                                &mut truncated,
-                                &mut offloaded,
+        if dc.audit_body_redact_pii().await && (capture_args || capture_result) {
+            // One-counter signal — operators who flip the toggle ON
+            // without realising MCP doesn't honor it will see this
+            // climb in their metrics, can choose to either disable
+            // capture or accept the gap.
+            metrics::counter!(
+                "audit_body_redact_unsupported_total",
+                "subsystem" => "mcp",
+            )
+            .increment(1);
+        }
+        let (arg_str, arg_bytes, result_str, result_bytes, capture_status) =
+            if !capture_args && !capture_result {
+                (None, None, None, None, Some("disabled".to_owned()))
+            } else {
+                let mut truncated = false;
+                let mut offloaded = false;
+                let mut arg_bytes: Option<u32> = None;
+                let mut result_bytes: Option<u32> = None;
+                let arg_str = if capture_args {
+                    match logged_arguments.as_ref() {
+                        Some(v) => {
+                            let raw = serde_json::to_string(v)
+                                .unwrap_or_else(|_| "[serialize_error]".to_owned());
+                            arg_bytes = Some(raw.len() as u32);
+                            Some(
+                                apply_mcp_body_capture(
+                                    raw,
+                                    body_max,
+                                    &self.blob_store,
+                                    &call_trace_id,
+                                    "arguments",
+                                    &mut truncated,
+                                    &mut offloaded,
+                                )
+                                .await,
                             )
-                            .await,
-                        )
+                        }
+                        None => None,
                     }
-                    None => None,
-                }
-            } else {
-                None
-            };
-            let result_str = if capture_result {
-                match response.result.as_ref() {
-                    Some(v) => {
-                        let raw = serde_json::to_string(v)
-                            .unwrap_or_else(|_| "[serialize_error]".to_owned());
-                        Some(
-                            apply_mcp_body_capture(
-                                raw,
-                                body_max,
-                                redact,
-                                &self.blob_store,
-                                &call_trace_id,
-                                "result",
-                                &mut truncated,
-                                &mut offloaded,
+                } else {
+                    None
+                };
+                let result_str = if capture_result {
+                    match response.result.as_ref() {
+                        Some(v) => {
+                            let raw = serde_json::to_string(v)
+                                .unwrap_or_else(|_| "[serialize_error]".to_owned());
+                            result_bytes = Some(raw.len() as u32);
+                            Some(
+                                apply_mcp_body_capture(
+                                    raw,
+                                    body_max,
+                                    &self.blob_store,
+                                    &call_trace_id,
+                                    "result",
+                                    &mut truncated,
+                                    &mut offloaded,
+                                )
+                                .await,
                             )
-                            .await,
-                        )
+                        }
+                        None => None,
                     }
-                    None => None,
-                }
-            } else {
-                None
+                } else {
+                    None
+                };
+                let status = if arg_str.is_none() && result_str.is_none() {
+                    "disabled"
+                } else if offloaded {
+                    // Same dominant-status rule as the AI gateway: a single
+                    // emit carrying one offloaded field reports "offloaded"
+                    // even if another field was small enough to truncate.
+                    "offloaded"
+                } else if truncated {
+                    "truncated"
+                } else {
+                    "captured"
+                };
+                (
+                    arg_str,
+                    arg_bytes,
+                    result_str,
+                    result_bytes,
+                    Some(status.to_owned()),
+                )
             };
-            let status = if arg_str.is_none() && result_str.is_none() {
-                "disabled"
-            } else if offloaded {
-                // Same dominant-status rule as the AI gateway: a single
-                // emit carrying one offloaded field reports "offloaded"
-                // even if another field was small enough to truncate.
-                "offloaded"
-            } else if truncated {
-                "truncated"
-            } else {
-                "captured"
-            };
-            (arg_str, result_str, Some(status.to_owned()))
-        };
 
         let mut entry =
             actor
@@ -1195,6 +1223,17 @@ impl McpProxy {
         }
         if let Some(r) = result_str {
             entry = entry.response_body(r);
+        }
+        // Stamp ORIGINAL byte counts (pre-offload) so the audit row's
+        // `arguments_bytes` / `result_bytes` columns reflect the
+        // user's actual payload size. Without these, an offloaded
+        // tool result would report ~80 bytes (the s3:// URL length)
+        // and break "average tool result size" analytics.
+        if let Some(b) = arg_bytes {
+            entry = entry.request_body_bytes(b);
+        }
+        if let Some(b) = result_bytes {
+            entry = entry.response_body_bytes(b);
         }
         if let Some(s) = capture_status {
             entry = entry.body_capture_status(s);

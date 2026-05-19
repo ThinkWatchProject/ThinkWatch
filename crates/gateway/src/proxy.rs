@@ -330,10 +330,20 @@ const BODY_OFFLOADED: &str = "offloaded";
 /// strings are already truncated / redacted / serialized by
 /// `prepare_body_capture` so the per-call-site cost is just two
 /// `Option<String>` clones.
+///
+/// `request_bytes` / `response_bytes` carry the ORIGINAL body size,
+/// not the cell size — when a body offloads to S3 the cell holds a
+/// short `s3://...` URL while the byte count needs to reflect the
+/// user's actual payload (auditors aggregating "total prompt bytes
+/// captured this month" would otherwise see ~80 bytes per offloaded
+/// row and a wildly wrong number). The flush mapper reads these in
+/// preference to `cell.len()` exactly to break that asymmetry.
 #[derive(Default, Clone)]
 struct BodyCapture {
     request: Option<String>,
     response: Option<String>,
+    request_bytes: Option<u32>,
+    response_bytes: Option<u32>,
     status: Option<&'static str>,
 }
 
@@ -342,6 +352,8 @@ impl BodyCapture {
         Self {
             request: None,
             response: None,
+            request_bytes: None,
+            response_bytes: None,
             status: Some(BODY_DISABLED),
         }
     }
@@ -357,6 +369,12 @@ impl BodyCapture {
         }
         if let Some(r) = self.response {
             entry = entry.response_body(r);
+        }
+        if let Some(b) = self.request_bytes {
+            entry = entry.request_body_bytes(b);
+        }
+        if let Some(b) = self.response_bytes {
+            entry = entry.response_body_bytes(b);
         }
         if let Some(s) = self.status {
             entry = entry.body_capture_status(s);
@@ -400,9 +418,12 @@ async fn prepare_body_capture(
 
     let mut truncated_flag = false;
     let mut offloaded_flag = false;
+    let mut request_bytes: Option<u32> = None;
+    let mut response_bytes: Option<u32> = None;
     let request = if capture_req {
         let raw =
             serde_json::to_string(messages).unwrap_or_else(|_| "[serialize_error]".to_owned());
+        request_bytes = Some(raw.len() as u32);
         Some(
             process_body(
                 raw,
@@ -425,6 +446,7 @@ async fn prepare_body_capture(
         (true, Some(resp)) => {
             let raw =
                 serde_json::to_string(resp).unwrap_or_else(|_| "[serialize_error]".to_owned());
+            response_bytes = Some(raw.len() as u32);
             Some(
                 process_body(
                     raw,
@@ -460,6 +482,8 @@ async fn prepare_body_capture(
     BodyCapture {
         request,
         response: response_body,
+        request_bytes,
+        response_bytes,
         status: Some(status),
     }
 }
@@ -531,6 +555,19 @@ async fn process_body(
         }
     }
     *truncated_flag = true;
+    // Operator-visible signal: any truncation is data loss, and a spike
+    // typically means S3 is unreachable (offload silently fell back to
+    // this path). Distinct counter from `audit_body_offload_failed_total`
+    // because deployments without S3 configured fall through here on
+    // every oversize body BY DESIGN — alerting on those would be noise.
+    // Pair with `audit_body_offload_failed_total` in dashboards to
+    // distinguish "S3 outage" (failed + truncated both rise) from
+    // "no S3 configured, normal" (only truncated rises).
+    metrics::counter!(
+        "audit_body_truncated_total",
+        "field" => field.to_string(),
+    )
+    .increment(1);
     // Leave room for the ellipsis sentinel and walk back to the
     // nearest UTF-8 char boundary — provider names / model tokens /
     // user prompts routinely include non-ASCII (CJK, emoji), and a
@@ -1571,16 +1608,26 @@ pub async fn proxy_chat_completion(
             .as_ref()
             .map(|u| (u.prompt_tokens, u.completion_tokens))
             .unwrap_or((0, 0));
-        let cached_request_body = if state.dynamic_config.audit_capture_request_bodies().await {
-            serde_json::to_string(&messages_for_audit).ok()
-        } else {
-            None
-        };
-        let cached_response_body = if state.dynamic_config.audit_capture_response_bodies().await {
-            serde_json::to_string(&cached).ok()
-        } else {
-            None
-        };
+        // Cache-hit body capture goes through the SAME pipeline as
+        // fresh requests — PII redaction toggle, byte-cap truncation,
+        // and S3 offload all apply. The prior shortcut here called
+        // `serde_json::to_string` directly which broke three contracts:
+        // (1) `audit.body_redact_pii=true` was silently ignored for
+        // cache hits, (2) a multi-MB cached response landed inline in
+        // CH without truncation, (3) oversize cached responses never
+        // offloaded to S3 even when configured. Override the status
+        // back to `from_cache` afterwards so auditors can still tell
+        // these rows apart from fresh captures.
+        let mut cache_body_capture = prepare_body_capture(
+            &state.dynamic_config,
+            &pii_redactor,
+            &state.blob_store,
+            &metadata.request_id,
+            &messages_for_audit,
+            Some(&cached),
+        )
+        .await;
+        cache_body_capture.status = Some(BODY_FROM_CACHE);
         emit_gateway_log(
             &state.audit,
             &metadata.request_id,
@@ -1598,11 +1645,7 @@ pub async fn proxy_chat_completion(
             Decimal::ZERO,
             request_started_at.elapsed().as_millis() as i64,
             200,
-            BodyCapture {
-                request: cached_request_body,
-                response: cached_response_body,
-                status: Some(BODY_FROM_CACHE),
-            },
+            cache_body_capture,
         );
 
         if is_stream {

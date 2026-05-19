@@ -124,11 +124,22 @@ pub struct AuditEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_body: Option<String>,
     /// One of: "captured" / "truncated" / "disabled" / "from_cache"
-    /// / "error". Lets auditors distinguish "we never captured this"
-    /// from "the body was bigger than the max and we cut it" from
+    /// / "offloaded" / "error". Lets auditors distinguish "we never
+    /// captured this" from "the body was bigger than the max and we
+    /// cut it" from "the body is sitting in object storage" from
     /// "this hit the response cache so no upstream payload existed".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub body_capture_status: Option<String>,
+    /// Original captured body size in bytes. Set explicitly by the
+    /// caller so it can reflect the user's ACTUAL payload size even
+    /// when the body cell was substituted for an `s3://...` URL on
+    /// offload. `None` means "flush mapper should fall back to
+    /// `request_body.len()`" — the right behavior for inline cells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_body_bytes: Option<u32>,
+    /// Same as `request_body_bytes` but for the response cell.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_body_bytes: Option<u32>,
     pub created_at: String,
 }
 
@@ -344,6 +355,8 @@ impl AuditEntry {
             request_body: None,
             response_body: None,
             body_capture_status: None,
+            request_body_bytes: None,
+            response_body_bytes: None,
             created_at: Utc::now().to_rfc3339(),
         }
     }
@@ -451,6 +464,23 @@ impl AuditEntry {
     /// body_capture_status` for the canonical value list.
     pub fn body_capture_status(mut self, status: impl Into<String>) -> Self {
         self.body_capture_status = Some(status.into());
+        self
+    }
+
+    /// Override the bytes reported for the request body. Use when the
+    /// stored cell isn't the same size as the original payload — e.g.
+    /// the body was offloaded to S3 and the cell holds a short URL but
+    /// the audit row should still report the user's actual payload
+    /// size. Without this the flush mapper falls back to
+    /// `request_body.len()`, which is the right answer for inline.
+    pub fn request_body_bytes(mut self, bytes: u32) -> Self {
+        self.request_body_bytes = Some(bytes);
+        self
+    }
+
+    /// Same as `request_body_bytes` for the response cell.
+    pub fn response_body_bytes(mut self, bytes: u32) -> Self {
+        self.response_body_bytes = Some(bytes);
         self
     }
 
@@ -2305,8 +2335,16 @@ async fn flush_gateway(
             detail: detail_str(&mut entry.detail),
             trace_id: entry.trace_id,
             session_id: entry.session_id,
-            request_body_bytes: entry.request_body.as_ref().map(|s| s.len() as u32),
-            response_body_bytes: entry.response_body.as_ref().map(|s| s.len() as u32),
+            // Prefer explicit byte counts set by the caller — for
+            // offloaded bodies the cell is a short URL but the audit
+            // row needs to record the user's ACTUAL payload size.
+            // Fall back to cell length for inline bodies.
+            request_body_bytes: entry
+                .request_body_bytes
+                .or_else(|| entry.request_body.as_ref().map(|s| s.len() as u32)),
+            response_body_bytes: entry
+                .response_body_bytes
+                .or_else(|| entry.response_body.as_ref().map(|s| s.len() as u32)),
             request_body: entry.request_body,
             response_body: entry.response_body,
             body_capture_status: entry.body_capture_status,
@@ -2337,8 +2375,14 @@ async fn flush_mcp(
             error_message: detail_field(&entry.detail, "error_message"),
             ip_address: entry.ip_address,
             detail: detail_str(&mut entry.detail),
-            arguments_bytes: entry.request_body.as_ref().map(|s| s.len() as u32),
-            result_bytes: entry.response_body.as_ref().map(|s| s.len() as u32),
+            // Same explicit-bytes fallback as flush_gateway — the URL
+            // length isn't the right value for offloaded tool results.
+            arguments_bytes: entry
+                .request_body_bytes
+                .or_else(|| entry.request_body.as_ref().map(|s| s.len() as u32)),
+            result_bytes: entry
+                .response_body_bytes
+                .or_else(|| entry.response_body.as_ref().map(|s| s.len() as u32)),
             tool_arguments: entry.request_body,
             tool_result: entry.response_body,
             body_capture_status: entry.body_capture_status,
