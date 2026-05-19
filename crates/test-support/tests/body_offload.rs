@@ -222,6 +222,223 @@ async fn oversize_body_offloads_to_blob_store_and_dereferences_via_endpoint() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// #11 — streaming on_done body capture must offload oversize assembled responses
+// ---------------------------------------------------------------------------
+
+/// Same plumbing as `seed_runtime` but stands up a STREAMING upstream
+/// mock so the test exercises the on_done assembly path.
+async fn seed_streaming_runtime(app: &TestApp) -> (String, uuid::Uuid) {
+    let user = fixtures::create_random_user(&app.db).await.unwrap();
+    let mock = MockProvider::openai_chat_stream_ok("gpt-stream-test").await;
+    let uri = mock.uri();
+    Box::leak(Box::new(mock));
+
+    let provider = fixtures::create_provider(
+        &app.db,
+        &unique_name("offload-stream-prov"),
+        "openai",
+        &uri,
+        None,
+    )
+    .await
+    .unwrap();
+    fixtures::create_model_and_route(&app.db, provider.id, "gpt-stream-test")
+        .await
+        .unwrap();
+    app.rebuild_gateway_router().await;
+
+    let key = fixtures::create_api_key(
+        &app.db,
+        user.user.id,
+        &unique_name("off-stream-key"),
+        &["ai_gateway"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    (key.plaintext, user.user.id)
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn streaming_on_done_offloads_oversize_assembled_response() {
+    // The streaming on_done path was added in 1ee9c0d; this test
+    // verifies the offload wire-up from 0fe7fb5 actually fires for
+    // assembled stream responses (the original `body_capture.rs`
+    // suite only covered non-stream). Without this test, a regression
+    // that broke the stream path's `prepare_body_capture` call would
+    // silently truncate streamed responses instead of offloading them.
+    let store = Arc::new(InMemoryBlobStore::default());
+    let store_dyn: Arc<dyn BlobStore> = store.clone();
+    let app = TestApp::try_spawn_with(SpawnOptions {
+        clickhouse: true,
+        blob_store: Some(store_dyn),
+        ..Default::default()
+    })
+    .await
+    .expect("spawn with custom blob_store");
+
+    // Tiny cap so even a small assembled response exceeds it. The
+    // streaming mock returns a few SSE chunks that assemble into a
+    // ChatCompletionResponse of a few hundred bytes — comfortably
+    // > 64.
+    fixtures::set_setting(&app.db, "audit.body_max_bytes", Value::from(64_i64))
+        .await
+        .unwrap();
+    let (api_key, user_id) = seed_streaming_runtime(&app).await;
+    let big_prompt = format!("{} {}", PROBE_PROMPT, "y".repeat(400));
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    gw.post(
+        "/v1/chat/completions",
+        json!({
+            "model": "gpt-stream-test",
+            "stream": true,
+            "messages": [{"role": "user", "content": big_prompt}],
+        }),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    let ch = app.state.clickhouse.as_ref().expect("clickhouse wired");
+    let row = poll_offload_row(ch, user_id).await;
+    assert_eq!(
+        row.body_capture_status.as_deref(),
+        Some("offloaded"),
+        "streaming on_done should offload both request + assembled response"
+    );
+    let req_url = row.request_body.expect("request_body cell populated");
+    assert!(
+        req_url.starts_with("s3://"),
+        "stream request should be offloaded, got: {req_url}"
+    );
+
+    // The store must have both a -request.json AND a -response.json key
+    // — proves the assembled response went through the offload path
+    // (not just the request).
+    let stored_keys: Vec<String> = store.contents.lock().await.keys().cloned().collect();
+    assert!(
+        stored_keys.iter().any(|k| k.ends_with("-request.json")),
+        "missing request upload, keys: {stored_keys:?}"
+    );
+    assert!(
+        stored_keys.iter().any(|k| k.ends_with("-response.json")),
+        "missing assembled-response upload — the stream on_done path didn't \
+         offload the response. keys: {stored_keys:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// #10 — cache-hit body capture must honor truncate / offload (post-56b00be)
+// ---------------------------------------------------------------------------
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn cache_hit_body_capture_offloads_oversize_cached_response() {
+    // Regression test for the bug fixed in 56b00be: cache-hit emit
+    // used to inline `serde_json::to_string` directly, bypassing
+    // PII redaction, truncation, AND offload. A multi-MB cached
+    // response would land inline in CH despite `audit.body_max_bytes`
+    // and a configured S3 backend.
+    //
+    // The fix routes cache-hit emit through `prepare_body_capture`
+    // and overrides the status back to `from_cache`. This test
+    // verifies the override path: oversize cached body should
+    // OFFLOAD (s3:// URL in the cell), status should still be
+    // `from_cache` so auditors distinguish it from fresh captures.
+    let store = Arc::new(InMemoryBlobStore::default());
+    let store_dyn: Arc<dyn BlobStore> = store.clone();
+    let app = TestApp::try_spawn_with(SpawnOptions {
+        clickhouse: true,
+        blob_store: Some(store_dyn),
+        ..Default::default()
+    })
+    .await
+    .expect("spawn with custom blob_store");
+    fixtures::set_setting(&app.db, "audit.body_max_bytes", Value::from(100_i64))
+        .await
+        .unwrap();
+
+    let (api_key, user_id) = seed_runtime(&app).await;
+    let big_prompt = format!("{} {}", PROBE_PROMPT, "z".repeat(400));
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+
+    // First call — cache miss, populates the slot. This emit
+    // offloads as a `captured` (status="offloaded") row.
+    gw.post(
+        "/v1/chat/completions",
+        json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": big_prompt.clone()}],
+        }),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    let ch = app.state.clickhouse.as_ref().unwrap();
+    // Wait for the first row to settle so the second call sees a
+    // populated cache slot.
+    let _ = poll_offload_row(ch, user_id).await;
+
+    // Second IDENTICAL call — cache hit. Status MUST be "from_cache"
+    // AND the body cell MUST be an s3:// URL (the bug being tested
+    // would have stored the raw cached response inline, blowing past
+    // the 100-byte cap).
+    gw.post(
+        "/v1/chat/completions",
+        json!({
+            "model": "gpt-test",
+            "messages": [{"role": "user", "content": big_prompt.clone()}],
+        }),
+    )
+    .await
+    .unwrap()
+    .assert_ok();
+
+    // Poll for the from_cache row specifically — the first row is
+    // status=offloaded so we have to scope the query.
+    for _ in 0..200 {
+        let row: Option<OffloadRow> = ch
+            .query(
+                "SELECT request_body, response_body, body_capture_status \
+                   FROM gateway_logs \
+                  WHERE user_id = ? AND body_capture_status = 'from_cache' \
+                  ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(user_id.to_string())
+            .fetch_optional()
+            .await
+            .expect("CH select");
+        if let Some(r) = row {
+            let resp = r.response_body.expect("response body cell on cache hit");
+            assert!(
+                resp.starts_with("s3://"),
+                "cache-hit response should offload to S3 when oversize — the 56b00be bug \
+                 would have inlined it. Got: {resp}"
+            );
+            // Either the body itself was small enough to inline OR
+            // it offloaded — but never truncated. A "..." sentinel
+            // here would mean the cache-hit path went through the
+            // truncation fallback, which means S3 isn't reachable
+            // OR (the bug) the cache-hit path bypassed the
+            // offload-aware pipeline.
+            assert!(
+                !resp.contains("..."),
+                "cache-hit response must not truncate when offload is available — got: {resp}"
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("from_cache offloaded row never landed for user {user_id}");
+}
+
 async fn poll_offload_row(ch: &clickhouse::Client, user_id: uuid::Uuid) -> OffloadRow {
     for _ in 0..200 {
         let row: Option<OffloadRow> = ch
