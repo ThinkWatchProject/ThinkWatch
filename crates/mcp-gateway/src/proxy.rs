@@ -574,7 +574,9 @@ impl McpProxy {
                 .send_request(&conn, &req, Some(auth_header.as_pair()), None, None, None)
                 .await
             {
-                Ok((r, _)) => r,
+                // Tools/list isn't a streaming surface — discard the
+                // optional audit body unconditionally.
+                Ok((r, _, _)) => r,
                 Err(e) => {
                     tracing::warn!(
                         server = %server.name,
@@ -1004,7 +1006,7 @@ impl McpProxy {
         };
         let auth_ref = auth_header.as_ref().map(AuthInjection::as_pair);
 
-        let response = match self
+        let (response, stream_audit_body) = match self
             .pool
             .send_request(
                 &conn,
@@ -1016,7 +1018,7 @@ impl McpProxy {
             )
             .await
         {
-            Ok((resp, new_upstream_sid)) => {
+            Ok((resp, new_upstream_sid, stream_body)) => {
                 // Persist any upstream session ID the server returned so
                 // subsequent calls from this user reuse the same session.
                 if let Some(sid) = new_upstream_sid {
@@ -1063,7 +1065,7 @@ impl McpProxy {
                     // the half-open probe / reset the failure counter.
                     self.circuit_breakers.record_success(&server_name).await;
                 }
-                resp
+                (resp, stream_body)
             }
             Err(e) => {
                 self.circuit_breakers.record_failure(&server_name).await;
@@ -1072,10 +1074,15 @@ impl McpProxy {
                     error = %e,
                     "upstream tools/call failed"
                 );
-                err_response(
-                    request.id.clone(),
-                    INTERNAL_ERROR,
-                    format!("Upstream server error: {e}"),
+                (
+                    err_response(
+                        request.id.clone(),
+                        INTERNAL_ERROR,
+                        format!("Upstream server error: {e}"),
+                    ),
+                    // Transport error path — no stream events were
+                    // successfully received, so no audit body to embed.
+                    None,
                 )
             }
         };
@@ -1176,10 +1183,27 @@ impl McpProxy {
                     None
                 };
                 let result_str = if capture_result {
-                    match response.result.as_ref() {
-                        Some(v) => {
-                            let raw = serde_json::to_string(v)
-                                .unwrap_or_else(|_| "[serialize_error]".to_owned());
+                    // Prefer the FULL streaming-event sequence (when the
+                    // upstream used text/event-stream and emitted
+                    // progress notifications + a final response) over
+                    // just the final `result` field. Auditors replaying
+                    // a long-running tool execution need the whole
+                    // timeline, not just the punchline. For plain
+                    // application/json responses `stream_audit_body` is
+                    // None and we fall back to serializing `result`
+                    // exactly as before — no behavior change for the
+                    // common case.
+                    let raw_opt: Option<String> =
+                        match (stream_audit_body.as_ref(), response.result.as_ref()) {
+                            (Some(stream), _) => Some(stream.clone()),
+                            (None, Some(v)) => Some(
+                                serde_json::to_string(v)
+                                    .unwrap_or_else(|_| "[serialize_error]".to_owned()),
+                            ),
+                            (None, None) => None,
+                        };
+                    match raw_opt {
+                        Some(raw) => {
                             result_bytes = Some(raw.len() as u32);
                             Some(
                                 apply_mcp_body_capture(

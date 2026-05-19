@@ -134,6 +134,20 @@ impl ConnectionPool {
     /// this specific caller — typically `("Authorization", "Bearer …")`
     /// from `UserTokenResolver`. `None` means the upstream is anonymous
     /// (no Authorization header at all).
+    ///
+    /// ## Streaming responses
+    ///
+    /// MCP's Streamable HTTP transport lets an upstream tool emit
+    /// `notifications/progress` events DURING tool execution and a
+    /// final response event AT the end — all over the same SSE body.
+    /// The third tuple element captures the complete raw event
+    /// sequence (one envelope per `\n` delimiter) when the upstream
+    /// used `text/event-stream`; the audit pipeline embeds it in
+    /// `mcp_logs.tool_result` so an investigator can replay the whole
+    /// tool execution timeline, not just the final result. `None`
+    /// for plain `application/json` responses where the response
+    /// envelope IS the entire payload and the proxy can serialize
+    /// `response.result` directly.
     #[allow(clippy::too_many_arguments)]
     pub async fn send_request(
         &self,
@@ -143,7 +157,7 @@ impl ConnectionPool {
         caller: Option<&CallerIdentity>,
         upstream_session_id: Option<&str>,
         trace_id: Option<&str>,
-    ) -> Result<(JsonRpcResponse, Option<String>), PoolError> {
+    ) -> Result<(JsonRpcResponse, Option<String>, Option<String>), PoolError> {
         let mut builder = conn
             .client
             .post(&conn.endpoint_url)
@@ -210,24 +224,34 @@ impl ConnectionPool {
             .unwrap_or("")
             .to_lowercase();
 
-        let json_resp: JsonRpcResponse = if content_type.contains("text/event-stream") {
-            let text = resp
-                .text()
-                .await
-                .map_err(|e| PoolError::ParseError(e.to_string()))?;
-            parse_sse_json_rpc(&text)?
-        } else {
-            resp.json()
-                .await
-                .map_err(|e| PoolError::ParseError(e.to_string()))?
-        };
+        let (json_resp, stream_audit_body): (JsonRpcResponse, Option<String>) =
+            if content_type.contains("text/event-stream") {
+                let text = resp
+                    .text()
+                    .await
+                    .map_err(|e| PoolError::ParseError(e.to_string()))?;
+                // Pick the response envelope by matching id against the
+                // request id — without this, a tool that emits
+                // `notifications/progress` before the final response
+                // had its first progress notification returned AS the
+                // response (notifications have id=None which deserializes
+                // into JsonRpcResponse just fine, masking the real reply).
+                let (matched, full_audit) = parse_sse_json_rpc(&text, request.id.as_ref())?;
+                (matched, Some(full_audit))
+            } else {
+                let envelope: JsonRpcResponse = resp
+                    .json()
+                    .await
+                    .map_err(|e| PoolError::ParseError(e.to_string()))?;
+                (envelope, None)
+            };
 
         // Validate JSON-RPC version
         if json_resp.jsonrpc != "2.0" {
             return Err(PoolError::ParseError("Invalid JSON-RPC version".into()));
         }
 
-        Ok((json_resp, new_session_id))
+        Ok((json_resp, new_session_id, stream_audit_body))
     }
 }
 
@@ -237,19 +261,54 @@ impl Default for ConnectionPool {
     }
 }
 
-/// Extract the first JSON-RPC response from an SSE body.
+/// Parse a complete SSE body, returning:
+///
+///   * the JSON-RPC ENVELOPE that matches the request id (the
+///     actual response — distinct from any `notifications/progress`
+///     events the upstream may have emitted during tool execution);
+///   * the full event sequence concatenated as a JSON array string,
+///     suitable for embedding into `mcp_logs.tool_result` so the
+///     audit trail captures the entire tool-execution timeline, not
+///     just the final result.
 ///
 /// SSE format is:
 /// ```text
 /// event: message
-/// data: {"jsonrpc":"2.0", ...}
+/// data: {"jsonrpc":"2.0", "method":"notifications/progress", "params":{...}}
+///
+/// event: message
+/// data: {"jsonrpc":"2.0", "id":1, "result":{...}}
 /// ```
 ///
-/// We scan for `data:` lines and try to parse each as JSON-RPC until one
-/// succeeds.  Multi-line `data:` fields are concatenated per the SSE spec.
-fn parse_sse_json_rpc(text: &str) -> Result<JsonRpcResponse, PoolError> {
+/// Multi-line `data:` fields are concatenated per the SSE spec. We
+/// match the response by id rather than "first envelope" because a
+/// notification envelope shape (`{jsonrpc, method, params}`) ALSO
+/// deserializes into `JsonRpcResponse` (id=None, result=None) — so
+/// the previous "first-success" picker silently returned the first
+/// notification AS the response when streaming was in play.
+///
+/// Falls back to "last envelope with a result or error" when no id
+/// match is found, to handle older MCP servers that return
+/// `id: null` on the final response.
+fn parse_sse_json_rpc(
+    text: &str,
+    request_id: Option<&serde_json::Value>,
+) -> Result<(JsonRpcResponse, String), PoolError> {
+    let mut events: Vec<serde_json::Value> = Vec::new();
     let mut data_buf = String::new();
-
+    let flush = |buf: &mut String, events: &mut Vec<serde_json::Value>| {
+        if buf.is_empty() {
+            return;
+        }
+        // Best-effort parse — non-JSON events (rare) are recorded
+        // verbatim as a string for audit so the full transcript is
+        // preserved even on malformed envelopes.
+        match serde_json::from_str::<serde_json::Value>(buf) {
+            Ok(v) => events.push(v),
+            Err(_) => events.push(serde_json::Value::String(buf.clone())),
+        }
+        buf.clear();
+    };
     for line in text.lines() {
         if let Some(payload) = line.strip_prefix("data:") {
             let payload = payload.trim_start();
@@ -257,23 +316,181 @@ fn parse_sse_json_rpc(text: &str) -> Result<JsonRpcResponse, PoolError> {
                 data_buf.push('\n');
             }
             data_buf.push_str(payload);
-        } else if line.is_empty() && !data_buf.is_empty() {
-            // End of an SSE event — try to parse what we have.
-            if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&data_buf) {
-                return Ok(resp);
-            }
-            data_buf.clear();
+        } else if line.is_empty() {
+            flush(&mut data_buf, &mut events);
         }
+        // event:/id:/retry: lines per the SSE spec are silently
+        // dropped — we only care about the data payloads.
+    }
+    flush(&mut data_buf, &mut events);
+
+    if events.is_empty() {
+        return Err(PoolError::ParseError(
+            "No SSE events found in stream".into(),
+        ));
     }
 
-    // Handle case where stream ends without a trailing blank line.
-    if !data_buf.is_empty()
-        && let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&data_buf)
-    {
-        return Ok(resp);
+    // Find the envelope that matches the request id. JSON-RPC
+    // responses ALWAYS carry the request's id; notifications carry
+    // no id or null id. Match by deep equality so numeric / string
+    // / structured ids all work consistently.
+    let response_event = if let Some(req_id) = request_id {
+        events
+            .iter()
+            .rev()
+            .find(|e| {
+                e.get("id")
+                    .map(|id| {
+                        id == req_id && (e.get("result").is_some() || e.get("error").is_some())
+                    })
+                    .unwrap_or(false)
+            })
+            .cloned()
+            // Fallback: last envelope with result or error, in case the
+            // upstream replied with id=null (some older MCP impls do).
+            .or_else(|| {
+                events
+                    .iter()
+                    .rev()
+                    .find(|e| e.get("result").is_some() || e.get("error").is_some())
+                    .cloned()
+            })
+    } else {
+        // No request id (notification-style send — rare) — pick the
+        // last response-shaped envelope.
+        events
+            .iter()
+            .rev()
+            .find(|e| e.get("result").is_some() || e.get("error").is_some())
+            .cloned()
+    };
+
+    let response_event = response_event.ok_or_else(|| {
+        PoolError::ParseError(format!(
+            "SSE stream had {} event(s) but none carried a result or error",
+            events.len()
+        ))
+    })?;
+
+    let json_resp: JsonRpcResponse = serde_json::from_value(response_event).map_err(|e| {
+        PoolError::ParseError(format!("matched SSE event failed to deserialize: {e}"))
+    })?;
+
+    // Serialize the full event sequence for audit. JSON array of the
+    // raw envelopes — auditors can scan progress notifications + the
+    // final response in one pretty-print. Failure here would mean
+    // serde_json::Value -> String is broken; treat as a hard error
+    // because the transport already accepted these as parseable JSON.
+    let audit_body = serde_json::to_string(&events)
+        .map_err(|e| PoolError::ParseError(format!("audit serialization: {e}")))?;
+
+    Ok((json_resp, audit_body))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn make_id(n: u64) -> serde_json::Value {
+        json!(n)
     }
 
-    Err(PoolError::ParseError(
-        "No valid JSON-RPC response found in SSE stream".into(),
-    ))
+    #[test]
+    fn parses_single_envelope_response() {
+        let sse = "event: message\n\
+                   data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\
+                   \n";
+        let req_id = make_id(1);
+        let (resp, audit) = parse_sse_json_rpc(sse, Some(&req_id)).unwrap();
+        assert_eq!(resp.id, Some(json!(1)));
+        assert_eq!(resp.result, Some(json!({"ok": true})));
+        // Audit body is a JSON array of all events.
+        let events: Vec<serde_json::Value> = serde_json::from_str(&audit).unwrap();
+        assert_eq!(events.len(), 1);
+    }
+
+    #[test]
+    fn returns_response_not_intermediate_progress_notification() {
+        // This is the regression: pre-fix code returned the FIRST
+        // parseable envelope, which for streaming tools is the
+        // progress notification (id=null) — silently dropping the
+        // real response.
+        let sse = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"pct\":30}}\n\
+                   \n\
+                   data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"pct\":90}}\n\
+                   \n\
+                   data: {\"jsonrpc\":\"2.0\",\"id\":42,\"result\":{\"content\":[{\"text\":\"done\"}]}}\n\
+                   \n";
+        let req_id = make_id(42);
+        let (resp, audit) = parse_sse_json_rpc(sse, Some(&req_id)).unwrap();
+        assert_eq!(resp.id, Some(json!(42)), "response must match request id");
+        assert_eq!(
+            resp.result,
+            Some(json!({"content": [{"text": "done"}]})),
+            "response.result is the actual reply, not a progress notification"
+        );
+        // Audit body captures the FULL stream so an investigator can
+        // replay all three events.
+        let events: Vec<serde_json::Value> = serde_json::from_str(&audit).unwrap();
+        assert_eq!(
+            events.len(),
+            3,
+            "audit body preserves the full event timeline"
+        );
+        assert!(audit.contains("notifications/progress"));
+        assert!(audit.contains("\"pct\":30"));
+    }
+
+    #[test]
+    fn falls_back_to_last_response_shaped_envelope_when_id_does_not_match() {
+        // Some older MCP impls return id=null on the final response;
+        // we should still pick up the envelope with `result` rather
+        // than erroring.
+        let sse = "data: {\"jsonrpc\":\"2.0\",\"id\":null,\"result\":{\"ok\":1}}\n\n";
+        let req_id = make_id(7);
+        let (resp, _audit) = parse_sse_json_rpc(sse, Some(&req_id)).unwrap();
+        assert_eq!(resp.result, Some(json!({"ok": 1})));
+    }
+
+    #[test]
+    fn errors_when_no_event_carries_result_or_error() {
+        let sse =
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n\n";
+        let req_id = make_id(1);
+        let err = parse_sse_json_rpc(sse, Some(&req_id)).unwrap_err();
+        assert!(matches!(err, PoolError::ParseError(_)));
+    }
+
+    #[test]
+    fn handles_multiline_data_payload() {
+        // Per the SSE spec, repeated `data:` lines within one event
+        // are concatenated with '\n'. JSON-RPC envelopes don't usually
+        // span lines but the parser must handle it for spec
+        // conformance.
+        let sse = "data: {\"jsonrpc\":\"2.0\",\n\
+                   data: \"id\":1,\n\
+                   data: \"result\":{\"ok\":true}}\n\
+                   \n";
+        let req_id = make_id(1);
+        let (resp, _audit) = parse_sse_json_rpc(sse, Some(&req_id)).unwrap();
+        assert_eq!(resp.result, Some(json!({"ok": true})));
+    }
+
+    #[test]
+    fn handles_stream_without_trailing_blank_line() {
+        // Stream ends with a payload but no terminating blank line —
+        // the flush at end-of-stream should still pick it up.
+        let sse = "data: {\"jsonrpc\":\"2.0\",\"id\":3,\"result\":\"x\"}";
+        let req_id = make_id(3);
+        let (resp, _audit) = parse_sse_json_rpc(sse, Some(&req_id)).unwrap();
+        assert_eq!(resp.result, Some(json!("x")));
+    }
+
+    #[test]
+    fn errors_on_empty_stream() {
+        let req_id = make_id(1);
+        let err = parse_sse_json_rpc("", Some(&req_id)).unwrap_err();
+        assert!(matches!(err, PoolError::ParseError(_)));
+    }
 }

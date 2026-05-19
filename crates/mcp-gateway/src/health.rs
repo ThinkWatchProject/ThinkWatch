@@ -55,13 +55,16 @@ impl HealthChecker {
         let elapsed = start.elapsed();
 
         match result {
-            Ok((resp, _upstream_sid)) if resp.error.is_none() => ServerHealth {
+            // Health probe doesn't audit, so the third tuple element
+            // (stream_audit_body) is discarded — only the response
+            // envelope matters here.
+            Ok((resp, _upstream_sid, _stream_audit)) if resp.error.is_none() => ServerHealth {
                 status: "healthy".to_owned(),
                 latency_ms: Some(elapsed.as_millis() as u64),
                 last_check: Utc::now(),
                 error: None,
             },
-            Ok((resp, _)) => {
+            Ok((resp, _, _)) => {
                 let msg = resp
                     .error
                     .map(|e| e.message)
