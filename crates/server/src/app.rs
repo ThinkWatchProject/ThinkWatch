@@ -115,6 +115,15 @@ pub struct AppState {
     /// at the bundled RustFS container so oversize prompts /
     /// completions land in object storage instead of bloating CH.
     pub blob_store: Arc<dyn think_watch_common::blob_store::BlobStore>,
+
+    /// Hot-swappable at-rest PII redactor, shared by the gateway
+    /// AND mcp-gateway audit pipelines. Constructed from the same
+    /// `security.pii_redactor_patterns` config the in-flight gateway
+    /// `PiiRedactor` reads, so a rule added via the admin UI takes
+    /// effect on BOTH redaction surfaces at once. Separate handle
+    /// (not derived from `pii_redactor`) because mcp-gateway can't
+    /// depend on the gateway crate without inverting the dep graph.
+    pub blob_redactor: Arc<arc_swap::ArcSwap<think_watch_common::pii::BlobRedactor>>,
 }
 
 /// Build a `ContentFilter` from the current `system_settings` value.
@@ -135,6 +144,20 @@ pub async fn load_pii_redactor(dc: &DynamicConfig) -> PiiRedactor {
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     PiiRedactor::from_config(&configs)
+}
+
+/// Build the cross-crate at-rest `BlobRedactor` from the SAME
+/// pattern set the in-flight `PiiRedactor` consumes — single
+/// source of truth in `system_settings.security.pii_redactor_patterns`.
+/// Constructed in parallel with `load_pii_redactor` so an operator
+/// edit hot-swaps both surfaces atomically.
+pub async fn load_blob_redactor(dc: &DynamicConfig) -> think_watch_common::pii::BlobRedactor {
+    let configs: Vec<think_watch_common::pii::PiiPatternConfig> = dc
+        .get("security.pii_redactor_patterns")
+        .await
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    think_watch_common::pii::BlobRedactor::from_configs(&configs)
 }
 
 /// Redis pub/sub channel that sibling replicas subscribe to so a
@@ -325,6 +348,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
         state.audit.clone(),
         state.user_token_resolver.clone(),
         state.blob_store.clone(),
+        state.blob_redactor.clone(),
     );
     // Wire the shared CB registry into the proxy so per-server breakers
     // are visible to the dashboard handler.

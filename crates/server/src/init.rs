@@ -98,8 +98,10 @@ pub async fn init_state(
 
     let initial_content_filter = app::load_content_filter(&dynamic_config).await;
     let initial_pii_redactor = app::load_pii_redactor(&dynamic_config).await;
+    let initial_blob_redactor = app::load_blob_redactor(&dynamic_config).await;
     let content_filter = Arc::new(arc_swap::ArcSwap::from_pointee(initial_content_filter));
     let pii_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(initial_pii_redactor));
+    let blob_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(initial_blob_redactor));
 
     let init_http_secs = dynamic_config.perf_http_client_secs().await as u64;
     let init_mcp_pool_secs = dynamic_config.perf_mcp_pool_secs().await as u64;
@@ -172,6 +174,7 @@ pub async fn init_state(
         url_validator: crate::app::production_url_validator(),
         cost_tracker,
         blob_store,
+        blob_redactor,
     };
 
     Ok(state)
@@ -238,6 +241,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
     let dc_clone = state.dynamic_config.clone();
     let cf_clone = state.content_filter.clone();
     let pii_clone = state.pii_redactor.clone();
+    let blob_clone = state.blob_redactor.clone();
     let http_clone = state.http_client.clone();
     let pool_clone = state.mcp_pool.clone();
     // Wrap in `supervise()` so a panic inside the reload (e.g.
@@ -268,6 +272,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                                pii: &arc_swap::ArcSwap<
             think_watch_gateway::pii_redactor::PiiRedactor,
         >,
+                               blob: &arc_swap::ArcSwap<think_watch_common::pii::BlobRedactor>,
                                http: &arc_swap::ArcSwap<reqwest::Client>,
                                pool: &arc_swap::ArcSwap<
             think_watch_mcp_gateway::pool::ConnectionPool,
@@ -280,6 +285,14 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
             cf.store(Arc::new(new_filter));
             let new_pii = app::load_pii_redactor(dc).await;
             pii.store(Arc::new(new_pii));
+            // Same pattern set, parallel hot-swap — the at-rest
+            // BlobRedactor used by both gateway and mcp-gateway
+            // audit pipelines must stay in lockstep with the
+            // in-flight PiiRedactor or operators get the surprise
+            // "I added a pattern via the admin UI and one of two
+            // redaction surfaces still leaks PII".
+            let new_blob = app::load_blob_redactor(dc).await;
+            blob.store(Arc::new(new_blob));
             let http_secs = dc.perf_http_client_secs().await as u64;
             let new_http = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(http_secs))
@@ -297,12 +310,28 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
             match rx.recv().await {
                 Ok(msg) => {
                     if msg.channel == "config:changed" {
-                        do_reload(&dc_clone, &cf_clone, &pii_clone, &http_clone, &pool_clone).await;
+                        do_reload(
+                            &dc_clone,
+                            &cf_clone,
+                            &pii_clone,
+                            &blob_clone,
+                            &http_clone,
+                            &pool_clone,
+                        )
+                        .await;
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     tracing::warn!("filter reload subscriber lagged by {n} messages; reloading");
-                    do_reload(&dc_clone, &cf_clone, &pii_clone, &http_clone, &pool_clone).await;
+                    do_reload(
+                        &dc_clone,
+                        &cf_clone,
+                        &pii_clone,
+                        &blob_clone,
+                        &http_clone,
+                        &pool_clone,
+                    )
+                    .await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     tracing::info!("filter reload subscriber channel closed; exiting task");

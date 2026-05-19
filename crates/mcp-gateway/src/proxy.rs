@@ -93,28 +93,31 @@ pub fn err_response(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Body-capture truncation + offload hook for `mcp_logs.tool_arguments`
-/// / `tool_result`. Mirrors the gateway-side `process_body` for the
-/// truncation + blob-offload contract; we don't share the helper
-/// across crates because the gateway's PiiRedactor isn't in `common`
-/// and pulling it down would invert the dep graph.
-///
-/// MCP body capture does NOT honor `audit.body_redact_pii` — the
-/// gateway has a real PiiRedactor wired in, mcp-gateway doesn't (yet).
-/// The dead `_redact_pii` parameter was removed; if an operator turns
-/// PII redaction on without realising MCP is exempt, the call site
-/// emits `audit_body_redact_unsupported_total{subsystem=mcp}` so the
-/// gap is observable instead of silently broken.
+/// Body-capture truncation + offload + at-rest PII redaction for
+/// `mcp_logs.tool_arguments` / `tool_result`. Mirrors the gateway-
+/// side `process_body` semantics so both audit pipelines share the
+/// same char-boundary-safe truncation + offload contract; redaction
+/// flows through the shared `common::pii::BlobRedactor` so an
+/// operator rule edit applies to both surfaces atomically.
 #[allow(clippy::too_many_arguments)]
 async fn apply_mcp_body_capture(
     mut s: String,
     max_bytes: usize,
+    redact_pii: bool,
+    blob_redactor: &think_watch_common::pii::BlobRedactor,
     blob_store: &std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>,
     trace_id: &str,
     field: &'static str,
     truncated_flag: &mut bool,
     offloaded_flag: &mut bool,
 ) -> String {
+    // Redact BEFORE the size check so the cap measures the version
+    // that will actually land in audit storage — operators expect
+    // `audit.body_max_bytes` to bound what's WRITTEN, not what was
+    // sent.
+    if redact_pii && !blob_redactor.is_empty() {
+        s = blob_redactor.redact_blob(&s);
+    }
     if s.len() <= max_bytes {
         return s;
     }
@@ -276,9 +279,15 @@ pub struct McpProxy {
     /// instead of inline `mcp_logs.tool_arguments` / `tool_result`
     /// columns. Same backing store the AI gateway uses.
     pub blob_store: std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>,
+    /// Hot-swappable at-rest PII redactor for the audit body capture
+    /// pipeline. Same handle the gateway audit path consumes — both
+    /// surfaces load from `security.pii_redactor_patterns` so a rule
+    /// edit in the admin UI applies to MCP and gateway simultaneously.
+    pub blob_redactor: std::sync::Arc<arc_swap::ArcSwap<think_watch_common::pii::BlobRedactor>>,
 }
 
 impl McpProxy {
+    #[allow(clippy::too_many_arguments)]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         registry: Registry,
@@ -290,6 +299,7 @@ impl McpProxy {
         audit: think_watch_common::audit::AuditLogger,
         user_tokens: UserTokenResolver,
         blob_store: std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>,
+        blob_redactor: std::sync::Arc<arc_swap::ArcSwap<think_watch_common::pii::BlobRedactor>>,
     ) -> Self {
         let cache = McpResponseCache::new(redis.clone());
         Self {
@@ -304,6 +314,7 @@ impl McpProxy {
             audit,
             user_tokens,
             blob_store,
+            blob_redactor,
         }
     }
 
@@ -1117,17 +1128,12 @@ impl McpProxy {
         let capture_args = dc.audit_capture_tool_arguments().await;
         let capture_result = dc.audit_capture_tool_results().await;
         let body_max = dc.audit_body_max_bytes().await as usize;
-        if dc.audit_body_redact_pii().await && (capture_args || capture_result) {
-            // One-counter signal — operators who flip the toggle ON
-            // without realising MCP doesn't honor it will see this
-            // climb in their metrics, can choose to either disable
-            // capture or accept the gap.
-            metrics::counter!(
-                "audit_body_redact_unsupported_total",
-                "subsystem" => "mcp",
-            )
-            .increment(1);
-        }
+        let redact_pii = dc.audit_body_redact_pii().await;
+        // Snapshot the hot-swappable redactor ONCE per request so the
+        // arguments + result halves see the same pattern set even if
+        // the operator hot-swaps mid-call. The ArcSwap load is
+        // ~1ns; we share the snapshot.
+        let blob_redactor_snapshot = self.blob_redactor.load_full();
         use think_watch_common::audit::BodyCaptureStatus;
         let (arg_str, arg_bytes, result_str, result_bytes, capture_status) =
             if !capture_args && !capture_result {
@@ -1153,6 +1159,8 @@ impl McpProxy {
                                 apply_mcp_body_capture(
                                     raw,
                                     body_max,
+                                    redact_pii,
+                                    &blob_redactor_snapshot,
                                     &self.blob_store,
                                     &call_trace_id,
                                     "arguments",
@@ -1177,6 +1185,8 @@ impl McpProxy {
                                 apply_mcp_body_capture(
                                     raw,
                                     body_max,
+                                    redact_pii,
+                                    &blob_redactor_snapshot,
                                     &self.blob_store,
                                     &call_trace_id,
                                     "result",
