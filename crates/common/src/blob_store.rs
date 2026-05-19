@@ -130,6 +130,25 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// body. `InlineStore` returns `Ok(())` because there's nothing
     /// to check.
     async fn smoke_test(&self) -> Result<(), BlobError>;
+
+    /// Best-effort query for the bucket's expiration-lifecycle rule
+    /// that covers the `bodies/` prefix. Used by the server to warn
+    /// when `audit.body_retention_days` is raised above the bucket's
+    /// GC horizon — without the cross-check, an operator can
+    /// configure 90-day audit retention while RustFS / S3 silently
+    /// GCs objects at 60 days, leaving CH rows with dangling
+    /// `s3://...` URLs that 404 on read.
+    ///
+    /// Returns `Ok(None)` for backends that don't support lifecycle
+    /// querying (or have no rule), `Ok(Some(days))` when an
+    /// expiration rule is found. `Err` only on transport failures —
+    /// callers should treat both `Ok(None)` and `Err` as "no
+    /// signal" and not block startup on either.
+    async fn lifecycle_days(&self) -> Result<Option<u32>, BlobError> {
+        // Default: no signal. Implementations that DO support it
+        // (S3Store) override.
+        Ok(None)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -396,6 +415,57 @@ impl BlobStore for S3Store {
         Ok(bytes.to_vec())
     }
 
+    async fn lifecycle_days(&self) -> Result<Option<u32>, BlobError> {
+        // Query `?lifecycle` on the bucket. AWS S3 + MinIO + RustFS
+        // all return the same XML shape:
+        //   <LifecycleConfiguration>
+        //     <Rule>
+        //       <Status>Enabled</Status>
+        //       <Filter><Prefix>bodies/</Prefix></Filter>
+        //       <Expiration><Days>60</Days></Expiration>
+        //     </Rule>
+        //   </LifecycleConfiguration>
+        // We only care about a single rule that targets the
+        // `bodies/` prefix (or no prefix = applies to all objects).
+        // Anything else (transition, abort-multipart-upload, …) we
+        // ignore — only Expiration affects audit-row resolvability.
+        //
+        // 404 = bucket has no lifecycle configured → return None
+        // (we have no signal, not an error). Real transport errors
+        // bubble up so the operator sees them in logs.
+        let bucket_endpoint = if self.cfg.path_style {
+            format!(
+                "{}/{}?lifecycle",
+                self.cfg.endpoint.trim_end_matches('/'),
+                self.cfg.bucket
+            )
+        } else {
+            let parsed = url::Url::parse(self.cfg.endpoint.trim_end_matches('/'))
+                .map_err(|e| BlobError::BadUrl(format!("S3 endpoint: {e}")))?;
+            let host = parsed.host_str().ok_or_else(|| {
+                BlobError::BadUrl("S3 endpoint missing host for virtual-host style".to_string())
+            })?;
+            let scheme = parsed.scheme();
+            let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!("{scheme}://{}.{host}{port}/?lifecycle", self.cfg.bucket)
+        };
+        let xml = match self.signed_request("GET", &bucket_endpoint, b"").await {
+            Ok(bytes) => bytes,
+            Err(BlobError::BadStatus { status: 404, .. }) => return Ok(None),
+            // MinIO returns NoSuchLifecycleConfiguration as 404 with a
+            // 200-shaped XML in some versions; treat any "no
+            // configuration" signal as no rule.
+            Err(BlobError::BadStatus { body, .. })
+                if body.contains("NoSuchLifecycleConfiguration") =>
+            {
+                return Ok(None);
+            }
+            Err(e) => return Err(e),
+        };
+        let text = std::str::from_utf8(&xml).unwrap_or("");
+        Ok(parse_lifecycle_days(text))
+    }
+
     async fn smoke_test(&self) -> Result<(), BlobError> {
         // Marker object lives under a dedicated prefix so a bucket
         // lifecycle rule that targets `bodies/` doesn't accidentally
@@ -437,6 +507,73 @@ impl BlobStore for S3Store {
 
 // chrono Datelike is needed for month()/day() in the S3 key formatter.
 use chrono::Datelike;
+
+/// Lightweight extractor for `<Expiration><Days>N</Days>` from the
+/// S3 `?lifecycle` XML response. We don't pull in a full XML parser
+/// crate because the format is rigid and the failure mode of "we
+/// missed a rule, emit no warning" is the same as the no-rule
+/// default. Picks the FIRST rule that contains both an Expiration/
+/// Days element and either no Filter or a Filter targeting
+/// `bodies/` (the prefix the audit pipeline writes under).
+///
+/// Returns `None` when no matching rule is found — the lifecycle
+/// check is non-blocking, so "no signal" is a valid answer.
+fn parse_lifecycle_days(xml: &str) -> Option<u32> {
+    // Walk <Rule>…</Rule> blocks. For each rule check that:
+    //   * <Status>Enabled</Status>
+    //   * EITHER no <Filter> block, OR <Filter> contains
+    //     <Prefix>bodies/...</Prefix> (or just <Prefix>bodies</Prefix>)
+    //     — anything else means "doesn't cover our bodies" and we skip.
+    //   * <Expiration><Days>N</Days></Expiration> is present.
+    let mut min_days: Option<u32> = None;
+    let mut remaining = xml;
+    while let Some(rule_start) = remaining.find("<Rule>") {
+        let rest = &remaining[rule_start + 6..];
+        let Some(rule_end) = rest.find("</Rule>") else {
+            break;
+        };
+        let rule = &rest[..rule_end];
+        remaining = &rest[rule_end + 7..];
+
+        // Status must be Enabled.
+        if !rule.contains("<Status>Enabled</Status>") {
+            continue;
+        }
+
+        // Filter check: either no <Filter> at all (covers everything)
+        // OR a Filter that mentions `bodies` somewhere in a Prefix.
+        if let Some(filter_start) = rule.find("<Filter>") {
+            let filter_rest = &rule[filter_start + 8..];
+            let filter_end = filter_rest.find("</Filter>").unwrap_or(0);
+            let filter = &filter_rest[..filter_end];
+            if !filter.contains("<Prefix>bodies") {
+                continue;
+            }
+        }
+
+        // Extract <Expiration><Days>N</Days></Expiration>.
+        let Some(exp_start) = rule.find("<Expiration>") else {
+            continue;
+        };
+        let exp_rest = &rule[exp_start + 12..];
+        let Some(exp_end) = exp_rest.find("</Expiration>") else {
+            continue;
+        };
+        let exp = &exp_rest[..exp_end];
+        let Some(days_start) = exp.find("<Days>") else {
+            continue;
+        };
+        let days_rest = &exp[days_start + 6..];
+        let Some(days_end) = days_rest.find("</Days>") else {
+            continue;
+        };
+        let days_text = &days_rest[..days_end].trim();
+        if let Ok(d) = days_text.parse::<u32>() {
+            min_days = Some(min_days.map_or(d, |existing| existing.min(d)));
+        }
+    }
+    min_days
+}
 
 // ---------------------------------------------------------------------------
 // Construction helper
@@ -620,5 +757,65 @@ mod tests {
         };
         let err = s.parse_s3_url("s3://audit-bodies").unwrap_err();
         assert!(matches!(err, BlobError::BadUrl(_)));
+    }
+
+    #[test]
+    fn parse_lifecycle_extracts_bodies_prefix_rule() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<LifecycleConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    <Rule>
+        <ID>expire-audit-bodies</ID>
+        <Status>Enabled</Status>
+        <Filter><Prefix>bodies/</Prefix></Filter>
+        <Expiration><Days>60</Days></Expiration>
+    </Rule>
+</LifecycleConfiguration>"#;
+        assert_eq!(parse_lifecycle_days(xml), Some(60));
+    }
+
+    #[test]
+    fn parse_lifecycle_no_filter_rule_matches_all_objects() {
+        // A rule without <Filter> applies to every object, including
+        // bodies/* — treat as our governing rule.
+        let xml = r#"<LifecycleConfiguration>
+            <Rule>
+                <Status>Enabled</Status>
+                <Expiration><Days>30</Days></Expiration>
+            </Rule>
+        </LifecycleConfiguration>"#;
+        assert_eq!(parse_lifecycle_days(xml), Some(30));
+    }
+
+    #[test]
+    fn parse_lifecycle_picks_shorter_when_multiple_rules() {
+        // Two rules cover bodies/* — the bucket will GC at whichever
+        // fires first, so the operator-relevant horizon is the MIN.
+        let xml = r#"<LifecycleConfiguration>
+            <Rule><Status>Enabled</Status><Filter><Prefix>bodies/</Prefix></Filter><Expiration><Days>90</Days></Expiration></Rule>
+            <Rule><Status>Enabled</Status><Filter><Prefix>bodies/2024</Prefix></Filter><Expiration><Days>30</Days></Expiration></Rule>
+        </LifecycleConfiguration>"#;
+        assert_eq!(parse_lifecycle_days(xml), Some(30));
+    }
+
+    #[test]
+    fn parse_lifecycle_ignores_disabled_rules() {
+        let xml = r#"<LifecycleConfiguration>
+            <Rule><Status>Disabled</Status><Filter><Prefix>bodies/</Prefix></Filter><Expiration><Days>10</Days></Expiration></Rule>
+        </LifecycleConfiguration>"#;
+        assert_eq!(parse_lifecycle_days(xml), None);
+    }
+
+    #[test]
+    fn parse_lifecycle_ignores_unrelated_prefix() {
+        let xml = r#"<LifecycleConfiguration>
+            <Rule><Status>Enabled</Status><Filter><Prefix>logs/</Prefix></Filter><Expiration><Days>7</Days></Expiration></Rule>
+        </LifecycleConfiguration>"#;
+        assert_eq!(parse_lifecycle_days(xml), None);
+    }
+
+    #[test]
+    fn parse_lifecycle_empty_xml_is_none() {
+        assert_eq!(parse_lifecycle_days(""), None);
+        assert_eq!(parse_lifecycle_days("<LifecycleConfiguration/>"), None);
     }
 }

@@ -1957,6 +1957,11 @@ async fn apply_clickhouse_ttls(state: &AppState, settings: &HashMap<String, serd
         && let Some(days) = value.as_i64()
     {
         apply_body_column_ttls(ch, days).await;
+        // Re-check the bucket lifecycle horizon — if the operator
+        // just raised retention above the bucket's GC, surface the
+        // mismatch in their PATCH-response log line rather than
+        // waiting for an auditor to hit a 404.
+        check_body_retention_vs_lifecycle(state).await;
     }
 }
 
@@ -1982,6 +1987,66 @@ pub async fn reconcile_clickhouse_ttls(state: &AppState) {
         apply_single_ttl(ch, table, days).await;
     }
     apply_body_column_ttls(ch, dc.audit_body_retention_days().await).await;
+}
+
+/// Detect mismatches between `audit.body_retention_days` (the CH
+/// column TTL operators tune via dynamic_config) and the bucket's
+/// own lifecycle horizon (administered out-of-band — RustFS init
+/// script, `mc ilm`, the AWS console, etc.). When the CH retention
+/// is set ABOVE the bucket horizon, every `s3://bucket/key` URL
+/// stored in CH between (bucket_days, ch_days] will 404 on read —
+/// the audit row outlives its referenced object. Silent in
+/// production until an auditor hits a "body fetch failed" 502.
+///
+/// Called at startup and after PATCH /api/admin/settings. Fail-OPEN:
+/// blob-store backends that can't report a lifecycle (`InlineStore`,
+/// or an S3 backend without a configured rule) skip the check
+/// cleanly. Transport errors are logged but don't fail startup —
+/// we WANT the server up even if the lifecycle query is flaky.
+pub async fn check_body_retention_vs_lifecycle(state: &AppState) {
+    if !state.blob_store.can_offload() {
+        return;
+    }
+    let configured_days = state.dynamic_config.audit_body_retention_days().await;
+    if configured_days <= 0 {
+        return;
+    }
+    let bucket_days = match state.blob_store.lifecycle_days().await {
+        Ok(Some(days)) => days,
+        Ok(None) => {
+            // No rule configured on the bucket — operator has to
+            // own the cleanup themselves. Log info so the audit
+            // posture is visible but don't warn.
+            tracing::info!(
+                "blob-store bucket has no lifecycle rule covering `bodies/`; \
+                 audit.body_retention_days={configured_days} relies on operator-driven cleanup"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "blob-store lifecycle query failed; skipping retention cross-check"
+            );
+            return;
+        }
+    };
+    if (configured_days as u32) > bucket_days {
+        tracing::warn!(
+            audit_body_retention_days = configured_days,
+            bucket_lifecycle_days = bucket_days,
+            "audit.body_retention_days is ABOVE the bucket lifecycle horizon — \
+             offloaded body URLs between {bucket_days}d and {configured_days}d will 404 on \
+             read; raise the bucket lifecycle (`mc ilm`) OR lower audit.body_retention_days"
+        );
+        metrics::counter!("audit_body_retention_above_bucket_lifecycle_total").increment(1);
+    } else {
+        tracing::info!(
+            audit_body_retention_days = configured_days,
+            bucket_lifecycle_days = bucket_days,
+            "audit.body_retention_days vs bucket lifecycle check passed"
+        );
+    }
 }
 
 /// `(table, column)` pairs that hold captured request/response bodies and

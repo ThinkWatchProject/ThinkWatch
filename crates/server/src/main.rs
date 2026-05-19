@@ -95,6 +95,13 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("blob-store smoke test passed (body offload ready)");
     }
 
+    // Cross-check `audit.body_retention_days` against the bucket
+    // lifecycle. The two TTLs are administered separately (CH
+    // column TTL vs bucket lifecycle rule) and an operator can
+    // raise CH retention above the bucket horizon, in which case
+    // `s3://...` URLs in CH rows 404 silently after the bucket GCs.
+    handlers::admin::check_body_retention_vs_lifecycle(&state).await;
+
     // --- Start Gateway server (AI API + MCP) ---
     let gateway_app = app::create_gateway_app(&config, state.clone()).await?;
     let gateway_addr = config.gateway_addr();

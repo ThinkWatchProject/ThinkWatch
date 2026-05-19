@@ -79,6 +79,11 @@ impl BlobStore for InMemoryBlobStore {
         // to misconfigure, so smoke_test is a no-op success.
         Ok(())
     }
+    async fn lifecycle_days(&self) -> Result<Option<u32>, BlobError> {
+        // In-memory store has no bucket lifecycle. None matches the
+        // BlobStore trait's "no signal" default.
+        Ok(None)
+    }
 }
 
 #[derive(Debug, Deserialize, clickhouse::Row)]
