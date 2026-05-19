@@ -13,7 +13,7 @@ import {
 import { Select, SelectContent, SelectItem, SelectTrigger } from '@/components/ui/select';
 import { Search, FileText, ChevronDown, ChevronRight, Plus, Minus, X } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { api } from '@/lib/api';
+import { api, hasPermission } from '@/lib/api';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible';
 import { DateTimeRangePicker } from '@/components/ui/datetime-picker';
@@ -360,6 +360,15 @@ function LogDetail({
     log.detail !== undefined &&
     typeof log.detail === 'object';
 
+  // Bodies live in a separate admin endpoint behind `logs:read_bodies`
+  // — render the viewer only on gateway/mcp rows for users that
+  // actually hold the permission. Each fetch fires a server-side
+  // `audit.body_viewed` row, so we want the user to think before
+  // clicking; that's why it's a button gated by a 24-char confirm
+  // string in the popover footer (not auto-loaded).
+  const showBodyViewer =
+    (category === 'gateway' || category === 'mcp') && hasPermission('logs:read_bodies');
+
   return (
     <div className="space-y-3 p-3">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-2">
@@ -380,6 +389,7 @@ function LogDetail({
           <PrettyJsonBlock value={log.detail} />
         </div>
       )}
+      {showBodyViewer && <BodyViewer category={category} logId={String(log.id ?? '')} />}
       <Collapsible className="text-xs">
         <CollapsibleTrigger className="cursor-pointer text-muted-foreground hover:text-foreground select-none">
           {t('logs.rawJson')}
@@ -388,6 +398,181 @@ function LogDetail({
           <RawJsonBlock value={log} />
         </CollapsibleContent>
       </Collapsible>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// BodyViewer — fetch + render the captured request/response payloads.
+// ---------------------------------------------------------------------------
+//
+// Renders a click-to-load button (NOT a Collapsible that auto-fetches on
+// open) because every successful fetch emits a server-side
+// `audit.body_viewed` row. We don't want an idle tab + auto-expand to
+// spam the audit log with phantom "viewed" entries — surface it as an
+// explicit user action.
+
+interface GatewayBodyResponse {
+  id: string;
+  trace_id: string | null;
+  user_id: string | null;
+  model_id: string | null;
+  created_at: string;
+  request_body: string | null;
+  response_body: string | null;
+  request_body_bytes: number | null;
+  response_body_bytes: number | null;
+  body_capture_status: string | null;
+}
+
+interface McpBodyResponse {
+  id: string;
+  trace_id: string | null;
+  user_id: string | null;
+  server_id: string | null;
+  server_name: string | null;
+  tool_name: string | null;
+  created_at: string;
+  tool_arguments: string | null;
+  tool_result: string | null;
+  arguments_bytes: number | null;
+  result_bytes: number | null;
+  body_capture_status: string | null;
+}
+
+type BodyState =
+  | { kind: 'idle' }
+  | { kind: 'loading' }
+  | { kind: 'ok'; data: GatewayBodyResponse | McpBodyResponse }
+  | { kind: 'err'; msg: string };
+
+function BodyViewer({ category, logId }: { category: 'gateway' | 'mcp'; logId: string }) {
+  const { t } = useTranslation();
+  const [state, setState] = useState<BodyState>({ kind: 'idle' });
+
+  const fetchBody = useCallback(() => {
+    if (state.kind === 'loading' || state.kind === 'ok') return;
+    setState({ kind: 'loading' });
+    const path =
+      category === 'gateway'
+        ? `/api/admin/gateway/logs/${encodeURIComponent(logId)}/body`
+        : `/api/admin/mcp/logs/${encodeURIComponent(logId)}/body`;
+    api<GatewayBodyResponse | McpBodyResponse>(path)
+      .then((data) => setState({ kind: 'ok', data }))
+      .catch((err: unknown) =>
+        setState({
+          kind: 'err',
+          msg: err instanceof Error ? err.message : 'unknown',
+        }),
+      );
+  }, [category, logId, state.kind]);
+
+  if (state.kind === 'idle') {
+    return (
+      <div className="space-y-1 rounded border border-dashed border-muted-foreground/40 p-2">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={fetchBody}
+          aria-label={category === 'gateway' ? t('logs.bodies.view') : t('logs.bodies.viewMcp')}>
+          {category === 'gateway' ? t('logs.bodies.view') : t('logs.bodies.viewMcp')}
+        </Button>
+        <p className="text-xs text-muted-foreground">{t('logs.bodies.permRequired')}</p>
+      </div>
+    );
+  }
+  if (state.kind === 'loading') {
+    return <div className="text-xs text-muted-foreground">{t('logs.bodies.loading')}</div>;
+  }
+  if (state.kind === 'err') {
+    return (
+      <Alert variant="destructive">
+        <AlertDescription>{t('logs.bodies.fetchFailed', { msg: state.msg })}</AlertDescription>
+      </Alert>
+    );
+  }
+
+  const status = state.data.body_capture_status;
+  const statusLabel =
+    status === 'captured'
+      ? t('logs.bodies.statusCaptured')
+      : status === 'truncated'
+        ? t('logs.bodies.statusTruncated')
+        : status === 'disabled'
+          ? t('logs.bodies.statusDisabled')
+          : status === 'from_cache'
+            ? t('logs.bodies.statusFromCache')
+            : status === 'error'
+              ? t('logs.bodies.statusError')
+              : null;
+
+  const [reqLabel, respLabel, reqBody, respBody, reqBytes, respBytes] =
+    category === 'gateway'
+      ? [
+          t('logs.bodies.request'),
+          t('logs.bodies.response'),
+          (state.data as GatewayBodyResponse).request_body,
+          (state.data as GatewayBodyResponse).response_body,
+          (state.data as GatewayBodyResponse).request_body_bytes,
+          (state.data as GatewayBodyResponse).response_body_bytes,
+        ]
+      : [
+          t('logs.bodies.arguments'),
+          t('logs.bodies.result'),
+          (state.data as McpBodyResponse).tool_arguments,
+          (state.data as McpBodyResponse).tool_result,
+          (state.data as McpBodyResponse).arguments_bytes,
+          (state.data as McpBodyResponse).result_bytes,
+        ];
+
+  return (
+    <div className="space-y-2 rounded border p-2">
+      {statusLabel && (
+        <div className="text-xs text-muted-foreground italic">{statusLabel}</div>
+      )}
+      <BodyPanel label={reqLabel} body={reqBody} bytes={reqBytes} />
+      <BodyPanel label={respLabel} body={respBody} bytes={respBytes} />
+    </div>
+  );
+}
+
+function BodyPanel({
+  label,
+  body,
+  bytes,
+}: {
+  label: string;
+  body: string | null;
+  bytes: number | null;
+}) {
+  const { t } = useTranslation();
+  // Try to pretty-print as JSON; fall back to raw text if it's not parseable
+  // (e.g. truncated mid-token).
+  let display = body ?? '';
+  if (body) {
+    try {
+      display = JSON.stringify(JSON.parse(body), null, 2);
+    } catch {
+      // Keep raw — truncated bodies legitimately don't parse.
+    }
+  }
+  return (
+    <div className="space-y-1">
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-xs uppercase tracking-wide text-muted-foreground">{label}</span>
+        {bytes != null && (
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {t('logs.bodies.size', { bytes: bytes.toLocaleString() })}
+          </span>
+        )}
+      </div>
+      {body == null || body === '' ? (
+        <div className="text-xs text-muted-foreground italic">{t('logs.bodies.noBody')}</div>
+      ) : (
+        <pre className="max-h-96 overflow-auto rounded bg-muted/40 p-2 text-xs">
+          <code>{display}</code>
+        </pre>
+      )}
     </div>
   );
 }

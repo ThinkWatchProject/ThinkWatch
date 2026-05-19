@@ -1528,6 +1528,24 @@
     "audit": {
       "detailJson": "Detail"
     },
+    "bodies": {
+      "view": "View request + response bodies",
+      "viewMcp": "View tool arguments + result",
+      "loading": "Loading captured bodies…",
+      "request": "Request body",
+      "response": "Response body",
+      "arguments": "Tool arguments",
+      "result": "Tool result",
+      "statusCaptured": "Captured in full",
+      "statusTruncated": "Truncated — body exceeded the configured byte cap",
+      "statusDisabled": "Capture disabled at write time",
+      "statusFromCache": "Served from response cache",
+      "statusError": "Capture failed",
+      "noBody": "No body captured for this field",
+      "fetchFailed": "Failed to load bodies: {{msg}}",
+      "permRequired": "Requires logs:read_bodies permission. Access to this view is itself audited.",
+      "size": "{{bytes}} bytes"
+    },
     "col": {
       "time": "Time",
       "model": "Model",

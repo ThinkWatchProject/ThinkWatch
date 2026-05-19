@@ -1528,6 +1528,24 @@
     "audit": {
       "detailJson": "详情"
     },
+    "bodies": {
+      "view": "查看完整请求与响应",
+      "viewMcp": "查看工具入参与返回",
+      "loading": "正在加载完整内容…",
+      "request": "请求体",
+      "response": "响应体",
+      "arguments": "工具入参",
+      "result": "工具返回",
+      "statusCaptured": "已完整记录",
+      "statusTruncated": "已截断 —— 内容超出配置上限",
+      "statusDisabled": "写入时未启用记录",
+      "statusFromCache": "命中响应缓存",
+      "statusError": "记录失败",
+      "noBody": "该字段没有记录内容",
+      "fetchFailed": "加载失败：{{msg}}",
+      "permRequired": "需要 logs:read_bodies 权限。本次查看本身也会被审计。",
+      "size": "{{bytes}} 字节"
+    },
     "col": {
       "time": "时间",
       "model": "模型",
