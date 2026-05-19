@@ -26,7 +26,6 @@ import {
 import {
   Table,
   TableBody,
-  TableCell,
   TableHead,
   TableHeader,
   TableRow,
@@ -38,217 +37,69 @@ import {
   SheetHeader,
   SheetTitle,
 } from '@/components/ui/sheet';
-import { LatencySparkline } from './routing/LatencySparkline';
-import { RoutingModeSection } from './routing/RoutingModeSection';
-import { TrafficBar } from './routing/TrafficBar';
-import {
-  AlertCircle,
-  Brain,
-  Loader2,
-  Pencil,
-  Plus,
-  Search,
-  Trash2,
-} from 'lucide-react';
+import { LatencySparkline } from '../routing/LatencySparkline';
+import { RoutingModeSection } from '../routing/RoutingModeSection';
+import { TrafficBar } from '../routing/TrafficBar';
+import { AlertCircle, Brain, Loader2, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { DataTablePagination } from '@/components/data-table-pagination';
 import { api, apiDelete, apiPatch, apiPost, hasPermission } from '@/lib/api';
 import { toast } from 'sonner';
-
-/* ---------- types ---------- */
-
-// Decimal fields come back from sqlx as strings (rust_decimal's default
-// Serialize) — keep them that way in TS so we don't lose precision on
-// parse, and let the form work in string space too.
-interface ModelRow {
-  id: string;
-  model_id: string;
-  display_name: string;
-  /// Relative input-token cost factor. Absolute USD cost is
-  /// `platform_pricing.input_price_per_token × input_weight × tokens`.
-  input_weight: string;
-  output_weight: string;
-  route_count: number;
-  enabled_route_count: number;
-  /// Model-level kill switch. FALSE ⇒ all routes are skipped at the
-  /// gateway regardless of per-route `enabled` state.
-  enabled: boolean;
-  /// Provider display names attached to this model, ordered by weight DESC.
-  /// Joined server-side so the row can render the column without
-  /// fetching per-row routes.
-  providers: string[];
-  /// Per-model routing override; null/undefined ⇒ use global default.
-  routing_strategy?: RoutingStrategy | null;
-  affinity_mode?: AffinityMode | null;
-  affinity_ttl_secs?: number | null;
-  /// Raw guardrails JSON from the server — discriminator-tagged
-  /// objects. Decoded into known variants at edit-open via
-  /// `parseGuardrails`; today only `max_length` lands.
-  output_guardrails?: OutputGuardrail[] | null;
-}
-
-function parseGuardrails(value: OutputGuardrail[] | null | undefined): OutputGuardrail[] {
-  if (!Array.isArray(value)) return [];
-  // Filter to known variants — keeps the form state strongly typed so
-  // future additions (json_schema, toxicity) require an explicit branch.
-  return value.filter((g): g is OutputGuardrail => g?.type === 'max_length');
-}
-
-/// Output guardrail rule shape — discriminated on `type` to match
-/// the Rust `#[serde(tag = "type", rename_all = "snake_case")]`
-/// encoding in `crates/gateway/src/output_guardrails.rs`. Today only
-/// `max_length` lands; other variants stay TODO in the roadmap.
-export type OutputGuardrail = { type: 'max_length'; max_chars: number };
-
-/// Default for the inline add form. 4096 covers most chat-completion
-/// caps without surprising the admin who immediately saves.
-const DEFAULT_MAX_CHARS = 4096;
-/// Mirrors the server-side ceiling in
-/// `crates/gateway/src/output_guardrails.rs::MAX_LENGTH_CAP_CEILING`.
-const MAX_CHARS_CEILING = 1_000_000;
-
-export type RoutingStrategy = 'weighted' | 'latency' | 'health' | 'latency_health';
-export type AffinityMode = 'none' | 'provider' | 'route';
-
-/// All four strategies — used by the global Settings page picker. The
-/// per-model UI splits this into "manual = weighted" vs "auto = one of
-/// the other three picked via a sub-picker".
-export const ROUTING_STRATEGIES: RoutingStrategy[] = [
-  'weighted',
-  'latency',
-  'health',
-  'latency_health',
-];
-
-/// Auto-mode targets shown in the per-model sub-picker. Order = display
-/// order. `latency_health` first because it's the global default.
-export const AUTO_TARGETS: RoutingStrategy[] = ['latency_health', 'latency', 'health'];
-
-export const AFFINITY_MODES: AffinityMode[] = ['none', 'provider', 'route'];
-
-export type BreakerState = 'closed' | 'open' | 'half_open';
-
-export interface RouteHealth {
-  state: BreakerState;
-  total: number;
-  errors: number;
-  error_pct: number;
-  ewma_latency_ms?: number | null;
-  /// Cumulative all-time request count for this route. Outlives the
-  /// rolling window — operators tuning weights use it to tell apart
-  /// "no traffic yet" from "quiet right now".
-  lifetime_requests: number;
-}
-
-export interface RouteHealthEntry {
-  route_id: string;
-  provider_id: string;
-  provider_name: string;
-  upstream_model: string;
-  weight: number;
-  enabled: boolean;
-  health: RouteHealth;
-}
-
-type ModelStatus = 'active' | 'disabled' | 'unrouted';
-
-function modelStatus(m: ModelRow): ModelStatus {
-  if (m.route_count === 0) return 'unrouted';
-  if (!m.enabled || m.enabled_route_count === 0) return 'disabled';
-  return 'active';
-}
-
-interface PlatformPricing {
-  input_price_per_token: string;
-  output_price_per_token: string;
-  currency: string;
-}
-
-interface RouteRow {
-  id: string;
-  model_id: string;
-  provider_id: string;
-  provider_name: string;
-  upstream_model: string;
-  weight: number;
-  enabled: boolean;
-  /// Optional human-readable identifier shown in the route table
-  /// (e.g. "EU-primary"). Null when admin hasn't set one.
-  label?: string | null;
-  /// Free-form admin note. Surfaced only in the edit dialog.
-  notes?: string | null;
-  rpm_cap?: number | null;
-  tpm_cap?: number | null;
-}
-
-export interface RouteHistoryBucket {
-  ts: number;
-  p50_ms: number | null;
-  p95_ms: number | null;
-  requests: number;
-  errors: number;
-}
-
-export interface RouteHistoryResponse {
-  buckets: RouteHistoryBucket[];
-}
+import {
+  AFFINITY_MODES,
+  AUTO_TARGETS,
+  MAX_CHARS_CEILING,
+  ROUTING_STRATEGIES,
+  emptyModelForm,
+  emptyRouteForm,
+  modelStatus,
+  parseGuardrails,
+  type AffinityMode,
+  type BreakerState,
+  type ModelFormState,
+  type ModelRow,
+  type ModelStatus,
+  type OutputGuardrail,
+  type PlatformPricing,
+  type RouteFormState,
+  type RouteHealth,
+  type RouteHealthEntry,
+  type RouteHistoryBucket,
+  type RouteHistoryResponse,
+  type RouteRow,
+  type RoutingStrategy,
+} from './types';
+import { ModelRowCell } from './ModelRowCell';
+import { CostPreview } from './CostPreview';
+import { OutputGuardrailsCard } from './OutputGuardrailsCard';
+// Re-export the constants/types that other routes import from
+// `'./models'` (e.g. RoutingModeSection consumes AUTO_TARGETS +
+// RoutingStrategy). They live in `./models/types` now, but the
+// public surface stays here so call sites don't have to update.
+export {
+  AFFINITY_MODES,
+  AUTO_TARGETS,
+  ROUTING_STRATEGIES,
+};
+export type {
+  AffinityMode,
+  BreakerState,
+  ModelRow,
+  OutputGuardrail,
+  RouteHealth,
+  RouteHealthEntry,
+  RouteHistoryBucket,
+  RouteHistoryResponse,
+  RoutingStrategy,
+};
 
 // `Provider` reused from provider-types so models.tsx and providers.tsx
 // can't drift apart. We previously declared a narrow local interface
 // with only id/name/display_name/provider_type which silently ignored
 // later additions to the canonical shape (e.g. region, config_json).
-import type { Provider } from './provider-types';
-
-interface ModelFormState {
-  model_id: string;
-  display_name: string;
-  input_weight: string;
-  output_weight: string;
-  /// Empty string = inherit global default. Form serializes that
-  /// to `null` on submit so the backend stores the override as NULL.
-  routing_strategy: '' | RoutingStrategy;
-  affinity_mode: '' | AffinityMode;
-  affinity_ttl_secs: string;
-  /// Per-model output guardrails. Replaced wholesale on submit
-  /// (PATCH array semantics on the server). Empty = no guardrails.
-  output_guardrails: OutputGuardrail[];
-}
-
-interface RouteFormState {
-  provider_id: string;
-  upstream_model: string;
-  enabled: boolean;
-  /// Optional human-readable identifier — surfaced in the route table.
-  label: string;
-  /// Free-form admin note. Empty = none.
-  notes: string;
-  /// Empty string ⇒ unlimited (NULL).
-  rpm_cap: string;
-  tpm_cap: string;
-}
-
-const emptyModelForm: ModelFormState = {
-  model_id: '',
-  display_name: '',
-  input_weight: '1.0',
-  output_weight: '1.0',
-  routing_strategy: '',
-  affinity_mode: '',
-  affinity_ttl_secs: '',
-  output_guardrails: [],
-};
-
-const emptyRouteForm: RouteFormState = {
-  provider_id: '',
-  upstream_model: '',
-  enabled: true,
-  label: '',
-  notes: '',
-  rpm_cap: '',
-  tpm_cap: '',
-};
+import type { Provider } from '../provider-types';
 
 /* ---------- component ---------- */
 
@@ -1201,7 +1052,7 @@ export function ModelsPage() {
               </TableHeader>
               <TableBody>
                 {models.map((m) => (
-                  <ModelRow
+                  <ModelRowCell
                     key={m.id}
                     model={m}
                     selected={selectedIds.has(m.id)}
@@ -2186,267 +2037,3 @@ export function ModelsPage() {
     </div>
   );
 }
-
-/* ---------- compact main-table row ---------- */
-
-function ModelRow({
-  model,
-  selected,
-  onToggleSelect,
-  onOpen,
-  onDelete,
-}: {
-  model: ModelRow;
-  selected: boolean;
-  onToggleSelect: () => void;
-  onOpen: () => void;
-  onDelete: () => void;
-}) {
-  const { t } = useTranslation();
-  const status = modelStatus(model);
-  return (
-    <TableRow
-      className="cursor-pointer hover:bg-muted/30"
-      data-state={selected ? 'selected' : undefined}
-      onClick={(e) => {
-        const target = e.target as HTMLElement;
-        // Don't open the drawer when the user is interacting with row
-        // controls (action buttons or the select checkbox).
-        if (target.closest('button')) return;
-        if (target.closest('[role="checkbox"]')) return;
-        onOpen();
-      }}
-    >
-      <TableCell
-        className="w-10"
-        onClick={(e) => {
-          // Click anywhere in the cell toggles selection — gives a
-          // generous hit target without making the whole row a no-op
-          // for the drawer.
-          e.stopPropagation();
-          onToggleSelect();
-        }}
-      >
-        <Checkbox
-          checked={selected}
-          onCheckedChange={onToggleSelect}
-          aria-label={t('models.selectAll')}
-        />
-      </TableCell>
-      <TableCell className="font-mono text-xs max-w-[260px] truncate" title={model.model_id}>
-        {model.model_id}
-      </TableCell>
-      <TableCell className="text-sm">{model.display_name}</TableCell>
-      <TableCell className="text-center">
-        {status === 'active' ? (
-          <Badge variant="default">{t('models.status.active')}</Badge>
-        ) : status === 'disabled' ? (
-          <Badge
-            variant="outline"
-            className="border-amber-500/60 text-amber-600 dark:text-amber-400"
-          >
-            {t('models.status.disabled')}
-          </Badge>
-        ) : (
-          <Badge variant="outline" className="text-muted-foreground">
-            {t('models.status.unrouted')}
-          </Badge>
-        )}
-      </TableCell>
-      <TableCell className="text-right font-mono text-xs tabular-nums">
-        {model.enabled_route_count}
-        {model.route_count > model.enabled_route_count && (
-          <span className="text-muted-foreground">/{model.route_count}</span>
-        )}
-      </TableCell>
-      <TableCell className="max-w-[260px]">
-        {model.providers.length > 0 ? (
-          <div className="flex flex-wrap gap-1">
-            {model.providers.slice(0, 3).map((name, i) => (
-              <Badge key={i} variant="secondary" className="text-[10px] font-normal">
-                {name}
-              </Badge>
-            ))}
-            {model.providers.length > 3 && (
-              <span className="text-[10px] text-muted-foreground">
-                +{model.providers.length - 3}
-              </span>
-            )}
-          </div>
-        ) : (
-          <span className="text-xs italic text-muted-foreground">—</span>
-        )}
-      </TableCell>
-      <TableCell className="text-right whitespace-nowrap">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={onOpen}
-          aria-label={t('common.edit')}
-          disabled={!hasPermission('models:write')}
-        >
-          <Pencil className="h-4 w-4" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={onDelete}
-          aria-label={t('common.delete')}
-          disabled={!hasPermission('models:write')}
-        >
-          <Trash2 className="h-4 w-4 text-destructive" />
-        </Button>
-      </TableCell>
-    </TableRow>
-  );
-}
-
-/* ---------- cost preview ---------- */
-
-/// Inline helper under the weight input showing `baseline × weight = $X/M tokens`.
-/// Baseline comes from the platform_pricing singleton; when it's unavailable
-/// (e.g. no settings:read permission) the preview just renders nothing.
-function CostPreview({
-  weight,
-  basePerToken,
-  currency,
-  side,
-}: {
-  weight: string;
-  basePerToken: string | undefined;
-  currency: string | undefined;
-  side: 'input' | 'output';
-}) {
-  const { t } = useTranslation();
-  if (!basePerToken) return null;
-  const w = Number(weight);
-  const base = Number(basePerToken);
-  if (!Number.isFinite(w) || !Number.isFinite(base) || w <= 0 || base < 0) return null;
-  const perMillion = w * base * 1_000_000;
-  return (
-    <p className="text-[11px] text-muted-foreground font-mono">
-      {t(`models.costPreview.${side}` as 'models.costPreview.input', {
-        amount: perMillion.toFixed(4),
-        currency: currency ?? 'USD',
-      })}
-    </p>
-  );
-}
-
-/* ---------- output guardrails ---------- */
-
-/// Per-model output guardrails sub-form rendered inside the model
-/// edit drawer. Lists current rules with a remove button each, and
-/// exposes an inline "+ Add max-length guardrail" affordance. Today
-/// only `max_length` is wired — other variants stay TODO in the
-/// gateway crate's roadmap docstring.
-function OutputGuardrailsCard({
-  rules,
-  onChange,
-}: {
-  rules: OutputGuardrail[];
-  onChange: (next: OutputGuardrail[]) => void;
-}) {
-  const { t } = useTranslation();
-  const [adding, setAdding] = useState(false);
-  const [draftMaxChars, setDraftMaxChars] = useState<string>(String(DEFAULT_MAX_CHARS));
-  const [draftError, setDraftError] = useState('');
-
-  const removeAt = (i: number) => {
-    const next = rules.slice();
-    next.splice(i, 1);
-    onChange(next);
-  };
-
-  const startAdd = () => {
-    setDraftMaxChars(String(DEFAULT_MAX_CHARS));
-    setDraftError('');
-    setAdding(true);
-  };
-
-  const cancelAdd = () => {
-    setAdding(false);
-    setDraftError('');
-  };
-
-  const commitAdd = () => {
-    const n = Number(draftMaxChars);
-    if (!Number.isInteger(n) || n < 1 || n > MAX_CHARS_CEILING) {
-      setDraftError(t('models.outputGuardrails.maxLengthRange', { max: MAX_CHARS_CEILING }));
-      return;
-    }
-    onChange([...rules, { type: 'max_length', max_chars: n }]);
-    setAdding(false);
-    setDraftError('');
-  };
-
-  return (
-    <div className="space-y-2 border-t pt-4">
-      <Label className="text-sm font-medium">{t('models.outputGuardrails.title')}</Label>
-      <p className="text-xs text-muted-foreground">
-        {t('models.outputGuardrails.description')}
-      </p>
-      {rules.length === 0 && !adding && (
-        <p className="text-xs italic text-muted-foreground">
-          {t('models.outputGuardrails.noRules')}
-        </p>
-      )}
-      {rules.length > 0 && (
-        <ul className="space-y-1">
-          {rules.map((rule, i) => (
-            <li
-              key={i}
-              className="flex items-center justify-between gap-2 rounded border px-2 py-1 text-xs"
-            >
-              <span className="font-mono">
-                {t('models.outputGuardrails.maxLengthLabel', { count: rule.max_chars })}
-              </span>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                onClick={() => removeAt(i)}
-                aria-label={t('common.remove')}
-              >
-                <Trash2 className="h-3.5 w-3.5 text-destructive" />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
-      {adding ? (
-        <div className="space-y-2 rounded border p-2">
-          <Label htmlFor="guardrail_max_chars" className="text-xs">
-            {t('models.outputGuardrails.maxLengthLabelShort')}
-          </Label>
-          <Input
-            id="guardrail_max_chars"
-            value={draftMaxChars}
-            onChange={(e) => setDraftMaxChars(e.target.value)}
-            inputMode="numeric"
-            min={1}
-            max={MAX_CHARS_CEILING}
-            type="number"
-          />
-          {draftError && (
-            <p className="text-xs text-destructive">{draftError}</p>
-          )}
-          <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" size="sm" onClick={cancelAdd}>
-              {t('common.cancel')}
-            </Button>
-            <Button type="button" size="sm" onClick={commitAdd}>
-              {t('common.add')}
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <Button type="button" variant="outline" size="sm" onClick={startAdd}>
-          <Plus className="mr-1 h-3.5 w-3.5" />
-          {t('models.outputGuardrails.addMaxLength')}
-        </Button>
-      )}
-    </div>
-  );
-}
-
