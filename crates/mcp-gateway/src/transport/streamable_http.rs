@@ -183,7 +183,16 @@ pub async fn handle_post(
             {
                 resp_headers.insert(MCP_SESSION_HEADER, val);
             }
-            let mut sse_resp = Sse::new(payload.body).into_response();
+            // `keep_alive` emits a `:` comment line every interval
+            // (15 s by default). Without it, a long-running tool that
+            // stays silent between progress events trips intermediate
+            // proxy idle timeouts (most defaults sit between 30 and 60
+            // seconds) and the client sees a half-closed connection
+            // even though both ends are still alive. The comment line
+            // is invisible to the JSON-RPC parser on the receiver.
+            let mut sse_resp = Sse::new(payload.body)
+                .keep_alive(axum::response::sse::KeepAlive::default())
+                .into_response();
             sse_resp.headers_mut().extend(resp_headers);
             sse_resp
         }
