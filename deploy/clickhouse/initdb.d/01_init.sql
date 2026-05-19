@@ -202,6 +202,17 @@ ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS response_body_bytes Nullable(U
 -- 'captured' | 'truncated' | 'disabled' | 'from_cache' | 'error'
 ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS body_capture_status LowCardinality(Nullable(String)) AFTER response_body_bytes;
 
+-- Body columns get a SHORTER TTL than the row-level retention. The
+-- Rust side (`apply_body_column_ttls` in handlers/admin.rs) re-issues
+-- these at startup against the operator-configurable
+-- `audit.body_retention_days` setting (default 30); this seed-default
+-- exists so a CH bootstrap that happens before the server ever runs
+-- still has the right shape. When the column TTL fires, the value is
+-- reset to NULL while the row stays around for the full table TTL —
+-- so metadata queries remain whole even after bodies have aged out.
+ALTER TABLE gateway_logs MODIFY COLUMN request_body  TTL toDateTime(created_at) + INTERVAL 30 DAY;
+ALTER TABLE gateway_logs MODIFY COLUMN response_body TTL toDateTime(created_at) + INTERVAL 30 DAY;
+
 CREATE TABLE IF NOT EXISTS mcp_logs (
     id               String,
     user_id          LowCardinality(Nullable(String)),
@@ -251,6 +262,10 @@ ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS tool_result        Nullable(String
 ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS arguments_bytes    Nullable(UInt32) AFTER tool_result;
 ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS result_bytes       Nullable(UInt32) AFTER arguments_bytes;
 ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS body_capture_status LowCardinality(Nullable(String)) AFTER result_bytes;
+
+-- Same body-column TTL story as gateway_logs above; see comment there.
+ALTER TABLE mcp_logs MODIFY COLUMN tool_arguments TTL toDateTime(created_at) + INTERVAL 30 DAY;
+ALTER TABLE mcp_logs MODIFY COLUMN tool_result    TTL toDateTime(created_at) + INTERVAL 30 DAY;
 
 -- platform_logs used to live here as a separate table for management
 -- operations. Its schema was a strict subset of audit_logs (no

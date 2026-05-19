@@ -271,6 +271,16 @@ dc_getters_i64! {
     data_retention_days_mcp,          "data.retention_days_mcp",               90;
     data_retention_days_access,       "data.retention_days_access",            30;
     data_retention_days_app,          "data.retention_days_app",               30;
+    // Body retention is INDEPENDENT of the row-level retention above.
+    // Tables keep their metadata rows for retention_days_{gateway,mcp}
+    // (typically 90+ days for audit / compliance lookback) but the
+    // body columns are wiped at this shorter horizon — heavy payloads
+    // dominate the cold-storage footprint and most operational replay
+    // needs sit inside a 30-day window. When this setting is < the
+    // table-level retention, queries for older rows return NULL bodies
+    // with a `body_capture_status = "expired"`-style absence; the
+    // frontend renders "no body captured" so auditors aren't confused.
+    audit_body_retention_days,        "audit.body_retention_days",             30;
     client_ip_xff_depth,              "security.client_ip_xff_depth",          1;
 }
 

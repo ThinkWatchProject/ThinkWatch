@@ -1947,6 +1947,17 @@ async fn apply_clickhouse_ttls(state: &AppState, settings: &HashMap<String, serd
         }
         apply_single_ttl(ch, table, days).await;
     }
+    // Body-column TTL is administered through a separate setting that
+    // shortens the lifetime of the heavy payload columns without
+    // touching the row TTL. Only apply on the PATCH path when the
+    // operator actually included it in the request, so unrelated edits
+    // (e.g. a single bump to access-log retention) don't churn the
+    // body-column metadata.
+    if let Some(value) = settings.get("audit.body_retention_days")
+        && let Some(days) = value.as_i64()
+    {
+        apply_body_column_ttls(ch, days).await;
+    }
 }
 
 /// Apply current persisted retention settings to all ClickHouse log tables.
@@ -1969,6 +1980,53 @@ pub async fn reconcile_clickhouse_ttls(state: &AppState) {
             continue;
         }
         apply_single_ttl(ch, table, days).await;
+    }
+    apply_body_column_ttls(ch, dc.audit_body_retention_days().await).await;
+}
+
+/// `(table, column)` pairs that hold captured request/response bodies and
+/// therefore deserve their own (shorter) TTL — auditors typically need
+/// recent replay, but holding terabytes of week-old prompts wastes
+/// storage. The byte-count + status columns are tiny and stay on the
+/// row's normal TTL.
+const BODY_COLUMNS: &[(&str, &str)] = &[
+    ("gateway_logs", "request_body"),
+    ("gateway_logs", "response_body"),
+    ("mcp_logs", "tool_arguments"),
+    ("mcp_logs", "tool_result"),
+];
+
+/// Issue per-column `ALTER TABLE ... MODIFY COLUMN <col> TTL ...` against
+/// each body column. Column-level TTL is independent of the row TTL: when
+/// it expires, ClickHouse merges the column to its default (NULL for our
+/// Nullable(String) columns) while leaving the row in place until the
+/// table-level TTL kicks in. Failures are logged but not surfaced —
+/// startup races and intermittent CH availability shouldn't prevent the
+/// server from coming up.
+async fn apply_body_column_ttls(ch: &clickhouse::Client, days: i64) {
+    if !(1..=MAX_RETENTION_DAYS).contains(&days) {
+        tracing::error!(days, "refusing body TTL update: days out of range");
+        return;
+    }
+    for (table, column) in BODY_COLUMNS {
+        if !VALID_LOG_TABLES.contains(table) {
+            // Guard against future drift even though the const is
+            // hand-curated — if someone adds a body column on an
+            // unaudited table, refuse to ALTER it rather than letting
+            // a typo through.
+            tracing::error!(table, "body column points at non-whitelisted table");
+            continue;
+        }
+        let sql = format!(
+            "ALTER TABLE {table} MODIFY COLUMN {column} \
+             TTL toDateTime(created_at) + INTERVAL {days} DAY"
+        );
+        match ch.query(&sql).execute().await {
+            Ok(()) => tracing::info!(table, column, days, "ClickHouse body-column TTL updated"),
+            Err(e) => {
+                tracing::error!(table, column, days, "Failed to update body-column TTL: {e}")
+            }
+        }
     }
 }
 
