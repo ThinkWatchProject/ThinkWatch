@@ -1220,14 +1220,8 @@ impl McpProxy {
                             )
                         }
                     };
-                    if response.error.is_some()
-                        && matches!(response.error.as_ref().map(|e| e.code), Some(c)
-                            if c == INTERNAL_ERROR || (-32099..=-32000).contains(&c))
-                    {
-                        self.circuit_breakers.record_failure(&server_name).await;
-                    } else {
-                        self.circuit_breakers.record_success(&server_name).await;
-                    }
+                    self.record_breaker_for_response(&server_name, &response)
+                        .await;
                     (response, None)
                 }
                 Err(e) => {
@@ -1269,44 +1263,7 @@ impl McpProxy {
                             .await;
                     }
 
-                    // JSON-RPC error responses count toward the breaker
-                    // ONLY when the upstream returned a server-side failure
-                    // code. The previous "any error trips the breaker"
-                    // rule punished every user on a shared server for one
-                    // user's bad input — e.g. five INVALID_PARAMS or
-                    // METHOD_NOT_FOUND replies from a single misbehaving
-                    // client opened the breaker and denied every other
-                    // user for the full cooldown.
-                    //
-                    // JSON-RPC 2.0 error code ranges (server-side):
-                    //   -32603             — Internal error
-                    //   -32000 .. -32099   — Implementation-defined server errors
-                    // Everything else (-32600 invalid request, -32601 method
-                    // not found, -32602 invalid params, -32700 parse error,
-                    // and our own custom application codes like
-                    // NEEDS_USER_CREDENTIALS = -32050) is caller-attributable
-                    // and must NOT count toward the breaker.
-                    //
-                    // The `record_cb_with_kind` call inside the breaker fires
-                    // the global OPEN_LISTENER installed by the server, which
-                    // emits `provider.circuit_open` audit events uniformly
-                    // for AI and MCP backends — no per-call emission here.
-                    let is_server_failure = resp
-                        .error
-                        .as_ref()
-                        .map(|err| {
-                            let c = err.code;
-                            c == INTERNAL_ERROR || (-32099..=-32000).contains(&c)
-                        })
-                        .unwrap_or(false);
-                    if is_server_failure {
-                        self.circuit_breakers.record_failure(&server_name).await;
-                    } else {
-                        // Success OR caller-side error — both indicate the
-                        // upstream is reachable and responsive, so credit
-                        // the half-open probe / reset the failure counter.
-                        self.circuit_breakers.record_success(&server_name).await;
-                    }
+                    self.record_breaker_for_response(&server_name, &resp).await;
                     (resp, stream_body)
                 }
                 Err(e) => {
@@ -1383,6 +1340,37 @@ impl McpProxy {
             HandleOutcome::Streaming(build_replay_payload(response, stream_audit_body.as_deref()))
         } else {
             HandleOutcome::Buffered(response)
+        }
+    }
+
+    /// Update the per-server circuit breaker based on a completed
+    /// JSON-RPC response.
+    ///
+    /// Counts as a failure only when the upstream returned a
+    /// server-side error code:
+    ///   - `-32603` (Internal error)
+    ///   - `-32000` .. `-32099` (implementation-defined server errors)
+    ///
+    /// Everything else — success, parse error, invalid params,
+    /// method not found, our own custom application codes — credits
+    /// the breaker, since the upstream proved reachable AND the
+    /// fault is caller-attributable, not provider-attributable.
+    /// One open breaker per misbehaving client used to deny every
+    /// other user on the same shared server for the full cooldown;
+    /// this gate fixes that.
+    async fn record_breaker_for_response(&self, server_name: &str, response: &JsonRpcResponse) {
+        let is_server_failure = response
+            .error
+            .as_ref()
+            .map(|err| {
+                let c = err.code;
+                c == INTERNAL_ERROR || (-32099..=-32000).contains(&c)
+            })
+            .unwrap_or(false);
+        if is_server_failure {
+            self.circuit_breakers.record_failure(server_name).await;
+        } else {
+            self.circuit_breakers.record_success(server_name).await;
         }
     }
 
@@ -1650,25 +1638,9 @@ impl McpProxy {
                         .await;
                 }
                 StreamOutcome::Natural | StreamOutcome::ClientCancelled => {
-                    let is_server_failure = response
-                        .error
-                        .as_ref()
-                        .map(|err| {
-                            let c = err.code;
-                            c == INTERNAL_ERROR || (-32099..=-32000).contains(&c)
-                        })
-                        .unwrap_or(false);
-                    if is_server_failure {
-                        proxy
-                            .circuit_breakers
-                            .record_failure(&server_name_done)
-                            .await;
-                    } else {
-                        proxy
-                            .circuit_breakers
-                            .record_success(&server_name_done)
-                            .await;
-                    }
+                    proxy
+                        .record_breaker_for_response(&server_name_done, &response)
+                        .await;
                 }
             }
 
