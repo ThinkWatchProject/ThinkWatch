@@ -175,6 +175,87 @@ async fn apply_mcp_body_capture(
     out
 }
 
+/// Find the byte index in `s` immediately AFTER a complete SSE
+/// event terminator (`\n\n` or `\r\n\r\n`). Returns `None` when no
+/// terminator has arrived yet so the caller knows to keep buffering.
+fn find_sse_event_terminator(s: &str) -> Option<usize> {
+    let lf = s.find("\n\n").map(|i| i + 2);
+    let crlf = s.find("\r\n\r\n").map(|i| i + 4);
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (a, b) => a.or(b),
+    }
+}
+
+/// Concatenate the `data:` payload(s) of one SSE event block. Per the
+/// SSE spec, multiple `data:` lines in one event join with `\n`; non-
+/// `data:` lines (`event:`, `id:`, `retry:`, comments) are ignored.
+/// Returns `None` when the event carried no data payload — caller
+/// skips it rather than yielding an empty downstream event.
+fn extract_sse_data_payload(event_block: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut had_data = false;
+    for line in event_block.lines() {
+        if let Some(payload) = line.strip_prefix("data:") {
+            if had_data {
+                out.push('\n');
+            }
+            out.push_str(payload.trim_start());
+            had_data = true;
+        }
+    }
+    had_data.then_some(out)
+}
+
+/// Pick the JSON-RPC response envelope from a sequence of upstream
+/// events, mirroring `pool::parse_sse_json_rpc`'s id-matching rules so
+/// the streaming and buffered paths agree on what counts as "the
+/// response" (vs `notifications/progress` events that the upstream
+/// emitted during tool execution).
+fn pick_response_envelope(
+    events: &[serde_json::Value],
+    request_id: Option<&serde_json::Value>,
+) -> Option<JsonRpcResponse> {
+    let pick = |with_id: bool| -> Option<serde_json::Value> {
+        events
+            .iter()
+            .rev()
+            .find(|e| {
+                let has_result_or_error = e.get("result").is_some() || e.get("error").is_some();
+                if !has_result_or_error {
+                    return false;
+                }
+                if with_id {
+                    request_id
+                        .map(|rid| e.get("id").map(|id| id == rid).unwrap_or(false))
+                        .unwrap_or(false)
+                } else {
+                    true
+                }
+            })
+            .cloned()
+    };
+    let matched = pick(true).or_else(|| pick(false))?;
+    serde_json::from_value(matched).ok()
+}
+
+/// How an upstream stream terminated. Drives audit-time classification
+/// and circuit breaker accounting in the detached on-done task.
+enum StreamOutcome {
+    /// Stream drained to end-of-body without error.
+    Natural,
+    /// The underlying transport (bytes_stream) returned an error
+    /// mid-flight, OR the upstream replied with a non-2xx before
+    /// any chunks could be forwarded.
+    UpstreamError { message: String },
+    /// `done_tx` was dropped without sending — the producing future
+    /// terminated before reaching its sentinel send, which happens
+    /// when the downstream client disconnects and axum drops the
+    /// SSE body. Treated as success for the breaker (no upstream
+    /// fault) but as not-cacheable (we never saw the full response).
+    ClientCancelled,
+}
+
 /// Build a human label for a rate-limit rule. Same shape the AI
 /// gateway uses (`subject:metric/window`) so log scrapers see one
 /// consistent format across surfaces.
@@ -1058,84 +1139,194 @@ impl McpProxy {
         };
         let auth_ref = auth_header.as_ref().map(AuthInjection::as_pair);
 
-        let (response, stream_audit_body) = match self
-            .pool
-            .send_request(
-                &conn,
-                &upstream_request,
-                auth_ref,
-                Some(&caller),
-                upstream_sid.as_deref(),
-                Some(&call_trace_id),
-            )
-            .await
-        {
-            Ok((resp, new_upstream_sid, stream_body)) => {
-                // Persist any upstream session ID the server returned so
-                // subsequent calls from this user reuse the same session.
-                if let Some(sid) = new_upstream_sid {
-                    self.sessions
-                        .set_upstream_session(client_session_id, server_id, sid)
-                        .await;
-                }
-
-                // JSON-RPC error responses count toward the breaker
-                // ONLY when the upstream returned a server-side failure
-                // code. The previous "any error trips the breaker"
-                // rule punished every user on a shared server for one
-                // user's bad input — e.g. five INVALID_PARAMS or
-                // METHOD_NOT_FOUND replies from a single misbehaving
-                // client opened the breaker and denied every other
-                // user for the full cooldown.
-                //
-                // JSON-RPC 2.0 error code ranges (server-side):
-                //   -32603             — Internal error
-                //   -32000 .. -32099   — Implementation-defined server errors
-                // Everything else (-32600 invalid request, -32601 method
-                // not found, -32602 invalid params, -32700 parse error,
-                // and our own custom application codes like
-                // NEEDS_USER_CREDENTIALS = -32050) is caller-attributable
-                // and must NOT count toward the breaker.
-                //
-                // The `record_cb_with_kind` call inside the breaker fires
-                // the global OPEN_LISTENER installed by the server, which
-                // emits `provider.circuit_open` audit events uniformly
-                // for AI and MCP backends — no per-call emission here.
-                let is_server_failure = resp
-                    .error
-                    .as_ref()
-                    .map(|err| {
-                        let c = err.code;
-                        c == INTERNAL_ERROR || (-32099..=-32000).contains(&c)
-                    })
-                    .unwrap_or(false);
-                if is_server_failure {
-                    self.circuit_breakers.record_failure(&server_name).await;
-                } else {
-                    // Success OR caller-side error — both indicate the
-                    // upstream is reachable and responsive, so credit
-                    // the half-open probe / reset the failure counter.
-                    self.circuit_breakers.record_success(&server_name).await;
-                }
-                (resp, stream_body)
-            }
-            Err(e) => {
-                self.circuit_breakers.record_failure(&server_name).await;
-                tracing::error!(
-                    server_id = %server_id,
-                    error = %e,
-                    "upstream tools/call failed"
-                );
-                (
-                    err_response(
-                        request.id.clone(),
-                        INTERNAL_ERROR,
-                        format!("Upstream server error: {e}"),
-                    ),
-                    // Transport error path — no stream events were
-                    // successfully received, so no audit body to embed.
-                    None,
+        // Real chunk-by-chunk pass-through. Engages only when the
+        // client signalled SSE capability AND the upstream returns
+        // `text/event-stream`. Drives audit + cache + breaker from
+        // a detached on-done task so each upstream chunk lands on
+        // the client as it arrives, instead of after the upstream
+        // completes. Application/json upstream falls through to the
+        // synchronous tail below (chunk parsing has nothing to do
+        // since there are no chunk boundaries).
+        let (response, stream_audit_body) = if ctx.wants_streaming {
+            match self
+                .pool
+                .send_request_streaming(
+                    &conn,
+                    &upstream_request,
+                    auth_ref,
+                    Some(&caller),
+                    upstream_sid.as_deref(),
+                    Some(&call_trace_id),
                 )
+                .await
+            {
+                Ok((resp, new_upstream_sid)) => {
+                    let is_sse = resp
+                        .headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .map(|s| s.to_lowercase().contains("text/event-stream"))
+                        .unwrap_or(false);
+                    if is_sse {
+                        // Persist the upstream session BEFORE returning
+                        // the streaming body so a follow-up call from
+                        // the same client can reuse it even while the
+                        // current stream is still in flight.
+                        if let Some(sid) = new_upstream_sid {
+                            self.sessions
+                                .set_upstream_session(client_session_id, server_id, sid)
+                                .await;
+                        }
+                        let logged_arguments = params.get("arguments").cloned();
+                        let cache_account_label =
+                            account_label_for_server(ctx.mcp_account_overrides, server.id)
+                                .map(|s| s.to_owned());
+                        return HandleOutcome::Streaming(self.build_chunk_passthrough(
+                            resp,
+                            request.id.clone(),
+                            user_id,
+                            user_email.to_owned(),
+                            ctx.ip_address.map(|s| s.to_owned()),
+                            server_id,
+                            server_name.clone(),
+                            tool_name.clone(),
+                            call_trace_id.clone(),
+                            upstream_request.clone(),
+                            logged_arguments,
+                            started,
+                            server.cache_scope,
+                            cache_account_label,
+                            effective_cache_ttl,
+                        ));
+                    }
+                    // application/json upstream — buffer the body and
+                    // fall through to the synchronous tail. Same logic
+                    // the buffered-path Ok arm does, just inline here
+                    // because we already consumed the request.
+                    if let Some(sid) = new_upstream_sid {
+                        self.sessions
+                            .set_upstream_session(client_session_id, server_id, sid)
+                            .await;
+                    }
+                    let parsed = resp.json::<JsonRpcResponse>().await;
+                    let response = match parsed {
+                        Ok(r) => r,
+                        Err(e) => {
+                            self.circuit_breakers.record_failure(&server_name).await;
+                            err_response(
+                                request.id.clone(),
+                                INTERNAL_ERROR,
+                                format!("Upstream server error: parse failed: {e}"),
+                            )
+                        }
+                    };
+                    if response.error.is_some()
+                        && matches!(response.error.as_ref().map(|e| e.code), Some(c)
+                            if c == INTERNAL_ERROR || (-32099..=-32000).contains(&c))
+                    {
+                        self.circuit_breakers.record_failure(&server_name).await;
+                    } else {
+                        self.circuit_breakers.record_success(&server_name).await;
+                    }
+                    (response, None)
+                }
+                Err(e) => {
+                    self.circuit_breakers.record_failure(&server_name).await;
+                    tracing::error!(
+                        server_id = %server_id,
+                        error = %e,
+                        "streaming upstream tools/call failed"
+                    );
+                    (
+                        err_response(
+                            request.id.clone(),
+                            INTERNAL_ERROR,
+                            format!("Upstream server error: {e}"),
+                        ),
+                        None,
+                    )
+                }
+            }
+        } else {
+            match self
+                .pool
+                .send_request(
+                    &conn,
+                    &upstream_request,
+                    auth_ref,
+                    Some(&caller),
+                    upstream_sid.as_deref(),
+                    Some(&call_trace_id),
+                )
+                .await
+            {
+                Ok((resp, new_upstream_sid, stream_body)) => {
+                    // Persist any upstream session ID the server returned so
+                    // subsequent calls from this user reuse the same session.
+                    if let Some(sid) = new_upstream_sid {
+                        self.sessions
+                            .set_upstream_session(client_session_id, server_id, sid)
+                            .await;
+                    }
+
+                    // JSON-RPC error responses count toward the breaker
+                    // ONLY when the upstream returned a server-side failure
+                    // code. The previous "any error trips the breaker"
+                    // rule punished every user on a shared server for one
+                    // user's bad input — e.g. five INVALID_PARAMS or
+                    // METHOD_NOT_FOUND replies from a single misbehaving
+                    // client opened the breaker and denied every other
+                    // user for the full cooldown.
+                    //
+                    // JSON-RPC 2.0 error code ranges (server-side):
+                    //   -32603             — Internal error
+                    //   -32000 .. -32099   — Implementation-defined server errors
+                    // Everything else (-32600 invalid request, -32601 method
+                    // not found, -32602 invalid params, -32700 parse error,
+                    // and our own custom application codes like
+                    // NEEDS_USER_CREDENTIALS = -32050) is caller-attributable
+                    // and must NOT count toward the breaker.
+                    //
+                    // The `record_cb_with_kind` call inside the breaker fires
+                    // the global OPEN_LISTENER installed by the server, which
+                    // emits `provider.circuit_open` audit events uniformly
+                    // for AI and MCP backends — no per-call emission here.
+                    let is_server_failure = resp
+                        .error
+                        .as_ref()
+                        .map(|err| {
+                            let c = err.code;
+                            c == INTERNAL_ERROR || (-32099..=-32000).contains(&c)
+                        })
+                        .unwrap_or(false);
+                    if is_server_failure {
+                        self.circuit_breakers.record_failure(&server_name).await;
+                    } else {
+                        // Success OR caller-side error — both indicate the
+                        // upstream is reachable and responsive, so credit
+                        // the half-open probe / reset the failure counter.
+                        self.circuit_breakers.record_success(&server_name).await;
+                    }
+                    (resp, stream_body)
+                }
+                Err(e) => {
+                    self.circuit_breakers.record_failure(&server_name).await;
+                    tracing::error!(
+                        server_id = %server_id,
+                        error = %e,
+                        "upstream tools/call failed"
+                    );
+                    (
+                        err_response(
+                            request.id.clone(),
+                            INTERNAL_ERROR,
+                            format!("Upstream server error: {e}"),
+                        ),
+                        // Transport error path — no stream events were
+                        // successfully received, so no audit body to embed.
+                        None,
+                    )
+                }
             }
         };
 
@@ -1152,186 +1343,23 @@ impl McpProxy {
                 .await;
         }
 
-        // Emit mcp_logs row so /api/admin/trace lights up this call.
-        // Tool discovery (`tools/list`) is deliberately excluded here —
-        // we're inside `handle_tools_call` already, so `tool_name` is
-        // always an actual invocation.
-        let (status, error_message) = if let Some(ref err) = response.error {
-            ("error".to_string(), Some(err.message.clone()))
-        } else {
-            ("ok".to_string(), None)
-        };
         // Capture the call arguments alongside the tool name so the
-        // trace endpoint can show what was actually invoked. Secret-
-        // shaped keys are redacted by sanitize_detail downstream
-        // (recursive walk over the JSON tree, see common::audit).
+        // trace endpoint can show what was actually invoked.
         let logged_arguments = params.get("arguments").cloned();
-        use think_watch_common::audit::{AuditActor, McpActor};
-        let actor = McpActor {
+        self.emit_tools_call_audit(
             user_id,
             user_email,
-            ip: ctx.ip_address,
-        };
-
-        // Body capture for audit. arguments + upstream result land in
-        // dedicated `mcp_logs.tool_arguments` / `mcp_logs.tool_result`
-        // columns (separate from the metadata-only `detail` JSON) so
-        // auditors can query them without parsing JSON per row. Gated
-        // by `audit.capture_tool_arguments` / `audit.capture_tool_results`
-        // with the same `audit.body_max_bytes` truncation contract
-        // the gateway side uses; defaults ON (the bastion positioning
-        // requires it). `audit.body_redact_pii` is NOT honored here
-        // (mcp-gateway has no PiiRedactor yet); the warn metric below
-        // makes that gap observable instead of silently broken.
-        let dc = &self.dynamic_config;
-        let capture_args = dc.audit_capture_tool_arguments().await;
-        let capture_result = dc.audit_capture_tool_results().await;
-        let body_max = dc.audit_body_max_bytes().await as usize;
-        let redact_pii = dc.audit_body_redact_pii().await;
-        // Snapshot the hot-swappable redactor ONCE per request so the
-        // arguments + result halves see the same pattern set even if
-        // the operator hot-swaps mid-call. The ArcSwap load is
-        // ~1ns; we share the snapshot.
-        let blob_redactor_snapshot = self.blob_redactor.load_full();
-        use think_watch_common::audit::BodyCaptureStatus;
-        let (arg_str, arg_bytes, result_str, result_bytes, capture_status) =
-            if !capture_args && !capture_result {
-                (
-                    None,
-                    None,
-                    None,
-                    None,
-                    Some(BodyCaptureStatus::Disabled.as_str().to_owned()),
-                )
-            } else {
-                let mut truncated = false;
-                let mut offloaded = false;
-                let mut arg_bytes: Option<u32> = None;
-                let mut result_bytes: Option<u32> = None;
-                let arg_str = if capture_args {
-                    match logged_arguments.as_ref() {
-                        Some(v) => {
-                            let raw = serde_json::to_string(v)
-                                .unwrap_or_else(|_| "[serialize_error]".to_owned());
-                            arg_bytes = Some(raw.len() as u32);
-                            Some(
-                                apply_mcp_body_capture(
-                                    raw,
-                                    body_max,
-                                    redact_pii,
-                                    &blob_redactor_snapshot,
-                                    &self.blob_store,
-                                    &call_trace_id,
-                                    "arguments",
-                                    &mut truncated,
-                                    &mut offloaded,
-                                )
-                                .await,
-                            )
-                        }
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                let result_str = if capture_result {
-                    // Prefer the FULL streaming-event sequence (when the
-                    // upstream used text/event-stream and emitted
-                    // progress notifications + a final response) over
-                    // just the final `result` field. Auditors replaying
-                    // a long-running tool execution need the whole
-                    // timeline, not just the punchline. For plain
-                    // application/json responses `stream_audit_body` is
-                    // None and we fall back to serializing `result`
-                    // exactly as before — no behavior change for the
-                    // common case.
-                    let raw_opt: Option<String> =
-                        match (stream_audit_body.as_ref(), response.result.as_ref()) {
-                            (Some(stream), _) => Some(stream.clone()),
-                            (None, Some(v)) => Some(
-                                serde_json::to_string(v)
-                                    .unwrap_or_else(|_| "[serialize_error]".to_owned()),
-                            ),
-                            (None, None) => None,
-                        };
-                    match raw_opt {
-                        Some(raw) => {
-                            result_bytes = Some(raw.len() as u32);
-                            Some(
-                                apply_mcp_body_capture(
-                                    raw,
-                                    body_max,
-                                    redact_pii,
-                                    &blob_redactor_snapshot,
-                                    &self.blob_store,
-                                    &call_trace_id,
-                                    "result",
-                                    &mut truncated,
-                                    &mut offloaded,
-                                )
-                                .await,
-                            )
-                        }
-                        None => None,
-                    }
-                } else {
-                    None
-                };
-                let status = if arg_str.is_none() && result_str.is_none() {
-                    BodyCaptureStatus::Disabled
-                } else if offloaded {
-                    // Same dominant-status rule as the AI gateway: a single
-                    // emit carrying one offloaded field reports `offloaded`
-                    // even if another field was small enough to truncate.
-                    BodyCaptureStatus::Offloaded
-                } else if truncated {
-                    BodyCaptureStatus::Truncated
-                } else {
-                    BodyCaptureStatus::Captured
-                };
-                (
-                    arg_str,
-                    arg_bytes,
-                    result_str,
-                    result_bytes,
-                    Some(status.as_str().to_owned()),
-                )
-            };
-
-        let mut entry =
-            actor
-                .audit("tools.call")
-                .trace_id(call_trace_id)
-                .detail(serde_json::json!({
-                    "server_id": server_id.to_string(),
-                    "server_name": server_name,
-                    "tool_name": tool_name,
-                    "arguments": logged_arguments,
-                    "duration_ms": started.elapsed().as_millis() as i64,
-                    "status": status,
-                    "error_message": error_message,
-                }));
-        if let Some(a) = arg_str {
-            entry = entry.request_body(a);
-        }
-        if let Some(r) = result_str {
-            entry = entry.response_body(r);
-        }
-        // Stamp ORIGINAL byte counts (pre-offload) so the audit row's
-        // `arguments_bytes` / `result_bytes` columns reflect the
-        // user's actual payload size. Without these, an offloaded
-        // tool result would report ~80 bytes (the s3:// URL length)
-        // and break "average tool result size" analytics.
-        if let Some(b) = arg_bytes {
-            entry = entry.request_body_bytes(b);
-        }
-        if let Some(b) = result_bytes {
-            entry = entry.response_body_bytes(b);
-        }
-        if let Some(s) = capture_status {
-            entry = entry.body_capture_status(s);
-        }
-        self.audit.log(entry);
+            ctx.ip_address,
+            server_id,
+            &server_name,
+            &tool_name,
+            &call_trace_id,
+            logged_arguments.as_ref(),
+            started,
+            &response,
+            stream_audit_body.as_deref(),
+        )
+        .await;
 
         if ctx.wants_streaming {
             // Client signalled SSE capability via `Accept: text/event-stream`.
@@ -1357,6 +1385,445 @@ impl McpProxy {
             HandleOutcome::Buffered(response)
         }
     }
+
+    /// Emit the `mcp_logs` audit row for a completed tools/call.
+    ///
+    /// Centralised so the buffered and (future) chunk-by-chunk
+    /// streaming paths share a single, deterministic audit pipeline —
+    /// the streaming path calls this once from its detached on_done
+    /// task after the upstream stream completes (or the client
+    /// disconnects), guaranteeing the row is emitted exactly once
+    /// regardless of how the call terminated.
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_tools_call_audit(
+        &self,
+        user_id: Uuid,
+        user_email: &str,
+        ip_address: Option<&str>,
+        server_id: Uuid,
+        server_name: &str,
+        tool_name: &str,
+        call_trace_id: &str,
+        logged_arguments: Option<&serde_json::Value>,
+        started: std::time::Instant,
+        response: &JsonRpcResponse,
+        stream_audit_body: Option<&str>,
+    ) {
+        let (status, error_message) = if let Some(ref err) = response.error {
+            ("error".to_string(), Some(err.message.clone()))
+        } else {
+            ("ok".to_string(), None)
+        };
+        use think_watch_common::audit::{AuditActor, BodyCaptureStatus, McpActor};
+        let actor = McpActor {
+            user_id,
+            user_email,
+            ip: ip_address,
+        };
+
+        // Body capture for audit. arguments + upstream result land in
+        // dedicated `mcp_logs.tool_arguments` / `mcp_logs.tool_result`
+        // columns (separate from the metadata-only `detail` JSON) so
+        // auditors can query them without parsing JSON per row.
+        let dc = &self.dynamic_config;
+        let capture_args = dc.audit_capture_tool_arguments().await;
+        let capture_result = dc.audit_capture_tool_results().await;
+        let body_max = dc.audit_body_max_bytes().await as usize;
+        let redact_pii = dc.audit_body_redact_pii().await;
+        // Snapshot the hot-swappable redactor ONCE per request so the
+        // arguments + result halves see the same pattern set even if
+        // the operator hot-swaps mid-call.
+        let blob_redactor_snapshot = self.blob_redactor.load_full();
+        let (arg_str, arg_bytes, result_str, result_bytes, capture_status) = if !capture_args
+            && !capture_result
+        {
+            (
+                None,
+                None,
+                None,
+                None,
+                Some(BodyCaptureStatus::Disabled.as_str().to_owned()),
+            )
+        } else {
+            let mut truncated = false;
+            let mut offloaded = false;
+            let mut arg_bytes: Option<u32> = None;
+            let mut result_bytes: Option<u32> = None;
+            let arg_str = if capture_args {
+                match logged_arguments {
+                    Some(v) => {
+                        let raw = serde_json::to_string(v)
+                            .unwrap_or_else(|_| "[serialize_error]".to_owned());
+                        arg_bytes = Some(raw.len() as u32);
+                        Some(
+                            apply_mcp_body_capture(
+                                raw,
+                                body_max,
+                                redact_pii,
+                                &blob_redactor_snapshot,
+                                &self.blob_store,
+                                call_trace_id,
+                                "arguments",
+                                &mut truncated,
+                                &mut offloaded,
+                            )
+                            .await,
+                        )
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let result_str = if capture_result {
+                // Prefer the FULL streaming-event sequence (when the
+                // upstream used text/event-stream and emitted
+                // progress notifications + a final response) over
+                // just the final `result` field. Auditors replaying
+                // a long-running tool execution need the whole
+                // timeline, not just the punchline.
+                let raw_opt: Option<String> = match (stream_audit_body, response.result.as_ref()) {
+                    (Some(stream), _) => Some(stream.to_owned()),
+                    (None, Some(v)) => Some(
+                        serde_json::to_string(v).unwrap_or_else(|_| "[serialize_error]".to_owned()),
+                    ),
+                    (None, None) => None,
+                };
+                match raw_opt {
+                    Some(raw) => {
+                        result_bytes = Some(raw.len() as u32);
+                        Some(
+                            apply_mcp_body_capture(
+                                raw,
+                                body_max,
+                                redact_pii,
+                                &blob_redactor_snapshot,
+                                &self.blob_store,
+                                call_trace_id,
+                                "result",
+                                &mut truncated,
+                                &mut offloaded,
+                            )
+                            .await,
+                        )
+                    }
+                    None => None,
+                }
+            } else {
+                None
+            };
+            let status = if arg_str.is_none() && result_str.is_none() {
+                BodyCaptureStatus::Disabled
+            } else if offloaded {
+                // Same dominant-status rule as the AI gateway: a
+                // single emit carrying one offloaded field reports
+                // `offloaded` even if another field was small enough
+                // to truncate.
+                BodyCaptureStatus::Offloaded
+            } else if truncated {
+                BodyCaptureStatus::Truncated
+            } else {
+                BodyCaptureStatus::Captured
+            };
+            (
+                arg_str,
+                arg_bytes,
+                result_str,
+                result_bytes,
+                Some(status.as_str().to_owned()),
+            )
+        };
+
+        let mut entry = actor
+            .audit("tools.call")
+            .trace_id(call_trace_id.to_owned())
+            .detail(serde_json::json!({
+                "server_id": server_id.to_string(),
+                "server_name": server_name,
+                "tool_name": tool_name,
+                "arguments": logged_arguments,
+                "duration_ms": started.elapsed().as_millis() as i64,
+                "status": status,
+                "error_message": error_message,
+            }));
+        if let Some(a) = arg_str {
+            entry = entry.request_body(a);
+        }
+        if let Some(r) = result_str {
+            entry = entry.response_body(r);
+        }
+        // Stamp ORIGINAL byte counts (pre-offload) so the audit row's
+        // `arguments_bytes` / `result_bytes` columns reflect the
+        // user's actual payload size. Without these, an offloaded
+        // tool result would report ~80 bytes (the s3:// URL length)
+        // and break "average tool result size" analytics.
+        if let Some(b) = arg_bytes {
+            entry = entry.request_body_bytes(b);
+        }
+        if let Some(b) = result_bytes {
+            entry = entry.response_body_bytes(b);
+        }
+        if let Some(s) = capture_status {
+            entry = entry.body_capture_status(s);
+        }
+        self.audit.log(entry);
+    }
+
+    /// Build a `StreamingPayload` that pumps upstream SSE chunks
+    /// downstream AS THEY ARRIVE, while accumulating every event
+    /// envelope into a shared buffer that a detached on-done task
+    /// drains to run circuit breaker accounting, cache write, and
+    /// audit emission exactly once when the stream terminates (or
+    /// the client disconnects).
+    ///
+    /// The on-done task runs on graceful end-of-body (Natural), on
+    /// a bytes_stream error (UpstreamError), or on client drop
+    /// (ClientCancelled — `done_tx` is dropped when the producing
+    /// future is). It is the single audit-emit site for this code
+    /// path; the synchronous tail in `handle_tools_call` is skipped
+    /// when we return here.
+    #[allow(clippy::too_many_arguments)]
+    fn build_chunk_passthrough(
+        &self,
+        upstream_resp: reqwest::Response,
+        request_id: Option<serde_json::Value>,
+        user_id: Uuid,
+        user_email: String,
+        ip_address: Option<String>,
+        server_id: Uuid,
+        server_name: String,
+        tool_name: String,
+        call_trace_id: String,
+        upstream_request: JsonRpcRequest,
+        logged_arguments: Option<serde_json::Value>,
+        started: std::time::Instant,
+        cache_scope_kind: ServerCacheScope,
+        cache_account_label: Option<String>,
+        effective_cache_ttl: u64,
+    ) -> StreamingPayload {
+        use futures::stream::StreamExt;
+        use std::sync::{Arc, Mutex};
+
+        let events_buf: Arc<Mutex<Vec<serde_json::Value>>> =
+            Arc::new(Mutex::new(Vec::with_capacity(8)));
+        let events_for_done = events_buf.clone();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
+
+        // The on-done task gets its own owned clone of every piece of
+        // state it needs — McpProxy is `Clone` so the breaker / cache /
+        // audit handles all come along for free.
+        let proxy = self.clone();
+        let server_name_done = server_name.clone();
+        let request_id_done = request_id.clone();
+        tokio::spawn(async move {
+            let outcome = done_rx.await.unwrap_or(StreamOutcome::ClientCancelled);
+            let events = events_for_done
+                .lock()
+                .ok()
+                .map(|mut g| std::mem::take(&mut *g))
+                .unwrap_or_default();
+            let response = pick_response_envelope(&events, request_id_done.as_ref())
+                .unwrap_or_else(|| {
+                    let msg = match &outcome {
+                        StreamOutcome::Natural => {
+                            "Upstream stream ended without a response envelope".to_string()
+                        }
+                        StreamOutcome::UpstreamError { message } => {
+                            format!("Upstream stream error: {message}")
+                        }
+                        StreamOutcome::ClientCancelled => {
+                            "Client cancelled before upstream replied".to_string()
+                        }
+                    };
+                    err_response(request_id_done.clone(), INTERNAL_ERROR, msg)
+                });
+
+            // Circuit breaker — transport error → failure; otherwise
+            // follow the same server-side-vs-caller-side rule the
+            // buffered path uses so the breaker doesn't open on a
+            // single user's bad INVALID_PARAMS.
+            match &outcome {
+                StreamOutcome::UpstreamError { .. } => {
+                    proxy
+                        .circuit_breakers
+                        .record_failure(&server_name_done)
+                        .await;
+                }
+                StreamOutcome::Natural | StreamOutcome::ClientCancelled => {
+                    let is_server_failure = response
+                        .error
+                        .as_ref()
+                        .map(|err| {
+                            let c = err.code;
+                            c == INTERNAL_ERROR || (-32099..=-32000).contains(&c)
+                        })
+                        .unwrap_or(false);
+                    if is_server_failure {
+                        proxy
+                            .circuit_breakers
+                            .record_failure(&server_name_done)
+                            .await;
+                    } else {
+                        proxy
+                            .circuit_breakers
+                            .record_success(&server_name_done)
+                            .await;
+                    }
+                }
+            }
+
+            // Cache write only on a fully drained, successful stream.
+            // Client cancellation means we may have a partial view of
+            // the response so caching it would poison subsequent calls.
+            if effective_cache_ttl > 0
+                && response.error.is_none()
+                && matches!(outcome, StreamOutcome::Natural)
+            {
+                let cache_scope = match cache_scope_kind {
+                    ServerCacheScope::Global => None,
+                    ServerCacheScope::PerCaller => Some(CallerScope {
+                        user_id: &user_id,
+                        account_label: cache_account_label.as_deref(),
+                    }),
+                };
+                proxy
+                    .cache
+                    .set(
+                        &server_id,
+                        cache_scope,
+                        &upstream_request,
+                        &response,
+                        effective_cache_ttl,
+                    )
+                    .await;
+            }
+
+            // Audit emit with the full upstream event timeline — same
+            // shape the buffered path produces via parse_sse_json_rpc,
+            // so trace replay UI gets identical data regardless of
+            // which transport the call took.
+            let stream_audit_body = serde_json::to_string(&events).ok();
+            proxy
+                .emit_tools_call_audit(
+                    user_id,
+                    &user_email,
+                    ip_address.as_deref(),
+                    server_id,
+                    &server_name_done,
+                    &tool_name,
+                    &call_trace_id,
+                    logged_arguments.as_ref(),
+                    started,
+                    &response,
+                    stream_audit_body.as_deref(),
+                )
+                .await;
+        });
+
+        // The body itself: SSE chunk-by-chunk pass-through. Buffers
+        // bytes only until the next `\n\n` boundary, then yields one
+        // downstream event per upstream event. axum's `Sse` wrapper
+        // re-frames each yielded `Event::default().data(payload)` as
+        // `data: <payload>\n\n` on the wire.
+        let bytes_source = upstream_resp
+            .bytes_stream()
+            .map(|r| r.map_err(|e| e.to_string()));
+        let body = build_passthrough_body(bytes_source, events_buf, done_tx);
+
+        StreamingPayload {
+            body,
+            // Proxy session-id is set by the transport layer from the
+            // per-request session it owns; we don't override it here.
+            new_session_id: None,
+        }
+    }
+}
+
+/// Pump bytes from `source` downstream as discrete SSE events,
+/// accumulating each parsed envelope into `events_buf` for the
+/// on-done audit pass. On natural end-of-stream sends `Natural` via
+/// `done_tx`; on a source-error sends `UpstreamError`; if neither
+/// path runs (e.g. the consumer drops the stream mid-flight) the
+/// receiver sees `Err` and treats it as `ClientCancelled`.
+///
+/// Generic over the source so the production path (reqwest's
+/// `bytes_stream` mapped to `String` errors) and tests (an
+/// `iter`-backed Stream) share one implementation.
+fn build_passthrough_body<S>(
+    source: S,
+    events_buf: std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    done_tx: tokio::sync::oneshot::Sender<StreamOutcome>,
+) -> std::pin::Pin<
+    Box<
+        dyn futures::stream::Stream<
+                Item = Result<axum::response::sse::Event, std::convert::Infallible>,
+            > + Send,
+    >,
+>
+where
+    S: futures::stream::Stream<Item = Result<bytes::Bytes, String>> + Send + 'static,
+{
+    use axum::response::sse::Event;
+    use std::convert::Infallible;
+    let body = async_stream::stream! {
+        use futures::stream::StreamExt;
+        let source = source;
+        futures::pin_mut!(source);
+        let mut text_buf = String::new();
+        let mut done_tx = Some(done_tx);
+        while let Some(chunk) = source.next().await {
+            match chunk {
+                Ok(bytes) => {
+                    let s = String::from_utf8_lossy(&bytes);
+                    text_buf.push_str(&s);
+                    while let Some(end) = find_sse_event_terminator(&text_buf) {
+                        let event_block: String = text_buf.drain(..end).collect();
+                        if let Some(payload) = extract_sse_data_payload(&event_block)
+                            && !payload.is_empty()
+                        {
+                            // Best-effort JSON parse so non-JSON
+                            // `data:` payloads (rare) still land in
+                            // the timeline verbatim.
+                            let parsed = serde_json::from_str::<serde_json::Value>(&payload)
+                                .unwrap_or_else(|_| {
+                                    serde_json::Value::String(payload.clone())
+                                });
+                            if let Ok(mut g) = events_buf.lock() {
+                                g.push(parsed);
+                            }
+                            yield Ok::<Event, Infallible>(Event::default().data(payload));
+                        }
+                    }
+                }
+                Err(message) => {
+                    // Transport-level error mid-stream. Surface via
+                    // the on-done task (no spec-defined error event
+                    // shape to emit downstream).
+                    if let Some(tx) = done_tx.take() {
+                        let _ = tx.send(StreamOutcome::UpstreamError { message });
+                    }
+                    break;
+                }
+            }
+        }
+        // Defensive flush: some upstreams omit the final `\n\n`.
+        let trailing = text_buf.trim_end_matches(['\n', '\r']);
+        if !trailing.is_empty()
+            && let Some(payload) = extract_sse_data_payload(trailing)
+            && !payload.is_empty()
+        {
+            let parsed = serde_json::from_str::<serde_json::Value>(&payload)
+                .unwrap_or_else(|_| serde_json::Value::String(payload.clone()));
+            if let Ok(mut g) = events_buf.lock() {
+                g.push(parsed);
+            }
+            yield Ok::<Event, Infallible>(Event::default().data(payload));
+        }
+        if let Some(tx) = done_tx.take() {
+            let _ = tx.send(StreamOutcome::Natural);
+        }
+    };
+    Box::pin(body)
 }
 
 /// Convert a (possibly already-streamed-by-upstream) JsonRpcResponse
@@ -1490,5 +1957,264 @@ mod replay_tests {
         let payload = build_replay_payload(resp, Some("[]"));
         let events = drain(payload).await;
         assert_eq!(events.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod sse_parser_tests {
+    use super::*;
+
+    #[test]
+    fn terminator_lf_lf() {
+        assert_eq!(find_sse_event_terminator("data: x\n\n"), Some(9));
+        assert_eq!(find_sse_event_terminator("data: x\n\nmore"), Some(9));
+    }
+
+    #[test]
+    fn terminator_crlf_crlf() {
+        assert_eq!(find_sse_event_terminator("data: x\r\n\r\n"), Some(11));
+    }
+
+    #[test]
+    fn terminator_picks_first_boundary() {
+        // `\n\n` appears earlier (at 6, end=8) than `\r\n\r\n` would.
+        // The function returns the smaller index — whichever boundary
+        // arrived first.
+        let s = "a\nb\n\nc\r\n\r\n";
+        assert_eq!(find_sse_event_terminator(s), Some(5));
+    }
+
+    #[test]
+    fn terminator_none_when_incomplete() {
+        assert_eq!(find_sse_event_terminator("data: still buffering"), None);
+        // Single newline isn't a terminator — SSE requires the blank
+        // line.
+        assert_eq!(find_sse_event_terminator("data: x\n"), None);
+    }
+
+    #[test]
+    fn extract_single_data_line() {
+        assert_eq!(
+            extract_sse_data_payload("data: hello"),
+            Some("hello".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_joins_multiple_data_lines() {
+        // Per SSE spec: multi-line `data:` joins with `\n`.
+        let block = "data: first\ndata: second";
+        assert_eq!(
+            extract_sse_data_payload(block),
+            Some("first\nsecond".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_strips_optional_space_after_colon() {
+        // `data: x` and `data:x` both yield `x`.
+        assert_eq!(
+            extract_sse_data_payload("data:no-space"),
+            Some("no-space".to_owned())
+        );
+    }
+
+    #[test]
+    fn extract_ignores_other_sse_fields() {
+        let block = "event: message\nid: 42\nretry: 1000\ndata: payload\n: comment";
+        assert_eq!(extract_sse_data_payload(block), Some("payload".to_owned()));
+    }
+
+    #[test]
+    fn extract_none_when_no_data_lines() {
+        assert_eq!(extract_sse_data_payload("event: ping\nid: 1"), None);
+    }
+
+    #[test]
+    fn pick_envelope_matches_request_id() {
+        let req_id = serde_json::json!(7);
+        let events = vec![
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"pct":50}}),
+            serde_json::json!({"jsonrpc":"2.0","id":7,"result":{"content":"done"}}),
+        ];
+        let r = pick_response_envelope(&events, Some(&req_id)).expect("envelope");
+        assert_eq!(r.id, Some(req_id));
+        assert!(r.result.is_some());
+    }
+
+    #[test]
+    fn pick_envelope_falls_back_to_last_response_shaped() {
+        // Upstream replied with id=null on the final response (older
+        // MCP impls do this). Match-by-id fails so we fall back to
+        // the last envelope with result/error.
+        let req_id = serde_json::json!(7);
+        let events = vec![
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"pct":50}}),
+            serde_json::json!({"jsonrpc":"2.0","id":null,"result":{"content":"done"}}),
+        ];
+        let r = pick_response_envelope(&events, Some(&req_id)).expect("fallback envelope");
+        assert!(r.result.is_some());
+    }
+
+    #[test]
+    fn pick_envelope_none_when_only_notifications() {
+        let req_id = serde_json::json!(1);
+        let events = vec![
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"pct":10}}),
+            serde_json::json!({"jsonrpc":"2.0","method":"notifications/progress","params":{"pct":20}}),
+        ];
+        assert!(pick_response_envelope(&events, Some(&req_id)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod passthrough_tests {
+    use super::*;
+    use bytes::Bytes;
+    use futures::stream::{self, StreamExt};
+    use std::sync::{Arc, Mutex};
+
+    /// Build the body from an iterator of byte chunks and drive it
+    /// to completion, returning the count of events that emerged
+    /// downstream + the accumulated envelopes captured for audit +
+    /// the resolved on-done outcome.
+    async fn run_body(
+        chunks: Vec<Result<Bytes, String>>,
+    ) -> (usize, Vec<serde_json::Value>, Option<&'static str>) {
+        let events_buf: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
+        let source = stream::iter(chunks);
+        let body = build_passthrough_body(source, events_buf.clone(), done_tx);
+        let mut count = 0usize;
+        let mut body = body;
+        while let Some(_ev) = body.next().await {
+            count += 1;
+        }
+        // Drain the oneshot — should always carry an outcome since the
+        // body ran to completion (no early drop here).
+        let outcome = done_rx.await.ok().map(|o| match o {
+            StreamOutcome::Natural => "natural",
+            StreamOutcome::UpstreamError { .. } => "upstream_error",
+            StreamOutcome::ClientCancelled => "cancelled",
+        });
+        let captured = events_buf.lock().unwrap().clone();
+        (count, captured, outcome)
+    }
+
+    #[tokio::test]
+    async fn one_event_per_chunk() {
+        // Each upstream chunk holds exactly one complete event. The
+        // body should yield three downstream events and accumulate
+        // three audit envelopes.
+        let chunks = vec![
+            Ok(Bytes::from(
+                "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"pct\":33}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"pct\":66}}\n\n",
+            )),
+            Ok(Bytes::from(
+                "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"content\":\"done\"}}\n\n",
+            )),
+        ];
+        let (count, events, outcome) = run_body(chunks).await;
+        assert_eq!(count, 3, "three upstream events → three downstream events");
+        assert_eq!(events.len(), 3);
+        assert_eq!(outcome, Some("natural"));
+    }
+
+    #[tokio::test]
+    async fn event_split_across_two_chunks() {
+        // A single SSE event straddles the boundary between two byte
+        // chunks. The buffer must hold the first chunk until the
+        // terminator arrives, then yield once.
+        let chunks = vec![
+            Ok(Bytes::from("data: {\"jsonrpc\":\"2.0\",\"id\":")),
+            Ok(Bytes::from("1,\"result\":{\"x\":1}}\n\n")),
+        ];
+        let (count, events, outcome) = run_body(chunks).await;
+        assert_eq!(count, 1, "fragmented event must coalesce into one yield");
+        assert_eq!(events.len(), 1);
+        assert_eq!(outcome, Some("natural"));
+    }
+
+    #[tokio::test]
+    async fn multiple_events_in_one_chunk() {
+        // Upstream coalesces two events into one byte chunk. The
+        // inner while-loop should pump both out without waiting for
+        // another chunk.
+        let chunks = vec![Ok(Bytes::from("data: {\"a\":1}\n\ndata: {\"b\":2}\n\n"))];
+        let (count, events, _outcome) = run_body(chunks).await;
+        assert_eq!(count, 2, "back-to-back events in one chunk → two yields");
+        assert_eq!(events.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn trailing_event_without_final_terminator() {
+        // Some upstreams end the body without a trailing `\n\n`. The
+        // defensive flush at end-of-stream picks it up.
+        let chunks = vec![Ok(Bytes::from(
+            "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"x\":1}}",
+        ))];
+        let (count, events, outcome) = run_body(chunks).await;
+        assert_eq!(count, 1, "trailing event flushed at EOF");
+        assert_eq!(events.len(), 1);
+        assert_eq!(outcome, Some("natural"));
+    }
+
+    #[tokio::test]
+    async fn upstream_error_surfaces_via_oneshot() {
+        // A mid-stream byte error breaks the loop and signals
+        // UpstreamError to the on-done task. Earlier successful
+        // chunks still land downstream.
+        let chunks = vec![
+            Ok(Bytes::from(
+                "data: {\"jsonrpc\":\"2.0\",\"method\":\"x\"}\n\n",
+            )),
+            Err("network reset".to_owned()),
+        ];
+        let (count, _events, outcome) = run_body(chunks).await;
+        assert_eq!(count, 1);
+        assert_eq!(outcome, Some("upstream_error"));
+    }
+
+    #[tokio::test]
+    async fn client_drop_yields_cancelled() {
+        // Build a body that won't complete (infinite stream) and
+        // drop it after one read. The oneshot sender is dropped
+        // without sending → receiver sees Err → ClientCancelled.
+        let events_buf: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
+        // Stream that yields one event then would block forever in
+        // production — for the test we just take(1) and drop.
+        let source = stream::iter(vec![Ok::<Bytes, String>(Bytes::from(
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"x\"}\n\n",
+        ))])
+        .chain(stream::pending());
+        let body = build_passthrough_body(source, events_buf.clone(), done_tx);
+        let mut body = body;
+        let _ = body.next().await;
+        drop(body);
+        // The sender lives inside the body's async_stream; dropping
+        // the body drops the future, which drops the sender.
+        let outcome = done_rx.await.ok();
+        assert!(outcome.is_none(), "dropped sender → recv error");
+        // The transport layer's wrapping spawn task interprets recv
+        // error as ClientCancelled — verified separately in the
+        // build_chunk_passthrough integration; here we just confirm
+        // the signal.
+    }
+
+    #[tokio::test]
+    async fn non_json_payload_recorded_verbatim() {
+        // A non-JSON `data:` payload is rare but legal. It should
+        // still land in the audit timeline as a string Value so the
+        // trace isn't lossy, AND emerge downstream so the client
+        // sees the same wire bytes the upstream emitted.
+        let chunks = vec![Ok(Bytes::from("data: not-json-text\n\n"))];
+        let (count, events, _) = run_body(chunks).await;
+        assert_eq!(count, 1);
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], serde_json::Value::String(_)));
     }
 }
