@@ -1843,19 +1843,62 @@ pub async fn proxy_chat_completion(
             return Err(ctx.emit(e).into());
         }
 
-        // 8a. Cache the *unrestored* response BEFORE PII restoration
-        // so future cache hits can restore using their own caller's
-        // redaction context. Storing the restored form would bake
-        // this caller's PII into the shared cache entry. The key is
-        // computed from the *redacted* request body, so two callers
-        // sending structurally-identical prompts (even with different
-        // PII embedded) collide on the same slot.
-        state.cache.set(&request, &response, None).await;
+        // Run the buffered branch through the lifecycle's post-invoke
+        // pipeline. The hooks own cache fill (pre-restore form, so
+        // future cache hits can apply per-caller restoration), audit
+        // emit, breaker accounting, and limits/budget debit — exactly
+        // what the streaming branch above does, just synchronously.
+        // Quota.consume + PII restore stay inline after the pipeline
+        // because they need the response back in hand.
+        let deps = crate::lifecycle::ChatPostInvokeDeps {
+            state: state.clone(),
+            pii_redactor: pii_redactor.clone(),
+            messages_for_audit: messages_for_audit.clone(),
+            request_for_cache: request.clone(),
+            original_model: original_model.clone(),
+            provider_name: chosen_entry.provider_name.clone(),
+            upstream_model: chosen_entry.upstream_model.clone(),
+            sel_record,
+            request_rules: request_rules.clone(),
+            budget_caps: budgets_for_ai_gateway(&identity),
+            identity: identity.clone(),
+            trace_id: metadata.request_id.clone(),
+            session_id: session_id.clone(),
+            request_started_at,
+            cache_enabled: true,
+        };
+        let invoked = think_watch_common::lifecycle::state::Invoked {
+            identity: identity.clone(),
+            trace_id: metadata.request_id.clone(),
+            started_at: request_started_at,
+            client_ip: identity.ip_address.clone(),
+            limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
+                currents: Vec::new(),
+            },
+            access_candidate: original_model.clone(),
+            view: think_watch_common::lifecycle::state::CapturedView::Buffered(
+                crate::lifecycle::ChatCompletionOutcome::Success(response),
+            ),
+        };
+        let emitted = think_watch_common::lifecycle::stages::run_post_invoke::<
+            crate::lifecycle::ChatCompletionSurface,
+        >(invoked, &deps)
+        .await;
+        let mut response = match emitted.response {
+            Some(crate::lifecycle::ChatCompletionOutcome::Success(r)) => r,
+            _ => unreachable!(
+                "Invocation::Buffered(Success(_)) must yield Emitted::Success — \
+                 the hook chain doesn't construct other variants"
+            ),
+        };
 
-        // 8b. Restore PII in the response (this caller's view).
+        // Restore PII in the response (this caller's view). The cache
+        // already stored the pre-restore form so a later caller can
+        // paint their own values onto the placeholders.
         pii_redactor.restore_response(&mut response, &redaction_ctx);
 
-        // 8c. Consume quota based on actual token usage
+        // Consume quota based on actual token usage. Independent of
+        // the limits engine accounting that ran inside emit_audit.
         if let Some(ref usage) = response.usage {
             let total = usage.total_tokens;
             if let Err(e) = state.quota.consume(&quota_key, total).await {
@@ -1863,76 +1906,11 @@ pub async fn proxy_chat_completion(
             }
         }
 
-        // 8d. Post-flight accounting against the limits engine.
-        if let Some(ref usage) = response.usage {
-            post_flight_account(
-                state.db.clone(),
-                state.redis.clone(),
-                state.dynamic_config.clone(),
-                state.weight_cache.clone(),
-                original_model.clone(),
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                request_rules.clone(),
-                budgets_for_ai_gateway(&identity),
-                identity.user_id.clone(),
-                identity.user_email.clone(),
-                identity.api_key_id.clone(),
-                identity.ip_address.clone(),
-                state.audit.clone(),
-            )
-            .await;
-        }
-
-        // 8e. Log audit detail including metadata
         tracing::info!(
             request_id = %metadata.request_id,
             metadata = %metadata.to_json(),
             "Audit log: request completed"
         );
-
-        // 8f. Emit gateway_logs row so `GET /api/admin/trace/{id}` can
-        // find this request. Cost is computed from provider pricing if
-        // we know it, otherwise 0.0 (analytics treats NULL == 0).
-        let (prompt_tokens, completion_tokens) = response
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens))
-            .unwrap_or((0, 0));
-        let cost_usd = state
-            .cost_tracker
-            .calculate_cost(&original_model, prompt_tokens, completion_tokens)
-            .await;
-        let body_capture = prepare_body_capture(
-            &state.dynamic_config,
-            &pii_redactor,
-            &state.blob_store,
-            &metadata.request_id,
-            &messages_for_audit,
-            Some(&response),
-        )
-        .await;
-        emit_gateway_log(
-            &state.audit,
-            &metadata.request_id,
-            session_id.as_deref(),
-            identity.user_id.as_deref(),
-            identity.user_email.as_deref(),
-            identity.api_key_id.as_deref(),
-            identity.api_key_lineage_id.as_deref(),
-            identity.ip_address.as_deref(),
-            &original_model,
-            Some(chosen_entry.provider_name.as_str()),
-            chosen_entry.upstream_model.as_deref(),
-            prompt_tokens,
-            completion_tokens,
-            cost_usd,
-            request_started_at.elapsed().as_millis() as i64,
-            200,
-            body_capture,
-        );
-
-        finalize_health(&state, &sel_record, true).await;
 
         let mut http_response = Json(&response).into_response();
         http_response
@@ -2275,71 +2253,51 @@ pub async fn proxy_anthropic_messages(
             return Err(ctx.emit(e).into());
         }
 
-        pii_redactor.restore_response(&mut response, &redaction_ctx);
-
-        // Post-flight: same accounting path the chat-completions
-        // surface uses. Anthropic responses always carry usage
-        // unless the upstream errored.
-        if let Some(ref usage) = response.usage {
-            post_flight_account(
-                state.db.clone(),
-                state.redis.clone(),
-                state.dynamic_config.clone(),
-                state.weight_cache.clone(),
-                mapped_model.clone(),
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                request_rules.clone(),
-                budgets_for_ai_gateway(&identity),
-                identity.user_id.clone(),
-                identity.user_email.clone(),
-                identity.api_key_id.clone(),
-                identity.ip_address.clone(),
-                state.audit.clone(),
-            )
-            .await;
-        }
-
-        // Emit gateway_logs for the trace timeline.
-        let (pt, ct) = response
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens))
-            .unwrap_or((0, 0));
-        let cost = state
-            .cost_tracker
-            .calculate_cost(&mapped_model, pt, ct)
-            .await;
-        let body_capture = prepare_body_capture(
-            &state.dynamic_config,
-            &pii_redactor,
-            &state.blob_store,
-            &trace_id,
-            &messages_for_audit,
-            Some(&response),
-        )
+        // Anthropic Messages doesn't cache (its buffered branch never
+        // did, the streaming pump's `cache_enabled: false` matches).
+        // Pipe the response through `run_post_invoke` so audit emit /
+        // breaker accounting / budget debit share one site with the
+        // chat completions surface.
+        let deps = crate::lifecycle::ChatPostInvokeDeps {
+            state: state.clone(),
+            pii_redactor: pii_redactor.clone(),
+            messages_for_audit: messages_for_audit.clone(),
+            request_for_cache: request.clone(),
+            original_model: mapped_model.clone(),
+            provider_name: chosen_entry.provider_name.clone(),
+            upstream_model: chosen_entry.upstream_model.clone(),
+            sel_record,
+            request_rules: request_rules.clone(),
+            budget_caps: budgets_for_ai_gateway(&identity),
+            identity: identity.clone(),
+            trace_id: trace_id.clone(),
+            session_id: session_id.clone(),
+            request_started_at,
+            cache_enabled: false,
+        };
+        let invoked = think_watch_common::lifecycle::state::Invoked {
+            identity: identity.clone(),
+            trace_id: trace_id.clone(),
+            started_at: request_started_at,
+            client_ip: identity.ip_address.clone(),
+            limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
+                currents: Vec::new(),
+            },
+            access_candidate: mapped_model.clone(),
+            view: think_watch_common::lifecycle::state::CapturedView::Buffered(
+                crate::lifecycle::ChatCompletionOutcome::Success(response),
+            ),
+        };
+        let emitted = think_watch_common::lifecycle::stages::run_post_invoke::<
+            crate::lifecycle::ChatCompletionSurface,
+        >(invoked, &deps)
         .await;
-        emit_gateway_log(
-            &state.audit,
-            &trace_id,
-            session_id.as_deref(),
-            identity.user_id.as_deref(),
-            identity.user_email.as_deref(),
-            identity.api_key_id.as_deref(),
-            identity.api_key_lineage_id.as_deref(),
-            identity.ip_address.as_deref(),
-            &mapped_model,
-            Some(chosen_entry.provider_name.as_str()),
-            chosen_entry.upstream_model.as_deref(),
-            pt,
-            ct,
-            cost,
-            request_started_at.elapsed().as_millis() as i64,
-            200,
-            body_capture,
-        );
+        let mut response = match emitted.response {
+            Some(crate::lifecycle::ChatCompletionOutcome::Success(r)) => r,
+            _ => unreachable!("buffered success path"),
+        };
 
-        finalize_health(&state, &sel_record, true).await;
+        pii_redactor.restore_response(&mut response, &redaction_ctx);
 
         // Convert OpenAI response back to Anthropic format
         let anthropic_response = convert_to_anthropic_response(&response);
@@ -2702,69 +2660,53 @@ pub async fn proxy_responses(
             return Err(ctx.emit(e).into());
         }
 
+        // OpenAI Responses doesn't cache (same as Anthropic Messages
+        // — its buffered branch never did, the streaming pump's
+        // `cache_enabled: false` matches). Pipe through
+        // `run_post_invoke` so audit emit / breaker accounting /
+        // budget debit share one site with the other two surfaces.
+        let deps = crate::lifecycle::ChatPostInvokeDeps {
+            state: state.clone(),
+            pii_redactor: pii_redactor.clone(),
+            messages_for_audit: messages_for_audit.clone(),
+            request_for_cache: request.clone(),
+            original_model: mapped_model.clone(),
+            provider_name: chosen_entry.provider_name.clone(),
+            upstream_model: chosen_entry.upstream_model.clone(),
+            sel_record,
+            request_rules: request_rules.clone(),
+            budget_caps: budgets_for_ai_gateway(&identity),
+            identity: identity.clone(),
+            trace_id: trace_id.clone(),
+            session_id: session_id.clone(),
+            request_started_at,
+            cache_enabled: false,
+        };
+        let invoked = think_watch_common::lifecycle::state::Invoked {
+            identity: identity.clone(),
+            trace_id: trace_id.clone(),
+            started_at: request_started_at,
+            client_ip: identity.ip_address.clone(),
+            limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
+                currents: Vec::new(),
+            },
+            access_candidate: mapped_model.clone(),
+            view: think_watch_common::lifecycle::state::CapturedView::Buffered(
+                crate::lifecycle::ChatCompletionOutcome::Success(response),
+            ),
+        };
+        let emitted = think_watch_common::lifecycle::stages::run_post_invoke::<
+            crate::lifecycle::ChatCompletionSurface,
+        >(invoked, &deps)
+        .await;
+        let mut response = match emitted.response {
+            Some(crate::lifecycle::ChatCompletionOutcome::Success(r)) => r,
+            _ => unreachable!("buffered success path"),
+        };
+
         // Restore PII placeholders so the converted response carries
         // the original user data the model echoed back.
         pii_redactor.restore_response(&mut response, &redaction_ctx);
-
-        if let Some(ref usage) = response.usage {
-            post_flight_account(
-                state.db.clone(),
-                state.redis.clone(),
-                state.dynamic_config.clone(),
-                state.weight_cache.clone(),
-                mapped_model.clone(),
-                usage.prompt_tokens,
-                usage.completion_tokens,
-                request_rules.clone(),
-                budgets_for_ai_gateway(&identity),
-                identity.user_id.clone(),
-                identity.user_email.clone(),
-                identity.api_key_id.clone(),
-                identity.ip_address.clone(),
-                state.audit.clone(),
-            )
-            .await;
-        }
-
-        let (pt, ct) = response
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens))
-            .unwrap_or((0, 0));
-        let cost = state
-            .cost_tracker
-            .calculate_cost(&mapped_model, pt, ct)
-            .await;
-        let body_capture = prepare_body_capture(
-            &state.dynamic_config,
-            &pii_redactor,
-            &state.blob_store,
-            &trace_id,
-            &messages_for_audit,
-            Some(&response),
-        )
-        .await;
-        emit_gateway_log(
-            &state.audit,
-            &trace_id,
-            session_id.as_deref(),
-            identity.user_id.as_deref(),
-            identity.user_email.as_deref(),
-            identity.api_key_id.as_deref(),
-            identity.api_key_lineage_id.as_deref(),
-            identity.ip_address.as_deref(),
-            &mapped_model,
-            Some(chosen_entry.provider_name.as_str()),
-            chosen_entry.upstream_model.as_deref(),
-            pt,
-            ct,
-            cost,
-            request_started_at.elapsed().as_millis() as i64,
-            200,
-            body_capture,
-        );
-
-        finalize_health(&state, &sel_record, true).await;
 
         let responses_format = convert_to_responses_format(&response);
         let mut http_response = Json(responses_format).into_response();
