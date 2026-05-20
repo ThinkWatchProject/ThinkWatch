@@ -1,13 +1,13 @@
-//! MCP-side wiring for the `common::lifecycle` pipeline. Defines
-//! [`McpSurface`] (the [`Surface`] trait impl plugging in MCP's
-//! wire-format types) and helpers that build pipeline inputs from
-//! the existing [`crate::proxy::RequestContext`] shape.
+//! MCP-side wiring for the `think_watch_common::lifecycle`
+//! pipeline. Defines [`McpSurface`] (the [`Surface`] trait impl
+//! plugging in MCP's wire-format types) and helpers that build
+//! pipeline inputs from the existing [`crate::proxy::RequestContext`]
+//! shape.
 //!
-//! See `crates/common/src/lifecycle/DESIGN.md` for the cross-
-//! cutting architecture. Stages that are surface-specific (cache
-//! lookup, circuit breaker check) live in the [`stages`]
-//! submodule here; truly cross-cutting stages (check_limits,
-//! check_access) live in `common::lifecycle::stages`.
+//! Stages that are surface-specific to MCP (cache lookup, circuit
+//! breaker check) live in the [`stages`] submodule here; truly
+//! cross-cutting stages (check_limits, check_budget, check_access)
+//! live in `think_watch_common::lifecycle::stages`.
 
 pub mod stages;
 

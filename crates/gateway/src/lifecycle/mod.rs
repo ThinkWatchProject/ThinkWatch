@@ -1,19 +1,30 @@
-//! Gateway-side wiring for the `common::lifecycle` pipeline. Defines
-//! the three AI-gateway surface markers (one per wire format) and
-//! the shared `GatewayPostInvokeDeps` bundle the post-invoke hooks
-//! read.
+//! AI-gateway-side wiring for the
+//! `think_watch_common::lifecycle` pipeline. Defines
+//! [`ChatCompletionSurface`] (one [`Surface`] impl shared across
+//! all three AI handlers — chat completions, Anthropic Messages,
+//! OpenAI Responses — because their providers normalise upstream
+//! streams to OpenAI `ChatCompletionChunk` so the captured shape
+//! is identical), plus the [`ChatPostInvokeDeps`] bundle the
+//! post-invoke hooks read.
 //!
-//! See `crates/common/src/lifecycle/STREAMING.md` for the cross-
-//! cutting design. Each surface owns its `S::Response` shape (the
-//! buffered cache / audit object) and `S::StreamResponse` (the
-//! axum `Sse<>::into_response()` envelope the handler returns to
-//! the wire). The post-invoke hooks are identical across surfaces —
-//! all three delegate to `emit_gateway_log_with_extra`,
-//! `finalize_health`, `cache.set`, and `post_flight_account` — but
-//! the surfaces differ in their `Response` / `StreamCaptured` /
-//! `RequestBody` types because each handler speaks a different wire
-//! format (OpenAI chat completions, Anthropic Messages, OpenAI
-//! Responses).
+//! The single per-request variation point between the three
+//! handlers — whether to fill the response cache (chat does;
+//! Anthropic / Responses don't, matching the pre-migration
+//! buffered behaviour) — is a `cache_enabled: bool` flag on
+//! `ChatPostInvokeDeps` rather than three near-identical Surface
+//! impls. When/if Anthropic or Responses ever needs a
+//! buffered-Response type distinct from `ChatCompletionResponse`
+//! (e.g. native Anthropic cache shape), splitting into separate
+//! Surface impls is the natural next step.
+//!
+//! Hook responsibilities (each Surface trait method):
+//! - `record_outcome` → `finalize_health` (breaker).
+//! - `write_cache` → `cache.set` (gated by `cache_enabled` AND
+//!   `CapturedView::is_success`).
+//! - `record_usage` → `post_flight_account` (limits + budget
+//!   debit).
+//! - `emit_audit` → `prepare_body_capture` +
+//!   `emit_gateway_log_with_extra`.
 
 use std::sync::Arc;
 

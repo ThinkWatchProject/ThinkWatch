@@ -1,37 +1,48 @@
-//! Surface-agnostic request lifecycle pipeline. See
-//! [`DESIGN.md`](./DESIGN.md) for the architecture decisions and
-//! migration plan; this module is the implementation.
+//! Surface-agnostic request lifecycle pipeline shared by the AI
+//! gateway and the MCP gateway. Each surface implements [`Surface`]
+//! to plug its wire-format types in; the stage functions in
+//! [`stages`] then drive the request through a fixed sequence with
+//! compiler-enforced ordering.
 //!
-//! ## At a glance
+//! ## Pipeline shape
 //!
-//! - [`Surface`] is the trait each gateway implements to plug its
-//!   wire-format types (identity / request body / response /
-//!   audit detail) into the pipeline.
-//! - [`state`] holds the per-stage state structs. Each stage
-//!   consumes one struct and returns the next, producing a
-//!   compiler-enforced execution order — you literally cannot
-//!   call `check_access` before `check_limits`.
-//! - [`stages`] holds the surface-agnostic stage implementations
-//!   as plain `async fn`s. No `Stage` trait, no dynamic dispatch.
-//! - [`error::StageError`] is the structured infrastructure-
-//!   failure type. User-attributable short-circuits (rate limited,
-//!   access denied, …) return `Err(S::Response)` directly so the
-//!   `?` operator threads them up alongside infra errors.
-//!
-//! ## Hello-world
-//!
-//! ```ignore
-//! async fn handle_request<S: Surface>(
-//!     identity: S::Identity,
-//!     body: S::RequestBody,
-//!     deps: &PipelineDeps,
-//! ) -> Result<S::Response, S::Response> {
-//!     let raw = state::Raw::new(identity, body);
-//!     let limits = stages::check_limits::<S>(raw, &deps.limit_rules, &deps.redis, &deps.audit).await?;
-//!     // …subsequent stages chain here…
-//!     todo!("pipeline mid-build; see DESIGN.md phase plan")
-//! }
+//! ```text
+//! Raw<S>
+//!   → check_limits      (rate-limit gate)
+//!   → check_budget      (pre-call budget peek)
+//!   → check_access      (allowed_models / allowed_tools)
+//!   → surface-specific  (cache lookup, breaker, credential resolution,
+//!                        invoke_upstream → Invocation<S>)
+//!   → run_post_invoke
+//!       → record_outcome (breaker accounting)
+//!       → write_cache    (success-gated)
+//!       → record_usage   (limits + budget post-debit)
+//!       → emit_audit     (single emit site)
+//!   → Emitted<S>
 //! ```
+//!
+//! ## Module map
+//!
+//! - [`Surface`] — the trait each gateway implements to plug in
+//!   `Identity` / `RequestBody` / `Response` / `StreamResponse` /
+//!   `StreamCaptured` / `PostInvokeDeps` types plus the hook fns
+//!   `record_outcome` / `write_cache` / `record_usage` /
+//!   `emit_audit` and short-circuit response factories.
+//! - [`state`] — per-stage state structs ([`state::Raw`],
+//!   [`state::LimitsChecked`], [`state::Authorized`],
+//!   [`state::Invoked`], [`state::Emitted`]) plus the
+//!   [`state::Invocation`] / [`state::CapturedView`] enums that
+//!   model the buffered/streaming fork at `invoke_upstream`.
+//! - [`stages`] — surface-agnostic stage `async fn`s. No `Stage`
+//!   trait, no dynamic dispatch.
+//! - [`error::StageError`] — structured infrastructure-failure
+//!   type. User-attributable short-circuits (rate limited, budget
+//!   exceeded, access denied, …) return `Err(S::Response)`
+//!   directly so the `?` operator threads them up alongside infra
+//!   errors.
+//! - [`streaming::StreamOutcome`] — three-state outcome
+//!   (`Natural` / `UpstreamError{status_code}` / `ClientCancelled`)
+//!   the streaming pump signals through its tail future.
 
 pub mod error;
 pub mod stages;

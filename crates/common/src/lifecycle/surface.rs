@@ -158,8 +158,10 @@ pub trait Surface: Sized + Send + Sync + 'static {
     /// request. Called by [`super::stages::emit_audit`] exactly
     /// once. The surface owns row shape (body capture, blob
     /// offload, token accounting). This is the single audit-emit
-    /// site for the post-invoke path; short-circuit stages emit
-    /// their own rows directly (see DESIGN.md §3).
+    /// site for the post-invoke path; short-circuit stages
+    /// (check_limits / check_budget / check_access) emit their own
+    /// rows directly from inside the stage before returning the
+    /// short-circuit response.
     fn emit_audit(
         deps: &Self::PostInvokeDeps,
         invoked: &Invoked<Self>,

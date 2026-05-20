@@ -1,17 +1,16 @@
-//! Surface-agnostic streaming primitives. Phase 2 of the lifecycle
-//! refactor (see [`STREAMING.md`](./STREAMING.md)) lifts the two
-//! per-surface `StreamOutcome` enums into this single shared type
-//! so the audit / cache / breaker tail in [`super::stages`] doesn't
-//! need to know which gateway it's running for.
+//! Surface-agnostic streaming primitives. Single source of truth
+//! for the three-state stream outcome (`Natural` /
+//! `UpstreamError{status_code}` / `ClientCancelled`) the AI gateway
+//! and MCP gateway pumps both signal through their tail futures.
+//! Lets the shared post-call work in [`super::stages`] (record
+//! outcome / write cache / record usage / emit audit) classify
+//! audit status and breaker accounting without knowing which
+//! gateway it's running for.
 //!
-//! The AI gateway's `gateway::streaming::StreamOutcome` and the MCP
-//! gateway's `mcp_gateway::proxy::streaming::StreamOutcome` are
-//! **deleted** in the same commits that migrate each surface; this
-//! module is the single source of truth.
-//!
-//! User-attributable rate-limit / access-denied outcomes are NOT
-//! streaming concerns — they short-circuit before `invoke_upstream`
-//! ever runs, per DESIGN.md §3.
+//! User-attributable rate-limit / budget / access-denied outcomes
+//! are NOT streaming concerns — they short-circuit before
+//! `invoke_upstream` ever runs, so the stream never starts and
+//! `StreamOutcome` never gets constructed for them.
 
 use serde_json::Value;
 

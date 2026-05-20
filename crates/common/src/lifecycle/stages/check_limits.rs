@@ -138,7 +138,7 @@ mod tests {
 
     /// Build a disconnected fred client. The `no_rules_…` test
     /// never reaches a Redis call so this is fine; tests that need
-    /// real Redis are integration-only (see DESIGN.md phase 2).
+    /// real Redis live in `crates/test-support/tests/limits*.rs`.
     fn dummy_redis() -> fred::clients::Client {
         let cfg = RedisConfig::from_url("redis://127.0.0.1:6379").expect("parse url");
         Builder::from_config(cfg).build().expect("build client")

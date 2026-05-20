@@ -1,12 +1,16 @@
 //! Pipeline stages — each surface-agnostic stage is a plain
-//! `async fn` here. See [DESIGN.md](../DESIGN.md) for the full
-//! stage inventory and migration plan.
+//! `async fn` here. See [`super`] for the full pipeline shape.
 //!
-//! Phase 1 lands the first stage (`check_limits`); subsequent
-//! phases add the rest. Adding a stage:
+//! Short-circuit stages (`check_limits`, `check_budget`,
+//! `check_access`) live as standalone fns that take the previous
+//! state struct and return either the next state or
+//! `Err(S::Response)`. The four post-invoke stages
+//! (`record_outcome` → `write_cache` → `record_usage` →
+//! `emit_audit`) live in [`run_post_invoke`] and are dispatched in
+//! order by the orchestrator of the same name.
 //!
-//! 1. Define its input + output state structs in
-//!    [`super::state`].
+//! Adding a stage:
+//! 1. Define its input + output state structs in [`super::state`].
 //! 2. Add the `async fn` in a new file here.
 //! 3. Re-export from this module.
 //! 4. Add unit tests against the in-tree
