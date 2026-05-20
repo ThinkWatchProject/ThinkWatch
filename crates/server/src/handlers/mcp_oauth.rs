@@ -23,13 +23,13 @@ use axum::extract::{Path, Query, State};
 use axum::response::{IntoResponse, Redirect, Response};
 use chrono::{DateTime, Utc};
 use data_encoding::BASE64URL_NOPAD;
-use hmac::{Hmac, Mac, digest::KeyInit};
-use rand::RngExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
+use think_watch_auth::oauth::pkce::{
+    parse_token_endpoint_error, pkce_challenge, random_token, state_binding,
+};
 use think_watch_common::audit::AuditActor;
 use think_watch_common::crypto::{self, parse_encryption_key};
 use think_watch_common::errors::AppError;
@@ -103,51 +103,6 @@ struct McpOauthState {
     /// Catches Redis tampering — only a server holding the encryption
     /// key can forge a matching pair.
     binding: String,
-}
-
-/// Look at the upstream token-endpoint response body for an OAuth 2.0
-/// error envelope (`{"error": "...", "error_description": "..."}`).
-/// Returns a one-line user-facing summary if the body is shaped like
-/// an error, `None` otherwise.
-///
-/// Per RFC 6749 §5.2 the error response is JSON with at least an
-/// `error` field. We tolerate non-spec upstreams that omit
-/// `error_description` and just fall back to `error` alone.
-fn parse_token_endpoint_error(body: &str) -> Option<String> {
-    #[derive(serde::Deserialize)]
-    struct ErrorEnvelope {
-        error: String,
-        #[serde(default)]
-        error_description: Option<String>,
-    }
-    let env: ErrorEnvelope = serde_json::from_str(body).ok()?;
-    Some(match env.error_description {
-        Some(d) if !d.is_empty() => format!("{} ({})", d, env.error),
-        _ => env.error,
-    })
-}
-
-fn state_binding(enc_key: &[u8; 32], state: &str, verifier: &str) -> String {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(enc_key).expect("HMAC-SHA256 accepts any key length");
-    mac.update(state.as_bytes());
-    mac.update(b":");
-    mac.update(verifier.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
-}
-
-/// 32 random bytes → URL-safe base64 with no padding. Used for both
-/// the state token and the PKCE code_verifier (RFC 7636 mandates
-/// `[A-Z][a-z][0-9]-._~`, 43–128 chars; base64url-no-pad of 32 bytes
-/// gives 43 URL-safe characters).
-fn random_token() -> Result<String, AppError> {
-    let bytes: [u8; 32] = rand::rng().random();
-    Ok(BASE64URL_NOPAD.encode(&bytes))
-}
-
-fn pkce_challenge(verifier: &str) -> String {
-    let digest = Sha256::digest(verifier.as_bytes());
-    BASE64URL_NOPAD.encode(&digest)
 }
 
 /// Fully-qualified base URL the OAuth provider should redirect back
@@ -377,8 +332,8 @@ pub async fn start_authorize(
         ));
     }
 
-    let state_token = random_token()?;
-    let code_verifier = random_token()?;
+    let state_token = random_token();
+    let code_verifier = random_token();
     let code_challenge = pkce_challenge(&code_verifier);
     let redirect_uri = callback_redirect_uri(&state)?;
 
@@ -2489,8 +2444,8 @@ pub async fn start_shared_authorize(
         ));
     }
 
-    let state_token = random_token()?;
-    let code_verifier = random_token()?;
+    let state_token = random_token();
+    let code_verifier = random_token();
     let code_challenge = pkce_challenge(&code_verifier);
     let redirect_uri = callback_redirect_uri(&state)?;
 
@@ -2758,8 +2713,8 @@ pub async fn start_wizard_authorize(
         return Err(AppError::BadRequest("oauth_client_id is required".into()));
     }
 
-    let state_token = random_token()?;
-    let code_verifier = random_token()?;
+    let state_token = random_token();
+    let code_verifier = random_token();
     let code_challenge = pkce_challenge(&code_verifier);
     let redirect_uri = callback_redirect_uri(&state)?;
 
@@ -3022,25 +2977,9 @@ fn urlencode_fragment(s: &str) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn pkce_challenge_matches_rfc7636_appendix_b() {
-        // RFC 7636 Appendix B test vector.
-        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-        let expected = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
-        assert_eq!(pkce_challenge(verifier), expected);
-    }
-
-    #[test]
-    fn random_token_yields_43_chars() {
-        // 32 bytes → 43 base64url-no-pad chars. Stable RFC 7636
-        // verifier length so the upstream's sanity checks pass.
-        let t = random_token().unwrap();
-        assert_eq!(t.len(), 43);
-        assert!(
-            t.chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        );
-    }
+    // Tests for `pkce_challenge`, `random_token`, `state_binding`,
+    // and `parse_token_endpoint_error` live in `think_watch_auth::oauth::pkce`
+    // now — pure crypto helpers tested in the crate that owns them.
 
     #[test]
     fn fragment_encoder_escapes_only_dangerous_chars() {
@@ -3048,17 +2987,6 @@ mod tests {
         assert_eq!(urlencode_fragment("a b"), "a%20b");
         assert_eq!(urlencode_fragment("a#b"), "a%23b");
         assert_eq!(urlencode_fragment("a/b"), "a%2Fb");
-    }
-
-    #[test]
-    fn binding_changes_with_inputs() {
-        let key = [0u8; 32];
-        let a = state_binding(&key, "state1", "verifier1");
-        let b = state_binding(&key, "state1", "verifier2");
-        let c = state_binding(&key, "state2", "verifier1");
-        assert_ne!(a, b);
-        assert_ne!(a, c);
-        assert_eq!(a, state_binding(&key, "state1", "verifier1"));
     }
 
     // -------- RFC 9728 / 8414 / 7591 probe helpers ----------------------
