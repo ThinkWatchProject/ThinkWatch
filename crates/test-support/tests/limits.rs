@@ -82,11 +82,14 @@ async fn user_rate_limit_caps_requests_per_minute() {
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn user_budget_cap_increments_redis_counter_post_flight() {
-    // Budget caps are advisory in the current implementation — they
-    // INCR a Redis counter and emit `budget.threshold_crossed` audit
-    // entries when thresholds are crossed, but the gateway does not
-    // pre-flight reject. This test pins that contract so a future
-    // change to *enforce* caps is a deliberate, observable shift.
+    // Post-flight side of the budget pipeline: a successful upstream
+    // call INCRs the Redis counter via `record_usage` (which calls
+    // `post_flight_account`) and emits `budget.threshold_crossed`
+    // audit entries when thresholds are crossed. The complementary
+    // pre-call rejection path is covered by
+    // `user_budget_cap_pre_call_rejects_when_already_exhausted` —
+    // this test pins the INCR-on-success contract that drives the
+    // counter that the pre-call peek reads.
     let app = TestApp::spawn().await;
     let (api_key, user_id) = seed_runtime(&app).await;
 
@@ -132,6 +135,84 @@ async fn user_budget_cap_increments_redis_counter_post_flight() {
     assert!(
         val.unwrap_or(0) > 0,
         "budget counter should be > 0 after a request, got {val:?}"
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn user_budget_cap_pre_call_rejects_when_already_exhausted() {
+    // Pre-call side of the budget pipeline: `check_budget` peeks the
+    // Redis counter and short-circuits with 429 when current >= limit
+    // BEFORE the upstream call fires. We seed the counter past the cap
+    // directly so the test doesn't depend on the cost-tracker emitting
+    // a specific weighted-token count per request (different upstream
+    // mocks land different token totals; the rejection path's contract
+    // is purely about peek-vs-limit, not about how the counter got
+    // there).
+    use chrono::Utc;
+    use fred::interfaces::KeysInterface;
+    use think_watch_common::limits::budget;
+
+    let app = TestApp::spawn().await;
+    let (api_key, user_id) = seed_runtime(&app).await;
+
+    // Small cap, then seed Redis well past it. Daily period so the
+    // key TTL doesn't expire during the test.
+    let cap_limit: i64 = 100;
+    fixtures::create_budget_cap(&app.db, "user", user_id, "daily", cap_limit)
+        .await
+        .unwrap();
+
+    let key = budget::build_key("user", user_id, "daily", Utc::now());
+    // EXPIRE is set by the post-flight path; for the test it's
+    // sufficient to drop a raw value — the peek is a plain GET.
+    let _: () = app
+        .state
+        .redis
+        .set(&key, cap_limit + 5, None, None, false)
+        .await
+        .unwrap();
+
+    let gw = app.gateway_client();
+    gw.set_bearer(&api_key);
+    let resp = gw
+        .post(
+            "/v1/chat/completions",
+            json!({"model": "gpt-test", "messages": [{"role": "user", "content": "x"}]}),
+        )
+        .await
+        .unwrap();
+
+    // 429 because `check_budget` -> `S::budget_exceeded_response` ->
+    // `GatewayError::LocalRateLimited` -> 429 (see gateway/providers/
+    // traits.rs::status_code, which lumps budget exhaustion under the
+    // rate-limit status family per LocalRateLimited's docstring).
+    assert_eq!(
+        resp.status.as_u16(),
+        429,
+        "expected 429 when budget cap is already at-or-past limit, \
+         got {} body={:?}",
+        resp.status,
+        resp.body
+    );
+
+    // Counter must NOT have been incremented — the request was
+    // rejected pre-call, so post_flight_account never ran. Anything
+    // past `cap_limit + 5` would mean we let an upstream call through.
+    let after: Option<i64> = app
+        .state
+        .redis
+        .get(&key)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|s: String| s.parse().ok());
+    assert_eq!(
+        after,
+        Some(cap_limit + 5),
+        "budget counter must stay at the seeded value when the request \
+         was rejected pre-call; any increment means an upstream call \
+         leaked past `check_budget`"
     );
 }
 
