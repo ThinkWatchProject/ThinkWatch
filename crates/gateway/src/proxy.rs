@@ -7,7 +7,6 @@ use rand::RngExt;
 use rust_decimal::Decimal;
 use sqlx::PgPool;
 use std::convert::Infallible;
-use std::pin::Pin;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -331,7 +330,7 @@ use think_watch_common::audit::BodyCaptureStatus;
 /// row and a wildly wrong number). The flush mapper reads these in
 /// preference to `cell.len()` exactly to break that asymmetry.
 #[derive(Default, Clone)]
-struct BodyCapture {
+pub(crate) struct BodyCapture {
     request: Option<String>,
     response: Option<String>,
     request_bytes: Option<u32>,
@@ -391,7 +390,7 @@ impl BodyCapture {
 /// `trace_id` is woven into the offload object key so an operator
 /// browsing the bucket can correlate objects back to the audit row
 /// without a CH query.
-async fn prepare_body_capture(
+pub(crate) async fn prepare_body_capture(
     dynamic_config: &DynamicConfig,
     pii_redactor: &PiiRedactor,
     blob_store: &std::sync::Arc<dyn think_watch_common::blob_store::BlobStore>,
@@ -635,7 +634,7 @@ fn emit_gateway_error_log(
 /// streaming on_done path to attach `error_type` / `error_message` /
 /// `stream_outcome` for non-natural completions, see OBS-02.
 #[allow(clippy::too_many_arguments)]
-fn emit_gateway_log_with_extra(
+pub(crate) fn emit_gateway_log_with_extra(
     audit: &think_watch_common::audit::AuditLogger,
     trace_id: &str,
     session_id: Option<&str>,
@@ -748,7 +747,7 @@ fn emit_gateway_log(
 /// over-estimates), so rate limits stay conservative. Operators can
 /// distinguish exact vs estimated rows by the `stream_usage_estimated`
 /// counter we bump on the fallback path.
-fn stream_usage_or_estimate(
+pub(crate) fn stream_usage_or_estimate(
     result: &crate::streaming::StreamResult,
     request_messages: &[crate::providers::traits::ChatMessage],
 ) -> (u32, u32) {
@@ -773,7 +772,7 @@ fn stream_usage_or_estimate(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn post_flight_account(
+pub(crate) async fn post_flight_account(
     db: sqlx::PgPool,
     redis: fred::clients::Client,
     _dynamic_config: Arc<DynamicConfig>,
@@ -1175,6 +1174,7 @@ async fn pick_with_strategy<'a>(
 
 /// What the proxy handler needs back from a selection in order to
 /// record health for the picked route after the request completes.
+#[derive(Clone)]
 pub(crate) struct SelectionRecord {
     pub picked_route_id: Uuid,
     pub started_at: std::time::Instant,
@@ -1188,7 +1188,7 @@ pub(crate) struct SelectionRecord {
 
 /// Record health for the picked route once the request finishes.
 /// Best-effort; failures are logged.
-pub(crate) async fn finalize_health(state: &GatewayState, sel: SelectionRecord, success: bool) {
+pub(crate) async fn finalize_health(state: &GatewayState, sel: &SelectionRecord, success: bool) {
     let total_latency_ms = sel.started_at.elapsed().as_millis().min(u32::MAX as u128) as u32;
     // For health, we want the picked route's *own* time, not the
     // cumulative including prior failed attempts. Non-stream sets
@@ -1711,156 +1711,77 @@ pub async fn proxy_chat_completion(
         )
         .await;
 
-        // Capture everything the post-flight callback needs BEFORE
-        // moving `request` into the provider stream.
-        let db = state.db.clone();
-        let redis = state.redis.clone();
-        let dynamic_config = state.dynamic_config.clone();
-        let weight_cache = state.weight_cache.clone();
-        let model = original_model.clone();
-        let request_rules_for_done = request_rules.clone();
-        let budget_caps = budgets_for_ai_gateway(&identity);
-        // Extra captures for emit_gateway_log — cloning small strings
-        // here is cheaper than retaining &state through the 'static bound.
-        let audit_for_done = state.audit.clone();
-        let cost_tracker = state.cost_tracker.clone();
-        let trace_id_for_done = metadata.request_id.clone();
-        let session_id_for_done = session_id.clone();
-        let user_id_for_done = identity.user_id.clone();
-        let user_email_for_done = identity.user_email.clone();
-        let api_key_id_for_done = identity.api_key_id.clone();
-        let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
-        let ip_address_for_done = identity.ip_address.clone();
-        let model_for_log = original_model.clone();
-        let provider_name_for_done = entry.provider_name.clone();
-        let upstream_model_for_done = entry.upstream_model.clone();
-        let started = request_started_at;
-        // Clone request for cache write — the original is moved into the provider.
-        let request_for_cache = request.clone();
-        // Snapshot the PRE-redaction messages into the on_done closure
-        // so audit-time body capture sees what the user actually wrote
-        // (request_for_cache holds the redacted form because it was
-        // cloned AFTER the pii_redactor mutated request.messages).
-        let messages_for_audit_for_done = messages_for_audit.clone();
-        let cache_for_done = state.cache.clone();
-        let state_for_done = state.clone();
-        let stream = entry.provider.stream_chat_completion(request);
-        let on_done = move |result: crate::streaming::StreamResult|
-            -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-            Box::pin(async move {
-                // Use the same token-resolution helper for the log row
-                // AND the budget increment (computed once below for
-                // both call sites). Previously the log row read raw
-                // `result.usage` which is None on ClientCancelled
-                // before the final usage chunk arrived — producing
-                // gateway_logs rows with pt=0, ct=0, cost=0 even though
-                // the upstream HAD generated and billed tokens. The
-                // budget already used the estimate path; the log was
-                // out of sync, breaking cost analytics for cancelled
-                // streams.
-                let (pt, ct) =
-                    stream_usage_or_estimate(&result, &request_for_cache.messages);
-                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
-                // Single classifier — Natural → 200, UpstreamError →
-                // the underlying GatewayError's canonical status (not
-                // the old 502 blanket), ClientCancelled → 499.
-                let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
-
-                // Assemble the streamed chunks into the canonical
-                // response shape ONCE — used both as the audit body
-                // and (when the stream ran to natural completion) as
-                // the cache fill below. Previously assemble_response
-                // only ran on the cache-fill side, so the audit row
-                // had no response payload to attach. Assembling for
-                // every outcome (natural, error, cancelled) lets the
-                // audit pipeline capture partial completions too,
-                // which is exactly what auditors need for
-                // mid-conversation incidents.
-                let assembled_for_audit = crate::streaming::assemble_response(
-                    &result.chunks,
-                    result.usage.clone(),
-                );
-                let stream_body_capture = prepare_body_capture(
-                    &state_for_done.dynamic_config,
-                    &state_for_done.pii_redactor.load(),
-                    &state_for_done.blob_store,
-                    &trace_id_for_done,
-                    &messages_for_audit_for_done,
-                    assembled_for_audit.as_ref(),
-                )
-                .await;
-
-                emit_gateway_log_with_extra(
-                    &audit_for_done,
-                    &trace_id_for_done,
-                    session_id_for_done.as_deref(),
-                    user_id_for_done.as_deref(),
-                    user_email_for_done.as_deref(),
-                    api_key_id_for_done.as_deref(),
-                    api_key_lineage_id_for_done.as_deref(),
-                    ip_address_for_done.as_deref(),
-                    &model_for_log,
-                    Some(provider_name_for_done.as_str()),
-                    upstream_model_for_done.as_deref(),
-                    pt,
-                    ct,
-                    cost,
-                    started.elapsed().as_millis() as i64,
-                    logged_status,
-                    error_detail,
-                    stream_body_capture,
-                );
-
-                // Health: Natural and ClientCancelled count as
-                // successes against the upstream (the latter is the
-                // client's choice, not the upstream's failure).
-                let stream_success = matches!(
-                    result.outcome,
-                    crate::streaming::StreamOutcome::Natural
-                        | crate::streaming::StreamOutcome::ClientCancelled
-                );
-                finalize_health(&state_for_done, sel_record, stream_success).await;
-
-                // Cache the assembled response when the stream ran to
-                // natural completion (partial streams from client
-                // disconnects are NOT cached). Reuses
-                // `assembled_for_audit` so we don't pay the assembly
-                // cost twice for a successful stream.
-                if result.natural_completion
-                    && let Some(ref assembled) = assembled_for_audit
-                {
-                    cache_for_done
-                        .set(&request_for_cache, assembled, None)
-                        .await;
-                }
-
-                // Reuse the (pt, ct) computed above for the log row so
-                // budget enforcement and cost analytics agree on the
-                // token count — without this, a cancelled stream would
-                // bill the budget for the estimated tokens but the
-                // gateway_logs row would show 0 tokens and 0 cost,
-                // making the two views permanently inconsistent.
-                post_flight_account(
-                    db,
-                    redis,
-                    dynamic_config,
-                    weight_cache,
-                    model,
-                    pt,
-                    ct,
-                    request_rules_for_done,
-                    budget_caps.clone(),
-                    user_id_for_done,
-                    user_email_for_done,
-                    api_key_id_for_done,
-                    ip_address_for_done,
-                    audit_for_done,
-                )
-                .await;
-            })
+        // Post-invoke pipeline owns audit emit + cache fill + breaker
+        // accounting + budget debit for the streaming branch. Build
+        // the deps the lifecycle hooks read; the detached task below
+        // picks them up after the stream terminates.
+        let pump_messages = request.messages.clone();
+        let original_model_for_pump = original_model.clone();
+        let state_for_pump = state.clone();
+        let deps = crate::lifecycle::ChatPostInvokeDeps {
+            state: state.clone(),
+            pii_redactor: pii_redactor.clone(),
+            messages_for_audit: messages_for_audit.clone(),
+            request_for_cache: request.clone(),
+            original_model: original_model.clone(),
+            provider_name: entry.provider_name.clone(),
+            upstream_model: entry.upstream_model.clone(),
+            sel_record,
+            request_rules: request_rules.clone(),
+            budget_caps: budgets_for_ai_gateway(&identity),
+            identity: identity.clone(),
+            trace_id: metadata.request_id.clone(),
+            session_id: session_id.clone(),
+            request_started_at,
+            // Chat completions cache — both the buffered branch
+            // and a successful stream fill the same slot.
+            cache_enabled: true,
         };
+
+        let stream = entry.provider.stream_chat_completion(request);
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
-        Ok(stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response())
+        let (sse, result_rx) = stream_to_sse_with_restorer(stream, stream_restorer);
+
+        // Detached tail: await the stream's result, materialise the
+        // captured view (token resolve + assembly + cost — once, not
+        // once per hook), and drive `run_post_invoke` through
+        // `record_outcome` → `write_cache` → `emit_audit`. Single
+        // audit-emit site for the streaming path.
+        tokio::spawn(async move {
+            let Ok(result) = result_rx.await else {
+                // The stream pump's internal task dropped the sender
+                // without sending — only possible during runtime
+                // teardown. Nothing to account for.
+                return;
+            };
+            let (outcome, captured) = crate::lifecycle::capture_chat_stream(
+                &state_for_pump,
+                &original_model_for_pump,
+                &pump_messages,
+                result,
+            )
+            .await;
+            let invoked = think_watch_common::lifecycle::state::Invoked {
+                identity: deps.identity.clone(),
+                trace_id: deps.trace_id.clone(),
+                started_at: deps.request_started_at,
+                client_ip: deps.identity.ip_address.clone(),
+                limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
+                    currents: Vec::new(),
+                },
+                access_candidate: deps.original_model.clone(),
+                view: think_watch_common::lifecycle::state::CapturedView::Streaming {
+                    outcome,
+                    captured,
+                },
+            };
+            think_watch_common::lifecycle::stages::run_post_invoke::<
+                crate::lifecycle::ChatCompletionSurface,
+            >(invoked, &deps)
+            .await;
+        });
+
+        Ok(sse.into_response())
     } else {
         // Non-streaming: full failover with retry across healthy candidates
         let sel_ctx =
@@ -1918,7 +1839,7 @@ pub async fn proxy_chat_completion(
             &response,
             &model_cfg.output_guardrails,
         ) {
-            finalize_health(&state, sel_record, false).await;
+            finalize_health(&state, &sel_record, false).await;
             return Err(ctx.emit(e).into());
         }
 
@@ -2011,7 +1932,7 @@ pub async fn proxy_chat_completion(
             body_capture,
         );
 
-        finalize_health(&state, sel_record, true).await;
+        finalize_health(&state, &sel_record, true).await;
 
         let mut http_response = Json(&response).into_response();
         http_response
@@ -2238,110 +2159,67 @@ pub async fn proxy_anthropic_messages(
         )
         .await;
 
-        let db = state.db.clone();
-        let redis = state.redis.clone();
-        let dynamic_config = state.dynamic_config.clone();
-        let weight_cache = state.weight_cache.clone();
-        let model_for_done = mapped_model.clone();
-        let request_rules_for_done = request_rules.clone();
-        let budget_caps = budgets_for_ai_gateway(&identity);
-        let audit_for_done = state.audit.clone();
-        let cost_tracker = state.cost_tracker.clone();
-        let trace_id_for_done = trace_id.clone();
-        let session_id_for_done = session_id.clone();
-        // Capture the prompt messages for usage estimation when the
-        // upstream stream doesn't surface a usage chunk — see
-        // `stream_usage_or_estimate` for the budget-bypass context.
-        let messages_for_done = request.messages.clone();
-        // Pre-redaction snapshot for audit body capture (see the
-        // `messages_for_audit` clone at the top of the handler).
-        let messages_for_audit_for_done = messages_for_audit.clone();
-        let user_id_for_done = identity.user_id.clone();
-        let user_email_for_done = identity.user_email.clone();
-        let api_key_id_for_done = identity.api_key_id.clone();
-        let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
-        let ip_address_for_done = identity.ip_address.clone();
-        let model_for_log = mapped_model.clone();
-        let provider_name_for_done = entry.provider_name.clone();
-        let upstream_model_for_done = entry.upstream_model.clone();
-        let started = request_started_at;
-        let state_for_done = state.clone();
-        let stream = entry.provider.stream_chat_completion(stream_request);
-        let on_done = move |result: crate::streaming::StreamResult|
-            -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-            Box::pin(async move {
-                // Resolve tokens once via the estimator (handles the
-                // ClientCancelled / no-final-usage case) and share the
-                // result between the log row and the budget update so
-                // the two views agree.
-                let (pt, ct) = stream_usage_or_estimate(&result, &messages_for_done);
-                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
-                let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
-                // Assemble streamed chunks into a canonical response for
-                // body capture. Same logic as the chat-completions stream
-                // path; auditors get the user's actual prompt + the AI's
-                // (possibly partial) reply.
-                let assembled_for_audit = crate::streaming::assemble_response(
-                    &result.chunks,
-                    result.usage.clone(),
-                );
-                let stream_body_capture = prepare_body_capture(
-                    &state_for_done.dynamic_config,
-                    &state_for_done.pii_redactor.load(),
-                    &state_for_done.blob_store,
-                    &trace_id_for_done,
-                    &messages_for_audit_for_done,
-                    assembled_for_audit.as_ref(),
-                )
-                .await;
-                emit_gateway_log_with_extra(
-                    &audit_for_done,
-                    &trace_id_for_done,
-                    session_id_for_done.as_deref(),
-                    user_id_for_done.as_deref(),
-                    user_email_for_done.as_deref(),
-                    api_key_id_for_done.as_deref(),
-                    api_key_lineage_id_for_done.as_deref(),
-                    ip_address_for_done.as_deref(),
-                    &model_for_log,
-                    Some(provider_name_for_done.as_str()),
-                    upstream_model_for_done.as_deref(),
-                    pt,
-                    ct,
-                    cost,
-                    started.elapsed().as_millis() as i64,
-                    logged_status,
-                    error_detail,
-                    stream_body_capture,
-                );
-                let stream_success = matches!(
-                    result.outcome,
-                    crate::streaming::StreamOutcome::Natural
-                        | crate::streaming::StreamOutcome::ClientCancelled
-                );
-                finalize_health(&state_for_done, sel_record, stream_success).await;
-                post_flight_account(
-                    db,
-                    redis,
-                    dynamic_config,
-                    weight_cache,
-                    model_for_done,
-                    pt,
-                    ct,
-                    request_rules_for_done,
-                    budget_caps.clone(),
-                    user_id_for_done,
-                    user_email_for_done,
-                    api_key_id_for_done,
-                    ip_address_for_done,
-                    audit_for_done,
-                )
-                .await;
-            })
+        // Post-invoke pipeline (see `proxy_chat_completion` for the
+        // shared design). Anthropic Messages does NOT cache —
+        // `cache_enabled: false` — but otherwise the breaker / audit
+        // / budget tail is identical.
+        let pump_messages = request.messages.clone();
+        let original_model_for_pump = mapped_model.clone();
+        let state_for_pump = state.clone();
+        let deps = crate::lifecycle::ChatPostInvokeDeps {
+            state: state.clone(),
+            pii_redactor: pii_redactor.clone(),
+            messages_for_audit: messages_for_audit.clone(),
+            request_for_cache: request.clone(),
+            original_model: mapped_model.clone(),
+            provider_name: entry.provider_name.clone(),
+            upstream_model: entry.upstream_model.clone(),
+            sel_record,
+            request_rules: request_rules.clone(),
+            budget_caps: budgets_for_ai_gateway(&identity),
+            identity: identity.clone(),
+            trace_id: trace_id.clone(),
+            session_id: session_id.clone(),
+            request_started_at,
+            cache_enabled: false,
         };
+
+        let stream = entry.provider.stream_chat_completion(stream_request);
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
-        let mut http_response =
-            stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response();
+        let (sse, result_rx) = stream_to_sse_with_restorer(stream, stream_restorer);
+
+        tokio::spawn(async move {
+            let Ok(result) = result_rx.await else {
+                return;
+            };
+            let (outcome, captured) = crate::lifecycle::capture_chat_stream(
+                &state_for_pump,
+                &original_model_for_pump,
+                &pump_messages,
+                result,
+            )
+            .await;
+            let invoked = think_watch_common::lifecycle::state::Invoked {
+                identity: deps.identity.clone(),
+                trace_id: deps.trace_id.clone(),
+                started_at: deps.request_started_at,
+                client_ip: deps.identity.ip_address.clone(),
+                limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
+                    currents: Vec::new(),
+                },
+                access_candidate: deps.original_model.clone(),
+                view: think_watch_common::lifecycle::state::CapturedView::Streaming {
+                    outcome,
+                    captured,
+                },
+            };
+            think_watch_common::lifecycle::stages::run_post_invoke::<
+                crate::lifecycle::ChatCompletionSurface,
+            >(invoked, &deps)
+            .await;
+        });
+
+        let mut http_response = sse.into_response();
         if let Ok(v) = trace_id.parse() {
             http_response.headers_mut().insert("x-trace-id", v);
         }
@@ -2393,7 +2271,7 @@ pub async fn proxy_anthropic_messages(
             &response,
             &model_cfg.output_guardrails,
         ) {
-            finalize_health(&state, sel_record, false).await;
+            finalize_health(&state, &sel_record, false).await;
             return Err(ctx.emit(e).into());
         }
 
@@ -2461,7 +2339,7 @@ pub async fn proxy_anthropic_messages(
             body_capture,
         );
 
-        finalize_health(&state, sel_record, true).await;
+        finalize_health(&state, &sel_record, true).await;
 
         // Convert OpenAI response back to Anthropic format
         let anthropic_response = convert_to_anthropic_response(&response);
@@ -2708,113 +2586,69 @@ pub async fn proxy_responses(
         )
         .await;
 
-        let db = state.db.clone();
-        let redis = state.redis.clone();
-        let dynamic_config = state.dynamic_config.clone();
-        let weight_cache = state.weight_cache.clone();
-        let model_for_done = mapped_model.clone();
-        let request_rules_for_done = request_rules.clone();
-        let budget_caps = budgets_for_ai_gateway(&identity);
-        let audit_for_done = state.audit.clone();
-        let cost_tracker = state.cost_tracker.clone();
-        let trace_id_for_done = trace_id.clone();
-        let session_id_for_done = session_id.clone();
-        // Capture the prompt messages for usage estimation when the
-        // upstream stream doesn't surface a usage chunk — see
-        // `stream_usage_or_estimate` for the budget-bypass context.
-        let messages_for_done = request.messages.clone();
-        // Pre-redaction snapshot for audit body capture (see the
-        // `messages_for_audit` clone at the top of the handler).
-        let messages_for_audit_for_done = messages_for_audit.clone();
-        let user_id_for_done = identity.user_id.clone();
-        let user_email_for_done = identity.user_email.clone();
-        let api_key_id_for_done = identity.api_key_id.clone();
-        let api_key_lineage_id_for_done = identity.api_key_lineage_id.clone();
-        let ip_address_for_done = identity.ip_address.clone();
-        let model_for_log = mapped_model.clone();
-        let provider_name_for_done = entry.provider_name.clone();
-        let upstream_model_for_done = entry.upstream_model.clone();
-        let started = request_started_at;
-        let state_for_done = state.clone();
-        let stream = entry.provider.stream_chat_completion(stream_request);
-        let on_done = move |result: crate::streaming::StreamResult|
-            -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-            Box::pin(async move {
-                // Resolve tokens once via the estimator (handles the
-                // ClientCancelled / no-final-usage case) and share the
-                // result between the log row and the budget update so
-                // the two views agree.
-                let (pt, ct) = stream_usage_or_estimate(&result, &messages_for_done);
-                let cost = cost_tracker.calculate_cost(&model_for_log, pt, ct).await;
-                let (logged_status, error_detail) = result.outcome.logged_status_and_detail();
-                // Assemble streamed chunks into a canonical response for
-                // body capture. Same logic as the chat-completions stream
-                // path; auditors get the user's actual prompt + the AI's
-                // (possibly partial) reply.
-                let assembled_for_audit = crate::streaming::assemble_response(
-                    &result.chunks,
-                    result.usage.clone(),
-                );
-                let stream_body_capture = prepare_body_capture(
-                    &state_for_done.dynamic_config,
-                    &state_for_done.pii_redactor.load(),
-                    &state_for_done.blob_store,
-                    &trace_id_for_done,
-                    &messages_for_audit_for_done,
-                    assembled_for_audit.as_ref(),
-                )
-                .await;
-                emit_gateway_log_with_extra(
-                    &audit_for_done,
-                    &trace_id_for_done,
-                    session_id_for_done.as_deref(),
-                    user_id_for_done.as_deref(),
-                    user_email_for_done.as_deref(),
-                    api_key_id_for_done.as_deref(),
-                    api_key_lineage_id_for_done.as_deref(),
-                    ip_address_for_done.as_deref(),
-                    &model_for_log,
-                    Some(provider_name_for_done.as_str()),
-                    upstream_model_for_done.as_deref(),
-                    pt,
-                    ct,
-                    cost,
-                    started.elapsed().as_millis() as i64,
-                    logged_status,
-                    error_detail,
-                    stream_body_capture,
-                );
-                let stream_success = matches!(
-                    result.outcome,
-                    crate::streaming::StreamOutcome::Natural
-                        | crate::streaming::StreamOutcome::ClientCancelled
-                );
-                finalize_health(&state_for_done, sel_record, stream_success).await;
-                post_flight_account(
-                    db,
-                    redis,
-                    dynamic_config,
-                    weight_cache,
-                    model_for_done,
-                    pt,
-                    ct,
-                    request_rules_for_done,
-                    budget_caps.clone(),
-                    user_id_for_done,
-                    user_email_for_done,
-                    api_key_id_for_done,
-                    ip_address_for_done,
-                    audit_for_done,
-                )
-                .await;
-            })
+        // Post-invoke pipeline (see `proxy_chat_completion` for the
+        // shared design). Responses (like Anthropic Messages) does
+        // NOT cache — `cache_enabled: false`.
+        let pump_messages = request.messages.clone();
+        let original_model_for_pump = mapped_model.clone();
+        let state_for_pump = state.clone();
+        let deps = crate::lifecycle::ChatPostInvokeDeps {
+            state: state.clone(),
+            pii_redactor: pii_redactor.clone(),
+            messages_for_audit: messages_for_audit.clone(),
+            request_for_cache: request.clone(),
+            original_model: mapped_model.clone(),
+            provider_name: entry.provider_name.clone(),
+            upstream_model: entry.upstream_model.clone(),
+            sel_record,
+            request_rules: request_rules.clone(),
+            budget_caps: budgets_for_ai_gateway(&identity),
+            identity: identity.clone(),
+            trace_id: trace_id.clone(),
+            session_id: session_id.clone(),
+            request_started_at,
+            cache_enabled: false,
         };
+
+        let stream = entry.provider.stream_chat_completion(stream_request);
         // Stitch placeholders back together as chunks stream through.
         // Same restorer the chat-completions surface uses; no-op when
         // redaction_ctx is empty so the feature-off path stays free.
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
-        let mut http_response =
-            stream_to_sse_with_restorer(stream, on_done, stream_restorer).into_response();
+        let (sse, result_rx) = stream_to_sse_with_restorer(stream, stream_restorer);
+
+        tokio::spawn(async move {
+            let Ok(result) = result_rx.await else {
+                return;
+            };
+            let (outcome, captured) = crate::lifecycle::capture_chat_stream(
+                &state_for_pump,
+                &original_model_for_pump,
+                &pump_messages,
+                result,
+            )
+            .await;
+            let invoked = think_watch_common::lifecycle::state::Invoked {
+                identity: deps.identity.clone(),
+                trace_id: deps.trace_id.clone(),
+                started_at: deps.request_started_at,
+                client_ip: deps.identity.ip_address.clone(),
+                limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
+                    currents: Vec::new(),
+                },
+                access_candidate: deps.original_model.clone(),
+                view: think_watch_common::lifecycle::state::CapturedView::Streaming {
+                    outcome,
+                    captured,
+                },
+            };
+            think_watch_common::lifecycle::stages::run_post_invoke::<
+                crate::lifecycle::ChatCompletionSurface,
+            >(invoked, &deps)
+            .await;
+        });
+
+        let mut http_response = sse.into_response();
         if let Ok(v) = trace_id.parse() {
             http_response.headers_mut().insert("x-trace-id", v);
         }
@@ -2864,7 +2698,7 @@ pub async fn proxy_responses(
             &response,
             &model_cfg.output_guardrails,
         ) {
-            finalize_health(&state, sel_record, false).await;
+            finalize_health(&state, &sel_record, false).await;
             return Err(ctx.emit(e).into());
         }
 
@@ -2930,7 +2764,7 @@ pub async fn proxy_responses(
             body_capture,
         );
 
-        finalize_health(&state, sel_record, true).await;
+        finalize_health(&state, &sel_record, true).await;
 
         let responses_format = convert_to_responses_format(&response);
         let mut http_response = Json(responses_format).into_response();

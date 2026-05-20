@@ -6,80 +6,10 @@ use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
-/// Outcome classification for a finished stream — separates a natural
-/// upstream `[DONE]` from a mid-stream error from a client cancel so
-/// the audit row says WHY the stream ended, not just that it didn't
-/// finish cleanly.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StreamOutcome {
-    /// Upstream emitted `[DONE]` and the consumer received every chunk.
-    Natural,
-    /// Upstream produced a `GatewayError` mid-stream. Most common
-    /// after a partial response — includes the error tag for the
-    /// gateway_logs row so dashboards can split provider drops from
-    /// cancellations.
-    UpstreamError {
-        /// `error_type` tag derived from the variant name (e.g.
-        /// `"NetworkError"`, `"ProviderTimeout"`); kept short so it
-        /// works as a Prometheus label value.
-        error_type: String,
-        /// Operator-facing description, truncated.
-        message: String,
-        /// Canonical HTTP status (via `GatewayError::status_code()`)
-        /// the wire would have carried if this error had occurred
-        /// *before* SSE headers were flushed. The streaming on_done
-        /// callbacks log this to gateway_logs so a 429 stays a 429 and
-        /// a 504 stays a 504 — historically every streaming-mid error
-        /// was logged as 502, which painted healthy-but-throttled
-        /// upstreams as broken on the dashboard.
-        status_code: i64,
-    },
-    /// Consumer dropped the stream future before completion. Signals
-    /// "the user closed the tab" or "axum dropped the connection";
-    /// nothing the gateway did wrong, but cost / token accounting
-    /// still uses whatever chunks did arrive.
-    ClientCancelled,
-}
-
-impl StreamOutcome {
-    pub fn is_natural(&self) -> bool {
-        matches!(self, StreamOutcome::Natural)
-    }
-
-    /// `(logged_status, optional_detail_blob)` for the audit row the
-    /// streaming on_done callback emits. Centralizing this lets the
-    /// three handler-format on_done sites (OpenAI / Anthropic /
-    /// Responses) share one mapping instead of each one hand-rolling
-    /// their own — historically two of them ignored the outcome and
-    /// always logged 200, silently masking mid-stream failures.
-    ///
-    /// Nginx 499 for client-cancelled is intentional; the standard
-    /// HTTP catalogue has no slot for "consumer left," and 499 is the
-    /// de-facto convention dashboards already filter on.
-    pub fn logged_status_and_detail(&self) -> (i64, Option<serde_json::Value>) {
-        match self {
-            StreamOutcome::Natural => (200, None),
-            StreamOutcome::UpstreamError {
-                error_type,
-                message,
-                status_code,
-            } => (
-                *status_code,
-                Some(serde_json::json!({
-                    "error_type": error_type,
-                    "error_message": message,
-                    "stream_outcome": "upstream_error",
-                })),
-            ),
-            StreamOutcome::ClientCancelled => (
-                499,
-                Some(serde_json::json!({
-                    "stream_outcome": "client_cancelled",
-                })),
-            ),
-        }
-    }
-}
+/// Outcome classification for a finished stream. Re-exported from
+/// the shared lifecycle module so the AI gateway and the MCP gateway
+/// agree on a single audit-status / Prometheus-label set.
+pub use think_watch_common::lifecycle::streaming::StreamOutcome;
 
 /// Payload delivered to the `on_done` callback when a stream completes
 /// (naturally or via client cancellation).
@@ -104,54 +34,51 @@ pub struct StreamResult {
     pub outcome: StreamOutcome,
 }
 
-/// Converts a stream of `ChatCompletionChunk` results into an Axum SSE response.
+/// Converts a stream of `ChatCompletionChunk` results into an Axum
+/// SSE response, returning the response alongside a oneshot
+/// `Receiver<StreamResult>` that resolves **exactly once** when the
+/// stream terminates — natural EOF, upstream error, or client drop.
 ///
-/// Each chunk is serialized as `data: {json}\n\n`. When the source stream ends,
-/// a final `data: [DONE]\n\n` event is emitted to signal completion (matching
-/// the OpenAI streaming protocol).
+/// Callers wrap the receiver into a lifecycle tail future:
 ///
-/// `on_done` is **guaranteed to run exactly once** for every stream
-/// returned from this function — including the case where the client
-/// drops the connection mid-stream.
+/// ```ignore
+/// let (sse, result_rx) = stream_to_sse_with_restorer(stream, restorer);
+/// let response = sse.into_response();
+/// let tail = Box::pin(async move {
+///     let result = result_rx.await.expect("internal task always sends");
+///     /* build Invoked<S> from result + ctx */
+/// });
+/// Invocation::Streaming { response, tail }
+/// ```
 ///
-/// **Why the channel dance:** the obvious implementation (call
-/// `on_done().await` at the bottom of an `async_stream::stream!`
+/// Each chunk is serialized as `data: {json}\n\n`. When the source
+/// stream ends, a final `data: [DONE]\n\n` event is emitted to signal
+/// completion (matching the OpenAI streaming protocol).
+///
+/// **Why the channel dance:** the obvious implementation (await
+/// `done_tx.send(...)` at the bottom of an `async_stream::stream!`
 /// block) silently leaks accounting whenever the consumer (Sse)
 /// drops the stream future before the loop exits — and the consumer
-/// drops as soon as the client disconnects. We sidestep that by
-/// running `on_done` in a detached `tokio::spawn` task that listens
-/// for either the stream's "I'm finished" signal or the dropped
-/// sender that signals "I was cancelled". Either way, the callback
-/// fires exactly once with whatever state the stream had captured.
-pub fn stream_to_sse<F>(
-    stream: Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>,
-    on_done: F,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
-where
-    F: FnOnce(StreamResult) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-        + Send
-        + 'static,
-{
-    stream_to_sse_with_restorer(stream, on_done, None)
-}
-
-/// Same as `stream_to_sse`, but runs each chunk's `delta.content` through
-/// a `PiiStreamRestorer` first. The restorer holds back any trailing
-/// content that might still be growing into a placeholder; on completion,
-/// a final synthetic chunk flushes whatever is left in the buffer.
+/// drops as soon as the client disconnects. A detached
+/// `tokio::spawn` listens for either the stream's "I'm finished"
+/// signal or the dropped sender that signals "I was cancelled" and
+/// forwards the corresponding `StreamResult` to the returned
+/// receiver. Either way, the receiver fires exactly once with
+/// whatever state the stream had captured.
 ///
-/// When `restorer` is `None` this is an exact no-op delegation — no
-/// extra allocations, no latency penalty for the feature-off path.
-pub fn stream_to_sse_with_restorer<F>(
+/// `restorer` runs each chunk's `delta.content` through a
+/// `PiiStreamRestorer` (holds back any trailing content that might
+/// still be growing into a placeholder; flushes the tail as a
+/// synthetic chunk on completion). When `None` this is an exact
+/// no-op — no extra allocations, no latency penalty for the
+/// feature-off path.
+pub fn stream_to_sse_with_restorer(
     stream: Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>,
-    on_done: F,
     restorer: Option<PiiStreamRestorer>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>>
-where
-    F: FnOnce(StreamResult) -> Pin<Box<dyn std::future::Future<Output = ()> + Send>>
-        + Send
-        + 'static,
-{
+) -> (
+    Sse<impl Stream<Item = Result<Event, Infallible>>>,
+    tokio::sync::oneshot::Receiver<StreamResult>,
+) {
     // Shared state — the stream loop writes into these; the post-flight
     // task reads them on completion or drop.
     let last_usage: Arc<Mutex<Option<Usage>>> = Arc::new(Mutex::new(None));
@@ -164,9 +91,10 @@ where
     // exit (Natural) or after observing a stream Err (UpstreamError).
     // If the loop is dropped before reaching either line, the sender
     // is dropped and the receiver yields `Err(RecvError)` — which we
-    // map to ClientCancelled. Either way the spawned task wakes up
-    // and runs `on_done` exactly once.
+    // map to ClientCancelled. Either way the spawned task assembles
+    // a `StreamResult` and forwards it to the caller's receiver.
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel::<StreamResult>();
 
     tokio::spawn(async move {
         let received = done_rx.await;
@@ -177,23 +105,22 @@ where
             .map(|mut g| std::mem::take(&mut *g))
             .unwrap_or_default();
         let outcome = received.unwrap_or(StreamOutcome::ClientCancelled);
-        // Three labels instead of two: the `cancelled` bucket used to
-        // hide upstream errors, which masked a real provider problem
-        // as "user closed the tab".
-        let label = match &outcome {
-            StreamOutcome::Natural => "natural",
-            StreamOutcome::UpstreamError { .. } => "upstream_error",
-            StreamOutcome::ClientCancelled => "cancelled",
-        };
-        metrics::counter!("gateway_stream_completion_total", "outcome" => label).increment(1);
+        metrics::counter!(
+            "gateway_stream_completion_total",
+            "outcome" => outcome.metric_label()
+        )
+        .increment(1);
         let natural = outcome.is_natural();
-        on_done(StreamResult {
+        // `result_tx.send` drops the value silently when the receiver
+        // is gone — that's the caller having dropped the tail future
+        // (e.g. axum dropped the request). Nothing to clean up
+        // ourselves; the StreamResult goes with it.
+        let _ = result_tx.send(StreamResult {
             usage,
             chunks,
             natural_completion: natural,
             outcome,
-        })
-        .await;
+        });
     });
 
     // Strip out the no-op case so the hot loop can skip the restorer
@@ -321,7 +248,7 @@ where
         yield Ok::<Event, Infallible>(Event::default().data("[DONE]"));
     };
 
-    Sse::new(body).keep_alive(KeepAlive::default())
+    (Sse::new(body).keep_alive(KeepAlive::default()), result_rx)
 }
 
 /// Assemble a complete `ChatCompletionResponse` from a sequence of
@@ -387,8 +314,6 @@ mod tests {
     use axum::body::Bytes;
     use axum::response::IntoResponse;
     use futures::StreamExt;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
     fn chunk(usage: Option<Usage>) -> Result<ChatCompletionChunk, GatewayError> {
         Ok(ChatCompletionChunk {
@@ -401,8 +326,12 @@ mod tests {
         })
     }
 
+    /// Client drop mid-stream MUST still resolve the result receiver,
+    /// carrying whatever usage / chunks the stream observed before the
+    /// drop. The pump tail future relies on this — without it,
+    /// post-call accounting would leak for any cancelled request.
     #[tokio::test]
-    async fn on_done_runs_when_client_drops_stream_early() {
+    async fn result_receiver_resolves_when_client_drops_stream_early() {
         let producer = async_stream::stream! {
             yield chunk(Some(Usage {
                 prompt_tokens: 10,
@@ -414,47 +343,27 @@ mod tests {
             yield chunk(None);
         };
 
-        let on_done_called = Arc::new(AtomicBool::new(false));
-        let captured_prompt = Arc::new(AtomicU32::new(0));
-        let captured_completion = Arc::new(AtomicU32::new(0));
-        let on_done_flag = on_done_called.clone();
-        let cap_p = captured_prompt.clone();
-        let cap_c = captured_completion.clone();
-
-        let on_done =
-            move |result: StreamResult| -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-                Box::pin(async move {
-                    on_done_flag.store(true, Ordering::SeqCst);
-                    if let Some(u) = result.usage {
-                        cap_p.store(u.prompt_tokens, Ordering::SeqCst);
-                        cap_c.store(u.completion_tokens, Ordering::SeqCst);
-                    }
-                })
-            };
-
-        let sse = stream_to_sse(Box::pin(producer), on_done);
+        let (sse, result_rx) = stream_to_sse_with_restorer(Box::pin(producer), None);
 
         let mut body_stream = sse.into_response().into_body().into_data_stream();
         let _first: Option<Result<Bytes, _>> = body_stream.next().await;
         drop(body_stream);
 
-        for _ in 0..20 {
-            if on_done_called.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-
+        let result = tokio::time::timeout(std::time::Duration::from_millis(200), result_rx)
+            .await
+            .expect("receiver MUST resolve even when the client drops the stream early")
+            .expect("internal task always sends");
+        let usage = result.usage.expect("usage from the chunk we did observe");
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 20);
         assert!(
-            on_done_called.load(Ordering::SeqCst),
-            "on_done MUST run even when the client drops the stream early"
+            !result.natural_completion,
+            "client cancel is not a natural completion"
         );
-        assert_eq!(captured_prompt.load(Ordering::SeqCst), 10);
-        assert_eq!(captured_completion.load(Ordering::SeqCst), 20);
     }
 
     #[tokio::test]
-    async fn on_done_runs_on_natural_completion() {
+    async fn result_receiver_resolves_on_natural_completion() {
         let producer = async_stream::stream! {
             yield chunk(Some(Usage {
                 prompt_tokens: 5,
@@ -463,82 +372,44 @@ mod tests {
             }));
         };
 
-        let on_done_called = Arc::new(AtomicBool::new(false));
-        let captured_prompt = Arc::new(AtomicU32::new(0));
-        let captured_completion = Arc::new(AtomicU32::new(0));
-        let on_done_flag = on_done_called.clone();
-        let cap_p = captured_prompt.clone();
-        let cap_c = captured_completion.clone();
-
-        let on_done =
-            move |result: StreamResult| -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-                Box::pin(async move {
-                    on_done_flag.store(true, Ordering::SeqCst);
-                    if let Some(u) = result.usage {
-                        cap_p.store(u.prompt_tokens, Ordering::SeqCst);
-                        cap_c.store(u.completion_tokens, Ordering::SeqCst);
-                    }
-                })
-            };
-
-        let sse = stream_to_sse(Box::pin(producer), on_done);
+        let (sse, result_rx) = stream_to_sse_with_restorer(Box::pin(producer), None);
         let mut body_stream = sse.into_response().into_body().into_data_stream();
         while let Some(item) = body_stream.next().await {
             let _: Result<Bytes, _> = item;
         }
         drop(body_stream);
 
-        for _ in 0..20 {
-            if on_done_called.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-
-        assert!(on_done_called.load(Ordering::SeqCst));
-        assert_eq!(captured_prompt.load(Ordering::SeqCst), 5);
-        assert_eq!(captured_completion.load(Ordering::SeqCst), 7);
+        let result = tokio::time::timeout(std::time::Duration::from_millis(200), result_rx)
+            .await
+            .expect("receiver MUST resolve after natural completion")
+            .expect("internal task always sends");
+        assert!(result.natural_completion);
+        let usage = result.usage.expect("usage was reported");
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, 7);
     }
 
     #[tokio::test]
-    async fn on_done_runs_with_none_when_no_usage_was_seen() {
+    async fn result_receiver_yields_none_when_no_usage_was_seen() {
         let producer = async_stream::stream! {
             yield chunk(None);
         };
 
-        let on_done_called = Arc::new(AtomicBool::new(false));
-        let received_some = Arc::new(AtomicBool::new(false));
-        let on_done_flag = on_done_called.clone();
-        let received = received_some.clone();
-
-        let on_done =
-            move |result: StreamResult| -> Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-                Box::pin(async move {
-                    on_done_flag.store(true, Ordering::SeqCst);
-                    if result.usage.is_some() {
-                        received.store(true, Ordering::SeqCst);
-                    }
-                })
-            };
-
-        let sse = stream_to_sse(Box::pin(producer), on_done);
+        let (sse, result_rx) = stream_to_sse_with_restorer(Box::pin(producer), None);
         let mut body_stream = sse.into_response().into_body().into_data_stream();
         while let Some(item) = body_stream.next().await {
             let _: Result<Bytes, _> = item;
         }
         drop(body_stream);
 
-        for _ in 0..20 {
-            if on_done_called.load(Ordering::SeqCst) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-        }
-
-        assert!(on_done_called.load(Ordering::SeqCst));
+        let result = tokio::time::timeout(std::time::Duration::from_millis(200), result_rx)
+            .await
+            .expect("receiver MUST resolve after natural completion")
+            .expect("internal task always sends");
+        assert!(result.natural_completion);
         assert!(
-            !received_some.load(Ordering::SeqCst),
-            "on_done should receive None when no chunk reported usage"
+            result.usage.is_none(),
+            "no chunk reported usage ⇒ result carries None"
         );
     }
 }
