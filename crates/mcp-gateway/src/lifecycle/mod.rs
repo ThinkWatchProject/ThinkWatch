@@ -15,12 +15,15 @@ use uuid::Uuid;
 
 use think_watch_common::audit::{AuditActor, AuditEntry, McpActor};
 use think_watch_common::lifecycle::Surface;
+use think_watch_common::lifecycle::state::Invoked;
 use think_watch_common::limits::{
     RateLimitRule, RateLimitSubject, Surface as LimitSurface, SurfaceConstraints,
 };
 
 use crate::access_control::is_tool_allowed;
-use crate::proxy::{INVALID_REQUEST, JsonRpcRequest, JsonRpcResponse, err_response};
+use crate::proxy::{
+    INVALID_REQUEST, JsonRpcRequest, JsonRpcResponse, StreamingPayload, err_response,
+};
 
 /// The MCP surface marker. Zero-size — stage code references the
 /// surface's wire-format types via `McpSurface::Identity` /
@@ -97,6 +100,40 @@ impl Surface for McpSurface {
         // own request body).
         err_response(None, INVALID_REQUEST, "Access denied for this tool")
     }
+
+    /// MCP streaming capture is the JSON-RPC event timeline the
+    /// pump accumulates as upstream events flow through. Phase 2
+    /// step 2 (STREAMING.md migration) wires this into
+    /// `build_mcp_pump`; for now the type exists so the Surface
+    /// trait is satisfied and downstream stages can be written
+    /// against `CapturedView::Streaming { captured, .. }`.
+    type StreamCaptured = Vec<serde_json::Value>;
+
+    /// Streaming wire response — the SSE body the transport layer
+    /// hands to axum before the post-call tail resolves. Defined
+    /// here so the `Surface` trait is satisfied; phase 2 step 2
+    /// wires this into `build_mcp_pump`.
+    type StreamResponse = StreamingPayload;
+
+    /// Post-invoke hook deps for MCP. Empty marker for now —
+    /// STREAMING.md step 2 fills this with a clone of the
+    /// `McpProxy` handle (circuit breakers, cache, audit, server-
+    /// id, tool-name, …) so the three hooks below can dispatch
+    /// into the existing post-call code.
+    type PostInvokeDeps = ();
+
+    /// No-op until STREAMING.md step 2. The MCP pipeline does not
+    /// yet route post-invoke work through
+    /// [`think_watch_common::lifecycle::stages::run_post_invoke`];
+    /// the existing `crate::proxy::streaming::build_chunk_passthrough`
+    /// owns breaker accounting until step 2 moves it here.
+    async fn record_outcome(_deps: &Self::PostInvokeDeps, _invoked: &Invoked<Self>) {}
+
+    /// No-op until STREAMING.md step 2 (see [`record_outcome`]).
+    async fn write_cache(_deps: &Self::PostInvokeDeps, _invoked: &Invoked<Self>) {}
+
+    /// No-op until STREAMING.md step 2 (see [`record_outcome`]).
+    async fn emit_audit(_deps: &Self::PostInvokeDeps, _invoked: &Invoked<Self>) {}
 }
 
 /// Build the MCP-surface `requests` rate-limit rules from a

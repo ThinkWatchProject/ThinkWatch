@@ -36,9 +36,11 @@
 pub mod error;
 pub mod stages;
 pub mod state;
+pub mod streaming;
 mod surface;
 
 pub use error::StageError;
+pub use streaming::StreamOutcome;
 pub use surface::Surface;
 
 #[cfg(test)]

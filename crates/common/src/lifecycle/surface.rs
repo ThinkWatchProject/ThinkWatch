@@ -1,7 +1,11 @@
 //! The [`Surface`] trait — each gateway crate implements this to
 //! plug its wire-format types into the pipeline.
 
+use std::future::Future;
+
 use crate::audit::AuditEntry;
+
+use super::state::Invoked;
 
 /// Per-surface plumbing. Each impl is a zero-sized marker type
 /// (`struct McpSurface;`, `struct OpenAiChatSurface;` …) — stages
@@ -11,7 +15,7 @@ use crate::audit::AuditEntry;
 /// All associated types are `Send + Sync + 'static` so they can be
 /// moved across `tokio::spawn` boundaries (the streaming on-done
 /// task in phase 2 will rely on this).
-pub trait Surface: Send + Sync + 'static {
+pub trait Surface: Sized + Send + Sync + 'static {
     /// Identity established by upstream auth middleware. Carries
     /// at minimum a stable subject id + the materialised
     /// [`crate::limits::SurfaceConstraints`] the limit/budget
@@ -23,11 +27,22 @@ pub trait Surface: Send + Sync + 'static {
     /// inspects the requested model/tool name) do.
     type RequestBody: Send + Sync + 'static;
 
-    /// Wire response shape. Short-circuit stages build one of these
-    /// via the `*_response` factory methods below; the buffered-
-    /// success path materialises one in `emit_audit`'s terminal
-    /// state.
+    /// Buffered wire response shape. Short-circuit stages build one
+    /// of these via the `*_response` factory methods below; the
+    /// buffered-success path threads one through
+    /// [`super::state::CapturedView::Buffered`] into the terminal
+    /// [`super::state::Emitted`]. The cache stores this shape; the
+    /// audit pipeline captures this shape.
     type Response: Send + Sync + 'static;
+
+    /// Streaming wire response shape, distinct from
+    /// [`Self::Response`] because the SSE body type rarely matches
+    /// the inner buffered shape. MCP: `StreamingPayload` (an SSE
+    /// body + optional session id); AI gateway: the axum
+    /// `Sse<...>::into_response()` envelope. Surface handlers
+    /// return [`super::state::Invocation::Streaming.response`]
+    /// straight to axum BEFORE the post-call tail resolves.
+    type StreamResponse: Send + 'static;
 
     /// Surface-specific detail blob the [`stages::emit_audit`]
     /// terminal stage attaches to the audit row's `detail` JSON.
@@ -35,6 +50,21 @@ pub trait Surface: Send + Sync + 'static {
     /// `{server_id, server_name, tool_name, …}`; for the AI
     /// gateway it's `{model, route_id, provider_id, tokens, …}`.
     type AuditDetail: Send + Sync + 'static;
+
+    /// Per-surface accumulator the streaming pump fills as chunks
+    /// flow through. For the AI gateway this is the
+    /// `Vec<ChatCompletionChunk>` + `Option<Usage>` pair; for MCP
+    /// it's the JSON-RPC event timeline (`Vec<serde_json::Value>`).
+    /// Post-invoke stages access it via
+    /// [`super::state::CapturedView::Streaming`].
+    type StreamCaptured: Send + Sync + 'static;
+
+    /// Surface-supplied bundle of handles the post-invoke stages
+    /// hand back into the trait methods below. Each surface
+    /// composes whatever combination it needs (cache handle,
+    /// breaker handle, audit logger, …) — the pipeline carries
+    /// the reference through but never dereferences fields itself.
+    type PostInvokeDeps: Send + Sync + 'static;
 
     /// Build the audit-row scaffolding (actor + action + base
     /// detail) the pipeline's emit stage will fill in. Surfaces
@@ -70,4 +100,38 @@ pub trait Surface: Send + Sync + 'static {
     /// is the rejected subject (tool / model) so the wire body
     /// can carry it.
     fn access_denied_response(candidate: &str) -> Self::Response;
+
+    /// Record the outcome against this surface's circuit breaker.
+    /// Called by [`super::stages::record_outcome`] exactly once per
+    /// request. The view tells the impl whether to derive
+    /// success/failure from a buffered response or a stream
+    /// outcome — surface decides the per-response classification
+    /// rule (JSON-RPC caller-side errors don't trip MCP's breaker;
+    /// 5xx upstream replies trip the AI gateway's).
+    fn record_outcome(
+        deps: &Self::PostInvokeDeps,
+        invoked: &Invoked<Self>,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// Write the response to the surface's cache. Called by
+    /// [`super::stages::write_cache`] only when
+    /// [`super::state::CapturedView::is_success`] returns true —
+    /// no need for the impl to re-check the outcome enum, only to
+    /// inspect the buffered response (if any) for surface-specific
+    /// success conditions (HTTP non-2xx, JSON-RPC `error`, …).
+    fn write_cache(
+        deps: &Self::PostInvokeDeps,
+        invoked: &Invoked<Self>,
+    ) -> impl Future<Output = ()> + Send;
+
+    /// Emit the audit row (gateway_logs / mcp_logs) for this
+    /// request. Called by [`super::stages::emit_audit`] exactly
+    /// once. The surface owns row shape (body capture, blob
+    /// offload, token accounting). This is the single audit-emit
+    /// site for the post-invoke path; short-circuit stages emit
+    /// their own rows directly (see DESIGN.md §3).
+    fn emit_audit(
+        deps: &Self::PostInvokeDeps,
+        invoked: &Invoked<Self>,
+    ) -> impl Future<Output = ()> + Send;
 }
