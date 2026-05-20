@@ -14,6 +14,7 @@ use think_watch_common::limits::{
     RateLimitRule, RateLimitSubject, Surface as LimitSurface, SurfaceConstraints,
 };
 
+use crate::access_control::is_tool_allowed;
 use crate::proxy::{INVALID_REQUEST, JsonRpcRequest, JsonRpcResponse, err_response};
 
 /// The MCP surface marker. Zero-size — stage code references the
@@ -35,6 +36,11 @@ pub struct McpIdentity {
     /// the parent crate computed across every role/team policy.
     /// Used by `check_limits` to extract the MCP block's rules.
     pub surface_constraints: SurfaceConstraints,
+    /// MCP tool-name patterns the calling API key is restricted
+    /// to. `None` = unrestricted; `Some([])` = deny all; supports
+    /// `<server>__*` and exact `<server>__<tool>` patterns.
+    /// Consumed by [`check_access`].
+    pub allowed_mcp_tools: Option<Vec<String>>,
 }
 
 impl Surface for McpSurface {
@@ -73,6 +79,18 @@ impl Surface for McpSurface {
             INVALID_REQUEST,
             "Rate limited: rate_limiter_unavailable".to_string(),
         )
+    }
+
+    fn is_access_allowed(identity: &Self::Identity, candidate: &str) -> bool {
+        is_tool_allowed(identity.allowed_mcp_tools.as_deref(), candidate)
+    }
+
+    fn access_denied_response(_candidate: &str) -> Self::Response {
+        // Preserve the pre-migration wire shape — the inline check
+        // returned `"Access denied for this tool"` without echoing
+        // the tool name (which the caller already knows from their
+        // own request body).
+        err_response(None, INVALID_REQUEST, "Access denied for this tool")
     }
 }
 

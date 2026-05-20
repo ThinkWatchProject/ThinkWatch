@@ -12,6 +12,8 @@
 //! 4. Add unit tests against the in-tree
 //!    [`super::test_surface::TestSurface`].
 
+mod check_access;
 mod check_limits;
 
+pub use check_access::check_access;
 pub use check_limits::check_limits;

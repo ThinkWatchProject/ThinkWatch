@@ -53,4 +53,21 @@ pub trait Surface: Send + Sync + 'static {
     /// audit row should distinguish "user hit a cap" from "Redis
     /// is down so we refused everyone".
     fn rate_limiter_unavailable_response() -> Self::Response;
+
+    /// Decide whether `candidate` is permitted by the identity's
+    /// access policy. Pure boolean — the stage layer wraps this
+    /// in audit + short-circuit handling, so impls focus on the
+    /// surface-specific pattern grammar:
+    ///
+    /// - MCP: namespaced tool name (`stream__test_tool`) against
+    ///   the identity's `allowed_mcp_tools` patterns
+    ///   (`mysql__*`, `github__list_issues`, …).
+    /// - AI gateway: flat model id against the identity's
+    ///   `allowed_models` list.
+    fn is_access_allowed(identity: &Self::Identity, candidate: &str) -> bool;
+
+    /// Render the surface's "access denied" response. `candidate`
+    /// is the rejected subject (tool / model) so the wire body
+    /// can carry it.
+    fn access_denied_response(candidate: &str) -> Self::Response;
 }

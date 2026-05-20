@@ -23,8 +23,8 @@ pub struct TestIdentity {
 pub enum TestResponse {
     /// Buffered-success terminal. Future phase-2 stages will
     /// construct this in `emit_audit`; for the phase-1 pilot
-    /// (check_limits only) the variant exists so the response
-    /// enum is exhaustive — tests against the no-rules path
+    /// (check_limits / check_access) the variant exists so the
+    /// response enum is exhaustive — short-circuit-path tests
     /// don't construct it directly.
     #[allow(dead_code)]
     Ok,
@@ -32,6 +32,9 @@ pub enum TestResponse {
         label: String,
     },
     RateLimiterUnavailable,
+    AccessDenied {
+        candidate: String,
+    },
 }
 
 pub struct TestSurface;
@@ -67,6 +70,19 @@ impl Surface for TestSurface {
 
     fn rate_limiter_unavailable_response() -> Self::Response {
         TestResponse::RateLimiterUnavailable
+    }
+
+    fn is_access_allowed(_identity: &Self::Identity, candidate: &str) -> bool {
+        // Toy policy for unit tests: allow anything starting with
+        // "allowed_". The check_access test exercises both arms by
+        // passing "allowed_tool" / "blocked_tool".
+        candidate.starts_with("allowed_")
+    }
+
+    fn access_denied_response(candidate: &str) -> Self::Response {
+        TestResponse::AccessDenied {
+            candidate: candidate.to_owned(),
+        }
     }
 }
 

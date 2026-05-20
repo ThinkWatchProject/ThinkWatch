@@ -570,41 +570,42 @@ impl McpProxy {
                 user_email: user_email.to_owned(),
                 ip_address: ctx.ip_address.map(|s| s.to_owned()),
                 surface_constraints: surface_constraints.clone(),
+                allowed_mcp_tools: allowed_mcp_tools.map(<[String]>::to_vec),
             },
             request.clone(),
             trace_id.to_owned(),
             ctx.ip_address.map(|s| s.to_owned()),
         );
-        match think_watch_common::lifecycle::stages::check_limits::<crate::lifecycle::McpSurface>(
-            raw,
-            &rules,
-            &self.redis,
-            fail_closed,
-            &self.audit,
-        )
+        let limits_checked = match think_watch_common::lifecycle::stages::check_limits::<
+            crate::lifecycle::McpSurface,
+        >(raw, &rules, &self.redis, fail_closed, &self.audit)
         .await
         {
-            // Phase 1 of the migration: discard the LimitsChecked
-            // state. Later phases will carry it through the next
-            // stages so the per-window currents surface in the
-            // audit row.
-            Ok(_) => {}
+            Ok(s) => s,
             Err(mut resp) => {
                 // Bind the inbound JSON-RPC `id` so the client
                 // can correlate the deny response to its request.
                 resp.id = request.id;
                 return HandleOutcome::Buffered(resp);
             }
-        }
+        };
 
-        // Access control: check tool against the user's allowed_mcp_tools patterns.
-        if !is_tool_allowed(allowed_mcp_tools, namespaced_name) {
-            return HandleOutcome::Buffered(err_response(
-                request.id,
-                INVALID_REQUEST,
-                "Access denied for this tool",
-            ));
-        }
+        // Access control via the shared `check_access` stage. The
+        // candidate is the namespaced tool name we extracted at the
+        // top of the handler; the surface impl
+        // (`McpSurface::is_access_allowed`) calls `is_tool_allowed`
+        // with the identity's `allowed_mcp_tools` patterns.
+        let _authorized = match think_watch_common::lifecycle::stages::check_access::<
+            crate::lifecycle::McpSurface,
+        >(limits_checked, namespaced_name, &self.audit)
+        .await
+        {
+            Ok(s) => s,
+            Err(mut resp) => {
+                resp.id = request.id;
+                return HandleOutcome::Buffered(resp);
+            }
+        };
 
         // Build the upstream request with the original (un-namespaced) tool
         // name.

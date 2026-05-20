@@ -89,3 +89,23 @@ pub struct LimitCheckRecord {
     /// can pair them back up.
     pub currents: Vec<i64>,
 }
+
+/// Output of `check_access`. Same field set as
+/// [`LimitsChecked`] — the access stage doesn't add new data, it
+/// just narrows the type so subsequent stages can't be reached
+/// without it. Carries the `candidate` string the access decision
+/// was made against (tool name for MCP, model name for the AI
+/// gateway) so downstream audit can record what was authorized.
+pub struct Authorized<S: Surface> {
+    pub identity: S::Identity,
+    pub body: S::RequestBody,
+    pub trace_id: String,
+    pub started_at: Instant,
+    pub client_ip: Option<String>,
+    pub limit_check: LimitCheckRecord,
+    /// Surface-specific candidate the access check ran against —
+    /// a tool name (`stream__test_tool`) for MCP, a model id
+    /// (`gpt-4o-mini`) for the AI gateway. Audit emit will surface
+    /// this on the row's `detail.access.subject` field.
+    pub access_candidate: String,
+}
