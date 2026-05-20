@@ -1965,9 +1965,22 @@ pub async fn proxy_anthropic_messages(
             trace_id.clone(),
             identity.ip_address.clone(),
         );
-    let _limits = think_watch_common::lifecycle::stages::check_limits::<
+    let limits_checked = think_watch_common::lifecycle::stages::check_limits::<
         crate::lifecycle::ChatCompletionSurface,
     >(raw, &request_rules, &state.redis, fail_closed, &state.audit)
+    .await
+    .map_err(|outcome| match outcome {
+        crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
+        crate::lifecycle::ChatCompletionOutcome::Success(_) => unreachable!(),
+    })?;
+    // Access control — match what proxy_chat_completion enforces so
+    // a key's `allowed_models` whitelist applies symmetrically across
+    // all three AI surfaces. Without this an operator could pin a
+    // key to `gpt-4o` and the caller could still reach `claude-3`
+    // through `/v1/messages`, dodging the per-key restriction.
+    let _authorized = think_watch_common::lifecycle::stages::check_access::<
+        crate::lifecycle::ChatCompletionSurface,
+    >(limits_checked, &mapped_model, &state.audit)
     .await
     .map_err(|outcome| match outcome {
         crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
@@ -2371,9 +2384,19 @@ pub async fn proxy_responses(
             trace_id.clone(),
             identity.ip_address.clone(),
         );
-    let _limits = think_watch_common::lifecycle::stages::check_limits::<
+    let limits_checked = think_watch_common::lifecycle::stages::check_limits::<
         crate::lifecycle::ChatCompletionSurface,
     >(raw, &request_rules, &state.redis, fail_closed, &state.audit)
+    .await
+    .map_err(|outcome| match outcome {
+        crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
+        crate::lifecycle::ChatCompletionOutcome::Success(_) => unreachable!(),
+    })?;
+    // Access control — see proxy_anthropic_messages for the
+    // cross-surface allowed_models symmetry rationale.
+    let _authorized = think_watch_common::lifecycle::stages::check_access::<
+        crate::lifecycle::ChatCompletionSurface,
+    >(limits_checked, &mapped_model, &state.audit)
     .await
     .map_err(|outcome| match outcome {
         crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
