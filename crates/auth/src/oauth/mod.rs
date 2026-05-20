@@ -6,11 +6,12 @@
 //!
 //! Today owns:
 //! - [`pkce`] — PKCE / state-binding / token-endpoint error helpers.
+//! - [`subject`] — JWT / userinfo subject extraction (pure parsers).
 //!
 //! Coming next sessions (see ROADMAP notes in the handler refactor):
-//! - `subject` — JWT/userinfo subject extraction (pure parsers).
 //! - `client` — token endpoint HTTP client (no AppState).
 //! - `flow` — `(user, server)` flow state machine.
 //! - `storage` — encrypted token I/O trait + Postgres impl.
 
 pub mod pkce;
+pub mod subject;
