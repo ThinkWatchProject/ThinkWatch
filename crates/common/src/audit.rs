@@ -1198,6 +1198,22 @@ fn log_audit_drop_throttled(err: &tokio::sync::mpsc::error::TrySendError<AuditEn
 }
 
 impl AuditLogger {
+    /// Build an audit logger that accepts entries but never
+    /// forwards them anywhere. Use in unit tests where the
+    /// system-under-test calls `.log(entry)` and the test doesn't
+    /// care about the side effects (sample rate is 100%, no
+    /// worker, channel just fills until the test ends).
+    #[cfg(test)]
+    pub fn test_drain() -> Self {
+        let (tx, _rx) = mpsc::channel(64);
+        Self {
+            tx,
+            db: None,
+            registry: Arc::new(RwLock::new(HashMap::new())),
+            sample_rate_bps: Arc::new(std::sync::atomic::AtomicU32::new(10_000)),
+        }
+    }
+
     /// Run one pass of the webhook-outbox drain loop. Production
     /// invokes the same code path on a 10-second tick from the
     /// background task spawned in `AuditLogger::new`; tests call

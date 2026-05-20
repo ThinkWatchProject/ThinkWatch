@@ -1,12 +1,14 @@
 # common/lifecycle — request pipeline DESIGN
 
-Status: **draft, for review**. No code lands until this design is acked.
+Status: **decisions locked**. Code is being implemented to match
+this document. If the implementation diverges, update this file in
+the same commit.
 
 ## Problem
 
 `crates/gateway/src/proxy.rs::proxy_chat_completion` and
 `crates/mcp-gateway/src/proxy.rs::handle_tools_call` are two
-implementations of the same lifecycle. Both do:
+implementations of the same lifecycle:
 
 ```
 identity (from middleware)
@@ -21,25 +23,25 @@ identity (from middleware)
   → audit emit (gateway_logs or mcp_logs)
 ```
 
-The two crates have **parallel** code for each step. Side effects of
-parallelism observed in this codebase:
+The two crates have **parallel** code for each step. Observed
+costs:
 
 - The "JSON-RPC error code → breaker failure" rule for MCP was
-  copy-pasted **three** times before B1 step 4c consolidated them
+  copy-pasted **three** times before B1 consolidated them
   ([b6306b0](commit)).
-- Rate-limit fail-closed logic ([b6306b0](commit)) had to be fixed
-  twice — once per gateway.
+- Rate-limit fail-closed logic had to be fixed twice — once per
+  gateway.
 - The streaming on-done audit pattern in `mcp-gateway::proxy` was
-  written from scratch in this session; the AI gateway side
+  written from scratch this session; the AI gateway side
   ([gateway::streaming::stream_to_sse_with_restorer](crates/gateway/src/streaming.rs))
   has the same shape with subtle differences.
 - Adding a new "PII redaction stage" or "content filter stage"
   requires editing both crates in parallel.
 
 The shared engine is already there (`common::limits::sliding`,
-`common::audit::AuditLogger`, soon `common::breaker` if we extract
-that). What's missing is the **glue**: a typed pipeline that
-composes the stages.
+`common::audit::AuditLogger`). What's missing is the **glue**: a
+typed, surface-agnostic representation of the lifecycle that lets
+both crates compose the same stages.
 
 ## Non-goals
 
@@ -47,206 +49,215 @@ composes the stages.
   already exist. This is for the **provider-side** lifecycle that
   runs AFTER the HTTP layer accepted the request.
 - We are not unifying the wire formats. OpenAI chat-completion,
-  Anthropic messages, JSON-RPC stay distinct — the surface adapters
-  in `gateway::surfaces::*` (still TBD as part of B2) translate.
-- We are not introducing dynamic dispatch into the hot path. The
-  pipeline composes statically per surface.
+  Anthropic messages, JSON-RPC stay distinct — each surface owns
+  its request/response/audit-row types via the [`Surface`] trait.
+- We are not introducing dynamic dispatch into the hot path. Stages
+  compose at compile time via concrete state-struct transitions.
 
-## Proposal: `CallStage<I, O>`
+## Architecture — decisions
+
+### 1. Stages are async functions, not trait impls
 
 ```rust
-// common/lifecycle/mod.rs
+pub async fn check_limits<S: Surface>(
+    state: Raw<S>,
+    rules: &[RateLimitRule],
+    redis: &fred::clients::Client,
+    audit: &AuditLogger,
+) -> Result<LimitsChecked<S>, S::Response>
+```
 
-/// One step in a per-request pipeline. Takes an `In`, returns an
-/// `Out`. Most stages also have a "short-circuit" path —
-/// e.g. cache hit ⇒ emit Buffered response, skip the rest. That's
-/// the `ShortCircuit<C>` arm: the type C is what the downstream
-/// audit emit needs.
-#[async_trait]
-pub trait CallStage {
-    type In;
-    type Out;
-    /// Surface-specific bag of "things every stage might need":
-    /// AppState handle, identity, trace_id, started_at. Each stage
-    /// gets it by ref, never mutates.
-    type Ctx: StageCtx;
+Not `trait Stage<I, O> { async fn run(...) }`. Reasoning:
 
-    async fn run(
-        &self,
-        ctx: &Self::Ctx,
-        input: Self::In,
-    ) -> Result<StageOutcome<Self::Out, Self::Ctx>, StageError>;
+- We don't need dynamic stage composition at runtime — every
+  surface knows its full pipeline at compile time.
+- A `Stage` trait would force every stage to take a single `&self`
+  config struct, OR thread the config through generic bounds. Both
+  add type plumbing without giving us anything Stage-trait-specific.
+- Pure async fns are testable in isolation with `tokio::test` — no
+  mock framework needed.
+- Per-stage instrumentation is `#[tracing::instrument]` on the fn.
+
+### 2. Type-state via separate state structs, not phantom markers
+
+```rust
+pub struct Raw<S: Surface> { /* identity, body, trace_id, … */ }
+pub struct LimitsChecked<S: Surface> { /* + limit_result */ }
+pub struct Authorized<S: Surface>    { /* + authorization */ }
+pub struct CacheChecked<S: Surface>  { /* + cache_key */ }
+…
+```
+
+Not `RequestState<S, Phantom<Marker>>`. Reasoning:
+
+- Phantom markers don't actually prevent field access at runtime.
+  Separate structs do — you literally cannot read `limit_result`
+  from a `Raw<S>` because the field doesn't exist.
+- Adding a field that one stage produces and a later stage consumes
+  is a localised edit (add field to one struct, plumb through
+  transition fns). No risk of "stage X reads a field that was
+  supposed to be set by stage Y but isn't".
+- Move semantics: each stage consumes `Raw<S>` and returns
+  `LimitsChecked<S>`. Compiler-enforced single-ownership of state.
+  No "did someone already process this?" confusion.
+
+The cost (verbose struct definitions per stage) is paid once,
+visible in `state.rs`, and exactly mirrors the lifecycle diagram.
+
+### 3. Short-circuit returns `Err(S::Response)`, not a sum type
+
+```rust
+async fn check_limits<S>(…) -> Result<LimitsChecked<S>, S::Response>
+```
+
+When a stage decides "render this response, skip the rest", it
+returns `Err(response)`. The surface handler unwraps via `?` —
+short-circuits and normal completion thread through the same
+control flow.
+
+Stages that short-circuit **also emit their own audit row** before
+returning the response. Each stage is responsible for the audit
+detail it produces (rate_limited / access_denied / breaker_open /
+…). The `EmitAudit` terminal stage handles the success path only.
+
+### 4. `Surface` trait carries the per-surface associated types
+
+```rust
+pub trait Surface {
+    type Identity: Send + Sync + 'static;
+    type RequestBody: Send + Sync + 'static;
+    type Response: Send + Sync + 'static;
+    type AuditDetail: Send + Sync + 'static;
+
+    /// The audit "actor" each surface defines (McpActor, GatewayActor).
+    /// Used by `emit_audit` to attribute the row.
+    fn actor(identity: &Self::Identity) -> Box<dyn AuditActor>;
+
+    /// Surface-specific factory for the "rate-limited" response shape.
+    /// MCP returns a JSON-RPC error; the AI gateway returns a 429.
+    fn rate_limited_response(reason: &str) -> Self::Response;
+
+    /// `access_denied`, `cache_unavailable`, …. Same idea.
+    fn access_denied_response(reason: &str) -> Self::Response;
+    // …
 }
 
-pub enum StageOutcome<O, Ctx: StageCtx> {
-    /// Stage produced output; pipeline continues to the next stage.
-    Continue(O),
-    /// Stage decided this request is done. Carries the final
-    /// response shape AND the audit row that should land for this
-    /// short-circuit (cache hit, rate-limit denied, etc.). The
-    /// surface adapter renders the response; the pipeline still
-    /// runs `EmitAudit` so observability is uniform.
-    ShortCircuit { response: Ctx::Response, audit: Ctx::AuditRow },
+pub struct McpSurface;
+impl Surface for McpSurface {
+    type Identity = McpRequestIdentity;
+    type RequestBody = JsonRpcRequest;
+    type Response = JsonRpcResponse;
+    type AuditDetail = McpAuditDetail;
+    // …
 }
 ```
 
-### Stages (surface-agnostic, in `common::lifecycle::stages::*`)
+Stage code reads `S::Identity`, `S::Response`, etc. — never knows
+the concrete shapes. Adding a new surface (a future MCP-over-WS, an
+SSE-only proxy, …) is one trait impl + the surface-specific
+`InvokeUpstream` stage.
 
-| Stage                | In               | Out              | Notes |
-|----------------------|------------------|------------------|-------|
-| `CheckLimits`        | `RawRequest`     | `RawRequest`     | Wraps existing `sliding::check_and_record`. ShortCircuit on deny. |
-| `CheckBudget`        | `RawRequest`     | `RawRequest`     | Reads materialised `SurfaceConstraints`. ShortCircuit on cap. |
-| `CheckAccess`        | `RawRequest`     | `AuthorizedRequest` | Type-state: emits a refined type after ACL check. |
-| `CheckCache`         | `AuthorizedRequest` | `AuthorizedRequest` | ShortCircuit on hit. Cache key is `Ctx::cache_key()`. |
-| `CheckBreaker`       | `AuthorizedRequest` | `AuthorizedRequest` | ShortCircuit on Open. |
-| `InvokeUpstream`     | `AuthorizedRequest` | `UpstreamResponse` | Surface-specific impl (provided by gateway / mcp-gateway). |
-| `RecordOutcome`      | `UpstreamResponse` | `UpstreamResponse` | Updates breaker. |
-| `WriteCache`         | `UpstreamResponse` | `UpstreamResponse` | Skips if outcome is error/cancelled. |
-| `EmitAudit`          | `UpstreamResponse` | `EmittedResponse` | Final stage. Always runs (even on ShortCircuit via the audit field). |
+### 5. Streaming is deferred to phase 2
 
-The `Ctx::Response` and `Ctx::AuditRow` associated types let each
-surface plug in its own wire shape (`ChatCompletionResponse` vs
-`JsonRpcResponse`; `gateway_logs` row vs `mcp_logs` row).
+The streaming path (`InvokeUpstream` returns a body that the
+downstream client consumes incrementally, while record_outcome /
+write_cache / emit_audit run in a detached task) needs a
+working prototype before locking the trait shape. The current
+`mcp-gateway::proxy::streaming::build_chunk_passthrough` handles
+the equivalent ad-hoc, and that pattern is what we'll generalise.
 
-### Streaming branch
+Phase 1 implements buffered-only stages. The migration will
+preserve the existing streaming code path; phase 2 generalises it.
 
-Streaming is a different `StageOutcome` variant:
+### 6. Errors
+
+`StageError` is a structured enum in `common::lifecycle::error`
+covering the **infrastructure** failures stages can have (Redis
+down, audit pipeline backed up, …). User-attributable failures
+(rate limited, denied, etc.) are not errors — they're short-
+circuit responses.
 
 ```rust
-pub enum StageOutcome<O, Ctx> {
-    Continue(O),
-    ShortCircuit { .. },
-    Streaming(Ctx::StreamingResponse),
+pub enum StageError {
+    /// Cache backing store unavailable.
+    CacheUnavailable(anyhow::Error),
+    /// Redis-backed limiter unavailable AND fail-closed mode.
+    RateLimiterUnavailable(anyhow::Error),
+    /// Audit pipeline rejected the row (shouldn't happen — bounded
+    /// channel).
+    AuditChannelFull,
+    /// Catch-all for unexpected upstream / DB failures.
+    Internal(anyhow::Error),
 }
 ```
 
-`Streaming` is produced by `InvokeUpstream` only. The pipeline
-detects it and switches to streaming mode: subsequent stages
-(`RecordOutcome`, `WriteCache`, `EmitAudit`) get attached as an
-on-done task via a oneshot — exactly the pattern already in
-[mcp_gateway::proxy::streaming::build_chunk_passthrough](crates/mcp-gateway/src/proxy/streaming.rs).
+The surface handler maps `StageError` → its wire-format error.
+There is exactly one place per surface that does this conversion.
 
-### Composition
+## Stage inventory
 
-```rust
-// crates/mcp-gateway/src/pipeline.rs
-pub fn build_pipeline() -> Pipeline<McpCtx> {
-    Pipeline::new()
-        .then(CheckLimits)
-        .then(CheckAccess)
-        .then(CheckCache)
-        .then(CheckBreaker)
-        .then(ResolveCredential::default())   // surface-specific
-        .then(InvokeUpstream::default())      // surface-specific
-        .then(RecordOutcome)
-        .then(WriteCache)
-        .then(EmitAudit)
-}
-```
+| Stage              | In               | Out                  | Surface-specific? |
+|--------------------|------------------|----------------------|---|
+| `check_limits`     | `Raw<S>`         | `LimitsChecked<S>`   | No |
+| `check_budget`     | `LimitsChecked<S>` | `BudgetChecked<S>` | No |
+| `check_access`     | `BudgetChecked<S>` | `Authorized<S>`    | No (consumes `S::Identity`'s access policy) |
+| `check_cache`     | `Authorized<S>`  | `CacheChecked<S>`    | Partial (cache trait is shared, key derivation is surface) |
+| `check_breaker`    | `CacheChecked<S>` | `BreakerChecked<S>` | No |
+| `resolve_credential` | `BreakerChecked<S>` | `CredentialResolved<S>` | Yes (MCP has UserTokenResolver; AI gateway has provider keys) |
+| `invoke_upstream`  | `CredentialResolved<S>` | `Invoked<S>` | Yes (the actual HTTP call) |
+| `record_outcome`   | `Invoked<S>`     | `Invoked<S>`         | No (uses common breaker abstraction) |
+| `write_cache`      | `Invoked<S>`     | `Invoked<S>`         | No |
+| `emit_audit`       | `Invoked<S>`     | `Emitted<S>`         | No (uses `S::AuditDetail`) |
 
-`Pipeline::new()` is a builder that statically chains stages by
-type. No dyn dispatch. New stages slot in with `.then(...)`.
-
-## Type-state vs runtime
-
-Each stage's `In` → `Out` is checked at compile time. `CheckAccess`
-returns `AuthorizedRequest`; `CheckCache` only accepts
-`AuthorizedRequest`. This means you can't accidentally compose a
-pipeline that skips access control — the types refuse to line up.
-
-The cost: the type plumbing is real, and adding a stage in the
-middle is a type-error cascade until you fix every downstream stage.
-We accept that — it's the price for "you can't forget ACL".
+`Emitted<S>` is the terminal state. The surface unpacks it to its
+wire-format response.
 
 ## Migration plan
 
-**Phase 1: scaffolding (no behaviour change)**
-1. `common::lifecycle::{CallStage, StageOutcome, StageError, Pipeline, StageCtx}` — empty trait + builder + tests.
-2. `common::lifecycle::stages::{check_limits, check_budget, emit_audit}` — wrap the existing implementations as `CallStage` impls. Use `common::limits::sliding` / `common::audit::AuditLogger` underneath; no logic moves.
+Since the project is unreleased and we don't carry backward-compat
+debt, the migration is a single rewrite per surface, not a dual-
+path cohabitation.
 
-**Phase 2: opt-in for one surface**
-3. `mcp-gateway::pipeline::build_pipeline()` — composes the new stages plus MCP-specific `InvokeUpstream`. Behind a `feature = "lifecycle_pipeline"` flag (or a runtime config flag if we want fleet rollout).
-4. `handle_tools_call` calls `pipeline.run(ctx, request)` when the flag is on; old code stays for diff-checking until 1.0.
+**Phase 1 (this session if scope allows, else next)**
+- Build `common::lifecycle::*`: Surface trait, state structs,
+  StageError, AND one fully-working stage (`check_limits`).
+- Unit-test the stage against a fake Surface impl.
+- Code goes into `common` crate; no surface uses it yet.
 
-**Phase 3: parity validation**
-5. Run integration suite under both paths in CI. Diff `mcp_logs` rows on the same request. Block landing until parity is clean.
+**Phase 2 (next session)**
+- Implement remaining stages.
+- Migrate `mcp-gateway::proxy::handle_tools_call` to use the
+  pipeline. The old implementation is **deleted** in the same
+  commit. Integration tests catch parity bugs.
 
-**Phase 4: drop the old path**
-6. Remove the dual-path branch. `handle_tools_call` is now ~30 lines: build pipeline, run, return.
+**Phase 3 (next-next session)**
+- Migrate `gateway::proxy::proxy_chat_completion` and its Anthropic
+  / Responses siblings. This is what was previously called "B2".
 
-**Phase 5: gateway migration (= B2)**
-7. Same pattern for `proxy_chat_completion` / `proxy_anthropic_messages` / `proxy_responses`. Each becomes a thin surface adapter on top of the shared pipeline.
+There is no feature flag, no dual-path, no opt-in. If phase 2
+breaks an integration test, the migration commit gets reworked
+until it passes. If phase 3 reveals a stage abstraction that
+doesn't fit Anthropic's wire format, the abstraction gets revised
+and phase 2 is updated to match.
 
-## Open questions
+## What we won't do until it earns its keep
 
-1. **`async_trait` vs hand-rolled GAT-based trait.** `async_trait` is
-   ergonomic but every stage call allocates a Box<Future>. For the
-   hot path that runs 9 stages per request, that's 9 boxed futures.
-   Likely fine (we already allocate for tokio task spawning), but
-   worth measuring after phase 2. If it shows up in profiles, switch
-   to a hand-rolled `impl Future` trait — current Rust supports
-   `async fn` in traits since 1.75, just with awkward bounds.
+- **Pipeline builder type** (`pipeline().then(...).then(...)`) — adds
+  generic plumbing without saving lines. Each surface's pipeline is
+  a `~30-line async fn` with `let s = stage_n(s, ...).await?;`
+  lines. That's the canonical readable shape.
+- **dyn Stage dispatch** — no use case.
+- **Per-stage middleware composition** — no use case.
+- **A `Pipeline` macro** — no use case.
 
-2. **Where does the on-done streaming task live?** Today it's
-   spawned inside `build_chunk_passthrough`. With a pipeline,
-   `InvokeUpstream` returns `Streaming(payload)`, and the pipeline
-   itself must spawn the post-stream task that runs the remaining
-   stages on the accumulated buffer. This is the trickiest piece of
-   the design — needs a working prototype before I commit to the
-   trait shape.
+If any of these ever has a use case, we add them then. Not now.
 
-3. **Per-stage metrics.** Each stage should auto-emit
-   `lifecycle_stage_duration_total{stage="check_limits"}` so we can
-   see where time goes. Cheap if we wrap `Pipeline::run` with the
-   metric; expensive if every stage `impl` has to do it. Lean toward
-   the wrapper.
+## Estimate (revised down from sketch)
 
-4. **Errors are surface-shaped.** `gateway::GatewayError` and
-   `mcp_oauth`'s `JsonRpcError` are very different. The pipeline
-   `StageError` carries a generic kind + structured detail; the
-   surface adapter at the very end converts to the wire shape.
-   Sketch only — needs the audit-row generic to land first.
+- Phase 1: 1 session.
+- Phase 2: 1-2 sessions.
+- Phase 3: 2 sessions.
 
-5. **What about the AI gateway's failover / retry?**
-   `gateway::failover::select_route_with_failover` runs multiple
-   upstream attempts in one request. The current sketch has
-   `InvokeUpstream` as one stage; failover would need to live
-   INSIDE that stage. That's fine but means each surface's
-   `InvokeUpstream` is bigger than just "one HTTP call". Document
-   this clearly.
-
-## What this is NOT
-
-- Not a replacement for `tower::Service` — that's HTTP-layer
-  middleware. Pipeline runs AFTER HTTP routing accepts.
-- Not a generic plugin framework — stages are statically composed
-  per-surface in code, not loaded at runtime.
-- Not "now". Phase 1 is a few hundred lines + tests. Phases 2-5 are
-  multi-session work. The point of this doc is to validate the
-  shape BEFORE writing the trait, not to ship in one PR.
-
-## Estimate
-
-- Phase 1 (scaffolding): 1 session.
-- Phase 2 (MCP opt-in): 1 session.
-- Phase 3 (parity validation): 1 session, plus integration test
-  changes.
-- Phase 4 (drop dual-path): 0.5 session.
-- Phase 5 (= B2, gateway migration): 2-3 sessions, depends on
-  surface adapter design (chat / Anthropic / Responses).
-
-Total: ~6-8 sessions if everything compiles on the first try (it
-won't). Realistic: ~10 sessions or ~4 weeks of focused work.
-
-## What I want from review
-
-- Is `StageOutcome { Continue / ShortCircuit / Streaming }` the
-  right enum? Or should `Streaming` be a separate trait method?
-- Is the type-state cost worth it, or should stages all take/return
-  the same generic `RequestState<S>` and the compile-time check
-  comes from phantom-typed `S`?
-- Are there stages I'm missing that exist today inline in
-  `proxy_chat_completion`? Skim `crates/gateway/src/proxy.rs` lines
-  1403-1700 to spot-check.
-- Open question #2 (streaming on-done) — does the sketch hold up,
-  or does it need a separate `StreamingPipeline` trait?
+Total: **4-5 sessions**, not the 10 sketched in the earlier draft.
+The earlier estimate budgeted for the dual-path migration; we're
+skipping that.

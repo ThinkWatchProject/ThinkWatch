@@ -116,6 +116,35 @@ fn script_sha() -> &'static String {
 // Public API
 // ----------------------------------------------------------------------------
 
+/// Render a rule's identity as the canonical
+/// `<subject_kind>:<metric>/<window>` label (e.g.
+/// `api_key:tokens/1h`, `user:requests/1m`). Used by:
+/// - the `Retry-After`-style HTTP body for rate-limited responses,
+/// - the `gateway_logs` / `mcp_logs` audit row's `limits.label`,
+/// - log scrapers that group by `{subject_kind, metric, window}`.
+///
+/// Lives next to the engine because every surface that runs
+/// `check_and_record` also needs to render the label that caused a
+/// deny — keeping them apart bred two identical copies (one each in
+/// the AI gateway and MCP gateway). One implementation, one format.
+pub fn rate_label(rule: &super::RateLimitRule) -> String {
+    let window = match rule.window_secs {
+        60 => "1m".to_string(),
+        300 => "5m".to_string(),
+        3_600 => "1h".to_string(),
+        18_000 => "5h".to_string(),
+        86_400 => "1d".to_string(),
+        604_800 => "1w".to_string(),
+        n => format!("{n}s"),
+    };
+    format!(
+        "{}:{}/{}",
+        rule.subject_kind.as_str(),
+        rule.metric.as_str(),
+        window
+    )
+}
+
 /// One rule resolved against the current request's metric, ready to
 /// hand to `check_and_record`. The `cost` parameter on the helper
 /// applies to all rules in the slice equally; callers MUST pre-filter

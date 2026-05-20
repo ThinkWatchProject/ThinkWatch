@@ -40,6 +40,7 @@ pub mod blob_store; // S3-compatible body offload for the audit pipeline
 pub mod cb_registry;
 pub mod clickhouse_client;
 pub mod cost_decimal; // Decimal ↔ raw i64/i128 helpers for CH Decimal(18, 10) columns
+pub mod lifecycle; // Surface-agnostic request pipeline — see lifecycle/DESIGN.md
 pub mod limits; // rate-limit & budget evaluation
 pub mod retry;
 
