@@ -23,6 +23,8 @@ tracing = { workspace = true }
 axum = { workspace = true }
 sqlx = { workspace = true }
 openidconnect = { workspace = true }
+reqwest = { workspace = true }
+serde_urlencoded = "0.7"
 tokio = { workspace = true }
 totp-rs = { workspace = true }
 data-encoding = { workspace = true }

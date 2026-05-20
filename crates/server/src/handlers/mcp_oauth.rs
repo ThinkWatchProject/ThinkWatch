@@ -27,9 +27,8 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use think_watch_auth::oauth::pkce::{
-    parse_token_endpoint_error, pkce_challenge, random_token, state_binding,
-};
+use think_watch_auth::oauth::client::TokenEndpointResponse;
+use think_watch_auth::oauth::pkce::{pkce_challenge, random_token, state_binding};
 use think_watch_auth::oauth::subject::{extract_subject_from_json, subject_from_jwt};
 use think_watch_common::audit::AuditActor;
 use think_watch_common::crypto::{self, parse_encryption_key};
@@ -770,9 +769,11 @@ fn decrypt_optional_secret(
     }
 }
 
-/// POST to the upstream token endpoint with PKCE. Extracted from the
-/// callback so the per-user, admin-shared, and wizard paths all share
-/// one error envelope and one transport.
+/// Thin wrapper around [`think_watch_auth::oauth::client::exchange_authorization_code`]
+/// that unpacks our handler-side `ExchangeContext` and maps the
+/// structured `TokenExchangeError` back to the HTTP-rendering
+/// `AppError` shape, attaching the operator-facing hint to the
+/// "upstream rejected" case.
 async fn oauth_token_exchange(
     http: &reqwest::Client,
     cfg: &ExchangeContext,
@@ -780,55 +781,37 @@ async fn oauth_token_exchange(
     redirect_uri: &str,
     code_verifier: &str,
 ) -> Result<TokenEndpointResponse, AppError> {
-    let mut form: Vec<(&str, &str)> = vec![
-        ("grant_type", "authorization_code"),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("client_id", cfg.client_id.as_str()),
-        ("code_verifier", code_verifier),
-    ];
-    if let Some(secret) = cfg.client_secret.as_deref() {
-        form.push(("client_secret", secret));
-    }
-    let body = serde_urlencoded::to_string(&form)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("encode token form: {e}")))?;
-
-    let resp = http
-        .post(&cfg.token_endpoint)
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .header("Accept", "application/json")
-        .body(body)
-        .send()
-        .await
-        .map_err(|e| AppError::BadRequest(format!("Token endpoint unreachable: {e}")))?;
-
-    let status = resp.status();
-    let resp_text = resp.text().await.unwrap_or_default();
-    if !status.is_success() {
-        let detail =
-            parse_token_endpoint_error(&resp_text).unwrap_or_else(|| format!("HTTP {status}"));
-        return Err(AppError::BadRequest(format!(
+    use think_watch_auth::oauth::client::{TokenExchangeError, exchange_authorization_code};
+    exchange_authorization_code(
+        http,
+        &cfg.token_endpoint,
+        &cfg.client_id,
+        cfg.client_secret.as_deref(),
+        code,
+        redirect_uri,
+        code_verifier,
+    )
+    .await
+    .map_err(|e| match e {
+        TokenExchangeError::EncodeForm(err) => {
+            AppError::Internal(anyhow::anyhow!("encode token form: {err}"))
+        }
+        TokenExchangeError::Unreachable(err) => {
+            AppError::BadRequest(format!("Token endpoint unreachable: {err}"))
+        }
+        TokenExchangeError::UpstreamRejected { detail } => AppError::BadRequest(format!(
             "Upstream rejected the OAuth exchange: {detail}. \
              The MCP server's OAuth client_id/secret may be misconfigured — \
              ask an administrator to verify them at /mcp/servers."
-        )));
-    }
-    if let Some(detail) = parse_token_endpoint_error(&resp_text) {
-        return Err(AppError::BadRequest(format!(
-            "Upstream rejected the OAuth exchange: {detail}. \
-             The MCP server's OAuth client_id/secret may be misconfigured — \
-             ask an administrator to verify them at /mcp/servers."
-        )));
-    }
-    serde_json::from_str(&resp_text).map_err(|e| {
-        // Don't surface `resp_text` to the client — on a malformed-
-        // but-token-bearing OAuth response (rare misbehaving servers)
-        // the body would carry `access_token` / `refresh_token` /
-        // vendor `_debug_*` fields and we'd leak them in the 400.
-        // The serde error already carries position info, which is
-        // enough to triage from logs.
-        tracing::warn!(error = %e, body_len = resp_text.len(), "MCP OAuth token response was not JSON");
-        AppError::BadRequest(format!("Token response not JSON: {e}"))
+        )),
+        TokenExchangeError::InvalidResponse(msg) => {
+            // Don't surface the upstream body — on malformed-but-
+            // token-bearing OAuth responses (rare misbehaving
+            // servers) it would leak `access_token` / `refresh_token`
+            // / vendor `_debug_*` fields. `msg` is the serde error,
+            // which carries position info but no payload.
+            AppError::BadRequest(format!("Token response not JSON: {msg}"))
+        }
     })
 }
 
@@ -2025,17 +2008,6 @@ async fn register_dynamic_client(
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-struct TokenEndpointResponse {
-    access_token: String,
-    #[serde(default)]
-    refresh_token: Option<String>,
-    #[serde(default)]
-    expires_in: Option<u64>,
-    #[serde(default)]
-    scope: Option<String>,
-}
 
 async fn load_server(state: &AppState, server_id: Uuid) -> Result<McpServer, AppError> {
     sqlx::query_as::<_, McpServer>(
