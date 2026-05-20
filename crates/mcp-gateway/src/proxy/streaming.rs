@@ -6,10 +6,9 @@
 //! engaged.
 
 use super::McpProxy;
-use super::jsonrpc::{INTERNAL_ERROR, JsonRpcRequest, JsonRpcResponse, err_response};
-use crate::cache::CallerScope;
-use crate::registry::ServerCacheScope;
-use uuid::Uuid;
+use super::jsonrpc::JsonRpcResponse;
+use think_watch_common::lifecycle::state::{CapturedView, Invocation, Invoked, LimitCheckRecord};
+use think_watch_common::lifecycle::streaming::StreamOutcome;
 
 /// Outcome of `McpProxy::handle_request`. The transport layer
 /// renders these differently:
@@ -35,23 +34,6 @@ pub struct StreamingPayload {
         >,
     >,
     pub new_session_id: Option<String>,
-}
-
-/// How an upstream stream terminated. Drives audit-time classification
-/// and circuit breaker accounting in the detached on-done task.
-pub(crate) enum StreamOutcome {
-    /// Stream drained to end-of-body without error.
-    Natural,
-    /// The underlying transport (bytes_stream) returned an error
-    /// mid-flight, OR the upstream replied with a non-2xx before
-    /// any chunks could be forwarded.
-    UpstreamError { message: String },
-    /// `done_tx` was dropped without sending — the producing future
-    /// terminated before reaching its sentinel send, which happens
-    /// when the downstream client disconnects and axum drops the
-    /// SSE body. Treated as success for the breaker (no upstream
-    /// fault) but as not-cacheable (we never saw the full response).
-    ClientCancelled,
 }
 
 /// Find the byte index in `s` immediately AFTER a complete SSE
@@ -118,144 +100,51 @@ pub(crate) fn pick_response_envelope(
     serde_json::from_value(matched).ok()
 }
 
+/// Lifecycle context carried from the upstream-stage state into
+/// the streaming pump. Captured fields populate the `Invoked<S>`
+/// the pump's tail future yields, so [`run_post_invoke`] downstream
+/// sees the same identity / trace / limit shape it would have for
+/// the buffered branch.
+///
+/// [`run_post_invoke`]: think_watch_common::lifecycle::stages::run_post_invoke
+pub(crate) struct PumpContext {
+    pub identity: crate::lifecycle::McpIdentity,
+    pub trace_id: String,
+    pub started_at: std::time::Instant,
+    pub client_ip: Option<String>,
+    pub limit_check: LimitCheckRecord,
+    pub access_candidate: String,
+}
+
 impl McpProxy {
-    /// Build a `StreamingPayload` that pumps upstream SSE chunks
-    /// downstream AS THEY ARRIVE, while accumulating every event
-    /// envelope into a shared buffer that a detached on-done task
-    /// drains to run circuit breaker accounting, cache write, and
-    /// audit emission exactly once when the stream terminates (or
-    /// the client disconnects).
+    /// Build an [`Invocation::Streaming`] for an in-flight upstream
+    /// SSE response. Streams chunks downstream AS THEY ARRIVE while
+    /// accumulating every event envelope into a shared buffer that
+    /// `tail` drains into a [`CapturedView::Streaming`] when the
+    /// stream terminates (natural EOF, transport error, or client
+    /// drop).
     ///
-    /// The on-done task runs on graceful end-of-body (Natural), on
-    /// a bytes_stream error (UpstreamError), or on client drop
-    /// (ClientCancelled — `done_tx` is dropped when the producing
-    /// future is). It is the single audit-emit site for this code
-    /// path; the synchronous tail in `handle_tools_call` is skipped
-    /// when we return here.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn build_chunk_passthrough(
+    /// The pump owns no breaker / cache / audit logic — that lives
+    /// in the [`crate::lifecycle::McpSurface`] hook impls and runs
+    /// from the detached `tokio::spawn(run_post_invoke(...))` the
+    /// surface handler attaches to the returned `tail`. Single
+    /// audit-emit site per request, regardless of how the stream
+    /// terminated.
+    pub(crate) fn build_mcp_pump(
         &self,
         upstream_resp: reqwest::Response,
-        request_id: Option<serde_json::Value>,
-        user_id: Uuid,
-        user_email: String,
-        ip_address: Option<String>,
-        server_id: Uuid,
-        server_name: String,
-        tool_name: String,
-        call_trace_id: String,
-        upstream_request: JsonRpcRequest,
-        logged_arguments: Option<serde_json::Value>,
-        started: std::time::Instant,
-        cache_scope_kind: ServerCacheScope,
-        cache_account_label: Option<String>,
-        effective_cache_ttl: u64,
-    ) -> StreamingPayload {
+        ctx: PumpContext,
+    ) -> Invocation<crate::lifecycle::McpSurface> {
         use futures::stream::StreamExt;
         use std::sync::{Arc, Mutex};
 
         let events_buf: Arc<Mutex<Vec<serde_json::Value>>> =
             Arc::new(Mutex::new(Vec::with_capacity(8)));
-        let events_for_done = events_buf.clone();
+        let events_for_tail = events_buf.clone();
         let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
 
-        // The on-done task gets its own owned clone of every piece of
-        // state it needs — McpProxy is `Clone` so the breaker / cache /
-        // audit handles all come along for free.
-        let proxy = self.clone();
-        let server_name_done = server_name.clone();
-        let request_id_done = request_id.clone();
-        tokio::spawn(async move {
-            let outcome = done_rx.await.unwrap_or(StreamOutcome::ClientCancelled);
-            let events = events_for_done
-                .lock()
-                .ok()
-                .map(|mut g| std::mem::take(&mut *g))
-                .unwrap_or_default();
-            let response = pick_response_envelope(&events, request_id_done.as_ref())
-                .unwrap_or_else(|| {
-                    let msg = match &outcome {
-                        StreamOutcome::Natural => {
-                            "Upstream stream ended without a response envelope".to_string()
-                        }
-                        StreamOutcome::UpstreamError { message } => {
-                            format!("Upstream stream error: {message}")
-                        }
-                        StreamOutcome::ClientCancelled => {
-                            "Client cancelled before upstream replied".to_string()
-                        }
-                    };
-                    err_response(request_id_done.clone(), INTERNAL_ERROR, msg)
-                });
-
-            // Circuit breaker — transport error → failure; otherwise
-            // follow the same server-side-vs-caller-side rule the
-            // buffered path uses so the breaker doesn't open on a
-            // single user's bad INVALID_PARAMS.
-            match &outcome {
-                StreamOutcome::UpstreamError { .. } => {
-                    proxy
-                        .circuit_breakers
-                        .record_failure(&server_name_done)
-                        .await;
-                }
-                StreamOutcome::Natural | StreamOutcome::ClientCancelled => {
-                    proxy
-                        .record_breaker_for_response(&server_name_done, &response)
-                        .await;
-                }
-            }
-
-            // Cache write only on a fully drained, successful stream.
-            // Client cancellation means we may have a partial view of
-            // the response so caching it would poison subsequent calls.
-            if effective_cache_ttl > 0
-                && response.error.is_none()
-                && matches!(outcome, StreamOutcome::Natural)
-            {
-                let cache_scope = match cache_scope_kind {
-                    ServerCacheScope::Global => None,
-                    ServerCacheScope::PerCaller => Some(CallerScope {
-                        user_id: &user_id,
-                        account_label: cache_account_label.as_deref(),
-                    }),
-                };
-                proxy
-                    .cache
-                    .set(
-                        &server_id,
-                        cache_scope,
-                        &upstream_request,
-                        &response,
-                        effective_cache_ttl,
-                    )
-                    .await;
-            }
-
-            // Audit emit with the full upstream event timeline — same
-            // shape the buffered path produces via parse_sse_json_rpc,
-            // so trace replay UI gets identical data regardless of
-            // which transport the call took.
-            let stream_audit_body = serde_json::to_string(&events).ok();
-            proxy
-                .emit_tools_call_audit(
-                    user_id,
-                    &user_email,
-                    ip_address.as_deref(),
-                    server_id,
-                    &server_name_done,
-                    &tool_name,
-                    &call_trace_id,
-                    logged_arguments.as_ref(),
-                    started,
-                    &response,
-                    stream_audit_body.as_deref(),
-                )
-                .await;
-        });
-
-        // The body itself: SSE chunk-by-chunk pass-through. Buffers
-        // bytes only until the next `\n\n` boundary, then yields one
+        // The wire body: chunk-by-chunk pass-through. Buffers bytes
+        // only until the next `\n\n` boundary, then yields one
         // downstream event per upstream event. axum's `Sse` wrapper
         // re-frames each yielded `Event::default().data(payload)` as
         // `data: <payload>\n\n` on the wire.
@@ -264,11 +153,40 @@ impl McpProxy {
             .map(|r| r.map_err(|e| e.to_string()));
         let body = build_passthrough_body(bytes_source, events_buf, done_tx);
 
-        StreamingPayload {
+        let payload = StreamingPayload {
             body,
-            // Proxy session-id is set by the transport layer from the
-            // per-request session it owns; we don't override it here.
+            // Proxy session-id is set by the transport layer from
+            // the per-request session it owns; we don't override
+            // it here.
             new_session_id: None,
+        };
+
+        // The tail future. Resolves when the body terminates —
+        // `done_rx.await` returns `Ok(outcome)` on natural EOF or
+        // transport error, `Err(_)` (which we map to
+        // `ClientCancelled`) when the consumer dropped the body
+        // before either path ran.
+        let tail = Box::pin(async move {
+            let outcome = done_rx.await.unwrap_or(StreamOutcome::ClientCancelled);
+            let captured = events_for_tail
+                .lock()
+                .ok()
+                .map(|mut g| std::mem::take(&mut *g))
+                .unwrap_or_default();
+            Invoked {
+                identity: ctx.identity,
+                trace_id: ctx.trace_id,
+                started_at: ctx.started_at,
+                client_ip: ctx.client_ip,
+                limit_check: ctx.limit_check,
+                access_candidate: ctx.access_candidate,
+                view: CapturedView::Streaming { outcome, captured },
+            }
+        });
+
+        Invocation::Streaming {
+            response: payload,
+            tail,
         }
     }
 }
@@ -332,9 +250,20 @@ where
                 Err(message) => {
                     // Transport-level error mid-stream. Surface via
                     // the on-done task (no spec-defined error event
-                    // shape to emit downstream).
+                    // shape to emit downstream). Status 502 because
+                    // a mid-stream byte-source failure is a bad-
+                    // gateway by definition — the downstream
+                    // connection succeeded but the upstream pipe
+                    // broke. Audit row's `logged_status_and_detail`
+                    // surfaces it as 502 so dashboards can split
+                    // genuine upstream outages from caller-side
+                    // INVALID_PARAMS noise.
                     if let Some(tx) = done_tx.take() {
-                        let _ = tx.send(StreamOutcome::UpstreamError { message });
+                        let _ = tx.send(StreamOutcome::UpstreamError {
+                            error_type: "transport".to_owned(),
+                            message,
+                            status_code: 502,
+                        });
                     }
                     break;
                 }

@@ -1,6 +1,8 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use think_watch_common::lifecycle::stages::run_post_invoke;
+use think_watch_common::lifecycle::state::{Authorized, CapturedView, Invocation, Invoked};
 use think_watch_common::limits::SurfaceConstraints;
 
 use crate::access_control::is_tool_allowed;
@@ -24,6 +26,7 @@ pub use jsonrpc::{
     METHOD_NOT_FOUND, NEEDS_USER_CREDENTIALS, err_response,
 };
 use streaming::build_replay_payload;
+pub(crate) use streaming::pick_response_envelope;
 pub use streaming::{HandleOutcome, StreamingPayload};
 
 // ---------------------------------------------------------------------------
@@ -666,7 +669,7 @@ impl McpProxy {
                 return HandleOutcome::Buffered(cached);
             }
         };
-        let _authorized = match crate::lifecycle::stages::check_breaker(
+        let authorized = match crate::lifecycle::stages::check_breaker(
             authorized,
             &self.circuit_breakers,
             &server.name,
@@ -700,7 +703,6 @@ impl McpProxy {
         // to the AI request that triggered the tool-use, or freshly
         // minted if the caller didn't supply one.
         let call_trace_id = trace_id.to_string();
-        let started = std::time::Instant::now();
         let server_id = server.id;
         let server_name = server.name.clone();
         let tool_name = original_tool_name.to_string();
@@ -837,15 +839,56 @@ impl McpProxy {
         };
         let auth_ref = auth_header.as_ref().map(AuthInjection::as_pair);
 
-        // Real chunk-by-chunk pass-through. Engages only when the
-        // client signalled SSE capability AND the upstream returns
-        // `text/event-stream`. Drives audit + cache + breaker from
-        // a detached on-done task so each upstream chunk lands on
-        // the client as it arrives, instead of after the upstream
-        // completes. Application/json upstream falls through to the
-        // synchronous tail below (chunk parsing has nothing to do
-        // since there are no chunk boundaries).
-        let (response, stream_audit_body) = if ctx.wants_streaming {
+        // The post-invoke pipeline owns breaker / cache / audit work
+        // for both transports below — build the deps once, hand them
+        // to `run_post_invoke` per branch.
+        let logged_arguments = params.get("arguments").cloned();
+        let mut deps = crate::lifecycle::McpPostInvokeDeps {
+            proxy: self.clone(),
+            server_id,
+            server_name: server_name.clone(),
+            tool_name: tool_name.clone(),
+            upstream_request: upstream_request.clone(),
+            logged_arguments,
+            cache_scope_kind: server.cache_scope,
+            cache_account_label: account_label_for_server(ctx.mcp_account_overrides, server.id)
+                .map(|s| s.to_owned()),
+            effective_cache_ttl,
+            // Filled in for the buffered branch when `send_request`
+            // captured an upstream SSE timeline; stays None for the
+            // streaming branch (timeline lives in CapturedView).
+            stream_audit_body: None,
+            original_request_id: request.id.clone(),
+        };
+
+        // Destructure the Authorized state. Each `Invocation`
+        // constructor below moves these carry-over fields into the
+        // new `Invoked` / `PumpContext`. The branches are mutually
+        // exclusive — Rust's move checker accepts the repeated
+        // identifiers in different match / if arms because exactly
+        // one path runs per request.
+        let Authorized {
+            identity: auth_identity,
+            body: _,
+            trace_id: auth_trace_id,
+            started_at: auth_started_at,
+            client_ip: auth_client_ip,
+            limit_check: auth_limit_check,
+            access_candidate: auth_access_candidate,
+        } = authorized;
+
+        // Compose the upstream invocation. Two transports
+        // (`send_request_streaming` for real SSE pass-through,
+        // `send_request` for buffered JSON-RPC) converge on
+        // [`Invocation`] — Buffered when no chunks flow downstream,
+        // Streaming when the upstream upgraded to text/event-stream.
+        // Breaker accounting for transport errors lives in the
+        // `record_outcome` hook: an `err_response(INTERNAL_ERROR)`
+        // is classified as a server-side failure by
+        // `record_breaker_for_response`, so the explicit
+        // `record_failure` calls the pre-migration code had on each
+        // error branch are absorbed into the single hook call site.
+        let invocation: Invocation<crate::lifecycle::McpSurface> = if ctx.wants_streaming {
             match self
                 .pool
                 .send_request_streaming(
@@ -865,78 +908,68 @@ impl McpProxy {
                         .and_then(|v| v.to_str().ok())
                         .map(|s| s.to_lowercase().contains("text/event-stream"))
                         .unwrap_or(false);
-                    if is_sse {
-                        // Persist the upstream session BEFORE returning
-                        // the streaming body so a follow-up call from
-                        // the same client can reuse it even while the
-                        // current stream is still in flight.
-                        if let Some(sid) = new_upstream_sid {
-                            self.sessions
-                                .set_upstream_session(client_session_id, server_id, sid)
-                                .await;
-                        }
-                        let logged_arguments = params.get("arguments").cloned();
-                        let cache_account_label =
-                            account_label_for_server(ctx.mcp_account_overrides, server.id)
-                                .map(|s| s.to_owned());
-                        return HandleOutcome::Streaming(self.build_chunk_passthrough(
-                            resp,
-                            request.id.clone(),
-                            user_id,
-                            user_email.to_owned(),
-                            ctx.ip_address.map(|s| s.to_owned()),
-                            server_id,
-                            server_name.clone(),
-                            tool_name.clone(),
-                            call_trace_id.clone(),
-                            upstream_request.clone(),
-                            logged_arguments,
-                            started,
-                            server.cache_scope,
-                            cache_account_label,
-                            effective_cache_ttl,
-                        ));
-                    }
-                    // application/json upstream — buffer the body and
-                    // fall through to the synchronous tail. Same logic
-                    // the buffered-path Ok arm does, just inline here
-                    // because we already consumed the request.
+                    // Persist the upstream session BEFORE returning so
+                    // a follow-up call from the same client can reuse
+                    // it even while the current stream is still in
+                    // flight.
                     if let Some(sid) = new_upstream_sid {
                         self.sessions
                             .set_upstream_session(client_session_id, server_id, sid)
                             .await;
                     }
-                    let parsed = resp.json::<JsonRpcResponse>().await;
-                    let response = match parsed {
-                        Ok(r) => r,
-                        Err(e) => {
-                            self.circuit_breakers.record_failure(&server_name).await;
-                            err_response(
+                    if is_sse {
+                        self.build_mcp_pump(
+                            resp,
+                            crate::proxy::streaming::PumpContext {
+                                identity: auth_identity,
+                                trace_id: auth_trace_id,
+                                started_at: auth_started_at,
+                                client_ip: auth_client_ip,
+                                limit_check: auth_limit_check,
+                                access_candidate: auth_access_candidate,
+                            },
+                        )
+                    } else {
+                        // Upstream chose application/json — buffer it.
+                        let response = match resp.json::<JsonRpcResponse>().await {
+                            Ok(r) => r,
+                            Err(e) => err_response(
                                 request.id.clone(),
                                 INTERNAL_ERROR,
                                 format!("Upstream server error: parse failed: {e}"),
-                            )
-                        }
-                    };
-                    self.record_breaker_for_response(&server_name, &response)
-                        .await;
-                    (response, None)
+                            ),
+                        };
+                        Invocation::Buffered(Invoked {
+                            identity: auth_identity,
+                            trace_id: auth_trace_id,
+                            started_at: auth_started_at,
+                            client_ip: auth_client_ip,
+                            limit_check: auth_limit_check,
+                            access_candidate: auth_access_candidate,
+                            view: CapturedView::Buffered(response),
+                        })
+                    }
                 }
                 Err(e) => {
-                    self.circuit_breakers.record_failure(&server_name).await;
                     tracing::error!(
                         server_id = %server_id,
                         error = %e,
                         "streaming upstream tools/call failed"
                     );
-                    (
-                        err_response(
-                            request.id.clone(),
-                            INTERNAL_ERROR,
-                            format!("Upstream server error: {e}"),
-                        ),
-                        None,
-                    )
+                    let response = err_response(
+                        request.id.clone(),
+                        INTERNAL_ERROR,
+                        format!("Upstream server error: {e}"),
+                    );
+                    Invocation::Buffered(Invoked {
+                        identity: auth_identity,
+                        trace_id: auth_trace_id,
+                        started_at: auth_started_at,
+                        client_ip: auth_client_ip,
+                        limit_check: auth_limit_check,
+                        access_candidate: auth_access_candidate,
+                        view: CapturedView::Buffered(response),
+                    })
                 }
             }
         } else {
@@ -953,91 +986,79 @@ impl McpProxy {
                 .await
             {
                 Ok((resp, new_upstream_sid, stream_body)) => {
-                    // Persist any upstream session ID the server returned so
-                    // subsequent calls from this user reuse the same session.
                     if let Some(sid) = new_upstream_sid {
                         self.sessions
                             .set_upstream_session(client_session_id, server_id, sid)
                             .await;
                     }
-
-                    self.record_breaker_for_response(&server_name, &resp).await;
-                    (resp, stream_body)
+                    // The pool captured an upstream SSE timeline when
+                    // present — thread it into the audit row via deps
+                    // so the buffered emit_audit still shows the full
+                    // timeline.
+                    deps.stream_audit_body = stream_body;
+                    Invocation::Buffered(Invoked {
+                        identity: auth_identity,
+                        trace_id: auth_trace_id,
+                        started_at: auth_started_at,
+                        client_ip: auth_client_ip,
+                        limit_check: auth_limit_check,
+                        access_candidate: auth_access_candidate,
+                        view: CapturedView::Buffered(resp),
+                    })
                 }
                 Err(e) => {
-                    self.circuit_breakers.record_failure(&server_name).await;
                     tracing::error!(
                         server_id = %server_id,
                         error = %e,
                         "upstream tools/call failed"
                     );
-                    (
-                        err_response(
-                            request.id.clone(),
-                            INTERNAL_ERROR,
-                            format!("Upstream server error: {e}"),
-                        ),
-                        // Transport error path — no stream events were
-                        // successfully received, so no audit body to embed.
-                        None,
-                    )
+                    let response = err_response(
+                        request.id.clone(),
+                        INTERNAL_ERROR,
+                        format!("Upstream server error: {e}"),
+                    );
+                    Invocation::Buffered(Invoked {
+                        identity: auth_identity,
+                        trace_id: auth_trace_id,
+                        started_at: auth_started_at,
+                        client_ip: auth_client_ip,
+                        limit_check: auth_limit_check,
+                        access_candidate: auth_access_candidate,
+                        view: CapturedView::Buffered(response),
+                    })
                 }
             }
         };
 
-        // Write successful responses to cache when caching is enabled.
-        if effective_cache_ttl > 0 && response.error.is_none() {
-            self.cache
-                .set(
-                    &server_id,
-                    cache_scope,
-                    &upstream_request,
-                    &response,
-                    effective_cache_ttl,
-                )
-                .await;
-        }
-
-        // Capture the call arguments alongside the tool name so the
-        // trace endpoint can show what was actually invoked.
-        let logged_arguments = params.get("arguments").cloned();
-        self.emit_tools_call_audit(
-            user_id,
-            user_email,
-            ctx.ip_address,
-            server_id,
-            &server_name,
-            &tool_name,
-            &call_trace_id,
-            logged_arguments.as_ref(),
-            started,
-            &response,
-            stream_audit_body.as_deref(),
-        )
-        .await;
-
-        if ctx.wants_streaming {
-            // Client signalled SSE capability via `Accept: text/event-stream`.
-            // The audit pipeline ran in full above (single, deterministic
-            // pass) — what's left is shape conversion: turn the response
-            // into a sequence of SSE events the client expects.
-            //
-            // When the upstream itself used text/event-stream we have
-            // `stream_audit_body` — a JSON array of every event envelope
-            // (progress notifications + final response) the upstream
-            // emitted. Replay each one as a discrete SSE event so the
-            // client sees the full timeline instead of a single buffered
-            // response. Note: this is NOT real-time pass-through (we
-            // already buffered the entire upstream before audit), it's
-            // the lossless replay of what we received. Real-time
-            // chunk-by-chunk forwarding is a follow-up that needs to
-            // restructure the audit emit timing.
-            //
-            // When the upstream replied with plain application/json we
-            // get one synthesized event carrying the response envelope.
-            HandleOutcome::Streaming(build_replay_payload(response, stream_audit_body.as_deref()))
-        } else {
-            HandleOutcome::Buffered(response)
+        // Dispatch into the post-invoke pipeline. Buffered runs
+        // synchronously; streaming spawns a detached task so chunks
+        // flow downstream while breaker / cache / audit work runs as
+        // the tail resolves.
+        match invocation {
+            Invocation::Buffered(invoked) => {
+                let emitted = run_post_invoke::<crate::lifecycle::McpSurface>(invoked, &deps).await;
+                let response = emitted
+                    .response
+                    .expect("Invocation::Buffered always yields Emitted.response");
+                if ctx.wants_streaming {
+                    // Client signalled SSE but the upstream replied
+                    // buffered. Wrap the response (and any captured
+                    // upstream timeline) as a sequence of SSE events.
+                    HandleOutcome::Streaming(build_replay_payload(
+                        response,
+                        deps.stream_audit_body.as_deref(),
+                    ))
+                } else {
+                    HandleOutcome::Buffered(response)
+                }
+            }
+            Invocation::Streaming { response, tail } => {
+                tokio::spawn(async move {
+                    let invoked = tail.await;
+                    run_post_invoke::<crate::lifecycle::McpSurface>(invoked, &deps).await;
+                });
+                HandleOutcome::Streaming(response)
+            }
         }
     }
 
@@ -1056,7 +1077,11 @@ impl McpProxy {
     /// One open breaker per misbehaving client used to deny every
     /// other user on the same shared server for the full cooldown;
     /// this gate fixes that.
-    async fn record_breaker_for_response(&self, server_name: &str, response: &JsonRpcResponse) {
+    pub(crate) async fn record_breaker_for_response(
+        &self,
+        server_name: &str,
+        response: &JsonRpcResponse,
+    ) {
         let is_server_failure = response
             .error
             .as_ref()

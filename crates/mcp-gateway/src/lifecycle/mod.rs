@@ -15,15 +15,19 @@ use uuid::Uuid;
 
 use think_watch_common::audit::{AuditActor, AuditEntry, McpActor};
 use think_watch_common::lifecycle::Surface;
-use think_watch_common::lifecycle::state::Invoked;
+use think_watch_common::lifecycle::state::{CapturedView, Invoked};
+use think_watch_common::lifecycle::streaming::StreamOutcome;
 use think_watch_common::limits::{
     RateLimitRule, RateLimitSubject, Surface as LimitSurface, SurfaceConstraints,
 };
 
 use crate::access_control::is_tool_allowed;
+use crate::cache::CallerScope;
 use crate::proxy::{
-    INVALID_REQUEST, JsonRpcRequest, JsonRpcResponse, StreamingPayload, err_response,
+    INTERNAL_ERROR, INVALID_REQUEST, JsonRpcRequest, JsonRpcResponse, McpProxy, StreamingPayload,
+    err_response, pick_response_envelope,
 };
+use crate::registry::ServerCacheScope;
 
 /// The MCP surface marker. Zero-size — stage code references the
 /// surface's wire-format types via `McpSurface::Identity` /
@@ -102,38 +106,170 @@ impl Surface for McpSurface {
     }
 
     /// MCP streaming capture is the JSON-RPC event timeline the
-    /// pump accumulates as upstream events flow through. Phase 2
-    /// step 2 (STREAMING.md migration) wires this into
-    /// `build_mcp_pump`; for now the type exists so the Surface
-    /// trait is satisfied and downstream stages can be written
-    /// against `CapturedView::Streaming { captured, .. }`.
+    /// pump accumulates as upstream events flow through (every
+    /// `notifications/progress` plus the final response envelope).
+    /// `record_outcome` / `write_cache` / `emit_audit` derive the
+    /// canonical response by handing this list to
+    /// [`pick_response_envelope`]; the audit hook also serialises
+    /// it into the row's response_body so trace replay UI shows
+    /// the full timeline, not just the final envelope.
     type StreamCaptured = Vec<serde_json::Value>;
 
     /// Streaming wire response — the SSE body the transport layer
-    /// hands to axum before the post-call tail resolves. Defined
-    /// here so the `Surface` trait is satisfied; phase 2 step 2
-    /// wires this into `build_mcp_pump`.
+    /// hands to axum before the post-call tail resolves. Wraps the
+    /// chunk-by-chunk pass-through plus the optional new
+    /// upstream-session id surfaced from headers.
     type StreamResponse = StreamingPayload;
 
-    /// Post-invoke hook deps for MCP. Empty marker for now —
-    /// STREAMING.md step 2 fills this with a clone of the
-    /// `McpProxy` handle (circuit breakers, cache, audit, server-
-    /// id, tool-name, …) so the three hooks below can dispatch
-    /// into the existing post-call code.
-    type PostInvokeDeps = ();
+    type PostInvokeDeps = McpPostInvokeDeps;
 
-    /// No-op until STREAMING.md step 2. The MCP pipeline does not
-    /// yet route post-invoke work through
-    /// [`think_watch_common::lifecycle::stages::run_post_invoke`];
-    /// the existing `crate::proxy::streaming::build_chunk_passthrough`
-    /// owns breaker accounting until step 2 moves it here.
-    async fn record_outcome(_deps: &Self::PostInvokeDeps, _invoked: &Invoked<Self>) {}
+    async fn record_outcome(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
+        // Streaming transport errors are unambiguous upstream
+        // faults — straight `record_failure` so a flapping upstream
+        // opens the breaker. Every other outcome (Natural, Client-
+        // Cancelled, any buffered response) goes through the
+        // shared response-code classifier so a single user's bad
+        // INVALID_PARAMS doesn't trip the breaker for everyone.
+        match &invoked.view {
+            CapturedView::Streaming {
+                outcome: StreamOutcome::UpstreamError { .. },
+                ..
+            } => {
+                deps.proxy
+                    .circuit_breakers
+                    .record_failure(&deps.server_name)
+                    .await;
+            }
+            _ => {
+                let response = response_for_hooks(invoked, deps);
+                deps.proxy
+                    .record_breaker_for_response(&deps.server_name, &response)
+                    .await;
+            }
+        }
+    }
 
-    /// No-op until STREAMING.md step 2 (see [`record_outcome`]).
-    async fn write_cache(_deps: &Self::PostInvokeDeps, _invoked: &Invoked<Self>) {}
+    async fn write_cache(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
+        if deps.effective_cache_ttl == 0 {
+            return;
+        }
+        let response = response_for_hooks(invoked, deps);
+        // The run_post_invoke stage gate filtered non-Natural
+        // streams; we still need the per-response error gate so
+        // buffered JSON-RPC errors don't poison the cache.
+        if response.error.is_some() {
+            return;
+        }
+        let scope = match deps.cache_scope_kind {
+            ServerCacheScope::Global => None,
+            ServerCacheScope::PerCaller => Some(CallerScope {
+                user_id: &invoked.identity.user_id,
+                account_label: deps.cache_account_label.as_deref(),
+            }),
+        };
+        deps.proxy
+            .cache
+            .set(
+                &deps.server_id,
+                scope,
+                &deps.upstream_request,
+                &response,
+                deps.effective_cache_ttl,
+            )
+            .await;
+    }
 
-    /// No-op until STREAMING.md step 2 (see [`record_outcome`]).
-    async fn emit_audit(_deps: &Self::PostInvokeDeps, _invoked: &Invoked<Self>) {}
+    async fn emit_audit(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
+        let response = response_for_hooks(invoked, deps);
+        // The streaming branch's full event timeline lands in the
+        // audit row's response_body so trace replay UI shows
+        // progress notifications + the final envelope. The buffered
+        // branch reuses `deps.stream_audit_body` for the case where
+        // the upstream itself replied with SSE inside a buffered
+        // call (captured by `send_request`).
+        let stream_audit_body = match &invoked.view {
+            CapturedView::Streaming { captured, .. } => serde_json::to_string(captured).ok(),
+            CapturedView::Buffered(_) => deps.stream_audit_body.clone(),
+        };
+        deps.proxy
+            .emit_tools_call_audit(
+                invoked.identity.user_id,
+                &invoked.identity.user_email,
+                invoked.identity.ip_address.as_deref(),
+                deps.server_id,
+                &deps.server_name,
+                &deps.tool_name,
+                &invoked.trace_id,
+                deps.logged_arguments.as_ref(),
+                invoked.started_at,
+                &response,
+                stream_audit_body.as_deref(),
+            )
+            .await;
+    }
+}
+
+/// Per-request handles + identifiers the post-invoke hooks need.
+/// `proxy` is cheap to clone (every field is `Arc`-backed or `Copy`-
+/// shaped); the rest are surface-specific identifiers the pipeline
+/// is generic over, so they cannot live on `Invoked<S>` itself.
+pub struct McpPostInvokeDeps {
+    pub proxy: McpProxy,
+    pub server_id: Uuid,
+    pub server_name: String,
+    pub tool_name: String,
+    /// The transformed (un-namespaced) upstream request body. Used
+    /// as the cache key in `write_cache` and forwarded into the
+    /// audit row's tool arguments via `logged_arguments`.
+    pub upstream_request: JsonRpcRequest,
+    /// Caller's tool arguments before transformation. Audited so
+    /// trace replay shows what the user invoked, not what we
+    /// forwarded.
+    pub logged_arguments: Option<serde_json::Value>,
+    pub cache_scope_kind: ServerCacheScope,
+    pub cache_account_label: Option<String>,
+    /// 0 ⇒ caching explicitly disabled for this server.
+    pub effective_cache_ttl: u64,
+    /// Event timeline captured by `send_request` when the upstream
+    /// replied with SSE inside a *buffered* call (the streaming
+    /// path captures its timeline into `CapturedView::Streaming`
+    /// directly, so this stays `None` there).
+    pub stream_audit_body: Option<String>,
+    /// Wire-level JSON-RPC id of the inbound request. Used by
+    /// [`response_for_hooks`] to bind a synthetic err_response when
+    /// no upstream envelope arrived.
+    pub original_request_id: Option<serde_json::Value>,
+}
+
+/// Materialise the canonical [`JsonRpcResponse`] the post-invoke
+/// hooks operate on. Buffered captures already carry it; streaming
+/// captures hold the raw event timeline so we pick the response
+/// envelope per the shared id-matching rule. Synthesises an
+/// INTERNAL_ERROR envelope (with the request id bound) when no
+/// envelope arrived — preserves the pre-migration error wire shape
+/// the existing `build_chunk_passthrough` produced.
+fn response_for_hooks(invoked: &Invoked<McpSurface>, deps: &McpPostInvokeDeps) -> JsonRpcResponse {
+    match &invoked.view {
+        CapturedView::Buffered(r) => r.clone(),
+        CapturedView::Streaming { outcome, captured } => {
+            pick_response_envelope(captured, deps.original_request_id.as_ref()).unwrap_or_else(
+                || {
+                    let msg = match outcome {
+                        StreamOutcome::Natural => {
+                            "Upstream stream ended without a response envelope".to_string()
+                        }
+                        StreamOutcome::UpstreamError { message, .. } => {
+                            format!("Upstream stream error: {message}")
+                        }
+                        StreamOutcome::ClientCancelled => {
+                            "Client cancelled before upstream replied".to_string()
+                        }
+                    };
+                    err_response(deps.original_request_id.clone(), INTERNAL_ERROR, msg)
+                },
+            )
+        }
+    }
 }
 
 /// Build the MCP-surface `requests` rate-limit rules from a
