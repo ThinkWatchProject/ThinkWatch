@@ -3,6 +3,7 @@ pub mod cache;
 pub mod circuit_breaker;
 pub mod detect;
 pub mod health;
+pub mod lifecycle;
 pub mod pool;
 pub mod proxy;
 pub mod registry;

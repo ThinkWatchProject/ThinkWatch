@@ -1,9 +1,7 @@
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use think_watch_common::limits::{
-    self, RateLimitRule, RateLimitSubject, RateMetric, Surface, SurfaceConstraints, sliding,
-};
+use think_watch_common::limits::SurfaceConstraints;
 
 use crate::access_control::is_tool_allowed;
 use crate::cache::{CallerScope, McpResponseCache};
@@ -27,27 +25,6 @@ pub use jsonrpc::{
 };
 use streaming::build_replay_payload;
 pub use streaming::{HandleOutcome, StreamingPayload};
-
-/// Build a human label for a rate-limit rule. Same shape the AI
-/// gateway uses (`subject:metric/window`) so log scrapers see one
-/// consistent format across surfaces.
-fn rate_label(rule: &limits::RateLimitRule) -> String {
-    let window = match rule.window_secs {
-        60 => "1m".to_string(),
-        300 => "5m".to_string(),
-        3_600 => "1h".to_string(),
-        18_000 => "5h".to_string(),
-        86_400 => "1d".to_string(),
-        604_800 => "1w".to_string(),
-        n => format!("{n}s"),
-    };
-    format!(
-        "{}:{}/{}",
-        rule.subject_kind.as_str(),
-        rule.metric.as_str(),
-        window
-    )
-}
 
 // ---------------------------------------------------------------------------
 // Per-request caller context
@@ -578,73 +555,45 @@ impl McpProxy {
                 }
             };
 
-        // Rate-limit pre-flight — materialize the user's merged MCP
-        // surface rules on the fly (the parent crate already did the
-        // most-restrictive aggregation across every role assignment).
-        let rules: Vec<RateLimitRule> = surface_constraints
-            .block(Surface::McpGateway)
-            .map(|block| {
-                block
-                    .rules
-                    .iter()
-                    .filter(|r| r.enabled)
-                    .map(|r| RateLimitRule {
-                        id: Uuid::nil(),
-                        subject_kind: RateLimitSubject::User,
-                        subject_id: user_id,
-                        surface: Surface::McpGateway,
-                        metric: r.metric,
-                        window_secs: r.window_secs,
-                        max_count: r.max_count,
-                        enabled: true,
-                        expires_at: None,
-                        reason: None,
-                        created_by: None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let resolved = sliding::resolve_rules(&rules, RateMetric::Requests);
-        if !resolved.is_empty() {
-            let fail_closed = self.dynamic_config.rate_limit_fail_closed().await;
-            let outcome =
-                match sliding::check_and_record(&self.redis, &resolved, 1, !fail_closed).await {
-                    Ok(o) => o,
-                    Err(e) => {
-                        if fail_closed {
-                            tracing::warn!("MCP rate-limit redis error: {e}; failing closed");
-                            return HandleOutcome::Buffered(err_response(
-                                request.id,
-                                INVALID_REQUEST,
-                                "Rate limited: rate_limiter_unavailable".to_string(),
-                            ));
-                        }
-                        tracing::warn!("MCP rate-limit redis error: {e}; allowing call");
-                        sliding::CheckOutcome {
-                            allowed: true,
-                            exceeded_index: -1,
-                            currents: Vec::new(),
-                        }
-                    }
-                };
-            if !outcome.allowed {
-                let label = (outcome.exceeded_index >= 0)
-                    .then(|| {
-                        rules
-                            .iter()
-                            .filter(|r| r.metric == RateMetric::Requests)
-                            .nth(outcome.exceeded_index as usize)
-                            .map(rate_label)
-                    })
-                    .flatten()
-                    .unwrap_or_else(|| "rate limit".to_string());
-                tracing::warn!(user_id = %user_id, server = %server.name, "MCP rate limited: {label}");
-                metrics::counter!("mcp_rate_limited_total").increment(1);
-                return HandleOutcome::Buffered(err_response(
-                    request.id,
-                    INVALID_REQUEST,
-                    format!("Rate limited: {label}"),
-                ));
+        // Rate-limit pre-flight — runs the lifecycle's shared
+        // `check_limits` stage. The stage emits its own audit row
+        // on short-circuit and the response shape comes from
+        // `McpSurface::rate_limited_response` so the deny payload
+        // stays identical to the pre-migration version. We bind
+        // the `request.id` onto the response after the fact
+        // because the stage doesn't know the wire-level id.
+        let rules = crate::lifecycle::rate_limit_rules(surface_constraints, user_id);
+        let fail_closed = self.dynamic_config.rate_limit_fail_closed().await;
+        let raw = think_watch_common::lifecycle::state::Raw::<crate::lifecycle::McpSurface>::new(
+            crate::lifecycle::McpIdentity {
+                user_id,
+                user_email: user_email.to_owned(),
+                ip_address: ctx.ip_address.map(|s| s.to_owned()),
+                surface_constraints: surface_constraints.clone(),
+            },
+            request.clone(),
+            trace_id.to_owned(),
+            ctx.ip_address.map(|s| s.to_owned()),
+        );
+        match think_watch_common::lifecycle::stages::check_limits::<crate::lifecycle::McpSurface>(
+            raw,
+            &rules,
+            &self.redis,
+            fail_closed,
+            &self.audit,
+        )
+        .await
+        {
+            // Phase 1 of the migration: discard the LimitsChecked
+            // state. Later phases will carry it through the next
+            // stages so the per-window currents surface in the
+            // audit row.
+            Ok(_) => {}
+            Err(mut resp) => {
+                // Bind the inbound JSON-RPC `id` so the client
+                // can correlate the deny response to its request.
+                resp.id = request.id;
+                return HandleOutcome::Buffered(resp);
             }
         }
 
