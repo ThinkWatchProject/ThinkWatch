@@ -280,12 +280,38 @@ impl Surface for ChatCompletionSurface {
         }
     }
 
+    async fn record_usage(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
+        // Debit the limits engine + budget caps using the same token
+        // resolution `emit_audit` will surface. Streaming pre-computed
+        // the counts (see `capture_chat_stream`) so the budget reflects
+        // what the upstream actually generated even on a client-cancel
+        // before the final usage chunk arrived. ShortCircuit outcomes
+        // contribute zero tokens — the debit is a no-op there but the
+        // call still happens for trace-shape symmetry.
+        let (prompt_tokens, completion_tokens) = extract_usage_tokens(&invoked.view);
+        post_flight_account(
+            deps.state.db.clone(),
+            deps.state.redis.clone(),
+            deps.state.dynamic_config.clone(),
+            deps.state.weight_cache.clone(),
+            deps.original_model.clone(),
+            prompt_tokens,
+            completion_tokens,
+            deps.request_rules.clone(),
+            deps.budget_caps.clone(),
+            deps.identity.user_id.clone(),
+            deps.identity.user_email.clone(),
+            deps.identity.api_key_id.clone(),
+            deps.identity.ip_address.clone(),
+            deps.state.audit.clone(),
+        )
+        .await;
+    }
+
     async fn emit_audit(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
         // Streaming: pull pre-computed token counts + cost +
         // assembled response from the captured view.
-        // Buffered: read from the response (only the streaming path
-        // currently invokes this hook; the buffered path stays
-        // inline in `proxy_chat_completion` per STREAMING.md scope).
+        // Buffered: read from the response.
         let (assembled_ref, prompt_tokens, completion_tokens, cost, logged_status, error_detail) =
             match &invoked.view {
                 CapturedView::Streaming { outcome, captured } => {
@@ -353,27 +379,26 @@ impl Surface for ChatCompletionSurface {
             error_detail,
             body_capture,
         );
+    }
+}
 
-        // Post-flight account against limits / budget — gateway-
-        // specific concern that STREAMING.md S6 explicitly leaves
-        // inside this hook for now (lifting it into a shared
-        // `record_usage` stage is a follow-up).
-        post_flight_account(
-            deps.state.db.clone(),
-            deps.state.redis.clone(),
-            deps.state.dynamic_config.clone(),
-            deps.state.weight_cache.clone(),
-            deps.original_model.clone(),
-            prompt_tokens,
-            completion_tokens,
-            deps.request_rules.clone(),
-            deps.budget_caps.clone(),
-            deps.identity.user_id.clone(),
-            deps.identity.user_email.clone(),
-            deps.identity.api_key_id.clone(),
-            deps.identity.ip_address.clone(),
-            deps.state.audit.clone(),
-        )
-        .await;
+/// Pull `(prompt_tokens, completion_tokens)` out of a captured view.
+/// Streaming uses the values `capture_chat_stream` resolved (handles
+/// the no-usage-chunk-arrived case for client-cancelled streams);
+/// buffered reads from `response.usage`. Shared between
+/// [`ChatCompletionSurface::record_usage`] and
+/// [`ChatCompletionSurface::emit_audit`] so the two hooks always
+/// agree on the token count.
+fn extract_usage_tokens(view: &CapturedView<ChatCompletionSurface>) -> (u32, u32) {
+    match view {
+        CapturedView::Streaming { captured, .. } => {
+            (captured.prompt_tokens, captured.completion_tokens)
+        }
+        CapturedView::Buffered(ChatCompletionOutcome::Success(r)) => r
+            .usage
+            .as_ref()
+            .map(|u| (u.prompt_tokens, u.completion_tokens))
+            .unwrap_or((0, 0)),
+        CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => (0, 0),
     }
 }

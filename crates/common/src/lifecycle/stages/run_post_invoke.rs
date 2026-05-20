@@ -1,15 +1,15 @@
-//! `run_post_invoke` — orchestrates the three post-`invoke_upstream`
-//! stages (`record_outcome` → `write_cache` → `emit_audit`) over a
-//! single [`Invoked`] state. The same function is called from
-//! both the buffered foreground path and the streaming detached
-//! task, so the audit emit happens exactly once per request
-//! regardless of transport mode.
+//! `run_post_invoke` — orchestrates the four post-`invoke_upstream`
+//! stages (`record_outcome` → `write_cache` → `record_usage` →
+//! `emit_audit`) over a single [`Invoked`] state. The same function
+//! is called from both the buffered foreground path and the
+//! streaming detached task, so the audit emit happens exactly once
+//! per request regardless of transport mode.
 //!
 //! Each stage delegates to a [`Surface`] trait method (see
 //! [`Surface::record_outcome`] / [`Surface::write_cache`] /
-//! [`Surface::emit_audit`]); this module owns the order, the
-//! "skip cache write when the stream errored / was cancelled"
-//! gate, and the per-stage tracing spans.
+//! [`Surface::record_usage`] / [`Surface::emit_audit`]); this
+//! module owns the order, the "skip cache write when the stream
+//! errored / was cancelled" gate, and the per-stage tracing spans.
 
 use super::super::Surface;
 use super::super::state::{Emitted, Invoked};
@@ -29,6 +29,7 @@ pub async fn run_post_invoke<S: Surface>(
 ) -> Emitted<S> {
     let invoked = record_outcome::<S>(invoked, deps).await;
     let invoked = write_cache::<S>(invoked, deps).await;
+    let invoked = record_usage::<S>(invoked, deps).await;
     emit_audit::<S>(invoked, deps).await
 }
 
@@ -60,6 +61,19 @@ pub async fn write_cache<S: Surface>(invoked: Invoked<S>, deps: &S::PostInvokeDe
     invoked
 }
 
+/// Debit limits / budget counters for the request's usage. Runs
+/// after [`write_cache`] (so a cache write doesn't accidentally
+/// re-fire on a counter rollback) and before [`emit_audit`] (so
+/// the audit row sees post-debit counter values when the surface
+/// chooses to embed them). MCP currently uses the default no-op
+/// since `tools/call` doesn't have a token concept; the AI gateway
+/// overrides the hook with `post_flight_account`.
+#[tracing::instrument(skip_all, fields(trace_id = %invoked.trace_id))]
+pub async fn record_usage<S: Surface>(invoked: Invoked<S>, deps: &S::PostInvokeDeps) -> Invoked<S> {
+    S::record_usage(deps, &invoked).await;
+    invoked
+}
+
 /// Emit the audit row (gateway_logs / mcp_logs). Single emit site
 /// for the post-invoke path. The terminal [`Emitted`] carries the
 /// wire response for the buffered case so the surface handler can
@@ -84,11 +98,11 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    /// Buffered path runs all three hooks in order and returns the
+    /// Buffered path runs all four hooks in order and returns the
     /// wire response inside `Emitted.response` so the surface
     /// handler can hand it to axum.
     #[tokio::test]
-    async fn buffered_runs_all_three_hooks_and_propagates_response() {
+    async fn buffered_runs_all_hooks_and_propagates_response() {
         let user_id = Uuid::new_v4();
         let invoked = make_buffered_invoked(user_id, TestResponse::Ok);
         let deps = TestDeps::default();
@@ -97,11 +111,18 @@ mod tests {
 
         assert_eq!(deps.record_outcome(), 1);
         assert_eq!(deps.write_cache(), 1);
+        assert_eq!(deps.record_usage(), 1);
         assert_eq!(deps.emit_audit(), 1);
         assert_eq!(
             deps.order(),
-            vec!["record_outcome", "write_cache", "emit_audit"],
-            "post-invoke stage order is record_outcome → write_cache → emit_audit"
+            vec![
+                "record_outcome",
+                "write_cache",
+                "record_usage",
+                "emit_audit"
+            ],
+            "post-invoke stage order is \
+             record_outcome → write_cache → record_usage → emit_audit"
         );
         assert_eq!(deps.write_cache_kind(), Some("buffered"));
         assert_eq!(
@@ -111,9 +132,9 @@ mod tests {
         );
     }
 
-    /// Streaming/Natural: cache write IS called, audit IS emitted,
-    /// but `Emitted.response` is `None` because the SSE body was
-    /// already on the wire before the tail resolved.
+    /// Streaming/Natural: cache write IS called, usage debit AND
+    /// audit emit run, but `Emitted.response` is `None` because the
+    /// SSE body was already on the wire before the tail resolved.
     #[tokio::test]
     async fn streaming_natural_writes_cache_with_no_terminal_response() {
         let user_id = Uuid::new_v4();
@@ -124,6 +145,7 @@ mod tests {
 
         assert_eq!(deps.write_cache(), 1);
         assert_eq!(deps.write_cache_kind(), Some("streaming"));
+        assert_eq!(deps.record_usage(), 1);
         assert_eq!(deps.emit_audit(), 1);
         assert!(
             emitted.response.is_none(),
@@ -134,8 +156,10 @@ mod tests {
     }
 
     /// ClientCancelled: cache write is SKIPPED (partial response
-    /// would poison subsequent callers), but record_outcome AND
-    /// audit still run so the request is fully accounted for.
+    /// would poison subsequent callers), but record_outcome,
+    /// record_usage, and emit_audit still run so the request is
+    /// fully accounted for (the tokens were generated even if the
+    /// client left).
     #[tokio::test]
     async fn streaming_client_cancelled_skips_cache_but_still_audits() {
         let user_id = Uuid::new_v4();
@@ -150,16 +174,18 @@ mod tests {
             0,
             "client cancellation = partial response = unsafe to cache"
         );
+        assert_eq!(deps.record_usage(), 1, "usage debit still runs");
         assert_eq!(deps.emit_audit(), 1, "audit row always emits");
         assert_eq!(
             deps.order(),
-            vec!["record_outcome", "emit_audit"],
-            "cache stage skipped; the other two still fire in order"
+            vec!["record_outcome", "record_usage", "emit_audit"],
+            "cache stage skipped; the remaining three still fire in order"
         );
     }
 
     /// UpstreamError: same skip rule as ClientCancelled — a stream
-    /// that errored has no canonical body to cache.
+    /// that errored has no canonical body to cache. record_usage
+    /// still fires so partial-token debits land.
     #[tokio::test]
     async fn streaming_upstream_error_skips_cache() {
         let user_id = Uuid::new_v4();
@@ -177,6 +203,7 @@ mod tests {
 
         assert_eq!(deps.record_outcome(), 1);
         assert_eq!(deps.write_cache(), 0);
+        assert_eq!(deps.record_usage(), 1);
         assert_eq!(deps.emit_audit(), 1);
     }
 }

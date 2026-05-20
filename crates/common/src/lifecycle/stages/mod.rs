@@ -18,4 +18,4 @@ mod run_post_invoke;
 
 pub use check_access::check_access;
 pub use check_limits::check_limits;
-pub use run_post_invoke::{emit_audit, record_outcome, run_post_invoke, write_cache};
+pub use run_post_invoke::{emit_audit, record_outcome, record_usage, run_post_invoke, write_cache};

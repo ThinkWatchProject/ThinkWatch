@@ -124,6 +124,20 @@ pub trait Surface: Sized + Send + Sync + 'static {
         invoked: &Invoked<Self>,
     ) -> impl Future<Output = ()> + Send;
 
+    /// Debit limits / budget counters for the usage the request
+    /// produced. Called by [`super::stages::record_usage`] after
+    /// [`Self::write_cache`] and before [`Self::emit_audit`] so the
+    /// audit row reflects post-debit counter values. The MCP
+    /// surface doesn't currently track usage (no token concept on
+    /// JSON-RPC `tools/call`); the default no-op satisfies it. The
+    /// AI gateway overrides this to call `post_flight_account`.
+    fn record_usage(
+        _deps: &Self::PostInvokeDeps,
+        _invoked: &Invoked<Self>,
+    ) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
     /// Emit the audit row (gateway_logs / mcp_logs) for this
     /// request. Called by [`super::stages::emit_audit`] exactly
     /// once. The surface owns row shape (body capture, blob

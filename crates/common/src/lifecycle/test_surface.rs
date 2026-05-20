@@ -54,9 +54,11 @@ pub struct TestStreamCaptured {
 pub struct TestDeps {
     pub record_outcome_calls: AtomicUsize,
     pub write_cache_calls: AtomicUsize,
+    pub record_usage_calls: AtomicUsize,
     pub emit_audit_calls: AtomicUsize,
     /// Ordered list of hook names as they fire. Used to assert
-    /// `record_outcome → write_cache → emit_audit` ordering.
+    /// `record_outcome → write_cache → record_usage → emit_audit`
+    /// ordering.
     pub call_log: Mutex<Vec<&'static str>>,
     /// The view passed to `write_cache` last — `None` if the stage
     /// gated it. Tests assert this stays `None` for non-Natural
@@ -69,6 +71,7 @@ impl Default for TestDeps {
         Self {
             record_outcome_calls: AtomicUsize::new(0),
             write_cache_calls: AtomicUsize::new(0),
+            record_usage_calls: AtomicUsize::new(0),
             emit_audit_calls: AtomicUsize::new(0),
             call_log: Mutex::new(Vec::new()),
             write_cache_view_kind: Mutex::new(None),
@@ -82,6 +85,9 @@ impl TestDeps {
     }
     pub fn write_cache(&self) -> usize {
         self.write_cache_calls.load(Ordering::SeqCst)
+    }
+    pub fn record_usage(&self) -> usize {
+        self.record_usage_calls.load(Ordering::SeqCst)
     }
     pub fn emit_audit(&self) -> usize {
         self.emit_audit_calls.load(Ordering::SeqCst)
@@ -160,6 +166,11 @@ impl Surface for TestSurface {
             super::state::CapturedView::Streaming { .. } => "streaming",
         };
         *deps.write_cache_view_kind.lock().unwrap() = Some(kind);
+    }
+
+    async fn record_usage(deps: &Self::PostInvokeDeps, _invoked: &Invoked<Self>) {
+        deps.record_usage_calls.fetch_add(1, Ordering::SeqCst);
+        deps.call_log.lock().unwrap().push("record_usage");
     }
 
     async fn emit_audit(deps: &Self::PostInvokeDeps, _invoked: &Invoked<Self>) {
