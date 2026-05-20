@@ -170,7 +170,15 @@ pub async fn capture_chat_stream(
 
 impl Surface for ChatCompletionSurface {
     type Identity = GatewayRequestIdentity;
-    type RequestBody = ChatCompletionRequest;
+    /// `Raw.body` is plumbing the common stages carry through
+    /// without ever reading. The AI gateway's three handlers build
+    /// their typed `ChatCompletionRequest` at different points in
+    /// the flow (chat-completions has one upfront from the Json
+    /// extractor; Anthropic Messages / Responses synthesise one
+    /// AFTER the preflight stages), so the lifecycle body is the
+    /// unit type and the handler keeps the typed request as a
+    /// local variable.
+    type RequestBody = ();
     type Response = ChatCompletionOutcome;
     type StreamResponse = axum::response::Response;
     type AuditDetail = serde_json::Value;
@@ -190,14 +198,19 @@ impl Surface for ChatCompletionSurface {
     }
 
     fn rate_limited_response(label: &str) -> Self::Response {
-        ChatCompletionOutcome::ShortCircuit(GatewayError::TransformError(format!(
-            "Rate limited: {label}"
-        )))
+        // `LocalRateLimited` so `status_code() == 429` on the wire.
+        // The label (`"<subject>:<metric>/<window>"`) is what the
+        // pre-migration `preflight_request_limits` already produced;
+        // keeping it intact lets clients diff exhausted windows.
+        ChatCompletionOutcome::ShortCircuit(GatewayError::LocalRateLimited(label.to_owned()))
     }
 
     fn rate_limiter_unavailable_response() -> Self::Response {
-        ChatCompletionOutcome::ShortCircuit(GatewayError::ProviderError(
-            "Rate limiter unavailable".into(),
+        // Matches the pre-migration `preflight_request_limits`
+        // fail-closed path — same `LocalRateLimited` variant with
+        // the sentinel label dashboards already filter on.
+        ChatCompletionOutcome::ShortCircuit(GatewayError::LocalRateLimited(
+            "rate_limiter_unavailable".to_owned(),
         ))
     }
 

@@ -867,69 +867,6 @@ pub(crate) async fn post_flight_account(
     }
 }
 
-/// Run the requests-metric pre-flight against the limits engine for
-/// one resolved request. Shared by all three AI gateway surfaces:
-/// chat completions, Anthropic Messages, and the OpenAI Responses
-/// API. Returns the loaded rule set so the caller can hand it to
-/// `post_flight_account` after the upstream responds — saves a
-/// second DB round-trip.
-///
-/// Honors `security.rate_limit_fail_closed`: when set, a Redis
-/// outage on the engine returns `Err(LocalRateLimited)` so the
-/// caller can return 429 instead of letting the request slip
-/// through.
-async fn preflight_request_limits(
-    state: &GatewayState,
-    identity: &GatewayRequestIdentity,
-    model: &str,
-) -> Result<(Option<Uuid>, Vec<limits::RateLimitRule>), GatewayErrorResponse> {
-    let _provider_id = state.router.load().provider_id_for(model);
-    // Role-inline constraints came in with the identity (materialized
-    // once by the auth middleware). No DB fetch here — fail-closed is
-    // only relevant for the Redis call below.
-    let request_rules = rules_for_ai_gateway(identity);
-    let resolved_request_rules = sliding::resolve_rules(&request_rules, RateMetric::Requests);
-    if !resolved_request_rules.is_empty() {
-        let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
-        let outcome =
-            match sliding::check_and_record(&state.redis, &resolved_request_rules, 1, !fail_closed)
-                .await
-            {
-                Ok(o) => o,
-                Err(e) => {
-                    if fail_closed {
-                        tracing::warn!("rate-limit redis error: {e}; failing closed");
-                        return Err(GatewayError::LocalRateLimited(
-                            "rate_limiter_unavailable".to_string(),
-                        )
-                        .into());
-                    }
-                    tracing::warn!("rate-limit redis error: {e}; allowing request");
-                    sliding::CheckOutcome {
-                        allowed: true,
-                        exceeded_index: -1,
-                        currents: Vec::new(),
-                    }
-                }
-            };
-        if !outcome.allowed {
-            let label = (outcome.exceeded_index >= 0)
-                .then(|| {
-                    request_rules
-                        .iter()
-                        .filter(|r| r.metric == RateMetric::Requests)
-                        .nth(outcome.exceeded_index as usize)
-                        .map(rule_label)
-                })
-                .flatten()
-                .unwrap_or_else(|| "rate limit".to_string());
-            metrics::counter!("gateway_rate_limited_total", "metric" => "requests").increment(1);
-            return Err(GatewayError::LocalRateLimited(label).into());
-        }
-    }
-    Ok((_provider_id, request_rules))
-}
-
 // ---------------------------------------------------------------------------
 // Multi-route selection: strategy-driven weights + circuit-breaker filter
 // + per-model session affinity (none / provider / route).
@@ -1365,27 +1302,6 @@ async fn select_route_for_stream<'a>(
     )))
 }
 
-/// Build a human-readable label for "which rule rejected the request",
-/// used as the error body so callers know what to lift. The label
-/// shape is `<subject>:<metric>/<window>` (e.g. `api_key:tokens/1h`).
-fn rule_label(rule: &limits::RateLimitRule) -> String {
-    let window = match rule.window_secs {
-        60 => "1m".to_string(),
-        300 => "5m".to_string(),
-        3_600 => "1h".to_string(),
-        18_000 => "5h".to_string(),
-        86_400 => "1d".to_string(),
-        604_800 => "1w".to_string(),
-        n => format!("{n}s"),
-    };
-    format!(
-        "{}:{}/{}",
-        rule.subject_kind.as_str(),
-        rule.metric.as_str(),
-        window
-    )
-}
-
 /// POST /v1/chat/completions
 ///
 /// Proxies chat completion requests to the appropriate AI provider based
@@ -1431,29 +1347,41 @@ pub async fn proxy_chat_completion(
         started: request_started_at,
     };
 
-    // 2. Enforce allowed_models from API key
-    if let Some(ref allowed) = identity.allowed_models
-        && !allowed.is_empty()
-        && !allowed
-            .iter()
-            .any(|m| request.model == *m || request.model.starts_with(m))
-    {
-        return Err(ctx
-            .emit(GatewayError::TransformError(format!(
-                "Model '{}' is not allowed for this API key",
-                request.model
-            )))
-            .into());
-    }
-
-    // 3. Rate limit pre-flight (requests metric). See
-    // `preflight_request_limits` — same path used by Anthropic
-    // Messages and the Responses surface so all three obey the
-    // same `(api_key, user, provider)` rule resolution and the
-    // same `security.rate_limit_fail_closed` toggle.
-    let (_provider_id, request_rules) = preflight_request_limits(&state, &identity, &request.model)
-        .await
-        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e.0)))?;
+    // 2. Rate-limit + access-control via the shared lifecycle
+    //    stages. `check_limits` charges the `requests` counter for
+    //    every resolved rule; `check_access` gates the requested
+    //    model against `identity.allowed_models`. Each short-
+    //    circuits with the surface's wire response and emits its
+    //    own audit row, so the deny path is uniform across
+    //    chat / anthropic / responses surfaces.
+    let request_rules = rules_for_ai_gateway(&identity);
+    let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
+    let raw =
+        think_watch_common::lifecycle::state::Raw::<crate::lifecycle::ChatCompletionSurface>::new(
+            identity.clone(),
+            (),
+            trace_id.clone(),
+            identity.ip_address.clone(),
+        );
+    let limits_checked = think_watch_common::lifecycle::stages::check_limits::<
+        crate::lifecycle::ChatCompletionSurface,
+    >(raw, &request_rules, &state.redis, fail_closed, &state.audit)
+    .await
+    .map_err(|outcome| match outcome {
+        crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
+        crate::lifecycle::ChatCompletionOutcome::Success(_) => unreachable!(
+            "check_limits never returns a Success outcome — it either passes \
+             through to LimitsChecked or short-circuits with ShortCircuit"
+        ),
+    })?;
+    let _authorized = think_watch_common::lifecycle::stages::check_access::<
+        crate::lifecycle::ChatCompletionSurface,
+    >(limits_checked, &request.model, &state.audit)
+    .await
+    .map_err(|outcome| match outcome {
+        crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
+        crate::lifecycle::ChatCompletionOutcome::Success(_) => unreachable!(),
+    })?;
 
     // 4. Extract per-request metadata from headers and body
     let metadata = RequestMetadata::extract(&headers, &request);
@@ -2022,12 +1950,29 @@ pub async fn proxy_anthropic_messages(
         started: request_started_at,
     };
 
-    // Rate limit pre-flight — same engine as the chat-completions
-    // path so a developer key can't dodge their per-minute quota
-    // by switching from `/v1/chat/completions` to `/v1/messages`.
-    let (_provider_id, request_rules) = preflight_request_limits(&state, &identity, &mapped_model)
-        .await
-        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e.0)))?;
+    // Rate-limit pre-flight via the shared `check_limits` stage so
+    // a developer key can't dodge their per-minute quota by switching
+    // from `/v1/chat/completions` to `/v1/messages` — both surfaces
+    // resolve and charge against the same counter set. `Raw.body =
+    // ()` because the typed request gets built below; the lifecycle
+    // stages don't read body.
+    let request_rules = rules_for_ai_gateway(&identity);
+    let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
+    let raw =
+        think_watch_common::lifecycle::state::Raw::<crate::lifecycle::ChatCompletionSurface>::new(
+            identity.clone(),
+            (),
+            trace_id.clone(),
+            identity.ip_address.clone(),
+        );
+    let _limits = think_watch_common::lifecycle::stages::check_limits::<
+        crate::lifecycle::ChatCompletionSurface,
+    >(raw, &request_rules, &state.redis, fail_closed, &state.audit)
+    .await
+    .map_err(|outcome| match outcome {
+        crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
+        crate::lifecycle::ChatCompletionOutcome::Success(_) => unreachable!(),
+    })?;
 
     // Content filter — check user messages
     if let Some(messages) = body.get("messages").and_then(|v| v.as_array()) {
@@ -2415,11 +2360,25 @@ pub async fn proxy_responses(
         started: request_started_at,
     };
 
-    // Rate limit pre-flight — same engine as the chat completions
-    // path. Keeps the three AI surfaces symmetric.
-    let (_provider_id, request_rules) = preflight_request_limits(&state, &identity, &mapped_model)
-        .await
-        .map_err(|e| GatewayErrorResponse::from(ctx.emit(e.0)))?;
+    // Rate-limit pre-flight via the shared `check_limits` stage —
+    // see `proxy_anthropic_messages` for the same migration.
+    let request_rules = rules_for_ai_gateway(&identity);
+    let fail_closed = state.dynamic_config.rate_limit_fail_closed().await;
+    let raw =
+        think_watch_common::lifecycle::state::Raw::<crate::lifecycle::ChatCompletionSurface>::new(
+            identity.clone(),
+            (),
+            trace_id.clone(),
+            identity.ip_address.clone(),
+        );
+    let _limits = think_watch_common::lifecycle::stages::check_limits::<
+        crate::lifecycle::ChatCompletionSurface,
+    >(raw, &request_rules, &state.redis, fail_closed, &state.audit)
+    .await
+    .map_err(|outcome| match outcome {
+        crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
+        crate::lifecycle::ChatCompletionOutcome::Success(_) => unreachable!(),
+    })?;
 
     // Extract messages from the "input" field (Responses API format)
     // Input can be a string or an array of messages
