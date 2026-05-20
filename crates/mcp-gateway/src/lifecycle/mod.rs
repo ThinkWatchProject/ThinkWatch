@@ -4,7 +4,12 @@
 //! the existing [`crate::proxy::RequestContext`] shape.
 //!
 //! See `crates/common/src/lifecycle/DESIGN.md` for the cross-
-//! cutting architecture.
+//! cutting architecture. Stages that are surface-specific (cache
+//! lookup, circuit breaker check) live in the [`stages`]
+//! submodule here; truly cross-cutting stages (check_limits,
+//! check_access) live in `common::lifecycle::stages`.
+
+pub mod stages;
 
 use uuid::Uuid;
 

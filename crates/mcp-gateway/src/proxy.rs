@@ -595,7 +595,7 @@ impl McpProxy {
         // top of the handler; the surface impl
         // (`McpSurface::is_access_allowed`) calls `is_tool_allowed`
         // with the identity's `allowed_mcp_tools` patterns.
-        let _authorized = match think_watch_common::lifecycle::stages::check_access::<
+        let authorized = match think_watch_common::lifecycle::stages::check_access::<
             crate::lifecycle::McpSurface,
         >(limits_checked, namespaced_name, &self.audit)
         .await
@@ -624,20 +624,15 @@ impl McpProxy {
             params: Some(upstream_params),
         };
 
-        // --- Response cache ---------------------------------------------------
-        // Resolve the effective cache TTL:
-        //   per-server override (0 = explicitly disabled) → global fallback
+        // Resolve the effective cache TTL (per-server override
+        // wins; 0 = explicitly disabled) and the cache scope
+        // (Global vs PerCaller with optional account label —
+        // PerCaller without an override collapses to per-user, so
+        // switching defaults grants at most TTL seconds of stale
+        // cache).
         let effective_cache_ttl = server
             .cache_ttl_secs
             .unwrap_or(self.dynamic_config.mcp_cache_ttl_secs().await);
-
-        // Build the per-request cache scope from the server's static
-        // `ServerCacheScope` plus, for PerCaller servers, the
-        // user_id and the optional account_label routed by the
-        // calling API key. PerCaller without an account override
-        // collapses to per-user — the user's *default* credential is
-        // implicit; if they switch defaults they get at most TTL
-        // seconds of stale cache, which is acceptable.
         let cache_scope = match server.cache_scope {
             ServerCacheScope::Global => None,
             ServerCacheScope::PerCaller => Some(CallerScope {
@@ -646,36 +641,45 @@ impl McpProxy {
             }),
         };
 
-        if effective_cache_ttl > 0 {
-            if let Some(cached) = self
-                .cache
-                .get(&server.id, cache_scope, &upstream_request)
-                .await
-            {
-                metrics::counter!("mcp_cache_hits_total").increment(1);
-                tracing::debug!(server = %server.name, "MCP cache hit");
+        // Cache lookup + circuit-breaker gate via the MCP-specific
+        // lifecycle stages. Each short-circuits with the
+        // appropriate response shape (cached body on hit;
+        // INTERNAL_ERROR with the unavailable message on breaker
+        // open) AND emits a `tools.call.cache_hit` /
+        // `tools.call.breaker_open` audit row so the deny shows up
+        // on the trace UI — the pre-migration inline code was
+        // silent on both.
+        let authorized = match crate::lifecycle::stages::check_cache(
+            authorized,
+            &self.cache,
+            server.id,
+            cache_scope,
+            effective_cache_ttl,
+            &upstream_request,
+            &self.audit,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(mut cached) => {
+                cached.id = request.id;
                 return HandleOutcome::Buffered(cached);
             }
-            metrics::counter!("mcp_cache_misses_total").increment(1);
-        }
-
-        // Circuit breaker — fail fast if the server's CB is currently Open.
-        // The breaker is keyed by server name, which is what the dashboard
-        // upstream-health panel reads from the shared cb_registry.
-        if self.circuit_breakers.check(&server.name).await.is_err() {
-            tracing::warn!(
-                server = %server.name,
-                "tools/call short-circuited: MCP circuit breaker open"
-            );
-            return HandleOutcome::Buffered(err_response(
-                request.id,
-                INTERNAL_ERROR,
-                format!(
-                    "Upstream MCP server '{}' is temporarily unavailable",
-                    server.name
-                ),
-            ));
-        }
+        };
+        let _authorized = match crate::lifecycle::stages::check_breaker(
+            authorized,
+            &self.circuit_breakers,
+            &server.name,
+            &self.audit,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(mut resp) => {
+                resp.id = request.id;
+                return HandleOutcome::Buffered(resp);
+            }
+        };
 
         // Get (or create) a connection and forward the request.
         let conn = self.pool.get_or_create(&server).await;
