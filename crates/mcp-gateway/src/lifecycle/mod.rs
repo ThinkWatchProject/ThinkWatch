@@ -105,6 +105,26 @@ impl Surface for McpSurface {
         err_response(None, INVALID_REQUEST, "Access denied for this tool")
     }
 
+    fn budget_exceeded_response(label: &str) -> Self::Response {
+        // MCP doesn't currently wire budget caps into
+        // `handle_tools_call` (the AI gateway is the only consumer
+        // of `check_budget` today). The factory exists so the
+        // `Surface` trait is satisfied uniformly — surfaces a
+        // JSON-RPC error with the same label-carrying shape rate-
+        // limit denies use, in case a future MCP feature lights it
+        // up.
+        metrics::counter!("mcp_budget_exceeded_total").increment(1);
+        err_response(None, INVALID_REQUEST, format!("Budget exceeded: {label}"))
+    }
+
+    fn budget_unavailable_response() -> Self::Response {
+        err_response(
+            None,
+            INVALID_REQUEST,
+            "Budget cap backend unavailable".to_string(),
+        )
+    }
+
     /// MCP streaming capture is the JSON-RPC event timeline the
     /// pump accumulates as upstream events flow through (every
     /// `notifications/progress` plus the final response envelope).

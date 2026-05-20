@@ -1374,6 +1374,28 @@ pub async fn proxy_chat_completion(
              through to LimitsChecked or short-circuits with ShortCircuit"
         ),
     })?;
+    // 2b. Budget peek — reject NEW requests once any of the API
+    // key's / user's / role's / team's budget caps is already at or
+    // past its limit. Soft pre-call gate (a simultaneous burst can
+    // still push past the cap; the post-call `record_usage` debit
+    // surfaces a crossing alert for that). The gate's value is
+    // rejecting the steady-state case where a runaway client keeps
+    // firing after the cap is already exhausted.
+    let budget_caps = budgets_for_ai_gateway(&identity);
+    let limits_checked = think_watch_common::lifecycle::stages::check_budget::<
+        crate::lifecycle::ChatCompletionSurface,
+    >(
+        limits_checked,
+        &budget_caps,
+        &state.redis,
+        fail_closed,
+        &state.audit,
+    )
+    .await
+    .map_err(|outcome| match outcome {
+        crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
+        crate::lifecycle::ChatCompletionOutcome::Success(_) => unreachable!(),
+    })?;
     let _authorized = think_watch_common::lifecycle::stages::check_access::<
         crate::lifecycle::ChatCompletionSurface,
     >(limits_checked, &request.model, &state.audit)
@@ -1973,6 +1995,23 @@ pub async fn proxy_anthropic_messages(
         crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
         crate::lifecycle::ChatCompletionOutcome::Success(_) => unreachable!(),
     })?;
+    // Budget peek — see `proxy_chat_completion` for the soft-gate
+    // rationale.
+    let budget_caps = budgets_for_ai_gateway(&identity);
+    let limits_checked = think_watch_common::lifecycle::stages::check_budget::<
+        crate::lifecycle::ChatCompletionSurface,
+    >(
+        limits_checked,
+        &budget_caps,
+        &state.redis,
+        fail_closed,
+        &state.audit,
+    )
+    .await
+    .map_err(|outcome| match outcome {
+        crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
+        crate::lifecycle::ChatCompletionOutcome::Success(_) => unreachable!(),
+    })?;
     // Access control — match what proxy_chat_completion enforces so
     // a key's `allowed_models` whitelist applies symmetrically across
     // all three AI surfaces. Without this an operator could pin a
@@ -2387,6 +2426,22 @@ pub async fn proxy_responses(
     let limits_checked = think_watch_common::lifecycle::stages::check_limits::<
         crate::lifecycle::ChatCompletionSurface,
     >(raw, &request_rules, &state.redis, fail_closed, &state.audit)
+    .await
+    .map_err(|outcome| match outcome {
+        crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),
+        crate::lifecycle::ChatCompletionOutcome::Success(_) => unreachable!(),
+    })?;
+    // Budget peek — see `proxy_chat_completion`.
+    let budget_caps = budgets_for_ai_gateway(&identity);
+    let limits_checked = think_watch_common::lifecycle::stages::check_budget::<
+        crate::lifecycle::ChatCompletionSurface,
+    >(
+        limits_checked,
+        &budget_caps,
+        &state.redis,
+        fail_closed,
+        &state.audit,
+    )
     .await
     .map_err(|outcome| match outcome {
         crate::lifecycle::ChatCompletionOutcome::ShortCircuit(e) => GatewayErrorResponse::from(e),

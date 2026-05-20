@@ -35,6 +35,10 @@ pub enum TestResponse {
     AccessDenied {
         candidate: String,
     },
+    BudgetExceeded {
+        label: String,
+    },
+    BudgetUnavailable,
 }
 
 /// Streaming capture for test surface. Phase-2 unit tests only
@@ -151,6 +155,16 @@ impl Surface for TestSurface {
         TestResponse::AccessDenied {
             candidate: candidate.to_owned(),
         }
+    }
+
+    fn budget_exceeded_response(label: &str) -> Self::Response {
+        TestResponse::BudgetExceeded {
+            label: label.to_owned(),
+        }
+    }
+
+    fn budget_unavailable_response() -> Self::Response {
+        TestResponse::BudgetUnavailable
     }
 
     async fn record_outcome(deps: &Self::PostInvokeDeps, _invoked: &Invoked<Self>) {

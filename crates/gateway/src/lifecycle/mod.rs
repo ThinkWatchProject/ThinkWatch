@@ -233,6 +233,20 @@ impl Surface for ChatCompletionSurface {
         )))
     }
 
+    fn budget_exceeded_response(label: &str) -> Self::Response {
+        // `LocalRateLimited` per its docstring's explicit budget
+        // coverage — wire status 429, label carries which cap fired
+        // (e.g. `"user:budget/monthly"`) so dashboards can split
+        // budget exhaustion from rate-limit hits.
+        ChatCompletionOutcome::ShortCircuit(GatewayError::LocalRateLimited(label.to_owned()))
+    }
+
+    fn budget_unavailable_response() -> Self::Response {
+        ChatCompletionOutcome::ShortCircuit(GatewayError::LocalRateLimited(
+            "budget_unavailable".to_owned(),
+        ))
+    }
+
     async fn record_outcome(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
         // Stream: Natural + ClientCancelled count as success against
         // the upstream (the latter is the client's choice). Upstream

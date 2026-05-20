@@ -101,6 +101,22 @@ pub trait Surface: Sized + Send + Sync + 'static {
     /// can carry it.
     fn access_denied_response(candidate: &str) -> Self::Response;
 
+    /// Render the surface's "budget cap exhausted" response. The
+    /// label is `"<subject>:budget/<period>"` (e.g.
+    /// `"user:budget/monthly"`) so clients can tell which cap fired
+    /// without parsing prose. Maps to 429 on the wire so existing
+    /// rate-limit retry semantics apply — `GatewayError::LocalRateLimited`'s
+    /// docstring explicitly covers both rate and budget under that
+    /// status family.
+    fn budget_exceeded_response(label: &str) -> Self::Response;
+
+    /// Render the surface's "budget read backend unavailable"
+    /// response (Redis outage + `fail_closed` enabled). Same wire
+    /// shape as `rate_limiter_unavailable_response` — distinct only
+    /// so the audit row can tell the two upstream-infrastructure
+    /// failures apart.
+    fn budget_unavailable_response() -> Self::Response;
+
     /// Record the outcome against this surface's circuit breaker.
     /// Called by [`super::stages::record_outcome`] exactly once per
     /// request. The view tells the impl whether to derive
