@@ -34,7 +34,7 @@ use think_watch_common::lifecycle::Surface;
 use think_watch_common::lifecycle::state::{CapturedView, Invoked};
 use think_watch_common::limits::{BudgetCap, RateLimitRule};
 
-use crate::pii_redactor::PiiRedactor;
+use crate::pii_redactor::{PiiRedactor, PiiStreamRestorer};
 use crate::providers::traits::{
     ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, GatewayError,
     Usage,
@@ -43,7 +43,13 @@ use crate::proxy::{
     GatewayRequestIdentity, GatewayState, SelectionRecord, emit_gateway_log_with_extra,
     finalize_health, post_flight_account, prepare_body_capture, stream_usage_or_estimate,
 };
-use crate::streaming::{StreamOutcome, StreamResult, assemble_response};
+use crate::streaming::{
+    StreamOutcome, StreamResult, assemble_response, stream_to_sse_with_restorer,
+};
+use axum::response::IntoResponse;
+use futures::Stream;
+use std::pin::Pin;
+use think_watch_common::lifecycle::state::LimitCheckRecord;
 
 /// Surface marker for the OpenAI chat completions API
 /// (`POST /v1/chat/completions`). Zero-size. Crate-private — the
@@ -180,6 +186,107 @@ pub async fn capture_chat_stream(
         assembled,
     };
     (result.outcome, captured)
+}
+
+/// Carry-over the streaming pump's tail future needs to construct a
+/// fully-populated `Invoked<ChatCompletionSurface>` once the
+/// upstream stream terminates. Built once per request alongside
+/// `ChatPostInvokeDeps` — see `ChatPumpContext::from_deps` for the
+/// canonical builder that copies the overlapping fields.
+pub(crate) struct ChatPumpContext {
+    pub state: GatewayState,
+    pub identity: GatewayRequestIdentity,
+    pub trace_id: String,
+    pub started_at: std::time::Instant,
+    pub client_ip: Option<String>,
+    /// The post-mapper model id, also stored on `Invoked.access_candidate`
+    /// for the audit row's `detail.subject` field.
+    pub mapped_model: String,
+    /// Post-redaction messages from the in-flight request body —
+    /// the same shape the upstream actually received, used by
+    /// `stream_usage_or_estimate` to estimate token counts on a
+    /// client-cancelled stream that didn't surface a final usage
+    /// chunk.
+    pub messages_for_estimate: Vec<ChatMessage>,
+}
+
+impl ChatPumpContext {
+    /// Build the pump context from the already-constructed
+    /// `ChatPostInvokeDeps`. The two structs share many fields (state,
+    /// identity, trace_id, …) so handlers don't have to spell them
+    /// twice. `messages_for_estimate` is taken separately because
+    /// `deps` carries the pre-redaction messages for the audit
+    /// pipeline, but token estimation needs the post-redaction form
+    /// (= what upstream actually saw).
+    pub(crate) fn from_deps(
+        deps: &ChatPostInvokeDeps,
+        messages_for_estimate: Vec<ChatMessage>,
+    ) -> Self {
+        Self {
+            state: deps.state.clone(),
+            identity: deps.identity.clone(),
+            trace_id: deps.trace_id.clone(),
+            started_at: deps.request_started_at,
+            client_ip: deps.identity.ip_address.clone(),
+            mapped_model: deps.mapped_model.clone(),
+            messages_for_estimate,
+        }
+    }
+}
+
+/// Build the streaming pump for the chat surface: wraps the
+/// provider's chunk stream into an axum SSE body and returns it
+/// alongside a tail future that resolves to the
+/// `Invoked<ChatCompletionSurface>` the post-invoke pipeline
+/// consumes.
+///
+/// Symmetric with MCP's `build_mcp_pump` — the handler can
+/// `tokio::spawn(async move { run_post_invoke(tail.await, &deps).await })`
+/// the moment the tuple comes back, without doing token resolution
+/// or `Invoked` construction inline.
+///
+/// The tail future synthesises a `ClientCancelled` outcome on a
+/// `result_rx` recv error. In practice this only triggers during
+/// runtime teardown (the pump's spawned forwarder always sends
+/// otherwise); the synthesised outcome lets the audit pipeline
+/// record a 499 row instead of silently dropping the request.
+pub(crate) fn build_chat_pump(
+    stream: Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>,
+    restorer: Option<PiiStreamRestorer>,
+    ctx: ChatPumpContext,
+) -> (
+    axum::response::Response,
+    Pin<Box<dyn std::future::Future<Output = Invoked<ChatCompletionSurface>> + Send>>,
+) {
+    let (sse, result_rx) = stream_to_sse_with_restorer(stream, restorer);
+    let response = sse.into_response();
+    let tail = Box::pin(async move {
+        let result = result_rx.await.unwrap_or_else(|_| StreamResult {
+            usage: None,
+            chunks: Vec::new(),
+            natural_completion: false,
+            outcome: StreamOutcome::ClientCancelled,
+        });
+        let (outcome, captured) = capture_chat_stream(
+            &ctx.state,
+            &ctx.mapped_model,
+            &ctx.messages_for_estimate,
+            result,
+        )
+        .await;
+        Invoked {
+            identity: ctx.identity,
+            trace_id: ctx.trace_id,
+            started_at: ctx.started_at,
+            client_ip: ctx.client_ip,
+            limit_check: LimitCheckRecord {
+                currents: Vec::new(),
+            },
+            access_candidate: ctx.mapped_model,
+            view: CapturedView::Streaming { outcome, captured },
+        }
+    });
+    (response, tail)
 }
 
 impl Surface for ChatCompletionSurface {

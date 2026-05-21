@@ -22,7 +22,6 @@ use crate::quota::QuotaManager;
 use crate::rate_limiter::RateLimiter;
 use crate::router::{AffinityMode, ModelRouter, RouteEntry};
 use crate::strategy::{self, RoutingStrategy};
-use crate::streaming::stream_to_sse_with_restorer;
 use std::str::FromStr;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::{
@@ -1663,9 +1662,6 @@ pub async fn proxy_chat_completion(
         // accounting + budget debit for the streaming branch. Build
         // the deps the lifecycle hooks read; the detached task below
         // picks them up after the stream terminates.
-        let pump_messages = request.messages.clone();
-        let mapped_model_for_pump = mapped_model.clone();
-        let state_for_pump = state.clone();
         let deps = crate::lifecycle::ChatPostInvokeDeps {
             state: state.clone(),
             pii_redactor: pii_redactor.clone(),
@@ -1685,51 +1681,27 @@ pub async fn proxy_chat_completion(
             // and a successful stream fill the same slot.
             cache_enabled: true,
         };
+        let pump_ctx =
+            crate::lifecycle::ChatPumpContext::from_deps(&deps, request.messages.clone());
 
         let stream = entry.provider.stream_chat_completion(request);
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
-        let (sse, result_rx) = stream_to_sse_with_restorer(stream, stream_restorer);
+        let (response, tail) = crate::lifecycle::build_chat_pump(stream, stream_restorer, pump_ctx);
 
-        // Detached tail: await the stream's result, materialise the
-        // captured view (token resolve + assembly + cost — once, not
-        // once per hook), and drive `run_post_invoke` through
-        // `record_outcome` → `write_cache` → `emit_audit`. Single
-        // audit-emit site for the streaming path.
+        // Detached tail: the pump's future resolves to the fully-
+        // populated `Invoked` once the stream terminates; we then
+        // drive `run_post_invoke` through record_outcome →
+        // write_cache → record_usage → emit_audit. Single audit-emit
+        // site for the streaming path.
         tokio::spawn(async move {
-            let Ok(result) = result_rx.await else {
-                // The stream pump's internal task dropped the sender
-                // without sending — only possible during runtime
-                // teardown. Nothing to account for.
-                return;
-            };
-            let (outcome, captured) = crate::lifecycle::capture_chat_stream(
-                &state_for_pump,
-                &mapped_model_for_pump,
-                &pump_messages,
-                result,
-            )
-            .await;
-            let invoked = think_watch_common::lifecycle::state::Invoked {
-                identity: deps.identity.clone(),
-                trace_id: deps.trace_id.clone(),
-                started_at: deps.request_started_at,
-                client_ip: deps.identity.ip_address.clone(),
-                limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
-                    currents: Vec::new(),
-                },
-                access_candidate: deps.mapped_model.clone(),
-                view: think_watch_common::lifecycle::state::CapturedView::Streaming {
-                    outcome,
-                    captured,
-                },
-            };
+            let invoked = tail.await;
             think_watch_common::lifecycle::stages::run_post_invoke::<
                 crate::lifecycle::ChatCompletionSurface,
             >(invoked, &deps)
             .await;
         });
 
-        Ok(sse.into_response())
+        Ok(response)
     } else {
         // Non-streaming: full failover with retry across healthy candidates
         let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
@@ -2134,9 +2106,6 @@ pub async fn proxy_anthropic_messages(
         // shared design). Anthropic Messages does NOT cache —
         // `cache_enabled: false` — but otherwise the breaker / audit
         // / budget tail is identical.
-        let pump_messages = request.messages.clone();
-        let mapped_model_for_pump = mapped_model.clone();
-        let state_for_pump = state.clone();
         let deps = crate::lifecycle::ChatPostInvokeDeps {
             state: state.clone(),
             pii_redactor: pii_redactor.clone(),
@@ -2154,43 +2123,22 @@ pub async fn proxy_anthropic_messages(
             request_started_at,
             cache_enabled: false,
         };
+        let pump_ctx =
+            crate::lifecycle::ChatPumpContext::from_deps(&deps, request.messages.clone());
 
         let stream = entry.provider.stream_chat_completion(stream_request);
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
-        let (sse, result_rx) = stream_to_sse_with_restorer(stream, stream_restorer);
+        let (response, tail) = crate::lifecycle::build_chat_pump(stream, stream_restorer, pump_ctx);
 
         tokio::spawn(async move {
-            let Ok(result) = result_rx.await else {
-                return;
-            };
-            let (outcome, captured) = crate::lifecycle::capture_chat_stream(
-                &state_for_pump,
-                &mapped_model_for_pump,
-                &pump_messages,
-                result,
-            )
-            .await;
-            let invoked = think_watch_common::lifecycle::state::Invoked {
-                identity: deps.identity.clone(),
-                trace_id: deps.trace_id.clone(),
-                started_at: deps.request_started_at,
-                client_ip: deps.identity.ip_address.clone(),
-                limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
-                    currents: Vec::new(),
-                },
-                access_candidate: deps.mapped_model.clone(),
-                view: think_watch_common::lifecycle::state::CapturedView::Streaming {
-                    outcome,
-                    captured,
-                },
-            };
+            let invoked = tail.await;
             think_watch_common::lifecycle::stages::run_post_invoke::<
                 crate::lifecycle::ChatCompletionSurface,
             >(invoked, &deps)
             .await;
         });
 
-        let mut http_response = sse.into_response();
+        let mut http_response = response;
         if let Ok(v) = trace_id.parse() {
             http_response.headers_mut().insert("x-trace-id", v);
         }
@@ -2579,9 +2527,6 @@ pub async fn proxy_responses(
         // Post-invoke pipeline (see `proxy_chat_completion` for the
         // shared design). Responses (like Anthropic Messages) does
         // NOT cache — `cache_enabled: false`.
-        let pump_messages = request.messages.clone();
-        let mapped_model_for_pump = mapped_model.clone();
-        let state_for_pump = state.clone();
         let deps = crate::lifecycle::ChatPostInvokeDeps {
             state: state.clone(),
             pii_redactor: pii_redactor.clone(),
@@ -2599,46 +2544,25 @@ pub async fn proxy_responses(
             request_started_at,
             cache_enabled: false,
         };
+        let pump_ctx =
+            crate::lifecycle::ChatPumpContext::from_deps(&deps, request.messages.clone());
 
         let stream = entry.provider.stream_chat_completion(stream_request);
         // Stitch placeholders back together as chunks stream through.
         // Same restorer the chat-completions surface uses; no-op when
         // redaction_ctx is empty so the feature-off path stays free.
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
-        let (sse, result_rx) = stream_to_sse_with_restorer(stream, stream_restorer);
+        let (response, tail) = crate::lifecycle::build_chat_pump(stream, stream_restorer, pump_ctx);
 
         tokio::spawn(async move {
-            let Ok(result) = result_rx.await else {
-                return;
-            };
-            let (outcome, captured) = crate::lifecycle::capture_chat_stream(
-                &state_for_pump,
-                &mapped_model_for_pump,
-                &pump_messages,
-                result,
-            )
-            .await;
-            let invoked = think_watch_common::lifecycle::state::Invoked {
-                identity: deps.identity.clone(),
-                trace_id: deps.trace_id.clone(),
-                started_at: deps.request_started_at,
-                client_ip: deps.identity.ip_address.clone(),
-                limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
-                    currents: Vec::new(),
-                },
-                access_candidate: deps.mapped_model.clone(),
-                view: think_watch_common::lifecycle::state::CapturedView::Streaming {
-                    outcome,
-                    captured,
-                },
-            };
+            let invoked = tail.await;
             think_watch_common::lifecycle::stages::run_post_invoke::<
                 crate::lifecycle::ChatCompletionSurface,
             >(invoked, &deps)
             .await;
         });
 
-        let mut http_response = sse.into_response();
+        let mut http_response = response;
         if let Ok(v) = trace_id.parse() {
             http_response.headers_mut().insert("x-trace-id", v);
         }
