@@ -23,12 +23,19 @@ pub mod top_users;
 pub mod ws;
 
 // Public surface — flat re-exports so callers' import paths
-// (`handlers::dashboard::X`) stay the same after the split.
+// (`handlers::dashboard::X`) stay the same after the split. The
+// "extra" types (ProviderKind / TopActiveUser* / WsAuthQuery) have
+// no current external callers but were `pub` in the old single-file
+// shape; preserve them here so the API stays identical to before.
 pub use layout::{DashboardLayout, get_dashboard_layout, put_dashboard_layout};
-pub use live::{DashboardLive, LiveLogRow, ProviderHealth, RpmBucket, get_dashboard_live};
+pub use live::{
+    DashboardLive, LiveLogRow, ProviderHealth, ProviderKind, RpmBucket, get_dashboard_live,
+};
 pub use stats::{DashboardStats, get_dashboard_stats};
-pub use top_users::get_top_active_users;
-pub use ws::{WsTicketResponse, create_dashboard_ws_ticket, dashboard_ws, user_revoked_key};
+pub use top_users::{TopActiveUserRow, TopActiveUsersResponse, get_top_active_users};
+pub use ws::{
+    WsAuthQuery, WsTicketResponse, create_dashboard_ws_ticket, dashboard_ws, user_revoked_key,
+};
 
 // `#[utoipa::path]` generates a `__path_<handler>` companion type
 // alongside each handler. The `OpenApi` derive in `crate::openapi`
