@@ -196,13 +196,13 @@ pub(super) fn is_known_permission(key: &str) -> bool {
 /// Default policy document for each seeded system role.
 ///
 /// This is the **single source of truth** for "what should this
-/// system role grant out of the box". The migration uses these to
+/// system role grant out of the box". `db/seeds.sql` uses these to
 /// seed `rbac_roles.policy_document` on a fresh database, and the
 /// "Reset to defaults" UI in the system-role editor uses them to
 /// roll back any in-place edits.
 ///
-/// Kept in lockstep with the seed in `migrations/001_init.sql`
-/// — `validate_seeded_roles` runs at startup so a drift between
+/// Kept in lockstep with the seed in `db/seeds.sql` —
+/// `validate_seeded_roles` runs at startup so a drift between
 /// the two would fail-fast.
 pub const SYSTEM_ROLE_DEFAULTS: &[(&str, &str)] = &[
     (
@@ -239,7 +239,7 @@ fn system_role_default_policy(name: &str) -> Option<serde_json::Value> {
 ///
 /// If this check fails the server refuses to start. Rationale: a seeded
 /// role that grants a permission the catalog doesn't know about means
-/// either (a) the migration is stale, (b) the catalog was trimmed without
+/// either (a) the seed is stale, (b) the catalog was trimmed without
 /// updating the seed, or (c) someone wrote to the DB by hand. All three
 /// are footguns that silently break authorization, so we want a loud
 /// fail-fast.
@@ -262,7 +262,7 @@ pub async fn validate_seeded_roles(pool: &sqlx::PgPool) -> anyhow::Result<()> {
         anyhow::bail!(
             "Found {} role permission(s) not in PERMISSION_CATALOG:\n  - {}\n\
              Either update the catalog in crates/server/src/handlers/roles.rs \
-             or fix the seed in migrations/001_init.sql.",
+             or fix the seed in db/seeds.sql.",
             unknown.len(),
             unknown.join("\n  - "),
         );
