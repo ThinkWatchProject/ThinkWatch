@@ -15,6 +15,14 @@
 //! No mutation, so failure of the Redis read defaults to fail-open
 //! (request allowed) unless the caller passes `fail_closed = true`
 //! — matching the [`super::check_limits`] semantics.
+//!
+//! Ordering note: this stage runs AFTER `check_limits`. A request
+//! that hits the per-window requests counter via `check_limits` and
+//! then gets rejected here for being over-budget will have its
+//! `requests` counter incremented anyway — rate-limit counters
+//! measure "attempts", not "successes". Operators querying the
+//! rate-limit metric will see budget-rejected requests reflected
+//! there, by design.
 
 use fred::clients::Client;
 
@@ -138,7 +146,6 @@ mod tests {
         let raw = make_raw(user_id);
         LimitsChecked {
             identity: raw.identity,
-            body: raw.body,
             trace_id: raw.trace_id,
             started_at: raw.started_at,
             client_ip: raw.client_ip,

@@ -22,11 +22,6 @@ pub trait Surface: Sized + Send + Sync + 'static {
     /// stages consume.
     type Identity: Send + Sync + 'static;
 
-    /// Wire request body the surface received. Stage 1 (`check_limits`)
-    /// doesn't read this; later stages (e.g. `check_access` which
-    /// inspects the requested model/tool name) do.
-    type RequestBody: Send + Sync + 'static;
-
     /// Buffered wire response shape. Short-circuit stages build one
     /// of these via the `*_response` factory methods below; the
     /// buffered-success path threads one through
@@ -145,8 +140,17 @@ pub trait Surface: Sized + Send + Sync + 'static {
     /// [`Self::write_cache`] and before [`Self::emit_audit`] so the
     /// audit row reflects post-debit counter values. The MCP
     /// surface doesn't currently track usage (no token concept on
-    /// JSON-RPC `tools/call`); the default no-op satisfies it. The
-    /// AI gateway overrides this to call `post_flight_account`.
+    /// JSON-RPC `tools/call`); its impl provides an explicit no-op
+    /// override rather than relying on the default below. The AI
+    /// gateway overrides this to call `post_flight_account`.
+    ///
+    /// **Default body is `async {}`** — silently skips accounting.
+    /// This makes a surface impl that forgets to opt in (whether
+    /// to debit or to explicitly no-op) compile without warning,
+    /// which can mask a real accounting bug. When you add a new
+    /// surface, decide consciously: either override with the real
+    /// debit path, or override with an empty body + a comment
+    /// explaining why this surface doesn't account.
     fn record_usage(
         _deps: &Self::PostInvokeDeps,
         _invoked: &Invoked<Self>,

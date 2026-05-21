@@ -1,17 +1,16 @@
 //! Per-stage state structs. Each stage consumes one struct and
 //! returns the next, encoding the lifecycle progression in the
 //! type system: you literally cannot call `check_access` against a
-//! [`Raw`] state because `check_access` takes `BudgetChecked`
-//! (phase 2 — not yet implemented).
+//! [`Raw`] state because the signature takes `LimitsChecked`.
 //!
 //! The transitions move ownership, not clone. Each subsequent
 //! struct destructures the previous one and adds the new field(s).
 //! Stage code looks like:
 //!
 //! ```ignore
-//! let Raw { identity, body, trace_id, started_at, client_ip } = state;
+//! let Raw { identity, trace_id, started_at, client_ip } = state;
 //! let limit_check = run_limit_check(&identity, &redis, &rules).await?;
-//! Ok(LimitsChecked { identity, body, trace_id, started_at, client_ip, limit_check })
+//! Ok(LimitsChecked { identity, trace_id, started_at, client_ip, limit_check })
 //! ```
 //!
 //! Verbose by design — the destructure makes every field carried
@@ -26,15 +25,19 @@ use super::Surface;
 use super::streaming::StreamOutcome;
 
 /// Initial state. Identity has been resolved by HTTP middleware;
-/// the request body has been deserialised; nothing else has
-/// happened yet.
+/// nothing else has happened yet.
+///
+/// Note: the typed request body (`ChatCompletionRequest`,
+/// `JsonRpcRequest`, …) is NOT carried through the lifecycle
+/// state — surface handlers keep it as a local variable instead.
+/// Stages haven't needed to inspect bodies in any of the four
+/// surfaces shipped so far (the candidate string for `check_access`
+/// is passed in as an explicit `&str`); when one does, add a
+/// dedicated `body: S::RequestBody` field at that point rather
+/// than carrying ceremonial plumbing.
 pub struct Raw<S: Surface> {
     /// Per-surface identity (carries `SurfaceConstraints`, etc.)
     pub identity: S::Identity,
-    /// Parsed request body. Stage code reads from this to derive
-    /// access-control inputs (model name for the AI gateway,
-    /// tool name for MCP).
-    pub body: S::RequestBody,
     /// Trace id — minted by HTTP middleware or pinned via
     /// `x-trace-id` header. Stamped on every audit row this
     /// pipeline produces.
@@ -47,15 +50,9 @@ pub struct Raw<S: Surface> {
 }
 
 impl<S: Surface> Raw<S> {
-    pub fn new(
-        identity: S::Identity,
-        body: S::RequestBody,
-        trace_id: String,
-        client_ip: Option<String>,
-    ) -> Self {
+    pub fn new(identity: S::Identity, trace_id: String, client_ip: Option<String>) -> Self {
         Self {
             identity,
-            body,
             trace_id,
             started_at: Instant::now(),
             client_ip,
@@ -69,7 +66,6 @@ impl<S: Surface> Raw<S> {
 /// this request charged.
 pub struct LimitsChecked<S: Surface> {
     pub identity: S::Identity,
-    pub body: S::RequestBody,
     pub trace_id: String,
     pub started_at: Instant,
     pub client_ip: Option<String>,
@@ -100,7 +96,6 @@ pub struct LimitCheckRecord {
 /// gateway) so downstream audit can record what was authorized.
 pub struct Authorized<S: Surface> {
     pub identity: S::Identity,
-    pub body: S::RequestBody,
     pub trace_id: String,
     pub started_at: Instant,
     pub client_ip: Option<String>,

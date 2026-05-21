@@ -47,7 +47,6 @@ pub async fn check_limits<S: Surface>(
     if resolved.is_empty() {
         return Ok(LimitsChecked {
             identity: state.identity,
-            body: state.body,
             trace_id: state.trace_id,
             started_at: state.started_at,
             client_ip: state.client_ip,
@@ -118,7 +117,6 @@ pub async fn check_limits<S: Surface>(
 
     Ok(LimitsChecked {
         identity: state.identity,
-        body: state.body,
         trace_id: state.trace_id,
         started_at: state.started_at,
         client_ip: state.client_ip,

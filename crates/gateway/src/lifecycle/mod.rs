@@ -118,9 +118,12 @@ pub(crate) struct ChatPostInvokeDeps {
     /// Request post-redaction, kept for cache key derivation and
     /// (for streaming) cache fill on natural completion.
     pub request_for_cache: ChatCompletionRequest,
-    /// Caller-visible model name (before model_mapper + route
-    /// upstream_model resolution).
-    pub original_model: String,
+    /// Caller-facing model id after `model_mapper.map(...)`,
+    /// before route-level `upstream_model` resolution. This is the
+    /// id that lands in `gateway_logs.model` and the audit detail
+    /// — operators query against the post-alias canonical name,
+    /// not the raw bytes the caller wrote.
+    pub mapped_model: String,
     /// Provider id that served the request (`"openai"`,
     /// `"anthropic"`, …).
     pub provider_name: String,
@@ -158,14 +161,14 @@ pub(crate) struct ChatPostInvokeDeps {
 /// hook.
 pub async fn capture_chat_stream(
     state: &GatewayState,
-    original_model: &str,
+    mapped_model: &str,
     request_messages: &[ChatMessage],
     result: StreamResult,
 ) -> (StreamOutcome, ChatStreamCaptured) {
     let (prompt_tokens, completion_tokens) = stream_usage_or_estimate(&result, request_messages);
     let cost_usd = state
         .cost_tracker
-        .calculate_cost(original_model, prompt_tokens, completion_tokens)
+        .calculate_cost(mapped_model, prompt_tokens, completion_tokens)
         .await;
     let assembled = assemble_response(&result.chunks, result.usage.clone());
     let captured = ChatStreamCaptured {
@@ -181,15 +184,6 @@ pub async fn capture_chat_stream(
 
 impl Surface for ChatCompletionSurface {
     type Identity = GatewayRequestIdentity;
-    /// `Raw.body` is plumbing the common stages carry through
-    /// without ever reading. The AI gateway's three handlers build
-    /// their typed `ChatCompletionRequest` at different points in
-    /// the flow (chat-completions has one upfront from the Json
-    /// extractor; Anthropic Messages / Responses synthesise one
-    /// AFTER the preflight stages), so the lifecycle body is the
-    /// unit type and the handler keeps the typed request as a
-    /// local variable.
-    type RequestBody = ();
     type Response = ChatCompletionOutcome;
     type StreamResponse = axum::response::Response;
     type AuditDetail = serde_json::Value;
@@ -319,7 +313,7 @@ impl Surface for ChatCompletionSurface {
             deps.state.redis.clone(),
             deps.state.dynamic_config.clone(),
             deps.state.weight_cache.clone(),
-            deps.original_model.clone(),
+            deps.mapped_model.clone(),
             prompt_tokens,
             completion_tokens,
             deps.request_rules.clone(),
@@ -359,7 +353,7 @@ impl Surface for ChatCompletionSurface {
                     let cost = deps
                         .state
                         .cost_tracker
-                        .calculate_cost(&deps.original_model, pt, ct)
+                        .calculate_cost(&deps.mapped_model, pt, ct)
                         .await;
                     (Some(r), pt, ct, cost, 200_i64, None)
                 }
@@ -393,7 +387,7 @@ impl Surface for ChatCompletionSurface {
             deps.identity.api_key_id.as_deref(),
             deps.identity.api_key_lineage_id.as_deref(),
             deps.identity.ip_address.as_deref(),
-            &deps.original_model,
+            &deps.mapped_model,
             Some(deps.provider_name.as_str()),
             deps.upstream_model.as_deref(),
             prompt_tokens,

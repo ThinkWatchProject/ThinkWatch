@@ -108,7 +108,6 @@ pub struct TestSurface;
 
 impl Surface for TestSurface {
     type Identity = TestIdentity;
-    type RequestBody = serde_json::Value;
     type Response = TestResponse;
     /// Marker shape — unit tests don't exercise the streaming
     /// wire body so a unit struct is sufficient.
@@ -197,7 +196,6 @@ impl Surface for TestSurface {
 pub fn make_raw(user_id: Uuid) -> Raw<TestSurface> {
     Raw::new(
         TestIdentity { user_id },
-        serde_json::json!({}),
         format!("test-trace-{user_id}"),
         Some("127.0.0.1".to_owned()),
     )

@@ -575,7 +575,6 @@ impl McpProxy {
                 surface_constraints: surface_constraints.clone(),
                 allowed_mcp_tools: allowed_mcp_tools.map(<[String]>::to_vec),
             },
-            request.clone(),
             trace_id.to_owned(),
             ctx.ip_address.map(|s| s.to_owned()),
         );
@@ -869,7 +868,6 @@ impl McpProxy {
         // one path runs per request.
         let Authorized {
             identity: auth_identity,
-            body: _,
             trace_id: auth_trace_id,
             started_at: auth_started_at,
             client_ip: auth_client_ip,

@@ -57,7 +57,6 @@ pub struct McpIdentity {
 
 impl Surface for McpSurface {
     type Identity = McpIdentity;
-    type RequestBody = JsonRpcRequest;
     type Response = JsonRpcResponse;
     /// MCP audit rows write their detail via `proxy::audit::
     /// emit_tools_call_audit` (still in-tree as of phase 1). Once
@@ -198,6 +197,14 @@ impl Surface for McpSurface {
             )
             .await;
     }
+
+    /// MCP `tools/call` has no token / cost concept, so there's
+    /// nothing to debit against the limits or budget engines.
+    /// Explicit opt-out per `Surface::record_usage`'s docstring
+    /// guidance — relying on the trait default would silently skip
+    /// accounting and be indistinguishable from a forgotten
+    /// override on a future surface that DOES need it.
+    async fn record_usage(_deps: &Self::PostInvokeDeps, _invoked: &Invoked<Self>) {}
 
     async fn emit_audit(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
         let response = response_for_hooks(invoked, deps);

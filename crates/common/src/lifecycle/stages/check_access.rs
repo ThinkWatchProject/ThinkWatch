@@ -40,7 +40,6 @@ pub async fn check_access<S: Surface>(
 
     Ok(Authorized {
         identity: state.identity,
-        body: state.body,
         trace_id: state.trace_id,
         started_at: state.started_at,
         client_ip: state.client_ip,
@@ -60,7 +59,6 @@ mod tests {
         let raw = make_raw(user_id);
         LimitsChecked {
             identity: raw.identity,
-            body: raw.body,
             trace_id: raw.trace_id,
             started_at: raw.started_at,
             client_ip: raw.client_ip,

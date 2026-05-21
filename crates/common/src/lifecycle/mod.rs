@@ -24,8 +24,8 @@
 //! ## Module map
 //!
 //! - [`Surface`] — the trait each gateway implements to plug in
-//!   `Identity` / `RequestBody` / `Response` / `StreamResponse` /
-//!   `StreamCaptured` / `PostInvokeDeps` types plus the hook fns
+//!   `Identity` / `Response` / `StreamResponse` / `StreamCaptured`
+//!   / `PostInvokeDeps` types plus the hook fns
 //!   `record_outcome` / `write_cache` / `record_usage` /
 //!   `emit_audit` and short-circuit response factories.
 //! - [`state`] — per-stage state structs ([`state::Raw`],

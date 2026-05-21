@@ -1359,7 +1359,6 @@ pub async fn proxy_chat_completion(
     let raw =
         think_watch_common::lifecycle::state::Raw::<crate::lifecycle::ChatCompletionSurface>::new(
             identity.clone(),
-            (),
             trace_id.clone(),
             identity.ip_address.clone(),
         );
@@ -1624,7 +1623,7 @@ pub async fn proxy_chat_completion(
     metrics::counter!("gateway_cache_total", "result" => "miss").increment(1);
 
     // Route to provider — multi-route failover
-    let original_model = request.model.clone();
+    let mapped_model = request.model.clone();
     let router = state.router.load();
     let routes = router.route(&request.model).ok_or_else(|| {
         ctx.emit(GatewayError::ProviderError(format!(
@@ -1640,8 +1639,7 @@ pub async fn proxy_chat_completion(
         // gateway_logs row just like the non-streaming bubble above
         // — operators debugging "my SSE stream never started" would
         // otherwise find zero trace events to correlate against.
-        let sel_ctx =
-            build_selection_ctx(&state, &original_model, identity.user_id.as_deref()).await;
+        let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
         let (entry, sel_record) = select_route_for_stream(routes, &sel_ctx)
             .await
             .map_err(|e| GatewayErrorResponse::from(ctx.emit(e)))?;
@@ -1654,7 +1652,7 @@ pub async fn proxy_chat_completion(
         set_affinity(
             &state.redis,
             identity.user_id.as_deref(),
-            &original_model,
+            &mapped_model,
             sel_ctx.affinity_mode,
             entry,
             sel_ctx.affinity_ttl_secs,
@@ -1666,14 +1664,14 @@ pub async fn proxy_chat_completion(
         // the deps the lifecycle hooks read; the detached task below
         // picks them up after the stream terminates.
         let pump_messages = request.messages.clone();
-        let original_model_for_pump = original_model.clone();
+        let mapped_model_for_pump = mapped_model.clone();
         let state_for_pump = state.clone();
         let deps = crate::lifecycle::ChatPostInvokeDeps {
             state: state.clone(),
             pii_redactor: pii_redactor.clone(),
             messages_for_audit: messages_for_audit.clone(),
             request_for_cache: request.clone(),
-            original_model: original_model.clone(),
+            mapped_model: mapped_model.clone(),
             provider_name: entry.provider_name.clone(),
             upstream_model: entry.upstream_model.clone(),
             sel_record,
@@ -1706,7 +1704,7 @@ pub async fn proxy_chat_completion(
             };
             let (outcome, captured) = crate::lifecycle::capture_chat_stream(
                 &state_for_pump,
-                &original_model_for_pump,
+                &mapped_model_for_pump,
                 &pump_messages,
                 result,
             )
@@ -1719,7 +1717,7 @@ pub async fn proxy_chat_completion(
                 limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
                     currents: Vec::new(),
                 },
-                access_candidate: deps.original_model.clone(),
+                access_candidate: deps.mapped_model.clone(),
                 view: think_watch_common::lifecycle::state::CapturedView::Streaming {
                     outcome,
                     captured,
@@ -1734,8 +1732,7 @@ pub async fn proxy_chat_completion(
         Ok(sse.into_response())
     } else {
         // Non-streaming: full failover with retry across healthy candidates
-        let sel_ctx =
-            build_selection_ctx(&state, &original_model, identity.user_id.as_deref()).await;
+        let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
         // Prepare the error-path body capture BEFORE select_route_with_failover
         // so the (synchronous) map_err closure can move it in without
         // needing to await. Error paths capture the request body only —
@@ -1765,7 +1762,7 @@ pub async fn proxy_chat_completion(
                         identity.api_key_id.as_deref(),
                         identity.api_key_lineage_id.as_deref(),
                         identity.ip_address.as_deref(),
-                        &original_model,
+                        &mapped_model,
                         None,
                         request_started_at.elapsed().as_millis() as i64,
                         &e,
@@ -1775,7 +1772,7 @@ pub async fn proxy_chat_completion(
                 })?;
 
         // Restore original model name in response (don't leak upstream_model)
-        response.model = original_model.clone();
+        response.model = mapped_model.clone();
 
         // 8a-pre. Output guardrails — enforce per-model size / shape
         // caps on the assistant message before it reaches the caller.
@@ -1784,7 +1781,7 @@ pub async fn proxy_chat_completion(
         // placeholder push a legitimate completion past the cap.
         // Streaming guardrails would require buffering the whole
         // stream, which fights latency — non-streaming only for now.
-        let model_cfg = router.config_for(&original_model);
+        let model_cfg = router.config_for(&mapped_model);
         if let Err(e) = crate::output_guardrails::apply_output_guardrails(
             &response,
             &model_cfg.output_guardrails,
@@ -1805,7 +1802,7 @@ pub async fn proxy_chat_completion(
             pii_redactor: pii_redactor.clone(),
             messages_for_audit: messages_for_audit.clone(),
             request_for_cache: request.clone(),
-            original_model: original_model.clone(),
+            mapped_model: mapped_model.clone(),
             provider_name: chosen_entry.provider_name.clone(),
             upstream_model: chosen_entry.upstream_model.clone(),
             sel_record,
@@ -1825,7 +1822,7 @@ pub async fn proxy_chat_completion(
             limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
                 currents: Vec::new(),
             },
-            access_candidate: original_model.clone(),
+            access_candidate: mapped_model.clone(),
             view: think_watch_common::lifecycle::state::CapturedView::Buffered(
                 crate::lifecycle::ChatCompletionOutcome::Success(response),
             ),
@@ -1983,7 +1980,6 @@ pub async fn proxy_anthropic_messages(
     let raw =
         think_watch_common::lifecycle::state::Raw::<crate::lifecycle::ChatCompletionSurface>::new(
             identity.clone(),
-            (),
             trace_id.clone(),
             identity.ip_address.clone(),
         );
@@ -2139,14 +2135,14 @@ pub async fn proxy_anthropic_messages(
         // `cache_enabled: false` — but otherwise the breaker / audit
         // / budget tail is identical.
         let pump_messages = request.messages.clone();
-        let original_model_for_pump = mapped_model.clone();
+        let mapped_model_for_pump = mapped_model.clone();
         let state_for_pump = state.clone();
         let deps = crate::lifecycle::ChatPostInvokeDeps {
             state: state.clone(),
             pii_redactor: pii_redactor.clone(),
             messages_for_audit: messages_for_audit.clone(),
             request_for_cache: request.clone(),
-            original_model: mapped_model.clone(),
+            mapped_model: mapped_model.clone(),
             provider_name: entry.provider_name.clone(),
             upstream_model: entry.upstream_model.clone(),
             sel_record,
@@ -2169,7 +2165,7 @@ pub async fn proxy_anthropic_messages(
             };
             let (outcome, captured) = crate::lifecycle::capture_chat_stream(
                 &state_for_pump,
-                &original_model_for_pump,
+                &mapped_model_for_pump,
                 &pump_messages,
                 result,
             )
@@ -2182,7 +2178,7 @@ pub async fn proxy_anthropic_messages(
                 limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
                     currents: Vec::new(),
                 },
-                access_candidate: deps.original_model.clone(),
+                access_candidate: deps.mapped_model.clone(),
                 view: think_watch_common::lifecycle::state::CapturedView::Streaming {
                     outcome,
                     captured,
@@ -2260,7 +2256,7 @@ pub async fn proxy_anthropic_messages(
             pii_redactor: pii_redactor.clone(),
             messages_for_audit: messages_for_audit.clone(),
             request_for_cache: request.clone(),
-            original_model: mapped_model.clone(),
+            mapped_model: mapped_model.clone(),
             provider_name: chosen_entry.provider_name.clone(),
             upstream_model: chosen_entry.upstream_model.clone(),
             sel_record,
@@ -2419,7 +2415,6 @@ pub async fn proxy_responses(
     let raw =
         think_watch_common::lifecycle::state::Raw::<crate::lifecycle::ChatCompletionSurface>::new(
             identity.clone(),
-            (),
             trace_id.clone(),
             identity.ip_address.clone(),
         );
@@ -2585,14 +2580,14 @@ pub async fn proxy_responses(
         // shared design). Responses (like Anthropic Messages) does
         // NOT cache — `cache_enabled: false`.
         let pump_messages = request.messages.clone();
-        let original_model_for_pump = mapped_model.clone();
+        let mapped_model_for_pump = mapped_model.clone();
         let state_for_pump = state.clone();
         let deps = crate::lifecycle::ChatPostInvokeDeps {
             state: state.clone(),
             pii_redactor: pii_redactor.clone(),
             messages_for_audit: messages_for_audit.clone(),
             request_for_cache: request.clone(),
-            original_model: mapped_model.clone(),
+            mapped_model: mapped_model.clone(),
             provider_name: entry.provider_name.clone(),
             upstream_model: entry.upstream_model.clone(),
             sel_record,
@@ -2618,7 +2613,7 @@ pub async fn proxy_responses(
             };
             let (outcome, captured) = crate::lifecycle::capture_chat_stream(
                 &state_for_pump,
-                &original_model_for_pump,
+                &mapped_model_for_pump,
                 &pump_messages,
                 result,
             )
@@ -2631,7 +2626,7 @@ pub async fn proxy_responses(
                 limit_check: think_watch_common::lifecycle::state::LimitCheckRecord {
                     currents: Vec::new(),
                 },
-                access_candidate: deps.original_model.clone(),
+                access_candidate: deps.mapped_model.clone(),
                 view: think_watch_common::lifecycle::state::CapturedView::Streaming {
                     outcome,
                     captured,
@@ -2707,7 +2702,7 @@ pub async fn proxy_responses(
             pii_redactor: pii_redactor.clone(),
             messages_for_audit: messages_for_audit.clone(),
             request_for_cache: request.clone(),
-            original_model: mapped_model.clone(),
+            mapped_model: mapped_model.clone(),
             provider_name: chosen_entry.provider_name.clone(),
             upstream_model: chosen_entry.upstream_model.clone(),
             sel_record,
