@@ -118,7 +118,7 @@ async fn resolve_breaker_config(state: &GatewayState) -> CircuitBreakerConfig {
 
 /// Strategy/affinity/breaker context resolved once per request and
 /// reused through the failover loop.
-pub(crate) struct SelectionCtx<'a> {
+pub(super) struct SelectionCtx<'a> {
     pub(super) model_id: &'a str,
     pub(super) user_id: Option<&'a str>,
     pub(super) strategy: RoutingStrategy,

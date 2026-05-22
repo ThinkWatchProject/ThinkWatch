@@ -34,7 +34,7 @@ pub(crate) struct BodyCapture {
     pub(super) response: Option<String>,
     pub(super) request_bytes: Option<u32>,
     pub(super) response_bytes: Option<u32>,
-    pub(crate) status: Option<&'static str>,
+    pub(super) status: Option<&'static str>,
 }
 
 impl BodyCapture {
@@ -50,7 +50,7 @@ impl BodyCapture {
 
     /// Attach the captured strings + status to an `AuditEntry`. No-op
     /// when all three fields are empty.
-    pub(crate) fn apply(
+    pub(super) fn apply(
         self,
         mut entry: think_watch_common::audit::AuditEntry,
     ) -> think_watch_common::audit::AuditEntry {

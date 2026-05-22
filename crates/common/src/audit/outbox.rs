@@ -70,7 +70,7 @@ pub(super) async fn webhook_outbox_drain_loop(db: PgPool, registry: ForwarderReg
 /// a long-broken receiver doesn't rot in the table for days between
 /// attempts. Extracted so the schedule is unit-testable without
 /// standing up a Postgres fixture.
-pub(crate) fn outbox_backoff_secs(attempt_number: i32) -> u64 {
+fn outbox_backoff_secs(attempt_number: i32) -> u64 {
     let n = attempt_number.max(1) as u32;
     // Saturating shift caps the doubling at attempt 8 → 30 × 128 = 3840s,
     // then clamped to 3600. Anything past attempt 8 stays at 1h.
