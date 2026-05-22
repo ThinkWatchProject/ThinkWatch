@@ -4,7 +4,10 @@ FROM node:24-alpine AS builder
 RUN corepack enable && corepack prepare pnpm@latest --activate
 
 WORKDIR /app
-COPY web/package.json web/pnpm-lock.yaml ./
+# pnpm-workspace.yaml carries the install-script allowlist (see its
+# top comment). Must be copied alongside package.json so the fresh
+# install in this image honors the same approvals as local + CI.
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY web/ .

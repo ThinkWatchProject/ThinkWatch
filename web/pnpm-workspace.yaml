@@ -1,0 +1,7 @@
+# pnpm 11+ requires every dep that ships a build/postinstall script
+# to be explicitly allowlisted, otherwise `pnpm install` exits with
+# `ERR_PNPM_IGNORED_BUILDS`. msw is a transitive dep of vitest and
+# is the only one we need to permit; add new entries here when CI
+# surfaces a new ignored build.
+allowBuilds:
+  msw: true
