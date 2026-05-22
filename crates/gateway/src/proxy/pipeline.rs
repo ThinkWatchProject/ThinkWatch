@@ -125,26 +125,26 @@ pub(super) fn launch_stream_pump(
 /// audit emit + breaker + budget debit), then unwrap the emitted
 /// response variant.
 ///
+/// Reads identity / trace_id / started_at / mapped_model directly off
+/// `deps.request` — handlers don't have to re-thread them through the
+/// call.
+///
 /// PII restore is the caller's job because anthropic/responses need
 /// to convert the response shape *after* restore, while chat returns
 /// the response shape directly.
 pub(super) async fn run_buffered_post_invoke(
     deps: &ChatPostInvokeDeps,
     response: ChatCompletionResponse,
-    identity: &GatewayRequestIdentity,
-    trace_id: &str,
-    request_started_at: std::time::Instant,
-    mapped_model: &str,
 ) -> ChatCompletionResponse {
     let invoked = Invoked {
-        identity: identity.clone(),
-        trace_id: trace_id.to_string(),
-        started_at: request_started_at,
-        client_ip: identity.ip_address.clone(),
+        identity: deps.request.identity.clone(),
+        trace_id: deps.request.trace_id.clone(),
+        started_at: deps.request.request_started_at,
+        client_ip: deps.request.identity.ip_address.clone(),
         limit_check: LimitCheckRecord {
             currents: Vec::new(),
         },
-        access_candidate: mapped_model.to_string(),
+        access_candidate: deps.request.mapped_model.clone(),
         view: CapturedView::Buffered(ChatCompletionOutcome::Success(response)),
     };
     let emitted = run_post_invoke::<ChatCompletionSurface>(invoked, deps).await;

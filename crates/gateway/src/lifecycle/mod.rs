@@ -100,6 +100,60 @@ pub struct ChatStreamCaptured {
     pub assembled: Option<ChatCompletionResponse>,
 }
 
+/// Snapshot of the in-flight request — captured once at handler
+/// entry, then read across the per-route attempts in failover and
+/// from the streaming tail task. Replicated (vs. borrowed) so the
+/// detached tail doesn't need to thread a `&` through `'static`
+/// bounds.
+pub(crate) struct ChatRequestSnapshot {
+    /// Resolved client identity (api key + user + email + IP, …).
+    pub identity: GatewayRequestIdentity,
+    /// Per-request correlation id. Chat completions sources this
+    /// from `metadata.request_id`; Anthropic / Responses use the
+    /// raw `x-trace-id` header. Either way it's the single id every
+    /// audit row + gateway log carries for this request.
+    pub trace_id: String,
+    /// Optional multi-turn conversation id from the `x-session-id`
+    /// header.
+    pub session_id: Option<String>,
+    /// Caller-facing model id after `model_mapper.map(...)`,
+    /// before route-level `upstream_model` resolution. This is the
+    /// id that lands in `gateway_logs.model` and the audit detail
+    /// — operators query against the post-alias canonical name,
+    /// not the raw bytes the caller wrote.
+    pub mapped_model: String,
+    /// Pre-redaction messages so audit body capture reflects what
+    /// the user authored (request.messages holds the redacted form
+    /// after the upfront redaction pass).
+    pub messages_for_audit: Vec<ChatMessage>,
+    /// Request post-redaction, kept for cache key derivation and
+    /// (for streaming) cache fill on natural completion.
+    pub request_for_cache: ChatCompletionRequest,
+    pub request_started_at: std::time::Instant,
+}
+
+/// Pre-flight rule + cap lists materialised once and reused by the
+/// post-flight `record_usage` debit. Computed by
+/// `run_preflight_stages` so the handler doesn't re-derive them.
+pub(crate) struct ChatPreflightLists {
+    pub request_rules: Vec<RateLimitRule>,
+    pub budget_caps: Vec<BudgetCap>,
+}
+
+/// The route + sel_record actually chosen for this request. In the
+/// non-stream failover path this is the successful candidate; in
+/// the stream path it's the single pick (no retry after first chunk).
+pub(crate) struct ChatPickedRoute {
+    /// Provider id that served the request (`"openai"`,
+    /// `"anthropic"`, …).
+    pub provider_name: String,
+    /// Upstream-side model id when the route remapped it.
+    pub upstream_model: Option<String>,
+    /// Selection record for the picked route — used by
+    /// `finalize_health` inside `record_outcome`.
+    pub sel_record: SelectionRecord,
+}
+
 /// Per-request post-invoke hook deps for the chat surface. Built
 /// once before `invoke_upstream`; consumed by [`run_post_invoke`]
 /// (in the foreground for buffered, inside the detached tail task
@@ -117,39 +171,9 @@ pub(crate) struct ChatPostInvokeDeps {
     /// pass used (a mid-flight hot-swap doesn't change what's
     /// already in flight).
     pub pii_redactor: Arc<PiiRedactor>,
-    /// Pre-redaction messages so audit body capture reflects what
-    /// the user authored (request.messages holds the redacted form
-    /// after the upfront redaction pass).
-    pub messages_for_audit: Vec<ChatMessage>,
-    /// Request post-redaction, kept for cache key derivation and
-    /// (for streaming) cache fill on natural completion.
-    pub request_for_cache: ChatCompletionRequest,
-    /// Caller-facing model id after `model_mapper.map(...)`,
-    /// before route-level `upstream_model` resolution. This is the
-    /// id that lands in `gateway_logs.model` and the audit detail
-    /// — operators query against the post-alias canonical name,
-    /// not the raw bytes the caller wrote.
-    pub mapped_model: String,
-    /// Provider id that served the request (`"openai"`,
-    /// `"anthropic"`, …).
-    pub provider_name: String,
-    /// Upstream-side model id when the route remapped it.
-    pub upstream_model: Option<String>,
-    /// Selection record for the picked route — used by
-    /// `finalize_health` inside `record_outcome`.
-    pub sel_record: SelectionRecord,
-    /// Materialised rate-limit rules for `post_flight_account`'s
-    /// tokens / total_tokens debit.
-    pub request_rules: Vec<RateLimitRule>,
-    /// Materialised budget caps for `post_flight_account`.
-    pub budget_caps: Vec<BudgetCap>,
-    /// Resolved client identity — replicated here so the streaming
-    /// detached task doesn't need to thread a `&Identity` through
-    /// `'static` bounds.
-    pub identity: GatewayRequestIdentity,
-    pub trace_id: String,
-    pub session_id: Option<String>,
-    pub request_started_at: std::time::Instant,
+    pub request: ChatRequestSnapshot,
+    pub preflight: ChatPreflightLists,
+    pub route: ChatPickedRoute,
     /// Whether `write_cache` should fill the response cache for this
     /// surface. The OpenAI chat completion handler caches; Anthropic
     /// Messages and the OpenAI Responses handler do not (their
@@ -224,11 +248,11 @@ impl ChatPumpContext {
     ) -> Self {
         Self {
             state: deps.state.clone(),
-            identity: deps.identity.clone(),
-            trace_id: deps.trace_id.clone(),
-            started_at: deps.request_started_at,
-            client_ip: deps.identity.ip_address.clone(),
-            mapped_model: deps.mapped_model.clone(),
+            identity: deps.request.identity.clone(),
+            trace_id: deps.request.trace_id.clone(),
+            started_at: deps.request.request_started_at,
+            client_ip: deps.request.identity.ip_address.clone(),
+            mapped_model: deps.request.mapped_model.clone(),
             messages_for_estimate,
         }
     }
@@ -376,7 +400,7 @@ impl Surface for ChatCompletionSurface {
             CapturedView::Buffered(ChatCompletionOutcome::Success(_)) => true,
             CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => false,
         };
-        finalize_health(&deps.state, &deps.sel_record, success).await;
+        finalize_health(&deps.state, &deps.route.sel_record, success).await;
     }
 
     async fn write_cache(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
@@ -401,7 +425,7 @@ impl Surface for ChatCompletionSurface {
         if let Some(response) = response {
             deps.state
                 .cache
-                .set(&deps.request_for_cache, response, None)
+                .set(&deps.request.request_for_cache, response, None)
                 .await;
         }
     }
@@ -420,15 +444,15 @@ impl Surface for ChatCompletionSurface {
             deps.state.redis.clone(),
             deps.state.dynamic_config.clone(),
             deps.state.weight_cache.clone(),
-            deps.mapped_model.clone(),
+            deps.request.mapped_model.clone(),
             prompt_tokens,
             completion_tokens,
-            deps.request_rules.clone(),
-            deps.budget_caps.clone(),
-            deps.identity.user_id.clone(),
-            deps.identity.user_email.clone(),
-            deps.identity.api_key_id.clone(),
-            deps.identity.ip_address.clone(),
+            deps.preflight.request_rules.clone(),
+            deps.preflight.budget_caps.clone(),
+            deps.request.identity.user_id.clone(),
+            deps.request.identity.user_email.clone(),
+            deps.request.identity.api_key_id.clone(),
+            deps.request.identity.ip_address.clone(),
             deps.state.audit.clone(),
         )
         .await;
@@ -460,7 +484,7 @@ impl Surface for ChatCompletionSurface {
                     let cost = deps
                         .state
                         .cost_tracker
-                        .calculate_cost(&deps.mapped_model, pt, ct)
+                        .calculate_cost(&deps.request.mapped_model, pt, ct)
                         .await;
                     (Some(r), pt, ct, cost, 200_i64, None)
                 }
@@ -480,27 +504,27 @@ impl Surface for ChatCompletionSurface {
             &deps.state.dynamic_config,
             &deps.pii_redactor,
             &deps.state.blob_store,
-            &deps.trace_id,
-            &deps.messages_for_audit,
+            &deps.request.trace_id,
+            &deps.request.messages_for_audit,
             assembled_ref,
         )
         .await;
         emit_gateway_log_with_extra(
             &deps.state.audit,
-            &deps.trace_id,
-            deps.session_id.as_deref(),
-            deps.identity.user_id.as_deref(),
-            deps.identity.user_email.as_deref(),
-            deps.identity.api_key_id.as_deref(),
-            deps.identity.api_key_lineage_id.as_deref(),
-            deps.identity.ip_address.as_deref(),
-            &deps.mapped_model,
-            Some(deps.provider_name.as_str()),
-            deps.upstream_model.as_deref(),
+            &deps.request.trace_id,
+            deps.request.session_id.as_deref(),
+            deps.request.identity.user_id.as_deref(),
+            deps.request.identity.user_email.as_deref(),
+            deps.request.identity.api_key_id.as_deref(),
+            deps.request.identity.api_key_lineage_id.as_deref(),
+            deps.request.identity.ip_address.as_deref(),
+            &deps.request.mapped_model,
+            Some(deps.route.provider_name.as_str()),
+            deps.route.upstream_model.as_deref(),
             prompt_tokens,
             completion_tokens,
             cost,
-            deps.request_started_at.elapsed().as_millis() as i64,
+            deps.request.request_started_at.elapsed().as_millis() as i64,
             logged_status,
             error_detail,
             body_capture,

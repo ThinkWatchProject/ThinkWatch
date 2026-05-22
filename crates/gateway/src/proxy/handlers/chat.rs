@@ -334,18 +334,24 @@ pub async fn proxy_chat_completion(
         let deps = crate::lifecycle::ChatPostInvokeDeps {
             state: state.clone(),
             pii_redactor: pii_redactor.clone(),
-            messages_for_audit: messages_for_audit.clone(),
-            request_for_cache: request.clone(),
-            mapped_model: mapped_model.clone(),
-            provider_name: entry.provider_name.clone(),
-            upstream_model: entry.upstream_model.clone(),
-            sel_record,
-            request_rules: preflight.request_rules.clone(),
-            budget_caps: preflight.budget_caps.clone(),
-            identity: identity.clone(),
-            trace_id: metadata.request_id.clone(),
-            session_id: session_id.clone(),
-            request_started_at,
+            request: crate::lifecycle::ChatRequestSnapshot {
+                identity: identity.clone(),
+                trace_id: metadata.request_id.clone(),
+                session_id: session_id.clone(),
+                mapped_model: mapped_model.clone(),
+                messages_for_audit: messages_for_audit.clone(),
+                request_for_cache: request.clone(),
+                request_started_at,
+            },
+            preflight: crate::lifecycle::ChatPreflightLists {
+                request_rules: preflight.request_rules.clone(),
+                budget_caps: preflight.budget_caps.clone(),
+            },
+            route: crate::lifecycle::ChatPickedRoute {
+                provider_name: entry.provider_name.clone(),
+                upstream_model: entry.upstream_model.clone(),
+                sel_record,
+            },
             // Chat completions cache — both the buffered branch
             // and a successful stream fill the same slot.
             cache_enabled: true,
@@ -425,29 +431,27 @@ pub async fn proxy_chat_completion(
         let deps = crate::lifecycle::ChatPostInvokeDeps {
             state: state.clone(),
             pii_redactor: pii_redactor.clone(),
-            messages_for_audit: messages_for_audit.clone(),
-            request_for_cache: request.clone(),
-            mapped_model: mapped_model.clone(),
-            provider_name: chosen_entry.provider_name.clone(),
-            upstream_model: chosen_entry.upstream_model.clone(),
-            sel_record,
-            request_rules: preflight.request_rules.clone(),
-            budget_caps: preflight.budget_caps.clone(),
-            identity: identity.clone(),
-            trace_id: metadata.request_id.clone(),
-            session_id: session_id.clone(),
-            request_started_at,
+            request: crate::lifecycle::ChatRequestSnapshot {
+                identity: identity.clone(),
+                trace_id: metadata.request_id.clone(),
+                session_id: session_id.clone(),
+                mapped_model: mapped_model.clone(),
+                messages_for_audit: messages_for_audit.clone(),
+                request_for_cache: request.clone(),
+                request_started_at,
+            },
+            preflight: crate::lifecycle::ChatPreflightLists {
+                request_rules: preflight.request_rules.clone(),
+                budget_caps: preflight.budget_caps.clone(),
+            },
+            route: crate::lifecycle::ChatPickedRoute {
+                provider_name: chosen_entry.provider_name.clone(),
+                upstream_model: chosen_entry.upstream_model.clone(),
+                sel_record,
+            },
             cache_enabled: true,
         };
-        let mut response = run_buffered_post_invoke(
-            &deps,
-            response,
-            &identity,
-            &metadata.request_id,
-            request_started_at,
-            &mapped_model,
-        )
-        .await;
+        let mut response = run_buffered_post_invoke(&deps, response).await;
 
         // Restore PII in the response (this caller's view). The cache
         // already stored the pre-restore form so a later caller can
