@@ -1435,7 +1435,9 @@
       "access": "访问日志（天）",
       "accessHint": "Gateway 和 Console 端口的 HTTP 访问日志。",
       "app": "应用日志（天）",
-      "appHint": "应用运行时追踪。"
+      "appHint": "应用运行时追踪。",
+      "body": "审计 Body（天）",
+      "bodyHint": "捕获的请求/响应正文可读时长。到期后正文列被置为 NULL，但审计行保留——避免在此窗口内查不到“当时发生了什么”。建议 ≤ 上面的网关行 TTL，且 ≤ S3 bucket 生命周期（AUDIT_BODY_LIFECYCLE_DAYS，默认 60）。"
     },
     "siteName": "站点名称",
     "publicGatewayUrl": "网关公开地址",

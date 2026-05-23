@@ -1435,7 +1435,9 @@
       "access": "Access Logs (days)",
       "accessHint": "HTTP access log for both ports.",
       "app": "App Logs (days)",
-      "appHint": "Application runtime tracing."
+      "appHint": "Application runtime tracing.",
+      "body": "Audit Bodies (days)",
+      "bodyHint": "How long captured request/response bodies stay readable. After this, the body columns are NULLed but the audit row stays — saving an admin from being unable to answer 'what happened' for that window. Should be ≤ gateway row TTL above, and ≤ S3 bucket lifecycle (AUDIT_BODY_LIFECYCLE_DAYS, default 60)."
     },
     "siteName": "Site Name",
     "publicGatewayUrl": "Public Gateway URL",
