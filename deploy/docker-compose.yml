@@ -230,7 +230,11 @@ services:
     volumes:
       - ./data/rustfs:/data
     healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:9000/minio/health/live || exit 1"]
+      # RustFS exposes `/health` (200); the earlier-MinIO path
+      # `/minio/health/live` 403s under root-creds mode on current
+      # RustFS builds and would keep the container permanently
+      # "unhealthy", blocking `rustfs_init` from creating the bucket.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9000/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

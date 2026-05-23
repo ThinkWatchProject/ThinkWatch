@@ -7,6 +7,9 @@ interface HealthPayload {
   // null when ClickHouse isn't configured for this deployment; in that
   // case it must NOT count against system health.
   clickhouse: boolean | null;
+  // null when no S3-compatible backend is wired in (oversize bodies
+  // truncate instead of offload); same not-counted-against rule.
+  s3: boolean | null;
 }
 
 export type SystemStatus = 'operational' | 'degraded' | 'down' | 'unknown';
@@ -29,6 +32,7 @@ export function useSystemHealth(): SystemStatus {
         if (cancelled) return;
         const services: boolean[] = [h.postgres, h.redis];
         if (h.clickhouse !== null) services.push(h.clickhouse);
+        if (h.s3 !== null) services.push(h.s3);
         const up = services.filter(Boolean).length;
         setStatus(up === services.length ? 'operational' : up === 0 ? 'down' : 'degraded');
       } catch {

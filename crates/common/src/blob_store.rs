@@ -131,6 +131,16 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
     /// to check.
     async fn smoke_test(&self) -> Result<(), BlobError>;
 
+    /// Cheap reachability probe — one signed HEAD on the bucket, no
+    /// body. Designed for repeat polling (the `/api/health` handler
+    /// is hit every ~60s by the sidebar status hook), so it MUST stay
+    /// out of `smoke_test`'s write path: a marker PUT every minute
+    /// would accumulate detritus and tickle bucket lifecycle scans.
+    /// `InlineStore` returns `Ok(())` — the frontend treats
+    /// `can_offload()==false` as "not configured" via a separate
+    /// signal.
+    async fn ping(&self) -> Result<(), BlobError>;
+
     /// Best-effort query for the bucket's expiration-lifecycle rule
     /// that covers the `bodies/` prefix. Used by the server to warn
     /// when `audit.body_retention_days` is raised above the bucket's
@@ -184,6 +194,12 @@ impl BlobStore for InlineStore {
     }
     async fn smoke_test(&self) -> Result<(), BlobError> {
         // No backend to test. Inline-only by design — caller knows.
+        Ok(())
+    }
+    async fn ping(&self) -> Result<(), BlobError> {
+        // No backend to ping. The "not configured" surface is
+        // `can_offload()==false`, which the health handler reads
+        // independently to render `null` instead of `true`.
         Ok(())
     }
 }
@@ -316,6 +332,7 @@ impl S3Store {
         let mut req_builder = match method {
             "PUT" => self.http.put(url),
             "GET" => self.http.get(url),
+            "HEAD" => self.http.head(url),
             "DELETE" => self.http.delete(url),
             other => return Err(BlobError::Signing(format!("unsupported method: {other}"))),
         };
@@ -464,6 +481,32 @@ impl BlobStore for S3Store {
         };
         let text = std::str::from_utf8(&xml).unwrap_or("");
         Ok(parse_lifecycle_days(text))
+    }
+
+    async fn ping(&self) -> Result<(), BlobError> {
+        // HEAD on the bucket root. Verifies endpoint reachable +
+        // SigV4 credentials accepted + bucket exists. No body, no
+        // object writes — safe to poll every minute from /api/health.
+        // path-style → `<endpoint>/<bucket>/`,
+        // virtual-host  → `<scheme>://<bucket>.<host>/`.
+        let url = if self.cfg.path_style {
+            format!(
+                "{}/{}/",
+                self.cfg.endpoint.trim_end_matches('/'),
+                self.cfg.bucket
+            )
+        } else {
+            let parsed = url::Url::parse(self.cfg.endpoint.trim_end_matches('/'))
+                .map_err(|e| BlobError::BadUrl(format!("S3 endpoint: {e}")))?;
+            let host = parsed.host_str().ok_or_else(|| {
+                BlobError::BadUrl("S3 endpoint missing host for virtual-host style".to_string())
+            })?;
+            let scheme = parsed.scheme();
+            let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!("{scheme}://{}.{host}{port}/", self.cfg.bucket)
+        };
+        self.signed_request("HEAD", &url, b"").await?;
+        Ok(())
     }
 
     async fn smoke_test(&self) -> Result<(), BlobError> {

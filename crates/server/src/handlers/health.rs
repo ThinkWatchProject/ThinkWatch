@@ -109,9 +109,18 @@ pub struct ServiceHealth {
     /// Distinguishing the two prevents the frontend from reporting a
     /// CH-less deployment as permanently degraded.
     pub clickhouse: Option<bool>,
+    /// `None` when no S3-compatible backend is configured (the
+    /// `InlineStore` path — oversize bodies truncate rather than
+    /// offload). `Some(bool)` when offload is wired in; the bool is
+    /// the result of a HEAD-bucket probe. S3 outages are degraded
+    /// rather than fatal — gateway keeps serving and audit rows
+    /// still write, just with truncated bodies — so this does NOT
+    /// gate the handler's HTTP status.
+    pub s3: Option<bool>,
     pub pg_latency_ms: Option<i64>,
     pub redis_latency_ms: Option<i64>,
     pub clickhouse_latency_ms: Option<i64>,
+    pub s3_latency_ms: Option<i64>,
     pub pool_idle: u32,
     pub pool_active: u32,
     pub uptime_seconds: i64,
@@ -145,6 +154,16 @@ pub async fn api_health_check(State(state): State<AppState>) -> Response {
         (None, None)
     };
 
+    // S3 / object storage — `None` for `InlineStore` (no offload backend
+    // wired in), `Some(bool)` from a HEAD-bucket probe otherwise.
+    let (s3_status, s3_latency) = if state.blob_store.can_offload() {
+        let s3_start = std::time::Instant::now();
+        let ok = state.blob_store.ping().await.is_ok();
+        (Some(ok), Some(s3_start.elapsed().as_millis() as i64))
+    } else {
+        (None, None)
+    };
+
     // Pool stats
     let pool_size = state.db.size() as u64;
     let pool_idle = state.db.num_idle() as u64;
@@ -155,9 +174,11 @@ pub async fn api_health_check(State(state): State<AppState>) -> Response {
         postgres: pg_ok,
         redis: redis_ok,
         clickhouse: ch_status,
+        s3: s3_status,
         pg_latency_ms: if pg_ok { Some(pg_latency) } else { None },
         redis_latency_ms: if redis_ok { Some(redis_latency) } else { None },
         clickhouse_latency_ms: ch_latency,
+        s3_latency_ms: s3_latency,
         pool_idle: pool_idle as u32,
         pool_active: pool_size.saturating_sub(pool_idle) as u32,
         uptime_seconds: uptime,

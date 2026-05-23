@@ -172,9 +172,12 @@ services:
     volumes:
       - ./data/rustfs:/data
     healthcheck:
-      # /minio/health/live is the lightweight liveness probe both MinIO
-      # and RustFS expose; doesn't require a bucket to exist.
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:9000/minio/health/live || exit 1"]
+      # RustFS exposes `/health` (200 OK on a live server); the
+      # MinIO-style `/minio/health/live` path that earlier RustFS
+      # builds answered now 403s under root-creds mode, which kept
+      # the container permanently "unhealthy" — blocking the
+      # `rustfs_init` one-shot and leaving the bucket uncreated.
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9000/health || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5

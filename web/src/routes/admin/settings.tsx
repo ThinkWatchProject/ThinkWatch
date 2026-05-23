@@ -14,7 +14,7 @@ import {
   SelectContent,
   SelectItem,
 } from '@/components/ui/select';
-import { Settings, Shield, Key, Database, Lock, AlertCircle, MemoryStick, Search } from 'lucide-react';
+import { Settings, Shield, Key, Database, Lock, AlertCircle, MemoryStick, BarChart3, Cloud } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Switch } from '@/components/ui/switch';
 import { api, apiPatch } from '@/lib/api';
@@ -66,7 +66,7 @@ export function SettingsPage() {
 
   // Read-only state from dedicated endpoints
   const [systemInfo, setSystemInfo] = useState<SystemInfo | null>(null);
-  const [health, setHealth] = useState<{ postgres: boolean; redis: boolean; clickhouse: boolean | null } | null>(null);
+  const [health, setHealth] = useState<{ postgres: boolean; redis: boolean; clickhouse: boolean | null; s3: boolean | null } | null>(null);
   const [auditConfig, setAuditConfig] = useState<AuditConfig | null>(null);
 
   // Editable settings from GET /api/admin/settings
@@ -204,7 +204,7 @@ export function SettingsPage() {
       api<SystemInfo>('/api/admin/settings/system').catch(tag('serverInfo', null)),
       api<AuditConfig>('/api/admin/settings/audit').catch(tag('auditConfig', null)),
       api<Record<string, SettingEntry[]>>('/api/admin/settings').catch(tag('settings', {})),
-      api<{ postgres: boolean; redis: boolean; clickhouse: boolean | null }>('/api/health').catch(tag('health', null)),
+      api<{ postgres: boolean; redis: boolean; clickhouse: boolean | null; s3: boolean | null }>('/api/health').catch(tag('health', null)),
       api<{ items: { id: string; name: string }[] }>('/api/admin/roles').catch(tag('roles', { items: [] })),
     ])
       .then(([sys, audit, settings, hp, rolesData]) => {
@@ -384,11 +384,12 @@ export function SettingsPage() {
                     <Separator className="my-4" />
                     <div>
                       <Label className="text-xs text-muted-foreground">{t('dashboard.systemStatus')}</Label>
-                      <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                      <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
                         {[
                           { name: 'PostgreSQL', key: 'postgres' as const, icon: Database },
                           { name: 'Redis', key: 'redis' as const, icon: MemoryStick },
-                          { name: 'ClickHouse', key: 'clickhouse' as const, icon: Search },
+                          { name: 'ClickHouse', key: 'clickhouse' as const, icon: BarChart3 },
+                          { name: 'S3', key: 's3' as const, icon: Cloud },
                         ].map((svc) => {
                           const raw = health?.[svc.key];
                           const notConfigured = raw === null;
