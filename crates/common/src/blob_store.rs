@@ -726,7 +726,7 @@ mod tests {
         S3Config {
             endpoint: "https://s3.example.com".to_string(),
             region: "us-east-1".to_string(),
-            bucket: "audit-bodies".to_string(),
+            bucket: "thinkwatch-audit-bodies".to_string(),
             access_key_id: "AKIA".to_string(),
             secret_access_key: "secret".to_string(),
             path_style,
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(
             s.object_url("bodies/gateway_logs/2026/05/18/abc-request.json")
                 .unwrap(),
-            "https://s3.example.com/audit-bodies/bodies/gateway_logs/2026/05/18/abc-request.json"
+            "https://s3.example.com/thinkwatch-audit-bodies/bodies/gateway_logs/2026/05/18/abc-request.json"
         );
     }
 
@@ -754,7 +754,7 @@ mod tests {
         };
         assert_eq!(
             s.object_url("bodies/x.json").unwrap(),
-            "https://audit-bodies.s3.example.com/bodies/x.json"
+            "https://thinkwatch-audit-bodies.s3.example.com/bodies/x.json"
         );
     }
 
@@ -766,7 +766,7 @@ mod tests {
         };
         assert_eq!(
             s.stored_url("bodies/x.json"),
-            "s3://audit-bodies/bodies/x.json"
+            "s3://thinkwatch-audit-bodies/bodies/x.json"
         );
     }
 
@@ -777,7 +777,8 @@ mod tests {
             http: reqwest::Client::new(),
         };
         assert_eq!(
-            s.parse_s3_url("s3://audit-bodies/bodies/x.json").unwrap(),
+            s.parse_s3_url("s3://thinkwatch-audit-bodies/bodies/x.json")
+                .unwrap(),
             "bodies/x.json"
         );
     }
@@ -798,7 +799,7 @@ mod tests {
             cfg: cfg(true),
             http: reqwest::Client::new(),
         };
-        let err = s.parse_s3_url("s3://audit-bodies").unwrap_err();
+        let err = s.parse_s3_url("s3://thinkwatch-audit-bodies").unwrap_err();
         assert!(matches!(err, BlobError::BadUrl(_)));
     }
 

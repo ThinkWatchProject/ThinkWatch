@@ -154,7 +154,7 @@ services:
   # crates/common/src/blob_store.rs). The server reads S3_* env vars at
   # startup and points at this container when they're set; without them
   # the offload pipeline runs InlineStore (truncation only). The bucket
-  # `audit-bodies` is created by the rustfs_init one-shot below using
+  # `thinkwatch-audit-bodies` is created by the rustfs_init one-shot below using
   # `mc` against the same RustFS endpoint — without it the first body
   # PUT 404s on a missing bucket and falls back to truncation forever.
   rustfs:
@@ -193,7 +193,7 @@ services:
       rustfs:
         condition: service_healthy
     environment:
-      S3_BUCKET: ${S3_BUCKET:-audit-bodies}
+      S3_BUCKET: ${S3_BUCKET:-thinkwatch-audit-bodies}
       S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:?}
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?}
     entrypoint:

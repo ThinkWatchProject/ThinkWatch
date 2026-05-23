@@ -24,7 +24,7 @@ use think_watch_common::blob_store::{BlobDecision, BlobError, BlobKeyHint, BlobS
 use think_watch_test_support::prelude::*;
 use tokio::sync::Mutex;
 
-const BUCKET: &str = "audit-bodies-test";
+const BUCKET: &str = "thinkwatch-audit-bodies-test";
 const PROBE_PROMPT: &str = "tell me about clickhouse body offload";
 
 /// In-memory `BlobStore` for the offload path. Captures every upload
@@ -175,7 +175,7 @@ async fn oversize_body_offloads_to_blob_store_and_dereferences_via_endpoint() {
     );
     let request_url = row.request_body.expect("request body cell populated");
     assert!(
-        request_url.starts_with("s3://audit-bodies-test/bodies/gateway_logs/"),
+        request_url.starts_with("s3://thinkwatch-audit-bodies-test/bodies/gateway_logs/"),
         "request_body cell should hold an s3:// URL, got: {request_url}"
     );
     assert!(
