@@ -1,20 +1,60 @@
 #!/usr/bin/env bash
-# Generate ThinkWatch production secrets.
+# Generate ThinkWatch env file (dev or prod) from .env.example.
 #
-# Safe to run from any CWD. Writes:
-#   <project-root>/.env.production
-#   <project-root>/deploy/clickhouse/users.d/default-user.xml
+# Usage:
+#   bash deploy/generate-secrets.sh --dev    # writes .env
+#   bash deploy/generate-secrets.sh --prod   # writes .env.production
+#                                            # (+ deploy/clickhouse/users.d/default-user.xml)
 #
-# Idempotent: refuses to overwrite an existing .env.production unless FORCE=1.
+# Reads `.env.example` as the single source of truth and:
+#   * drops lines tagged for the OTHER mode (`# dev:` vs `# prod:`)
+#   * strips the tag from active-mode lines
+#   * substitutes every `__SECRET_HEX_<N>__` token with `openssl rand -hex <N>`
+#
+# Idempotent: refuses to overwrite an existing output unless FORCE=1.
+# Safe to run from any CWD.
+
 set -euo pipefail
+
+MODE=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dev)   MODE="dev"; shift ;;
+    --prod)  MODE="prod"; shift ;;
+    -h|--help)
+      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    *)
+      echo "✗ unknown arg: $1" >&2
+      echo "  usage: $0 --dev | --prod" >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$MODE" ]; then
+  echo "✗ specify --dev or --prod" >&2
+  echo "  usage: $0 --dev | --prod" >&2
+  exit 1
+fi
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
-ENV_FILE="$PROJECT_ROOT/.env.production"
-CH_USERS_DIR="$SCRIPT_DIR/clickhouse/users.d"
+TEMPLATE="$PROJECT_ROOT/.env.example"
 
-if [ -f "$ENV_FILE" ] && [ "${FORCE:-0}" != "1" ]; then
-  echo "✗ $ENV_FILE already exists. Re-run with FORCE=1 to overwrite." >&2
+case "$MODE" in
+  dev)  OUT="$PROJECT_ROOT/.env" ;;
+  prod) OUT="$PROJECT_ROOT/.env.production" ;;
+esac
+
+if [ ! -f "$TEMPLATE" ]; then
+  echo "✗ template not found: $TEMPLATE" >&2
+  exit 1
+fi
+
+if [ -f "$OUT" ] && [ "${FORCE:-0}" != "1" ]; then
+  echo "✗ $OUT already exists. Re-run with FORCE=1 to overwrite." >&2
   exit 1
 fi
 
@@ -25,42 +65,48 @@ fi
 
 umask 077
 
-cat > "$ENV_FILE" <<EOF
-# ThinkWatch Production Secrets
-# Generated on $(date -u +%Y-%m-%dT%H:%M:%SZ)
+OTHER="prod"
+[ "$MODE" = "prod" ] && OTHER="dev"
 
-JWT_SECRET=$(openssl rand -hex 32)
-ENCRYPTION_KEY=$(openssl rand -hex 32)
-DB_PASSWORD=$(openssl rand -base64 24 | tr -d '=/+')
-REDIS_PASSWORD=$(openssl rand -base64 24 | tr -d '=/+')
-CLICKHOUSE_PASSWORD=$(openssl rand -base64 24 | tr -d '=/+')
-# Bearer token for /metrics scraping. Configure your Prometheus
-# scrape job with the same value via authorization.credentials
-# (or bearer_token).
-METRICS_BEARER_TOKEN=$(openssl rand -hex 32)
+# Step 1: mode-filter the template. Drop other-mode lines; strip the
+# `# dev:` / `# prod:` prefix (plus its trailing space) from this-mode
+# lines. Anything else passes through unchanged.
+#
+# Step 2: substitute every `__SECRET_HEX_<N>__` token with a fresh
+# `openssl rand -hex <N>`. We loop in bash (not awk) so we can shell
+# out per token — awk would need `getline cmd` per match which is
+# fiddlier than just iterating in bash.
+{
+  echo "# Generated $(date -u +%Y-%m-%dT%H:%M:%SZ) by deploy/generate-secrets.sh --$MODE"
+  echo "# DO NOT EDIT BY HAND — edit .env.example then re-run with FORCE=1."
+  echo ""
+  awk -v mode="$MODE" -v other="$OTHER" '
+    {
+      if ($0 ~ "^# " other ":") next
+      if ($0 ~ "^# " mode ":") sub("^# " mode ": *", "")
+      print
+    }
+  ' "$TEMPLATE"
+} | while IFS= read -r line || [ -n "$line" ]; do
+  while [[ "$line" =~ __SECRET_HEX_([0-9]+)__ ]]; do
+    n="${BASH_REMATCH[1]}"
+    secret=$(openssl rand -hex "$n")
+    line="${line/__SECRET_HEX_${n}__/$secret}"
+  done
+  echo "$line"
+done > "$OUT"
 
-DATABASE_URL=postgres://thinkwatch:\${DB_PASSWORD}@postgres:5432/think_watch?sslmode=disable
-REDIS_URL=redis://:\${REDIS_PASSWORD}@redis:6379
-SERVER_HOST=0.0.0.0
-GATEWAY_PORT=3000
-CONSOLE_PORT=3001
-CORS_ORIGINS=https://console.yourdomain.com
-RUST_LOG=info,think_watch=info
+chmod 600 "$OUT"
+echo "✓ Wrote $OUT"
 
-CLICKHOUSE_URL=http://clickhouse:8123
-CLICKHOUSE_DB=think_watch
-CLICKHOUSE_USER=thinkwatch
-
-# SSO/OIDC is configured via the Web console (Admin > Settings > SSO),
-# not via env vars. Leave the form blank in the wizard if you don't
-# need SSO; you can enable it later without restarting.
-EOF
-
-# Generate ClickHouse user XML so the container's users.d/ mount
-# creates the thinkwatch user at first boot.
-CH_PASS=$(awk -F= '/^CLICKHOUSE_PASSWORD=/{print $2; exit}' "$ENV_FILE")
-mkdir -p "$CH_USERS_DIR"
-cat > "$CH_USERS_DIR/default-user.xml" <<CHEOF
+# Prod also needs the ClickHouse user XML. The official CH image consumes
+# `CLICKHOUSE_PASSWORD` natively in dev (no XML required), but the prod
+# compose mounts a users.d/ override so we write the password there.
+if [ "$MODE" = "prod" ]; then
+  CH_USERS_DIR="$SCRIPT_DIR/clickhouse/users.d"
+  CH_PASS=$(awk -F= '/^CLICKHOUSE_PASSWORD=/{print $2; exit}' "$OUT")
+  mkdir -p "$CH_USERS_DIR"
+  cat > "$CH_USERS_DIR/default-user.xml" <<CHEOF
 <clickhouse>
   <users>
     <default remove="remove">
@@ -77,7 +123,6 @@ cat > "$CH_USERS_DIR/default-user.xml" <<CHEOF
   </users>
 </clickhouse>
 CHEOF
-
-echo "✓ Wrote $ENV_FILE"
-echo "✓ Wrote $CH_USERS_DIR/default-user.xml"
-echo "  Review CORS_ORIGINS and any optional settings before deployment."
+  echo "✓ Wrote $CH_USERS_DIR/default-user.xml"
+  echo "  Review CORS_ORIGINS and any optional settings before deployment."
+fi

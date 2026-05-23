@@ -164,8 +164,8 @@ ThinkWatch 是为后一种场景设计的。
 # 1. 启动基础设施
 make infra
 
-# 2. 启动后端 (gateway :3000 + console :3001)
-cp .env.example .env
+# 2. 生成 dev 密钥并启动后端 (gateway :3000 + console :3001)
+make dev-secrets       # 从 .env.example 派生 .env，并填入随机密钥
 make dev-backend
 
 # 3. 启动前端开发服务器

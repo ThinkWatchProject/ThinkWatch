@@ -29,7 +29,7 @@ $(DEV_RUN_DIR):
 # The `--remove-orphans` is here because `rustfs_init` is intentionally
 # a one-shot — without the flag, every subsequent `make infra` would
 # warn about the exited container even though it's the design.
-infra:
+infra: .env
 	docker compose -f deploy/docker-compose.dev.yml --env-file .env up -d --remove-orphans
 
 infra-down:
@@ -218,13 +218,22 @@ deploy: .env.production
 deploy-down:
 	docker compose -f deploy/docker-compose.yml --env-file .env.production down
 
-# Explicit secrets (re)generation; respects FORCE=1 to overwrite
-secrets:
-	bash deploy/generate-secrets.sh
+# Explicit secrets (re)generation from .env.example template; respects
+# FORCE=1 to overwrite. `dev-secrets` writes .env; `prod-secrets`
+# writes .env.production + the ClickHouse user XML.
+dev-secrets:
+	bash deploy/generate-secrets.sh --dev
+
+prod-secrets:
+	bash deploy/generate-secrets.sh --prod
+
+.env:
+	@echo "→ .env not found — generating dev secrets from .env.example…"
+	@bash deploy/generate-secrets.sh --dev
 
 .env.production:
 	@echo "→ .env.production not found — generating secrets…"
-	@bash deploy/generate-secrets.sh
+	@bash deploy/generate-secrets.sh --prod
 
 # ---- Kubernetes / Helm ----
 HELM_RELEASE    ?= thinkwatch

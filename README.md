@@ -294,8 +294,8 @@ to non-streaming if it needs the original text restored.
 # 1. Start infrastructure
 make infra
 
-# 2. Start backend (gateway :3000 + console :3001)
-cp .env.example .env
+# 2. Generate dev secrets + start backend (gateway :3000 + console :3001)
+make dev-secrets       # writes .env from .env.example with random secrets
 make dev-backend
 
 # 3. Start frontend dev server
