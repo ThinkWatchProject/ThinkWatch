@@ -10,13 +10,19 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { DollarSign, TrendingUp, TrendingDown, AlertCircle, Download, ChevronDown } from 'lucide-react';
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from '@/components/ui/chart';
 import { api } from '@/lib/api';
 import { toast } from 'sonner';
 import { useTeams } from '@/hooks/use-teams';
 import { TeamFilter } from '@/components/filters/team-filter';
-import { SimpleBarChart } from '@/components/ui/simple-chart';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Progress } from '@/components/ui/progress';
 import { Badge } from '@/components/ui/badge';
@@ -44,6 +50,12 @@ interface CostRow {
 type CostDimension = 'model' | 'user' | 'cost_center' | 'provider';
 const DIMENSION_OPTIONS: readonly CostDimension[] = ['model', 'user', 'cost_center', 'provider'] as const;
 const MAX_DIMENSIONS = 2;
+
+// `var(--color-cost)` resolves through ChartContainer to `var(--chart-2)`
+// — the same accent the dashboard cost stat-card uses.
+const COST_CHART_CONFIG = {
+  cost: { label: 'Cost', color: 'var(--chart-2)' },
+} satisfies ChartConfig;
 
 type TimeRange = '24h' | '7d' | '30d' | 'mtd';
 const TIME_RANGE_OPTIONS: readonly TimeRange[] = ['24h', '7d', '30d', 'mtd'] as const;
@@ -181,7 +193,10 @@ export function CostsPage() {
   }, [queryString, selectedDimensions, t]);
 
   // Chart: top N rows by cost for single-dimension mode. Sort via
-  // Decimal so extreme values don't get compared as f64.
+  // Decimal so extreme values don't get compared as f64. The full
+  // label is kept on `fullLabel` for the tooltip — `label` is the
+  // YAxis-visible truncation so a long `huggingface/google/...` slug
+  // doesn't blow up the axis gutter.
   const chartData = useMemo(() => {
     if (!isSingleDimension) return [];
     const dim = selectedDimensions[0];
@@ -189,13 +204,13 @@ export function CostsPage() {
       .slice()
       .sort((a, b) => new Decimal(b.total_cost).comparedTo(new Decimal(a.total_cost)))
       .map((row) => {
-        const label = getDimensionValue(row, dim);
+        const fullLabel = getDimensionValue(row, dim);
         return {
-          label: label.length > 18 ? label.slice(0, 16) + '..' : label,
-          // simple-chart takes a number; converting to Number here
-          // keeps the visual plot happy while the source of truth
-          // stays as a Decimal string on every other path.
-          value: new Decimal(row.total_cost).toNumber(),
+          fullLabel,
+          label: fullLabel.length > 24 ? '…' + fullLabel.slice(-22) : fullLabel,
+          // Recharts wants a Number for the bar value; Decimal stays
+          // source of truth elsewhere on this page.
+          cost: new Decimal(row.total_cost).toNumber(),
         };
       });
   }, [rows, isSingleDimension, selectedDimensions]);
@@ -354,7 +369,11 @@ export function CostsPage() {
         </div>
       </div>
 
-      <div className={`grid gap-4 ${showPeriodCard ? 'md:grid-cols-3' : 'md:grid-cols-2'}`}>
+      <div className={`grid gap-4 ${showPeriodCard ? 'md:grid-cols-2' : 'md:grid-cols-1'}`}>
+        {/* MTD cost + (when configured) budget progress in one card.
+            Empty-budget accounts get the lighter, single-stat shape;
+            once a monthly cap is wired in role constraints, the
+            progress bar materialises in the same slot. */}
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium">{t('analyticsCosts.totalCostMtd')}</CardTitle>
@@ -364,6 +383,15 @@ export function CostsPage() {
             <div className="text-2xl font-bold">
               {loading ? <Skeleton className="h-8 w-24" /> : `$${new Decimal(stats.total_cost_mtd).toFixed(2)}`}
             </div>
+            {!loading && stats.budget_usage_pct != null && (
+              <div className="mt-3 space-y-1.5">
+                <Progress value={Math.min(budgetPct, 100)} />
+                <div className="flex items-center justify-between text-xs text-muted-foreground">
+                  <span>{t('analyticsCosts.budgetUsage')}</span>
+                  <span className="font-mono tabular-nums">{budgetPct.toFixed(1)}%</span>
+                </div>
+              </div>
+            )}
           </CardContent>
         </Card>
         {showPeriodCard && (
@@ -416,23 +444,12 @@ export function CostsPage() {
             </CardContent>
           </Card>
         )}
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium">{t('analyticsCosts.budgetUsage')}</CardTitle>
-            <TrendingUp className="h-4 w-4 text-muted-foreground" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-2xl font-bold">
-              {loading ? <Skeleton className="h-8 w-24" /> : stats.budget_usage_pct != null ? `${budgetPct.toFixed(1)}%` : '—'}
-            </div>
-            {stats.budget_usage_pct != null && (
-              <Progress value={Math.min(budgetPct, 100)} className="mt-2" />
-            )}
-          </CardContent>
-        </Card>
       </div>
 
-      {/* Bar chart -- only shown for single-dimension mode */}
+      {/* Bar chart -- only shown for single-dimension mode. Horizontal
+          layout so long labels like `huggingface/google/gemma-4-3b-it`
+          stay readable along the Y axis instead of stacking + overlapping
+          under vertical bars. */}
       {isSingleDimension && (
         <Card>
           <CardHeader>
@@ -444,7 +461,52 @@ export function CostsPage() {
             ) : chartData.length === 0 ? (
               <div className="flex h-48 items-center justify-center text-muted-foreground">{t('analyticsCosts.noCosts')}</div>
             ) : (
-              <SimpleBarChart data={chartData} formatValue={(v) => `$${v.toFixed(4)}`} />
+              <ChartContainer
+                config={COST_CHART_CONFIG}
+                className="aspect-auto w-full"
+                // Per-row height + breathing room; 36 px / bar lines
+                // up with the YAxis tick spacing recharts picks by
+                // default and keeps a 2-bar chart from collapsing into
+                // one fat slab.
+                style={{ height: Math.max(192, chartData.length * 36 + 32) }}
+              >
+                <BarChart
+                  data={chartData}
+                  layout="vertical"
+                  margin={{ top: 8, right: 24, bottom: 0, left: 0 }}
+                >
+                  <CartesianGrid horizontal={false} strokeOpacity={0.15} />
+                  <XAxis
+                    type="number"
+                    tickLine={false}
+                    axisLine={false}
+                    fontSize={10}
+                    tickFormatter={(v: number) => `$${v.toFixed(v < 1 ? 4 : 2)}`}
+                  />
+                  <YAxis
+                    type="category"
+                    dataKey="label"
+                    tickLine={false}
+                    axisLine={false}
+                    fontSize={11}
+                    width={180}
+                  />
+                  <ChartTooltip
+                    content={
+                      <ChartTooltipContent
+                        // Show the full (untruncated) label in the
+                        // tooltip — the YAxis tick truncates to ~24
+                        // chars so the gutter doesn't blow up.
+                        labelFormatter={(_, payload) =>
+                          payload?.[0]?.payload?.fullLabel ?? ''
+                        }
+                        formatter={(v) => `$${Number(v).toFixed(4)}`}
+                      />
+                    }
+                  />
+                  <Bar dataKey="cost" fill="var(--color-cost)" radius={[0, 3, 3, 0]} />
+                </BarChart>
+              </ChartContainer>
             )}
           </CardContent>
         </Card>

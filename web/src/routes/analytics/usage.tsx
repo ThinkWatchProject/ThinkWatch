@@ -10,11 +10,17 @@ import {
   TableRow,
 } from '@/components/ui/table';
 import { BarChart3, Hash, AlertCircle } from 'lucide-react';
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from '@/components/ui/chart';
 import { api } from '@/lib/api';
 import { useTeams } from '@/hooks/use-teams';
 import { TeamFilter } from '@/components/filters/team-filter';
-import { SimpleBarChart } from '@/components/ui/simple-chart';
 import { Skeleton } from '@/components/ui/skeleton';
 
 import Decimal from 'decimal.js';
@@ -36,6 +42,14 @@ interface UsageStats {
   total_tokens: number;
   total_requests: number;
 }
+
+// `var(--color-value)` resolves to `var(--chart-1)` once ChartContainer
+// expands the config — matches the chart-1 color the dashboard
+// stat-card sparklines use, so the analytics surface stays visually
+// in family with the live dashboard.
+const TOKEN_TREND_CONFIG = {
+  value: { label: 'Tokens', color: 'var(--chart-1)' },
+} satisfies ChartConfig;
 
 export function UsagePage() {
   const { t } = useTranslation();
@@ -123,7 +137,25 @@ export function UsagePage() {
           ) : chartData.length === 0 ? (
             <div className="flex h-48 items-center justify-center text-muted-foreground">{t('analyticsUsage.noUsage')}</div>
           ) : (
-            <SimpleBarChart data={chartData} formatValue={(v) => v.toLocaleString()} />
+            <ChartContainer config={TOKEN_TREND_CONFIG} className="aspect-auto h-48 w-full">
+              <BarChart data={chartData} margin={{ top: 8, right: 8, bottom: 0, left: 0 }}>
+                <CartesianGrid vertical={false} strokeOpacity={0.15} />
+                <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={10} />
+                <YAxis
+                  tickLine={false}
+                  axisLine={false}
+                  fontSize={10}
+                  tickFormatter={(v: number) =>
+                    new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(v)
+                  }
+                  width={42}
+                />
+                <ChartTooltip
+                  content={<ChartTooltipContent formatter={(v) => Number(v).toLocaleString()} />}
+                />
+                <Bar dataKey="value" fill="var(--color-value)" radius={[3, 3, 0, 0]} />
+              </BarChart>
+            </ChartContainer>
           )}
         </CardContent>
       </Card>

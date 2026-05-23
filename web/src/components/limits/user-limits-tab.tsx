@@ -50,7 +50,13 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { ConfirmDialog } from '@/components/confirm-dialog';
-import { SimpleBarChart } from '@/components/ui/simple-chart';
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from 'recharts';
+import {
+  ChartContainer,
+  ChartTooltip,
+  ChartTooltipContent,
+  type ChartConfig,
+} from '@/components/ui/chart';
 import { api, apiPost } from '@/lib/api';
 import { toast } from 'sonner';
 
@@ -819,23 +825,39 @@ function secsLabel(secs: number, t: (k: string) => string): string {
 // Usage chart (7-day token total)
 // ----------------------------------------------------------------------------
 
+const USAGE_CHART_CONFIG = {
+  value: { label: 'Tokens', color: 'var(--chart-1)' },
+} satisfies ChartConfig;
+
+function fmtCompactTokens(v: number): string {
+  if (v >= 1_000_000) return `${(v / 1_000_000).toFixed(1)}M`;
+  if (v >= 1_000) return `${(v / 1_000).toFixed(1)}k`;
+  return v.toString();
+}
+
 function UsageChart({ rows }: { rows: UsageDay[] }) {
   const data = rows.map((r) => ({
     label: r.day.slice(5), // MM-DD
     value: r.tokens,
   }));
   return (
-    <SimpleBarChart
-      data={data}
-      height={140}
-      formatValue={(v) =>
-        v >= 1_000_000
-          ? `${(v / 1_000_000).toFixed(1)}M`
-          : v >= 1_000
-            ? `${(v / 1_000).toFixed(1)}k`
-            : v.toString()
-      }
-    />
+    <ChartContainer config={USAGE_CHART_CONFIG} className="aspect-auto h-36 w-full">
+      <BarChart data={data} margin={{ top: 4, right: 4, bottom: 0, left: 0 }}>
+        <CartesianGrid vertical={false} strokeOpacity={0.15} />
+        <XAxis dataKey="label" tickLine={false} axisLine={false} fontSize={10} />
+        <YAxis
+          tickLine={false}
+          axisLine={false}
+          fontSize={10}
+          tickFormatter={fmtCompactTokens}
+          width={36}
+        />
+        <ChartTooltip
+          content={<ChartTooltipContent formatter={(v) => Number(v).toLocaleString()} />}
+        />
+        <Bar dataKey="value" fill="var(--color-value)" radius={[3, 3, 0, 0]} />
+      </BarChart>
+    </ChartContainer>
   );
 }
 
