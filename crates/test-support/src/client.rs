@@ -193,9 +193,13 @@ impl TestClient {
             .and_then(|n| u8::try_from(n).ok())
             .context("difficulty missing or out of range")?;
 
-        // Server lower-cases + trims on store; mirror that so the
-        // hash we compute matches the one verify_pow will compute.
-        let bound_email = email.trim().to_lowercase();
+        // Server uses `normalize_email` (trim + ASCII lowercase) on
+        // store; mirror that exactly. `to_ascii_lowercase` not
+        // `to_lowercase` — the Unicode variants diverge between Rust
+        // and JS for codepoints like Greek final sigma, and validate_email
+        // rejects non-ASCII anyway, so the Unicode case-folding is
+        // dead surface area waiting to be a future bug.
+        let bound_email = email.trim().to_ascii_lowercase();
         let mut nonce: u64 = 0;
         loop {
             let nonce_str = nonce.to_string();

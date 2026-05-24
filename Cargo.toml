@@ -95,7 +95,7 @@ aws-smithy-eventstream = "0.60"
 # Utils
 arc-swap = "1"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 anyhow = "1"

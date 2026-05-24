@@ -117,6 +117,15 @@ export function usePowChallenge(email: string): PowState & { refresh: () => void
         workerRef.current = null;
       }
       clearExpiryTimer();
+      // Reset expiresAtRef BEFORE the network fetch. The
+      // visibilitychange listener reads this ref to decide whether
+      // to flip to `expired`; if we leave the previous challenge's
+      // expiry value in place during the fetch, a tab-resume in
+      // that window could see a stale "still valid" timestamp and
+      // make an incorrect decision. Matches the discipline of the
+      // setTimeout body and visibility handler (which both clear
+      // the ref before mutating state).
+      expiresAtRef.current = 0;
 
       let challenge: PowChallenge;
       try {
@@ -193,6 +202,13 @@ export function usePowChallenge(email: string): PowState & { refresh: () => void
       };
       worker.onerror = (e) => {
         if (epoch !== epochRef.current) return;
+        // Bump epoch BEFORE mutating state, matching the setTimeout
+        // and visibility handlers. A worker that crashed could
+        // theoretically have already posted a `done` message before
+        // erroring; without the bump, the queued `done` would beat
+        // our `error` setState and the chip would mis-report 'ready'
+        // for a dead worker.
+        epochRef.current++;
         if (workerRef.current) {
           workerRef.current.terminate();
           workerRef.current = null;

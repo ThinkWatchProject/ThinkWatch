@@ -79,13 +79,13 @@ pub async fn setup_initialize(
     State(state): State<AppState>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, AppError> {
-    let client_ip = crate::middleware::auth_guard::extract_client_ip(
-        &state,
-        request.headers(),
-        request.extensions(),
-    )
-    .await
-    .unwrap_or_else(|| "unknown".into());
+    // Consistent with login/register/pow-challenge: reject 400 when
+    // the helper can't resolve a real IP, rather than collapsing
+    // every misconfigured-proxy request into a shared "unknown"
+    // bucket that an attacker could pump to lock out an honest
+    // operator's one-shot initialization.
+    let client_ip =
+        super::auth::require_client_ip(&state, request.headers(), request.extensions()).await?;
     let user_agent = request
         .headers()
         .get(axum::http::header::USER_AGENT)
@@ -159,14 +159,9 @@ pub async fn setup_initialize(
     .bind(&req.admin.display_name)
     .bind(&password_hash)
     .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| {
-        if e.to_string().contains("duplicate") || e.to_string().contains("unique") {
-            AppError::Conflict("Email already exists".into())
-        } else {
-            AppError::Internal(e.into())
-        }
-    })?;
+    .await?;
+    // sqlx unique-violations now map to `AppError::Conflict` globally
+    // via `From<sqlx::Error>`. No per-site string-sniffing needed.
 
     // Assign super_admin role.
     sqlx::query(
@@ -224,7 +219,7 @@ pub async fn setup_initialize(
             .audit("setup.initialize")
             .resource("system")
             .detail(serde_json::json!({
-                "admin_email": req.admin.email,
+                "admin_email": admin_email,
             })),
     );
 

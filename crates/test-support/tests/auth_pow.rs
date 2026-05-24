@@ -365,20 +365,27 @@ async fn adaptive_difficulty_escalates_after_subnet_failures() {
 #[tokio::test]
 async fn successful_login_decays_subnet_failure_counter() {
     // Decay (not clear) model: a single successful login from the
-    // subnet reduces the failure counter by a constant, so legit
-    // activity drifts the counter back toward zero over multiple
-    // logins WITHOUT letting an attacker holding one valid
-    // credential one-shot the entire defense.
+    // subnet reduces the failure counter by `SUBNET_FAIL_SUCCESS_DECAY`
+    // (= 3), so legit activity drifts the counter back toward zero
+    // over multiple logins WITHOUT letting an attacker holding one
+    // valid credential one-shot the entire defense.
     //
-    // Strategy: trip the escalation, log in successfully, then
-    // re-mint and assert difficulty dropped one tier (21 → 19, since
-    // 10 - decay(3) = 7 falls below the 10-fail threshold).
+    // This test exercises the magnitude of the decay, not just its
+    // sign. We trip the counter to 13 (3 above the first tier
+    // threshold of 10) so a SINGLE success can only drop us back to
+    // exactly 10 — still at the elevated tier. Then we run two more
+    // successes (total -9) which lands us at 4 — below threshold,
+    // so difficulty drops to 19.
+    //
+    // A regression that re-introduced the original DEL behavior, or
+    // accidentally over-decayed, would land at <= 0 after the FIRST
+    // success and fail the "still elevated after 1 success" assert.
     let app = TestApp::spawn().await;
     let admin = fixtures::create_admin_user(&app.db).await.unwrap();
     let con = app.console_client();
 
-    // Bump the subnet counter to 10 (first escalation tier).
-    for i in 0..10 {
+    // Bump the subnet counter to 13 (3 above the first tier).
+    for i in 0..13 {
         let email = format!("decay-test-{i}@example.test");
         con.post(
             "/api/auth/login",
@@ -388,7 +395,7 @@ async fn successful_login_decays_subnet_failure_counter() {
         .unwrap();
     }
 
-    // Confirm escalation is active before we test the decay path.
+    // Precondition: escalation active.
     let resp = con
         .send(
             reqwest::Method::POST,
@@ -404,7 +411,7 @@ async fn successful_login_decays_subnet_failure_counter() {
         "precondition: subnet should be at elevated difficulty"
     );
 
-    // One successful login from this subnet decays the counter.
+    // First successful login decays counter 13 → 10. Still at tier.
     let resp = con
         .post(
             "/api/auth/login",
@@ -417,11 +424,6 @@ async fn successful_login_decays_subnet_failure_counter() {
         .unwrap();
     resp.assert_ok();
 
-    // Counter should have decayed below the 10-fail threshold so
-    // next mint returns to base difficulty. The DECRBY does NOT
-    // zero the counter — that's the whole point of the fix. A
-    // larger ladder (50+ failures → difficulty 23) would still need
-    // multiple successful logins to drain completely.
     let resp = con
         .send(
             reqwest::Method::POST,
@@ -433,9 +435,41 @@ async fn successful_login_decays_subnet_failure_counter() {
     let body: serde_json::Value = resp.json().unwrap();
     assert_eq!(
         body["difficulty"].as_u64().unwrap(),
+        21,
+        "ONE successful login must NOT zero the counter — DEL \
+         regression would drop to 19 here; body: {body}"
+    );
+
+    // Two more successful logins (total decay 3+3+3 = 9) take 13 → 4.
+    // Below the 10-fail threshold so difficulty returns to base.
+    for _ in 0..2 {
+        let resp = con
+            .post(
+                "/api/auth/login",
+                json!({
+                    "email": admin.user.email,
+                    "password": admin.plaintext_password,
+                }),
+            )
+            .await
+            .unwrap();
+        resp.assert_ok();
+    }
+
+    let resp = con
+        .send(
+            reqwest::Method::POST,
+            "/api/auth/pow-challenge",
+            Some(&json!({ "email": "probe3@example.test" })),
+        )
+        .await
+        .unwrap();
+    let body: serde_json::Value = resp.json().unwrap();
+    assert_eq!(
+        body["difficulty"].as_u64().unwrap(),
         19,
-        "successful login should decay subnet counter below \
-         escalation threshold; body: {body}"
+        "three successful logins should decay counter (13 - 9 = 4) \
+         below escalation threshold; body: {body}"
     );
 }
 

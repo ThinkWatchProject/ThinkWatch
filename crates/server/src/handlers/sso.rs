@@ -344,15 +344,56 @@ async fn handle_live_callback(
         }
         Some(u) => u,
         None => {
-            // Normalize email so SSO-provisioned users sit in the
-            // same canonical lowercase form as password-registered
-            // ones. If we ever add an SSO-email-merges-with-existing
-            // local account flow, the lookup would otherwise miss
-            // on a case-only difference (IdP sends `Alice@x.com`,
-            // local row stored `alice@x.com`).
-            let raw_email = user_info.email.as_deref().unwrap_or(&user_info.subject);
-            let email = think_watch_common::validation::normalize_email(raw_email);
-            let display_name = user_info.name.as_deref().unwrap_or(&email);
+            // Pick the email to store. Priority:
+            //   1. IdP-supplied email — normalized + validated. If
+            //      validation rejects (non-ASCII, malformed, too
+            //      long), DO NOT silently fall through to the
+            //      subject branch — that would let a malicious or
+            //      buggy IdP smuggle CRLF / huge strings / arbitrary
+            //      UTF-8 into our `users.email` column, where they
+            //      get propagated into JWT claims, MCP custom-header
+            //      `{{user_email}}` substitution, and audit logs.
+            //      Better: fail the SSO login loudly and refuse to
+            //      provision until the IdP sends a clean email.
+            //   2. No IdP email at all — synthesize a deterministic
+            //      placeholder from a UUIDv5 of (issuer, subject).
+            //      Stable across re-provisioning, parseable as an
+            //      email, can never collide with a real address
+            //      (the `.invalid` TLD is reserved by RFC 2606), and
+            //      survives validate_email.
+            use think_watch_common::validation::{normalize_email, validate_email};
+            let email = match user_info.email.as_deref() {
+                Some(raw) => {
+                    let candidate = normalize_email(raw);
+                    validate_email(&candidate).map_err(|_| {
+                        tracing::warn!(
+                            issuer = %user_info.issuer,
+                            "SSO IdP supplied a malformed email; refusing to provision"
+                        );
+                        AppError::BadRequest(
+                            "Identity provider returned an invalid email address".into(),
+                        )
+                    })?;
+                    candidate
+                }
+                None => {
+                    // RFC 2606 reserves `.invalid` — guaranteed never
+                    // to be a real address. UUIDv5 over the
+                    // (issuer, subject) pair gives us a stable
+                    // identifier that re-provisioning lands on the
+                    // same row.
+                    let ns = uuid::Uuid::NAMESPACE_URL;
+                    let id = uuid::Uuid::new_v5(
+                        &ns,
+                        format!("{}|{}", user_info.issuer, user_info.subject).as_bytes(),
+                    );
+                    format!("sso-{id}@oidc.invalid")
+                }
+            };
+            let display_name = user_info
+                .name
+                .as_deref()
+                .unwrap_or(user_info.email.as_deref().unwrap_or(&email));
 
             let u = sqlx::query_as::<_, User>(
                 r#"INSERT INTO users (email, display_name, oidc_subject, oidc_issuer)
@@ -384,16 +425,16 @@ async fn handle_live_callback(
         return Err(AppError::Forbidden("Account is deactivated".into()));
     }
 
-    let access_ttl = state.dynamic_config.jwt_access_ttl_secs().await;
-    let refresh_ttl_days = state.dynamic_config.jwt_refresh_ttl_days().await;
-
-    let access_token = state
-        .jwt
-        .create_access_token_with_ttl(user.id, &user.email, access_ttl)?;
-    let refresh_token =
-        state
-            .jwt
-            .create_refresh_token_with_ttl(user.id, &user.email, refresh_ttl_days)?;
+    // Route through the shared session-issue path so SSO inherits
+    // every invariant the password-login flow already enforces
+    // (signing-key slot reset, RBAC preload, cookie attribute
+    // discipline). Previously the SSO branch inlined its own
+    // create_access_token / create_refresh_token + cookie builders,
+    // which would silently miss any future tightening of
+    // `issue_auth_session` (e.g. signing-key cleanup, future session
+    // binding fields).
+    let session = super::auth::issue_auth_session(&state, user.id, &user.email, None).await?;
+    let access_ttl = session.access_ttl;
 
     // OIDC callback: user_id resolved from the verified token, but the
     // handler doesn't currently take a headers extractor — IP/UA stay
@@ -428,26 +469,18 @@ async fn handle_live_callback(
 
     let redirect_url = format!("{}/#sso=ok&expires_in={}", frontend_url, access_ttl);
 
-    use axum::http::header::{LOCATION, SET_COOKIE};
+    use axum::http::header::LOCATION;
     let mut response = axum::response::Response::builder()
         .status(axum::http::StatusCode::TEMPORARY_REDIRECT)
         .body(axum::body::Body::empty())
         .map_err(|e| AppError::Internal(anyhow::anyhow!("redirect build failed: {e}")))?;
-    let headers = response.headers_mut();
     if let Ok(loc) = redirect_url.parse() {
-        headers.insert(LOCATION, loc);
+        response.headers_mut().insert(LOCATION, loc);
     }
-    let access_cookie =
-        crate::middleware::verify_signature::access_token_cookie(&access_token, access_ttl);
-    let refresh_cookie = crate::middleware::verify_signature::refresh_token_cookie(
-        &refresh_token,
-        refresh_ttl_days * 86400,
-    );
-    for cookie_str in [&access_cookie, &refresh_cookie] {
-        if let Ok(v) = cookie_str.parse() {
-            headers.append(SET_COOKIE, v);
-        }
-    }
+    // session.set_cookies appends both Set-Cookie headers built by
+    // issue_auth_session — any future cookie-attribute change there
+    // applies here too without an edit on this side.
+    session.set_cookies(&mut response);
     Ok(response)
 }
 

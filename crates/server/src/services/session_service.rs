@@ -84,6 +84,30 @@ pub(crate) async fn issue_auth_session(
     email: &str,
     _client_ip: Option<&str>,
 ) -> Result<AuthSession, AppError> {
+    // Clear any stale signing-key binding from a prior session for
+    // this user. Without this, a fresh login leaves an old
+    // `signing_pubkey:{uid}` + `signing_key_ip:{uid}` lying around;
+    // the client's subsequent `/api/auth/register-key` call would
+    // either overwrite silently (old behavior, lets an attacker who
+    // captured the access cookie register THEIR key first) or get
+    // 409'd by the new NX guard. DEL-then-register-with-NX gives
+    // the legitimate fresh-login flow a clean slot exactly once.
+    //
+    // Best-effort: a Redis hiccup here is non-fatal — the worst
+    // case is the client sees a 409 on register-key and has to
+    // log out + back in, which is annoying but not a security
+    // regression. The lockout / rate-limit machinery is what
+    // gates the session, not the signing-key plumbing.
+    let _: Result<(), _> = fred::interfaces::KeysInterface::del::<(), _>(
+        &state.redis,
+        format!("signing_pubkey:{user_id}"),
+    )
+    .await;
+    let _: Result<(), _> = fred::interfaces::KeysInterface::del::<(), _>(
+        &state.redis,
+        format!("signing_key_ip:{user_id}"),
+    )
+    .await;
     // Load roles/permissions for the login response body (frontend needs them),
     // but they are NOT embedded in the JWT anymore.
     let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user_id).await?;

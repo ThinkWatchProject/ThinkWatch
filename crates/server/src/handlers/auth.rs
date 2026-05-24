@@ -104,7 +104,7 @@ fn subnet_fail_key(client_ip: &str) -> String {
 /// or ConnectInfo never attached). Failing the request loudly is
 /// the right user-visible signal; the warn-log is the operator-
 /// visible one.
-async fn require_client_ip(
+pub(crate) async fn require_client_ip(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     extensions: &axum::http::Extensions,
@@ -284,6 +284,16 @@ async fn verify_login_pow(
     pow_solution: Option<&PowSolution>,
     login_email: &str,
 ) -> Result<(), AppError> {
+    // Dev-build sanity check on the documented precondition. If a
+    // future caller forgets to pre-normalize, the bound_email !=
+    // login_email comparison below silently returns 400 "different
+    // account" 100% of the time, which is a frustrating foot-gun to
+    // diagnose. Compiles out in release builds; costs nothing in prod.
+    debug_assert_eq!(
+        login_email,
+        think_watch_common::validation::normalize_email(login_email),
+        "verify_login_pow: caller must pass a normalize_email'd address"
+    );
     let solution = pow_solution.ok_or_else(|| {
         AppError::BadRequest(
             "Proof-of-work required. Request a fresh challenge from /api/auth/pow-challenge."
@@ -714,16 +724,47 @@ pub async fn login(
                         // failure — they can retry with a fresh code.
                         // Audit-log it so ops can spot a real attacker
                         // grinding races, but don't arm the lockout.
+                        //
+                        // Dedup the audit row with a per-user SET NX EX
+                        // marker: an attacker who captured ONE valid
+                        // recovery code and spams N concurrent requests
+                        // would otherwise emit N-1 race_lost audit rows
+                        // (one per loser), amplifying the audit volume
+                        // ~10x per leaked code. 60s window aggregates a
+                        // burst into a single row; legitimate
+                        // double-click races also dedup cleanly.
                         if code_was_valid {
-                            let actor = think_watch_common::audit::AnonymousActor {
-                                ip: Some(&client_ip),
-                                user_agent: user_agent.as_deref(),
-                                user_email: Some(&user.email),
-                                user_id: Some(user.id),
-                            };
-                            state
-                                .audit
-                                .log(actor.audit("auth.totp_recovery_race_lost").resource("auth"));
+                            let dedup_key = format!("totp_recovery_race_lost_seen:{}", user.id);
+                            // SET NX returns bool: true when the key was
+                            // created (first-in-window), false when it
+                            // already existed (subsequent loser in the
+                            // same 60s burst). Same binding shape as
+                            // `test_rate_limit.rs::enforce_admin_rate_limit`.
+                            // On Redis error, conservatively emit the
+                            // audit row (no dedup) so a flaky Redis
+                            // doesn't suppress real attack signal.
+                            let dedup_result: Result<bool, _> =
+                                fred::interfaces::KeysInterface::set(
+                                    &state.redis,
+                                    &dedup_key,
+                                    "1",
+                                    Some(fred::types::Expiration::EX(60)),
+                                    Some(fred::types::SetOptions::NX),
+                                    false,
+                                )
+                                .await;
+                            let first_in_window = dedup_result.unwrap_or(true);
+                            if first_in_window {
+                                let actor = think_watch_common::audit::AnonymousActor {
+                                    ip: Some(&client_ip),
+                                    user_agent: user_agent.as_deref(),
+                                    user_email: Some(&user.email),
+                                    user_id: Some(user.id),
+                                };
+                                state.audit.log(
+                                    actor.audit("auth.totp_recovery_race_lost").resource("auth"),
+                                );
+                            }
                             return Err(AppError::Unauthorized);
                         }
 
@@ -870,13 +911,21 @@ pub async fn login(
     const DECAY_LUA: &str = "if redis.call('EXISTS', KEYS[1]) == 1 then \
                               return redis.call('DECRBY', KEYS[1], ARGV[1]) \
                               else return 0 end";
-    let _: Result<i64, _> = fred::interfaces::LuaInterface::eval(
+    let decay_result: Result<i64, _> = fred::interfaces::LuaInterface::eval(
         &state.redis,
         DECAY_LUA,
         vec![fail_key.as_str()],
         SUBNET_FAIL_SUCCESS_DECAY,
     )
     .await;
+    if let Err(e) = decay_result {
+        // Match the warn-log posture of the failure-path INCR a few
+        // hundred lines up — a Redis hiccup here loses ONE success's
+        // worth of decay, but a silent swallow let the counter only
+        // ever climb (which would defeat adaptive difficulty over
+        // time). Surfacing the error gives ops something to alert on.
+        tracing::warn!(error = %e, key = %fail_key, "subnet failure counter decay failed");
+    }
 
     let actor = think_watch_common::audit::AnonymousActor {
         ip: Some(&client_ip),
@@ -914,6 +963,37 @@ pub async fn register_key(
     State(state): State<AppState>,
     Json(req): Json<RegisterKeyRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
+    // Per-user rate limit. Without this, an attacker who captured an
+    // access cookie can race the legitimate browser's register-key
+    // call dozens of times per second, hoping to land their own JWK
+    // in the brief window before the legitimate client registers.
+    // 5/min covers a real user retrying a failed call a few times
+    // (e.g. transient network blip) without buying the attacker any
+    // useful concurrency.
+    let rk_rate_key = format!("register_key_rate:{}", auth_user.claims.sub);
+    let _: () = fred::interfaces::KeysInterface::set(
+        &state.redis,
+        &rk_rate_key,
+        "0",
+        Some(fred::types::Expiration::EX(60)),
+        Some(fred::types::SetOptions::NX),
+        false,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Redis register-key rate-limit init failed (fail-closed): {e}");
+        AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
+    })?;
+    let attempts: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &rk_rate_key, 1)
+        .await
+        .map_err(|e| {
+            tracing::error!("Redis register-key rate-limit incr failed (fail-closed): {e}");
+            AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
+        })?;
+    if attempts > 5 {
+        return Err(AppError::RateLimited);
+    }
+
     // Web Crypto JWK includes extra fields (key_ops, ext) that the p256 crate
     // doesn't understand. Extract only the fields p256 needs: kty, crv, x, y.
     let jwk = &req.public_key;
@@ -952,7 +1032,7 @@ pub async fn register_key(
     // Match the refresh-token lifetime so the pubkey stays usable for
     // the entire session, not just the first 24 hours.
     let ttl_secs = state.dynamic_config.jwt_refresh_ttl_days().await * 86_400;
-    verify_signature::store_public_key(
+    let outcome = verify_signature::store_public_key(
         &state.redis,
         &auth_user.claims.sub,
         &pubkey_json,
@@ -961,6 +1041,24 @@ pub async fn register_key(
     )
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("Failed to store public key: {e}")))?;
+
+    // SET NX inside store_public_key refused: a key is already
+    // registered. Refuse a silent overwrite so an attacker who
+    // captured the access cookie within the 120s bootstrap grace
+    // window can't clobber the legitimate user's JWK + bound IP. To
+    // rotate keys, the user must log out / back in — `issue_auth_session`
+    // clears the slot on every fresh login.
+    if matches!(outcome, verify_signature::StoreKeyOutcome::AlreadyExists) {
+        tracing::warn!(
+            user_id = %auth_user.claims.sub,
+            ip = %client_ip,
+            "register_key refused: a signing key is already bound for this user"
+        );
+        return Err(AppError::Conflict(
+            "Signing key is already registered for this session. Log out and back in to rotate."
+                .into(),
+        ));
+    }
 
     Ok(Json(serde_json::json!({"status": "ok"})))
 }
@@ -1400,7 +1498,7 @@ async fn fetch_user_role_assignments(
     tag = "Auth",
     request_body = ChangePasswordRequest,
     responses(
-        (status = 200, description = "Password changed — all sessions invalidated"),
+        (status = 200, description = "Password changed — OTHER sessions invalidated; the caller receives a fresh session cookie pair in this response and stays logged in"),
         (status = 400, description = "Invalid password or SSO account"),
         (status = 401, description = "Unauthorized or wrong current password"),
     ),
@@ -1410,7 +1508,7 @@ pub async fn change_password(
     auth_user: AuthUser,
     State(state): State<AppState>,
     Json(req): Json<ChangePasswordRequest>,
-) -> Result<Json<serde_json::Value>, AppError> {
+) -> Result<axum::response::Response, AppError> {
     validate_password(&req.new_password)?;
 
     // Return Unauthorized (not NotFound) when the user row is gone —
@@ -1485,7 +1583,29 @@ pub async fn change_password(
         .audit
         .log(auth_user.audit("auth.password_changed").resource("auth"));
 
-    Ok(Json(serde_json::json!({"status": "password_changed"})))
+    // Issue a fresh session for the just-authenticated user. Without
+    // this, the caller's CURRENT access cookie is immediately
+    // invalidated (`pw_epoch` is now() and the middleware rejects on
+    // `iat <= pw_epoch`), so the very next request from the same
+    // client 401s — UX is "you changed your password and got booted
+    // to the login page" with no explanation.
+    //
+    // Order matters: pw_epoch was set ABOVE at time T1. JWT iat is
+    // whole-seconds, and the middleware uses `iat <= epoch` to
+    // include same-second tokens in the revocation sweep (correct
+    // behavior for force-logout). To mint a token that passes, we
+    // need iat > T1 — i.e., wait for the clock to roll into the
+    // NEXT whole second before calling issue_auth_session. 1.1s is
+    // enough to cross any second boundary regardless of when within
+    // the second we landed. The user-visible cost is ~1s of latency
+    // on a password change; the alternative is forcing every
+    // password-change-er to manually re-log in.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let client_ip = auth_user.ip.as_deref();
+    let session = issue_auth_session(&state, user.id, &user.email, client_ip).await?;
+    let mut response = Json(serde_json::json!({"status": "password_changed"})).into_response();
+    session.set_cookies(&mut response);
+    Ok(response)
 }
 
 #[utoipa::path(

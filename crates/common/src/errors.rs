@@ -134,9 +134,13 @@ impl IntoResponse for AppError {
 impl From<sqlx::Error> for AppError {
     fn from(err: sqlx::Error) -> Self {
         // A genuine schema bug is still `Internal`; transient
-        // connectivity is `ServiceUnavailable`. Distinguishing
-        // the two lets dashboards separate "Postgres is down" from
-        // "a query is broken."
+        // connectivity is `ServiceUnavailable`. Unique-violation
+        // bubbles up as `Conflict` so concurrent inserts that race
+        // past a SELECT-EXISTS check don't 500 the caller — the
+        // intent ("this key already exists") survives end-to-end.
+        // Distinguishing all three lets dashboards separate
+        // "Postgres is down" from "a query is broken" from "a
+        // benign concurrent-write conflict."
         match &err {
             sqlx::Error::PoolTimedOut
             | sqlx::Error::PoolClosed
@@ -144,6 +148,18 @@ impl From<sqlx::Error> for AppError {
             | sqlx::Error::Io(_) => {
                 tracing::error!("Database unavailable: {err:?}");
                 AppError::ServiceUnavailable("Database unavailable".into())
+            }
+            sqlx::Error::Database(db_err)
+                if matches!(db_err.kind(), sqlx::error::ErrorKind::UniqueViolation) =>
+            {
+                // The PG SQLSTATE for unique_violation is `23505`.
+                // We surface this as 409 so register / setup / admin
+                // create / SSO provisioning all return a clean
+                // Conflict on case-only racy duplicates against the
+                // `LOWER(email)` functional index without each
+                // handler needing its own ErrorKind sniffing.
+                tracing::debug!("Database unique violation: {err:?}");
+                AppError::Conflict("Resource already exists".into())
             }
             _ => {
                 tracing::error!("Database error: {err:?}");

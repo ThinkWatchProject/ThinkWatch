@@ -25,23 +25,48 @@ const HEADER_SIGNATURE: &str = "x-signature";
 /// (no headers + no key → allow) then let unsigned requests through
 /// unchecked, collapsing the signature-binding security model for
 /// any session older than a day.
+/// Outcome of an attempt to register a public key for a user.
+#[derive(Debug, PartialEq, Eq)]
+pub enum StoreKeyOutcome {
+    /// First registration for this user (Redis SET NX accepted).
+    Stored,
+    /// A key was already registered. Caller should return 409 so a
+    /// stolen access cookie can't silently overwrite the
+    /// legitimate user's signing key from the attacker's IP within
+    /// the 120s bootstrap grace window. To rotate, the user must
+    /// re-authenticate (login DELetes the keys via
+    /// `issue_auth_session`) before calling register-key again.
+    AlreadyExists,
+}
+
 pub async fn store_public_key(
     redis: &fred::clients::Client,
     user_id: &uuid::Uuid,
     pubkey_jwk_json: &str,
     client_ip: Option<&str>,
     ttl_secs: i64,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<StoreKeyOutcome> {
     let redis_key = format!("signing_pubkey:{user_id}");
-    fred::interfaces::KeysInterface::set::<(), _, _>(
+    // SET NX returns bool: the FIRST register-key call for this
+    // session wins (Ok(true)). A second call (potentially an attacker
+    // who captured the access cookie racing the legitimate browser)
+    // gets Ok(false). Same binding shape as test_rate_limit.rs's
+    // enforce_admin_rate_limit.
+    let stored: bool = fred::interfaces::KeysInterface::set(
         redis,
         &redis_key,
         pubkey_jwk_json,
         Some(fred::types::Expiration::EX(ttl_secs)),
-        None,
+        Some(fred::types::SetOptions::NX),
         false,
     )
     .await?;
+    if !stored {
+        // NX refused the write — key already exists. Don't touch the
+        // IP key; we'd half-update the binding (pubkey from session A,
+        // IP from attacker B) which is worse than refusing entirely.
+        return Ok(StoreKeyOutcome::AlreadyExists);
+    }
 
     // Store the IP the public key was registered from for session binding
     if let Some(ip) = client_ip {
@@ -57,7 +82,7 @@ pub async fn store_public_key(
         .await?;
     }
 
-    Ok(())
+    Ok(StoreKeyOutcome::Stored)
 }
 
 /// Build the httpOnly access-token cookie. SameSite=Lax (not Strict)
