@@ -22,7 +22,10 @@ vi.mock('@/hooks/use-pow-challenge', () => ({
     status: 'ready',
     solution: { challenge_id: 'test-challenge', nonce: '0' },
     tried: 0,
+    difficulty: 19,
     error: null,
+    // Far-future expiry so submit-time staleness check passes.
+    expiresAt: Date.now() + 60_000,
     refresh: vi.fn(),
   }),
 }))

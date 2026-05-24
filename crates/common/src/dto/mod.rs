@@ -30,23 +30,38 @@ pub struct LoginRequest {
     pub totp_code: Option<String>,
     /// Proof-of-work solution. Required on every login attempt so a
     /// distributed brute-forcer can't dodge per-IP / per-email rate
-    /// limits without committing CPU. The frontend grinds in a Web
-    /// Worker while the user types their password, so legitimate
-    /// users almost never wait.
+    /// limits without committing CPU. The challenge must have been
+    /// minted for this exact `email` (the server stored it at mint
+    /// time and re-checks both via the hash input and a metadata
+    /// equality check). The frontend grinds in a Web Worker while
+    /// the user types their password, so legitimate users almost
+    /// never wait.
     #[serde(default)]
     pub pow: Option<PowSolution>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct PowSolution {
     /// Opaque ID returned by `POST /api/auth/pow-challenge`.
     pub challenge_id: String,
     /// UTF-8 nonce the client found such that the SHA-256 of
-    /// `challenge_random:nonce` has the required leading-zero bits.
+    /// `challenge_random || ":" || email || ":" || nonce` has the
+    /// required leading-zero bits. The email must be the same value
+    /// (normalized to trim + lowercase) that was passed to the mint
+    /// endpoint — see [`think_watch_auth::pow::verify_pow`].
     pub nonce: String,
 }
 
-#[derive(Debug, Serialize)]
+/// Mint request for `POST /api/auth/pow-challenge`. Email is
+/// required so the server can bind the challenge to the account
+/// the client will eventually try to authenticate as (see
+/// [`think_watch_auth::pow::verify_pow`] for why).
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
+pub struct PowChallengeRequest {
+    pub email: String,
+}
+
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct PowChallengeResponse {
     pub challenge_id: String,
     pub challenge_random: String,
@@ -55,6 +70,11 @@ pub struct PowChallengeResponse {
     /// stale challenges proactively rather than rely on the server's
     /// `Challenge expired` error.
     pub issued_at: i64,
+    /// Server-authoritative lifetime of the challenge in seconds.
+    /// Client counts down from `issued_at + ttl_secs` and re-mints
+    /// before the Redis key dies, so a slow user never sees a stale
+    /// "verified" chip.
+    pub ttl_secs: i64,
 }
 
 /// Login / refresh / SSO callback response.

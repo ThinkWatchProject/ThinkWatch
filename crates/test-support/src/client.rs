@@ -138,7 +138,14 @@ impl TestClient {
             if let Value::Object(map) = &value
                 && !map.contains_key("pow")
             {
-                let solution = self.mint_and_grind_pow().await?;
+                // PoW is now bound to the email the login is for —
+                // mint with the same email the body carries, so the
+                // server-side email-match check passes.
+                let email = map
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .context("login body missing `email`; cannot mint PoW")?;
+                let solution = self.mint_and_grind_pow(email).await?;
                 let mut owned = map.clone();
                 owned.insert("pow".into(), solution);
                 return self
@@ -150,16 +157,20 @@ impl TestClient {
         self.send(Method::POST, path, Some(&body)).await
     }
 
-    /// Hit `POST /api/auth/pow-challenge`, grind the returned
-    /// challenge until SHA-256 has the required leading zero bits,
-    /// and return the `{ challenge_id, nonce }` body the login
-    /// handler expects under `pow`.
-    async fn mint_and_grind_pow(&self) -> Result<Value> {
+    /// Hit `POST /api/auth/pow-challenge` with the supplied email,
+    /// grind the returned challenge until SHA-256 has the required
+    /// leading zero bits, and return the `{ challenge_id, nonce }`
+    /// body the login handler expects under `pow`.
+    ///
+    /// The email is part of the hash input (see
+    /// [`think_watch_auth::pow::verify_pow`]) — passing the wrong
+    /// one here means no nonce ever validates.
+    pub async fn mint_and_grind_pow(&self, email: &str) -> Result<Value> {
         let challenge_resp = self
             .send(
                 Method::POST,
                 "/api/auth/pow-challenge",
-                Some(&serde_json::json!({})),
+                Some(&serde_json::json!({ "email": email })),
             )
             .await?;
         if !challenge_resp.status.is_success() {
@@ -182,10 +193,18 @@ impl TestClient {
             .and_then(|n| u8::try_from(n).ok())
             .context("difficulty missing or out of range")?;
 
+        // Server lower-cases + trims on store; mirror that so the
+        // hash we compute matches the one verify_pow will compute.
+        let bound_email = email.trim().to_lowercase();
         let mut nonce: u64 = 0;
         loop {
             let nonce_str = nonce.to_string();
-            if think_watch_auth::pow::verify_pow(challenge_random, &nonce_str, difficulty) {
+            if think_watch_auth::pow::verify_pow(
+                challenge_random,
+                &bound_email,
+                &nonce_str,
+                difficulty,
+            ) {
                 return Ok(serde_json::json!({
                     "challenge_id": challenge_id,
                     "nonce": nonce_str,

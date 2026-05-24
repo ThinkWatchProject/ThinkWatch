@@ -30,10 +30,12 @@ export function LoginPage({ onLogin }: LoginPageProps) {
   const { ssoEnabled, allowRegistration: registrationOpen } = useSsoStatus();
   const [totpStep, setTotpStep] = useState(false);
   const [totpCode, setTotpCode] = useState('');
-  // PoW grinder runs in a Web Worker from mount. By the time the
-  // user has typed their password and clicked Sign in, the solution
-  // is usually already `ready` and the click is instant.
-  const pow = usePowChallenge();
+  // PoW is bound to the account being authenticated — the hook
+  // watches the email field and only starts grinding once it looks
+  // like a valid address (debounced). By the time the user finishes
+  // typing their password, the solution is usually already `ready`
+  // and the click is instant.
+  const pow = usePowChallenge(email);
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -43,6 +45,15 @@ export function LoginPage({ onLogin }: LoginPageProps) {
       // The Sign-in button is disabled in that state, but defend
       // against a programmatic submit.
       setError(t('auth.powStillVerifying'));
+      return;
+    }
+    // The hook's expiry setTimeout can drift when the tab was
+    // backgrounded. Re-check the absolute timestamp at submit time
+    // so we don't post a solution the server has already evicted
+    // from Redis (which would 400 with a confusing error path).
+    if (pow.expiresAt > 0 && Date.now() >= pow.expiresAt) {
+      setError(t('auth.powStillVerifying'));
+      pow.refresh();
       return;
     }
     setLoading(true);
@@ -159,7 +170,6 @@ export function LoginPage({ onLogin }: LoginPageProps) {
             <PowIndicator
               status={pow.status}
               tried={pow.tried}
-              elapsedMs={pow.elapsedMs}
               difficulty={pow.difficulty}
               errorMessage={pow.error}
               onRetry={pow.refresh}

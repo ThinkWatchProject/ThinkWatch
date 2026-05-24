@@ -19,20 +19,40 @@
 //!
 //! ## Mechanism
 //!
-//! - Server issues `(challenge_id, challenge_random, difficulty)`,
-//!   stashes `challenge_id → (challenge_random, difficulty)` in Redis
-//!   under [`POW_CHALLENGE_PREFIX`] with [`CHALLENGE_TTL_SECS`].
+//! - Client posts `{ email }` to `/api/auth/pow-challenge`. Server
+//!   issues `(challenge_id, challenge_random, difficulty)` and
+//!   stashes `challenge_id → (challenge_random, difficulty, email)`
+//!   in Redis under [`POW_CHALLENGE_PREFIX`] with
+//!   [`CHALLENGE_TTL_SECS`].
 //! - Client finds a `nonce` (any UTF-8 string, typically a number)
-//!   such that `SHA-256(challenge_random || ":" || nonce)` has at
-//!   least `difficulty` leading zero *bits*.
+//!   such that `SHA-256(challenge_random || ":" || email || ":" ||
+//!   nonce)` has at least `difficulty` leading zero *bits*.
 //! - Client posts `{ challenge_id, nonce }` alongside the login.
 //! - Server `GETDEL`s the challenge (single-use, prevents replay),
-//!   re-computes the hash, checks the leading-zero count, then runs
-//!   the normal credential check.
+//!   re-computes the hash with the stored email, checks the
+//!   leading-zero count, **then** asserts the stored email matches
+//!   the login request email, then runs the normal credential
+//!   check.
+//!
+//! ## Why email is in the hash AND a stored field
+//!
+//! Mixing email into the SHA-256 input means a challenge ground for
+//! `alice@x` cannot be replayed against `bob@x` — the hashes would
+//! differ. Keeping the bound email in Redis lets verify reject
+//! mismatched email at the metadata layer too (defense in depth,
+//! and a clearer 4xx than "invalid nonce").
+//!
+//! Practical effect: an attacker pre-mining a stockpile of
+//! challenges must commit to which email each one targets at mint
+//! time. They cannot grind one challenge and try it against every
+//! email in a credential-stuffing list.
 //!
 //! Difficulty 19 → expected ~262144 SHA-256 ops → ~150-250ms in a
 //! browser Web Worker via WebCrypto. Tunable per-environment via the
-//! settings table; defaults are conservative.
+//! settings table; defaults are conservative. The mint handler may
+//! also escalate to higher difficulty when the requesting IP
+//! subnet has recent login failures — see
+//! [`difficulty_for_subnet_failures`].
 
 use data_encoding::BASE64URL_NOPAD;
 use sha2::{Digest, Sha256};
@@ -57,20 +77,74 @@ pub const CHALLENGE_TTL_SECS: i64 = 300;
 /// Redis key prefix for issued challenges.
 pub const POW_CHALLENGE_PREFIX: &str = "pow:challenge:";
 
-/// Verify that `SHA-256(challenge_random || ":" || nonce)` has at
-/// least `difficulty` leading zero bits. Returns `true` on a valid
-/// proof.
+/// Verify that `SHA-256(challenge_random || ":" || email || ":" ||
+/// nonce)` has at least `difficulty` leading zero bits. Returns
+/// `true` on a valid proof.
 ///
-/// Constant separator `:` between random and nonce so an attacker
-/// can't swap part of the random into the nonce side and re-use a
-/// pre-computed hash for a different `(random, nonce)` pair.
-pub fn verify_pow(challenge_random: &str, nonce: &str, difficulty: u8) -> bool {
+/// The email is part of the hash input so a challenge ground for
+/// one account cannot be replayed against another — the SHA-256
+/// output differs as soon as the email differs. The server passes
+/// the email it stored at mint time (NOT the email from the login
+/// request) to keep this honest: a forged login email won't change
+/// what the hash gate accepts.
+///
+/// Constant `:` separator between every field so an attacker can't
+/// swap part of one component into another and pre-compute a hash
+/// for a different `(random, email, nonce)` triple.
+pub fn verify_pow(challenge_random: &str, email: &str, nonce: &str, difficulty: u8) -> bool {
     let mut hasher = Sha256::new();
     hasher.update(challenge_random.as_bytes());
+    hasher.update(b":");
+    hasher.update(email.as_bytes());
     hasher.update(b":");
     hasher.update(nonce.as_bytes());
     let digest = hasher.finalize();
     leading_zero_bits(&digest) >= difficulty as u32
+}
+
+/// Pick a PoW difficulty based on recent login failures observed
+/// from the requesting IP's /24 (IPv4) or /48 (IPv6) subnet. Three
+/// tiers so a single mistyping user on a corporate NAT doesn't
+/// instantly land in the slow lane, but a confirmed brute-force
+/// botnet hitting from a /24 pays compound interest.
+///
+/// At difficulty 19 the median grind is ~150-250ms, 21 jumps to
+/// ~600ms-1s, 23 to ~2-4s. Bots feel each step; humans don't notice
+/// the first.
+pub fn difficulty_for_subnet_failures(recent_failures: u64) -> u8 {
+    if recent_failures >= 50 {
+        23
+    } else if recent_failures >= 10 {
+        21
+    } else {
+        DEFAULT_DIFFICULTY
+    }
+}
+
+/// Compute the Redis subnet key for failure aggregation. `/24` on
+/// IPv4 (256 hosts) and `/48` on IPv6 (the typical residential
+/// allocation) match how botnets are actually distributed without
+/// being so wide that one bad actor sinks an entire ISP.
+///
+/// Callers MUST pass a real IP — the auth handlers gate on
+/// `require_client_ip` and reject the request with 400 when no IP
+/// can be resolved, so this function is only invoked with parseable
+/// input in production. The unparseable-input branch returns the
+/// raw string for test ergonomics; if it ever fires in prod, the
+/// `require_client_ip` invariant has been violated upstream.
+pub fn subnet_key(ip: &str) -> String {
+    use std::net::IpAddr;
+    match ip.parse::<IpAddr>() {
+        Ok(IpAddr::V4(v4)) => {
+            let o = v4.octets();
+            format!("{}.{}.{}.0/24", o[0], o[1], o[2])
+        }
+        Ok(IpAddr::V6(v6)) => {
+            let s = v6.segments();
+            format!("{:x}:{:x}:{:x}::/48", s[0], s[1], s[2])
+        }
+        Err(_) => ip.to_string(),
+    }
 }
 
 /// Count leading zero bits in a byte slice. Big-endian — byte 0
@@ -117,8 +191,8 @@ mod tests {
     fn verify_rejects_zero_difficulty_with_wrong_random() {
         // 0-bit difficulty accepts any solution; sanity check that
         // the function still reads challenge_random correctly.
-        assert!(verify_pow("rnd-A", "0", 0));
-        assert!(verify_pow("rnd-B", "0", 0));
+        assert!(verify_pow("rnd-A", "a@x.com", "0", 0));
+        assert!(verify_pow("rnd-B", "a@x.com", "0", 0));
     }
 
     #[test]
@@ -126,10 +200,11 @@ mod tests {
         // Brute-force a small solution to exercise the happy path.
         // 12 bits is fast (avg ~4096 iters).
         let challenge = "test-random";
+        let email = "user@example.com";
         let mut nonce = 0u64;
         loop {
             let candidate = nonce.to_string();
-            if verify_pow(challenge, &candidate, 12) {
+            if verify_pow(challenge, email, &candidate, 12) {
                 break;
             }
             nonce += 1;
@@ -141,18 +216,39 @@ mod tests {
     fn verify_rejects_solution_for_different_random() {
         // Find a valid nonce for one random, then verify against a
         // different random — must fail.
+        let email = "user@example.com";
         let mut nonce = 0u64;
         loop {
-            if verify_pow("rnd-1", &nonce.to_string(), 12) {
+            if verify_pow("rnd-1", email, &nonce.to_string(), 12) {
                 break;
             }
             nonce += 1;
         }
         let n = nonce.to_string();
-        assert!(verify_pow("rnd-1", &n, 12));
+        assert!(verify_pow("rnd-1", email, &n, 12));
         assert!(
-            !verify_pow("rnd-2", &n, 12),
+            !verify_pow("rnd-2", email, &n, 12),
             "valid nonce for rnd-1 must NOT validate against rnd-2"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_solution_for_different_email() {
+        // The whole point of email-binding: a challenge ground for
+        // alice can't be replayed against bob even if the attacker
+        // knows the (challenge_random, nonce) pair.
+        let mut nonce = 0u64;
+        loop {
+            if verify_pow("rnd-1", "alice@x.com", &nonce.to_string(), 12) {
+                break;
+            }
+            nonce += 1;
+        }
+        let n = nonce.to_string();
+        assert!(verify_pow("rnd-1", "alice@x.com", &n, 12));
+        assert!(
+            !verify_pow("rnd-1", "bob@x.com", &n, 12),
+            "valid nonce for alice MUST NOT validate against bob"
         );
     }
 
@@ -165,5 +261,73 @@ mod tests {
         assert_ne!(a_id, a_rnd, "id and random must be independent");
         assert_eq!(a_id.len(), 22, "16 bytes base64-url-no-pad = 22 chars");
         assert_eq!(a_rnd.len(), 22);
+    }
+
+    #[test]
+    fn difficulty_escalates_with_subnet_failure_count() {
+        assert_eq!(difficulty_for_subnet_failures(0), DEFAULT_DIFFICULTY);
+        assert_eq!(difficulty_for_subnet_failures(9), DEFAULT_DIFFICULTY);
+        assert_eq!(difficulty_for_subnet_failures(10), 21);
+        assert_eq!(difficulty_for_subnet_failures(49), 21);
+        assert_eq!(difficulty_for_subnet_failures(50), 23);
+        assert_eq!(difficulty_for_subnet_failures(1_000_000), 23);
+    }
+
+    #[test]
+    fn subnet_key_groups_ipv4_by_24() {
+        assert_eq!(subnet_key("192.168.1.42"), "192.168.1.0/24");
+        assert_eq!(subnet_key("192.168.1.99"), "192.168.1.0/24");
+        assert_eq!(subnet_key("192.168.2.42"), "192.168.2.0/24");
+        assert_eq!(subnet_key("10.0.0.1"), "10.0.0.0/24");
+    }
+
+    #[test]
+    fn subnet_key_groups_ipv6_by_48() {
+        assert_eq!(subnet_key("2001:db8:1::1"), "2001:db8:1::/48");
+        assert_eq!(subnet_key("2001:db8:1::abcd"), "2001:db8:1::/48");
+        assert_eq!(subnet_key("2001:db8:2::1"), "2001:db8:2::/48");
+    }
+
+    #[test]
+    fn subnet_key_ipv6_canonicalizes_before_grouping() {
+        // `Ipv6Addr::from_str` normalises before `.segments()`, so a
+        // fully-expanded form collides with its `::` shorthand.
+        assert_eq!(
+            subnet_key("2001:db8:1::1"),
+            subnet_key("2001:0db8:0001:0000:0000:0000:0000:0001"),
+        );
+    }
+
+    #[test]
+    fn subnet_key_ipv6_loopback_and_linklocal_share_zero_bucket() {
+        // Both addresses start with three zero segments and collapse
+        // into the same key. In production these wouldn't reach the
+        // login handler (they're not routable across the public
+        // internet), but if a reverse proxy ever forwards them they
+        // aggregate together. Documenting the behaviour so a future
+        // reviewer doesn't read it as a bug.
+        assert_eq!(subnet_key("::1"), "0:0:0::/48");
+        assert_eq!(subnet_key("fe80::abcd"), "fe80:0:0::/48");
+    }
+
+    #[test]
+    fn subnet_key_ipv4_mapped_ipv6_collapses_to_zero_bucket() {
+        // `::ffff:192.0.2.1` is an IPv4-mapped IPv6 address; the
+        // first three segments are zero so it lands in the same
+        // bucket as `::1`. In practice axum's `ConnectInfo` exposes
+        // the unmapped V4 address — the parser sees a real V4 —
+        // but XFF-supplied mapped forms would aggregate here.
+        assert_eq!(subnet_key("::ffff:192.0.2.1"), "0:0:0::/48");
+    }
+
+    #[test]
+    fn subnet_key_passes_through_unparseable() {
+        // Production callers go through `require_client_ip`, which
+        // 400s if an IP can't be resolved — this branch is for unit
+        // tests and operator debugging only. We still want a
+        // deterministic key so test data is stable.
+        assert_eq!(subnet_key("unknown"), "unknown");
+        assert_eq!(subnet_key(""), "");
+        assert_eq!(subnet_key("not-an-ip"), "not-an-ip");
     }
 }

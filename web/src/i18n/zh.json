@@ -191,9 +191,11 @@
     "powStillVerifying": "验证还没完成，请稍后再试。",
     "invalidCredentials": "邮箱或密码错误",
     "pow": {
+      "awaiting": "反爆破护盾 · 等待邮箱",
       "fetching": "反爆破护盾 · 获取挑战中…",
       "grinding": "反爆破护盾 · 正在算证明",
       "ready": "反爆破护盾 · 已验证",
+      "expired": "反爆破护盾 · 挑战已过期",
       "errorShort": "反爆破护盾 · 挑战失败"
     },
     "email": "邮箱",

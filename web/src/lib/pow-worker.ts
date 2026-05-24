@@ -3,9 +3,15 @@
 // main thread while the user fills out the login form.
 //
 // Protocol:
-//   - main → worker: { challenge_random, difficulty }
+//   - main → worker: { challenge_random, email, difficulty }
 //   - worker → main: { type: 'progress', tried } (every 50k iters)
 //   - worker → main: { type: 'done', nonce, tried, elapsed_ms }
+//
+// Hash input is `challenge_random || ":" || email || ":" || nonce` —
+// the email is part of the salt so a challenge cannot be ground for
+// one account and reused against another. Caller must pass the
+// same email the mint endpoint was called with (server stored it
+// at mint, will compare on verify).
 //
 // The worker terminates itself after posting `done`. Main thread
 // reuses one worker per challenge (cheaper than re-spawn for the
@@ -14,6 +20,7 @@
 interface StartMessage {
   type: 'start';
   challenge_random: string;
+  email: string;
   difficulty: number;
 }
 
@@ -22,10 +29,10 @@ type Inbound = StartMessage;
 self.onmessage = async (e: MessageEvent<Inbound>) => {
   const msg = e.data;
   if (msg.type !== 'start') return;
-  const { challenge_random, difficulty } = msg;
+  const { challenge_random, email, difficulty } = msg;
 
   const encoder = new TextEncoder();
-  const prefix = encoder.encode(`${challenge_random}:`);
+  const prefix = encoder.encode(`${challenge_random}:${email}:`);
   // SubtleCrypto.digest is async; doing one call per nonce works but
   // adds ~50µs of promise overhead each. Fine at our difficulty
   // (~250k iters), and saves us a JS SHA-256 implementation.

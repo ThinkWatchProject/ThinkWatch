@@ -191,9 +191,11 @@
     "powStillVerifying": "Verification still running. Try again in a moment.",
     "invalidCredentials": "Invalid email or password",
     "pow": {
+      "awaiting": "Anti-bot shield · awaiting email",
       "fetching": "Anti-bot shield · preparing challenge…",
       "grinding": "Anti-bot shield · computing proof",
       "ready": "Anti-bot shield · verified",
+      "expired": "Anti-bot shield · challenge expired",
       "errorShort": "Anti-bot shield · challenge failed"
     },
     "email": "Email",

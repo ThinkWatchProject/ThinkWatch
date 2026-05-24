@@ -8,12 +8,12 @@ use think_watch_auth::password;
 use think_watch_auth::pow;
 use think_watch_common::audit::AuditActor;
 use think_watch_common::dto::{
-    CreateUserRequest, LoginRequest, PowChallengeResponse, PowSolution, RefreshRequest,
-    UserResponse,
+    CreateUserRequest, LoginRequest, PowChallengeRequest, PowChallengeResponse, PowSolution,
+    RefreshRequest, UserResponse,
 };
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
-use think_watch_common::validation::validate_password;
+use think_watch_common::validation::{validate_email, validate_password};
 
 use crate::middleware::verify_signature;
 
@@ -54,8 +54,68 @@ pub struct DisableTotpRequest {
     pub old_password: String,
 }
 
+/// Redis prefix for the per-subnet failed-login counter. Drives
+/// adaptive PoW difficulty: a /24 (or /48 on IPv6) accumulating
+/// failures gets handed harder challenges on its next mint.
+const SUBNET_FAIL_PREFIX: &str = "auth_fail_subnet:";
+
+/// Fixed-start window for the per-subnet failure counter. The SET
+/// NX EX seeds the key at first failure; INCR does NOT refresh the
+/// TTL, so the counter spans 10 minutes from that first miss rather
+/// than rolling on every increment. Long enough that a sustained
+/// brute-force trips the elevated difficulty before the window
+/// closes, short enough that a single bad morning behind a corporate
+/// NAT clears by lunch.
+const SUBNET_FAIL_WINDOW_SECS: i64 = 600;
+
+/// Resolve the client IP or fail-closed with 400. Returning
+/// `"unknown"` (the old fallback) caused two real problems:
+///
+/// 1. The literal `"unknown"` was used as a subnet key — every
+///    requester that hit the fallback shared one
+///    `auth_fail_subnet:unknown` bucket. A single attacker landing
+///    there could pump the counter past 50 and force every other
+///    "unknown" requester into difficulty 23 for the whole window.
+/// 2. The same string keyed per-IP rate limits, so one bot ate the
+///    60/min mint quota for everyone in the same bucket.
+///
+/// `extract_client_ip` only returns `None` when the operator's
+/// proxy config is broken (e.g. `ip_source=xff` but no XFF header,
+/// or ConnectInfo never attached). Failing the request loudly is
+/// the right user-visible signal; the warn-log is the operator-
+/// visible one.
+async fn require_client_ip(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    extensions: &axum::http::Extensions,
+) -> Result<String, AppError> {
+    match crate::middleware::auth_guard::extract_client_ip(state, headers, extensions).await {
+        Some(ip) => Ok(ip),
+        None => {
+            tracing::warn!(
+                "client IP could not be determined — check security.trusted_proxies / \
+                 client_ip_source config"
+            );
+            Err(AppError::BadRequest(
+                "Cannot determine client IP — check proxy configuration".into(),
+            ))
+        }
+    }
+}
+
 /// `POST /api/auth/pow-challenge` — issue a fresh proof-of-work
-/// challenge for the next login attempt.
+/// challenge for the next login attempt against the supplied
+/// account.
+///
+/// **Email is required and bound to the challenge** — see the
+/// module docs in [`think_watch_auth::pow`] for the reasoning. The
+/// short version: it stops an attacker from grinding one challenge
+/// and trying it across a credential-stuffing list of emails.
+///
+/// **Difficulty is adaptive** — if the requesting IP's /24 (or /48
+/// on IPv6) has 10+ recent login failures, the minted challenge
+/// requires more leading-zero bits. The user usually doesn't
+/// notice; a botnet does.
 ///
 /// Per-IP rate-limited (60/min) so an attacker can't hammer the
 /// endpoint and either (a) churn through Redis storage faster than
@@ -64,8 +124,10 @@ pub struct DisableTotpRequest {
     post,
     path = "/api/auth/pow-challenge",
     tag = "Auth",
+    request_body = PowChallengeRequest,
     responses(
-        (status = 200, description = "Challenge minted"),
+        (status = 200, description = "Challenge minted", body = PowChallengeResponse),
+        (status = 400, description = "Missing or invalid email"),
         (status = 429, description = "Per-IP challenge mint rate exceeded"),
     ),
     security(()),
@@ -74,16 +136,16 @@ pub async fn issue_pow_challenge(
     State(state): State<AppState>,
     request: axum::extract::Request,
 ) -> Result<Json<PowChallengeResponse>, AppError> {
-    let client_ip = crate::middleware::auth_guard::extract_client_ip(
-        &state,
-        request.headers(),
-        request.extensions(),
-    )
-    .await
-    .unwrap_or_else(|| "unknown".to_string());
+    let client_ip = require_client_ip(&state, request.headers(), request.extensions()).await?;
 
-    // Per-IP rate limit on challenge minting. Higher than the
-    // login limit (30/min) because each login attempt may consume +
+    // Rate limit BEFORE parsing the body, so a client spamming
+    // malformed JSON or invalid emails still consumes their per-IP
+    // slot. Order was reversed in the first cut, which let an
+    // attacker burn server-side parse cycles without ever tripping
+    // the 60/min cap.
+    //
+    // Per-IP rate limit on challenge minting. Higher than the login
+    // limit (30/min) because each login attempt may consume +
     // re-issue a challenge on a wrong-password retry, so a real
     // user mistyping twice already needs ~3 mints.
     let key = format!("pow_mint_ip:{client_ip}");
@@ -107,18 +169,66 @@ pub async fn issue_pow_challenge(
             AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
         })?;
     if count > 60 {
-        return Err(AppError::BadRequest(
-            "Too many challenge requests from this address. Please slow down.".into(),
-        ));
+        // 429 matches the utoipa annotation and RFC 6585. Client
+        // also gets Retry-After via AppError::RateLimited's
+        // IntoResponse impl.
+        return Err(AppError::RateLimited);
+    }
+
+    let req: PowChallengeRequest = parse_json_body(request, 4096).await?;
+    let email = req.email.trim().to_lowercase();
+    validate_email(&email)?;
+
+    // Adaptive difficulty: look up the requesting subnet's recent
+    // failure count. GET only — never create the key here, only the
+    // failure path on `/api/auth/login` does. A missing key means
+    // zero failures.
+    let subnet = pow::subnet_key(&client_ip);
+    let subnet_fail_key = format!("{SUBNET_FAIL_PREFIX}{subnet}");
+    let recent_failures: u64 = match fred::interfaces::KeysInterface::get::<Option<String>, _>(
+        &state.redis,
+        &subnet_fail_key,
+    )
+    .await
+    {
+        Ok(Some(s)) => s.parse().unwrap_or(0),
+        Ok(None) => 0,
+        Err(e) => {
+            // Fail open *on the read*: a Redis hiccup here would
+            // otherwise refuse mints entirely. We accept the small
+            // risk of giving an attacker the default difficulty
+            // during a brief outage. The mint counter above
+            // already failed-closed if Redis is fully down.
+            tracing::warn!(
+                error = %e,
+                "subnet failure-count read failed, defaulting to base difficulty"
+            );
+            0
+        }
+    };
+    let difficulty = pow::difficulty_for_subnet_failures(recent_failures);
+    if difficulty > pow::DEFAULT_DIFFICULTY {
+        // Observability for ops: when adaptive difficulty kicks in,
+        // we want a log line that ties subnet → fail-count →
+        // difficulty so a human can correlate brute-force traffic
+        // with the defense engaging.
+        tracing::info!(
+            subnet = %subnet,
+            recent_failures,
+            difficulty,
+            "PoW difficulty escalated for subnet"
+        );
     }
 
     let (challenge_id, challenge_random) = pow::mint_challenge();
-    let difficulty = pow::DEFAULT_DIFFICULTY;
 
-    // Stash so login can verify + atomically consume it.
-    // Format: `random:difficulty` packed into one string so a single
-    // GETDEL pulls everything we need.
-    let blob = format!("{challenge_random}:{difficulty}");
+    // Stash so login can verify + atomically consume it. Format:
+    // `random:difficulty:email` — three colon-separated fields. The
+    // email is the trailing field so a `:` inside it (if a future
+    // validator change ever allows one) is absorbed by `splitn(3, ':')`
+    // on the verify side rather than splitting the email in two.
+    // `challenge_random` is base64-url-no-pad and never contains `:`.
+    let blob = format!("{challenge_random}:{difficulty}:{email}");
     let _: () = fred::interfaces::KeysInterface::set(
         &state.redis,
         format!("{}{challenge_id}", pow::POW_CHALLENGE_PREFIX),
@@ -135,17 +245,26 @@ pub async fn issue_pow_challenge(
         challenge_random,
         difficulty,
         issued_at: chrono::Utc::now().timestamp(),
+        ttl_secs: pow::CHALLENGE_TTL_SECS,
     }))
 }
 
 /// Atomically claim + verify a PoW solution from the login request.
-/// Returns `Ok(())` on a valid proof; any other outcome (missing
-/// challenge, expired challenge, wrong nonce) maps to `BadRequest`.
+/// Returns `Ok(())` on a valid proof bound to `login_email`; any
+/// other outcome (missing challenge, expired challenge, wrong nonce,
+/// email mismatch) maps to `BadRequest`.
 ///
 /// GETDEL prevents replay — a valid solution is single-use.
+///
+/// The `login_email` arg is the email from the login request. It's
+/// compared (case-insensitively, trimmed) against the email that
+/// was bound to the challenge at mint time. The hash itself also
+/// includes the bound email, so even bypassing this string check
+/// the SHA-256 wouldn't validate.
 async fn verify_login_pow(
     state: &AppState,
     pow_solution: Option<&PowSolution>,
+    login_email: &str,
 ) -> Result<(), AppError> {
     let solution = pow_solution.ok_or_else(|| {
         AppError::BadRequest(
@@ -164,17 +283,47 @@ async fn verify_login_pow(
         )
     })?;
 
-    // `random:difficulty` packed in mint_challenge above. A
-    // malformed blob (race with a manual Redis edit?) is a server
-    // problem, not a user problem.
-    let (challenge_random, difficulty_str) = blob
-        .split_once(':')
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("corrupt pow blob")))?;
-    let difficulty: u8 = difficulty_str
-        .parse()
-        .map_err(|_| AppError::Internal(anyhow::anyhow!("corrupt pow difficulty")))?;
+    // `random:difficulty:email` packed in mint above. `splitn(3, ':')`
+    // keeps the email intact even if it ever contains `:` (today
+    // validate_email doesn't explicitly reject `:`, so the parser
+    // being robust to it is genuine defense-in-depth, not redundant).
+    //
+    // Corrupt blobs map to 400, not 500: this branch only fires after
+    // a successful GETDEL, so the user CAN recover by minting a fresh
+    // challenge. A 500 would correctly page on-call during a rolling
+    // deploy that changes the wire format — but the same upgrade flow
+    // is much better served by a "request a fresh challenge" 4xx that
+    // tracing-logs the corruption separately.
+    let parts: Vec<&str> = blob.splitn(3, ':').collect();
+    let stale_blob_error = || {
+        AppError::BadRequest(
+            "Proof-of-work challenge expired or already consumed. Request a fresh one.".into(),
+        )
+    };
+    if parts.len() != 3 {
+        tracing::warn!(
+            blob_len = blob.len(),
+            "PoW blob missing fields after GETDEL"
+        );
+        return Err(stale_blob_error());
+    }
+    let challenge_random = parts[0];
+    let difficulty: u8 = parts[1].parse().map_err(|_| {
+        tracing::warn!(
+            difficulty_field = parts[1],
+            "PoW blob has unparseable difficulty"
+        );
+        stale_blob_error()
+    })?;
+    let bound_email = parts[2];
 
-    if !pow::verify_pow(challenge_random, &solution.nonce, difficulty) {
+    if bound_email != login_email.trim().to_lowercase() {
+        return Err(AppError::BadRequest(
+            "Proof-of-work was issued for a different account. Request a fresh challenge.".into(),
+        ));
+    }
+
+    if !pow::verify_pow(challenge_random, bound_email, &solution.nonce, difficulty) {
         return Err(AppError::BadRequest(
             "Invalid proof-of-work nonce. Re-grind the challenge.".into(),
         ));
@@ -206,13 +355,10 @@ pub async fn login(
     // Extract client IP for composite rate limiting via the shared helper
     // that validates the trusted-proxy whitelist. Without this validation
     // an attacker can forge X-Forwarded-For to bypass per-IP rate limits.
-    let client_ip = crate::middleware::auth_guard::extract_client_ip(
-        &state,
-        request.headers(),
-        request.extensions(),
-    )
-    .await
-    .unwrap_or_else(|| "unknown".to_string());
+    // `require_client_ip` 400s when the helper returns None — the old
+    // `"unknown"` sentinel collapsed every misconfigured-proxy request
+    // into a single shared subnet/rate-limit bucket.
+    let client_ip = require_client_ip(&state, request.headers(), request.extensions()).await?;
 
     let user_agent = request
         .headers()
@@ -254,7 +400,7 @@ pub async fn login(
     //
     // TOTP-step second submits ride a freshly minted challenge too —
     // every login POST consumes one.
-    verify_login_pow(&state, req.pow.as_ref()).await?;
+    verify_login_pow(&state, req.pow.as_ref(), &req.email).await?;
 
     // Composite rate limiting: per-email AND per-IP.
     //
@@ -388,6 +534,32 @@ pub async fn login(
         let trigger = count.max(email_fails);
         if let Some(secs) = crate::services::auth_lockout::ladder_secs(trigger) {
             crate::services::auth_lockout::apply_lockout(&state.redis, &lockout_key, secs).await?;
+        }
+
+        // Per-subnet failure counter feeds the next PoW mint's
+        // difficulty pick (see `pow::difficulty_for_subnet_failures`).
+        // Best-effort: if Redis hiccups here we audit-log + carry on
+        // with the 401 — refusing the response over a counter blip
+        // would hide real auth failures from the user.
+        let subnet = pow::subnet_key(&client_ip);
+        let subnet_fail_key = format!("{SUBNET_FAIL_PREFIX}{subnet}");
+        let nx_result: Result<(), _> = fred::interfaces::KeysInterface::set(
+            &state.redis,
+            &subnet_fail_key,
+            "0",
+            Some(fred::types::Expiration::EX(SUBNET_FAIL_WINDOW_SECS)),
+            Some(fred::types::SetOptions::NX),
+            false,
+        )
+        .await;
+        if let Err(e) = nx_result {
+            tracing::warn!(error = %e, subnet, "subnet failure counter init failed");
+        } else {
+            let incr_result: Result<u64, _> =
+                fred::interfaces::KeysInterface::incr_by(&state.redis, &subnet_fail_key, 1).await;
+            if let Err(e) = incr_result {
+                tracing::warn!(error = %e, subnet, "subnet failure counter incr failed");
+            }
         }
 
         // Log failed attempt — `AnonymousActor` pre-fills IP / UA /
@@ -568,13 +740,24 @@ pub async fn login(
         }
     }
 
-    // Clear rate limit, lockout, and email-failure keys on successful login.
-    // Also clears the TOTP-specific counter/lock so a real user whose
-    // previous attempts tripped the lockout gets a clean slate after
-    // successfully completing the second factor.
+    // Clear rate limit, lockout, and email-failure keys on successful
+    // login. Also clears the TOTP-specific counter/lock so a real
+    // user whose previous attempts tripped the lockout gets a clean
+    // slate after successfully completing the second factor.
+    //
+    // ALSO clear the per-subnet PoW failure counter on success: a
+    // legitimate user logging in is strong evidence the subnet is
+    // not actively being brute-forced. Without this, an attacker
+    // probing the same /24 (CGNAT, corporate NAT, mobile carrier)
+    // would leave neighbours stuck at difficulty 23 for the rest of
+    // the 10-min window even though the subnet hosts a real user.
+    // The attacker can't game this by holding ONE valid account to
+    // self-clear because they'd also be tripping per-email and
+    // global lockouts — the surface that protected those still does.
     let email_fail_key = format!("auth_email_fails:{}", req.email);
     let totp_fail_key = format!("auth_totp_fails:{}", user.id);
     let totp_lock_key = format!("auth_totp_locked:{}", user.id);
+    let subnet_fail_key = format!("{}{}", SUBNET_FAIL_PREFIX, pow::subnet_key(&client_ip));
     crate::services::auth_lockout::clear(
         &state.redis,
         &[
@@ -583,6 +766,7 @@ pub async fn login(
             &email_fail_key,
             &totp_fail_key,
             &totp_lock_key,
+            &subnet_fail_key,
         ],
     )
     .await;

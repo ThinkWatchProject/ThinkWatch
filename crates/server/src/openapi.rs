@@ -212,6 +212,9 @@ use crate::handlers::{
         schemas(
             // Auth
             ChangePasswordRequest, DisableTotpRequest, TotpSetupResponse, TotpVerifyRequest,
+            think_watch_common::dto::PowChallengeRequest,
+            think_watch_common::dto::PowChallengeResponse,
+            think_watch_common::dto::PowSolution,
             // API Keys
             UpdateKeyRequest,
             ForceRevokeRequest,
