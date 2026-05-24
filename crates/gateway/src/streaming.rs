@@ -11,6 +11,25 @@ use std::sync::{Arc, Mutex};
 /// agree on a single audit-status / Prometheus-label set.
 pub use think_watch_common::lifecycle::streaming::StreamOutcome;
 
+/// Serialize a chunk for an SSE `data:` line. On serialization failure
+/// — which should be impossible for a well-formed `ChatCompletionChunk`
+/// but is theoretically reachable if a provider injects a non-finite
+/// number into `usage` — emit a structured error event instead of an
+/// empty `data:\n\n` frame. An empty event silently breaks audit
+/// (zero-length chunks look successful) and confuses tolerant SSE
+/// parsers; the explicit error frame is loud at every layer.
+pub(crate) fn serialize_sse_chunk<T: serde::Serialize>(chunk: &T) -> String {
+    match serde_json::to_string(chunk) {
+        Ok(s) => s,
+        Err(e) => {
+            metrics::counter!("gateway_stream_chunk_serialize_failed_total").increment(1);
+            tracing::error!("SSE chunk serialization failed: {e}");
+            r#"{"error":{"message":"chunk serialization failed","type":"internal_error"}}"#
+                .to_string()
+        }
+    }
+}
+
 /// Payload delivered to the `on_done` callback when a stream completes
 /// (naturally or via client cancellation).
 pub struct StreamResult {
@@ -182,7 +201,7 @@ pub fn stream_to_sse_with_restorer(
                         }
                     }
 
-                    let json = serde_json::to_string(&chunk).unwrap_or_default();
+                    let json = serialize_sse_chunk(&chunk);
                     yield Ok::<Event, Infallible>(Event::default().data(json));
                 }
                 Err(e) => {
@@ -193,7 +212,19 @@ pub fn stream_to_sse_with_restorer(
                     // the old blanket 502.
                     let error_type = e.error_tag().to_string();
                     let status_code = e.status_code();
-                    let message = e.to_string();
+                    let raw_message = e.to_string();
+                    // Restore PII placeholders inside the error message
+                    // before yielding. Upstream errors that include
+                    // request fragments would otherwise leak `{{EMAIL_1}}`
+                    // (or whatever the redactor uses) to the client
+                    // instead of the original value the caller actually
+                    // sent. `restore_oneshot` leaves the restorer's
+                    // buffer alone so the subsequent tail flush below
+                    // still behaves correctly.
+                    let message = match restorer.as_ref() {
+                        Some(r) if !r.is_noop() => r.restore_oneshot(&raw_message),
+                        _ => raw_message.clone(),
+                    };
                     let error_json = serde_json::json!({
                         "error": {
                             "message": message,
@@ -212,7 +243,9 @@ pub fn stream_to_sse_with_restorer(
                     if let Some(tx) = done_tx.take() {
                         let _ = tx.send(StreamOutcome::UpstreamError {
                             error_type,
-                            message,
+                            // Audit/metrics keep the raw form — the
+                            // restored copy is for the client only.
+                            message: raw_message,
                             status_code,
                         });
                     }
@@ -235,7 +268,7 @@ pub fn stream_to_sse_with_restorer(
                     choice.delta = serde_json::json!({"content": tail});
                     choice.finish_reason = None;
                 }
-                let json = serde_json::to_string(&flush_chunk).unwrap_or_default();
+                let json = serialize_sse_chunk(&flush_chunk);
                 yield Ok::<Event, Infallible>(Event::default().data(json));
             }
         }

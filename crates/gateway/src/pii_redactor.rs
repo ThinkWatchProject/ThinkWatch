@@ -408,6 +408,16 @@ impl PiiStreamRestorer {
         restored
     }
 
+    /// One-shot restoration for a string that is NOT part of the
+    /// streaming content path (typically an error message or a cached
+    /// chunk). Does not touch the internal buffer, so a successful
+    /// chunk's unflushed tail survives — important when an upstream
+    /// error interrupts a stream mid-placeholder and we still want the
+    /// trailing `flush()` to behave correctly.
+    pub fn restore_oneshot(&self, s: &str) -> String {
+        self.restore_complete(s)
+    }
+
     /// Final drain — called once when the source stream ends. Any
     /// residual buffer is emitted verbatim (an unterminated `{{...` at
     /// the very end of a stream never becomes a placeholder, so the

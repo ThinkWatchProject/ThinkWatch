@@ -23,6 +23,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
+use uuid::Uuid;
 
 use think_watch_common::cb_registry::{CbState, record_cb_with_kind};
 
@@ -57,18 +58,27 @@ struct BreakerInner {
     last_failure: Option<Instant>,
 }
 
-/// One circuit breaker, scoped to a single MCP server (keyed by name).
+/// One circuit breaker, scoped to a single MCP server.
+///
+/// Keyed by `server_id` (UUID) at the registry level so a rename or
+/// a second server that happens to share a name doesn't inherit the
+/// other's open/closed state. The display name is passed in on every
+/// call rather than stored on the breaker, so a rename takes effect
+/// in dashboard / log output immediately — caching the name at
+/// breaker construction would freeze the old label until process
+/// restart.
 struct Breaker {
-    server_name: String,
+    #[allow(dead_code)]
+    server_id: Uuid,
     config: CircuitConfig,
     inner: Mutex<BreakerInner>,
 }
 
 impl Breaker {
-    fn new(server_name: String, config: CircuitConfig) -> Self {
-        record_cb_with_kind(&server_name, CbState::Closed, "mcp");
+    fn new(server_id: Uuid, display_name: &str, config: CircuitConfig) -> Self {
+        record_cb_with_kind(display_name, CbState::Closed, "mcp");
         Self {
-            server_name,
+            server_id,
             config,
             inner: Mutex::new(BreakerInner {
                 state: CbState::Closed,
@@ -84,7 +94,7 @@ impl Breaker {
     /// transitions it to `HalfOpen` so the caller's request acts as a
     /// probe. The whole check-then-transition runs under one mutex so
     /// concurrent callers can't both "win" the half-open promotion.
-    async fn check(&self) -> Result<(), CircuitOpen> {
+    async fn check(&self, display_name: &str) -> Result<(), CircuitOpen> {
         let mut inner = self.inner.lock().await;
         match inner.state {
             CbState::Closed | CbState::HalfOpen => Ok(()),
@@ -97,9 +107,9 @@ impl Breaker {
                     inner.state = CbState::HalfOpen;
                     inner.half_open_successes = 0;
                     inner.consecutive_failures = 0;
-                    record_cb_with_kind(&self.server_name, CbState::HalfOpen, "mcp");
+                    record_cb_with_kind(display_name, CbState::HalfOpen, "mcp");
                     tracing::info!(
-                        server = %self.server_name,
+                        server = %display_name,
                         "MCP circuit breaker HALF-OPEN (probing recovery)"
                     );
                     Ok(())
@@ -110,7 +120,7 @@ impl Breaker {
         }
     }
 
-    async fn record_success(&self) {
+    async fn record_success(&self, display_name: &str) {
         let mut inner = self.inner.lock().await;
         inner.consecutive_failures = 0;
         match inner.state {
@@ -119,9 +129,9 @@ impl Breaker {
                 if inner.half_open_successes >= self.config.half_open_max {
                     inner.state = CbState::Closed;
                     inner.half_open_successes = 0;
-                    record_cb_with_kind(&self.server_name, CbState::Closed, "mcp");
+                    record_cb_with_kind(display_name, CbState::Closed, "mcp");
                     tracing::info!(
-                        server = %self.server_name,
+                        server = %display_name,
                         "MCP circuit breaker CLOSED (recovered)"
                     );
                 }
@@ -130,7 +140,7 @@ impl Breaker {
                 // Shouldn't happen — `check` would have rejected — but if
                 // a stale request lands, recover gracefully.
                 inner.state = CbState::Closed;
-                record_cb_with_kind(&self.server_name, CbState::Closed, "mcp");
+                record_cb_with_kind(display_name, CbState::Closed, "mcp");
             }
             CbState::Closed => {}
         }
@@ -141,7 +151,7 @@ impl Breaker {
     /// `record_cb_with_kind` side-effect fires the global OPEN_LISTENER,
     /// which is where the `provider.circuit_open` audit event gets
     /// emitted — no return-value threading required.
-    async fn record_failure(&self) {
+    async fn record_failure(&self, display_name: &str) {
         let mut inner = self.inner.lock().await;
         inner.consecutive_failures += 1;
         match inner.state {
@@ -150,9 +160,9 @@ impl Breaker {
                     inner.state = CbState::Open;
                     inner.last_failure = Some(Instant::now());
                     let failures = inner.consecutive_failures;
-                    record_cb_with_kind(&self.server_name, CbState::Open, "mcp");
+                    record_cb_with_kind(display_name, CbState::Open, "mcp");
                     tracing::warn!(
-                        server = %self.server_name,
+                        server = %display_name,
                         failures,
                         "MCP circuit breaker OPEN"
                     );
@@ -163,9 +173,9 @@ impl Breaker {
                 inner.state = CbState::Open;
                 inner.last_failure = Some(Instant::now());
                 inner.half_open_successes = 0;
-                record_cb_with_kind(&self.server_name, CbState::Open, "mcp");
+                record_cb_with_kind(display_name, CbState::Open, "mcp");
                 tracing::warn!(
-                    server = %self.server_name,
+                    server = %display_name,
                     "MCP circuit breaker back to OPEN (probe failed)"
                 );
             }
@@ -187,11 +197,18 @@ impl std::fmt::Display for CircuitOpen {
 
 impl std::error::Error for CircuitOpen {}
 
-/// Per-process registry of one circuit breaker per MCP server, keyed by
-/// the server's stable name. Cheap to clone; everything inside is `Arc`.
+/// Per-process registry of one circuit breaker per MCP server, keyed
+/// by the server's stable UUID (NOT name).
+///
+/// Renaming a server, or accidentally registering two servers with the
+/// same name, used to share or inherit breaker state because the map
+/// was string-keyed. Concretely: server `srv` flaps, breaker trips
+/// OPEN; admin deletes `srv` and creates a fresh, healthy `srv` →
+/// new server immediately rejects every call until the recovery
+/// window elapses. UUID keys eliminate both failure modes.
 #[derive(Clone, Default)]
 pub struct McpCircuitBreakers {
-    inner: Arc<RwLock<HashMap<String, Arc<Breaker>>>>,
+    inner: Arc<RwLock<HashMap<Uuid, Arc<Breaker>>>>,
     config: CircuitConfig,
 }
 
@@ -207,38 +224,54 @@ impl McpCircuitBreakers {
         }
     }
 
-    /// Get the breaker for `server_name`, creating it on first touch.
-    async fn breaker_for(&self, server_name: &str) -> Arc<Breaker> {
-        if let Some(b) = self.inner.read().await.get(server_name) {
+    /// Get the breaker for `server_id`, creating it on first touch.
+    /// `display_name` is used only at creation time for the initial
+    /// `record_cb_with_kind` event; subsequent state-change events
+    /// pick up whatever name the current caller is using, so a server
+    /// rename takes effect on the very next breaker event.
+    async fn breaker_for(&self, server_id: Uuid, display_name: &str) -> Arc<Breaker> {
+        if let Some(b) = self.inner.read().await.get(&server_id) {
             return Arc::clone(b);
         }
         let mut w = self.inner.write().await;
-        if let Some(b) = w.get(server_name) {
+        if let Some(b) = w.get(&server_id) {
             return Arc::clone(b);
         }
-        let b = Arc::new(Breaker::new(server_name.to_string(), self.config));
-        w.insert(server_name.to_string(), Arc::clone(&b));
+        let b = Arc::new(Breaker::new(server_id, display_name, self.config));
+        w.insert(server_id, Arc::clone(&b));
         b
     }
 
     /// Returns `Ok(())` if the server can be called. Returns `Err(CircuitOpen)`
-    /// if the breaker is currently rejecting requests.
-    pub async fn check(&self, server_name: &str) -> Result<(), CircuitOpen> {
-        self.breaker_for(server_name).await.check().await
+    /// if the breaker is currently rejecting requests. `display_name`
+    /// is used for log lines and the dashboard cb_registry on every
+    /// state-change event — pass the current name so a rename is
+    /// reflected immediately.
+    pub async fn check(&self, server_id: Uuid, display_name: &str) -> Result<(), CircuitOpen> {
+        self.breaker_for(server_id, display_name)
+            .await
+            .check(display_name)
+            .await
     }
 
-    pub async fn record_success(&self, server_name: &str) {
-        self.breaker_for(server_name).await.record_success().await;
+    pub async fn record_success(&self, server_id: Uuid, display_name: &str) {
+        self.breaker_for(server_id, display_name)
+            .await
+            .record_success(display_name)
+            .await;
     }
 
-    pub async fn record_failure(&self, server_name: &str) {
-        self.breaker_for(server_name).await.record_failure().await;
+    pub async fn record_failure(&self, server_id: Uuid, display_name: &str) {
+        self.breaker_for(server_id, display_name)
+            .await
+            .record_failure(display_name)
+            .await;
     }
 
     /// Pre-register a server so it shows up in the dashboard CB snapshot
     /// even before its first call.
-    pub async fn register(&self, server_name: &str) {
-        let _ = self.breaker_for(server_name).await;
+    pub async fn register(&self, server_id: Uuid, display_name: &str) {
+        let _ = self.breaker_for(server_id, display_name).await;
     }
 }
 
@@ -257,48 +290,52 @@ mod tests {
     #[tokio::test]
     async fn opens_after_threshold_failures() {
         let cb = McpCircuitBreakers::with_config(cfg());
+        let id = Uuid::new_v4();
         for _ in 0..3 {
-            cb.record_failure("srv-a").await;
+            cb.record_failure(id, "srv-a").await;
         }
-        assert!(cb.check("srv-a").await.is_err());
+        assert!(cb.check(id, "srv-a").await.is_err());
     }
 
     #[tokio::test]
     async fn closed_servers_pass_through() {
         let cb = McpCircuitBreakers::with_config(cfg());
-        assert!(cb.check("srv-a").await.is_ok());
-        cb.record_success("srv-a").await;
-        assert!(cb.check("srv-a").await.is_ok());
+        let id = Uuid::new_v4();
+        assert!(cb.check(id, "srv-a").await.is_ok());
+        cb.record_success(id, "srv-a").await;
+        assert!(cb.check(id, "srv-a").await.is_ok());
     }
 
     #[tokio::test]
     async fn half_open_recovers_after_successes() {
         let cb = McpCircuitBreakers::with_config(cfg());
+        let id = Uuid::new_v4();
         for _ in 0..3 {
-            cb.record_failure("srv-b").await;
+            cb.record_failure(id, "srv-b").await;
         }
-        assert!(cb.check("srv-b").await.is_err());
+        assert!(cb.check(id, "srv-b").await.is_err());
 
         // Wait past the recovery window then probe.
         tokio::time::sleep(Duration::from_millis(1100)).await;
-        assert!(cb.check("srv-b").await.is_ok()); // transitions to HalfOpen
+        assert!(cb.check(id, "srv-b").await.is_ok()); // transitions to HalfOpen
 
-        cb.record_success("srv-b").await;
-        cb.record_success("srv-b").await; // half_open_max = 2
+        cb.record_success(id, "srv-b").await;
+        cb.record_success(id, "srv-b").await; // half_open_max = 2
         // Should now be Closed again.
-        assert!(cb.check("srv-b").await.is_ok());
+        assert!(cb.check(id, "srv-b").await.is_ok());
     }
 
     #[tokio::test]
     async fn half_open_failure_reopens() {
         let cb = McpCircuitBreakers::with_config(cfg());
+        let id = Uuid::new_v4();
         for _ in 0..3 {
-            cb.record_failure("srv-c").await;
+            cb.record_failure(id, "srv-c").await;
         }
         tokio::time::sleep(Duration::from_millis(1100)).await;
-        assert!(cb.check("srv-c").await.is_ok()); // HalfOpen
-        cb.record_failure("srv-c").await; // probe fails
-        assert!(cb.check("srv-c").await.is_err()); // back to Open
+        assert!(cb.check(id, "srv-c").await.is_ok()); // HalfOpen
+        cb.record_failure(id, "srv-c").await; // probe fails
+        assert!(cb.check(id, "srv-c").await.is_err()); // back to Open
     }
 
     /// Concurrent failures must not bump the breaker past Open multiple
@@ -306,19 +343,20 @@ mod tests {
     #[tokio::test]
     async fn concurrent_failures_serialize() {
         let cb = McpCircuitBreakers::with_config(cfg());
+        let id = Uuid::new_v4();
         let cb1 = cb.clone();
         let cb2 = cb.clone();
         let cb3 = cb.clone();
         let (a, b, c) = tokio::join!(
-            tokio::spawn(async move { cb1.record_failure("srv-d").await }),
-            tokio::spawn(async move { cb2.record_failure("srv-d").await }),
-            tokio::spawn(async move { cb3.record_failure("srv-d").await }),
+            tokio::spawn(async move { cb1.record_failure(id, "srv-d").await }),
+            tokio::spawn(async move { cb2.record_failure(id, "srv-d").await }),
+            tokio::spawn(async move { cb3.record_failure(id, "srv-d").await }),
         );
         a.unwrap();
         b.unwrap();
         c.unwrap();
         // Threshold = 3 → all three failures together must trip Open exactly once.
-        assert!(cb.check("srv-d").await.is_err());
+        assert!(cb.check(id, "srv-d").await.is_err());
     }
 
     /// Concurrent half-open probes must not all be allowed through at once
@@ -327,8 +365,9 @@ mod tests {
     #[tokio::test]
     async fn concurrent_open_to_halfopen_one_winner() {
         let cb = McpCircuitBreakers::with_config(cfg());
+        let id = Uuid::new_v4();
         for _ in 0..3 {
-            cb.record_failure("srv-e").await;
+            cb.record_failure(id, "srv-e").await;
         }
         tokio::time::sleep(Duration::from_millis(1100)).await;
         // Three concurrent checks — all should succeed (HalfOpen lets
@@ -337,11 +376,63 @@ mod tests {
         let cb2 = cb.clone();
         let cb3 = cb.clone();
         let r = tokio::join!(
-            tokio::spawn(async move { cb1.check("srv-e").await.is_ok() }),
-            tokio::spawn(async move { cb2.check("srv-e").await.is_ok() }),
-            tokio::spawn(async move { cb3.check("srv-e").await.is_ok() }),
+            tokio::spawn(async move { cb1.check(id, "srv-e").await.is_ok() }),
+            tokio::spawn(async move { cb2.check(id, "srv-e").await.is_ok() }),
+            tokio::spawn(async move { cb3.check(id, "srv-e").await.is_ok() }),
         );
         // All three should be permitted as HalfOpen probes.
         assert!(r.0.unwrap() && r.1.unwrap() && r.2.unwrap());
+    }
+
+    /// The bug this fix targets: two servers sharing a name must not
+    /// share breaker state. Servers A and B both display "github" but
+    /// have different UUIDs — flapping A must not open B's breaker.
+    #[tokio::test]
+    async fn same_name_distinct_ids_are_isolated() {
+        let cb = McpCircuitBreakers::with_config(cfg());
+        let id_a = Uuid::new_v4();
+        let id_b = Uuid::new_v4();
+        for _ in 0..3 {
+            cb.record_failure(id_a, "github").await;
+        }
+        assert!(cb.check(id_a, "github").await.is_err());
+        // B has the same display name but a different ID — must remain Closed.
+        assert!(cb.check(id_b, "github").await.is_ok());
+    }
+
+    /// Rename: same UUID, new display name. The breaker is keyed by
+    /// UUID so it reuses the existing entry, but the dashboard /
+    /// cb_registry events emitted by subsequent state changes must
+    /// pick up the NEW name — earlier implementations froze the name
+    /// at first-touch and never updated it.
+    #[tokio::test]
+    async fn rename_takes_effect_on_next_state_change() {
+        use think_watch_common::cb_registry::snapshot_cb_states;
+
+        let cb = McpCircuitBreakers::with_config(cfg());
+        let id = Uuid::new_v4();
+        // Use uuid-derived names so we don't crosstalk with the
+        // process-global cb_registry that other tests share.
+        let old_name = format!("rename-old-{}", id.simple());
+        let new_name = format!("rename-new-{}", id.simple());
+
+        // First touch registers under the OLD name.
+        cb.register(id, &old_name).await;
+        assert!(snapshot_cb_states().contains_key(&old_name));
+
+        // Admin renames the server. Subsequent state changes pass the
+        // new name; the registry must learn it. If the breaker had
+        // cached the name at construction time, every event would
+        // continue to emit under the old key and `new_name` would
+        // never appear.
+        for _ in 0..3 {
+            cb.record_failure(id, &new_name).await;
+        }
+        let snap = snapshot_cb_states();
+        assert!(
+            snap.contains_key(&new_name),
+            "rename did not propagate to cb_registry; keys = {:?}",
+            snap.keys().collect::<Vec<_>>()
+        );
     }
 }

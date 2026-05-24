@@ -4,12 +4,16 @@
 //! closed/half-open path, short-circuits with an `INTERNAL_ERROR`
 //! JSON-RPC response on Open.
 //!
-//! The breaker is keyed by server name (what the dashboard's
-//! upstream-health panel reads from the shared `cb_registry`);
-//! this stage doesn't decide the key, the surface code hands it
-//! in. Pre-migration inline code emitted a `warn!` log but no
-//! audit row; this stage emits a `"breaker_open"` row so the
-//! deny shows up on the trace UI.
+//! The breaker is keyed by server UUID (NOT name) — see
+//! [`crate::circuit_breaker::McpCircuitBreakers`] for why. The
+//! display name is still threaded through so the audit row and
+//! short-circuit error message stay human-readable; this stage
+//! doesn't decide the key, the surface code hands it in.
+//! Pre-migration inline code emitted a `warn!` log but no audit
+//! row; this stage emits a `"breaker_open"` row so the deny
+//! shows up on the trace UI.
+
+use uuid::Uuid;
 
 use think_watch_common::audit::{AuditActor, AuditLogger, McpActor};
 use think_watch_common::lifecycle::state::Authorized;
@@ -25,10 +29,11 @@ use crate::proxy::{INTERNAL_ERROR, JsonRpcResponse, err_response};
 pub async fn check_breaker(
     state: Authorized<McpSurface>,
     breakers: &McpCircuitBreakers,
+    server_id: Uuid,
     server_name: &str,
     audit: &AuditLogger,
 ) -> Result<Authorized<McpSurface>, JsonRpcResponse> {
-    if breakers.check(server_name).await.is_err() {
+    if breakers.check(server_id, server_name).await.is_err() {
         metrics::counter!("lifecycle_breaker_short_circuit_total").increment(1);
         tracing::warn!(
             trace_id = %state.trace_id,

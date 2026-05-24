@@ -118,10 +118,72 @@ pub async fn get_audit_settings(
         false
     };
     Ok(Json(AuditConfigResponse {
-        clickhouse_url: state.config.clickhouse_url.clone(),
+        clickhouse_url: state
+            .config
+            .clickhouse_url
+            .as_deref()
+            .and_then(redact_url_userinfo),
         clickhouse_db: state.config.clickhouse_db.clone(),
         connected,
     }))
+}
+
+/// Strip `user[:password]@` from a URL so admins viewing audit config
+/// don't see embedded ClickHouse credentials (which leak through browser
+/// history + screenshots).
+///
+/// - Returns the original verbatim when the URL has no userinfo to strip,
+///   or doesn't parse as a URL at all (the alternative — dropping the
+///   field — is worse for diagnostics).
+/// - Returns `None` when the URL DOES have userinfo but the `url` crate
+///   refuses to strip it (e.g. cannot-be-base schemes like `mailto:` —
+///   not a realistic ClickHouse URL, but if it ever appears, dropping
+///   the field is strictly safer than returning a half-redacted URL
+///   that still leaks the password).
+fn redact_url_userinfo(raw: &str) -> Option<String> {
+    let Ok(mut parsed) = url::Url::parse(raw) else {
+        return Some(raw.to_string());
+    };
+    if parsed.username().is_empty() && parsed.password().is_none() {
+        return Some(raw.to_string());
+    }
+    if parsed.set_username("").is_err() || parsed.set_password(None).is_err() {
+        tracing::warn!(
+            "clickhouse_url contains credentials but its scheme refuses userinfo \
+             mutation; dropping the field from the audit-settings response"
+        );
+        return None;
+    }
+    Some(parsed.to_string())
+}
+
+#[cfg(test)]
+mod redact_url_tests {
+    use super::redact_url_userinfo;
+
+    #[test]
+    fn strips_user_and_password() {
+        assert_eq!(
+            redact_url_userinfo("http://user:pw@host:9000/db").as_deref(),
+            Some("http://host:9000/db"),
+        );
+    }
+
+    #[test]
+    fn passes_through_clean_url() {
+        assert_eq!(
+            redact_url_userinfo("http://host:9000/db").as_deref(),
+            Some("http://host:9000/db"),
+        );
+    }
+
+    #[test]
+    fn passes_through_unparseable() {
+        assert_eq!(
+            redact_url_userinfo("not a url").as_deref(),
+            Some("not a url"),
+        );
+    }
 }
 
 // --- Dynamic settings CRUD ---
@@ -265,28 +327,46 @@ pub async fn update_settings(
 }
 /// Validate a setting value based on its key.
 fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError> {
-    match key {
-        // Integer settings that must be > 0
-        "auth.jwt_access_ttl_secs"
-        | "auth.jwt_refresh_ttl_days"
-        | "gateway.cache_ttl_secs"
-        | "gateway.request_timeout_secs"
-        | "gateway.body_limit_bytes"
-        | "console.request_timeout_secs"
-        | "console.body_limit_bytes"
-        | "security.signature_nonce_ttl_secs"
-        | "audit.batch_size"
-        | "audit.flush_interval_secs"
-        | "audit.channel_capacity"
-        | "api_keys.rotation_grace_period_hours" => {
-            let v = value
-                .as_i64()
-                .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
-            if v <= 0 {
-                return Err(AppError::BadRequest(format!("{key} must be > 0")));
-            }
-        }
+    // Per-key reasonable upper bounds for positive integer settings.
+    // Without these, an admin (or a script with admin creds) can store
+    // `i64::MAX` and cause downstream allocation explosions
+    // (`audit.channel_capacity` is a Vec preallocation), absurd
+    // session lifetimes, or denial-of-service via "infinite" timeouts
+    // that pin server threads. Maxima are chosen to be larger than any
+    // legitimate operational value while bounded enough that overflow
+    // and OOM are impossible. If a real workload bumps against one,
+    // raise it deliberately rather than removing the cap.
+    fn positive_int_bound(key: &str) -> Option<i64> {
+        Some(match key {
+            "auth.jwt_access_ttl_secs" => 86_400,            // 1 day
+            "auth.jwt_refresh_ttl_days" => 365,              // 1 year
+            "gateway.cache_ttl_secs" => 86_400,              // 1 day
+            "gateway.request_timeout_secs" => 600,           // 10 min
+            "gateway.body_limit_bytes" => 100 * 1024 * 1024, // 100 MiB
+            "console.request_timeout_secs" => 600,
+            "console.body_limit_bytes" => 100 * 1024 * 1024,
+            "security.signature_nonce_ttl_secs" => 3600, // 1 hour
+            "audit.batch_size" => 10_000,                // CH insert sweet spot
+            "audit.flush_interval_secs" => 300,          // 5 min
+            "audit.channel_capacity" => 1_000_000,       // ~GB-scale memory budget
+            "api_keys.rotation_grace_period_hours" => 24 * 30, // 30 days
+            _ => return None,
+        })
+    }
 
+    if let Some(max) = positive_int_bound(key) {
+        let v = value
+            .as_i64()
+            .ok_or_else(|| AppError::BadRequest(format!("{key} must be an integer")))?;
+        if !(1..=max).contains(&v) {
+            return Err(AppError::BadRequest(format!(
+                "{key} must be between 1 and {max}"
+            )));
+        }
+        return Ok(());
+    }
+
+    match key {
         // Audit sampling fraction. Lives in the same dynamic-config
         // path as other audit knobs; 0.0 keeps no events (a knob worth
         // having for emergency CH offload), 1.0 keeps everything.
@@ -715,6 +795,17 @@ mod tests {
         assert!(validate_setting("auth.jwt_access_ttl_secs", &json!(900)).is_ok());
         assert!(validate_setting("auth.jwt_access_ttl_secs", &json!(0)).is_err());
         assert!(validate_setting("auth.jwt_access_ttl_secs", &json!(-1)).is_err());
+    }
+
+    #[test]
+    fn rejects_positive_integer_above_upper_bound() {
+        // Upper bounds defeat the i64::MAX → OOM/overflow DoS class.
+        // audit.channel_capacity max = 1_000_000, audit.batch_size max =
+        // 10_000 — values above are rejected at save time.
+        assert!(validate_setting("audit.channel_capacity", &json!(i64::MAX)).is_err());
+        assert!(validate_setting("audit.batch_size", &json!(10_001)).is_err());
+        assert!(validate_setting("auth.jwt_refresh_ttl_days", &json!(366)).is_err());
+        assert!(validate_setting("gateway.request_timeout_secs", &json!(601)).is_err());
     }
 
     #[test]

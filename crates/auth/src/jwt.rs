@@ -40,16 +40,71 @@ pub struct Claims {
     pub iss: String,
 }
 
+/// Default `validation.leeway` for [`JwtManager::verify_token`] when the
+/// operator hasn't set `JWT_LEEWAY_SECS` in the environment. 10s
+/// tolerates the ~5s of clock drift NTP-synced hosts see in practice
+/// without meaningfully extending short-lived access tokens (15min
+/// default). Larger values amount to lengthening every token's
+/// effective TTL; smaller values risk rejecting valid tokens on
+/// hosts with even small steal-time spikes.
+pub const DEFAULT_JWT_LEEWAY_SECS: u64 = 10;
+
+/// Cap on `JWT_LEEWAY_SECS` — anything above five minutes effectively
+/// disables exp checking. Operators who genuinely need more should
+/// fix their time-sync instead.
+pub const MAX_JWT_LEEWAY_SECS: u64 = 300;
+
 pub struct JwtManager {
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
+    leeway_secs: u64,
 }
 
 impl JwtManager {
     pub fn new(secret: &str) -> Self {
+        Self::with_leeway(secret, DEFAULT_JWT_LEEWAY_SECS)
+    }
+
+    /// Build a manager with an explicit verification leeway. Use this
+    /// from the app entrypoint to honour the `JWT_LEEWAY_SECS` env
+    /// override — deployments on hosts with chronic clock drift (KVM
+    /// guests under steal-time spikes, e.g.) need to bump this beyond
+    /// the conservative 10s default without recompiling.
+    pub fn with_leeway(secret: &str, leeway_secs: u64) -> Self {
         Self {
             encoding_key: EncodingKey::from_secret(secret.as_bytes()),
             decoding_key: DecodingKey::from_secret(secret.as_bytes()),
+            leeway_secs: leeway_secs.min(MAX_JWT_LEEWAY_SECS),
+        }
+    }
+
+    /// Read `JWT_LEEWAY_SECS` from the environment, falling back to
+    /// [`DEFAULT_JWT_LEEWAY_SECS`]. Invalid / out-of-range values log
+    /// a warning and use the default rather than panicking — JWT
+    /// verification is on the request hot path and must not fail
+    /// closed because of a typo in env.
+    pub fn leeway_from_env() -> u64 {
+        match std::env::var("JWT_LEEWAY_SECS") {
+            Err(_) => DEFAULT_JWT_LEEWAY_SECS,
+            Ok(s) => match s.parse::<u64>() {
+                Ok(n) if n <= MAX_JWT_LEEWAY_SECS => n,
+                Ok(n) => {
+                    tracing::warn!(
+                        requested = n,
+                        cap = MAX_JWT_LEEWAY_SECS,
+                        "JWT_LEEWAY_SECS exceeds cap; clamping",
+                    );
+                    MAX_JWT_LEEWAY_SECS
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        value = %s,
+                        error = %e,
+                        "JWT_LEEWAY_SECS is not a non-negative integer; falling back to default ({DEFAULT_JWT_LEEWAY_SECS})",
+                    );
+                    DEFAULT_JWT_LEEWAY_SECS
+                }
+            },
         }
     }
 
@@ -113,7 +168,7 @@ impl JwtManager {
         // happens to share the JWT secret would validate here, breaking
         // multi-tenant isolation.
         let mut validation = Validation::new(Algorithm::HS256);
-        validation.leeway = 30; // Allow 30s clock skew
+        validation.leeway = self.leeway_secs;
         validation.set_audience(&[JWT_AUDIENCE]);
         validation.set_issuer(&[JWT_ISSUER]);
         let token_data = decode::<Claims>(token, &self.decoding_key, &validation)?;

@@ -12,6 +12,25 @@ pub(super) fn sanitize_detail(detail: &mut Option<serde_json::Value>) {
     }
 }
 
+/// Sanitize a captured request/response body string. The gateway and
+/// MCP proxy serialise their JSON payloads to a `String` before
+/// stashing them in `AuditEntry::request_body` / `response_body`, so
+/// the same secret-key matcher that runs on `detail` doesn't reach
+/// them — a prompt like `{"api_key":"sk-…","messages":[…]}` would
+/// otherwise land in `gateway_logs.request_body` verbatim. If the body
+/// parses as JSON we re-walk it through the same matcher and
+/// re-serialise; non-JSON bodies pass through (no known shape to
+/// redact against). The cost is one parse + re-serialise per audit
+/// row, only at flush time on the batched worker.
+pub(super) fn sanitize_body_if_json(body: Option<String>) -> Option<String> {
+    let body = body?;
+    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return Some(body);
+    };
+    sanitize_value(&mut value);
+    Some(value.to_string())
+}
+
 /// Recursively redact values whose keys look secret-shaped, anywhere
 /// in the JSON tree. Top-level-only redaction (the previous version)
 /// missed MCP `arguments.{password,api_key,token,…}` and any other
@@ -129,5 +148,26 @@ mod tests {
         assert_eq!(v["input_tokens"], 12);
         assert_eq!(v["total_tokens"], 17);
         assert_eq!(v["completion_tokens"], 5);
+    }
+
+    #[test]
+    fn body_sanitizer_redacts_secrets_in_json_body_strings() {
+        // The gateway captures the full request payload as a JSON
+        // string. Without body-level sanitisation, a user prompt that
+        // embeds `{"api_key":"…"}` lands in CH verbatim. Pin the
+        // contract: parse → walk → re-serialise produces the same
+        // redacted shape as `sanitize_detail` would on the Value
+        // directly.
+        let body = r#"{"api_key":"sk-live-xxx","messages":[{"role":"user","content":"hi"}]}"#;
+        let out = sanitize_body_if_json(Some(body.to_string())).unwrap();
+        assert!(out.contains("[REDACTED]"));
+        assert!(!out.contains("sk-live-xxx"));
+        assert!(out.contains("hi")); // benign content preserved
+    }
+
+    #[test]
+    fn body_sanitizer_passes_through_non_json() {
+        let body = "not actually json {{{".to_string();
+        assert_eq!(sanitize_body_if_json(Some(body.clone())), Some(body),);
     }
 }

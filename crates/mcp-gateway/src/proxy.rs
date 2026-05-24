@@ -671,6 +671,7 @@ impl McpProxy {
         let authorized = match crate::lifecycle::stages::check_breaker(
             authorized,
             &self.circuit_breakers,
+            server.id,
             &server.name,
             &self.audit,
         )
@@ -1077,6 +1078,7 @@ impl McpProxy {
     /// this gate fixes that.
     pub(crate) async fn record_breaker_for_response(
         &self,
+        server_id: uuid::Uuid,
         server_name: &str,
         response: &JsonRpcResponse,
     ) {
@@ -1089,9 +1091,13 @@ impl McpProxy {
             })
             .unwrap_or(false);
         if is_server_failure {
-            self.circuit_breakers.record_failure(server_name).await;
+            self.circuit_breakers
+                .record_failure(server_id, server_name)
+                .await;
         } else {
-            self.circuit_breakers.record_success(server_name).await;
+            self.circuit_breakers
+                .record_success(server_id, server_name)
+                .await;
         }
     }
 }

@@ -175,12 +175,36 @@ impl SessionManager {
     }
 
     /// Record an upstream session ID obtained from an MCP server.
+    ///
+    /// Rejects pathological values up front. A compromised or
+    /// misconfigured MCP server could otherwise hand us a multi-MB
+    /// session ID or one containing control characters; persisting
+    /// either bloats Redis and corrupts the next outbound HTTP header
+    /// we glue it into. 256 bytes is well above anything sane (RFC-7234
+    /// shaped IDs are typically UUIDs or short opaque blobs) and the
+    /// printable-ASCII filter matches the `Mcp-Session-Id` header
+    /// grammar.
     pub async fn set_upstream_session(
         &self,
         session_id: &str,
         server_id: Uuid,
         upstream_session_id: String,
     ) {
+        const MAX_UPSTREAM_SESSION_LEN: usize = 256;
+        if upstream_session_id.is_empty()
+            || upstream_session_id.len() > MAX_UPSTREAM_SESSION_LEN
+            || !upstream_session_id
+                .bytes()
+                .all(|b| b.is_ascii_graphic() || b == b' ')
+        {
+            tracing::warn!(
+                server_id = %server_id,
+                length = upstream_session_id.len(),
+                "rejecting malformed upstream Mcp-Session-Id (length or non-printable)"
+            );
+            metrics::counter!("mcp_upstream_session_rejected_total").increment(1);
+            return;
+        }
         // Same pattern as update_activity — mutate under the write
         // lock, snapshot, drop the guard before any await on Redis.
         let (snapshot, redis_handle) = {

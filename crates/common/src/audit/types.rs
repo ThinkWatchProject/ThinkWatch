@@ -363,6 +363,19 @@ pub(super) fn detail_field<T: serde::de::DeserializeOwned>(
         .and_then(|v| serde_json::from_value(v.clone()).ok())
 }
 
+/// Like [`detail_field`] but clamps negative values to 0. Use for fields
+/// that are semantically non-negative (token counts, latencies, status
+/// codes, durations) where a producer bug or malformed upstream payload
+/// could otherwise inject `-1` into ClickHouse and break `AVG`/`SUM`
+/// aggregations. serde's i64 deserialization accepts negatives silently,
+/// so the clamp has to live in the extraction helper.
+pub(super) fn detail_field_non_neg_i64(
+    detail: &Option<serde_json::Value>,
+    key: &str,
+) -> Option<i64> {
+    detail_field::<i64>(detail, key).map(|v| v.max(0))
+}
+
 /// Extract a Decimal-stringified field from the audit JSON detail
 /// and encode it as the raw i64 ClickHouse expects under a
 /// `Decimal(_, 10)` column. The producer side (proxy.rs emit_*

@@ -140,7 +140,15 @@ pub async fn proxy_chat_completion(
     let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&request.messages);
     request.messages = redacted_messages;
 
-    // 7. Check token quota — use user/api_key as quota key when available
+    // 7. Check token quota — use user/api_key as quota key when available.
+    //
+    // Key is `{id}:{client-requested model}`, NOT the upstream model the
+    // router eventually selects. Users see and reason about the model
+    // alias they typed (e.g. `gpt-4`); their quota dashboards group by
+    // that alias too. If we keyed by `upstream_model`, an alias that
+    // routes to two different upstreams would split a user's budget
+    // across two counters and surprise them. Audit rows still log
+    // `upstream_model` separately so operators can attribute capacity.
     let quota_key = identity
         .user_id
         .as_deref()
@@ -259,7 +267,7 @@ pub async fn proxy_chat_completion(
 
         if is_stream {
             // Re-emit as SSE: one data chunk with the full response + [DONE]
-            let chunk_json = serde_json::to_string(&cached).unwrap_or_default();
+            let chunk_json = crate::streaming::serialize_sse_chunk(&cached);
             let body = async_stream::stream! {
                 yield Ok::<axum::response::sse::Event, Infallible>(
                     axum::response::sse::Event::default().data(chunk_json),

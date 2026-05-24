@@ -156,13 +156,13 @@ impl Surface for McpSurface {
             } => {
                 deps.proxy
                     .circuit_breakers
-                    .record_failure(&deps.server_name)
+                    .record_failure(deps.server_id, &deps.server_name)
                     .await;
             }
             _ => {
                 let response = response_for_hooks(invoked, deps);
                 deps.proxy
-                    .record_breaker_for_response(&deps.server_name, &response)
+                    .record_breaker_for_response(deps.server_id, &deps.server_name, &response)
                     .await;
             }
         }

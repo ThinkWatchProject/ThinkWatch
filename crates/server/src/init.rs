@@ -94,7 +94,10 @@ pub async fn init_state(
 
     let oidc_manager = build_oidc(&config, &dynamic_config).await;
 
-    let jwt = Arc::new(think_watch_auth::jwt::JwtManager::new(&config.jwt_secret));
+    let jwt = Arc::new(think_watch_auth::jwt::JwtManager::with_leeway(
+        &config.jwt_secret,
+        think_watch_auth::jwt::JwtManager::leeway_from_env(),
+    ));
 
     let initial_content_filter = app::load_content_filter(&dynamic_config).await;
     let initial_pii_redactor = app::load_pii_redactor(&dynamic_config).await;

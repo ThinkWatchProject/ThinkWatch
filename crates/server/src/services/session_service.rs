@@ -175,32 +175,57 @@ pub(crate) async fn invalidate_refresh_tokens(
     user_id: uuid::Uuid,
     refresh_ttl_days: i64,
 ) {
-    let result: Result<(), _> = fred::interfaces::KeysInterface::set(
-        redis,
-        &format!("pw_epoch:{user_id}"),
-        &chrono::Utc::now().timestamp().to_string(),
-        Some(fred::types::Expiration::EX(refresh_ttl_days * 86400)),
-        None,
-        false,
-    )
-    .await;
-    if let Err(e) = result {
-        // Previously this was `let _: Result<(), _> = …` — a Redis
-        // outage during a password change silently left the OLD
-        // refresh tokens valid for up to refresh_ttl_days, so a
-        // leaked refresh token from before the change kept working.
-        // The user assumed (correctly, per UX) that changing their
-        // password locked out other sessions; the reality was the
-        // opposite. Operators alert on this metric and chase the
-        // Redis incident.
-        metrics::counter!("session_invalidate_failures_total").increment(1);
-        tracing::error!(
-            user_id = %user_id,
-            error = %e,
-            "Failed to set pw_epoch — old refresh tokens for this user remain valid \
-             until their natural exp ({refresh_ttl_days} days). Likely Redis outage."
-        );
+    // Bounded retry: a transient Redis blip during a password change
+    // used to silently leak old refresh tokens for the full TTL window
+    // (default 7 days). Two attempts with a 100 ms backoff catch the
+    // overwhelming majority of failover/restart blips. We deliberately
+    // do NOT loop further — the fred client's own connect/op timeout
+    // dominates the wall-clock on a hard Redis outage (each failed
+    // SET can take seconds), and the password-change handler awaits
+    // this inline. More attempts would push the user-facing request
+    // past common reverse-proxy timeouts even though the underlying
+    // PG password write already committed. Persistent outages fall
+    // through to the metric + ERROR log path where operator alerting
+    // takes over.
+    const ATTEMPTS: u32 = 2;
+    let mut last_err = None;
+    for attempt in 0..ATTEMPTS {
+        let result: Result<(), _> = fred::interfaces::KeysInterface::set(
+            redis,
+            &format!("pw_epoch:{user_id}"),
+            &chrono::Utc::now().timestamp().to_string(),
+            Some(fred::types::Expiration::EX(refresh_ttl_days * 86400)),
+            None,
+            false,
+        )
+        .await;
+        match result {
+            Ok(()) => {
+                if attempt > 0 {
+                    metrics::counter!("session_invalidate_retried_total").increment(1);
+                }
+                return;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
     }
+    // All retries exhausted — surface via metric + ERROR log. The
+    // alternative (propagating to the caller) would leave the user
+    // staring at a 500 after their password row has already been
+    // committed; the operator alert path is the right escalation here.
+    metrics::counter!("session_invalidate_failures_total").increment(1);
+    tracing::error!(
+        user_id = %user_id,
+        error = ?last_err,
+        attempts = ATTEMPTS,
+        "Failed to set pw_epoch after retries — old refresh tokens for this user remain valid \
+         until their natural exp ({refresh_ttl_days} days). Likely Redis outage."
+    );
 }
 
 /// How long an admin-issued temporary password remains usable.

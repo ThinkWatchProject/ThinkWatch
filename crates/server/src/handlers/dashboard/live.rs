@@ -351,7 +351,9 @@ pub(super) async fn build_live_snapshot(
                     ifNull(server_name, 'unknown') AS provider, \
                     count() AS requests, \
                     avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
-                    (countIf(status = 'ok') / count()) * 100 AS success_rate, \
+                    if(count() > 0, \
+                       (countIf(status = 'ok') / count()) * 100, \
+                       100) AS success_rate, \
                     toFloat64(0) AS throttled_rate \
                  FROM mcp_logs \
                  PREWHERE created_at >= now() - INTERVAL 15 MINUTE \
@@ -367,7 +369,9 @@ pub(super) async fn build_live_snapshot(
                     ifNull(server_name, 'unknown') AS provider, \
                     count() AS requests, \
                     avg(ifNull(duration_ms, 0)) AS avg_latency_ms, \
-                    (countIf(status = 'ok') / count()) * 100 AS success_rate, \
+                    if(count() > 0, \
+                       (countIf(status = 'ok') / count()) * 100, \
+                       100) AS success_rate, \
                     toFloat64(0) AS throttled_rate \
                  FROM mcp_logs \
                  PREWHERE created_at >= now() - INTERVAL 15 MINUTE \

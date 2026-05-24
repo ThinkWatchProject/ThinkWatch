@@ -7,9 +7,10 @@
 //! `CH_RETAIN_CAP`) so the next worker tick can retry instead of
 //! dropping audit data on every transient outage.
 
+use super::sanitize::sanitize_body_if_json;
 use super::types::{
     AuditEntry, ChAccessRow, ChAppLogRow, ChAuditRow, ChGatewayRow, ChMcpRow, LogType,
-    detail_cost_usd, detail_field, detail_str, parse_created_at,
+    detail_cost_usd, detail_field, detail_field_non_neg_i64, detail_str, parse_created_at,
 };
 
 /// Upper bound on how many entries we retain after a flush error.
@@ -116,7 +117,7 @@ async fn flush_access(
                 method: detail_field(&entry.detail, "method").unwrap_or_default(),
                 path: detail_field(&entry.detail, "path").unwrap_or_default(),
                 status_code: detail_field(&entry.detail, "status_code").unwrap_or(0),
-                latency_ms: detail_field(&entry.detail, "latency_ms").unwrap_or(0),
+                latency_ms: detail_field_non_neg_i64(&entry.detail, "latency_ms").unwrap_or(0),
                 port: detail_field(&entry.detail, "port").unwrap_or(0),
                 user_id: entry.user_id,
                 user_email: entry.user_email,
@@ -166,6 +167,19 @@ async fn flush_gateway(
     let mut insert = client.insert::<ChGatewayRow>(table)?;
     for mut entry in batch.drain(..) {
         let ts = parse_created_at(&entry.created_at);
+        // Sanitise first, then measure — so the bytes column reflects
+        // what is ACTUALLY stored in the body cell, not the pre-redaction
+        // size. The explicit byte counts on the entry win for offloaded
+        // bodies (where the cell is an S3 URL and the user's payload size
+        // is the auditable fact).
+        let sanitized_request = sanitize_body_if_json(entry.request_body.take());
+        let sanitized_response = sanitize_body_if_json(entry.response_body.take());
+        let row_request_body_bytes = entry
+            .request_body_bytes
+            .or_else(|| sanitized_request.as_ref().map(|s| s.len() as u32));
+        let row_response_body_bytes = entry
+            .response_body_bytes
+            .or_else(|| sanitized_response.as_ref().map(|s| s.len() as u32));
         let row = ChGatewayRow {
             id: entry.id,
             user_id: entry.user_id,
@@ -175,28 +189,20 @@ async fn flush_gateway(
             model_id: detail_field(&entry.detail, "model_id"),
             provider: detail_field(&entry.detail, "provider"),
             upstream_model: detail_field(&entry.detail, "upstream_model"),
-            input_tokens: detail_field(&entry.detail, "input_tokens"),
-            output_tokens: detail_field(&entry.detail, "output_tokens"),
+            input_tokens: detail_field_non_neg_i64(&entry.detail, "input_tokens"),
+            output_tokens: detail_field_non_neg_i64(&entry.detail, "output_tokens"),
             cost_usd: detail_cost_usd(&entry.detail),
-            latency_ms: detail_field(&entry.detail, "latency_ms"),
-            status_code: detail_field(&entry.detail, "status_code"),
+            latency_ms: detail_field_non_neg_i64(&entry.detail, "latency_ms"),
+            status_code: detail_field_non_neg_i64(&entry.detail, "status_code"),
             ip_address: entry.ip_address,
             user_agent: entry.user_agent,
             detail: detail_str(&mut entry.detail),
             trace_id: entry.trace_id,
             session_id: entry.session_id,
-            // Prefer explicit byte counts set by the caller — for
-            // offloaded bodies the cell is a short URL but the audit
-            // row needs to record the user's ACTUAL payload size.
-            // Fall back to cell length for inline bodies.
-            request_body_bytes: entry
-                .request_body_bytes
-                .or_else(|| entry.request_body.as_ref().map(|s| s.len() as u32)),
-            response_body_bytes: entry
-                .response_body_bytes
-                .or_else(|| entry.response_body.as_ref().map(|s| s.len() as u32)),
-            request_body: entry.request_body,
-            response_body: entry.response_body,
+            request_body_bytes: row_request_body_bytes,
+            response_body_bytes: row_response_body_bytes,
+            request_body: sanitized_request,
+            response_body: sanitized_response,
             body_capture_status: entry.body_capture_status,
             created_at: ts,
         };
@@ -213,6 +219,16 @@ async fn flush_mcp(
     let mut insert = client.insert::<ChMcpRow>(table)?;
     for mut entry in batch.drain(..) {
         let ts = parse_created_at(&entry.created_at);
+        // Same sanitise-then-measure ordering as flush_gateway so
+        // `length(tool_arguments) == arguments_bytes` for inline rows.
+        let sanitized_args = sanitize_body_if_json(entry.request_body.take());
+        let sanitized_result = sanitize_body_if_json(entry.response_body.take());
+        let row_arguments_bytes = entry
+            .request_body_bytes
+            .or_else(|| sanitized_args.as_ref().map(|s| s.len() as u32));
+        let row_result_bytes = entry
+            .response_body_bytes
+            .or_else(|| sanitized_result.as_ref().map(|s| s.len() as u32));
         let row = ChMcpRow {
             id: entry.id,
             user_id: entry.user_id,
@@ -220,21 +236,15 @@ async fn flush_mcp(
             server_id: detail_field(&entry.detail, "server_id"),
             server_name: detail_field(&entry.detail, "server_name"),
             tool_name: detail_field(&entry.detail, "tool_name"),
-            duration_ms: detail_field(&entry.detail, "duration_ms"),
+            duration_ms: detail_field_non_neg_i64(&entry.detail, "duration_ms"),
             status: detail_field(&entry.detail, "status"),
             error_message: detail_field(&entry.detail, "error_message"),
             ip_address: entry.ip_address,
             detail: detail_str(&mut entry.detail),
-            // Same explicit-bytes fallback as flush_gateway — the URL
-            // length isn't the right value for offloaded tool results.
-            arguments_bytes: entry
-                .request_body_bytes
-                .or_else(|| entry.request_body.as_ref().map(|s| s.len() as u32)),
-            result_bytes: entry
-                .response_body_bytes
-                .or_else(|| entry.response_body.as_ref().map(|s| s.len() as u32)),
-            tool_arguments: entry.request_body,
-            tool_result: entry.response_body,
+            arguments_bytes: row_arguments_bytes,
+            result_bytes: row_result_bytes,
+            tool_arguments: sanitized_args,
+            tool_result: sanitized_result,
             body_capture_status: entry.body_capture_status,
             trace_id: entry.trace_id,
             created_at: ts,
