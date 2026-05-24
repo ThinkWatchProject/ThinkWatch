@@ -838,7 +838,6 @@ export function GuidePage() {
                 <Badge variant="outline" className="mr-2 font-mono text-xs">DELETE</Badge>
                 {t('guide.mcpSessionEndpoint')}
               </p>
-              <p className="mt-2 text-xs text-muted-foreground">{t('guide.mcpVersionNote')}</p>
             </CardContent>
           </Card>
 

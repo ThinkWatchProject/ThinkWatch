@@ -1690,7 +1690,6 @@
     "mcpInfo": "MCP Protocol Info",
     "mcpStreamableEndpoint": "Streamable HTTP: /mcp (initialize, tools/list, tools/call)",
     "mcpSessionEndpoint": "Session termination: /mcp (terminate session)",
-    "mcpVersionNote": "Implements MCP protocol version 2025-03-26 with Streamable HTTP transport",
     "mcpInitSession": "Initialize Session",
     "mcpListTools": "List Tools",
     "mcpSessionIdNote": "Save the Mcp-Session-Id from the initialization response and include it in subsequent requests",

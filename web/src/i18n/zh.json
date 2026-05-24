@@ -1690,7 +1690,6 @@
     "mcpInfo": "MCP 协议信息",
     "mcpStreamableEndpoint": "Streamable HTTP：/mcp（initialize、tools/list、tools/call）",
     "mcpSessionEndpoint": "会话终止：/mcp（终止会话）",
-    "mcpVersionNote": "实现 MCP 协议版本 2025-03-26，采用 Streamable HTTP 传输",
     "mcpInitSession": "初始化会话",
     "mcpListTools": "列出工具",
     "mcpSessionIdNote": "保存初始化响应中的 Mcp-Session-Id，并在后续请求中携带",
