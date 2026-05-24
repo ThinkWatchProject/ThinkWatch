@@ -140,6 +140,18 @@ pub fn subnet_key(ip: &str) -> String {
             format!("{}.{}.{}.0/24", o[0], o[1], o[2])
         }
         Ok(IpAddr::V6(v6)) => {
+            // Unmap IPv4-mapped IPv6 BEFORE bucketing. Without this,
+            // every `::ffff:V4` address (which some reverse proxies
+            // emit in XFF when running dual-stack) lands in the
+            // all-zero `0:0:0::/48` bucket — recreating the very
+            // "shared bucket" failure mode that motivated
+            // require_client_ip. Run the unmapped V4 through the
+            // /24 branch instead so a real IPv4 attacker can't hide
+            // their /24 bucket by sending the mapped form.
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                let o = v4.octets();
+                return format!("{}.{}.{}.0/24", o[0], o[1], o[2]);
+            }
             let s = v6.segments();
             format!("{:x}:{:x}:{:x}::/48", s[0], s[1], s[2])
         }
@@ -311,13 +323,18 @@ mod tests {
     }
 
     #[test]
-    fn subnet_key_ipv4_mapped_ipv6_collapses_to_zero_bucket() {
-        // `::ffff:192.0.2.1` is an IPv4-mapped IPv6 address; the
-        // first three segments are zero so it lands in the same
-        // bucket as `::1`. In practice axum's `ConnectInfo` exposes
-        // the unmapped V4 address — the parser sees a real V4 —
-        // but XFF-supplied mapped forms would aggregate here.
-        assert_eq!(subnet_key("::ffff:192.0.2.1"), "0:0:0::/48");
+    fn subnet_key_ipv4_mapped_ipv6_unmaps_to_v4_bucket() {
+        // `::ffff:192.0.2.1` is an IPv4-mapped IPv6 address. We
+        // unmap to the real V4 address BEFORE bucketing so the /24
+        // attack signal isn't lost (the all-zero `0:0:0::/48` bucket
+        // would have been a shared sink for every distinct mapped
+        // V4, recreating the same "shared bucket" failure mode that
+        // motivated require_client_ip).
+        assert_eq!(subnet_key("::ffff:192.0.2.1"), "192.0.2.0/24");
+        // Distinct mapped V4s land in distinct /24s.
+        assert_eq!(subnet_key("::ffff:10.0.0.5"), "10.0.0.0/24");
+        // Same bucket as the unmapped form.
+        assert_eq!(subnet_key("::ffff:10.0.0.5"), subnet_key("10.0.0.5"));
     }
 
     #[test]

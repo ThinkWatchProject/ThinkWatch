@@ -70,6 +70,18 @@ CREATE TABLE IF NOT EXISTS users (
 
 CREATE INDEX IF NOT EXISTS idx_users_not_deleted ON users(created_at) WHERE deleted_at IS NULL;
 
+-- Defense-in-depth case-insensitive uniqueness. All application
+-- writers (`register`, `setup_initialize`, `admin/users::create`,
+-- `sso` provisioning) normalize email via `normalize_email`
+-- (trim + ASCII lowercase) BEFORE this INSERT lands, so the column
+-- value itself is already canonical lowercase. This functional
+-- unique index catches any writer that ever forgets to normalize
+-- by rejecting the INSERT at the DB layer with a clean
+-- UNIQUE-violation rather than letting `Alice@x.com` coexist with
+-- `alice@x.com` and silently splitting the per-email rate-limit /
+-- lockout / audit identity across two rows.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email_lower ON users (LOWER(email));
+
 CREATE TABLE IF NOT EXISTS teams (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name            VARCHAR(255) NOT NULL UNIQUE,

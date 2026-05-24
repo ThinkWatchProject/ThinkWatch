@@ -5,7 +5,7 @@ use think_watch_auth::{api_key, password};
 use think_watch_common::audit::AuditActor;
 use think_watch_common::dynamic_config;
 use think_watch_common::errors::AppError;
-use think_watch_common::validation::validate_password;
+use think_watch_common::validation::{normalize_email, validate_email, validate_password};
 use utoipa::ToSchema;
 
 use crate::app::AppState;
@@ -142,9 +142,12 @@ pub async fn setup_initialize(
         return Err(AppError::Forbidden("Setup already completed".into()));
     }
 
-    // Validate inputs
+    // Validate inputs + normalize the email so the canonical
+    // lowercase form lands in the DB (login normalizes on lookup
+    // and would otherwise miss a mixed-case admin email).
     validate_password(&req.admin.password)?;
-    think_watch_common::validation::validate_email(&req.admin.email)?;
+    let admin_email = normalize_email(&req.admin.email);
+    validate_email(&admin_email)?;
 
     // 1. Create super_admin user
     let password_hash = password::hash_password(&req.admin.password)?;
@@ -152,7 +155,7 @@ pub async fn setup_initialize(
         r#"INSERT INTO users (email, display_name, password_hash)
            VALUES ($1, $2, $3) RETURNING id, email"#,
     )
-    .bind(&req.admin.email)
+    .bind(&admin_email)
     .bind(&req.admin.display_name)
     .bind(&password_hash)
     .fetch_one(&mut *tx)

@@ -148,8 +148,19 @@ export function usePowChallenge(email: string): PowState & { refresh: () => void
       // Arm the expiry trip from receive-time. Fires whether the
       // worker is still grinding or already done — in both cases
       // the challenge is dead server-side and the user must retry.
+      //
+      // CRITICAL: bump `epochRef.current` BEFORE clearing state.
+      // A worker that already posted `done` leaves the message in
+      // the main thread's queue even after we terminate it. Without
+      // the epoch bump, that queued message would race past our
+      // `expired` setState and overwrite status back to `ready` —
+      // pointing at a server-evicted challenge. login.tsx's
+      // expiresAt guard wouldn't catch it (we cleared expiresAt to
+      // 0 here, so the `>= 0` comparison passes), and the user
+      // gets a confusing 400 on submit.
       expiryTimerRef.current = setTimeout(() => {
         if (epoch !== epochRef.current) return;
+        epochRef.current++;
         if (workerRef.current) {
           workerRef.current.terminate();
           workerRef.current = null;
@@ -240,6 +251,11 @@ export function usePowChallenge(email: string): PowState & { refresh: () => void
       const expiry = expiresAtRef.current;
       if (expiry === 0) return;
       if (Date.now() < expiry) return;
+      // Bump epoch before mutating state — same race as the
+      // setTimeout body: a queued `done` from the (still-listening)
+      // worker would otherwise overwrite our `expired` flip back to
+      // `ready` after we returned.
+      epochRef.current++;
       if (workerRef.current) {
         workerRef.current.terminate();
         workerRef.current = null;

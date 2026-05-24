@@ -363,15 +363,16 @@ async fn adaptive_difficulty_escalates_after_subnet_failures() {
 
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
-async fn successful_login_clears_subnet_failure_counter() {
-    // Decay model: a successful login from the subnet is strong
-    // evidence the subnet is not actively being brute-forced.
-    // Without this, an attacker can leave neighbours stuck at
-    // difficulty 23 for the whole 10-min window even though the
-    // /24 hosts a real user.
+async fn successful_login_decays_subnet_failure_counter() {
+    // Decay (not clear) model: a single successful login from the
+    // subnet reduces the failure counter by a constant, so legit
+    // activity drifts the counter back toward zero over multiple
+    // logins WITHOUT letting an attacker holding one valid
+    // credential one-shot the entire defense.
     //
     // Strategy: trip the escalation, log in successfully, then
-    // re-mint and assert difficulty dropped back to base.
+    // re-mint and assert difficulty dropped one tier (21 → 19, since
+    // 10 - decay(3) = 7 falls below the 10-fail threshold).
     let app = TestApp::spawn().await;
     let admin = fixtures::create_admin_user(&app.db).await.unwrap();
     let con = app.console_client();
@@ -387,7 +388,7 @@ async fn successful_login_clears_subnet_failure_counter() {
         .unwrap();
     }
 
-    // Confirm escalation is active before we test the clear path.
+    // Confirm escalation is active before we test the decay path.
     let resp = con
         .send(
             reqwest::Method::POST,
@@ -403,7 +404,7 @@ async fn successful_login_clears_subnet_failure_counter() {
         "precondition: subnet should be at elevated difficulty"
     );
 
-    // A successful login from this subnet must clear the counter.
+    // One successful login from this subnet decays the counter.
     let resp = con
         .post(
             "/api/auth/login",
@@ -416,7 +417,11 @@ async fn successful_login_clears_subnet_failure_counter() {
         .unwrap();
     resp.assert_ok();
 
-    // Next mint should be back at base difficulty.
+    // Counter should have decayed below the 10-fail threshold so
+    // next mint returns to base difficulty. The DECRBY does NOT
+    // zero the counter — that's the whole point of the fix. A
+    // larger ladder (50+ failures → difficulty 23) would still need
+    // multiple successful logins to drain completely.
     let resp = con
         .send(
             reqwest::Method::POST,
@@ -429,7 +434,8 @@ async fn successful_login_clears_subnet_failure_counter() {
     assert_eq!(
         body["difficulty"].as_u64().unwrap(),
         19,
-        "successful login should clear subnet counter; body: {body}"
+        "successful login should decay subnet counter below \
+         escalation threshold; body: {body}"
     );
 }
 

@@ -12,7 +12,7 @@ use think_watch_common::dto::{
 };
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
-use think_watch_common::validation::validate_password;
+use think_watch_common::validation::{normalize_email, validate_email, validate_password};
 
 use crate::app::AppState;
 use crate::middleware::auth_guard::{AuthUser, invalidate_user_perms};
@@ -488,7 +488,13 @@ pub async fn create_user(
     // (`contains('@') && contains('.')` admitted shapes like `..@x.`).
     // Threat-model-wise the admin path being the laxest is backwards:
     // it's the only one that doesn't go through public POW + lockout.
-    think_watch_common::validation::validate_email(&req.email)?;
+    //
+    // Normalize so the row lands in the same canonical form the
+    // login handler will look up. Without this, an admin creating
+    // a user as "Alice@x.com" would lock them out — login normalizes
+    // to "alice@x.com" and the SQL `WHERE email = $1` would miss.
+    let email = normalize_email(&req.email);
+    validate_email(&email)?;
 
     let (raw_password, force_change) = match &req.password {
         Some(p) => {
@@ -532,7 +538,7 @@ pub async fn create_user(
 
     let exists =
         sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM users WHERE email = $1)")
-            .bind(&req.email)
+            .bind(&email)
             .fetch_one(&state.db)
             .await?;
 
@@ -548,7 +554,7 @@ pub async fn create_user(
         r#"INSERT INTO users (email, display_name, password_hash, password_change_required)
            VALUES ($1, $2, $3, $4) RETURNING *"#,
     )
-    .bind(&req.email)
+    .bind(&email)
     .bind(&req.display_name)
     .bind(&password_hash)
     .bind(force_change)

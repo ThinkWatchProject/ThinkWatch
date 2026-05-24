@@ -344,14 +344,21 @@ async fn handle_live_callback(
         }
         Some(u) => u,
         None => {
-            let email = user_info.email.as_deref().unwrap_or(&user_info.subject);
-            let display_name = user_info.name.as_deref().unwrap_or(email);
+            // Normalize email so SSO-provisioned users sit in the
+            // same canonical lowercase form as password-registered
+            // ones. If we ever add an SSO-email-merges-with-existing
+            // local account flow, the lookup would otherwise miss
+            // on a case-only difference (IdP sends `Alice@x.com`,
+            // local row stored `alice@x.com`).
+            let raw_email = user_info.email.as_deref().unwrap_or(&user_info.subject);
+            let email = think_watch_common::validation::normalize_email(raw_email);
+            let display_name = user_info.name.as_deref().unwrap_or(&email);
 
             let u = sqlx::query_as::<_, User>(
                 r#"INSERT INTO users (email, display_name, oidc_subject, oidc_issuer)
                    VALUES ($1, $2, $3, $4) RETURNING *"#,
             )
-            .bind(email)
+            .bind(&email)
             .bind(display_name)
             .bind(&user_info.subject)
             .bind(&user_info.issuer)

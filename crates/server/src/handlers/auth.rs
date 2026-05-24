@@ -13,7 +13,7 @@ use think_watch_common::dto::{
 };
 use think_watch_common::errors::AppError;
 use think_watch_common::models::User;
-use think_watch_common::validation::{validate_email, validate_password};
+use think_watch_common::validation::{normalize_email, validate_email, validate_password};
 
 use crate::middleware::verify_signature;
 
@@ -67,6 +67,26 @@ const SUBNET_FAIL_PREFIX: &str = "auth_fail_subnet:";
 /// closes, short enough that a single bad morning behind a corporate
 /// NAT clears by lunch.
 const SUBNET_FAIL_WINDOW_SECS: i64 = 600;
+
+/// Per-success decay applied to the subnet failure counter. Each
+/// successful login does `DECRBY auth_fail_subnet:{subnet} N` —
+/// chosen so that legit subnet activity (a /24 with multiple real
+/// users logging in periodically) drains the counter naturally,
+/// while ONE attacker-controlled credential cannot wipe out a
+/// botnet's accumulated attack signal in a single login. At 3, a
+/// healthy office NAT with ~5-10 successful logins/min drops the
+/// counter by 15-30/min — plenty of headroom over a brute-forcer
+/// contributing 5-10 failures/min from the same subnet, but a lone
+/// attacker with one good password can only drain 3 per login.
+const SUBNET_FAIL_SUCCESS_DECAY: i64 = 3;
+
+/// Format the Redis key for the subnet failure counter. Centralized
+/// so the format string lives in one place — two earlier call sites
+/// each used a slightly different `format!` shape, which would have
+/// silently desynced if either was edited.
+fn subnet_fail_key(client_ip: &str) -> String {
+    format!("{SUBNET_FAIL_PREFIX}{}", pow::subnet_key(client_ip))
+}
 
 /// Resolve the client IP or fail-closed with 400. Returning
 /// `"unknown"` (the old fallback) caused two real problems:
@@ -176,7 +196,7 @@ pub async fn issue_pow_challenge(
     }
 
     let req: PowChallengeRequest = parse_json_body(request, 4096).await?;
-    let email = req.email.trim().to_lowercase();
+    let email = normalize_email(&req.email);
     validate_email(&email)?;
 
     // Adaptive difficulty: look up the requesting subnet's recent
@@ -184,28 +204,26 @@ pub async fn issue_pow_challenge(
     // failure path on `/api/auth/login` does. A missing key means
     // zero failures.
     let subnet = pow::subnet_key(&client_ip);
-    let subnet_fail_key = format!("{SUBNET_FAIL_PREFIX}{subnet}");
-    let recent_failures: u64 = match fred::interfaces::KeysInterface::get::<Option<String>, _>(
-        &state.redis,
-        &subnet_fail_key,
-    )
-    .await
-    {
-        Ok(Some(s)) => s.parse().unwrap_or(0),
-        Ok(None) => 0,
-        Err(e) => {
-            // Fail open *on the read*: a Redis hiccup here would
-            // otherwise refuse mints entirely. We accept the small
-            // risk of giving an attacker the default difficulty
-            // during a brief outage. The mint counter above
-            // already failed-closed if Redis is fully down.
-            tracing::warn!(
-                error = %e,
-                "subnet failure-count read failed, defaulting to base difficulty"
-            );
-            0
-        }
-    };
+    let fail_key = subnet_fail_key(&client_ip);
+    let recent_failures: u64 =
+        match fred::interfaces::KeysInterface::get::<Option<String>, _>(&state.redis, &fail_key)
+            .await
+        {
+            Ok(Some(s)) => s.parse().unwrap_or(0),
+            Ok(None) => 0,
+            Err(e) => {
+                // Fail open *on the read*: a Redis hiccup here would
+                // otherwise refuse mints entirely. We accept the small
+                // risk of giving an attacker the default difficulty
+                // during a brief outage. The mint counter above
+                // already failed-closed if Redis is fully down.
+                tracing::warn!(
+                    error = %e,
+                    "subnet failure-count read failed, defaulting to base difficulty"
+                );
+                0
+            }
+        };
     let difficulty = pow::difficulty_for_subnet_failures(recent_failures);
     if difficulty > pow::DEFAULT_DIFFICULTY {
         // Observability for ops: when adaptive difficulty kicks in,
@@ -256,11 +274,11 @@ pub async fn issue_pow_challenge(
 ///
 /// GETDEL prevents replay — a valid solution is single-use.
 ///
-/// The `login_email` arg is the email from the login request. It's
-/// compared (case-insensitively, trimmed) against the email that
-/// was bound to the challenge at mint time. The hash itself also
-/// includes the bound email, so even bypassing this string check
-/// the SHA-256 wouldn't validate.
+/// **`login_email` MUST already be `normalize_email`-normalized**
+/// (trim + ASCII lowercase). The login handler does this at the top
+/// of the request. The hash includes the bound email, so a forged
+/// login email won't change what the hash gate accepts even if a
+/// future caller forgets to normalize.
 async fn verify_login_pow(
     state: &AppState,
     pow_solution: Option<&PowSolution>,
@@ -300,10 +318,21 @@ async fn verify_login_pow(
             "Proof-of-work challenge expired or already consumed. Request a fresh one.".into(),
         )
     };
-    if parts.len() != 3 {
+    // Reject malformed shapes loudly. Any of these means Redis
+    // returned something we did not write:
+    //   - fewer than 3 colon-separated fields
+    //   - empty random (would let `verify_pow` hash the empty
+    //     string and accept any difficulty-0 nonce)
+    //   - empty difficulty (parse below would catch it, but
+    //     making the precondition explicit makes the warn log
+    //     readable when triaging)
+    //   - empty bound email (would silently match an empty
+    //     `login_email` even though `validate_email` would reject
+    //     an empty input upstream — defense in depth)
+    if parts.len() != 3 || parts.iter().any(|p| p.is_empty()) {
         tracing::warn!(
             blob_len = blob.len(),
-            "PoW blob missing fields after GETDEL"
+            "PoW blob missing or empty fields after GETDEL"
         );
         return Err(stale_blob_error());
     }
@@ -317,7 +346,7 @@ async fn verify_login_pow(
     })?;
     let bound_email = parts[2];
 
-    if bound_email != login_email.trim().to_lowercase() {
+    if bound_email != login_email {
         return Err(AppError::BadRequest(
             "Proof-of-work was issued for a different account. Request a fresh challenge.".into(),
         ));
@@ -376,19 +405,18 @@ pub async fn login(
             "Password must be at least 8 characters".into(),
         ));
     }
-    {
-        let email = req.email.trim();
-        let parts: Vec<&str> = email.splitn(2, '@').collect();
-        if parts.len() != 2
-            || parts[0].is_empty()
-            || parts[1].len() < 3
-            || !parts[1].contains('.')
-            || parts[1].starts_with('.')
-            || parts[1].ends_with('.')
-        {
-            return Err(AppError::BadRequest("Invalid email format".into()));
-        }
-    }
+
+    // Normalize email ONCE up front. Every downstream identity key
+    // (SQL lookup, rate-limit Redis key, lockout key, audit log,
+    // PoW verify) MUST use this normalized form so:
+    //   - a user who registered as "Alice@x.com" can log in as
+    //     "alice@x.com" without the SQL `WHERE email = $1` missing,
+    //   - per-email lockout keys can't be sidestepped by rotating
+    //     the case (the old code keyed lockouts on raw `req.email`,
+    //     so `Victim@x.com` and `vIctim@x.com` lived in separate
+    //     buckets and progressive lockout effectively didn't apply).
+    let email = normalize_email(&req.email);
+    validate_email(&email)?;
 
     // Proof-of-work BEFORE rate limit / lockout / password check.
     // This is the layer that defeats distributed brute-force: an
@@ -400,7 +428,7 @@ pub async fn login(
     //
     // TOTP-step second submits ride a freshly minted challenge too —
     // every login POST consumes one.
-    verify_login_pow(&state, req.pow.as_ref(), &req.email).await?;
+    verify_login_pow(&state, req.pow.as_ref(), &email).await?;
 
     // Composite rate limiting: per-email AND per-IP.
     //
@@ -410,8 +438,8 @@ pub async fn login(
     // INCR-then-EXPIRE pattern had a window (Redis failure or process
     // crash between the two) that left a persistent counter and
     // silently disabled the limit.
-    let rate_key = format!("auth_rate:{}:{}", client_ip, req.email);
-    let ip_rate_key = format!("auth_rate_ip:{}", client_ip);
+    let rate_key = format!("auth_rate:{client_ip}:{email}");
+    let ip_rate_key = format!("auth_rate_ip:{client_ip}");
     // SET ... NX returns nil when the counter already exists. Bind
     // to `()` so fred's reply parser accepts both the OK and nil
     // shapes — the previous `let _: bool` panicked on the second
@@ -470,7 +498,7 @@ pub async fn login(
     // Progressive lockout: after 5 failures, increase lockout exponentially.
     // Fail closed: a Redis outage must NOT silently disable the lockout
     // check, otherwise an attacker can brute-force during the outage window.
-    let lockout_key = format!("auth_lockout:{}", req.email);
+    let lockout_key = format!("auth_lockout:{email}");
     let lockout_ttl: Option<i64> =
         match fred::interfaces::KeysInterface::ttl(&state.redis, &lockout_key).await {
             Ok(t) => t,
@@ -498,7 +526,7 @@ pub async fn login(
     let maybe_user = sqlx::query_as::<_, User>(
         "SELECT * FROM users WHERE email = $1 AND is_active = true AND deleted_at IS NULL",
     )
-    .bind(&req.email)
+    .bind(&email)
     .fetch_optional(&state.db)
     .await?;
 
@@ -528,7 +556,7 @@ pub async fn login(
         // the lockout trips on either the per-IP+email counter OR the
         // per-email aggregate — defeating IP-rotation bypass without
         // punishing a single user on a shared NAT.
-        let email_fail_key = format!("auth_email_fails:{}", req.email);
+        let email_fail_key = format!("auth_email_fails:{email}");
         let email_fails =
             crate::services::auth_lockout::record_failure(&state.redis, &email_fail_key).await?;
         let trigger = count.max(email_fails);
@@ -541,11 +569,10 @@ pub async fn login(
         // Best-effort: if Redis hiccups here we audit-log + carry on
         // with the 401 — refusing the response over a counter blip
         // would hide real auth failures from the user.
-        let subnet = pow::subnet_key(&client_ip);
-        let subnet_fail_key = format!("{SUBNET_FAIL_PREFIX}{subnet}");
+        let fail_key = subnet_fail_key(&client_ip);
         let nx_result: Result<(), _> = fred::interfaces::KeysInterface::set(
             &state.redis,
-            &subnet_fail_key,
+            &fail_key,
             "0",
             Some(fred::types::Expiration::EX(SUBNET_FAIL_WINDOW_SECS)),
             Some(fred::types::SetOptions::NX),
@@ -553,12 +580,12 @@ pub async fn login(
         )
         .await;
         if let Err(e) = nx_result {
-            tracing::warn!(error = %e, subnet, "subnet failure counter init failed");
+            tracing::warn!(error = %e, key = %fail_key, "subnet failure counter init failed");
         } else {
             let incr_result: Result<u64, _> =
-                fred::interfaces::KeysInterface::incr_by(&state.redis, &subnet_fail_key, 1).await;
+                fred::interfaces::KeysInterface::incr_by(&state.redis, &fail_key, 1).await;
             if let Err(e) = incr_result {
-                tracing::warn!(error = %e, subnet, "subnet failure counter incr failed");
+                tracing::warn!(error = %e, key = %fail_key, "subnet failure counter incr failed");
             }
         }
 
@@ -572,14 +599,14 @@ pub async fn login(
         let actor = think_watch_common::audit::AnonymousActor {
             ip: Some(&client_ip),
             user_agent: user_agent.as_deref(),
-            user_email: Some(&req.email),
+            user_email: Some(&email),
             user_id: None,
         };
         state.audit.log(
             actor
                 .audit("auth.login_failed")
                 .resource("auth")
-                .detail(serde_json::json!({"email": req.email})),
+                .detail(serde_json::json!({"email": email})),
         );
         return Err(AppError::Unauthorized);
     }
@@ -621,6 +648,19 @@ pub async fn login(
                 // since we read it, so two concurrent login attempts with
                 // the same recovery code can't both succeed.
                 if !totp_valid {
+                    // Two outcomes worth distinguishing:
+                    //   - `code_was_valid` — the user provided a string
+                    //     that was on the recovery list at decrypt time.
+                    //   - `recovery_used` — our CAS UPDATE successfully
+                    //     removed it (rows_affected == 1).
+                    // The CAS can lose to a concurrent request that
+                    // consumed the same (or any other) code. In that
+                    // race, `code_was_valid` is still true — the user
+                    // didn't fail authentication, they just need to
+                    // retry. Counting them toward the per-user TOTP
+                    // failure ladder would unfairly march legitimate
+                    // double-clicks toward a lockout.
+                    let mut code_was_valid = false;
                     let mut recovery_used = false;
                     if let Some(ref codes_blob) = user.totp_recovery_codes
                         && let Ok(mut codes) = crate::services::totp_service::decrypt_recovery_codes(
@@ -628,6 +668,7 @@ pub async fn login(
                         )
                         && let Some(pos) = think_watch_auth::totp::find_recovery_code(&codes, code)
                     {
+                        code_was_valid = true;
                         codes.remove(pos);
                         let updated_blob =
                             crate::services::totp_service::encrypt_recovery_codes(&state, &codes)?;
@@ -667,14 +708,35 @@ pub async fn login(
                     }
 
                     if !recovery_used {
-                        // Apply the same progressive lockout ladder the
-                        // password-mismatch path uses. Without this, an
-                        // attacker holding correct credentials can grind
-                        // the 6-digit TOTP space (1M combinations) limited
-                        // only by per-IP soft rate limits — the password
-                        // check passed so `auth_lockout` was never armed.
-                        // Key on user_id since TOTP is per-user (not
-                        // per-email like the credentials lockout).
+                        // Race-loser: code WAS valid but a concurrent
+                        // request (probably the user's own double-click)
+                        // beat us to the CAS. 401 without counting the
+                        // failure — they can retry with a fresh code.
+                        // Audit-log it so ops can spot a real attacker
+                        // grinding races, but don't arm the lockout.
+                        if code_was_valid {
+                            let actor = think_watch_common::audit::AnonymousActor {
+                                ip: Some(&client_ip),
+                                user_agent: user_agent.as_deref(),
+                                user_email: Some(&user.email),
+                                user_id: Some(user.id),
+                            };
+                            state
+                                .audit
+                                .log(actor.audit("auth.totp_recovery_race_lost").resource("auth"));
+                            return Err(AppError::Unauthorized);
+                        }
+
+                        // Genuine failure (wrong TOTP code AND wrong/no
+                        // recovery code). Apply the same progressive
+                        // lockout ladder the password-mismatch path uses.
+                        // Without this, an attacker holding correct
+                        // credentials can grind the 6-digit TOTP space
+                        // (1M combinations) limited only by per-IP soft
+                        // rate limits — the password check passed so
+                        // `auth_lockout` was never armed. Key on user_id
+                        // since TOTP is per-user (not per-email like the
+                        // credentials lockout).
                         let totp_fail_key = format!("auth_totp_fails:{}", user.id);
                         let totp_lock_key = format!("auth_totp_locked:{}", user.id);
                         let fails = crate::services::auth_lockout::record_failure(
@@ -701,7 +763,7 @@ pub async fn login(
                             actor
                                 .audit("auth.totp_failed")
                                 .resource("auth")
-                                .detail(serde_json::json!({"email": req.email})),
+                                .detail(serde_json::json!({"email": email})),
                         );
                         return Err(AppError::Unauthorized);
                     }
@@ -718,12 +780,33 @@ pub async fn login(
     // Redis restart so a freshly-issued temp isn't invalidated out of
     // band; past that window the marker is authoritative.
     if user.password_change_required {
-        let marker_exists: bool = fred::interfaces::KeysInterface::exists::<bool, _>(
+        // Distinguish "marker truly absent" from "Redis errored out".
+        // The previous code's `.unwrap_or(false)` conflated both into
+        // "no marker" — during a Redis outage, every user with
+        // `password_change_required = true` got an opaque 401 even
+        // though we couldn't actually verify their temp expired. The
+        // rest of this file fails-CLOSED with 5xx on Redis errors
+        // (see the rate-limit and lockout blocks above); we do the
+        // same here so an outage produces a retryable "try again"
+        // instead of a hard credentials-lockout-looking 401.
+        let marker_exists: bool = match fred::interfaces::KeysInterface::exists::<bool, _>(
             &state.redis,
             &temp_password_marker_key(user.id),
         )
         .await
-        .unwrap_or(false);
+        {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    user_id = %user.id,
+                    "Redis temp-password marker check failed (fail-closed)"
+                );
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "Authentication temporarily unavailable"
+                )));
+            }
+        };
         let within_grandfather = user.updated_at
             > chrono::Utc::now() - chrono::Duration::seconds(TEMP_PASSWORD_TTL_SECS);
         if !marker_exists && !within_grandfather {
@@ -744,20 +827,9 @@ pub async fn login(
     // login. Also clears the TOTP-specific counter/lock so a real
     // user whose previous attempts tripped the lockout gets a clean
     // slate after successfully completing the second factor.
-    //
-    // ALSO clear the per-subnet PoW failure counter on success: a
-    // legitimate user logging in is strong evidence the subnet is
-    // not actively being brute-forced. Without this, an attacker
-    // probing the same /24 (CGNAT, corporate NAT, mobile carrier)
-    // would leave neighbours stuck at difficulty 23 for the rest of
-    // the 10-min window even though the subnet hosts a real user.
-    // The attacker can't game this by holding ONE valid account to
-    // self-clear because they'd also be tripping per-email and
-    // global lockouts — the surface that protected those still does.
-    let email_fail_key = format!("auth_email_fails:{}", req.email);
+    let email_fail_key = format!("auth_email_fails:{email}");
     let totp_fail_key = format!("auth_totp_fails:{}", user.id);
     let totp_lock_key = format!("auth_totp_locked:{}", user.id);
-    let subnet_fail_key = format!("{}{}", SUBNET_FAIL_PREFIX, pow::subnet_key(&client_ip));
     crate::services::auth_lockout::clear(
         &state.redis,
         &[
@@ -766,8 +838,43 @@ pub async fn login(
             &email_fail_key,
             &totp_fail_key,
             &totp_lock_key,
-            &subnet_fail_key,
         ],
+    )
+    .await;
+
+    // Decay (not clear) the per-subnet PoW failure counter on
+    // success. Earlier code DELed the key — that was exploitable:
+    // an attacker holding ONE valid credential (compromised low-priv
+    // account, throwaway in open-registration deployments) could
+    // log in every 10 minutes to nuke the counter and keep their
+    // brute-force on OTHER accounts at base difficulty forever. The
+    // per-email and global lockouts protect the brute-forced
+    // accounts, not the subnet counter, so they don't compensate.
+    //
+    // DECRBY-via-EVAL lets legit subnet activity decay the counter
+    // naturally over multiple successful logins (a /24 that hosts
+    // real users will drift back toward zero in a handful of logins)
+    // while preserving a botnet's accumulated attack signal. A
+    // single attacker-controlled account can no longer one-shot the
+    // defense.
+    //
+    // EVAL wraps the DECRBY in an EXISTS guard: a raw DECRBY on a
+    // missing key would create it at 0, decrement, and leave an
+    // orphan key with NO TTL (since DECRBY doesn't set one). The
+    // next failure path's SET-NX-EX would then no-op (key exists),
+    // INCR would advance the orphan counter, and the 10-min window
+    // semantic breaks until manual cleanup. The Lua script keeps
+    // the existence check + decrement atomic in a single round
+    // trip.
+    let fail_key = subnet_fail_key(&client_ip);
+    const DECAY_LUA: &str = "if redis.call('EXISTS', KEYS[1]) == 1 then \
+                              return redis.call('DECRBY', KEYS[1], ARGV[1]) \
+                              else return 0 end";
+    let _: Result<i64, _> = fred::interfaces::LuaInterface::eval(
+        &state.redis,
+        DECAY_LUA,
+        vec![fail_key.as_str()],
+        SUBNET_FAIL_SUCCESS_DECAY,
     )
     .await;
 
@@ -878,13 +985,7 @@ pub async fn register(
     State(state): State<AppState>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, AppError> {
-    let client_ip = crate::middleware::auth_guard::extract_client_ip(
-        &state,
-        request.headers(),
-        request.extensions(),
-    )
-    .await
-    .unwrap_or_else(|| "unknown".into());
+    let client_ip = require_client_ip(&state, request.headers(), request.extensions()).await?;
     let user_agent = request
         .headers()
         .get(axum::http::header::USER_AGENT)
@@ -901,9 +1002,13 @@ pub async fn register(
         ));
     }
 
-    // Input validation
+    // Input validation + canonical normalization. Stored email is
+    // always normalized so the case-insensitive login lookup (which
+    // also normalizes) finds the row regardless of how the user
+    // types their address in subsequent logins.
     validate_password(&req.password)?;
-    think_watch_common::validation::validate_email(&req.email)?;
+    let email = normalize_email(&req.email);
+    validate_email(&email)?;
 
     let password_hash = password::hash_password(&req.password)?;
 
@@ -917,7 +1022,7 @@ pub async fn register(
            ON CONFLICT (email) DO NOTHING
            RETURNING *"#,
     )
-    .bind(&req.email)
+    .bind(&email)
     .bind(&req.display_name)
     .bind(&password_hash)
     .fetch_optional(&mut *tx)

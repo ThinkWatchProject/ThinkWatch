@@ -27,6 +27,20 @@ pub fn validate_password(password: &str) -> Result<(), AppError> {
 /// rather than RFC-strict — we want to keep typos out of the DB
 /// (`foo`, `foo@`, `@bar.com`, `foo@.bar`, `foo@bar.`) without
 /// rejecting weird-but-legal addresses.
+///
+/// ASCII-only. We restrict to ASCII for two reasons:
+///   1. The PoW layer hashes `email` in both Rust (`str::to_lowercase`)
+///      and JavaScript (`String.prototype.toLowerCase`) — these
+///      diverge on a few non-ASCII codepoints (Greek final sigma,
+///      Turkish dotless-i in some locales) which would produce
+///      byte-different hashes and lock the user out.
+///   2. SMTPUTF8 deliverability is still patchy in 2026; a tenant
+///      configuring an upstream mail provider without explicit
+///      SMTPUTF8 support would see all non-ASCII addresses bounce.
+///
+/// If you ever need to accept IDN/Unicode addresses, normalise via
+/// IDNA Punycode + Unicode UAX #31 NFC before storage AND grind, so
+/// both sides of the PoW hash agree.
 pub fn validate_email(email: &str) -> Result<(), AppError> {
     // RFC 5321 caps the entire address at 254 chars; longer is
     // either deliberately oversized (DoS via huge insert error
@@ -36,6 +50,11 @@ pub fn validate_email(email: &str) -> Result<(), AppError> {
     if email.len() > 254 {
         return Err(AppError::BadRequest(
             "Email too long (max 254 chars)".into(),
+        ));
+    }
+    if !email.is_ascii() {
+        return Err(AppError::BadRequest(
+            "Email must contain ASCII characters only".into(),
         ));
     }
     let parts: Vec<&str> = email.splitn(2, '@').collect();
@@ -55,6 +74,16 @@ pub fn validate_email(email: &str) -> Result<(), AppError> {
         ));
     }
     Ok(())
+}
+
+/// Canonical normalization used wherever the email needs to be a
+/// stable identifier (DB lookup key, PoW hash input, audit log
+/// identity, rate-limit Redis keys). Trim + ASCII lowercase. Since
+/// `validate_email` rejects non-ASCII, `to_ascii_lowercase()` is
+/// safe and matches JavaScript `String.prototype.toLowerCase()`
+/// byte-for-byte on the accepted character set.
+pub fn normalize_email(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
 }
 
 // --- Outbound URL + header validation (shared SSRF + injection guards) ---
@@ -253,6 +282,30 @@ mod tests {
     #[test]
     fn too_short() {
         assert!(validate_password("Ab1").is_err());
+    }
+
+    #[test]
+    fn email_rejects_non_ascii() {
+        // Rejecting Greek-sigma / Cyrillic / CJK keeps PoW hash
+        // byte-parity between Rust and JS — see validate_email
+        // docstring.
+        assert!(validate_email("Σigma@example.com").is_err());
+        assert!(validate_email("用户@example.com").is_err());
+        assert!(validate_email("alice@münchen.de").is_err());
+        // Plain ASCII addresses still accepted.
+        assert!(validate_email("alice@example.com").is_ok());
+        assert!(validate_email("a.b+tag@example.co.uk").is_ok());
+    }
+
+    #[test]
+    fn normalize_email_strips_whitespace_and_lowercases() {
+        assert_eq!(
+            normalize_email("  Alice@Example.COM  "),
+            "alice@example.com"
+        );
+        assert_eq!(normalize_email("alice@example.com"), "alice@example.com");
+        // Tabs and weird whitespace too.
+        assert_eq!(normalize_email("\tBOB@X.io\n"), "bob@x.io");
     }
 
     #[test]
