@@ -225,6 +225,10 @@ pub async fn setup_initialize(
 
     // Auto-login: issue JWT cookies so the admin is authenticated
     // immediately after setup, without a manual login step.
+    // Clear the signing-key slot first — no-op for a brand-new
+    // user but keeps the clear-before-issue invariant uniform
+    // across all new-session paths.
+    super::auth::clear_signing_key_slot(&state.redis, admin_user.0).await;
     let session =
         super::auth::issue_auth_session(&state, admin_user.0, &admin_user.1, Some(&client_ip))
             .await?;

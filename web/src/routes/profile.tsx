@@ -153,12 +153,15 @@ export function ProfilePage() {
         old_password: oldPassword,
         new_password: newPassword,
       });
+      // Server invalidates the OLD session (pw_epoch bump) AND
+      // immediately re-issues fresh cookies for THIS caller so we
+      // stay logged in. No forced logout — the user can continue
+      // using the app. Other tabs / devices still get evicted via
+      // the pw_epoch check on their next request.
       setPwSuccess(t('auth.passwordChanged'));
       setOldPassword('');
       setNewPassword('');
       setConfirmPassword('');
-      // Force logout after 2 seconds
-      setTimeout(logoutAndRedirect, 2000);
     } catch (err) {
       setPwError(err instanceof Error ? err.message : t('common.error'));
     } finally {

@@ -39,8 +39,9 @@ pub(crate) async fn parse_json_body<T: serde::de::DeserializeOwned>(
 // paths everything else in this file (and admin.rs / setup.rs) used
 // to import.
 pub(crate) use crate::services::session_service::{
-    TEMP_PASSWORD_TTL_SECS, clear_temporary_password_marker, invalidate_refresh_tokens,
-    issue_auth_session, mark_temporary_password, temp_password_marker_key,
+    TEMP_PASSWORD_TTL_SECS, clear_signing_key_slot, clear_temporary_password_marker,
+    invalidate_refresh_tokens, issue_auth_session, mark_temporary_password,
+    temp_password_marker_key,
 };
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -935,6 +936,12 @@ pub async fn login(
     };
     state.audit.log(actor.audit("auth.login").resource("auth"));
 
+    // Fresh login starts a new logical session — clear any
+    // stale signing-key slot from a prior session so the client's
+    // follow-up register-key NX SET lands on a clean slot.
+    // Pointedly NOT inside `issue_auth_session` because refresh
+    // also calls that and MUST preserve the existing key.
+    clear_signing_key_slot(&state.redis, user.id).await;
     let session = issue_auth_session(&state, user.id, &user.email, Some(&client_ip)).await?;
     Ok(session.into_login_response(user.password_change_required))
 }
@@ -1169,7 +1176,11 @@ pub async fn register(
         .log(actor.audit("auth.register").resource("auth"));
 
     // Auto-login: issue tokens + cookies so the user is immediately
-    // authenticated — same flow as the login handler.
+    // authenticated — same flow as the login handler. Clear the
+    // signing-key slot first (no-op for a brand-new user, but
+    // covers the edge case of a soft-deleted account being
+    // re-registered with the same id).
+    clear_signing_key_slot(&state.redis, user.id).await;
     let session = issue_auth_session(&state, user.id, &user.email, Some(&client_ip)).await?;
     Ok(session.into_login_response(false))
 }
@@ -1317,6 +1328,13 @@ pub async fn refresh(
     // than trusting the refresh token's snapshot. Critical: if an
     // admin revoked a role or changed scope between login and
     // refresh, the re-minted token must reflect the current state.
+    //
+    // Pointedly NOT calling `clear_signing_key_slot` here — refresh
+    // rotates JWTs but keeps the same logical session. DEL'ing the
+    // signing key would force the client to re-register on every
+    // refresh cycle (default 15 min), re-opening the 120s bootstrap
+    // grace window per cycle and breaking non-browser clients that
+    // lack the auto-retry chain. See the helper's docstring.
     let session =
         issue_auth_session(&state, claims.sub, &claims.email, client_ip.as_deref()).await?;
     Ok(session.into_login_response(false))
@@ -1602,6 +1620,11 @@ pub async fn change_password(
     // password-change-er to manually re-log in.
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let client_ip = auth_user.ip.as_deref();
+    // Password change starts a new logical session — clear the
+    // signing-key slot so the client's follow-up register-key
+    // hits a clean NX slot. The old key was bound to the
+    // pre-password-change session and is logically dead.
+    clear_signing_key_slot(&state.redis, user.id).await;
     let session = issue_auth_session(&state, user.id, &user.email, client_ip).await?;
     let mut response = Json(serde_json::json!({"status": "password_changed"})).into_response();
     session.set_cookies(&mut response);

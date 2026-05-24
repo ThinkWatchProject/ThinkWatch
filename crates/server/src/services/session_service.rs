@@ -75,39 +75,49 @@ impl AuthSession {
     }
 }
 
-/// Issue a full auth session: load RBAC, create JWT pair + signing key,
-/// and prepare cookie headers. Shared by login, register, refresh, and
-/// setup_initialize.
+/// DEL the signing-key + bound-IP slots for a user. Callers that
+/// genuinely start a new session (login, register, setup_initialize,
+/// SSO callback, change_password) invoke this BEFORE
+/// `issue_auth_session` so the client's follow-up
+/// `/api/auth/register-key` lands on a clean NX slot.
+///
+/// **MUST NOT be called from `/api/auth/refresh`.** Refresh rotates
+/// JWTs but keeps the same logical session — DEL'ing the signing
+/// key would force the client to re-register, which:
+///   1. Re-opens the 120s bootstrap grace window on EVERY refresh
+///      (default 15-min cycle, 7-day refresh TTL → ~672 windows
+///      per session) — design intent is bootstrap-only.
+///   2. Causes any signed request in flight during the
+///      DEL → register-key gap to 401.
+///   3. Breaks non-browser clients (CI, SDKs, scripts) that lack
+///      the browser's auto-`registerKeyPair()` retry chain.
+///
+/// Best-effort: a Redis hiccup here is non-fatal — the worst
+/// case is the client sees a 409 on register-key and has to log
+/// out + back in. The lockout / rate-limit machinery is what
+/// gates the session, not this plumbing.
+pub(crate) async fn clear_signing_key_slot(redis: &fred::clients::Client, user_id: uuid::Uuid) {
+    let _: Result<(), _> =
+        fred::interfaces::KeysInterface::del::<(), _>(redis, format!("signing_pubkey:{user_id}"))
+            .await;
+    let _: Result<(), _> =
+        fred::interfaces::KeysInterface::del::<(), _>(redis, format!("signing_key_ip:{user_id}"))
+            .await;
+}
+
+/// Issue a full auth session: load RBAC, create JWT pair, and
+/// prepare cookie headers. Shared by login, register, refresh,
+/// setup_initialize, SSO, and change_password.
+///
+/// Does NOT touch the signing-key slot — refresh must keep the
+/// existing key intact across token rotation. Callers that start
+/// a new logical session call `clear_signing_key_slot` FIRST.
 pub(crate) async fn issue_auth_session(
     state: &AppState,
     user_id: uuid::Uuid,
     email: &str,
     _client_ip: Option<&str>,
 ) -> Result<AuthSession, AppError> {
-    // Clear any stale signing-key binding from a prior session for
-    // this user. Without this, a fresh login leaves an old
-    // `signing_pubkey:{uid}` + `signing_key_ip:{uid}` lying around;
-    // the client's subsequent `/api/auth/register-key` call would
-    // either overwrite silently (old behavior, lets an attacker who
-    // captured the access cookie register THEIR key first) or get
-    // 409'd by the new NX guard. DEL-then-register-with-NX gives
-    // the legitimate fresh-login flow a clean slot exactly once.
-    //
-    // Best-effort: a Redis hiccup here is non-fatal — the worst
-    // case is the client sees a 409 on register-key and has to
-    // log out + back in, which is annoying but not a security
-    // regression. The lockout / rate-limit machinery is what
-    // gates the session, not the signing-key plumbing.
-    let _: Result<(), _> = fred::interfaces::KeysInterface::del::<(), _>(
-        &state.redis,
-        format!("signing_pubkey:{user_id}"),
-    )
-    .await;
-    let _: Result<(), _> = fred::interfaces::KeysInterface::del::<(), _>(
-        &state.redis,
-        format!("signing_key_ip:{user_id}"),
-    )
-    .await;
     // Load roles/permissions for the login response body (frontend needs them),
     // but they are NOT embedded in the JWT anymore.
     let roles = think_watch_auth::rbac::load_user_role_names(&state.db, user_id).await?;

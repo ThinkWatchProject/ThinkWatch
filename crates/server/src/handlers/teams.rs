@@ -311,10 +311,17 @@ pub async fn create_team(
     .fetch_one(&state.db)
     .await
     .map_err(|e| match e {
-        sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+        sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
             AppError::Conflict(format!("Team '{name}' already exists"))
         }
-        other => AppError::Internal(anyhow::anyhow!("create team failed: {other}")),
+        // Delegate non-unique-violation errors to the global
+        // `From<sqlx::Error>` mapping. Without `e.into()`, the
+        // catch-all `Internal(...)` here would swallow the
+        // `PoolTimedOut` / `PoolClosed` / `WorkerCrashed` / `Io`
+        // → `ServiceUnavailable(503)` distinction the global
+        // mapping makes, losing operator-facing infra-vs-app
+        // separation in dashboards.
+        other => other.into(),
     })?;
 
     state.audit.log(
@@ -409,10 +416,12 @@ pub async fn update_team(
     .fetch_one(&state.db)
     .await
     .map_err(|e| match e {
-        sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
+        sqlx::Error::Database(ref db_err) if db_err.is_unique_violation() => {
             AppError::Conflict(format!("Team '{new_name}' already exists"))
         }
-        other => AppError::Internal(anyhow::anyhow!("update team failed: {other}")),
+        // See create_team above — delegate to global mapping so
+        // transient-vs-permanent DB failures stay distinguishable.
+        other => other.into(),
     })?;
 
     state.audit.log(

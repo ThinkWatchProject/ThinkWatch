@@ -427,12 +427,16 @@ async fn handle_live_callback(
 
     // Route through the shared session-issue path so SSO inherits
     // every invariant the password-login flow already enforces
-    // (signing-key slot reset, RBAC preload, cookie attribute
-    // discipline). Previously the SSO branch inlined its own
-    // create_access_token / create_refresh_token + cookie builders,
-    // which would silently miss any future tightening of
-    // `issue_auth_session` (e.g. signing-key cleanup, future session
-    // binding fields).
+    // (RBAC preload, cookie attribute discipline). Previously the
+    // SSO branch inlined its own create_access_token /
+    // create_refresh_token + cookie builders, which would silently
+    // miss any future tightening of `issue_auth_session`.
+    //
+    // Clear the signing-key slot explicitly first — SSO is a fresh
+    // login, same as the password-login path; previous session's
+    // signing key is logically dead. Refresh does NOT call this
+    // helper; see `clear_signing_key_slot` doc.
+    super::auth::clear_signing_key_slot(&state.redis, user.id).await;
     let session = super::auth::issue_auth_session(&state, user.id, &user.email, None).await?;
     let access_ttl = session.access_ttl;
 
