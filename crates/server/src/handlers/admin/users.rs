@@ -878,6 +878,12 @@ pub async fn update_user(
         {
             tracing::warn!(%user_id, "failed to cascade api_keys disable on user deactivation: {e}");
         }
+        // Same MCP cache lane wipe as `delete_user` — a deactivated
+        // user's cached tool responses would otherwise survive for
+        // ~15min, defeating the rest of the invalidation chain above.
+        think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+            .invalidate_user_lane_all_servers(&user_id)
+            .await;
     }
     if req.role_assignments.is_some() {
         invalidate_user_perms(&state.redis, user_id).await;
@@ -986,6 +992,18 @@ pub async fn delete_user(
         fred::interfaces::KeysInterface::del(&state.redis, &format!("signing_pubkey:{user_id}"))
             .await
             .unwrap_or(());
+
+    // Wipe MCP per-user response cache lanes across every server. Without
+    // this, the deleted user's cached upstream responses linger for the
+    // full cache TTL (15min default) — any in-flight request that still
+    // holds a valid identity token would see a pre-deletion response,
+    // and the rare case of UUID reuse (e.g. a manual restore) would
+    // hand the new account the old account's tool outputs. Same
+    // post-commit placement as the JWT/perm invalidation above so a
+    // rolled-back delete doesn't strand the wipe.
+    think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
+        .invalidate_user_lane_all_servers(&user_id)
+        .await;
 
     state.audit.log(
         auth_user

@@ -220,6 +220,33 @@ impl McpResponseCache {
             .await;
     }
 
+    /// Wipe every cached response for `user_id` across **all** MCP
+    /// servers and account labels.
+    ///
+    /// Called when a user is deleted or deactivated — their per-caller
+    /// cache lanes would otherwise survive for the full TTL (15min
+    /// default), and any UUID reuse (rare) or in-flight session race
+    /// would tunnel pre-deletion responses to a request that no longer
+    /// should be served from this user's identity.
+    ///
+    /// Uses the same `mcp_cache:<server>:<user>:*` key shape — the
+    /// `<server>` segment is wildcarded so a single SCAN sweeps every
+    /// server lane the user ever populated. The `<user>` segment is
+    /// hex-only (UUID `simple` format) so the wildcard match can't
+    /// collide with the `_` placeholder used by the shared / global
+    /// lane.
+    pub async fn invalidate_user_lane_all_servers(&self, user_id: &Uuid) {
+        let pattern = format!("{KEY_PREFIX}*:{}:*", user_id.simple());
+        let dummy_server = Uuid::nil();
+        self.scan_and_delete(
+            pattern,
+            "user_lane_all_servers",
+            Some(*user_id),
+            &dummy_server,
+        )
+        .await;
+    }
+
     async fn scan_and_delete(
         &self,
         pattern: String,

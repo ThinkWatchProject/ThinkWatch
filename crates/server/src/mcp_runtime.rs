@@ -728,54 +728,66 @@ pub fn spawn_mcp_health_loop(
     pool: think_watch_mcp_gateway::pool::ConnectionPool,
 ) {
     let checker = think_watch_mcp_gateway::health::HealthChecker::new(pool);
-    tokio::spawn(async move {
-        // Skip the immediate-fire first tick so we don't pile probes on
-        // top of the startup discovery burst. Cadence is read from
-        // DynamicConfig (`mcp.health_interval_secs`) before each sleep,
-        // so changes via the settings UI take effect within one tick
-        // — no restart needed.
-        tokio::time::sleep(std::time::Duration::from_secs(
-            state.dynamic_config.mcp_health_interval_secs().await,
-        ))
-        .await;
-        loop {
-            let servers = registry.list().await;
-            for server in &servers {
-                let health = checker.check_server(server).await;
-                let new_status = if health.error.is_none() {
-                    think_watch_mcp_gateway::registry::ServerStatus::Connected
-                } else {
-                    think_watch_mcp_gateway::registry::ServerStatus::Disconnected
-                };
-                registry.update_status(server.id, new_status.clone()).await;
+    // Wrap in supervise_restart so a single panic in the probe path
+    // (registry list, SSE parse, DB query) doesn't permanently kill
+    // health monitoring. Without this, the admin UI silently freezes
+    // showing whatever state the registry had at the moment of the
+    // panic.
+    think_watch_common::tasks::supervise_restart("mcp_health_loop", move || {
+        let state = state.clone();
+        let registry = registry.clone();
+        let checker = checker.clone();
+        async move {
+            // Skip the immediate-fire first tick so we don't pile probes on
+            // top of the startup discovery burst. Cadence is read from
+            // DynamicConfig (`mcp.health_interval_secs`) before each sleep,
+            // so changes via the settings UI take effect within one tick
+            // — no restart needed.
+            tokio::time::sleep(std::time::Duration::from_secs(
+                state.dynamic_config.mcp_health_interval_secs().await,
+            ))
+            .await;
+            loop {
+                let servers = registry.list().await;
+                for server in &servers {
+                    let health = checker.check_server(server).await;
+                    let new_status = if health.error.is_none() {
+                        think_watch_mcp_gateway::registry::ServerStatus::Connected
+                    } else {
+                        think_watch_mcp_gateway::registry::ServerStatus::Disconnected
+                    };
+                    registry.update_status(server.id, new_status.clone()).await;
 
-                // Mirror the runtime status + last error into Postgres so
-                // the admin UI doesn't depend on a fresh process being up.
-                let status_str = match new_status {
-                    think_watch_mcp_gateway::registry::ServerStatus::Connected => "connected",
-                    think_watch_mcp_gateway::registry::ServerStatus::Disconnected => "disconnected",
-                    think_watch_mcp_gateway::registry::ServerStatus::Unknown => "unknown",
-                };
-                if let Err(e) = sqlx::query(
-                    "UPDATE mcp_servers SET status = $1, last_health_check = now(), last_error = $2 WHERE id = $3",
-                )
-                .bind(status_str)
-                .bind(health.error.clone())
-                .bind(server.id)
-                .execute(&state.db)
-                .await
-                {
-                    tracing::warn!(
-                        mcp_server = %server.name,
-                        error = %e,
-                        "Failed to write back MCP server health status"
-                    );
+                    // Mirror the runtime status + last error into Postgres so
+                    // the admin UI doesn't depend on a fresh process being up.
+                    let status_str = match new_status {
+                        think_watch_mcp_gateway::registry::ServerStatus::Connected => "connected",
+                        think_watch_mcp_gateway::registry::ServerStatus::Disconnected => {
+                            "disconnected"
+                        }
+                        think_watch_mcp_gateway::registry::ServerStatus::Unknown => "unknown",
+                    };
+                    if let Err(e) = sqlx::query(
+                        "UPDATE mcp_servers SET status = $1, last_health_check = now(), last_error = $2 WHERE id = $3",
+                    )
+                    .bind(status_str)
+                    .bind(health.error.clone())
+                    .bind(server.id)
+                    .execute(&state.db)
+                    .await
+                    {
+                        tracing::warn!(
+                            mcp_server = %server.name,
+                            error = %e,
+                            "Failed to write back MCP server health status"
+                        );
+                    }
                 }
+                // Re-read cadence each iteration so settings UI changes
+                // take effect immediately on the next probe round.
+                let secs = state.dynamic_config.mcp_health_interval_secs().await;
+                tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
             }
-            // Re-read cadence each iteration so settings UI changes
-            // take effect immediately on the next probe round.
-            let secs = state.dynamic_config.mcp_health_interval_secs().await;
-            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
         }
     });
 }
@@ -794,62 +806,71 @@ pub fn spawn_mcp_catalog_refresh_loop(
     registry: think_watch_mcp_gateway::registry::Registry,
 ) {
     const CATALOG_REFRESH_INTERVAL_SECS: u64 = 24 * 60 * 60;
-    tokio::spawn(async move {
-        // Stagger the first run so it doesn't pile on top of the
-        // startup discovery burst initiated by `load_mcp_servers_into_registry`.
-        tokio::time::sleep(std::time::Duration::from_secs(
-            CATALOG_REFRESH_INTERVAL_SECS,
-        ))
-        .await;
-        loop {
-            let servers = match sqlx::query_as::<_, think_watch_common::models::McpServer>(
-                "SELECT * FROM mcp_servers",
-            )
-            .fetch_all(&state.db)
-            .await
-            {
-                Ok(rows) => rows,
-                Err(e) => {
-                    tracing::warn!("catalog refresh: failed to list servers: {e}");
-                    tokio::time::sleep(std::time::Duration::from_secs(
-                        CATALOG_REFRESH_INTERVAL_SECS,
-                    ))
-                    .await;
-                    continue;
-                }
-            };
-            let key = state.config.encryption_key.clone();
-            for server in &servers {
-                let http = (**state.http_client.load()).clone();
-                match discover_and_persist_tools(&state.db, &http, server).await {
-                    SystemDiscoveryOutcome::Tools(n) => {
-                        tracing::info!(
-                            mcp_server = %server.name,
-                            tools = n,
-                            "MCP catalog refresh succeeded"
-                        );
-                        if let Ok(updated) = build_registered_server(&state.db, server, &key).await
-                        {
-                            registry.register(updated).await;
-                        }
-                    }
-                    SystemDiscoveryOutcome::AuthRequired => {
-                        // Steady state for OAuth/static-token servers.
-                        // Per-user discovery happens on first call.
-                    }
-                    SystemDiscoveryOutcome::Failed(e) => {
-                        tracing::debug!(
-                            mcp_server = %server.name,
-                            error = %e,
-                            "MCP catalog refresh failed (cached snapshot retained)"
-                        );
-                    }
-                }
-            }
+    // Wrap in supervise_restart for the same reason as the health
+    // loop — a panic in `discover_and_persist_tools` (SSE parse, JSON
+    // decode, sqlx) would otherwise permanently freeze the cached
+    // tool catalog and silently let it drift from upstream reality.
+    think_watch_common::tasks::supervise_restart("mcp_catalog_refresh_loop", move || {
+        let state = state.clone();
+        let registry = registry.clone();
+        async move {
+            // Stagger the first run so it doesn't pile on top of the
+            // startup discovery burst initiated by `load_mcp_servers_into_registry`.
             tokio::time::sleep(std::time::Duration::from_secs(
                 CATALOG_REFRESH_INTERVAL_SECS,
             ))
             .await;
+            loop {
+                let servers = match sqlx::query_as::<_, think_watch_common::models::McpServer>(
+                    "SELECT * FROM mcp_servers",
+                )
+                .fetch_all(&state.db)
+                .await
+                {
+                    Ok(rows) => rows,
+                    Err(e) => {
+                        tracing::warn!("catalog refresh: failed to list servers: {e}");
+                        tokio::time::sleep(std::time::Duration::from_secs(
+                            CATALOG_REFRESH_INTERVAL_SECS,
+                        ))
+                        .await;
+                        continue;
+                    }
+                };
+                let key = state.config.encryption_key.clone();
+                for server in &servers {
+                    let http = (**state.http_client.load()).clone();
+                    match discover_and_persist_tools(&state.db, &http, server).await {
+                        SystemDiscoveryOutcome::Tools(n) => {
+                            tracing::info!(
+                                mcp_server = %server.name,
+                                tools = n,
+                                "MCP catalog refresh succeeded"
+                            );
+                            if let Ok(updated) =
+                                build_registered_server(&state.db, server, &key).await
+                            {
+                                registry.register(updated).await;
+                            }
+                        }
+                        SystemDiscoveryOutcome::AuthRequired => {
+                            // Steady state for OAuth/static-token servers.
+                            // Per-user discovery happens on first call.
+                        }
+                        SystemDiscoveryOutcome::Failed(e) => {
+                            tracing::debug!(
+                                mcp_server = %server.name,
+                                error = %e,
+                                "MCP catalog refresh failed (cached snapshot retained)"
+                            );
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(
+                    CATALOG_REFRESH_INTERVAL_SECS,
+                ))
+                .await;
+            }
         }
     });
 }

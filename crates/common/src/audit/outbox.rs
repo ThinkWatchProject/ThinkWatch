@@ -221,11 +221,28 @@ pub(super) async fn drain_once(
         };
         match dispatch_result {
             Ok(()) => {
-                let _ = sqlx::query("DELETE FROM webhook_outbox WHERE id = $1")
+                // Dispatch succeeded; tombstone the row so the next drain
+                // tick doesn't re-claim and double-send. Silent swallow
+                // here used to leave delivered rows in the outbox: the
+                // 10s tick re-leased them, the upstream got the payload
+                // again, attempts climbed to the 24 cap, and the row was
+                // *dropped* as if delivery had failed — masking the
+                // double-delivery with a "max retries exceeded" metric.
+                if let Err(e) = sqlx::query("DELETE FROM webhook_outbox WHERE id = $1")
                     .bind(row.id)
                     .execute(db)
-                    .await;
-                let _ = sqlx::query(
+                    .await
+                {
+                    metrics::counter!("webhook_outbox_delete_failed_total").increment(1);
+                    tracing::error!(
+                        outbox_id = %row.id,
+                        forwarder_id = %row.forwarder_id,
+                        error = %e,
+                        "outbox DELETE failed after successful dispatch — row will be re-attempted, \
+                         the receiver may see a duplicate"
+                    );
+                }
+                if let Err(e) = sqlx::query(
                     "UPDATE log_forwarders SET sent_count = sent_count + 1, \
                                                 last_sent_at = now(), \
                                                 updated_at = now() \
@@ -233,7 +250,15 @@ pub(super) async fn drain_once(
                 )
                 .bind(row.forwarder_id)
                 .execute(db)
-                .await;
+                .await
+                {
+                    // Stats drift isn't critical — log at warn and move on.
+                    tracing::warn!(
+                        forwarder_id = %row.forwarder_id,
+                        error = %e,
+                        "outbox sent_count UPDATE failed; forwarder health stats may drift"
+                    );
+                }
             }
             Err(err_msg) => {
                 let next_attempts = row.attempts + 1;

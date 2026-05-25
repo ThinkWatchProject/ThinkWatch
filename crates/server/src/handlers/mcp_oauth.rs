@@ -405,6 +405,45 @@ pub async fn start_authorize(
     }))
 }
 
+/// Bounded retry around the OAuth-callback storage step. The upstream
+/// OAuth code has been exchanged for tokens by the time we reach this
+/// point — a transient PG blip would otherwise drop those tokens on
+/// the floor and force the user back through the full re-authorize
+/// flow even though the upstream side already succeeded. 2 attempts
+/// with a 100 ms backoff catches the typical failover/restart case;
+/// persistent failures still surface so the operator sees the metric.
+async fn retry_pg_storage<F, Fut, T>(label: &'static str, mut op: F) -> Result<T, AppError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, AppError>>,
+{
+    const ATTEMPTS: u32 = 2;
+    let mut last_err: Option<AppError> = None;
+    for attempt in 0..ATTEMPTS {
+        match op().await {
+            Ok(v) => {
+                if attempt > 0 {
+                    metrics::counter!("oauth_storage_retried_total", "label" => label).increment(1);
+                }
+                return Ok(v);
+            }
+            Err(e) => {
+                last_err = Some(e);
+                if attempt + 1 < ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            }
+        }
+    }
+    metrics::counter!("oauth_storage_failed_total", "label" => label).increment(1);
+    tracing::error!(
+        label,
+        "OAuth callback could not persist credential after {ATTEMPTS} attempts; \
+         user must re-authorize (upstream OAuth code is single-use, tokens are lost)"
+    );
+    Err(last_err.expect("ATTEMPTS >= 1 so last_err is always Some by here"))
+}
+
 // ---------------------------------------------------------------------------
 // GET /api/mcp/oauth/callback — upstream redirects here with code+state
 // ---------------------------------------------------------------------------
@@ -520,6 +559,16 @@ pub async fn oauth_callback(
     .await;
 
     // Dispatch storage based on target.
+    //
+    // The Redis state was GETDEL'd above (line 451) — by this point
+    // the upstream OAuth code is also consumed, so any storage
+    // failure here lands the user in a dead-end ("authorization
+    // succeeded upstream, but we lost the tokens"). Bounded retry on
+    // the PG insert catches the common transient case (PG failover
+    // blip, network jitter). A persistent failure still surfaces the
+    // error, but the operator can scrape the warn log to manually
+    // re-create the credential — the user, on the other hand, must
+    // re-authorize because the upstream code is single-use.
     match &blob.target {
         OauthStateTarget::PerUser {
             server_id,
@@ -527,18 +576,20 @@ pub async fn oauth_callback(
             account_label,
         } => {
             let server = load_server(&state, *server_id).await?;
-            upsert_credential(
-                &state,
-                *server_id,
-                *user_id,
-                account_label,
-                "oauth_authcode",
-                &access_encrypted,
-                refresh_encrypted.as_deref(),
-                expires_at,
-                &scopes,
-                upstream_subject.as_deref(),
-            )
+            retry_pg_storage("per_user_credential", || {
+                upsert_credential(
+                    &state,
+                    *server_id,
+                    *user_id,
+                    account_label,
+                    "oauth_authcode",
+                    &access_encrypted,
+                    refresh_encrypted.as_deref(),
+                    expires_at,
+                    &scopes,
+                    upstream_subject.as_deref(),
+                )
+            })
             .await?;
             think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
                 .invalidate_user_lane(server_id, user_id)
@@ -589,17 +640,19 @@ pub async fn oauth_callback(
             configured_by,
         } => {
             let server = load_server(&state, *server_id).await?;
-            shared::upsert_shared_credential(
-                &state,
-                *server_id,
-                "oauth_authcode",
-                &access_encrypted,
-                refresh_encrypted.as_deref(),
-                expires_at,
-                &scopes,
-                upstream_subject.as_deref(),
-                *configured_by,
-            )
+            retry_pg_storage("admin_shared_credential", || {
+                shared::upsert_shared_credential(
+                    &state,
+                    *server_id,
+                    "oauth_authcode",
+                    &access_encrypted,
+                    refresh_encrypted.as_deref(),
+                    expires_at,
+                    &scopes,
+                    upstream_subject.as_deref(),
+                    *configured_by,
+                )
+            })
             .await?;
             think_watch_mcp_gateway::cache::McpResponseCache::new(state.redis.clone())
                 .invalidate_server_lane(server_id)
@@ -893,15 +946,51 @@ pub async fn revoke_connection(
         }
     }
 
-    sqlx::query(
+    // Delete + (if needed) promote-another-default inside one
+    // transaction. The partial unique index `uq_mcp_user_credentials_default`
+    // guarantees there's AT MOST one default per (server, user), but
+    // doesn't enforce AT LEAST one — so deleting the user's default
+    // credential while they still hold other rows would leave the
+    // gateway unable to resolve a default and return 401 on the next
+    // call, even though the user clearly still has a usable connection.
+    // Promote the most recently created remaining row as a graceful
+    // fallback so the user keeps working without manually re-marking.
+    let mut tx = state.db.begin().await?;
+    let was_default: Option<bool> = sqlx::query_scalar(
         r#"DELETE FROM mcp_user_credentials
-            WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3"#,
+            WHERE mcp_server_id = $1 AND user_id = $2 AND account_label = $3
+            RETURNING is_default"#,
     )
     .bind(server_id)
     .bind(auth_user.claims.sub)
     .bind(&account_label)
-    .execute(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
+
+    if matches!(was_default, Some(true)) {
+        // Promote the newest remaining credential for the same
+        // (server, user). Newest wins because a user juggling
+        // multiple credentials usually treats the latest one as
+        // "current" — same heuristic the connect-then-overwrite UX
+        // already nudges them toward. NULL `created_at` shouldn't
+        // exist (column is NOT NULL DEFAULT now()) but the ORDER BY
+        // is still safe under NULLS LAST.
+        sqlx::query(
+            r#"UPDATE mcp_user_credentials
+                SET is_default = true
+                WHERE id = (
+                    SELECT id FROM mcp_user_credentials
+                     WHERE mcp_server_id = $1 AND user_id = $2
+                     ORDER BY created_at DESC NULLS LAST
+                     LIMIT 1
+                )"#,
+        )
+        .bind(server_id)
+        .bind(auth_user.claims.sub)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
 
     // Cached responses pinned to this credential are now serving an
     // identity that no longer has access. Wipe the user's lane for

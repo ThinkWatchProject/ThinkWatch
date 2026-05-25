@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearch } from '@tanstack/react-router';
+import Decimal from 'decimal.js';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
@@ -1090,8 +1091,13 @@ function PlatformPricingCard() {
         output_price_per_token: string;
         currency: string;
       }>('/api/admin/platform-pricing');
-      setInputPerM((Number(p.input_price_per_token) * 1_000_000).toString());
-      setOutputPerM((Number(p.output_price_per_token) * 1_000_000).toString());
+      // Pricing comes from the backend as a `Decimal(18,10)` string —
+      // routing it through JS `Number` clips at ~15 significant digits
+      // and silently mis-displays prices like `0.00000012345` once they
+      // scale up to per-million. Stay in decimal.js end-to-end on this
+      // form to match the rest of the cost surface.
+      setInputPerM(new Decimal(p.input_price_per_token).mul(1_000_000).toString());
+      setOutputPerM(new Decimal(p.output_price_per_token).mul(1_000_000).toString());
       setCurrency(p.currency);
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
@@ -1108,14 +1114,30 @@ function PlatformPricingCard() {
   // the whole thing using the latest state. Per-field SaveIndicator
   // gives the user the same inline-feedback as the rest of the page.
   const persistAll = useCallback(async () => {
-    const i = Number(inputPerM);
-    const o = Number(outputPerM);
-    if (!Number.isFinite(i) || !Number.isFinite(o) || i < 0 || o < 0) {
+    // Decimal.js round-trips the user input as a string so the payload
+    // matches what the backend's `Decimal(18,10)` column will store
+    // byte-for-byte. The previous `Number(x) / 1_000_000` path silently
+    // rebased small per-million inputs (`0.123`) into precision-lossy
+    // f64 land before reaching the wire.
+    let inputDec: Decimal;
+    let outputDec: Decimal;
+    try {
+      inputDec = new Decimal(inputPerM);
+      outputDec = new Decimal(outputPerM);
+    } catch {
+      throw new Error(t('settingsPage.platformPricing.invalid'));
+    }
+    if (
+      !inputDec.isFinite() ||
+      !outputDec.isFinite() ||
+      inputDec.isNegative() ||
+      outputDec.isNegative()
+    ) {
       throw new Error(t('settingsPage.platformPricing.invalid'));
     }
     await apiPatch('/api/admin/platform-pricing', {
-      input_price_per_token: i / 1_000_000,
-      output_price_per_token: o / 1_000_000,
+      input_price_per_token: inputDec.div(1_000_000).toString(),
+      output_price_per_token: outputDec.div(1_000_000).toString(),
       currency,
     });
   }, [inputPerM, outputPerM, currency, t]);

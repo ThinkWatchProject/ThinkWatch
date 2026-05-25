@@ -127,7 +127,14 @@ pub async fn init_state(
         .timeout(std::time::Duration::from_secs(init_http_secs))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
+        // Builder only fails on TLS-backend / runtime-init pathologies
+        // — never on plausible runtime config. Falling back to
+        // `Client::new()` previously hid the failure by handing back a
+        // client with NO timeout and default redirects, so MCP discovery
+        // / OAuth refresh could hang on a slow upstream forever. Boot
+        // failure is the correct response: operator notices immediately
+        // and investigates the TLS stack.
+        .expect("HTTP client must build — TLS/runtime init failed");
     let user_token_resolver = think_watch_mcp_gateway::user_token::UserTokenResolver::new(
         pool.clone(),
         crypto_key,
@@ -297,12 +304,28 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
             let new_blob = app::load_blob_redactor(dc).await;
             blob.store(Arc::new(new_blob));
             let http_secs = dc.perf_http_client_secs().await as u64;
-            let new_http = reqwest::Client::builder()
+            match reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(http_secs))
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
-            http.store(Arc::new(new_http));
+            {
+                Ok(new_http) => {
+                    http.store(Arc::new(new_http));
+                }
+                Err(e) => {
+                    // Hot-reload path — we can't crash the live server
+                    // for a config edit, so keep the previous client
+                    // and surface the failure. Operator sees the metric
+                    // / log and fixes the config; existing requests
+                    // keep working under the prior client.
+                    metrics::counter!("hot_reload_http_client_failed_total").increment(1);
+                    tracing::error!(
+                        error = %e,
+                        "Hot-reload of HTTP client failed; keeping previous client. \
+                         Check TLS / proxy config."
+                    );
+                }
+            }
             let pool_secs = dc.perf_mcp_pool_secs().await as u64;
             let new_pool = think_watch_mcp_gateway::pool::ConnectionPool::with_timeout(pool_secs);
             pool.store(Arc::new(new_pool));
