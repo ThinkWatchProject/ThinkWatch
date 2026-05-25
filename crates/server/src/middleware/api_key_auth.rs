@@ -93,8 +93,9 @@ pub fn require_api_key(
             // `delete_user` ever miss the api_keys cascade, a key for
             // a disabled or deleted user is rejected here. The
             // console-facing `auth_via_api_key` path (auth_guard.rs)
-            // already has this join — the gateway path used to omit
-            // it and trusted the cascade. Mirror the same predicate.
+            // has the matching join — the two paths MUST stay in sync,
+            // otherwise the wrong half-fix lets a deleted user's API
+            // key keep working on whichever surface drifted.
             let row = sqlx::query_as::<_, think_watch_common::models::ApiKey>(
                 r#"SELECT api_keys.* FROM api_keys
                    JOIN users ON users.id = api_keys.user_id

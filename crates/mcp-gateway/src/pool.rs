@@ -358,18 +358,40 @@ fn parse_sse_json_rpc(
     text: &str,
     request_id: Option<&serde_json::Value>,
 ) -> Result<(JsonRpcResponse, String), PoolError> {
+    // Cap the captured envelopes so a long-running tool that emits
+    // tens of thousands of progress notifications can't blow up the
+    // audit body or the heap. Beyond `MAX_AUDIT_EVENTS` we stop
+    // pushing into the audit Vec but KEEP parsing so the response-
+    // matching loop below can still find the response envelope.
+    // The audit body gets a single trailing `{"_truncated": N}`
+    // marker so operators can see the cut happened.
+    const MAX_AUDIT_EVENTS: usize = 1024;
     let mut events: Vec<serde_json::Value> = Vec::new();
+    let mut truncated_count: usize = 0;
     let mut data_buf = String::new();
-    let flush = |buf: &mut String, events: &mut Vec<serde_json::Value>| {
+    let mut flush = |buf: &mut String| {
         if buf.is_empty() {
             return;
         }
         // Best-effort parse — non-JSON events (rare) are recorded
         // verbatim as a string for audit so the full transcript is
         // preserved even on malformed envelopes.
-        match serde_json::from_str::<serde_json::Value>(buf) {
-            Ok(v) => events.push(v),
-            Err(_) => events.push(serde_json::Value::String(buf.clone())),
+        let parsed = match serde_json::from_str::<serde_json::Value>(buf) {
+            Ok(v) => v,
+            Err(_) => serde_json::Value::String(buf.clone()),
+        };
+        // Response-shaped envelopes (have `result` or `error`) MUST
+        // always land in `events` so the matching pass below can find
+        // them — otherwise an extremely chatty upstream that emits
+        // tens of thousands of progress notifications before the
+        // response would push the response itself past the cap and
+        // we'd return ParseError on what is actually a successful
+        // call. Notifications are the ones we truncate.
+        let is_response = parsed.get("result").is_some() || parsed.get("error").is_some();
+        if is_response || events.len() < MAX_AUDIT_EVENTS {
+            events.push(parsed);
+        } else {
+            truncated_count += 1;
         }
         buf.clear();
     };
@@ -381,12 +403,16 @@ fn parse_sse_json_rpc(
             }
             data_buf.push_str(payload);
         } else if line.is_empty() {
-            flush(&mut data_buf, &mut events);
+            flush(&mut data_buf);
         }
         // event:/id:/retry: lines per the SSE spec are silently
         // dropped — we only care about the data payloads.
     }
-    flush(&mut data_buf, &mut events);
+    flush(&mut data_buf);
+    if truncated_count > 0 {
+        metrics::counter!("mcp_pool_sse_events_truncated_total").increment(truncated_count as u64);
+        events.push(serde_json::json!({ "_truncated_events": truncated_count }));
+    }
 
     if events.is_empty() {
         return Err(PoolError::ParseError(

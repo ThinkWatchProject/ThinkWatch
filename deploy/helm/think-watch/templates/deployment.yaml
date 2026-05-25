@@ -156,17 +156,46 @@ spec:
             - name: http
               containerPort: 80
               protocol: TCP
+          # nginx in this image writes to /var/run, /var/cache/nginx,
+          # and /tmp at runtime. With readOnlyRootFilesystem: true (set
+          # above) those paths must be backed by an emptyDir or the pod
+          # fails to start with "Read-only file system" on the first
+          # forked worker. Each volume is sized for normal SPA
+          # operation; bump `sizeLimit` if a custom nginx.conf adds
+          # heavy buffering / large file uploads.
+          volumeMounts:
+            - name: nginx-run
+              mountPath: /var/run
+            - name: nginx-cache
+              mountPath: /var/cache/nginx
+            - name: nginx-tmp
+              mountPath: /tmp
+          # Probe the proxied backend instead of the SPA's index.html.
+          # `/` is the SPA fallback and ALWAYS returns 200 even when
+          # the backend behind /api/* is unreachable — meaning a
+          # broken pod still passes ready/live, traffic keeps landing
+          # on it, and users see "loading…" forever.
           livenessProbe:
             httpGet:
-              path: /
+              path: /api/health
               port: http
             initialDelaySeconds: 5
             periodSeconds: 15
           readinessProbe:
             httpGet:
-              path: /
+              path: /api/health
               port: http
             initialDelaySeconds: 3
             periodSeconds: 5
           resources:
             {{- toYaml .Values.resources.web | nindent 12 }}
+      volumes:
+        - name: nginx-run
+          emptyDir:
+            sizeLimit: 4Mi
+        - name: nginx-cache
+          emptyDir:
+            sizeLimit: 32Mi
+        - name: nginx-tmp
+          emptyDir:
+            sizeLimit: 32Mi

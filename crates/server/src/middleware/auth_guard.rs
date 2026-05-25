@@ -540,10 +540,26 @@ pub async fn extract_client_ip(
     headers: &axum::http::HeaderMap,
     extensions: &axum::http::Extensions,
 ) -> Option<String> {
-    let ip_source = state.dynamic_config.client_ip_source().await;
     let connection_ip = extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip().to_string());
+    resolve_client_ip(&state.dynamic_config, headers, connection_ip).await
+}
+
+/// Core IP resolution. Same trust contract as [`extract_client_ip`] but
+/// takes the already-extracted connection IP directly so it can be
+/// called from middleware (like `access_log`) that doesn't have an
+/// `AppState` in scope. KEEP THIS THE ONLY READER of `client_ip_source`
+/// / `client_ip_xff_*` / `security.trusted_proxies` — every duplicate
+/// copy of this logic is one more place a forwarded-IP spoofing bug
+/// can hide (caught by audit-IP review when access_log had its own
+/// copy that ignored `trusted_proxies` entirely).
+pub async fn resolve_client_ip(
+    dc: &think_watch_common::dynamic_config::DynamicConfig,
+    headers: &axum::http::HeaderMap,
+    connection_ip: Option<String>,
+) -> Option<String> {
+    let ip_source = dc.client_ip_source().await;
 
     if ip_source != "connection" {
         // Require a non-empty trusted-proxy whitelist before trusting
@@ -553,8 +569,7 @@ pub async fn extract_client_ip(
         // every request could spoof X-Forwarded-For to forge the IP
         // used for rate limiting, audit logging, and session binding.
         // Fall back to the TCP peer address in that misconfiguration.
-        let trusted_proxies = state
-            .dynamic_config
+        let trusted_proxies = dc
             .get_string("security.trusted_proxies")
             .await
             .unwrap_or_default();
@@ -582,8 +597,8 @@ pub async fn extract_client_ip(
 
     match ip_source.as_str() {
         "xff" => {
-            let position = state.dynamic_config.client_ip_xff_position().await;
-            let depth = state.dynamic_config.client_ip_xff_depth().await.max(1) as usize;
+            let position = dc.client_ip_xff_position().await;
+            let depth = dc.client_ip_xff_depth().await.max(1) as usize;
             headers
                 .get("x-forwarded-for")
                 .and_then(|v| v.to_str().ok())
@@ -889,19 +904,29 @@ async fn auth_via_api_key(
         .dynamic_config
         .api_keys_inactivity_timeout_days()
         .await;
+    // JOIN users so a deleted / disabled user's API key stops working
+    // immediately on the console surface, matching the gateway path
+    // in `api_key_auth::require_api_key`. Without this, the H8 fix
+    // ("clear MCP cache + sessions on user delete") is silently
+    // bypassed — the deleted user's API key keeps minting admin
+    // requests until the key itself expires.
     let row = sqlx::query_as::<_, think_watch_common::models::ApiKey>(
-        r#"SELECT * FROM api_keys
-           WHERE key_hash = $1
-             AND deleted_at IS NULL
+        r#"SELECT api_keys.* FROM api_keys
+           JOIN users ON users.id = api_keys.user_id
+           WHERE api_keys.key_hash = $1
+             AND api_keys.deleted_at IS NULL
+             AND users.is_active = true
+             AND users.deleted_at IS NULL
              AND (
-                 is_active = true
-                 OR (grace_period_ends_at IS NOT NULL AND grace_period_ends_at > now())
+                 api_keys.is_active = true
+                 OR (api_keys.grace_period_ends_at IS NOT NULL
+                     AND api_keys.grace_period_ends_at > now())
              )
              AND (
-                 last_used_at IS NULL
-                 OR last_used_at > now() - CASE
-                     WHEN COALESCE(inactivity_timeout_days, 0) > 0
-                         THEN make_interval(days => inactivity_timeout_days::int)
+                 api_keys.last_used_at IS NULL
+                 OR api_keys.last_used_at > now() - CASE
+                     WHEN COALESCE(api_keys.inactivity_timeout_days, 0) > 0
+                         THEN make_interval(days => api_keys.inactivity_timeout_days::int)
                      WHEN $2::bigint > 0
                          THEN make_interval(days => $2::int)
                      ELSE interval '999999 days'

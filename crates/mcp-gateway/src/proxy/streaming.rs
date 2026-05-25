@@ -217,6 +217,12 @@ where
 {
     use axum::response::sse::Event;
     use std::convert::Infallible;
+    // Mirror the gateway SSE parser's 8 MiB cap on the inter-event
+    // buffer. An upstream that streams without ever emitting the
+    // `\n\n` terminator would otherwise grow `text_buf` without
+    // bound; multiplied across concurrent streams that's a trivial
+    // OOM vector even with a single misbehaving registered MCP server.
+    const MAX_SSE_EVENT_BYTES: usize = 8 * 1024 * 1024;
     let body = async_stream::stream! {
         use futures::stream::StreamExt;
         let source = source;
@@ -226,6 +232,28 @@ where
         while let Some(chunk) = source.next().await {
             match chunk {
                 Ok(bytes) => {
+                    // Reject the chunk BEFORE the allocation when its
+                    // post-append size would push us past the cap.
+                    // Tearing down the stream is preferable to letting
+                    // one bad upstream pin a process.
+                    if text_buf.len() + bytes.len() > MAX_SSE_EVENT_BYTES {
+                        tracing::error!(
+                            buffered = text_buf.len(),
+                            incoming = bytes.len(),
+                            "MCP SSE event would exceed {MAX_SSE_EVENT_BYTES} bytes — terminating"
+                        );
+                        metrics::counter!("mcp_sse_buffer_overflow_total").increment(1);
+                        if let Some(tx) = done_tx.take() {
+                            let _ = tx.send(StreamOutcome::UpstreamError {
+                                error_type: "transport".to_owned(),
+                                message: format!(
+                                    "MCP SSE event exceeded {MAX_SSE_EVENT_BYTES} bytes without delimiter"
+                                ),
+                                status_code: 502,
+                            });
+                        }
+                        break;
+                    }
                     let s = String::from_utf8_lossy(&bytes);
                     text_buf.push_str(&s);
                     while let Some(end) = find_sse_event_terminator(&text_buf) {

@@ -206,33 +206,13 @@ where
                 return Ok(response);
             }
 
-            // Resolve client IP using the same logic as auth_guard
-            let ip = match dc.client_ip_source().await.as_str() {
-                "xff" => {
-                    let position = dc.client_ip_xff_position().await;
-                    let depth = dc.client_ip_xff_depth().await.max(1) as usize;
-                    headers
-                        .get("x-forwarded-for")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|v| {
-                            let parts: Vec<&str> = v.split(',').map(|s| s.trim()).collect();
-                            let idx = if position == "right" {
-                                parts.len().checked_sub(depth)
-                            } else {
-                                let i = depth - 1;
-                                if i < parts.len() { Some(i) } else { None }
-                            };
-                            idx.and_then(|i| parts.get(i)).map(|s| s.to_string())
-                        })
-                        .or(connection_ip)
-                }
-                "x-real-ip" => headers
-                    .get("x-real-ip")
-                    .and_then(|v| v.to_str().ok())
-                    .map(|s| s.trim().to_string())
-                    .or(connection_ip),
-                _ => connection_ip,
-            };
+            // Delegate to the shared resolver so the trusted-proxy
+            // contract is enforced identically here and in auth_guard.
+            // The previous inlined copy honored XFF / X-Real-IP
+            // unconditionally, letting any direct connection spoof the
+            // IP recorded in access_logs / IP-keyed analytics.
+            let ip = crate::middleware::auth_guard::resolve_client_ip(&dc, &headers, connection_ip)
+                .await;
 
             // Build the access-log entry through `AnonymousActor`:
             // even though some requests are authenticated, this

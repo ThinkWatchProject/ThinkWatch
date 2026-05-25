@@ -445,3 +445,99 @@ async fn limits_admin_creates_and_lists_user_rule() {
         "expected max_count=100 rule: {arr:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Console-surface API key + user state interaction
+// (regression for C3: auth_guard.rs::auth_via_api_key used to omit the
+// users JOIN that api_key_auth.rs has, so a deleted/disabled user kept
+// admin access through their console API key indefinitely.)
+// ---------------------------------------------------------------------------
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn console_api_key_rejected_after_owner_deleted() {
+    let app = TestApp::spawn().await;
+
+    // A user with a console-surface API key. We deliberately pick a
+    // non-admin user — even a low-privilege user's key should stop
+    // working at the auth layer once the user is gone, before any
+    // permission check fires.
+    let owner = fixtures::create_random_user(&app.db).await.unwrap();
+    let key = fixtures::create_api_key(
+        &app.db,
+        owner.user.id,
+        "console-key",
+        &["console"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    // Baseline: the key works before deletion (hits /api/auth/me which
+    // only requires authentication, not a specific permission).
+    let con = app.console_client();
+    con.set_bearer(key.plaintext.clone());
+    let baseline = con.get("/api/auth/me").await.unwrap();
+    assert!(
+        matches!(baseline.status.as_u16(), 200 | 403),
+        "baseline: key should at least authenticate, got {}",
+        baseline.status
+    );
+
+    // Soft-delete the owner. Production path: an admin calls
+    // DELETE /api/admin/users/{id}. Doing it via SQL here keeps the
+    // test focused on the auth contract rather than the admin flow.
+    sqlx::query("UPDATE users SET deleted_at = now() WHERE id = $1")
+        .bind(owner.user.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    let after = con.get("/api/auth/me").await.unwrap();
+    assert_eq!(
+        after.status.as_u16(),
+        401,
+        "console API key MUST stop authenticating once owner is soft-deleted; got {}",
+        after.status
+    );
+}
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn console_api_key_rejected_after_owner_deactivated() {
+    let app = TestApp::spawn().await;
+    let owner = fixtures::create_random_user(&app.db).await.unwrap();
+    let key = fixtures::create_api_key(
+        &app.db,
+        owner.user.id,
+        "console-key",
+        &["console"],
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let con = app.console_client();
+    con.set_bearer(key.plaintext.clone());
+    let baseline = con.get("/api/auth/me").await.unwrap();
+    assert!(
+        matches!(baseline.status.as_u16(), 200 | 403),
+        "baseline auth before deactivation"
+    );
+
+    sqlx::query("UPDATE users SET is_active = false WHERE id = $1")
+        .bind(owner.user.id)
+        .execute(&app.db)
+        .await
+        .unwrap();
+
+    let after = con.get("/api/auth/me").await.unwrap();
+    assert_eq!(
+        after.status.as_u16(),
+        401,
+        "console API key MUST stop authenticating once owner is deactivated; got {}",
+        after.status
+    );
+}
