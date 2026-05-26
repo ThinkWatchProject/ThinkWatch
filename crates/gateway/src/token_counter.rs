@@ -28,6 +28,11 @@ pub fn estimate_tokens(text: &str) -> u32 {
 ///
 /// Each message incurs a small fixed overhead (~4 tokens for role/framing)
 /// plus the content tokens.
+///
+/// The string-content fast path borrows `&str` directly so a 40 KB
+/// conversation message doesn't get cloned just to count chars. Only
+/// non-string content (rare — multimodal / function-call shapes) pays
+/// for one allocation via `Value::to_string`.
 pub fn count_message_tokens(messages: &[ChatMessage]) -> u32 {
     let mut total: u32 = 0;
 
@@ -35,12 +40,10 @@ pub fn count_message_tokens(messages: &[ChatMessage]) -> u32 {
         // ~4 tokens of overhead per message for role, delimiters, etc.
         total += 4;
 
-        let content_text = match &msg.content {
-            serde_json::Value::String(s) => s.clone(),
-            other => other.to_string(),
+        total += match &msg.content {
+            serde_json::Value::String(s) => estimate_tokens(s),
+            other => estimate_tokens(&other.to_string()),
         };
-
-        total += estimate_tokens(&content_text);
     }
 
     total

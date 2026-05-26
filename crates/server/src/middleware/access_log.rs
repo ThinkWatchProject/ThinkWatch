@@ -31,19 +31,16 @@ pub struct AccessLogUserInfo {
 #[derive(Clone, Default)]
 pub struct AccessLogUserSlot(pub Arc<OnceLock<AccessLogUserInfo>>);
 
-/// Per-request correlation id inserted into request extensions so any
-/// downstream audit emission can tag itself with it. Mirrors what the
-/// gateway puts in `metadata.request_id` for AI traffic — setting this
-/// from the access_log layer means management endpoints get a trace id
-/// too, and a single `GET /api/admin/trace/{id}` query returns every
-/// row from audit_logs, gateway_logs, or mcp_logs that shares it.
-///
-/// Clients can pin the id by sending the `x-trace-id` header; otherwise
-/// a fresh UUID is minted. We echo the chosen id back on the response
-/// as `x-trace-id` so operators can copy it out of a cURL trace.
-#[derive(Clone, Debug)]
-#[allow(dead_code)] // read by handlers that tag audit entries with .trace_id()
-pub struct RequestTraceId(pub String);
+// Note: this middleware previously inserted a `RequestTraceId(String)`
+// type into `request.extensions_mut()` with a comment claiming
+// downstream handlers read it back to tag audit rows with `.trace_id()`.
+// A workspace-wide grep showed zero such readers — gateway / MCP audit
+// rows derive their trace id from the lifecycle state's
+// `metadata.request_id` instead, and admin handlers don't tag at all.
+// The struct + insert were removed in commit (this one) to stop
+// pretending the wire-up exists. If a future audit row needs the
+// access-layer trace id, add the extractor at the call site AND a
+// reader test before re-introducing the extension entry.
 
 /// Should the path/status pair be excluded from access_logs entirely?
 ///
@@ -158,9 +155,6 @@ where
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty() && s.len() <= 128 && s.chars().all(|c| !c.is_control()));
         let trace_id = incoming_trace.unwrap_or_else(|| Uuid::new_v4().to_string());
-        request
-            .extensions_mut()
-            .insert(RequestTraceId(trace_id.clone()));
 
         // Slot for auth_guard to publish the resolved user_id into.
         let user_slot = AccessLogUserSlot::default();

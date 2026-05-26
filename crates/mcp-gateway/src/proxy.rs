@@ -246,14 +246,35 @@ impl McpProxy {
             description: Option<String>,
             input_schema: Option<serde_json::Value>,
         }
+        // Hard cap on tool catalog size per tools/list call. A user
+        // who has authenticated against 200 MCP servers, each with 50
+        // tools, would otherwise pull 10k rows into memory + serialize
+        // them into a single response on every tools/list (typically
+        // called at session start and on registry changes). The cap
+        // is generous enough that legitimate setups won't see
+        // truncation; if a deployment ever does, the warn log + the
+        // metric on the truncation path tells operators to either
+        // raise the cap or rethink the user's MCP fan-out.
+        const MAX_USER_TOOL_ROWS: i64 = 5_000;
         let user_tool_rows: Vec<UserToolRow> = sqlx::query_as(
             "SELECT mcp_server_id, tool_name, description, input_schema
-               FROM mcp_user_tools WHERE user_id = $1",
+               FROM mcp_user_tools WHERE user_id = $1
+               ORDER BY mcp_server_id, tool_name
+               LIMIT $2",
         )
         .bind(ctx.user_id)
+        .bind(MAX_USER_TOOL_ROWS)
         .fetch_all(&self.db)
         .await
         .unwrap_or_default();
+        if user_tool_rows.len() as i64 == MAX_USER_TOOL_ROWS {
+            metrics::counter!("mcp_user_tools_catalog_truncated_total").increment(1);
+            tracing::warn!(
+                user_id = %ctx.user_id,
+                limit = MAX_USER_TOOL_ROWS,
+                "tools/list per-user catalog hit the row cap — some tools omitted"
+            );
+        }
         let mut user_tools_by_server: std::collections::HashMap<Uuid, Vec<UserToolRow>> =
             std::collections::HashMap::new();
         for row in user_tool_rows {

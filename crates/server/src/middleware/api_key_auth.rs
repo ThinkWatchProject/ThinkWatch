@@ -254,12 +254,17 @@ pub fn require_api_key(
                     );
                     return Err(StatusCode::UNAUTHORIZED);
                 };
-                let user_email: String =
-                    sqlx::query_scalar("SELECT email FROM users WHERE id = $1")
-                        .bind(uid)
-                        .fetch_one(&state.db)
-                        .await
-                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                // Reuse the email already loaded for `gateway_identity`
+                // above — same user_id, same row. The MCP branch used
+                // to issue a SECOND `SELECT email` query against PG on
+                // every request which is pure waste; the user-state
+                // gate at the JOIN above guarantees the user still
+                // exists, so an absent email here means the user was
+                // hard-deleted between the JOIN and this point (rare)
+                // and we should 401 rather than serve the request.
+                let Some(user_email) = gateway_identity.user_email.clone() else {
+                    return Err(StatusCode::UNAUTHORIZED);
+                };
                 let mcp_identity = McpRequestIdentity {
                     user_id: uid,
                     user_email,
