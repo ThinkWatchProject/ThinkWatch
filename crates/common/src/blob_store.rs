@@ -159,6 +159,23 @@ pub trait BlobStore: Send + Sync + std::fmt::Debug {
         // (S3Store) override.
         Ok(None)
     }
+
+    /// Install / replace the bucket lifecycle rule that expires
+    /// objects under the `bodies/` prefix after `days` days. Mirrors
+    /// the shape `lifecycle_days()` reads so a write + read round
+    /// trips. Implementations that can't write a lifecycle rule
+    /// (`InlineStore`) return `Ok(())` so the server boot path stays
+    /// uniform.
+    ///
+    /// Driven by `audit.body_s3_lifecycle_days` from dynamic_config:
+    /// `retention::apply_blob_lifecycle` calls this on every PATCH
+    /// that touches the key, and `reconcile_blob_lifecycle` calls it
+    /// once at boot.
+    #[allow(unused_variables)]
+    async fn set_lifecycle_days(&self, days: u32) -> Result<(), BlobError> {
+        // Default: no-op. Implementations override.
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -481,6 +498,48 @@ impl BlobStore for S3Store {
         };
         let text = std::str::from_utf8(&xml).unwrap_or("");
         Ok(parse_lifecycle_days(text))
+    }
+
+    async fn set_lifecycle_days(&self, days: u32) -> Result<(), BlobError> {
+        // PUT the canonical `<LifecycleConfiguration>` XML to
+        // `<bucket>?lifecycle`. Shape mirrors what `lifecycle_days()`
+        // reads back, so the write + read round trips. Targets the
+        // same `bodies/` prefix the audit pipeline uses for offloaded
+        // payloads. The rule ID is stable so subsequent PUTs
+        // overwrite this rule rather than appending duplicates (S3
+        // / MinIO / RustFS all dedup on `<ID>`).
+        if days == 0 {
+            return Err(BlobError::Signing("lifecycle days must be > 0".to_string()));
+        }
+        let bucket_endpoint = if self.cfg.path_style {
+            format!(
+                "{}/{}?lifecycle",
+                self.cfg.endpoint.trim_end_matches('/'),
+                self.cfg.bucket
+            )
+        } else {
+            let parsed = url::Url::parse(self.cfg.endpoint.trim_end_matches('/'))
+                .map_err(|e| BlobError::BadUrl(format!("S3 endpoint: {e}")))?;
+            let host = parsed.host_str().ok_or_else(|| {
+                BlobError::BadUrl("S3 endpoint missing host for virtual-host style".to_string())
+            })?;
+            let scheme = parsed.scheme();
+            let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+            format!("{scheme}://{}.{host}{port}/?lifecycle", self.cfg.bucket)
+        };
+        let body = format!(
+            "<LifecycleConfiguration>\
+                <Rule>\
+                    <ID>expire-audit-bodies</ID>\
+                    <Status>Enabled</Status>\
+                    <Filter><Prefix>bodies/</Prefix></Filter>\
+                    <Expiration><Days>{days}</Days></Expiration>\
+                </Rule>\
+            </LifecycleConfiguration>"
+        );
+        self.signed_request("PUT", &bucket_endpoint, body.as_bytes())
+            .await?;
+        Ok(())
     }
 
     async fn ping(&self) -> Result<(), BlobError> {

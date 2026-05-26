@@ -75,6 +75,13 @@ async fn main() -> anyhow::Result<()> {
     // defaults.
     handlers::admin::reconcile_clickhouse_ttls(&state).await;
 
+    // Push the persisted `audit.body_s3_lifecycle_days` to the
+    // blob-store bucket so a fresh deploy gets the default
+    // 60-day expiration installed automatically and any subsequent
+    // admin-UI change survives restarts. No-op when offload isn't
+    // configured.
+    handlers::admin::reconcile_blob_lifecycle(&state).await;
+
     // Smoke-test the body-offload backend so misconfig surfaces
     // immediately in operator logs instead of waiting for the first
     // oversize body to silently degrade to truncation. Fail-OPEN

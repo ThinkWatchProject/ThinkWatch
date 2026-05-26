@@ -97,6 +97,73 @@ pub(super) async fn apply_clickhouse_ttls(
     }
 }
 
+/// Apply the blob-store bucket lifecycle rule for any settings PATCH
+/// that touched `audit.body_s3_lifecycle_days`. Mirrors the
+/// `apply_clickhouse_ttls` pattern: persisted-then-applied, failures
+/// log but don't surface (the bucket might be temporarily
+/// unreachable; the next boot's `reconcile_blob_lifecycle` will
+/// retry). InlineStore deployments no-op via the trait default.
+pub(super) async fn apply_blob_lifecycle(
+    state: &AppState,
+    settings: &HashMap<String, serde_json::Value>,
+) {
+    let Some(value) = settings.get("audit.body_s3_lifecycle_days") else {
+        return;
+    };
+    let Some(days) = value.as_i64() else { return };
+    if !(1..=MAX_RETENTION_DAYS).contains(&days) {
+        tracing::error!(days, "refusing blob lifecycle update: days out of range");
+        return;
+    }
+    if !state.blob_store.can_offload() {
+        // Setting persists for when offload is later configured, but
+        // there's no bucket to PUT against today.
+        return;
+    }
+    match state.blob_store.set_lifecycle_days(days as u32).await {
+        Ok(()) => {
+            tracing::info!(days, "blob-store bucket lifecycle updated");
+            // Same cross-check the body-column TTL path runs — the
+            // operator may have just resolved or freshly broken the
+            // retention-vs-lifecycle invariant.
+            check_body_retention_vs_lifecycle(state).await;
+        }
+        Err(e) => {
+            tracing::error!(
+                days,
+                error = %e,
+                "Failed to update blob-store bucket lifecycle — \
+                 next boot's reconcile will retry"
+            );
+        }
+    }
+}
+
+/// Push the current persisted `audit.body_s3_lifecycle_days` to the
+/// bucket. Boot-time companion to [`apply_blob_lifecycle`] — without
+/// this, a fresh deployment would never install the lifecycle rule
+/// (the operator hasn't touched the setting, so no PATCH fires).
+/// No-op when blob-store offload isn't configured.
+pub async fn reconcile_blob_lifecycle(state: &AppState) {
+    if !state.blob_store.can_offload() {
+        return;
+    }
+    let days = state.dynamic_config.audit_body_s3_lifecycle_days().await;
+    if !(1..=MAX_RETENTION_DAYS).contains(&days) {
+        tracing::error!(days, "blob lifecycle reconcile: days out of range");
+        return;
+    }
+    match state.blob_store.set_lifecycle_days(days as u32).await {
+        Ok(()) => tracing::info!(days, "blob-store bucket lifecycle reconciled at boot"),
+        Err(e) => tracing::warn!(
+            days,
+            error = %e,
+            "blob-store bucket lifecycle reconcile failed at boot — \
+             operator can re-trigger via PATCH /api/admin/settings"
+        ),
+    }
+}
+
 /// Apply current persisted retention settings to all ClickHouse log tables.
 /// Called once at server startup so settings survive restarts. Silently no-ops
 /// if ClickHouse is not configured.
@@ -122,13 +189,12 @@ pub async fn reconcile_clickhouse_ttls(state: &AppState) {
 }
 
 /// Detect mismatches between `audit.body_retention_days` (the CH
-/// column TTL operators tune via dynamic_config) and the bucket's
-/// own lifecycle horizon (administered out-of-band — RustFS init
-/// script, `mc ilm`, the AWS console, etc.). When the CH retention
-/// is set ABOVE the bucket horizon, every `s3://bucket/key` URL
-/// stored in CH between (bucket_days, ch_days] will 404 on read —
-/// the audit row outlives its referenced object. Silent in
-/// production until an auditor hits a "body fetch failed" 502.
+/// column TTL) and `audit.body_s3_lifecycle_days` (the bucket
+/// lifecycle rule the app pushes to S3). When the CH retention is
+/// set ABOVE the bucket horizon, every `s3://bucket/key` URL stored
+/// in CH between (bucket_days, ch_days] will 404 on read — the
+/// audit row outlives its referenced object. Silent in production
+/// until an auditor hits a "body fetch failed" 502.
 ///
 /// Called at startup and after PATCH /api/admin/settings. Fail-OPEN:
 /// blob-store backends that can't report a lifecycle (`InlineStore`,
@@ -169,7 +235,7 @@ pub async fn check_body_retention_vs_lifecycle(state: &AppState) {
             bucket_lifecycle_days = bucket_days,
             "audit.body_retention_days is ABOVE the bucket lifecycle horizon — \
              offloaded body URLs between {bucket_days}d and {configured_days}d will 404 on \
-             read; raise the bucket lifecycle (`mc ilm`) OR lower audit.body_retention_days"
+             read; raise audit.body_s3_lifecycle_days OR lower audit.body_retention_days"
         );
         metrics::counter!("audit_body_retention_above_bucket_lifecycle_total").increment(1);
     } else {

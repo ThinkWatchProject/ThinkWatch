@@ -21,7 +21,9 @@ pub use oidc::{
     delete_oidc_draft, discover_oidc_draft, get_oidc_settings, start_oidc_test_login,
     toggle_oidc_active, update_oidc_draft,
 };
-pub use retention::{check_body_retention_vs_lifecycle, reconcile_clickhouse_ttls};
+pub use retention::{
+    check_body_retention_vs_lifecycle, reconcile_blob_lifecycle, reconcile_clickhouse_ttls,
+};
 pub use settings::{
     AuditConfigResponse, SystemInfo, UpdateSettingsRequest, get_all_settings, get_audit_settings,
     get_settings_by_category, get_system_settings, update_settings,

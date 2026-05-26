@@ -1438,7 +1438,9 @@
       "app": "应用日志（天）",
       "appHint": "应用运行时追踪。",
       "body": "审计 Body（天）",
-      "bodyHint": "捕获的请求/响应正文可读时长。到期后正文列被置为 NULL，但审计行保留——避免在此窗口内查不到“当时发生了什么”。建议 ≤ 上面的网关行 TTL，且 ≤ S3 bucket 生命周期（AUDIT_BODY_LIFECYCLE_DAYS，默认 60）。"
+      "bodyHint": "捕获的请求/响应正文可读时长。到期后正文列被置为 NULL，但审计行保留——避免在此窗口内查不到「当时发生了什么」。建议 ≤ 上面的网关行 TTL，且 ≤ 下面的 S3 bucket 生命周期。",
+      "bodyS3Lifecycle": "S3 Bucket 生命周期（天）",
+      "bodyS3LifecycleHint": "下放到 S3 bucket 的 body 对象在 bucket 生命周期规则到期前能保留多久。保存与启动时,服务端会自动把这个值写到 bucket 上,不再需要手动跑 `mc ilm import`。必须 ≥ 上面的「审计 Body」,否则比 bucket 视野更久远的审计行在拉取 body 时会 404。"
     },
     "siteName": "站点名称",
     "publicGatewayUrl": "网关公开地址",

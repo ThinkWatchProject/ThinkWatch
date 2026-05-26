@@ -129,6 +129,7 @@ export function SettingsPage() {
   const [accessRetention, setAccessRetention] = useState(30);
   const [appRetention, setAppRetention] = useState(30);
   const [bodyRetention, setBodyRetention] = useState(30);
+  const [bodyS3Lifecycle, setBodyS3Lifecycle] = useState(60);
   // Performance tuning
   const [perfHttpClientSecs, setPerfHttpClientSecs] = useState(15);
   const [perfMcpPoolSecs, setPerfMcpPoolSecs] = useState(30);
@@ -185,6 +186,7 @@ export function SettingsPage() {
     setAccessRetention(num(getSettingValue(data, 'data', 'retention_days_access'), 30));
     setAppRetention(num(getSettingValue(data, 'data', 'retention_days_app'), 30));
     setBodyRetention(num(getSettingValue(data, 'audit', 'body_retention_days'), 30));
+    setBodyS3Lifecycle(num(getSettingValue(data, 'audit', 'body_s3_lifecycle_days'), 60));
 
     setPerfHttpClientSecs(num(getSettingValue(data, 'perf', 'http_client_secs'), 15));
     setPerfMcpPoolSecs(num(getSettingValue(data, 'perf', 'mcp_pool_secs'), 30));
@@ -277,6 +279,7 @@ export function SettingsPage() {
   const accessRetentionSave = useFieldAutosave({ value: accessRetention, isLoaded, persist: (v) => patchOne('data.retention_days_access', v) });
   const appRetentionSave = useFieldAutosave({ value: appRetention, isLoaded, persist: (v) => patchOne('data.retention_days_app', v) });
   const bodyRetentionSave = useFieldAutosave({ value: bodyRetention, isLoaded, persist: (v) => patchOne('audit.body_retention_days', v) });
+  const bodyS3LifecycleSave = useFieldAutosave({ value: bodyS3Lifecycle, isLoaded, persist: (v) => patchOne('audit.body_s3_lifecycle_days', v) });
   // Performance
   const perfHttpClientSave = useFieldAutosave({ value: perfHttpClientSecs, isLoaded, persist: (v) => patchOne('perf.http_client_secs', v) });
   const perfMcpPoolSave = useFieldAutosave({ value: perfMcpPoolSecs, isLoaded, persist: (v) => patchOne('perf.mcp_pool_secs', v) });
@@ -1022,6 +1025,15 @@ export function SettingsPage() {
                       min={1}
                       max={3650}
                       indicator={<SaveIndicator state={bodyRetentionSave.state} error={bodyRetentionSave.error} />}
+                    />
+                    <NumberField
+                      label={t('settings.retention.bodyS3Lifecycle')}
+                      hint={t('settings.retention.bodyS3LifecycleHint')}
+                      value={bodyS3Lifecycle}
+                      onChange={setBodyS3Lifecycle}
+                      min={1}
+                      max={3650}
+                      indicator={<SaveIndicator state={bodyS3LifecycleSave.state} error={bodyS3LifecycleSave.error} />}
                     />
                   </div>
                 </div>

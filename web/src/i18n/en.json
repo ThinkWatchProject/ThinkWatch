@@ -1438,7 +1438,9 @@
       "app": "App Logs (days)",
       "appHint": "Application runtime tracing.",
       "body": "Audit Bodies (days)",
-      "bodyHint": "How long captured request/response bodies stay readable. After this, the body columns are NULLed but the audit row stays — saving an admin from being unable to answer 'what happened' for that window. Should be ≤ gateway row TTL above, and ≤ S3 bucket lifecycle (AUDIT_BODY_LIFECYCLE_DAYS, default 60)."
+      "bodyHint": "How long captured request/response bodies stay readable. After this, the body columns are NULLed but the audit row stays — saving an admin from being unable to answer 'what happened' for that window. Should be ≤ gateway row TTL above, and ≤ S3 bucket lifecycle below.",
+      "bodyS3Lifecycle": "S3 Bucket Lifecycle (days)",
+      "bodyS3LifecycleHint": "How long offloaded body objects survive in the S3 bucket before its lifecycle rule expires them. The server pushes this value to the bucket on save + on boot, so you no longer need to run `mc ilm import` manually. MUST be ≥ Audit Bodies above, or audit rows older than the bucket horizon will 404 on body fetch."
     },
     "siteName": "Site Name",
     "publicGatewayUrl": "Public Gateway URL",

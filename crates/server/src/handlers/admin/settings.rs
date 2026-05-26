@@ -16,7 +16,7 @@ use think_watch_common::errors::AppError;
 use crate::app::AppState;
 use crate::middleware::auth_guard::AuthUser;
 
-use super::retention::{MAX_RETENTION_DAYS, apply_clickhouse_ttls};
+use super::retention::{MAX_RETENTION_DAYS, apply_blob_lifecycle, apply_clickhouse_ttls};
 
 // --- System settings ---
 
@@ -308,6 +308,10 @@ pub async fn update_settings(
     // ClickHouse runs the cleanup asynchronously in its merge worker, so this
     // returns immediately.
     apply_clickhouse_ttls(&state, &req.settings).await;
+    // Push the bucket lifecycle rule to the blob store when the
+    // operator touched it. No-op when the setting isn't in `req` and
+    // when blob-store offload isn't configured.
+    apply_blob_lifecycle(&state, &req.settings).await;
 
     // Notify other instances via Redis Pub/Sub
     dynamic_config::notify_config_changed(&state.redis).await;
@@ -349,6 +353,15 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
             "audit.batch_size" => 10_000,                // CH insert sweet spot
             "audit.flush_interval_secs" => 300,          // 5 min
             "audit.channel_capacity" => 1_000_000,       // ~GB-scale memory budget
+            // Body-column TTL (ClickHouse) AND its companion bucket
+            // lifecycle (S3 / RustFS / MinIO). The PATCH handler in
+            // this file previously rejected both with "Unknown
+            // setting" because neither had a validation arm — fix
+            // them together with the new lifecycle knob. Both share
+            // MAX_RETENTION_DAYS as the upper bound for the same
+            // reason the data.retention_days_* settings do.
+            "audit.body_retention_days" => MAX_RETENTION_DAYS,
+            "audit.body_s3_lifecycle_days" => MAX_RETENTION_DAYS,
             "api_keys.rotation_grace_period_hours" => 24 * 30, // 30 days
             _ => return None,
         })

@@ -281,6 +281,16 @@ dc_getters_i64! {
     // with a `body_capture_status = "expired"`-style absence; the
     // frontend renders "no body captured" so auditors aren't confused.
     audit_body_retention_days,        "audit.body_retention_days",             30;
+    // S3-side garbage collection horizon for offloaded body objects.
+    // The blob-store (S3 / RustFS / MinIO) holds its own bucket
+    // lifecycle rule that expires objects under `bodies/` after this
+    // many days. Must be ≥ `audit.body_retention_days` so a CH row
+    // that still has a non-NULL body URL can always be dereferenced
+    // to actual bytes — `check_body_retention_vs_lifecycle` warns
+    // when this invariant is broken. Reconciled to the bucket on
+    // boot + on every PATCH /api/admin/settings touch via
+    // `apply_blob_lifecycle`.
+    audit_body_s3_lifecycle_days,     "audit.body_s3_lifecycle_days",          60;
     client_ip_xff_depth,              "security.client_ip_xff_depth",          1;
 }
 
