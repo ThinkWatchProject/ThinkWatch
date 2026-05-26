@@ -1,0 +1,143 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["thinkwatch"],
+  "templating": {
+    "list": [
+      {
+        "name": "datasource",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus"
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "ThinkWatch · Overview",
+  "uid": "thinkwatch-overview",
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Gateway requests (per sec)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "sum by (result) (rate(gateway_cache_total[1m]))",
+          "legendFormat": "{{result}}",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps" } }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Audit pipeline drops (per sec)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "rate(audit_log_dropped_total[1m])",
+          "legendFormat": "channel full",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (rate(audit_ch_dropped_total[1m]))",
+          "legendFormat": "ch · {{reason}}",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Rate-limited + quota-exceeded (per sec)",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "x": 0, "y": 7, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "rate(gateway_rate_limited_total[1m])",
+          "legendFormat": "rate-limited",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(gateway_quota_overflow_total[1m])",
+          "legendFormat": "quota overflow",
+          "refId": "B"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Stream / SSE health",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "x": 12, "y": 7, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "rate(gateway_sse_buffer_overflow_total[5m])",
+          "legendFormat": "gateway SSE overflow",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(mcp_sse_buffer_overflow_total[5m])",
+          "legendFormat": "MCP SSE overflow",
+          "refId": "B"
+        },
+        {
+          "expr": "rate(gateway_stream_chunk_serialize_failed_total[5m])",
+          "legendFormat": "chunk serialize fail",
+          "refId": "C"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" } }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Auth health",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "x": 0, "y": 14, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "increase(auth_refresh_replay_total[5m])",
+          "legendFormat": "refresh token replays (5m)",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(session_invalidate_failures_total[5m])",
+          "legendFormat": "session invalidate failures",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Supervised task panics + blob-store smoke",
+      "datasource": { "type": "prometheus", "uid": "${datasource}" },
+      "gridPos": { "x": 12, "y": 14, "w": 12, "h": 7 },
+      "targets": [
+        {
+          "expr": "increase(supervised_task_panics_total[15m])",
+          "legendFormat": "panics · {{task}} (15m)",
+          "refId": "A"
+        },
+        {
+          "expr": "rate(blob_store_smoke_failed_total[5m])",
+          "legendFormat": "blob-store smoke fail",
+          "refId": "B"
+        }
+      ]
+    }
+  ]
+}

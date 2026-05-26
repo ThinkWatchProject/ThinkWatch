@@ -1,7 +1,11 @@
 # Stage 1: Build
 FROM node:24-alpine AS builder
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Pin pnpm to a known-good 11.x. The workspace YAML's `allowBuilds`
+# field requires pnpm 11+ (see web/pnpm-workspace.yaml top comment).
+# Pinning the build avoids `latest` flipping under us on a future
+# image bake and producing a non-reproducible dist/.
+RUN corepack enable && corepack prepare pnpm@11.0.0 --activate
 
 WORKDIR /app
 # pnpm-workspace.yaml carries the install-script allowlist (see its

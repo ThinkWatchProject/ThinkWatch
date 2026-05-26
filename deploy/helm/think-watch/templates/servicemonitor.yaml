@@ -1,0 +1,46 @@
+{{- if .Values.metrics.serviceMonitor.enabled }}
+{{/*
+  Prometheus ServiceMonitor for the `/metrics` endpoint on the console
+  port. The server gates `/metrics` on a bearer token (env
+  `METRICS_BEARER_TOKEN`) so the same Secret the deployment reads is
+  referenced here. Operators using a Prometheus stack outside the
+  release namespace can override `metrics.serviceMonitor.namespace`.
+
+  This template only renders when the operator opts in. The
+  `monitoring.coreos.com/v1` CRD is NOT bundled — installing without
+  `kube-prometheus-stack` (or equivalent) installed will fail with
+  "no matches for kind".
+*/}}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ .Release.Name }}-server
+  {{- with .Values.metrics.serviceMonitor.namespace }}
+  namespace: {{ . | quote }}
+  {{- end }}
+  labels:
+    {{- include "tw.labels" . | nindent 4 }}
+    {{- with .Values.metrics.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace | quote }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Chart.Name }}
+      app.kubernetes.io/component: server
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  endpoints:
+    - port: console
+      path: /metrics
+      interval: {{ .Values.metrics.serviceMonitor.interval | quote }}
+      scrapeTimeout: {{ .Values.metrics.serviceMonitor.scrapeTimeout | quote }}
+      scheme: http
+      authorization:
+        type: Bearer
+        credentials:
+          name: {{ include "tw.secret.name" . }}
+          key: METRICS_BEARER_TOKEN
+{{- end }}

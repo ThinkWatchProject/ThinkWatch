@@ -43,6 +43,30 @@ config:
 secrets:
   jwtSecret: ""
   encryptionKey: ""
+  # Bearer token gating the `/metrics` endpoint. Leave empty to
+  # auto-generate; set explicitly if Prometheus is scraping from a
+  # different cluster / namespace and you want to manage the secret
+  # there.
+  metricsBearerToken: ""
+
+# Prometheus metrics endpoint. When `metricsBearerToken` is set (auto
+# or explicit), the server installs the Prometheus recorder and mounts
+# `/metrics` on the console port behind bearer auth. When empty (and
+# `serviceMonitor.enabled=false`), the endpoint is not mounted at all
+# and the `metrics::*!` macros become silent no-ops.
+metrics:
+  serviceMonitor:
+    # Set to true ONLY if `kube-prometheus-stack` (or another operator
+    # that watches the `ServiceMonitor` CRD) is installed in-cluster.
+    # The chart does not include the CRD itself.
+    enabled: false
+    # Empty → defaults to the release namespace.
+    namespace: ""
+    # Extra labels applied to the ServiceMonitor. Prometheus is
+    # configured to match these (see `prometheus.spec.serviceMonitorSelector`).
+    additionalLabels: {}
+    interval: 30s
+    scrapeTimeout: 10s
 
 # ---- Bundled databases (in-chart StatefulSets) ----
 # Set `bundled: false` to use an external service; then set `externalUrl`.
