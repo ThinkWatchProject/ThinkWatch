@@ -75,9 +75,6 @@ TTL toDateTime(created_at) + INTERVAL 30 DAY
 SETTINGS index_granularity = 8192,
          ttl_only_drop_parts = 1;
 
-ALTER TABLE access_logs ADD COLUMN IF NOT EXISTS user_email LowCardinality(Nullable(String)) AFTER user_id;
-ALTER TABLE access_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloom_filter GRANULARITY 4;
-
 CREATE TABLE IF NOT EXISTS audit_logs (
     id               String,
     user_id          LowCardinality(Nullable(String)),
@@ -174,13 +171,6 @@ TTL toDateTime(created_at) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192,
          ttl_only_drop_parts = 1;
 
-ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS user_email LowCardinality(Nullable(String)) AFTER user_id;
-ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloom_filter GRANULARITY 4;
-ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS session_id LowCardinality(Nullable(String)) AFTER trace_id;
-ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_session session_id TYPE bloom_filter GRANULARITY 4;
-ALTER TABLE gateway_logs ADD COLUMN IF NOT EXISTS upstream_model LowCardinality(Nullable(String)) AFTER provider;
-ALTER TABLE gateway_logs ADD INDEX IF NOT EXISTS idx_upstream upstream_model TYPE set(200) GRANULARITY 2;
-
 ALTER TABLE gateway_logs ADD PROJECTION IF NOT EXISTS proj_by_cost (
     SELECT * ORDER BY cost_usd, created_at
 );
@@ -255,9 +245,6 @@ TTL toDateTime(created_at) + INTERVAL 90 DAY
 SETTINGS index_granularity = 8192,
          ttl_only_drop_parts = 1;
 
-ALTER TABLE mcp_logs ADD COLUMN IF NOT EXISTS user_email LowCardinality(Nullable(String)) AFTER user_id;
-ALTER TABLE mcp_logs ADD INDEX IF NOT EXISTS idx_user_email user_email TYPE bloom_filter GRANULARITY 4;
-
 ALTER TABLE mcp_logs ADD PROJECTION IF NOT EXISTS proj_by_duration (
     SELECT * ORDER BY duration_ms, created_at
 );
@@ -280,13 +267,6 @@ ALTER TABLE mcp_logs MODIFY COLUMN tool_result    TTL toDateTime(created_at) + I
 -- Same substring-search rationale as gateway_logs above.
 ALTER TABLE mcp_logs ADD INDEX IF NOT EXISTS idx_tool_arguments ifNull(tool_arguments, '') TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4;
 ALTER TABLE mcp_logs ADD INDEX IF NOT EXISTS idx_tool_result    ifNull(tool_result, '')    TYPE tokenbf_v1(512, 3, 0) GRANULARITY 4;
-
--- platform_logs used to live here as a separate table for management
--- operations. Its schema was a strict subset of audit_logs (no
--- api_key_id, no trace_id), so the split only fragmented the audit
--- explorer and broke trace correlation for admin actions. Everything
--- now flows into audit_logs; LogType::Platform was removed.
-DROP TABLE IF EXISTS platform_logs;
 
 -- ---------------------------------------------------------------------------
 -- Materialized views and rollups

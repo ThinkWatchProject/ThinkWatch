@@ -21,19 +21,6 @@
 use serde_json::Value;
 use think_watch_test_support::prelude::*;
 
-async fn admin_session(app: &TestApp) -> (TestClient, fixtures::SeededUser) {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    (con, admin)
-}
-
 async fn login(app: &TestApp, email: &str, password: &str) -> TestClient {
     let con = app.console_client();
     con.post(
@@ -50,7 +37,7 @@ async fn login(app: &TestApp, email: &str, password: &str) -> TestClient {
 #[tokio::test]
 async fn reset_password_invalidates_old_password_and_returns_temp_one() {
     let app = TestApp::spawn().await;
-    let (admin_con, _) = admin_session(&app).await;
+    let (admin_con, _) = admin_session_with_user(&app).await;
     let target = fixtures::create_random_user(&app.db).await.unwrap();
     let original_pwd = target.plaintext_password.clone();
 
@@ -132,7 +119,7 @@ async fn reset_password_marker_expiry_blocks_temp_password_after_ttl() {
     // again). We can't actually wait 24h; simulate by deleting the
     // Redis marker and backdating `updated_at`.
     let app = TestApp::spawn().await;
-    let (admin_con, _) = admin_session(&app).await;
+    let (admin_con, _) = admin_session_with_user(&app).await;
     let target = fixtures::create_random_user(&app.db).await.unwrap();
 
     let body: Value = admin_con
@@ -191,7 +178,7 @@ async fn force_logout_invalidates_targets_refresh_tokens() {
     // refresh token issued before the force-logout must be rejected
     // (same gap I closed in `revoke_sessions`).
     let app = TestApp::spawn().await;
-    let (admin_con, _) = admin_session(&app).await;
+    let (admin_con, _) = admin_session_with_user(&app).await;
     let target = fixtures::create_random_user(&app.db).await.unwrap();
 
     // Target logs in to get a refresh token.
@@ -230,7 +217,7 @@ async fn force_logout_drops_signing_key() {
     // requests. Verifies the cleanup happens at the SAME time as
     // refresh-token invalidation.
     let app = TestApp::spawn().await;
-    let (admin_con, _) = admin_session(&app).await;
+    let (admin_con, _) = admin_session_with_user(&app).await;
     let target = fixtures::create_random_user(&app.db).await.unwrap();
 
     let target_con = login(&app, &target.user.email, &target.plaintext_password).await;

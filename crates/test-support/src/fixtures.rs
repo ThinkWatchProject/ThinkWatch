@@ -102,21 +102,6 @@ pub async fn assign_role_global(db: &PgPool, user_id: Uuid, role_name: &str) -> 
     Ok(())
 }
 
-/// Mark `setup.initialized = true` so the public `/api/setup/*`
-/// endpoints stop returning 200 and the system behaves like a real
-/// running deployment.
-pub async fn mark_setup_complete(db: &PgPool) -> Result<()> {
-    sqlx::query(
-        r#"UPDATE system_settings
-           SET value = 'true'::jsonb, updated_at = now()
-           WHERE key = 'setup.initialized'"#,
-    )
-    .execute(db)
-    .await
-    .context("UPDATE system_settings setup.initialized")?;
-    Ok(())
-}
-
 /// Set an arbitrary system setting. JSON value as-is.
 pub async fn set_setting(db: &PgPool, key: &str, value: Value) -> Result<()> {
     sqlx::query(

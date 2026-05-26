@@ -14,24 +14,11 @@
 use chrono::{Duration, Utc};
 use think_watch_test_support::prelude::*;
 
-async fn admin_session(app: &TestApp) -> (TestClient, fixtures::SeededUser) {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    (con, admin)
-}
-
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn upsert_rule_with_meta_persists_expires_reason_created_by() {
     let app = TestApp::spawn().await;
-    let (con, admin) = admin_session(&app).await;
+    let (con, admin) = admin_session_with_user(&app).await;
     let target = fixtures::create_random_user(&app.db).await.unwrap();
 
     let expires = Utc::now() + Duration::days(7);
@@ -82,7 +69,7 @@ async fn upsert_rule_with_meta_persists_expires_reason_created_by() {
 #[tokio::test]
 async fn upsert_rule_rejects_past_expires_at() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let target = fixtures::create_random_user(&app.db).await.unwrap();
 
     let resp = con
@@ -107,7 +94,7 @@ async fn upsert_rule_rejects_past_expires_at() {
 #[tokio::test]
 async fn upsert_rule_rejects_overlong_horizon() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let target = fixtures::create_random_user(&app.db).await.unwrap();
 
     // 100 days > MAX_OVERRIDE_HORIZON_DAYS (90).
@@ -137,7 +124,7 @@ async fn upsert_rule_rejects_overlong_horizon() {
 #[tokio::test]
 async fn upsert_rule_rejects_overlong_reason() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let target = fixtures::create_random_user(&app.db).await.unwrap();
     let reason = "x".repeat(501);
 
@@ -228,7 +215,7 @@ async fn expired_overrides_are_invisible_to_the_gateway_hot_path() {
 #[tokio::test]
 async fn budget_cap_meta_round_trips() {
     let app = TestApp::spawn().await;
-    let (con, admin) = admin_session(&app).await;
+    let (con, admin) = admin_session_with_user(&app).await;
     let target = fixtures::create_random_user(&app.db).await.unwrap();
 
     let expires = Utc::now() + Duration::days(30);
@@ -274,7 +261,7 @@ async fn upsert_rule_emits_audit_entry_with_override_meta() {
     // the action name + the per-row meta so a future refactor that
     // forgets the audit emit fails this test loudly.
     let app = TestApp::spawn_with_clickhouse().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let target = fixtures::create_random_user(&app.db).await.unwrap();
 
     let expires = Utc::now() + Duration::days(3);

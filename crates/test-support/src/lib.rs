@@ -331,6 +331,34 @@ pub mod prelude {
     pub use serde_json::{Value as Json, json};
     pub use uuid::Uuid;
 
+    /// Mint a super-admin user, log them in through the console, and
+    /// return the authenticated client. 15+ integration tests used to
+    /// each ship their own copy of this helper; this is the single
+    /// source of truth. Use [`admin_session_with_user`] when the test
+    /// also needs the seeded `User` (e.g. to assert against the
+    /// admin's id/email).
+    pub async fn admin_session(app: &TestApp) -> TestClient {
+        admin_session_with_user(app).await.0
+    }
+
+    /// Variant of [`admin_session`] that also surfaces the seeded
+    /// admin so the caller can drive secondary requests as them
+    /// (force-logout sweeps, "delete me" assertions, etc).
+    pub async fn admin_session_with_user(app: &TestApp) -> (TestClient, fixtures::SeededUser) {
+        let admin = fixtures::create_admin_user(&app.db)
+            .await
+            .expect("seed admin user");
+        let con = app.console_client();
+        con.post(
+            "/api/auth/login",
+            json!({"email": admin.user.email, "password": admin.plaintext_password}),
+        )
+        .await
+        .expect("admin login")
+        .assert_ok();
+        (con, admin)
+    }
+
     /// Generate a unique-per-test email so Redis lockout / rate-limit
     /// keys (which are keyed on email) don't collide across parallel
     /// tests sharing a Redis instance.

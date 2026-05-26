@@ -12,19 +12,6 @@ use serde_json::Value;
 use think_watch_test_support::prelude::*;
 use uuid::Uuid;
 
-async fn admin_session(app: &TestApp) -> (TestClient, fixtures::SeededUser) {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    (con, admin)
-}
-
 /// Three users + one api_key, in a Vec the bulk handlers can target.
 async fn seed_subjects(app: &TestApp) -> (Vec<Uuid>, Uuid) {
     let mut users = Vec::with_capacity(3);
@@ -50,7 +37,7 @@ async fn seed_subjects(app: &TestApp) -> (Vec<Uuid>, Uuid) {
 #[tokio::test]
 async fn bulk_apply_rule_writes_one_row_per_subject() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let (users, _) = seed_subjects(&app).await;
 
     let body: Value = con
@@ -93,7 +80,7 @@ async fn bulk_apply_rule_rejects_past_expires_at() {
     // per-row loop, so a bogus `expires_at` must short-circuit
     // with 400 and leave the DB untouched.
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let (users, _) = seed_subjects(&app).await;
 
     let resp = con
@@ -132,7 +119,7 @@ async fn bulk_apply_rule_rejects_past_expires_at() {
 #[tokio::test]
 async fn bulk_apply_cap_writes_budget_rows() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let (users, _) = seed_subjects(&app).await;
 
     let body: Value = con
@@ -166,7 +153,7 @@ async fn bulk_apply_cap_writes_budget_rows() {
 #[tokio::test]
 async fn bulk_disable_then_delete_rules_round_trip() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let (users, _) = seed_subjects(&app).await;
 
     // Seed one rule per user directly.
@@ -232,7 +219,7 @@ async fn bulk_disable_then_delete_rules_round_trip() {
 #[tokio::test]
 async fn bulk_disable_then_delete_caps_round_trip() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let (users, _) = seed_subjects(&app).await;
 
     let mut cap_ids = Vec::new();

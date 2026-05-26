@@ -318,15 +318,10 @@ pub async fn ensure_clickhouse_tables(
     backfill_if_empty(
         client,
         "provider_health_5m",
-        // 7 columns, named explicitly. The table has a `throttled_requests`
-        // column (added by a later ALTER) that this backfill used to omit
-        // — `INSERT ... SELECT 6 cols` would fail outright with a count
-        // mismatch on any deployment that had gateway_logs traffic to
-        // backfill from. Also: split status_code=429 out of error_requests
-        // so the backfill matches the MV's accounting (the MV was
-        // rewritten to separate throttle from error after operators
-        // mis-read throttled upstreams as 'down'; the backfill was left
-        // on the old lumped accounting).
+        // 7 columns named explicitly so a future schema add doesn't
+        // silently shift positions. 429s land in `throttled_requests`
+        // (NOT `error_requests`) to match the MV's accounting — a
+        // throttled upstream isn't down.
         "INSERT INTO provider_health_5m \
             (bucket_5m, provider, total_requests, error_requests, \
              throttled_requests, sum_latency_ms, requests_latency) \

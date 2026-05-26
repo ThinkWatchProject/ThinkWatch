@@ -41,19 +41,6 @@ async fn mcp_upstream() -> MockServer {
     server
 }
 
-async fn admin_session(app: &TestApp) -> (TestClient, fixtures::SeededUser) {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    (con, admin)
-}
-
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn wizard_create_with_shared_static_token_round_trip() {
@@ -61,7 +48,7 @@ async fn wizard_create_with_shared_static_token_round_trip() {
     // shared PAT in Step 3, hits Save. Single API call lands the row
     // + shared credential in one transaction.
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let upstream = mcp_upstream().await;
 
     let _ = upstream;
@@ -111,7 +98,7 @@ async fn wizard_create_rejects_both_credential_paths() {
     // Both `wizard_session_id` and `shared_static_token` set is a
     // mistake — the API surfaces a 400 instead of silently picking one.
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
 
     let resp = con
         .post(
@@ -139,7 +126,7 @@ async fn wizard_credential_fields_require_admin_shared() {
     // an admin accidentally pasting a wizard session into a per_user
     // create call.
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
 
     let resp = con
         .post(
@@ -168,7 +155,7 @@ async fn wizard_session_id_with_missing_redis_blob_400s() {
     // blob's gone and Save must surface a clear "re-run authorize"
     // rather than create a half-baked server with no credential.
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
 
     let resp = con
         .post(
@@ -237,7 +224,7 @@ async fn wizard_oauth_admin_shared_full_round_trip() {
     //
     // This pins the round-trip the audit flagged as untested.
     let app = TestApp::spawn().await;
-    let (con, _admin) = admin_session(&app).await;
+    let (con, _admin) = admin_session_with_user(&app).await;
     let provider = wizard_oauth_provider().await;
 
     let session_id = unique_name("wiz-sess");

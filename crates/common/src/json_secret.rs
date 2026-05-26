@@ -3,12 +3,11 @@
 //!
 //! Provider `config_json` carries multiple header values plus
 //! `aws_secret_access_key`; each of those individual values is wrapped
-//! as `{"$enc": "<hex>"}` in production rows, or left as a bare
-//! plaintext string on legacy dev DBs that pre-date the at-rest
-//! encryption migration. Centralising the wire shape here means the
-//! next at-rest field added to a JSONB column reuses the same envelope
-//! instead of inventing its own; tests can ask `JsonSecret::is_encrypted`
-//! instead of reaching into `value.get("$enc")` directly.
+//! as `{"$enc": "<hex>"}` in production rows. Centralising the wire
+//! shape here means the next at-rest field added to a JSONB column
+//! reuses the same envelope instead of inventing its own; tests can
+//! ask `JsonSecret::is_encrypted` instead of reaching into
+//! `value.get("$enc")` directly.
 //!
 //! This module covers the *JSON-nested* case only. Column-level
 //! ciphertexts (mcp_oauth client secret, totp_secret, etc.) already use
@@ -22,36 +21,39 @@ use crate::errors::AppError;
 /// Stored representation of a JSON-nested secret value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsonSecret {
-    /// Production shape — `{"$enc": "<hex AES-256-GCM envelope>"}`.
+    /// `{"$enc": "<hex AES-256-GCM envelope>"}`.
     Encrypted { hex: String },
-    /// Legacy plaintext row predating the encryption migration. Loaded
-    /// transparently; the caller surfaces a `tracing::warn!` so admins
-    /// re-save to upgrade.
-    LegacyPlain(String),
     /// Missing key, null, empty string, or any other shape we treat as
     /// "no value supplied". The loader fans this back into the empty
     /// string at the consumer boundary.
     Empty,
 }
 
-/// JSON marker key — only exported because the backfill task needs to
-/// recognise already-wrapped rows without a full round-trip decrypt.
-/// Production read paths should call [`JsonSecret::from_json`] instead.
+/// JSON marker key — only exported because tests need to recognise
+/// already-wrapped rows without a full round-trip decrypt. Production
+/// read paths should call [`JsonSecret::from_json`] instead.
 pub const ENC_MARKER: &str = "$enc";
 
 impl JsonSecret {
-    /// Recognise the three valid on-disk shapes.
-    pub fn from_json(value: &serde_json::Value) -> Self {
+    /// Recognise the valid on-disk shapes. Returns `Err` for a bare
+    /// non-empty string — that shape is never written by any producer
+    /// in this codebase, so encountering one at read time signals a
+    /// corrupted row or a hand-edited DB. Surfacing the error stops
+    /// us from silently swallowing the cipher and serving a "no
+    /// credentials" downstream error that's much harder to trace.
+    pub fn from_json(value: &serde_json::Value) -> Result<Self, AppError> {
         if let Some(obj) = value.as_object()
             && let Some(hex_str) = obj.get(ENC_MARKER).and_then(|v| v.as_str())
         {
-            return JsonSecret::Encrypted {
+            return Ok(JsonSecret::Encrypted {
                 hex: hex_str.to_string(),
-            };
+            });
         }
         match value.as_str() {
-            Some("") | None => JsonSecret::Empty,
-            Some(s) => JsonSecret::LegacyPlain(s.to_string()),
+            Some("") | None => Ok(JsonSecret::Empty),
+            Some(_) => Err(AppError::Internal(anyhow::anyhow!(
+                "config_json secret is a bare string; expected `{{\"{ENC_MARKER}\":...}}` or null",
+            ))),
         }
     }
 
@@ -71,11 +73,9 @@ impl JsonSecret {
         })
     }
 
-    /// Resolve to plaintext + a `was_encrypted` flag. Empty values
-    /// resolve to `("", false)`; legacy plaintext resolves to the
-    /// stored bytes with `was_encrypted=false` (caller can surface a
-    /// warn line to prompt re-save).
-    pub fn decrypt(&self, encryption_key: &str) -> Result<(String, bool), AppError> {
+    /// Resolve to plaintext. `Empty` resolves to `""`; `Encrypted`
+    /// decrypts via the workspace's at-rest key.
+    pub fn decrypt(&self, encryption_key: &str) -> Result<String, AppError> {
         match self {
             JsonSecret::Encrypted { hex } => {
                 let bytes = hex::decode(hex).map_err(|e| {
@@ -87,13 +87,11 @@ impl JsonSecret {
                 let plain = crypto::decrypt(&bytes, &key).map_err(|e| {
                     AppError::Internal(anyhow::anyhow!("Secret decrypt failed: {e}"))
                 })?;
-                let s = String::from_utf8(plain).map_err(|e| {
+                String::from_utf8(plain).map_err(|e| {
                     AppError::Internal(anyhow::anyhow!("Secret is not valid UTF-8: {e}"))
-                })?;
-                Ok((s, true))
+                })
             }
-            JsonSecret::LegacyPlain(s) => Ok((s.clone(), false)),
-            JsonSecret::Empty => Ok((String::new(), false)),
+            JsonSecret::Empty => Ok(String::new()),
         }
     }
 
@@ -103,21 +101,20 @@ impl JsonSecret {
     pub fn to_json(&self) -> serde_json::Value {
         match self {
             JsonSecret::Encrypted { hex } => serde_json::json!({ ENC_MARKER: hex }),
-            JsonSecret::LegacyPlain(s) => serde_json::Value::String(s.clone()),
             JsonSecret::Empty => serde_json::Value::String(String::new()),
         }
     }
 
-    /// Cheap check used by tests + the backfill: was this value
-    /// stored with the encryption envelope, or is it still legacy
-    /// plaintext that needs re-wrapping?
+    /// Cheap check used by tests: was this value stored with the
+    /// encryption envelope, or is it `Empty`?
     pub fn is_encrypted(&self) -> bool {
         matches!(self, JsonSecret::Encrypted { .. })
     }
 
     /// Convenience: classify a raw JSON value without holding the
-    /// intermediate `JsonSecret`. Used in backfill loops where the
-    /// caller only needs the boolean.
+    /// intermediate `JsonSecret`. The write path uses this to skip
+    /// double-encrypting an `{"$enc":...}` shape that round-tripped
+    /// from a GET response.
     pub fn json_is_encrypted(value: &serde_json::Value) -> bool {
         value
             .as_object()
@@ -139,9 +136,8 @@ mod tests {
         let key = test_key_hex();
         let enc = JsonSecret::encrypt("sk-secret", &key).unwrap();
         assert!(enc.is_encrypted());
-        let (plain, was_enc) = enc.decrypt(&key).unwrap();
+        let plain = enc.decrypt(&key).unwrap();
         assert_eq!(plain, "sk-secret");
-        assert!(was_enc);
     }
 
     #[test]
@@ -154,41 +150,31 @@ mod tests {
     }
 
     #[test]
-    fn from_json_recognises_all_three_shapes() {
+    fn from_json_recognises_enc_envelope_and_empty() {
         let key = test_key_hex();
         let enc = JsonSecret::encrypt("hello", &key).unwrap();
         let wire = enc.to_json();
-        assert_eq!(JsonSecret::from_json(&wire), enc);
-
-        let legacy = serde_json::Value::String("plain".into());
-        assert_eq!(
-            JsonSecret::from_json(&legacy),
-            JsonSecret::LegacyPlain("plain".into())
-        );
+        assert_eq!(JsonSecret::from_json(&wire).unwrap(), enc);
 
         let empty_str = serde_json::Value::String(String::new());
-        assert_eq!(JsonSecret::from_json(&empty_str), JsonSecret::Empty);
         assert_eq!(
-            JsonSecret::from_json(&serde_json::Value::Null),
+            JsonSecret::from_json(&empty_str).unwrap(),
+            JsonSecret::Empty
+        );
+        assert_eq!(
+            JsonSecret::from_json(&serde_json::Value::Null).unwrap(),
             JsonSecret::Empty
         );
     }
 
     #[test]
-    fn legacy_plain_decrypts_to_itself_with_was_encrypted_false() {
-        let v = JsonSecret::LegacyPlain("old-key".into());
-        let (plain, was_enc) = v.decrypt(&test_key_hex()).unwrap();
-        assert_eq!(plain, "old-key");
-        assert!(!was_enc);
-    }
-
-    #[test]
-    fn json_is_encrypted_detects_envelope() {
-        let enc = JsonSecret::encrypt("x", &test_key_hex()).unwrap().to_json();
-        assert!(JsonSecret::json_is_encrypted(&enc));
-        assert!(!JsonSecret::json_is_encrypted(&serde_json::Value::String(
-            "x".into()
-        )));
-        assert!(!JsonSecret::json_is_encrypted(&serde_json::Value::Null));
+    fn from_json_rejects_bare_non_empty_string() {
+        // No producer in this codebase ever writes a bare string into
+        // a secret slot — encountering one at read time means the row
+        // is corrupted or hand-edited. The reader returns Err so the
+        // caller can surface the misconfig instead of silently
+        // treating it as Empty and falling through to "no credentials".
+        let bare = serde_json::Value::String("hand-typed-secret".into());
+        assert!(JsonSecret::from_json(&bare).is_err());
     }
 }

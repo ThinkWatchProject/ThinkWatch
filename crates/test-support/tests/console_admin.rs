@@ -20,19 +20,6 @@ fn pick_list(value: &Value) -> Option<&Vec<Value>> {
         .or_else(|| value.get("data").and_then(|v| v.as_array()))
 }
 
-async fn admin_session(app: &TestApp) -> (TestClient, fixtures::SeededUser) {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    (con, admin)
-}
-
 // ---------------------------------------------------------------------------
 // API Keys CRUD
 // ---------------------------------------------------------------------------
@@ -41,7 +28,7 @@ async fn admin_session(app: &TestApp) -> (TestClient, fixtures::SeededUser) {
 #[tokio::test]
 async fn api_keys_create_list_get_rotate_revoke_cycle() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
 
     // Create
     let created: Value = con
@@ -170,7 +157,7 @@ async fn developer_cannot_force_revoke_admin_keys() {
 #[tokio::test]
 async fn admin_can_list_create_update_delete_users() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
 
     let created: Value = con
         .post(
@@ -226,7 +213,7 @@ async fn admin_can_list_create_update_delete_users() {
 #[tokio::test]
 async fn list_roles_includes_seeded_systems() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
 
     let resp = con.get("/api/admin/roles").await.unwrap();
     resp.assert_ok();
@@ -251,7 +238,7 @@ async fn list_roles_includes_seeded_systems() {
 #[tokio::test]
 async fn permissions_endpoint_returns_known_keys() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let body: Value = con
         .get("/api/admin/permissions")
         .await
@@ -274,7 +261,7 @@ async fn permissions_endpoint_returns_known_keys() {
 #[tokio::test]
 async fn teams_create_add_member_list_remove() {
     let app = TestApp::spawn().await;
-    let (con, _admin) = admin_session(&app).await;
+    let (con, _admin) = admin_session_with_user(&app).await;
     let dev = fixtures::create_random_user(&app.db).await.unwrap();
 
     // Create
@@ -331,7 +318,7 @@ async fn teams_create_add_member_list_remove() {
 #[tokio::test]
 async fn providers_can_be_created_listed_deleted() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
 
     let created: Value = con
         .post(
@@ -380,7 +367,7 @@ async fn providers_can_be_created_listed_deleted() {
 #[tokio::test]
 async fn settings_round_trip_updates_dynamic_config() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
 
     let body = con.get("/api/admin/settings/system").await.unwrap();
     body.assert_ok();
@@ -415,7 +402,7 @@ async fn settings_round_trip_updates_dynamic_config() {
 #[tokio::test]
 async fn limits_admin_creates_and_lists_user_rule() {
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
     let dev = fixtures::create_random_user(&app.db).await.unwrap();
 
     let path = format!("/api/admin/limits/user/{}/rules", dev.user.id);

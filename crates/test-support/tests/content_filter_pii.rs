@@ -22,19 +22,6 @@ use think_watch_test_support::prelude::*;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, Request, ResponseTemplate};
 
-async fn admin_session(app: &TestApp) -> TestClient {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    con
-}
-
 /// Boots a fresh app with content filter / PII rules pre-seeded
 /// directly into `system_settings` and reloaded into the runtime.
 async fn seed_rules(

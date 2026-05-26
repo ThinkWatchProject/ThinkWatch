@@ -43,17 +43,6 @@ pub async fn init_state(
         .await
         .context("persisted rate-limit / weight rows fail validation")?;
 
-    // Idempotent at-rest encryption backfill: re-wrap any provider
-    // header values or AWS secrets still stored in plaintext under
-    // `providers.config_json`. Runs once per boot; no-op once every
-    // row is in the `{"$enc": "<b64>"}` shape.
-    if let Err(e) = app::backfill_provider_secrets(&pool, &config.encryption_key).await {
-        // Don't block startup if backfill fails — the read path still
-        // handles legacy plaintext (with a warn). The next admin
-        // re-save will encrypt the row.
-        tracing::error!("Provider secret backfill failed (continuing): {e}");
-    }
-
     // ClickHouse tables. Same bounded retry as production but without
     // the metrics counter (recorder is not installed in tests).
     if ch_client.is_some() {
@@ -127,13 +116,9 @@ pub async fn init_state(
         .timeout(std::time::Duration::from_secs(init_http_secs))
         .redirect(reqwest::redirect::Policy::none())
         .build()
-        // Builder only fails on TLS-backend / runtime-init pathologies
-        // — never on plausible runtime config. Falling back to
-        // `Client::new()` previously hid the failure by handing back a
-        // client with NO timeout and default redirects, so MCP discovery
-        // / OAuth refresh could hang on a slow upstream forever. Boot
-        // failure is the correct response: operator notices immediately
-        // and investigates the TLS stack.
+        // Builder only fails on TLS-backend / runtime-init pathologies.
+        // Boot must fail loudly so the operator investigates the TLS
+        // stack rather than silently serving requests with no timeout.
         .expect("HTTP client must build — TLS/runtime init failed");
     let user_token_resolver = think_watch_mcp_gateway::user_token::UserTokenResolver::new(
         pool.clone(),

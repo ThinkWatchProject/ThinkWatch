@@ -31,11 +31,6 @@ const PRESETS: { id: string; label: string; fields: AuthHeaderFields }[] = [
     label: 'api-key',
     fields: { headerName: 'api-key', valueTemplate: '{{token}}' },
   },
-  {
-    id: 'github-legacy',
-    label: 'token',
-    fields: { headerName: 'Authorization', valueTemplate: 'token {{token}}' },
-  },
 ];
 
 interface Props {
@@ -59,11 +54,7 @@ export function AuthHeaderFieldset({ value, onChange, previewToken }: Props) {
   const sample = previewToken && previewToken.length > 0
     ? `${previewToken.slice(0, 6)}…`
     : '••••••••';
-  // Defensive: callers should always pass a non-empty template, but
-  // if a stale API response sneaks through with an empty string the
-  // preview should still render rather than crash on .replaceAll().
-  const template = value.valueTemplate || 'Bearer {{token}}';
-  const renderedValue = template.replaceAll('{{token}}', sample);
+  const renderedValue = value.valueTemplate.replaceAll('{{token}}', sample);
 
   return (
     <div className="space-y-3">

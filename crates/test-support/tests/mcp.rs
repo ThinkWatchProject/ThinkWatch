@@ -17,19 +17,6 @@ fn pick_list(value: &Value) -> Option<&Vec<Value>> {
         .or_else(|| value.get("data").and_then(|v| v.as_array()))
 }
 
-async fn admin_session(app: &TestApp) -> TestClient {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    con
-}
-
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn store_lists_seeded_templates() {

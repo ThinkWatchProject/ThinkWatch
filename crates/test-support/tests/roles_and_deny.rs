@@ -14,19 +14,6 @@ use serde_json::{Value, json};
 use think_watch_test_support::prelude::*;
 use uuid::Uuid;
 
-async fn admin_session(app: &TestApp) -> TestClient {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    con
-}
-
 async fn login_as(app: &TestApp, user: &fixtures::SeededUser) -> TestClient {
     let con = app.console_client();
     con.post(

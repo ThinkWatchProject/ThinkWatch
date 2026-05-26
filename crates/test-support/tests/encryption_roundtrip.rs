@@ -27,19 +27,6 @@
 use serde_json::{Value, json};
 use think_watch_test_support::prelude::*;
 
-async fn admin_session(app: &TestApp) -> TestClient {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    con
-}
-
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn oidc_client_secret_round_trips_through_admin_patch() {
@@ -193,14 +180,12 @@ async fn totp_secret_lands_encrypted_in_users_row() {
 /// key. Panics if the value isn't a well-formed envelope.
 fn decode_enc_envelope(v: &Value, encryption_key: &str) -> String {
     use think_watch_common::json_secret::JsonSecret;
-    let secret = JsonSecret::from_json(v);
+    let secret = JsonSecret::from_json(v).expect("envelope");
     assert!(
         secret.is_encrypted(),
         "expected JsonSecret::Encrypted wrapper, got {v}"
     );
-    let (plain, was_enc) = secret.decrypt(encryption_key).expect("decrypt envelope");
-    assert!(was_enc);
-    plain
+    secret.decrypt(encryption_key).expect("decrypt envelope")
 }
 
 #[ignore = "integration test — run via `make test-it`"]
@@ -321,84 +306,6 @@ async fn provider_create_encrypts_aws_bedrock_secret() {
 
     // access_key_id is not sensitive — must remain plaintext for log/UI surfacing.
     assert_eq!(stored["aws_access_key_id"], "AKIAIOSFODNN7EXAMPLE");
-}
-
-#[ignore = "integration test — run via `make test-it`"]
-#[tokio::test]
-async fn provider_startup_backfill_encrypts_legacy_plaintext_rows() {
-    // Simulate a pre-encryption dev DB row by inserting a provider
-    // whose `config_json.headers` and `aws_secret_access_key` are
-    // plaintext strings. The backfill runs in `init::init_state`, so
-    // boot a fresh TestApp pointed at the same DB to exercise it.
-    //
-    // We do it the other way round: stand up an app, INSERT a legacy
-    // row, then invoke the backfill helper directly and re-read.
-    let app = TestApp::spawn().await;
-
-    let legacy_id = uuid::Uuid::new_v4();
-    let legacy_secret = "legacy-plain-bearer-token-xyz";
-    sqlx::query(
-        r#"INSERT INTO providers (id, name, display_name, provider_type, base_url, is_active, config_json)
-           VALUES ($1, $2, $2, 'openai', 'https://api.openai.com', true, $3)"#,
-    )
-    .bind(legacy_id)
-    .bind("legacy-plaintext-provider")
-    .bind(serde_json::json!({
-        "headers": [
-            {"key": "Authorization", "value": format!("Bearer {legacy_secret}")},
-        ],
-        "aws_secret_access_key": "plain-aws-secret-for-coverage",
-    }))
-    .execute(&app.db)
-    .await
-    .unwrap();
-
-    // Run the backfill — should rewrite the row.
-    let rewritten = think_watch_server::app::backfill_provider_secrets(
-        &app.db,
-        &app.state.config.encryption_key,
-    )
-    .await
-    .unwrap();
-    assert!(rewritten >= 1, "backfill should rewrite at least our row");
-
-    let stored: Value = sqlx::query_scalar("SELECT config_json FROM providers WHERE id = $1::uuid")
-        .bind(legacy_id)
-        .fetch_one(&app.db)
-        .await
-        .unwrap();
-    let stored_str = serde_json::to_string(&stored).unwrap();
-    assert!(
-        !stored_str.contains(legacy_secret),
-        "plaintext bearer survived backfill: {stored_str}"
-    );
-
-    use think_watch_common::json_secret::JsonSecret;
-    let header_value = &stored["headers"][0]["value"];
-    assert!(
-        JsonSecret::json_is_encrypted(header_value),
-        "header value not encrypted-at-rest after backfill: {header_value}"
-    );
-    let plain = decode_enc_envelope(header_value, &app.state.config.encryption_key);
-    assert_eq!(plain, format!("Bearer {legacy_secret}"));
-
-    let aws_secret = &stored["aws_secret_access_key"];
-    assert!(
-        JsonSecret::json_is_encrypted(aws_secret),
-        "aws_secret_access_key not encrypted-at-rest after backfill: {aws_secret}"
-    );
-
-    // Idempotent: a second run rewrites nothing.
-    let again = think_watch_server::app::backfill_provider_secrets(
-        &app.db,
-        &app.state.config.encryption_key,
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        again, 0,
-        "second backfill run must be a no-op — all rows already encrypted"
-    );
 }
 
 #[ignore = "integration test — run via `make test-it`"]

@@ -32,19 +32,6 @@ use serde_json::Value;
 use think_watch_common::audit::{AuditEntry, LogType};
 use think_watch_test_support::prelude::*;
 
-async fn admin_session(app: &TestApp) -> TestClient {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    con
-}
-
 // ---------------------------------------------------------------------------
 // access_logs
 // ---------------------------------------------------------------------------

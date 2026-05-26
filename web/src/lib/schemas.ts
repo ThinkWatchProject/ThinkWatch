@@ -30,8 +30,8 @@ export const UserResponseSchema = z.object({
   display_name: z.string(),
   avatar_url: z.string().nullable(),
   is_active: z.boolean(),
-  permissions: z.array(z.string()).optional(),
-  denied_permissions: z.array(z.string()).optional(),
+  permissions: z.array(z.string()),
+  denied_permissions: z.array(z.string()),
 });
 export type UserResponse = z.infer<typeof UserResponseSchema>;
 

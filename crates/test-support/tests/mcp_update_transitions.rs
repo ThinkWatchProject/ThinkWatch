@@ -10,19 +10,6 @@ use think_watch_test_support::prelude::*;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-async fn admin_session(app: &TestApp) -> (TestClient, fixtures::SeededUser) {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    (con, admin)
-}
-
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn update_flipping_auth_shape_purges_user_credentials_and_tools() {
@@ -31,7 +18,7 @@ async fn update_flipping_auth_shape_purges_user_credentials_and_tools() {
     // user). Flipping auth_shape to oauth makes both stale — the
     // handler must purge each in the same TX as the UPDATE.
     let app = TestApp::spawn().await;
-    let (con, admin) = admin_session(&app).await;
+    let (con, admin) = admin_session_with_user(&app).await;
 
     let server_id = fixtures::create_mcp_server_with(
         &app.db,
@@ -127,7 +114,7 @@ async fn update_per_user_to_admin_shared_purges_per_user_creds_and_tools() {
     // will bypass it for the shared row that the admin will (or has)
     // configured. Both rows must go in the same TX as the UPDATE.
     let app = TestApp::spawn().await;
-    let (con, admin) = admin_session(&app).await;
+    let (con, admin) = admin_session_with_user(&app).await;
 
     let server_id = fixtures::create_mcp_server_with(
         &app.db,
@@ -209,7 +196,7 @@ async fn update_admin_shared_to_per_user_revokes_upstream_and_deletes_row() {
     //   2. DELETE the shared row inside the same TX as the row
     //      UPDATE so the orphan can't outlive the transition.
     let app = TestApp::spawn().await;
-    let (con, admin) = admin_session(&app).await;
+    let (con, admin) = admin_session_with_user(&app).await;
 
     let revoke_endpoint = MockServer::start().await;
     Mock::given(method("POST"))
@@ -293,7 +280,7 @@ async fn create_rejects_anonymous_with_admin_shared() {
     // semantically incoherent (no credential needed vs credential
     // mandatory) and should 400.
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
 
     let resp = con
         .post(
@@ -325,7 +312,7 @@ async fn update_rejects_anonymous_with_admin_shared() {
     // rejected, otherwise the resolver would never read the orphan
     // shared row.
     let app = TestApp::spawn().await;
-    let (con, _) = admin_session(&app).await;
+    let (con, _) = admin_session_with_user(&app).await;
 
     let server_id = fixtures::create_mcp_server_with(
         &app.db,

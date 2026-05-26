@@ -93,15 +93,9 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
   const [credentialOwner, setCredentialOwner] = useState<CredentialOwner>(
     server.credential_owner ?? 'per_user',
   );
-  // `auth_header_name` / `auth_value_template` are backend-side
-  // NOT NULL columns with sane defaults, but a dev backend lagging
-  // behind the frontend (or an old API consumer) might omit them
-  // from the response. Fall back to the schema defaults so the
-  // dialog never explodes on the .replaceAll() in
-  // AuthHeaderFieldset's preview.
   const [authHeader, setAuthHeader] = useState<AuthHeaderFields>({
-    headerName: server.auth_header_name || 'Authorization',
-    valueTemplate: server.auth_value_template || 'Bearer {{token}}',
+    headerName: server.auth_header_name,
+    valueTemplate: server.auth_value_template,
   });
 
   const [saving, setSaving] = useState(false);
@@ -124,8 +118,8 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
     );
     setCredentialOwner(server.credential_owner ?? 'per_user');
     setAuthHeader({
-      headerName: server.auth_header_name || 'Authorization',
-      valueTemplate: server.auth_value_template || 'Bearer {{token}}',
+      headerName: server.auth_header_name,
+      valueTemplate: server.auth_value_template,
     });
     setError('');
   }, [server]);

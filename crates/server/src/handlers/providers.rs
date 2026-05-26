@@ -20,10 +20,6 @@ use crate::middleware::auth_guard::AuthUser;
 // dependency-aligned with the OIDC / TOTP storage path which already encodes
 // the envelope as hex.
 //
-// Read paths (`load_providers_into_router`) detect the wrapper and decrypt.
-// Plaintext legacy rows still load — they emit a one-shot `tracing::warn!` so
-// admins know to re-save them. A startup backfill (`backfill_provider_secrets`)
-// converts every plaintext row on first boot, after which no plaintext exists.
 // ---------------------------------------------------------------------------
 
 use think_watch_common::json_secret::JsonSecret;
@@ -38,14 +34,14 @@ pub(crate) fn encrypt_secret_to_json(
     Ok(JsonSecret::encrypt(plaintext, encryption_key)?.to_json())
 }
 
-/// Inverse of [`encrypt_secret_to_json`]. Returns `(plaintext,
-/// was_encrypted)` so the caller can decide whether to surface a
-/// `tracing::warn!` prompting an admin to re-save the row.
+/// Inverse of [`encrypt_secret_to_json`]. Returns the plaintext or an
+/// error if the wire value isn't a valid envelope (corrupted /
+/// hand-edited row).
 pub(crate) fn decrypt_secret_from_json(
     value: &serde_json::Value,
     encryption_key: &str,
-) -> Result<(String, bool), AppError> {
-    JsonSecret::from_json(value).decrypt(encryption_key)
+) -> Result<String, AppError> {
+    JsonSecret::from_json(value)?.decrypt(encryption_key)
 }
 
 /// Take a header list as supplied in a request and return a JSON array
@@ -539,8 +535,7 @@ mod tests {
             "plaintext must not appear in stored JSON"
         );
 
-        let (plain, was_encrypted) = decrypt_secret_from_json(&json, test_hex_key()).unwrap();
-        assert!(was_encrypted, "round-tripped value reports as encrypted");
+        let plain = decrypt_secret_from_json(&json, test_hex_key()).unwrap();
         assert_eq!(plain, "sk-supersecret");
     }
 
@@ -550,23 +545,19 @@ mod tests {
         // "no credential supplied".
         let json = encrypt_secret_to_json("", test_hex_key()).unwrap();
         assert_eq!(json, serde_json::Value::String(String::new()));
-        let (plain, was_encrypted) = decrypt_secret_from_json(&json, test_hex_key()).unwrap();
-        assert!(!was_encrypted);
+        let plain = decrypt_secret_from_json(&json, test_hex_key()).unwrap();
         assert_eq!(plain, "");
     }
 
     #[test]
-    fn legacy_plaintext_decodes_with_flag() {
-        // Pre-encryption dev DBs still hold plain strings. The decoder
-        // returns them verbatim and flags `was_encrypted = false`
-        // so the loader can emit a one-shot re-save warn.
-        let legacy = serde_json::Value::String("Bearer abc123".to_string());
-        let (plain, was_encrypted) = decrypt_secret_from_json(&legacy, test_hex_key()).unwrap();
-        assert!(
-            !was_encrypted,
-            "plaintext string must NOT report as encrypted"
-        );
-        assert_eq!(plain, "Bearer abc123");
+    fn bare_string_at_rest_is_rejected() {
+        // No producer writes a bare non-empty string into a secret
+        // slot — encountering one at read time means the row was
+        // corrupted or hand-edited. Surface the error instead of
+        // silently degrading to a "no credentials" downstream
+        // failure.
+        let bare = serde_json::Value::String("Bearer abc123".to_string());
+        assert!(decrypt_secret_from_json(&bare, test_hex_key()).is_err());
     }
 
     #[test]

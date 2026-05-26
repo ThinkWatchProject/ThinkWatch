@@ -22,19 +22,6 @@
 use serde_json::Value;
 use think_watch_test_support::prelude::*;
 
-async fn admin_session(app: &TestApp) -> TestClient {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    con
-}
-
 async fn drive_one_call(app: &TestApp, model: &str) -> (uuid::Uuid, uuid::Uuid, String) {
     // Returns (user_id, api_key_id, trace_id).
     let user = fixtures::create_random_user(&app.db).await.unwrap();

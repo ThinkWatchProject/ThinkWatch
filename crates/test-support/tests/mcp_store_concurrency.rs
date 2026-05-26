@@ -42,19 +42,6 @@ async fn seed_template(db: &PgPool, slug: &str, default_name: &str) -> String {
     slug.to_owned()
 }
 
-async fn admin_session(app: &TestApp) -> TestClient {
-    let admin = fixtures::create_admin_user(&app.db).await.unwrap();
-    let con = app.console_client();
-    con.post(
-        "/api/auth/login",
-        json!({"email": admin.user.email, "password": admin.plaintext_password}),
-    )
-    .await
-    .unwrap()
-    .assert_ok();
-    con
-}
-
 #[ignore = "integration test — run via `make test-it`"]
 #[tokio::test]
 async fn parallel_installs_same_template_keep_count_in_sync() {
