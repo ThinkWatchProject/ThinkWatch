@@ -17,8 +17,14 @@ interface Props {
  * theatre is visible (users see "anti-bot shield engaged" instead of
  * an unexplained delay) without hijacking attention.
  *
- * Five states:
+ * States:
  *
+ *   - `idle`     — RENDERS NOTHING. The chip is only meaningful once
+ *                  the hook has something to report; showing
+ *                  "waiting for email" before the user has typed
+ *                  anything is pure visual noise. The submit button
+ *                  is still disabled in this state, so the user
+ *                  can't act prematurely.
  *   - `fetching` — server challenge in flight; spinner.
  *   - `grinding` — Web Worker hashing; emerald background fills
  *                  left-to-right as the CDF of finding a solution
@@ -40,6 +46,13 @@ export function PowIndicator({
   className,
 }: Props) {
   const { t } = useTranslation();
+
+  // Hide entirely until there's something to say. `aria-live` regions
+  // that contain nothing don't get announced, so screen-reader users
+  // also aren't bothered by the empty-state placeholder.
+  if (status === 'idle') {
+    return null;
+  }
 
   const tone =
     status === 'ready'
@@ -115,7 +128,6 @@ export function PowIndicator({
             )}
           </>
         )}
-        {status === 'idle' && t('auth.pow.awaiting')}
       </span>
       {showRetry && (
         <button
