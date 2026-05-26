@@ -2,8 +2,8 @@ apiVersion: v2
 name: think-watch
 description: Enterprise AI API Gateway & MCP Management Platform
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.5.0
+appVersion: "0.5.0"
 keywords:
   - ai
   - gateway
