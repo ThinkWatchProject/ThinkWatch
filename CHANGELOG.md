@@ -69,19 +69,28 @@ release note.
   lines of legacy compat scrubbed) preceded this tag — see
   commits `b0b5820 → dbfe9da` for the full series.
 
+### Operations
+
+- Helm chart ships an opt-in `ServiceMonitor`
+  (`metrics.serviceMonitor.enabled=true`) gated on the
+  auto-generated `METRICS_BEARER_TOKEN` secret. Pair with
+  `kube-prometheus-stack` for `/metrics` scraping.
+- `deploy/grafana/dashboards/` — starter overview dashboard JSON
+  plus a metric reference + minimal alert rule set in the README.
+- `docs/operations/secret-rotation.md` — JWT_SECRET online
+  rotation and ENCRYPTION_KEY offline re-encrypt procedures.
+- `docs/operations/backup-restore.md` — PG + ClickHouse + S3
+  procedures with restore-order gotchas, cross-version compat
+  notes, and a quarterly DR drill template.
+
 ### Known limitations for `0.5.x`
 
-- **Backup / restore runbook not yet shipped** — PG, ClickHouse,
-  and S3 backups are the operator's responsibility for now.
-- **No bundled Prometheus `ServiceMonitor` or Grafana dashboards**
-  — `/metrics` is exposed, but operators wire the scrape config
-  themselves.
-- **No `JWT_SECRET` / `ENCRYPTION_KEY` rotation runbook** — both
-  can be rotated but require a planned-downtime sequence that
-  isn't documented yet.
 - **API surface NOT frozen** — REST routes, MCP wire shapes,
   audit-row JSON keys, and database schema may change in any
-  `0.x` bump.
+  `0.x` bump. SemVer kicks in at `1.0.0`.
+- **No online ENCRYPTION_KEY rotation** — the documented
+  procedure requires a brief downtime window. Online dual-key
+  rotation is queued for `1.x`.
 
 ### Upgrade path from `0.1.0`
 
