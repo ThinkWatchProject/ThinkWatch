@@ -26,6 +26,25 @@ target.
 ### Security
 - _(nothing yet)_
 
+## [1.0.1] — 2026-05-27
+
+Release-pipeline validation. **No product change** — the published
+binary, REST surface, MCP wire shapes, and audit semantics are
+identical to `v1.0.0`. Operators pinning `1.0.0` have no reason to
+bump; those tracking `:latest` move forward.
+
+### Changed
+
+- **Release workflow** — arm64 image builds now run on a native
+  arm64 runner (`ubuntu-24.04-arm`) instead of QEMU emulation.
+  v1.0.0's server image build took 1h24m; this should drop to
+  ~10 min. Multi-arch manifest assembled by a new merge job via
+  `docker buildx imagetools create`.
+- **Node 24 opt-in** — workflow sets
+  `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` so all `actions/*` +
+  `docker/*` run on Node 24 ahead of GitHub's 2026-06-02 forced
+  cutover.
+
 ## [1.0.0] — 2026-05-27
 
 Stability commitment. No code delta since `0.5.0` — this tag marks
@@ -120,6 +139,7 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.1
 [1.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.0
 [0.5.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v0.5.0
