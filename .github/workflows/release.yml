@@ -15,39 +15,52 @@ on:
   push:
     tags: ['v*.*.*']
 
-# The GITHUB_TOKEN needs explicit write scopes for the publish steps —
-# the default is read-only. `packages: write` is for ghcr.io; `contents:
-# write` is for the Release entry.
 permissions:
   contents: write
   packages: write
 
+# `actions/*` and `docker/*` shipped on Node 20 still work today, but
+# GitHub's deprecation timer fires 2026-06-02 — they'll be force-
+# migrated to Node 24 on the runner anyway. Opt in early so a
+# mid-release runner update doesn't break a tag push, and so the
+# workflow log stops emitting the annotation noise that drowned the
+# v1.0.0 run.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   # -------------------------------------------------------------------
-  # Docker images — server + web in parallel via matrix
+  # Per-platform Docker image build. 2×2 matrix (component × platform);
+  # arm64 runs on a NATIVE arm64 runner instead of QEMU emulation —
+  # the v1.0.0 release spent 1h24m on a Rust+LTO+QEMU arm64 link
+  # which native runners drop to ~10 min. Each job pushes BY DIGEST
+  # only (no human-readable tag); the merge job below combines the
+  # digests into the final `:version` + `:latest` manifest list.
   # -------------------------------------------------------------------
   build-images:
-    name: Image · ${{ matrix.component }}
-    runs-on: ubuntu-latest
+    name: Build · ${{ matrix.component }} · ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         component: [server, web]
+        platform: [linux/amd64, linux/arm64]
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@v4
 
       - name: Reclaim runner disk
-        # `Dockerfile.server` links 40+ test binaries + ships a stripped
-        # release build; the default ubuntu-latest ~14 GiB freespace is
-        # not enough. Mirror what ci.yml's rust job does — drop the
-        # preinstalled CodeQL / dotnet / Android toolchains before
-        # buildx allocates layers.
+        # `Dockerfile.server` links the entire workspace under LTO +
+        # codegen-units=1 + strip — the default runner ~14 GiB
+        # freespace fills mid-link. Same trimming as ci.yml's rust job.
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
                       /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
           df -h /
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -59,53 +72,127 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve version + image metadata
+      - name: Resolve image name + platform pair
         id: meta
+        # `platform_pair` is the platform name munged for use as an
+        # artifact suffix — `actions/upload-artifact@v4` rejects `/`.
+        # `image` lowercases the owner because GHCR is case-sensitive
+        # on path segments and the Helm values default to lowercase.
         run: |
           set -eu
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          # Lowercase repo owner — GHCR rejects mixed case. This
-          # matches the default in the project's Helm values
-          # (`ghcr.io/thinkwatch/...`) so a tag bump publishes to the
-          # repo Helm already points at.
           OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
           echo "image=ghcr.io/$OWNER/think-watch-${{ matrix.component }}" >> "$GITHUB_OUTPUT"
-          # Tag `:latest` ONLY for stable releases — anything that
-          # looks like a pre-release (`0.x.y`, `-rc`, `-beta`, `-alpha`)
-          # stays version-pinned. Operators chase `:latest` at their
-          # own risk; betas don't get to surprise them.
-          PRERELEASE=false
-          case "$GITHUB_REF_NAME" in
-            v0.*|*-rc.*|*-beta.*|*-alpha.*) PRERELEASE=true ;;
-          esac
-          echo "prerelease=$PRERELEASE" >> "$GITHUB_OUTPUT"
+          PLATFORM_PAIR="$(echo '${{ matrix.platform }}' | tr '/' '-')"
+          echo "platform_pair=$PLATFORM_PAIR" >> "$GITHUB_OUTPUT"
 
-      - name: Build & push image
+      - name: Build & push by digest
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
           file: deploy/docker/Dockerfile.${{ matrix.component }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          # Always publish the version tag; only publish `:latest`
-          # for stable releases. The `if:` on the latter would
-          # require splitting the step — `cat <<EOF` form keeps it
-          # in one place and lets buildx skip the empty tag silently.
-          tags: |
-            ${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}
-            ${{ steps.meta.outputs.prerelease == 'false' && format('{0}:latest', steps.meta.outputs.image) || '' }}
-          # GHCR-side OCI labels — what `helm install` / `docker scout`
-          # surface in cluster inventories. Pull the source / version /
-          # license / authors from the tag rather than the Dockerfile
-          # so they stay in lockstep with the GitHub Release.
+          platforms: ${{ matrix.platform }}
+          # `push-by-digest=true,name-canonical=true` is the documented
+          # multi-arch split: each platform job pushes an UNTAGGED
+          # blob whose digest the merge job glues into a manifest list
+          # below. Without push-by-digest, the second platform's push
+          # would overwrite the first's `:version` tag.
+          outputs: |
+            type=image,name=${{ steps.meta.outputs.image }},push-by-digest=true,name-canonical=true,push=true
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+            org.opencontainers.image.version=${{ github.ref_name }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=BUSL-1.1
-          cache-from: type=gha,scope=${{ matrix.component }}
-          cache-to: type=gha,scope=${{ matrix.component }},mode=max
+          cache-from: type=gha,scope=${{ matrix.component }}-${{ steps.meta.outputs.platform_pair }}
+          cache-to: type=gha,scope=${{ matrix.component }}-${{ steps.meta.outputs.platform_pair }},mode=max
+
+      - name: Export digest
+        run: |
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.component }}-${{ steps.meta.outputs.platform_pair }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # -------------------------------------------------------------------
+  # Merge per-platform digests into a single multi-arch manifest list
+  # tagged `:version` (always) and `:latest` (stable releases only).
+  # -------------------------------------------------------------------
+  merge-manifests:
+    name: Manifest · ${{ matrix.component }}
+    runs-on: ubuntu-latest
+    needs: build-images
+    strategy:
+      fail-fast: false
+      matrix:
+        component: [server, web]
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-${{ matrix.component }}-*
+          merge-multiple: true
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve tags
+        id: tags
+        # Reuse the existing version + prerelease detection — keeps
+        # the "0.x and -rc/-beta/-alpha don't get :latest" rule in
+        # exactly one place across both job stages.
+        run: |
+          set -eu
+          VERSION="${GITHUB_REF_NAME#v}"
+          OWNER="$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')"
+          IMAGE="ghcr.io/$OWNER/think-watch-${{ matrix.component }}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          TAG_ARGS="-t $IMAGE:$VERSION"
+          case "$GITHUB_REF_NAME" in
+            v0.*|*-rc.*|*-beta.*|*-alpha.*) ;;
+            *) TAG_ARGS="$TAG_ARGS -t $IMAGE:latest" ;;
+          esac
+          echo "tag_args=$TAG_ARGS" >> "$GITHUB_OUTPUT"
+
+      - name: Create manifest list and push
+        # `docker buildx imagetools create` is the canonical primitive
+        # for assembling a multi-arch manifest list from individually-
+        # pushed per-platform digests. It writes the manifest to GHCR
+        # under each `-t` tag and resolves the children by their
+        # already-pushed sha256 references.
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -eu
+          REFS=""
+          for d in *; do
+            REFS="$REFS ${{ steps.tags.outputs.image }}@sha256:$d"
+          done
+          docker buildx imagetools create ${{ steps.tags.outputs.tag_args }} $REFS
+
+      - name: Inspect resulting manifest
+        # Cheap sanity check — `imagetools inspect` lists the platforms
+        # in the manifest, so a regression where only one platform
+        # landed (silent push failure on the other matrix entry) is
+        # caught here instead of in a user's `helm install`.
+        run: |
+          docker buildx imagetools inspect \
+            ${{ steps.tags.outputs.image }}:${{ steps.tags.outputs.version }}
 
   # -------------------------------------------------------------------
   # Helm chart — packaged with the same version as the tag
@@ -144,7 +231,7 @@ jobs:
   # -------------------------------------------------------------------
   create-release:
     name: GitHub Release
-    needs: [build-images, package-helm]
+    needs: [merge-manifests, package-helm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
