@@ -26,6 +26,27 @@ target.
 ### Security
 - _(nothing yet)_
 
+## [1.0.0] — 2026-05-27
+
+Stability commitment. No code delta since `0.5.0` — this tag marks
+the point at which the API surface becomes a [SemVer](https://semver.org/spec/v2.0.0.html)
+commitment.
+
+### Changed
+
+- **Versioning policy** — from this tag onwards every breaking
+  change (REST routes, MCP wire shapes, audit-row JSON keys,
+  database schema, public Rust APIs in published crates) requires
+  a major bump. Operators chasing the `:latest` tag on the GHCR
+  images can do so without surprise.
+
+### Notes
+
+- Docker images cut at this tag receive `:latest` for the first
+  time — the release workflow suppresses `:latest` on `0.x` and
+  pre-release tags. Pin the version in production rather than
+  tracking `:latest` unless you have a controlled rollback path.
+
 ## [0.5.0] — 2026-05-26
 
 First public beta. The product surface is stable enough to deploy
@@ -99,5 +120,6 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.0
 [0.5.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v0.5.0
