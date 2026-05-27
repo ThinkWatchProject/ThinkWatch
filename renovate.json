@@ -1,0 +1,127 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":semanticCommits",
+    ":semanticCommitTypeAll(chore)",
+    ":semanticCommitScope(deps)"
+  ],
+
+  "description": [
+    "Renovate config for ThinkWatch. Install the GitHub App from",
+    "https://github.com/apps/renovate against ThinkWatchProject to",
+    "activate. Renovate will open PRs against the default branch",
+    "(`dev`); merges to main happen at release time only.",
+    "",
+    "Cadence: weekly batched on Sunday so the Monday-morning queue is",
+    "one PR per dep group rather than a flurry of opens. Security",
+    "advisories override the schedule and open immediately."
+  ],
+
+  "schedule": ["before 6am on sunday"],
+  "timezone": "Asia/Shanghai",
+  "labels": ["deps"],
+  "prHourlyLimit": 4,
+  "prConcurrentLimit": 10,
+
+  "rangeStrategy": "bump",
+  "rebaseWhen": "conflicted",
+
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "schedule": ["at any time"],
+    "labels": ["deps", "security"],
+    "prHourlyLimit": 0,
+    "prConcurrentLimit": 0
+  },
+
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 6am on the first day of the month"]
+  },
+
+  "packageRules": [
+    {
+      "description": "Cargo crates — group everything together, separate major bumps to a dedicated PR for review.",
+      "matchManagers": ["cargo"],
+      "groupName": "rust deps",
+      "matchUpdateTypes": ["patch", "minor"],
+      "automerge": false
+    },
+    {
+      "matchManagers": ["cargo"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "rust major bumps",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Crypto-critical crates are `=` pinned for exactly the reason Renovate would otherwise bump them. Require explicit approval on the dashboard before opening.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": [
+        "jsonwebtoken",
+        "argon2",
+        "aes-gcm",
+        "sha2",
+        "sha1",
+        "hmac",
+        "p256",
+        "ecdsa",
+        "subtle"
+      ],
+      "groupName": "crypto deps (review carefully)",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "npm deps — same shape as cargo. The frontend lockfile is the single source of truth so range-strategy=bump rewrites the pin AND the lockfile.",
+      "matchManagers": ["npm"],
+      "groupName": "npm deps",
+      "matchUpdateTypes": ["patch", "minor"],
+      "automerge": false
+    },
+    {
+      "matchManagers": ["npm"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "npm major bumps",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "GitHub Actions — batch weekly. Pin to exact versions for reproducibility.",
+      "matchManagers": ["github-actions"],
+      "groupName": "github actions",
+      "pinDigests": true
+    },
+    {
+      "description": "Docker base images in deploy/docker/Dockerfile.*. Patch + minor automerge if CI passes — the base images we use (node:24-alpine, nginx:1.29-alpine, distroless/static) are mature enough that patch bumps are safe. Major bumps go through review.",
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["patch", "minor"],
+      "groupName": "docker base images",
+      "automerge": false
+    },
+    {
+      "matchManagers": ["dockerfile"],
+      "matchUpdateTypes": ["major"],
+      "groupName": "docker base images — major",
+      "dependencyDashboardApproval": true
+    },
+    {
+      "description": "Helm chart deps (if any add later). Treated like Cargo — batched, no automerge.",
+      "matchManagers": ["helmv3"],
+      "groupName": "helm chart deps"
+    },
+    {
+      "description": "pnpm packageManager pin in package.json — group with GH Actions cadence since the Dockerfile pin moves in lockstep.",
+      "matchManagers": ["npm"],
+      "matchDepNames": ["pnpm"],
+      "groupName": "pnpm version"
+    }
+  ],
+
+  "cargo": {
+    "description": [
+      "The workspace Cargo.toml exposes deps via [workspace.dependencies];",
+      "each crate's Cargo.toml uses `{ workspace = true }`. Renovate's",
+      "cargo manager reads both layers, so a workspace-level bump fans",
+      "out to every crate automatically."
+    ]
+  }
+}

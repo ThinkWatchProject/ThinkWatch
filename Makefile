@@ -168,6 +168,27 @@ test:
 # present at the same version.
 tools:
 	cargo install cargo-nextest --locked
+	cargo install git-cliff --locked
+
+# Render the CHANGELOG section for the next release from
+# Conventional Commits since the previous `v*` tag. Set VERSION to
+# the target version (without `v` prefix) — the rendered section
+# uses today's date.
+#
+#   make changelog VERSION=1.0.2          # print to stdout (review first)
+#   make changelog VERSION=1.0.2 WRITE=1  # prepend to CHANGELOG.md in place
+#
+# Config: see cliff.toml. The output uses Keep-a-Changelog headers
+# matching the existing CHANGELOG so the rendered section can drop
+# straight under `## [Unreleased]`.
+changelog:
+	@if [ -z "$(VERSION)" ]; then echo "Usage: make changelog VERSION=X.Y.Z [WRITE=1]"; exit 1; fi
+	@if [ -n "$(WRITE)" ]; then \
+		git-cliff --unreleased --tag v$(VERSION) --prepend CHANGELOG.md; \
+		echo "CHANGELOG.md updated — review the diff before committing."; \
+	else \
+		git-cliff --unreleased --tag v$(VERSION); \
+	fi
 
 # Run the full integration test suite (test-support crate). Tests
 # are #[ignore]-marked so the default `cargo test --workspace` skips
