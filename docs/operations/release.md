@@ -7,18 +7,29 @@ nobody (including future-you) has to remember the order.
 
 ## Branch contract
 
-- **`dev`** — default branch. Everything routine lands here: feature
-  work, fixes, Renovate dep bumps, refactors. CI gates on every push
-  (`Rust Check & Test` + `Frontend Build`); the docker-image jobs in
-  `ci.yml` are deliberately scoped to `main` so dev pushes stay fast.
-- **`main`** — release-only. Branch-protected on GitHub: requires PR,
-  requires the two CI status checks, requires linear history, no
-  force-push, no deletion. Every commit on `main` is a release
-  snapshot tagged immediately after merge.
+- **`main`** — GitHub default branch + release-only line. Branch-
+  protected: requires PR, requires the two CI status checks
+  (`Rust Check & Test` + `Frontend Build`), requires linear
+  history, no force-push, no deletion. Every commit on `main` is
+  a release snapshot tagged immediately after merge. Visitors
+  landing on the repo see this branch; clones default to it.
+- **`dev`** — working branch where everything routine lands:
+  feature work, fixes, Renovate dep bumps, refactors. CI gates on
+  every push. The docker-image build jobs in `ci.yml` are scoped
+  to `main` only so `dev` pushes stay fast.
 
-Don't push directly to `main` — the protection will reject it and
-the wider tooling (release workflow, image `:latest` semantics,
-CHANGELOG link refs) assumes the branch is monotonic.
+Day-to-day target is `dev`. The GitHub UI defaults new PRs to
+`main` (the default branch) — when opening a feature PR by hand
+or via `gh pr create`, **set `--base dev` explicitly**. The only
+PR that goes to `main` is the release PR (see step 5 below).
+
+Renovate is pinned to `dev` via `baseBranches` in `renovate.json`
+— it never opens a PR against `main`. Other automation should
+follow the same convention.
+
+Don't push directly to `main` — the protection will reject it,
+and the wider tooling (release workflow, image `:latest`
+semantics, CHANGELOG link refs) assumes the branch is monotonic.
 
 ## Versioning rules
 

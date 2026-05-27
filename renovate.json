@@ -10,14 +10,20 @@
   "description": [
     "Renovate config for ThinkWatch. Install the GitHub App from",
     "https://github.com/apps/renovate against ThinkWatchProject to",
-    "activate. Renovate will open PRs against the default branch",
-    "(`dev`); merges to main happen at release time only.",
+    "activate.",
+    "",
+    "`baseBranches: ['dev']` pins Renovate to the working branch — the",
+    "GitHub default is `main` (release-only, branch-protected), but",
+    "dep-bump PRs MUST target `dev` so they get merged into the next",
+    "release naturally. Without this override, Renovate would default",
+    "to `main` and every PR would bounce on branch protection.",
     "",
     "Cadence: weekly batched on Sunday so the Monday-morning queue is",
     "one PR per dep group rather than a flurry of opens. Security",
     "advisories override the schedule and open immediately."
   ],
 
+  "baseBranches": ["dev"],
   "schedule": ["before 6am on sunday"],
   "timezone": "Asia/Shanghai",
   "labels": ["deps"],
