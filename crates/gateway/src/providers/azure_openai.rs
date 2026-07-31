@@ -18,10 +18,10 @@ pub struct AzureOpenAiProvider {
 
 impl AzureOpenAiProvider {
     pub fn new(base_url: String, api_version: Option<String>) -> Self {
-        let mut base = ProviderBase::new(base_url);
-        base.base_url = base.base_url.trim_end_matches('/').to_string();
+        // Trailing-slash normalization now lives in `ProviderBase::new`
+        // so every provider gets it, not just this one.
         Self {
-            base,
+            base: ProviderBase::new(base_url),
             api_version: api_version.unwrap_or_else(|| "2024-12-01-preview".to_string()),
         }
     }

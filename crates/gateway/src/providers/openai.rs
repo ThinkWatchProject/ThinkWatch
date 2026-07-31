@@ -109,3 +109,20 @@ impl AiProvider for OpenAiProvider {
         })
     }
 }
+
+#[cfg(test)]
+mod base_url_tests {
+    use super::*;
+
+    #[test]
+    fn trailing_slash_in_base_url_does_not_double_up() {
+        // Regression: an admin-entered `https://host/` produced
+        // `https://host//v1/chat/completions`, which upstreams answer
+        // with a bare 404 — while the "Test connection" probe, which
+        // trimmed the slash itself, reported the provider healthy.
+        let trimmed = OpenAiProvider::new("https://api.example.com".into()).completions_url();
+        let slashed = OpenAiProvider::new("https://api.example.com/".into()).completions_url();
+        assert_eq!(trimmed, "https://api.example.com/v1/chat/completions");
+        assert_eq!(slashed, trimmed);
+    }
+}

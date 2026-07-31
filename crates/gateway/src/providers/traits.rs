@@ -246,7 +246,15 @@ impl ProviderBase {
             .build()
             .expect("reqwest client builder cannot fail on stable inputs");
         Self {
-            base_url,
+            // Normalize here, once, for every provider: each one builds
+            // its endpoint as `format!("{base_url}/v1/…")`, so an
+            // admin-entered trailing slash (the browser hands you one
+            // for free when you paste a URL) produced `https://host//v1/
+            // chat/completions` and a bare 404 from upstream. The
+            // "Test connection" probe trimmed already, which is why a
+            // provider could pass its check and still fail every real
+            // inference call.
+            base_url: base_url.trim_end_matches('/').to_string(),
             client,
             custom_headers: Vec::new(),
         }
