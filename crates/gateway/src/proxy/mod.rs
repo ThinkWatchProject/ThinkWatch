@@ -29,6 +29,7 @@ mod headers;
 mod identity;
 mod log_ctx;
 mod pipeline;
+mod protocol_relearn;
 mod routing;
 
 // pub(crate) re-exports — `lifecycle` module reaches in for these.

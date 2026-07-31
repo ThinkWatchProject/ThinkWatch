@@ -11,6 +11,7 @@ pub mod mcp_runtime;
 pub mod middleware;
 pub mod oidc_helpers;
 pub mod openapi;
+pub mod protocol_probe;
 pub mod services;
 pub mod tasks;
 pub mod tracing_ch;

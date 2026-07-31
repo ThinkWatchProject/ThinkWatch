@@ -366,7 +366,11 @@ pub async fn proxy_chat_completion(
         };
         let pump_ctx =
             crate::lifecycle::ChatPumpContext::from_deps(&deps, request.messages.clone());
-        let stream = entry.provider.stream_chat_completion(request);
+        let stream = super::super::protocol_relearn::open_stream_with_relearn(
+            entry,
+            request,
+            state.db.clone(),
+        );
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
         Ok(launch_stream_pump(deps, pump_ctx, stream, stream_restorer))
     } else {

@@ -221,7 +221,11 @@ pub async fn proxy_anthropic_messages(
         };
         let pump_ctx =
             crate::lifecycle::ChatPumpContext::from_deps(&deps, request.messages.clone());
-        let stream = entry.provider.stream_chat_completion(stream_request);
+        let stream = super::super::protocol_relearn::open_stream_with_relearn(
+            entry,
+            stream_request,
+            state.db.clone(),
+        );
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
         let mut http_response = launch_stream_pump(deps, pump_ctx, stream, stream_restorer);
         if let Ok(v) = trace_id.parse() {

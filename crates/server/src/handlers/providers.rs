@@ -374,6 +374,29 @@ pub async fn update_provider(
     .fetch_one(&state.db)
     .await?;
 
+    // A new base URL or credential can mean an entirely different
+    // upstream, so every dialect we learned for this provider's routes
+    // is now a guess about a host that may no longer be there. Clear
+    // them and let the runtime relearn on first use — stale beats
+    // wrong, and the relearn is invisible to the caller.
+    if req.base_url.is_some() || req.headers.is_some() {
+        let cleared: u64 = sqlx::query(
+            "UPDATE model_routes SET upstream_protocol = NULL
+             WHERE provider_id = $1 AND upstream_protocol IS NOT NULL",
+        )
+        .bind(id)
+        .execute(&state.db)
+        .await?
+        .rows_affected();
+        if cleared > 0 {
+            tracing::info!(
+                provider = %existing.name,
+                routes = cleared,
+                "Provider endpoint changed — cleared learned upstream protocols"
+            );
+        }
+    }
+
     state.audit.log(
         auth_user
             .audit("provider.updated")

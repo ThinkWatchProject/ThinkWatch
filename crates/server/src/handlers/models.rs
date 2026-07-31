@@ -847,14 +847,13 @@ pub async fn create_model_route(
     }
 
     // Verify provider exists
-    let provider_exists: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM providers WHERE id = $1 AND deleted_at IS NULL")
-            .bind(req.provider_id)
-            .fetch_optional(&state.db)
-            .await?;
-    if provider_exists.is_none() {
-        return Err(AppError::BadRequest("Provider not found".into()));
-    }
+    let provider = sqlx::query_as::<_, think_watch_common::models::Provider>(
+        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(req.provider_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("Provider not found".into()))?;
 
     let weight = req.weight.unwrap_or(100);
     let upstream_model = req
@@ -931,6 +930,10 @@ pub async fn create_model_route(
     );
 
     crate::app::rebuild_gateway_router(&state).await;
+
+    // Same background probe the bulk import runs — a hand-created route
+    // must not be second-class.
+    crate::protocol_probe::spawn_probe(&state, provider, vec![upstream_model]);
 
     Ok(Json(row))
 }
@@ -1235,14 +1238,13 @@ pub async fn batch_create_routes(
         return Err(AppError::BadRequest("items is empty".into()));
     }
 
-    let provider_exists: Option<Uuid> =
-        sqlx::query_scalar("SELECT id FROM providers WHERE id = $1 AND deleted_at IS NULL")
-            .bind(req.provider_id)
-            .fetch_optional(&state.db)
-            .await?;
-    if provider_exists.is_none() {
-        return Err(AppError::BadRequest("Provider not found".into()));
-    }
+    let provider = sqlx::query_as::<_, think_watch_common::models::Provider>(
+        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(req.provider_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or_else(|| AppError::BadRequest("Provider not found".into()))?;
 
     // Split the request into the two flows. Each flow is one bulk
     // INSERT via UNNEST so we stay at O(1) round trips regardless of N.
@@ -1357,6 +1359,17 @@ pub async fn batch_create_routes(
     );
 
     crate::app::rebuild_gateway_router(&state).await;
+
+    // Work out which wire dialect this upstream wants for each model —
+    // in the background. The routes already work (an un-probed route
+    // runs on the provider type's default and the runtime relearns if
+    // that's wrong), so there is no reason to hold the import open
+    // while the gateway talks to the upstream once per model family.
+    let mut probe_models: Vec<String> = new_upstreams;
+    probe_models.extend(attach_upstreams);
+    probe_models.sort();
+    probe_models.dedup();
+    crate::protocol_probe::spawn_probe(&state, provider, probe_models);
 
     Ok(Json(serde_json::json!({ "created": created })))
 }

@@ -229,7 +229,11 @@ pub async fn proxy_responses(
         };
         let pump_ctx =
             crate::lifecycle::ChatPumpContext::from_deps(&deps, request.messages.clone());
-        let stream = entry.provider.stream_chat_completion(stream_request);
+        let stream = super::super::protocol_relearn::open_stream_with_relearn(
+            entry,
+            stream_request,
+            state.db.clone(),
+        );
         // Stitch placeholders back together as chunks stream through.
         // Same restorer the chat-completions surface uses; no-op when
         // redaction_ctx is empty so the feature-off path stays free.

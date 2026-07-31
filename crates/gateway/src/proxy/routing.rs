@@ -342,7 +342,42 @@ pub(super) async fn select_route_with_failover<'a>(
         // (which would double-count earlier failed attempts in
         // a failover chain and skew the latency strategy).
         let attempt_started_at = std::time::Instant::now();
-        let result = entry.provider.chat_completion_boxed(req).await;
+        let mut result = entry.provider.chat_completion_boxed(req.clone()).await;
+
+        // The upstream may reject the dialect this route was configured
+        // with — models get moved between APIs, and the import-time
+        // probe groups by model family, which can be one bucket too
+        // coarse. Rather than surface that to an operator, try the
+        // route's other dialects and remember whichever answers.
+        if let Err(ref e) = result
+            && super::protocol_relearn::is_protocol_mismatch(e)
+        {
+            for (protocol, adapter) in &entry.alternates {
+                tracing::info!(
+                    provider = %entry.provider_name,
+                    model = %req.model,
+                    from = %entry.protocol,
+                    to = %protocol,
+                    "Upstream rejected the configured protocol — retrying with an alternate"
+                );
+                let retry = adapter.chat_completion_boxed(req.clone()).await;
+                let recovered = retry.is_ok();
+                result = retry;
+                if recovered {
+                    super::protocol_relearn::persist(&ctx.state.db, entry.route_id, *protocol)
+                        .await;
+                    break;
+                }
+                if let Err(ref e) = result
+                    && !super::protocol_relearn::is_protocol_mismatch(e)
+                {
+                    // A different failure means we've stopped learning
+                    // anything about dialects — stop burning requests.
+                    break;
+                }
+            }
+        }
+
         let attempt_latency_ms = attempt_started_at
             .elapsed()
             .as_millis()
