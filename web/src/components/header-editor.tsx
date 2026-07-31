@@ -8,8 +8,12 @@ export interface HeaderEditorProps {
   onChange: (headers: [string, string][]) => void;
   /** Placeholder for the header name input (default: "Header-Name") */
   keyPlaceholder?: string;
-  /** Placeholder for the header value input */
-  valuePlaceholder?: string;
+  /**
+   * Placeholder for the header value input. A function receives the row
+   * index so callers can mark individual rows (e.g. "a secret is stored,
+   * leave blank to keep it") without it bleeding onto freshly added rows.
+   */
+  valuePlaceholder?: string | ((index: number) => string | undefined);
   /** Preset header buttons rendered after the "Add Header" button */
   presets?: { label: string; header: [string, string] }[];
 }
@@ -55,7 +59,10 @@ export function HeaderEditor({
           />
           <Input
             className="flex-1"
-            placeholder={valuePlaceholder ?? t('mcpServers.headerValuePlaceholder')}
+            placeholder={
+              (typeof valuePlaceholder === 'function' ? valuePlaceholder(i) : valuePlaceholder)
+                ?? t('mcpServers.headerValuePlaceholder')
+            }
             value={v}
             onChange={(e) => updateValue(i, e.target.value)}
           />

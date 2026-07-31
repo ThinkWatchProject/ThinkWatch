@@ -358,3 +358,93 @@ async fn provider_loader_decrypts_envelopes_back_to_headers() {
         "model {model_id} missing from router after encrypted-header reload (loader likely failed): {models:?}"
     );
 }
+
+#[ignore = "integration test — run via `make test-it`"]
+#[tokio::test]
+async fn provider_read_redacts_headers_and_blank_patch_keeps_secret() {
+    // The read endpoints used to hand the raw `{"$enc": …}` envelope to
+    // the browser: the admin edit form rendered it as the literal string
+    // "[object Object]" and saved that back as the provider's new
+    // secret. Reads must redact, and a header PATCHed with an empty
+    // value must keep whatever is stored.
+    let app = TestApp::spawn().await;
+    let con = admin_session(&app).await;
+
+    let secret_value = "sk-redaction-9876543210";
+    let name = unique_name("redact-rt");
+    let resp = con
+        .post(
+            "/api/admin/providers",
+            json!({
+                "name": name,
+                "display_name": name,
+                "provider_type": "openai",
+                "base_url": "https://api.openai.com",
+                "headers": [
+                    {"key": "Authorization", "value": format!("Bearer {secret_value}")},
+                    {"key": "X-Empty", "value": ""},
+                ],
+            }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+    let created: Value = resp.json().unwrap();
+    let provider_id = created["id"].as_str().unwrap().to_string();
+
+    // Every read path redacts: no ciphertext, no plaintext, and an
+    // `encrypted` flag that distinguishes "secret stored" from "empty".
+    for body in [
+        created.clone(),
+        con.get(&format!("/api/admin/providers/{provider_id}"))
+            .await
+            .unwrap()
+            .json::<Value>()
+            .unwrap(),
+    ] {
+        let body_str = serde_json::to_string(&body).unwrap();
+        assert!(
+            !body_str.contains(secret_value) && !body_str.contains("$enc"),
+            "provider response leaked a secret: {body_str}"
+        );
+        let headers = body["config_json"]["headers"].as_array().unwrap();
+        let auth = headers
+            .iter()
+            .find(|h| h["key"] == "Authorization")
+            .unwrap();
+        assert_eq!(auth["value"], "");
+        assert_eq!(auth["encrypted"], true);
+        let empty = headers.iter().find(|h| h["key"] == "X-Empty").unwrap();
+        assert_eq!(empty["encrypted"], false);
+    }
+
+    // Re-submitting the redacted (blank) header must not wipe the key —
+    // this is exactly what "open the edit dialog, rename, save" sends.
+    let resp = con
+        .patch(
+            &format!("/api/admin/providers/{provider_id}"),
+            json!({
+                "display_name": "renamed",
+                "headers": [{"key": "Authorization", "value": ""}],
+            }),
+        )
+        .await
+        .unwrap();
+    resp.assert_ok();
+
+    let stored: Value = sqlx::query_scalar("SELECT config_json FROM providers WHERE id = $1::uuid")
+        .bind(&provider_id)
+        .fetch_one(&app.db)
+        .await
+        .unwrap();
+    let auth = stored["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["key"] == "Authorization")
+        .expect("Authorization header survives a blank PATCH");
+    assert_eq!(
+        decode_enc_envelope(&auth["value"], &app.state.config.encryption_key),
+        format!("Bearer {secret_value}"),
+    );
+}

@@ -62,6 +62,120 @@ fn encrypt_headers_for_storage(
     Ok(serde_json::Value::Array(out))
 }
 
+/// Decrypt the header list stored in a provider's `config_json`.
+///
+/// The stored `value` is a `{"$enc": …}` envelope, so deserializing the
+/// array straight into `Vec<ProviderHeader>` (whose `value` is a
+/// `String`) always fails — callers that did that silently ended up
+/// with zero headers and made unauthenticated upstream calls. Headers
+/// that fail to decrypt are skipped with a loud log line: the row is
+/// corrupted, and forwarding a ciphertext as a header value would be
+/// worse than omitting it.
+pub(crate) fn decrypt_headers_from_config(
+    config_json: &serde_json::Value,
+    encryption_key: &str,
+    provider_name: &str,
+) -> Vec<ProviderHeader> {
+    config_json
+        .get("headers")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| {
+                    let key = item.get("key")?.as_str()?.to_string();
+                    let raw = item.get("value")?;
+                    match decrypt_secret_from_json(raw, encryption_key) {
+                        Ok(value) => Some(ProviderHeader { key, value }),
+                        Err(e) => {
+                            tracing::error!(
+                                provider = %provider_name,
+                                header = %key,
+                                "Failed to decrypt provider header — skipping: {e}"
+                            );
+                            None
+                        }
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Same as [`encrypt_headers_for_storage`], but a header submitted with
+/// an empty value keeps whatever ciphertext is already stored under that
+/// key. The read endpoints redact secrets (see
+/// [`redact_provider_secrets`]), so the edit form can only ever send
+/// back a blank for an untouched header — without this merge, opening
+/// the dialog and pressing Save would silently wipe every API key.
+/// Clearing a value is done by removing the header row, not by blanking
+/// it.
+fn merge_headers_for_storage(
+    headers: &[ProviderHeader],
+    existing_config: &serde_json::Value,
+    encryption_key: &str,
+) -> Result<serde_json::Value, AppError> {
+    let stored = existing_config
+        .get("headers")
+        .and_then(|h| h.as_array())
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    let mut out = Vec::with_capacity(headers.len());
+    for h in headers {
+        let enc_value = if h.value.is_empty() {
+            stored
+                .iter()
+                .find(|s| s.get("key").and_then(|k| k.as_str()) == Some(h.key.as_str()))
+                .map(|s| s.get("value").cloned().unwrap_or(serde_json::Value::Null))
+                .filter(JsonSecret::json_is_encrypted)
+                .map_or_else(
+                    || encrypt_secret_to_json(&h.value, encryption_key),
+                    Ok::<_, AppError>,
+                )?
+        } else {
+            encrypt_secret_to_json(&h.value, encryption_key)?
+        };
+        out.push(serde_json::json!({
+            "key": h.key,
+            "value": enc_value,
+        }));
+    }
+    Ok(serde_json::Value::Array(out))
+}
+
+/// Strip at-rest ciphertext from a provider before it goes over the
+/// wire. The read endpoints return `config_json` verbatim, so without
+/// this the `{"$enc": …}` envelopes reach the browser — the admin UI
+/// rendered one as the literal string `[object Object]` in the
+/// header-value input and would have written that back as the new
+/// secret on save.
+///
+/// Header entries gain an `encrypted` flag so the UI can tell "a secret
+/// is stored, leave blank to keep it" from "genuinely empty".
+fn redact_provider_secrets(provider: &mut Provider) {
+    let Some(obj) = provider.config_json.as_object_mut() else {
+        return;
+    };
+    if let Some(secret) = obj.get_mut("aws_secret_access_key")
+        && JsonSecret::json_is_encrypted(secret)
+    {
+        *secret = serde_json::Value::String(String::new());
+    }
+    let Some(headers) = obj.get_mut("headers").and_then(|h| h.as_array_mut()) else {
+        return;
+    };
+    for header in headers.iter_mut() {
+        let Some(entry) = header.as_object_mut() else {
+            continue;
+        };
+        let encrypted = entry
+            .get("value")
+            .is_some_and(JsonSecret::json_is_encrypted);
+        entry.insert("value".into(), serde_json::Value::String(String::new()));
+        entry.insert("encrypted".into(), serde_json::Value::Bool(encrypted));
+    }
+}
+
 /// If `config["aws_secret_access_key"]` is a plaintext string, wrap it
 /// with the encryption envelope. Already-encrypted or empty values are
 /// left alone (idempotent under repeated calls).
@@ -106,11 +220,12 @@ pub async fn list_providers(
     auth_user
         .require_global_permission(&state.db, "providers:read")
         .await?;
-    let providers = sqlx::query_as::<_, Provider>(
+    let mut providers = sqlx::query_as::<_, Provider>(
         "SELECT * FROM providers WHERE deleted_at IS NULL ORDER BY created_at DESC",
     )
     .fetch_all(&state.db)
     .await?;
+    providers.iter_mut().for_each(redact_provider_secrets);
 
     Ok(Json(providers))
 }
@@ -151,7 +266,7 @@ pub async fn create_provider(
     encrypt_aws_secret_in_config(&mut config, &state.config.encryption_key)?;
     config["headers"] = encrypt_headers_for_storage(&req.headers, &state.config.encryption_key)?;
 
-    let provider = sqlx::query_as::<_, Provider>(
+    let mut provider = sqlx::query_as::<_, Provider>(
         r#"INSERT INTO providers (name, display_name, provider_type, base_url, config_json)
            VALUES ($1, $2, $3, $4, $5) RETURNING *"#,
     )
@@ -173,6 +288,7 @@ pub async fn create_provider(
 
     crate::app::rebuild_gateway_router(&state).await;
 
+    redact_provider_secrets(&mut provider);
     Ok(Json(provider))
 }
 
@@ -228,12 +344,18 @@ pub async fn update_provider(
     }
 
     // Update headers in config_json if provided. Encrypt every header
-    // value at rest; if any AWS secret rode along in config_json we
-    // re-wrap it too (handles admins editing plaintext legacy rows).
+    // value at rest, keeping the stored ciphertext for headers submitted
+    // blank (the read path redacts them, so blank = "unchanged"); if any
+    // AWS secret rode along in config_json we re-wrap it too (handles
+    // admins editing plaintext legacy rows).
     let config_json = if let Some(ref headers) = req.headers {
         let mut config = existing.config_json.clone();
         encrypt_aws_secret_in_config(&mut config, &state.config.encryption_key)?;
-        config["headers"] = encrypt_headers_for_storage(headers, &state.config.encryption_key)?;
+        config["headers"] = merge_headers_for_storage(
+            headers,
+            &existing.config_json,
+            &state.config.encryption_key,
+        )?;
         config
     } else {
         let mut config = existing.config_json.clone();
@@ -241,7 +363,7 @@ pub async fn update_provider(
         config
     };
 
-    let updated = sqlx::query_as::<_, Provider>(
+    let mut updated = sqlx::query_as::<_, Provider>(
         r#"UPDATE providers SET display_name = $2, base_url = $3, config_json = $4
            WHERE id = $1 RETURNING *"#,
     )
@@ -262,6 +384,7 @@ pub async fn update_provider(
 
     crate::app::rebuild_gateway_router(&state).await;
 
+    redact_provider_secrets(&mut updated);
     Ok(Json(updated))
 }
 
@@ -287,13 +410,14 @@ pub async fn get_provider(
     auth_user
         .require_global_permission(&state.db, "providers:read")
         .await?;
-    let provider = sqlx::query_as::<_, Provider>(
+    let mut provider = sqlx::query_as::<_, Provider>(
         "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
     )
     .bind(id)
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound("Provider not found".into()))?;
+    redact_provider_secrets(&mut provider);
 
     Ok(Json(provider))
 }
@@ -367,6 +491,13 @@ pub struct TestProviderRequest {
     /// Unified request headers (auth + custom).
     #[serde(default)]
     pub headers: Vec<ProviderHeader>,
+    /// Existing provider the test is being run against, if any. Its
+    /// stored secrets fill in any header submitted with an empty value —
+    /// the edit dialog never receives the real values back (they're
+    /// redacted), so without this "Test connection" from that dialog
+    /// would always hit upstream unauthenticated.
+    #[serde(default)]
+    pub provider_id: Option<Uuid>,
 }
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
@@ -407,6 +538,28 @@ pub async fn test_provider(
     auth_user
         .require_global_permission(&state.db, "providers:create")
         .await?;
+
+    let mut req = req;
+    if let Some(provider_id) = req.provider_id {
+        let provider = sqlx::query_as::<_, Provider>(
+            "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(provider_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound("Provider not found".into()))?;
+        let stored = decrypt_headers_from_config(
+            &provider.config_json,
+            &state.config.encryption_key,
+            &provider.name,
+        );
+        for header in req.headers.iter_mut().filter(|h| h.value.is_empty()) {
+            if let Some(s) = stored.iter().find(|s| s.key == header.key) {
+                header.value.clone_from(&s.value);
+            }
+        }
+    }
+
     let http_client = (**state.http_client.load()).clone();
     run_provider_test(req, http_client).await
 }
@@ -626,5 +779,75 @@ mod tests {
             msg.contains("decrypt"),
             "expected decrypt failure, got: {msg}"
         );
+    }
+}
+
+#[cfg(test)]
+mod header_plumbing_tests {
+    use super::*;
+
+    fn test_hex_key() -> &'static str {
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    }
+
+    fn config_with_header(key: &str, value: &str) -> serde_json::Value {
+        let headers = encrypt_headers_for_storage(
+            &[ProviderHeader {
+                key: key.to_string(),
+                value: value.to_string(),
+            }],
+            test_hex_key(),
+        )
+        .unwrap();
+        serde_json::json!({ "headers": headers })
+    }
+
+    #[test]
+    fn stored_headers_decrypt_back_to_plaintext() {
+        // Regression: `serde_json::from_value::<Vec<ProviderHeader>>`
+        // over the stored array can never succeed — `value` is a
+        // `{"$enc": …}` object, not a String — so the remote-model
+        // probe silently ran with zero headers and got a 401 from
+        // upstream. The decrypt path must hand back the real value.
+        let config = config_with_header("x-api-key", "sk-remote-probe");
+        let headers = decrypt_headers_from_config(&config, test_hex_key(), "p");
+        assert_eq!(headers.len(), 1);
+        assert_eq!(headers[0].key, "x-api-key");
+        assert_eq!(headers[0].value, "sk-remote-probe");
+    }
+
+    #[test]
+    fn blank_header_patch_keeps_stored_secret() {
+        let config = config_with_header("x-api-key", "sk-keep-me");
+        let merged = merge_headers_for_storage(
+            &[ProviderHeader {
+                key: "x-api-key".to_string(),
+                value: String::new(),
+            }],
+            &config,
+            test_hex_key(),
+        )
+        .unwrap();
+        assert_eq!(merged, config["headers"], "blank must reuse the ciphertext");
+    }
+
+    #[test]
+    fn non_blank_header_patch_overwrites_stored_secret() {
+        let config = config_with_header("x-api-key", "sk-old");
+        let merged = merge_headers_for_storage(
+            &[ProviderHeader {
+                key: "x-api-key".to_string(),
+                value: "sk-new".to_string(),
+            }],
+            &config,
+            test_hex_key(),
+        )
+        .unwrap();
+        let decrypted = decrypt_headers_from_config(
+            &serde_json::json!({ "headers": merged }),
+            test_hex_key(),
+            "p",
+        );
+        assert_eq!(decrypted[0].value, "sk-new");
     }
 }

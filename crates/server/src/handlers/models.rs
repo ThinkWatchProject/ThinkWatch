@@ -17,7 +17,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use think_watch_common::dto::ProviderHeader;
 use think_watch_common::errors::AppError;
 use think_watch_common::models::Model;
 use think_watch_gateway::output_guardrails::{MAX_LENGTH_CAP_CEILING, OutputGuardrail};
@@ -1698,15 +1697,20 @@ pub async fn list_remote_models(
     .await?
     .ok_or(AppError::NotFound("Provider not found".into()))?;
 
-    let headers: Vec<ProviderHeader> = provider
-        .config_json
-        .get("headers")
-        .and_then(|v| serde_json::from_value(v.clone()).ok())
-        .unwrap_or_default();
+    // Stored header values are `{"$enc": …}` envelopes, so they have to
+    // be decrypted here — deserializing them straight into
+    // `Vec<ProviderHeader>` fails and yields an empty list, which sent
+    // the model probe upstream with no API key at all.
+    let headers = super::providers::decrypt_headers_from_config(
+        &provider.config_json,
+        &state.config.encryption_key,
+        &provider.name,
+    );
     let test_req = super::providers::TestProviderRequest {
         provider_type: provider.provider_type.clone(),
         base_url: provider.base_url.clone(),
         headers,
+        provider_id: Some(provider.id),
     };
 
     let http_client = (**state.http_client.load()).clone();

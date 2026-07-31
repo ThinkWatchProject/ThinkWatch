@@ -322,6 +322,7 @@
     "editDescription": "Update provider settings.",
     "headers": "Request Headers",
     "headersDesc": "Headers sent with every request to this provider. Use {{user_id}} or {{user_email}} in values to forward caller identity.",
+    "headerValueStored": "Saved — leave blank to keep",
     "customHeaders": "Custom Headers",
     "customHeadersDesc": "Custom HTTP headers forwarded with requests. Use {{user_id}} or {{user_email}} in values to forward caller identity.",
     "addHeader": "Add Header",

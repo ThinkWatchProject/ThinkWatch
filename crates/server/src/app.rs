@@ -1241,33 +1241,15 @@ pub(crate) async fn load_providers_into_router(
         // string (or any other shape) at read time means the row was
         // corrupted; decrypt_secret_from_json returns Err and we
         // skip the header with a loud log line.
-        let headers: Vec<(String, String)> = provider
-            .config_json
-            .get("headers")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|item| {
-                        let key = item.get("key")?.as_str()?.to_string();
-                        let raw = item.get("value")?;
-                        match crate::handlers::providers::decrypt_secret_from_json(
-                            raw,
-                            &state.config.encryption_key,
-                        ) {
-                            Ok(value) => Some((key, value)),
-                            Err(e) => {
-                                tracing::error!(
-                                    provider = %provider.name,
-                                    header = %key,
-                                    "Failed to decrypt provider header — skipping: {e}"
-                                );
-                                None
-                            }
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let headers: Vec<(String, String)> =
+            crate::handlers::providers::decrypt_headers_from_config(
+                &provider.config_json,
+                &state.config.encryption_key,
+                &provider.name,
+            )
+            .into_iter()
+            .map(|h| (h.key, h.value))
+            .collect();
 
         let dyn_provider: Arc<dyn think_watch_gateway::providers::DynAiProvider> = match provider
             .provider_type

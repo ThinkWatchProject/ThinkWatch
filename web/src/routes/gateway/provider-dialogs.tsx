@@ -121,6 +121,12 @@ async function handleTestConnection(
   hdrs: [string, string][],
   setTesting: (v: boolean) => void,
   setTestResult: (v: TestResult | null) => void,
+  /**
+   * Set when testing an already-saved provider: the server fills any
+   * blank header value from that provider's stored secrets, which the
+   * edit dialog never sees (they come back redacted).
+   */
+  providerId?: string,
 ) {
   setTesting(true);
   setTestResult(null);
@@ -131,6 +137,7 @@ async function handleTestConnection(
         provider_type: type,
         base_url: url,
         headers: hdrs.filter(([k]) => k.trim()).map(([k, v]) => ({ key: k, value: v })),
+        provider_id: providerId,
       },
     );
     setTestResult(res);
@@ -362,6 +369,14 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
   const [editDisplayName, setEditDisplayName] = useState('');
   const [editBaseUrl, setEditBaseUrl] = useState('');
   const [editHeaders, setEditHeaders] = useState<[string, string][]>([]);
+  /**
+   * Header keys the server holds a secret for. Their values come back
+   * redacted, so an untouched row stays blank and the PATCH preserves
+   * what's stored — this set only drives the "saved" placeholder. Keyed
+   * by header name rather than row index so removing or reordering rows
+   * can't shift the flags onto the wrong header.
+   */
+  const [editStoredKeys, setEditStoredKeys] = useState<Set<string>>(new Set());
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState('');
   const [testing, setTesting] = useState(false);
@@ -376,8 +391,17 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
       setEditBaseUrl(provider.base_url);
       setEditError('');
       setTestResult(null);
-      const existing = (provider.config_json?.headers ?? []) as { key: string; value: string }[];
-      setEditHeaders(existing.map(h => [h.key, h.value] as [string, string]));
+      const existing = provider.config_json?.headers ?? [];
+      // `value` is redacted server-side; coerce defensively so a legacy
+      // row that still carries the raw `{"$enc": …}` envelope renders as
+      // an empty input instead of the string "[object Object]" — which
+      // would then be saved back as the provider's new secret.
+      setEditHeaders(
+        existing.map(h => [h.key, typeof h.value === 'string' ? h.value : ''] as [string, string]),
+      );
+      setEditStoredKeys(
+        new Set(existing.filter(h => h.encrypted || typeof h.value !== 'string').map(h => h.key)),
+      );
     }
   }
 
@@ -433,7 +457,11 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
                     setEditHeaders([[hk, wrapped], ...editHeaders]);
                   }
                 }}
-                placeholder={t('providers.apiKey')}
+                placeholder={
+                  editStoredKeys.has(authHeaderKey[provider.provider_type]!)
+                    ? t('providers.headerValueStored')
+                    : t('providers.apiKey')
+                }
               />
             </div>
           )}
@@ -443,6 +471,11 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
             <HeaderEditor
               headers={editHeaders}
               onChange={setEditHeaders}
+              valuePlaceholder={(i) =>
+                editHeaders[i][1] === '' && editStoredKeys.has(editHeaders[i][0])
+                  ? t('providers.headerValueStored')
+                  : undefined
+              }
               presets={headerPresets(t)}
             />
           </div>
@@ -459,7 +492,7 @@ export function EditProviderDialog({ open, onOpenChange, provider, onSuccess }: 
           <TestConnectionButton
             testing={testing}
             disabled={testing || !editBaseUrl}
-            onClick={() => handleTestConnection(provider!.provider_type, editBaseUrl, editHeaders, setTesting, setTestResult)}
+            onClick={() => handleTestConnection(provider!.provider_type, editBaseUrl, editHeaders, setTesting, setTestResult, provider!.id)}
           />
           <Button onClick={handleEdit} disabled={editSaving}>
             {editSaving ? t('common.loading') : t('common.save')}
