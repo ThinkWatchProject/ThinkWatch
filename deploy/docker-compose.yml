@@ -3,6 +3,12 @@
 ##
 ## Required: create .env.production with real secrets before deploying.
 
+# Pinned project name — see the matching note in docker-compose.dev.yml.
+# Both files sit in `deploy/`, so the default project name would be
+# `deploy` for both and the two stacks would clobber each other's
+# containers.
+name: thinkwatch
+
 services:
   server:
     image: ghcr.io/thinkwatch/think-watch-server:${IMAGE_TAG:-latest}
@@ -48,7 +54,11 @@ services:
       rustfs:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:3000/health/live"]
+      # The runtime image is distroless/static — no shell, no curl. The
+      # binary probes itself instead (see main.rs `healthcheck` arg);
+      # a curl-based probe here silently kept `server` unhealthy forever
+      # and blocked `web` from ever starting.
+      test: ["CMD", "/think-watch-server", "healthcheck"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -208,7 +218,10 @@ services:
       - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
       - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      # 127.0.0.1, not `localhost`: with `--listen_host=0.0.0.0` CH binds
+      # IPv4 only, while `localhost` resolves to ::1 first inside the
+      # container — the probe got ECONNREFUSED and CH stayed unhealthy.
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 10

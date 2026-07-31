@@ -7,6 +7,17 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Container healthcheck. The runtime image is distroless/static —
+    // no shell, no curl — so the only executable available to Docker's
+    // healthcheck is this binary. `think-watch-server healthcheck`
+    // probes the gateway liveness route and exits 0 (healthy) / 1.
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        let port = std::env::var("GATEWAY_PORT").unwrap_or_else(|_| "3000".to_string());
+        let url = format!("http://127.0.0.1:{port}/health/live");
+        let ok = matches!(reqwest::get(&url).await, Ok(r) if r.status().is_success());
+        std::process::exit(if ok { 0 } else { 1 });
+    }
+
     // Phase 1: stdout-only tracing (before ClickHouse is available).
     // The CH layer slot starts as None and gets swapped in after AuditLogger init.
     let (ch_layer, ch_layer_reload) =

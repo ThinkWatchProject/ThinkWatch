@@ -1,3 +1,9 @@
+# Pinned project name. Both compose files live in `deploy/`, so without
+# this they'd both default to the project name `deploy` — and `make
+# infra`'s `--remove-orphans` would delete the production stack's
+# containers as "orphans" of the same project.
+name: thinkwatch-dev
+
 services:
   postgres:
     image: postgres:18-alpine
@@ -53,7 +59,7 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - ./data/postgres:/var/lib/postgresql
+      - ./data-dev/postgres:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-thinkwatch}"]
       interval: 5s
@@ -66,7 +72,7 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - ./data/redis:/data
+      - ./data-dev/redis:/data
       - ./redis/redis.conf:/etc/redis/redis.conf:ro
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
@@ -87,12 +93,12 @@ services:
       CLICKHOUSE_DB: ${CLICKHOUSE_DB:-think_watch}
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
     volumes:
-      - ./data/clickhouse:/var/lib/clickhouse
+      - ./data-dev/clickhouse:/var/lib/clickhouse
       - ./clickhouse/initdb.d/:/docker-entrypoint-initdb.d/:ro
       - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
       - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -113,13 +119,18 @@ services:
       ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${ZITADEL_PG_PASSWORD}
       ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
       ZITADEL_EXTERNALDOMAIN: localhost
-      ZITADEL_EXTERNALPORT: 8080
+      # Host port 8082, not 8080: the production compose serves the web
+      # UI on ${WEB_PORT}, whose obvious local value is 8080, and the
+      # two stacks are routinely up back-to-back. This must match the
+      # published host port below — Zitadel bakes it into the OIDC
+      # issuer URL, so a mismatch breaks discovery.
+      ZITADEL_EXTERNALPORT: 8082
       ZITADEL_EXTERNALSECURE: "false"
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: "admin"
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: "${ZITADEL_ADMIN_PASSWORD:-${ZITADEL_PG_PASSWORD}!Aa1}"
       ZITADEL_TELEMETRY_ENABLED: "false"
     ports:
-      - "8080:8080"
+      - "8082:8080"
     depends_on:
       zitadel_db:
         condition: service_healthy
@@ -141,7 +152,7 @@ services:
       POSTGRES_PASSWORD: ${ZITADEL_PG_PASSWORD:?ZITADEL_PG_PASSWORD is required}
       POSTGRES_DB: zitadel
     volumes:
-      - ./data/zitadel_db:/var/lib/postgresql
+      - ./data-dev/zitadel_db:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 5s
@@ -170,7 +181,7 @@ services:
       - "9100:9000"   # S3 API — host port 9100 to avoid clashing with CH native 9000
       - "9101:9001"   # Admin console (read-only browse for operators)
     volumes:
-      - ./data/rustfs:/data
+      - ./data-dev/rustfs:/data
     healthcheck:
       # RustFS exposes `/health` (200 OK on a live server); the
       # MinIO-style `/minio/health/live` path that earlier RustFS
