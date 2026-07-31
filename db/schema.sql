@@ -435,6 +435,37 @@ CREATE TABLE IF NOT EXISTS model_routes (
 -- place.
 ALTER TABLE model_routes ADD COLUMN IF NOT EXISTS upstream_protocol VARCHAR(32);
 
+-- What we know about each (provider, upstream model) pair: whether the
+-- upstream will actually serve it, and over which wire dialect.
+--
+-- Written when an admin imports models (each selected model is probed
+-- with a minimal completion before any route is created) and updated
+-- when a live request teaches us something new. Read to keep models
+-- the upstream refuses out of the import picker entirely — the
+-- alternative is what shipped before: 55 routes created, 15 of them
+-- dead, discovered one failed call at a time.
+--
+-- Deliberately has no TTL and no background refresh. A verdict is only
+-- revisited when the operator asks for it (the provider's "check all
+-- models" action), when a live call proves it wrong, or when the
+-- provider's endpoint / credentials change (which drops every row for
+-- that provider, since they described a different upstream).
+CREATE TABLE IF NOT EXISTS provider_model_probes (
+    provider_id     UUID NOT NULL REFERENCES providers(id) ON DELETE CASCADE,
+    upstream_model  VARCHAR(255) NOT NULL,
+    -- 'ok'          — served; `protocol` holds the dialect that answered
+    -- 'unavailable' — every candidate dialect was refused; `error` holds
+    --                 the upstream's own wording, which is what the
+    --                 admin needs to see to act on it
+    -- Transient failures (timeout, network) are NOT recorded: a row here
+    -- is a statement about the upstream, not about one bad moment.
+    status          VARCHAR(16) NOT NULL CHECK (status IN ('ok', 'unavailable')),
+    protocol        VARCHAR(32),
+    error           TEXT,
+    checked_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (provider_id, upstream_model)
+);
+
 CREATE INDEX IF NOT EXISTS idx_model_routes_model ON model_routes(model_id);
 CREATE INDEX IF NOT EXISTS idx_model_routes_provider ON model_routes(provider_id);
 

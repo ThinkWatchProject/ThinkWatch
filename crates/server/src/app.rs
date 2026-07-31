@@ -798,6 +798,10 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
             get(handlers::models::list_remote_models),
         )
         .route(
+            "/api/admin/providers/{provider_id}/recheck-models",
+            post(handlers::models::recheck_provider_models),
+        )
+        .route(
             "/api/admin/platform-pricing",
             get(handlers::platform_pricing::get_platform_pricing)
                 .patch(handlers::platform_pricing::update_platform_pricing),

@@ -159,11 +159,29 @@ fn mentions_4xx(message: &str) -> bool {
 /// bookkeeping UPDATE didn't land would be a strictly worse outcome.
 /// A lost write costs one more retry on the next request.
 pub(super) async fn persist(db: &sqlx::PgPool, route_id: Uuid, protocol: UpstreamProtocol) {
-    let result = sqlx::query("UPDATE model_routes SET upstream_protocol = $2 WHERE id = $1")
-        .bind(route_id)
-        .bind(protocol.as_str())
-        .execute(db)
-        .await;
+    // Update the import-time probe cache from the same statement: a
+    // live call is better evidence than a probe, and leaving a stale
+    // "unavailable" behind would keep the model out of the import
+    // picker even though it just answered.
+    let result = sqlx::query(
+        r#"WITH updated AS (
+               UPDATE model_routes SET upstream_protocol = $2
+                WHERE id = $1
+            RETURNING provider_id, upstream_model
+           )
+           INSERT INTO provider_model_probes
+               (provider_id, upstream_model, status, protocol, error, checked_at)
+           SELECT provider_id, upstream_model, 'ok', $2, NULL, now() FROM updated
+           ON CONFLICT (provider_id, upstream_model) DO UPDATE
+               SET status = 'ok',
+                   protocol = EXCLUDED.protocol,
+                   error = NULL,
+                   checked_at = now()"#,
+    )
+    .bind(route_id)
+    .bind(protocol.as_str())
+    .execute(db)
+    .await;
     match result {
         Ok(_) => tracing::info!(
             %route_id,

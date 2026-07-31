@@ -896,11 +896,31 @@ pub async fn create_model_route(
         return Err(AppError::BadRequest("tpm_cap must be > 0".into()));
     }
 
+    // Same check the bulk import runs: don't create a route the
+    // upstream has told us it won't serve. Refusing here beats creating
+    // it and letting the operator find out on their first call.
+    let verdict = crate::protocol_probe::resolve(
+        &state.db,
+        &provider,
+        &state.config.encryption_key,
+        std::slice::from_ref(&upstream_model),
+        false,
+    )
+    .await
+    .remove(&upstream_model)
+    .unwrap_or(crate::protocol_probe::Verdict::Unknown);
+    if let crate::protocol_probe::Verdict::Unavailable(reason) = &verdict {
+        return Err(AppError::BadRequest(format!(
+            "Provider does not serve '{upstream_model}': {reason}"
+        )));
+    }
+    let upstream_protocol = verdict.protocol().map(|p| p.as_str().to_string());
+
     let row = sqlx::query_as::<_, ModelRouteRow>(
         r#"INSERT INTO model_routes
               (model_id, provider_id, upstream_model, weight, enabled,
-               label, notes, rpm_cap, tpm_cap)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+               label, notes, rpm_cap, tpm_cap, upstream_protocol)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
            RETURNING id, model_id, provider_id,
                      (SELECT name FROM providers WHERE id = provider_id) AS provider_name,
                      upstream_model, weight, enabled,
@@ -915,6 +935,7 @@ pub async fn create_model_route(
     .bind(req.notes.as_deref().filter(|s| !s.is_empty()))
     .bind(req.rpm_cap)
     .bind(req.tpm_cap)
+    .bind(&upstream_protocol)
     .fetch_one(&state.db)
     .await?;
 
@@ -930,10 +951,6 @@ pub async fn create_model_route(
     );
 
     crate::app::rebuild_gateway_router(&state).await;
-
-    // Same background probe the bulk import runs — a hand-created route
-    // must not be second-class.
-    crate::protocol_probe::spawn_probe(&state, provider, vec![upstream_model]);
 
     Ok(Json(row))
 }
@@ -1252,12 +1269,55 @@ pub async fn batch_create_routes(
     // For "new" items we carry both the exposed id (what clients call)
     // and the upstream id (what the provider expects). They're equal
     // when the admin didn't customize.
+    // Ask the upstream whether it will serve each selected model before
+    // creating anything. Refused models are dropped from the import
+    // rather than turned into routes that fail on first use; cached
+    // verdicts make a repeat import free. Models the probe couldn't
+    // conclude on (timeout, transport) are imported anyway — that's the
+    // pre-probe behaviour, and the runtime relearn path covers them.
+    let selected: Vec<String> = {
+        let mut v: Vec<String> = req.items.iter().map(|it| it.upstream.clone()).collect();
+        v.sort();
+        v.dedup();
+        v
+    };
+    let verdicts = crate::protocol_probe::resolve(
+        &state.db,
+        &provider,
+        &state.config.encryption_key,
+        &selected,
+        false,
+    )
+    .await;
+    let skipped: Vec<serde_json::Value> = verdicts
+        .iter()
+        .filter_map(|(model, verdict)| match verdict {
+            crate::protocol_probe::Verdict::Unavailable(reason) => Some(serde_json::json!({
+                "upstream": model,
+                "reason": reason,
+            })),
+            _ => None,
+        })
+        .collect();
+
     let mut new_exposed: Vec<String> = Vec::new();
     let mut new_upstreams: Vec<String> = Vec::new();
+    let mut new_protocols: Vec<Option<String>> = Vec::new();
     let mut attach_targets: Vec<String> = Vec::new();
     let mut attach_upstreams: Vec<String> = Vec::new();
+    let mut attach_protocols: Vec<Option<String>> = Vec::new();
 
     for it in &req.items {
+        let verdict = verdicts.get(&it.upstream);
+        if matches!(
+            verdict,
+            Some(crate::protocol_probe::Verdict::Unavailable(_))
+        ) {
+            continue;
+        }
+        let protocol = verdict
+            .and_then(|v| v.protocol())
+            .map(|p| p.as_str().to_string());
         match &it.target_model_id {
             None => {
                 let exposed = it
@@ -1269,10 +1329,12 @@ pub async fn batch_create_routes(
                     .to_string();
                 new_exposed.push(exposed);
                 new_upstreams.push(it.upstream.clone());
+                new_protocols.push(protocol);
             }
             Some(target) => {
                 attach_targets.push(target.clone());
                 attach_upstreams.push(it.upstream.clone());
+                attach_protocols.push(protocol);
             }
         }
     }
@@ -1300,9 +1362,10 @@ pub async fn batch_create_routes(
         sqlx::query_scalar::<_, i64>(
             r#"WITH ins AS (
                  INSERT INTO model_routes
-                     (model_id, provider_id, upstream_model, weight)
-                 SELECT exposed, $3, upstream, 100
-                 FROM UNNEST($1::TEXT[], $2::TEXT[]) AS t(exposed, upstream)
+                     (model_id, provider_id, upstream_model, weight, upstream_protocol)
+                 SELECT exposed, $3, upstream, 100, protocol
+                 FROM UNNEST($1::TEXT[], $2::TEXT[], $4::TEXT[])
+                   AS t(exposed, upstream, protocol)
                  ON CONFLICT (model_id, provider_id, upstream_model) DO NOTHING
                  RETURNING 1
                )
@@ -1311,6 +1374,7 @@ pub async fn batch_create_routes(
         .bind(&new_exposed)
         .bind(&new_upstreams)
         .bind(req.provider_id)
+        .bind(&new_protocols)
         .fetch_one(&mut *tx)
         .await?
     };
@@ -1326,10 +1390,10 @@ pub async fn batch_create_routes(
         sqlx::query_scalar::<_, i64>(
             r#"WITH ins AS (
                  INSERT INTO model_routes
-                     (model_id, provider_id, upstream_model, weight)
-                 SELECT t.target, $3, t.upstream, 100
-                 FROM UNNEST($1::TEXT[], $2::TEXT[])
-                   AS t(target, upstream)
+                     (model_id, provider_id, upstream_model, weight, upstream_protocol)
+                 SELECT t.target, $3, t.upstream, 100, t.protocol
+                 FROM UNNEST($1::TEXT[], $2::TEXT[], $4::TEXT[])
+                   AS t(target, upstream, protocol)
                  WHERE EXISTS (SELECT 1 FROM models m WHERE m.model_id = t.target)
                  ON CONFLICT (model_id, provider_id, upstream_model) DO NOTHING
                  RETURNING 1
@@ -1339,6 +1403,7 @@ pub async fn batch_create_routes(
         .bind(&attach_targets)
         .bind(&attach_upstreams)
         .bind(req.provider_id)
+        .bind(&attach_protocols)
         .fetch_one(&mut *tx)
         .await?
     };
@@ -1360,18 +1425,12 @@ pub async fn batch_create_routes(
 
     crate::app::rebuild_gateway_router(&state).await;
 
-    // Work out which wire dialect this upstream wants for each model —
-    // in the background. The routes already work (an un-probed route
-    // runs on the provider type's default and the runtime relearns if
-    // that's wrong), so there is no reason to hold the import open
-    // while the gateway talks to the upstream once per model family.
-    let mut probe_models: Vec<String> = new_upstreams;
-    probe_models.extend(attach_upstreams);
-    probe_models.sort();
-    probe_models.dedup();
-    crate::protocol_probe::spawn_probe(&state, provider, probe_models);
-
-    Ok(Json(serde_json::json!({ "created": created })))
+    // `skipped` is the whole point of probing first: the admin selected
+    // these and they are not being imported, so say which and why.
+    Ok(Json(serde_json::json!({
+        "created": created,
+        "skipped": skipped,
+    })))
 }
 
 // ---------------------------------------------------------------------------
@@ -1699,7 +1758,7 @@ pub async fn list_remote_models(
     auth_user: AuthUser,
     State(state): State<AppState>,
     Path(provider_id): Path<Uuid>,
-) -> Result<Json<Vec<String>>, AppError> {
+) -> Result<Json<Vec<Value>>, AppError> {
     auth_user.require_permission("models:read")?;
 
     let provider = sqlx::query_as::<_, think_watch_common::models::Provider>(
@@ -1727,7 +1786,8 @@ pub async fn list_remote_models(
     };
 
     let http_client = (**state.http_client.load()).clone();
-    let Json(resp) = super::providers::run_provider_test(test_req, http_client).await?;
+    let Json(resp) =
+        super::providers::run_provider_test(test_req, http_client, &state.url_validator).await?;
     if !resp.success {
         return Err(AppError::BadRequest(format!(
             "Provider unreachable: {}",
@@ -1735,7 +1795,123 @@ pub async fn list_remote_models(
         )));
     }
 
-    Ok(Json(resp.models.unwrap_or_default()))
+    let models = resp.models.unwrap_or_default();
+
+    // Attach whatever we already know about each model so the import
+    // picker can mark the ones this upstream refuses without spending a
+    // request. Models with no cached verdict come back unmarked — the
+    // probe runs when the admin actually imports them.
+    let verdicts = crate::protocol_probe::cached_verdicts(&state.db, provider.id)
+        .await
+        .unwrap_or_default();
+    let entries: Vec<serde_json::Value> = models
+        .into_iter()
+        .map(|model| match verdicts.get(&model) {
+            Some(crate::protocol_probe::Verdict::Unavailable(reason)) => serde_json::json!({
+                "id": model, "available": false, "reason": reason,
+            }),
+            Some(crate::protocol_probe::Verdict::Ok(_)) => serde_json::json!({
+                "id": model, "available": true,
+            }),
+            _ => serde_json::json!({ "id": model }),
+        })
+        .collect();
+
+    Ok(Json(entries))
+}
+
+/// POST /api/admin/providers/{provider_id}/recheck-models
+///
+/// Re-probe the provider's entire catalog, overwriting every cached
+/// verdict. This is the only way a model that was refused becomes
+/// importable again: verdicts never expire and nothing polls the
+/// upstream, so an operator who enables a model there tells us by
+/// pressing this.
+pub async fn recheck_provider_models(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Path(provider_id): Path<Uuid>,
+) -> Result<Json<Value>, AppError> {
+    auth_user
+        .require_global_permission(&state.db, "models:write")
+        .await?;
+
+    let provider = sqlx::query_as::<_, think_watch_common::models::Provider>(
+        "SELECT * FROM providers WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(provider_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound("Provider not found".into()))?;
+
+    let headers = super::providers::decrypt_headers_from_config(
+        &provider.config_json,
+        &state.config.encryption_key,
+        &provider.name,
+    );
+    let http_client = (**state.http_client.load()).clone();
+    let Json(resp) = super::providers::run_provider_test(
+        super::providers::TestProviderRequest {
+            provider_type: provider.provider_type.clone(),
+            base_url: provider.base_url.clone(),
+            headers,
+            provider_id: Some(provider.id),
+        },
+        http_client,
+        &state.url_validator,
+    )
+    .await?;
+    if !resp.success {
+        return Err(AppError::BadRequest(format!(
+            "Provider unreachable: {}",
+            resp.message
+        )));
+    }
+    let models = resp.models.unwrap_or_default();
+
+    let verdicts = crate::protocol_probe::resolve(
+        &state.db,
+        &provider,
+        &state.config.encryption_key,
+        &models,
+        true,
+    )
+    .await;
+
+    let mut available = 0usize;
+    let mut unavailable: Vec<serde_json::Value> = Vec::new();
+    let mut inconclusive = 0usize;
+    for (model, verdict) in &verdicts {
+        match verdict {
+            crate::protocol_probe::Verdict::Ok(_) => available += 1,
+            crate::protocol_probe::Verdict::Unavailable(reason) => {
+                unavailable.push(serde_json::json!({ "upstream": model, "reason": reason }))
+            }
+            crate::protocol_probe::Verdict::Unknown => inconclusive += 1,
+        }
+    }
+
+    // A model that just became unavailable is still routed until an
+    // operator removes it — we report it rather than deleting routes
+    // behind their back.
+    state.audit.log(
+        auth_user
+            .audit("provider.models_rechecked")
+            .resource("provider")
+            .resource_id(provider_id.to_string())
+            .detail(serde_json::json!({
+                "checked": verdicts.len(),
+                "available": available,
+                "unavailable": unavailable.len(),
+            })),
+    );
+
+    Ok(Json(serde_json::json!({
+        "checked": verdicts.len(),
+        "available": available,
+        "inconclusive": inconclusive,
+        "unavailable": unavailable,
+    })))
 }
 
 #[cfg(test)]

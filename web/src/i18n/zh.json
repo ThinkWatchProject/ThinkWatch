@@ -300,6 +300,9 @@
     "unreachable": "不可达"
   },
   "providers": {
+    "recheckModels": "重新检测模型可用性",
+    "recheckDone": "{{checked}} 个模型中 {{available}} 个可用",
+    "recheckUnavailable": "{{count}} 个该提供商不提供: {{models}}",
     "title": "提供商",
     "subtitle": "管理 AI 模型提供商",
     "addProvider": "添加提供商",
@@ -390,6 +393,8 @@
     "inactiveTab": "已失效"
   },
   "models": {
+    "upstreamRefuses": "上游不提供",
+    "batchSkipped": "{{count}} 个模型未导入 — 该提供商不提供它们: {{models}}",
     "title": "模型",
     "subtitle": "客户端通过 /v1/models 能调用的模型 catalog。每个条目配置输入/输出权重，按平台基准价计算成本和加权 token 配额。",
     "noModels": "尚未注册任何模型。",

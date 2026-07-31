@@ -13,9 +13,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { Plus, Trash2, Pencil, Plug, AlertCircle, Download } from 'lucide-react';
+import { Plus, Trash2, Pencil, Plug, AlertCircle, Download, RefreshCw } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import { api, apiDelete, hasPermission } from '@/lib/api';
+import { api, apiDelete, apiPost, hasPermission } from '@/lib/api';
 import { ConfirmDialog } from '@/components/confirm-dialog';
 import { DataTablePagination } from '@/components/data-table-pagination';
 import { useClientPagination } from '@/hooks/use-client-pagination';
@@ -38,6 +38,7 @@ export function ProvidersPage() {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [editProvider, setEditProvider] = useState<Provider | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [rechecking, setRechecking] = useState<string | null>(null);
 
   const fetchProviders = async (signal?: AbortSignal) => {
     try {
@@ -65,6 +66,40 @@ export function ProvidersPage() {
       await fetchProviders();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
+    }
+  };
+
+  /// Re-probe every model this provider exposes, overwriting what we
+  /// previously concluded. Verdicts never expire and nothing polls the
+  /// upstream, so this is how an operator says "I enabled that model on
+  /// your side, look again".
+  const recheckModels = async (providerId: string) => {
+    setRechecking(providerId);
+    try {
+      const res = await apiPost<{
+        checked: number;
+        available: number;
+        unavailable: { upstream: string; reason: string }[];
+      }>(`/api/admin/providers/${providerId}/recheck-models`, {});
+      toast.success(
+        t('providers.recheckDone', { available: res.available, checked: res.checked }),
+        res.unavailable.length
+          ? {
+              description: t('providers.recheckUnavailable', {
+                count: res.unavailable.length,
+                models: res.unavailable
+                  .slice(0, 5)
+                  .map((m) => m.upstream)
+                  .join(', '),
+              }),
+              duration: 10000,
+            }
+          : undefined,
+      );
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
+    } finally {
+      setRechecking(null);
     }
   };
 
@@ -162,6 +197,18 @@ export function ProvidersPage() {
                           disabled={!hasPermission('models:write')}
                         >
                           <Download className="h-4 w-4" />
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() => void recheckModels(p.id)}
+                          title={t('providers.recheckModels')}
+                          aria-label={t('providers.recheckModels')}
+                          disabled={!hasPermission('models:write') || rechecking === p.id}
+                        >
+                          <RefreshCw
+                            className={`h-4 w-4 ${rechecking === p.id ? 'animate-spin' : ''}`}
+                          />
                         </Button>
                         <Button
                           variant="ghost"

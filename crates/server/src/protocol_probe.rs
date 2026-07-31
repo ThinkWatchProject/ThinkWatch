@@ -1,81 +1,147 @@
-//! Working out which wire dialect an upstream wants for a given model,
-//! without ever asking the admin.
+//! Finding out, before a route exists, whether an upstream will
+//! actually serve a model — and over which wire dialect.
 //!
-//! Aggregators routinely serve several model families over one host and
-//! one credential while exposing a *different* API per family. The
-//! admin shouldn't have to know that, let alone encode it as one
-//! provider record per dialect. So the gateway determines it itself, in
-//! three escalating steps:
+//! Aggregators list models in `/v1/models` that they will not serve to
+//! your credential, and serve the ones they do over different APIs
+//! depending on the model. Neither fact is discoverable from the
+//! catalog, and neither is something an admin should have to research.
+//! So each model gets probed with the smallest possible completion
+//! before it is imported: refused models never become routes, and
+//! served ones land with their dialect already recorded.
 //!
-//! 1. **Catalog metadata** — some upstreams already say which endpoints
-//!    a model answers on. Free, so it's tried first.
-//! 2. **Model-id family heuristic** — orders the candidates
-//!    (`anthropic.*` → Messages first). Never decides on its own; it
-//!    only chooses what to try first.
-//! 3. **Live probe** — the smallest possible completion against each
-//!    candidate in turn. The first one that answers wins.
+//! Probing is per model, never per family. Grouping by vendor prefix
+//! was the obvious optimisation and it is wrong: on a real upstream,
+//! `minimax.minimax-m2.1` answers while `minimax.minimax-m2` refuses,
+//! and `openai.gpt-oss-120b` answers while `openai.gpt-5.5` refuses —
+//! same host, same path, same credential.
 //!
-//! Results are memoised per model *family* within a run, so importing
-//! 55 models across 6 families costs 6 probes, not 55.
-//!
-//! Anything left unresolved stays NULL in `model_routes` and is picked
-//! up later by the runtime relearn path — a failed probe degrades to
-//! "figure it out on first use", never to a hard error.
+//! Verdicts are cached in `provider_model_probes` with no expiry. They
+//! are revisited only on an explicit operator action, when a live call
+//! contradicts them, or when the provider's endpoint changes.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
+use futures::stream::{self, StreamExt};
+use think_watch_common::errors::AppError;
 use think_watch_common::models::Provider;
 use think_watch_gateway::providers::protocol::UpstreamProtocol;
 use think_watch_gateway::providers::traits::{ChatCompletionRequest, ChatMessage, GatewayError};
+use uuid::Uuid;
 
 use crate::gateway_adapters::{ProviderMaterials, build_adapter};
 
-/// Group key for memoising probe results. Aggregator ids are
-/// vendor-prefixed (`anthropic.claude-…`, `openai.gpt-…`); first-party
-/// ones aren't (`claude-…`, `gpt-…`), so fall back to the leading
-/// alphabetic run. Two models that share this key are assumed to share
-/// an API surface — if that assumption is ever wrong for a specific
-/// model, the runtime relearn path corrects that route on first use.
-fn family_key(upstream_model: &str) -> String {
-    let lower = upstream_model.to_ascii_lowercase();
-    if let Some((vendor, _)) = lower.split_once(['.', '/']) {
-        return vendor.to_string();
-    }
-    lower
-        .chars()
-        .take_while(|c| c.is_ascii_alphabetic())
-        .collect()
+/// How many models we probe at once. The upstream is someone else's
+/// service — this is deliberately modest, and it still resolves a
+/// typical import in about one round trip.
+const PROBE_CONCURRENCY: usize = 10;
+
+/// Per-model ceiling. A model that hasn't answered by now is left
+/// unrecorded rather than holding up the import: the route gets created
+/// and the runtime relearn path sorts it out on first use, which is
+/// exactly the pre-probe behaviour.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// What we know about one `(provider, upstream model)` pair.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum Verdict {
+    /// The upstream served it over this dialect.
+    Ok(UpstreamProtocol),
+    /// Every candidate dialect was refused. Carries the upstream's own
+    /// wording — the admin needs that to know whether to enable the
+    /// model upstream or give up on it.
+    Unavailable(String),
+    /// The probe itself didn't conclude (timeout, network). Not a
+    /// statement about the upstream, so it is never cached.
+    Unknown,
 }
 
-/// Read the protocol straight off a catalog entry, when the upstream
-/// publishes one. Recognises the shapes seen in the wild: a list of
-/// endpoint paths, or a list of API names.
-fn from_catalog_metadata(entry: &serde_json::Value) -> Option<UpstreamProtocol> {
-    let values = ["supported_endpoints", "endpoints", "supported_apis"]
-        .iter()
-        .find_map(|k| entry.get(*k))
-        .and_then(|v| v.as_array())?;
-
-    let mut seen = Vec::new();
-    for v in values {
-        let s = v.as_str()?.to_ascii_lowercase();
-        if s.contains("/v1/messages") || s.contains("messages") {
-            seen.push(UpstreamProtocol::AnthropicMessages);
-        } else if s.contains("/v1/responses") || s.contains("responses") {
-            seen.push(UpstreamProtocol::OpenAiResponses);
-        } else if s.contains("chat/completions") || s.contains("chat_completions") {
-            seen.push(UpstreamProtocol::OpenAiChat);
-        } else if s.contains("generatecontent") {
-            seen.push(UpstreamProtocol::GoogleGenerate);
+impl Verdict {
+    pub(crate) fn protocol(&self) -> Option<UpstreamProtocol> {
+        match self {
+            Self::Ok(p) => Some(*p),
+            _ => None,
         }
     }
-    // Ambiguous metadata (several dialects advertised) is no better
-    // than none — fall through to the probe, which finds out what
-    // actually works rather than what's claimed.
-    match seen.as_slice() {
-        [only] => Some(*only),
-        _ => None,
+}
+
+/// Read cached verdicts for a provider. Models with no row come back
+/// absent, not `Unknown` — "never asked" and "asked, got nothing" are
+/// different things to the caller.
+pub(crate) async fn cached_verdicts(
+    db: &sqlx::PgPool,
+    provider_id: Uuid,
+) -> Result<HashMap<String, Verdict>, AppError> {
+    let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT upstream_model, status, protocol, error
+           FROM provider_model_probes WHERE provider_id = $1",
+    )
+    .bind(provider_id)
+    .fetch_all(db)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(model, status, protocol, error)| {
+            let verdict = match status.as_str() {
+                "ok" => Verdict::Ok(protocol.as_deref().and_then(UpstreamProtocol::parse)?),
+                "unavailable" => Verdict::Unavailable(error.unwrap_or_default()),
+                _ => return None,
+            };
+            Some((model, verdict))
+        })
+        .collect())
+}
+
+/// Record a verdict. `Unknown` is dropped on the floor by design — see
+/// the enum.
+pub(crate) async fn record(
+    db: &sqlx::PgPool,
+    provider_id: Uuid,
+    upstream_model: &str,
+    verdict: &Verdict,
+) {
+    let (status, protocol, error) = match verdict {
+        Verdict::Ok(p) => ("ok", Some(p.as_str()), None),
+        Verdict::Unavailable(msg) => ("unavailable", None, Some(msg.as_str())),
+        Verdict::Unknown => return,
+    };
+    // Best-effort: the caller already has the answer it needs, and
+    // failing an import over a cache write would be a worse outcome
+    // than probing this model again next time.
+    if let Err(e) = sqlx::query(
+        r#"INSERT INTO provider_model_probes
+               (provider_id, upstream_model, status, protocol, error, checked_at)
+           VALUES ($1, $2, $3, $4, $5, now())
+           ON CONFLICT (provider_id, upstream_model) DO UPDATE
+               SET status = EXCLUDED.status,
+                   protocol = EXCLUDED.protocol,
+                   error = EXCLUDED.error,
+                   checked_at = now()"#,
+    )
+    .bind(provider_id)
+    .bind(upstream_model)
+    .bind(status)
+    .bind(protocol)
+    .bind(error)
+    .execute(db)
+    .await
+    {
+        tracing::warn!(%provider_id, model = %upstream_model, "Could not cache probe verdict: {e}");
     }
+}
+
+/// Forget everything we learned about a provider's models.
+///
+/// Called when the endpoint or credentials change: every verdict was a
+/// statement about the upstream that used to be there.
+pub(crate) async fn clear_for_provider(db: &sqlx::PgPool, provider_id: Uuid) -> u64 {
+    sqlx::query("DELETE FROM provider_model_probes WHERE provider_id = $1")
+        .bind(provider_id)
+        .execute(db)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or_default()
 }
 
 /// The smallest completion that still exercises the real code path:
@@ -98,179 +164,140 @@ fn probe_request(upstream_model: &str) -> ChatCompletionRequest {
     }
 }
 
-/// Does this failure mean "wrong dialect" (try the next candidate) or
-/// "stop probing entirely"?
+/// Does this failure tell us anything about the model, or only about
+/// the moment?
 ///
-/// Auth and rate-limit failures say nothing about the dialect — every
-/// candidate would fail the same way, so burning three requests to
-/// learn that is pure waste. Everything else is treated as a dialect
-/// rejection, which is the conservative reading: the worst case is one
-/// extra probe request.
-fn is_fatal_for_probing(err: &GatewayError) -> bool {
+/// Auth, rate-limit and transport failures say nothing — recording
+/// "unavailable" off the back of an expired key would blacklist an
+/// entire catalog for good, since verdicts don't expire.
+fn is_inconclusive(err: &GatewayError) -> bool {
     match err {
-        GatewayError::UpstreamAuthError | GatewayError::UpstreamRateLimited { .. } => true,
+        GatewayError::UpstreamAuthError
+        | GatewayError::UpstreamRateLimited { .. }
+        | GatewayError::NetworkError(_)
+        | GatewayError::ProviderTimeout(_) => true,
         GatewayError::ProviderHttpError { status, .. } => *status == 401 || *status == 403,
+        GatewayError::ProviderError(message) => {
+            let m = message.to_ascii_lowercase();
+            m.contains(" returned 401")
+                || m.contains(" returned 403")
+                || m.contains(" returned 429")
+        }
         _ => false,
     }
 }
 
-/// Resolve the protocol for every `upstream_model` in one import.
+/// Probe one model across its candidate dialects, first answer wins.
+async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdict {
+    let candidates = UpstreamProtocol::candidates_for(&materials.provider_type, upstream_model);
+    let mut last_refusal: Option<String> = None;
+
+    for candidate in candidates {
+        let adapter = build_adapter(candidate, materials);
+        let attempt = tokio::time::timeout(
+            PROBE_TIMEOUT,
+            adapter.chat_completion_boxed(probe_request(upstream_model)),
+        )
+        .await;
+
+        match attempt {
+            Ok(Ok(_)) => return Verdict::Ok(candidate),
+            Ok(Err(e)) if is_inconclusive(&e) => {
+                tracing::warn!(
+                    provider = %materials.name,
+                    model = %upstream_model,
+                    "Probe inconclusive — not recording a verdict: {e}"
+                );
+                return Verdict::Unknown;
+            }
+            Ok(Err(e)) => last_refusal = Some(e.to_string()),
+            Err(_elapsed) => {
+                tracing::warn!(
+                    provider = %materials.name,
+                    model = %upstream_model,
+                    protocol = %candidate,
+                    "Probe timed out"
+                );
+                return Verdict::Unknown;
+            }
+        }
+    }
+
+    match last_refusal {
+        Some(reason) => Verdict::Unavailable(reason),
+        // No candidates at all shouldn't happen, but "we learned
+        // nothing" is the honest reading if it does.
+        None => Verdict::Unknown,
+    }
+}
+
+/// Resolve a verdict for each model: cached ones for free, the rest
+/// probed concurrently.
 ///
-/// Returns a map from upstream model name to the protocol that answered.
-/// Models absent from the map stay NULL — the runtime works them out on
-/// first use.
-pub(crate) async fn resolve_protocols(
+/// Synchronous on purpose. The caller is about to decide which routes
+/// to create, and that decision needs the answer — a background probe
+/// would mean creating routes first and discovering they're dead later,
+/// which is the failure mode this whole mechanism exists to remove. The
+/// wait is bounded by [`PROBE_TIMEOUT`] per model with
+/// [`PROBE_CONCURRENCY`] in flight, and cached models cost nothing, so
+/// a repeat import returns immediately.
+pub(crate) async fn resolve(
+    db: &sqlx::PgPool,
     provider: &Provider,
     encryption_key: &str,
     upstream_models: &[String],
-    // `catalog`: entries keyed by upstream model, when the caller has
-    // them from `/v1/models`. Lets the free metadata path run before
-    // any billable request.
-    catalog: &HashMap<String, serde_json::Value>,
-) -> HashMap<String, UpstreamProtocol> {
-    let materials = ProviderMaterials::from_provider(provider, encryption_key);
-    let mut resolved: HashMap<String, UpstreamProtocol> = HashMap::new();
-    let mut by_family: HashMap<String, UpstreamProtocol> = HashMap::new();
-    // One auth failure means every subsequent probe fails identically.
-    let mut probing_disabled = false;
+    force: bool,
+) -> HashMap<String, Verdict> {
+    let mut out: HashMap<String, Verdict> = HashMap::new();
+    let cached = if force {
+        HashMap::new()
+    } else {
+        cached_verdicts(db, provider.id).await.unwrap_or_else(|e| {
+            tracing::warn!(provider = %provider.name, "Could not read probe cache: {e}");
+            HashMap::new()
+        })
+    };
 
+    let mut to_probe: Vec<String> = Vec::new();
     for model in upstream_models {
-        if let Some(entry) = catalog.get(model)
-            && let Some(p) = from_catalog_metadata(entry)
-        {
-            resolved.insert(model.clone(), p);
-            continue;
-        }
-
-        let key = family_key(model);
-        if let Some(p) = by_family.get(&key) {
-            resolved.insert(model.clone(), *p);
-            continue;
-        }
-
-        let candidates = UpstreamProtocol::candidates_for(&materials.provider_type, model);
-        // A provider whose transport admits no alternative needs no
-        // probe: there is nothing to choose between.
-        if let [only] = candidates.as_slice() {
-            resolved.insert(model.clone(), *only);
-            by_family.insert(key, *only);
-            continue;
-        }
-        if probing_disabled {
-            continue;
-        }
-
-        for candidate in candidates {
-            let adapter = build_adapter(candidate, &materials);
-            match adapter.chat_completion_boxed(probe_request(model)).await {
-                Ok(_) => {
-                    tracing::info!(
-                        provider = %materials.name,
-                        model = %model,
-                        protocol = %candidate,
-                        "Probed upstream protocol"
-                    );
-                    resolved.insert(model.clone(), candidate);
-                    by_family.insert(key.clone(), candidate);
-                    break;
-                }
-                Err(e) if is_fatal_for_probing(&e) => {
-                    tracing::warn!(
-                        provider = %materials.name,
-                        model = %model,
-                        "Protocol probe abandoned — upstream rejected our credentials: {e}"
-                    );
-                    probing_disabled = true;
-                    break;
-                }
-                Err(e) => {
-                    tracing::debug!(
-                        provider = %materials.name,
-                        model = %model,
-                        protocol = %candidate,
-                        "Protocol candidate rejected: {e}"
-                    );
-                }
+        match cached.get(model) {
+            Some(v) => {
+                out.insert(model.clone(), v.clone());
             }
+            None => to_probe.push(model.clone()),
         }
     }
-
-    resolved
-}
-
-/// Probe in the background and write the results back to the routes.
-///
-/// Import returns the moment the rows land — nobody waits on a page
-/// while the gateway talks to an upstream N times. Requests that arrive
-/// before this finishes are not broken by it either: an un-probed route
-/// runs on the provider type's default dialect, and if that's wrong the
-/// runtime relearn path fixes it on the first call. This task only
-/// removes that first-call retry.
-///
-/// Fire-and-forget by design: a failure here costs one retry later, so
-/// there is nothing worth propagating to the caller.
-pub(crate) fn spawn_probe(
-    state: &crate::app::AppState,
-    provider: think_watch_common::models::Provider,
-    upstream_models: Vec<String>,
-) {
-    if upstream_models.is_empty() {
-        return;
+    if to_probe.is_empty() {
+        return out;
     }
-    let state = state.clone();
-    tokio::spawn(async move {
-        let protocols = resolve_protocols(
-            &provider,
-            &state.config.encryption_key,
-            &upstream_models,
-            &HashMap::new(),
-        )
-        .await;
-        if protocols.is_empty() {
-            return;
-        }
 
-        let (models, values): (Vec<String>, Vec<String>) = protocols
-            .into_iter()
-            .map(|(m, p)| (m, p.as_str().to_string()))
-            .unzip();
-        // Only fill in routes nobody has decided on yet: between the
-        // import and this task finishing, a live request may already
-        // have relearned a dialect the hard way, and that observation
-        // beats ours — it came from real traffic.
-        let updated = sqlx::query(
-            r#"UPDATE model_routes AS mr
-                  SET upstream_protocol = t.protocol
-                 FROM UNNEST($2::TEXT[], $3::TEXT[]) AS t(upstream, protocol)
-                WHERE mr.provider_id = $1
-                  AND mr.upstream_model = t.upstream
-                  AND mr.upstream_protocol IS NULL"#,
-        )
-        .bind(provider.id)
-        .bind(&models)
-        .bind(&values)
-        .execute(&state.db)
+    let materials = ProviderMaterials::from_provider(provider, encryption_key);
+    let materials = &materials;
+    let probed: Vec<(String, Verdict)> = stream::iter(to_probe)
+        .map(move |model| async move {
+            let verdict = probe_one(materials, &model).await;
+            (model, verdict)
+        })
+        .buffer_unordered(PROBE_CONCURRENCY)
+        .collect()
         .await;
 
-        match updated {
-            Ok(r) if r.rows_affected() > 0 => {
-                tracing::info!(
-                    provider = %provider.name,
-                    routes = r.rows_affected(),
-                    "Upstream protocols probed — routes updated"
-                );
-                // Swap the new dialects into the live router so the
-                // next request uses them without waiting for the next
-                // provider/model edit to trigger a rebuild.
-                crate::app::rebuild_gateway_router(&state).await;
-            }
-            Ok(_) => {}
-            Err(e) => tracing::warn!(
-                provider = %provider.name,
-                "Probed upstream protocols but could not persist them: {e}"
+    for (model, verdict) in probed {
+        record(db, provider.id, &model, &verdict).await;
+        match &verdict {
+            Verdict::Ok(p) => tracing::info!(
+                provider = %provider.name, model = %model, protocol = %p,
+                "Model probed — upstream serves it"
             ),
+            Verdict::Unavailable(reason) => tracing::info!(
+                provider = %provider.name, model = %model, reason = %reason,
+                "Model probed — upstream refuses it on every dialect"
+            ),
+            Verdict::Unknown => {}
         }
-    });
+        out.insert(model, verdict);
+    }
+    out
 }
 
 #[cfg(test)]
@@ -278,54 +305,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn family_key_groups_vendor_prefixed_and_bare_ids() {
-        assert_eq!(family_key("anthropic.claude-opus-4"), "anthropic");
-        assert_eq!(family_key("openai/gpt-4o"), "openai");
-        assert_eq!(family_key("claude-3-5-sonnet"), "claude");
-        assert_eq!(family_key("gpt-4o"), "gpt");
-        // Same family ⇒ one probe covers both.
-        assert_eq!(
-            family_key("anthropic.claude-opus-4"),
-            family_key("anthropic.claude-haiku-4")
-        );
+    fn transient_failures_never_become_a_permanent_verdict() {
+        // Verdicts don't expire, so recording "unavailable" off an
+        // expired key would blacklist a whole catalog for good.
+        assert!(is_inconclusive(&GatewayError::UpstreamAuthError));
+        assert!(is_inconclusive(&GatewayError::UpstreamRateLimited {
+            retry_after_secs: None
+        }));
+        assert!(is_inconclusive(&GatewayError::NetworkError(
+            "connection reset".into()
+        )));
+        assert!(is_inconclusive(&GatewayError::ProviderError(
+            "OpenAI returned 401 Unauthorized: bad key".into()
+        )));
     }
 
     #[test]
-    fn catalog_metadata_is_read_when_unambiguous() {
-        let entry = serde_json::json!({"supported_endpoints": ["/v1/messages"]});
+    fn a_refusal_of_the_model_itself_is_conclusive() {
+        // This is the case worth recording: the upstream answered, and
+        // its answer was "not this model".
+        assert!(!is_inconclusive(&GatewayError::ProviderError(
+            "OpenAI returned 400 Bad Request: The model 'openai.gpt-5.5' does not support \
+             the '/v1/chat/completions' API"
+                .into()
+        )));
+        assert!(!is_inconclusive(&GatewayError::ProviderHttpError {
+            status: 404,
+            message: "no such model".into(),
+        }));
+    }
+
+    #[test]
+    fn verdict_exposes_the_protocol_only_when_served() {
         assert_eq!(
-            from_catalog_metadata(&entry),
+            Verdict::Ok(UpstreamProtocol::AnthropicMessages).protocol(),
             Some(UpstreamProtocol::AnthropicMessages)
         );
-        let entry = serde_json::json!({"endpoints": ["/v1/responses"]});
-        assert_eq!(
-            from_catalog_metadata(&entry),
-            Some(UpstreamProtocol::OpenAiResponses)
-        );
-    }
-
-    #[test]
-    fn ambiguous_or_missing_metadata_falls_through_to_probing() {
-        // Two dialects advertised — believing either one over the other
-        // would be a guess; the probe finds out what actually answers.
-        let entry =
-            serde_json::json!({"supported_endpoints": ["/v1/messages", "/v1/chat/completions"]});
-        assert_eq!(from_catalog_metadata(&entry), None);
-        assert_eq!(from_catalog_metadata(&serde_json::json!({"id": "m"})), None);
-    }
-
-    #[test]
-    fn auth_failures_stop_probing_but_dialect_rejections_do_not() {
-        assert!(is_fatal_for_probing(&GatewayError::UpstreamAuthError));
-        assert!(is_fatal_for_probing(&GatewayError::ProviderHttpError {
-            status: 403,
-            message: "forbidden".into(),
-        }));
-        // "model does not support this API" — exactly what we want to
-        // react to by trying the next candidate.
-        assert!(!is_fatal_for_probing(&GatewayError::ProviderHttpError {
-            status: 400,
-            message: "does not support the '/v1/chat/completions' API".into(),
-        }));
+        assert_eq!(Verdict::Unavailable("refused".into()).protocol(), None);
+        assert_eq!(Verdict::Unknown.protocol(), None);
     }
 }

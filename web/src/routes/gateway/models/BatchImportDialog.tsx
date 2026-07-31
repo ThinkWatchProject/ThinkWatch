@@ -65,6 +65,7 @@ export function BatchImportDialog({
   const [step, setStep] = useState<1 | 2>(1);
   const [providerId, setProviderId] = useState('');
   const [remoteModels, setRemoteModels] = useState<string[]>([]);
+  const [unavailable, setUnavailable] = useState<Map<string, string>>(new Map());
   const [remoteModelsLoading, setRemoteModelsLoading] = useState(false);
   const [remoteModelsError, setRemoteModelsError] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -111,6 +112,7 @@ export function BatchImportDialog({
     setSelected(new Set());
     setSearch('');
     setRemoteModels([]);
+    setUnavailable(new Map());
     setRemoteModelsError('');
     setExistingIds(new Set());
 
@@ -119,12 +121,24 @@ export function BatchImportDialog({
     setRemoteModelsLoading(true);
     try {
       const [rmodels, existing] = await Promise.all([
-        api<string[]>(`/api/admin/providers/${pid}/remote-models`),
+        api<{ id: string; available?: boolean; reason?: string }[]>(
+          `/api/admin/providers/${pid}/remote-models`,
+        ),
         api<{ items: RouteRow[]; total: number }>(
           `/api/admin/model-routes?provider_id=${pid}&page=1&page_size=10000`,
         ),
       ]);
-      setRemoteModels(rmodels);
+      setRemoteModels(rmodels.map((m) => m.id));
+      // Models this upstream has already told us it won't serve. They
+      // stay selectable — the import re-checks and reports — but
+      // flagging them here saves the admin a pointless round trip.
+      setUnavailable(
+        new Map(
+          rmodels
+            .filter((m) => m.available === false)
+            .map((m) => [m.id, m.reason ?? '']),
+        ),
+      );
       // A remote name counts as "already imported" when it appears
       // as either a route's exposed model_id (new-catalog-entry
       // imports) or its upstream_model (attach-to-existing imports
@@ -206,11 +220,22 @@ export function BatchImportDialog({
           new_model_id: d.target_model_id === null && newId ? newId : undefined,
         };
       });
-      const res = await apiPost<{ created: number }>('/api/admin/model-routes/batch', {
-        provider_id: providerId,
-        items,
-      });
+      const res = await apiPost<{
+        created: number;
+        skipped?: { upstream: string; reason: string }[];
+      }>('/api/admin/model-routes/batch', { provider_id: providerId, items });
       toast.success(t('models.batchSuccess', { count: res.created }));
+      // Never let a skipped model pass silently: the admin picked it and
+      // it did not get imported, so say which ones and why.
+      if (res.skipped?.length) {
+        toast.warning(
+          t('models.batchSkipped', {
+            count: res.skipped.length,
+            models: res.skipped.map((s) => s.upstream).join(', '),
+          }),
+          { description: res.skipped[0].reason, duration: 10000 },
+        );
+      }
       onClose();
       await onSaved();
       // If the drawer is open on a model we just touched, refresh it.
@@ -318,10 +343,19 @@ export function BatchImportDialog({
                         >
                           {modelId}
                         </span>
-                        {exists && (
+                        {exists ? (
                           <span className="text-xs text-muted-foreground ml-auto whitespace-nowrap">
                             ({t('models.alreadyExists')})
                           </span>
+                        ) : (
+                          unavailable.has(modelId) && (
+                            <span
+                              className="text-xs text-destructive ml-auto whitespace-nowrap"
+                              title={unavailable.get(modelId)}
+                            >
+                              ({t('models.upstreamRefuses')})
+                            </span>
+                          )
                         )}
                       </label>
                     );

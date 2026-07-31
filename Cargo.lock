@@ -4164,6 +4164,7 @@ dependencies = [
  "dotenvy",
  "ecdsa",
  "fred",
+ "futures",
  "hex",
  "hmac 0.13.0",
  "metrics",

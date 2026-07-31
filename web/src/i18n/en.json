@@ -300,6 +300,9 @@
     "unreachable": "Unreachable"
   },
   "providers": {
+    "recheckModels": "Re-check model availability",
+    "recheckDone": "{{available}} of {{checked}} models available",
+    "recheckUnavailable": "{{count}} not served by this provider: {{models}}",
     "title": "Providers",
     "subtitle": "Manage AI model providers",
     "addProvider": "Add Provider",
@@ -390,6 +393,8 @@
     "inactiveTab": "Inactive"
   },
   "models": {
+    "upstreamRefuses": "upstream refuses",
+    "batchSkipped": "{{count}} model(s) not imported — this provider does not serve them: {{models}}",
     "title": "Models",
     "subtitle": "Exposed catalog of model IDs clients can call via /v1/models. Each entry has per-direction weights that scale the platform baseline for cost reports and weighted-token quotas.",
     "noModels": "No models registered yet.",

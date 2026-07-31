@@ -388,11 +388,17 @@ pub async fn update_provider(
         .execute(&state.db)
         .await?
         .rows_affected();
-        if cleared > 0 {
+        // Same reasoning for the probe cache: "this upstream refuses
+        // model X" described the old endpoint. Dropping it is also the
+        // path back for an operator who fixed access upstream and
+        // re-saved their credentials.
+        let forgotten = crate::protocol_probe::clear_for_provider(&state.db, id).await;
+        if cleared > 0 || forgotten > 0 {
             tracing::info!(
                 provider = %existing.name,
                 routes = cleared,
-                "Provider endpoint changed — cleared learned upstream protocols"
+                probes = forgotten,
+                "Provider endpoint changed — cleared learned protocols and probe verdicts"
             );
         }
     }
@@ -584,17 +590,23 @@ pub async fn test_provider(
     }
 
     let http_client = (**state.http_client.load()).clone();
-    run_provider_test(req, http_client).await
+    run_provider_test(req, http_client, &state.url_validator).await
 }
 
 pub(crate) async fn run_provider_test(
     req: TestProviderRequest,
     client: reqwest::Client,
+    // The pluggable SSRF guard from `AppState`, not the global
+    // `validate_url`: this path fetches an admin-supplied URL exactly
+    // like the gateway does, so it has to honour the same swappable
+    // policy — otherwise the probe paths built on it can't be
+    // integration-tested against a loopback mock at all.
+    validate: &crate::app::UrlValidator,
 ) -> Result<Json<TestProviderResponse>, AppError> {
     if req.base_url.is_empty() {
         return Err(AppError::BadRequest("base_url is required".into()));
     }
-    validate_url(&req.base_url)?;
+    validate(&req.base_url)?;
 
     // Provider-specific probe URL. We always hit a cheap, read-only
     // endpoint that requires auth so a wrong key is detected too.
