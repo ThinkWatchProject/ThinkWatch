@@ -1,5 +1,6 @@
 use crate::output_guardrails::OutputGuardrail;
 use crate::providers::DynAiProvider;
+use crate::providers::protocol::UpstreamProtocol;
 use crate::strategy::RoutingStrategy;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -51,6 +52,20 @@ pub struct RouteEntry {
     pub rpm_cap: Option<u32>,
     /// Per-route TPM cap.
     pub tpm_cap: Option<u32>,
+    /// Wire dialect `provider` speaks — the resolved value of
+    /// `model_routes.upstream_protocol`.
+    pub protocol: UpstreamProtocol,
+    /// Adapters for the *other* dialects this same upstream could be
+    /// asked in, pre-built alongside `provider`.
+    ///
+    /// They exist so the runtime can recover from an upstream that
+    /// rejects the dialect we picked ("model X does not support the
+    /// /v1/chat/completions API") without the gateway crate needing a
+    /// provider factory — building one here would mean reaching back
+    /// into the server crate that owns credential decryption. Empty for
+    /// providers whose transport admits no alternative (Bedrock SigV4,
+    /// Gemini).
+    pub alternates: Vec<(UpstreamProtocol, Arc<dyn DynAiProvider>)>,
 }
 
 /// Per-model overrides for routing strategy / affinity. `None` on
@@ -278,6 +293,8 @@ mod tests {
             label: None,
             rpm_cap: None,
             tpm_cap: None,
+            protocol: UpstreamProtocol::OpenAiChat,
+            alternates: Vec::new(),
         }
     }
 

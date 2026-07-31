@@ -30,6 +30,7 @@ use think_watch_mcp_gateway::proxy::McpProxy;
 use think_watch_mcp_gateway::session::SessionManager;
 use think_watch_mcp_gateway::transport::streamable_http::{self, McpGatewayState};
 
+use crate::gateway_adapters::{ProviderMaterials, build_adapter};
 use crate::handlers;
 
 /// SSRF guard for URLs the server is about to fetch. Boxed so tests
@@ -1212,10 +1213,6 @@ pub(crate) async fn load_providers_into_router(
     router: &mut ModelRouter,
 ) -> anyhow::Result<()> {
     use std::collections::HashMap;
-    use think_watch_gateway::providers::{
-        anthropic::AnthropicProvider, azure_openai::AzureOpenAiProvider, bedrock::BedrockProvider,
-        custom::CustomProvider, google::GoogleProvider, openai::OpenAiProvider,
-    };
 
     let providers = sqlx::query_as::<_, think_watch_common::models::Provider>(
         "SELECT * FROM providers WHERE is_active = true AND deleted_at IS NULL",
@@ -1223,117 +1220,25 @@ pub(crate) async fn load_providers_into_router(
     .fetch_all(&state.db)
     .await?;
 
-    // Build provider map: id -> (Arc<dyn DynAiProvider>, provider_type,
-    // provider_name). The name rides through to RouteEntry and onto
-    // every `gateway_logs` row we emit, so the audit pipeline can
-    // snapshot "which provider handled this request" without a second
-    // DB hit per call.
-    type ProviderMapEntry = (
-        Arc<dyn think_watch_gateway::providers::DynAiProvider>,
-        String,
-        String,
-    );
-    let mut provider_map: HashMap<uuid::Uuid, ProviderMapEntry> = HashMap::new();
+    // Decrypted, ready-to-use inputs for building an adapter. Adapters
+    // themselves are built per `(provider, protocol)` further down —
+    // one provider can serve several wire dialects because a route
+    // carries its own `upstream_protocol`.
+    //
+    // `name` rides through to RouteEntry and onto every `gateway_logs`
+    // row we emit, so the audit pipeline can snapshot "which provider
+    // handled this request" without a second DB hit per call.
+    let mut provider_map: HashMap<uuid::Uuid, ProviderMaterials> = HashMap::new();
 
     for provider in &providers {
-        // Parse unified headers from config_json. Each `value` is the
-        // `{"$enc": "<b64>"}` envelope `JsonSecret` produces. A bare
-        // string (or any other shape) at read time means the row was
-        // corrupted; decrypt_secret_from_json returns Err and we
-        // skip the header with a loud log line.
-        let headers: Vec<(String, String)> =
-            crate::handlers::providers::decrypt_headers_from_config(
-                &provider.config_json,
-                &state.config.encryption_key,
-                &provider.name,
-            )
-            .into_iter()
-            .map(|h| (h.key, h.value))
-            .collect();
-
-        let dyn_provider: Arc<dyn think_watch_gateway::providers::DynAiProvider> = match provider
-            .provider_type
-            .as_str()
-        {
-            "openai" => Arc::new(
-                OpenAiProvider::new(provider.base_url.clone()).with_custom_headers(headers.clone()),
-            ),
-            "anthropic" => Arc::new(
-                AnthropicProvider::new(provider.base_url.clone())
-                    .with_custom_headers(headers.clone()),
-            ),
-            "google" => Arc::new(
-                GoogleProvider::new(provider.base_url.clone()).with_custom_headers(headers.clone()),
-            ),
-            "azure_openai" => {
-                let api_version = provider
-                    .config_json
-                    .get("api_version")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                Arc::new(
-                    AzureOpenAiProvider::new(provider.base_url.clone(), api_version)
-                        .with_custom_headers(headers.clone()),
-                )
-            }
-            "bedrock" => {
-                // AWS credentials stored as separate config_json fields, not headers.
-                // The access_key_id is not sensitive; the secret_access_key
-                // is wrapped as `{"$enc": ...}` at rest. A decrypt failure
-                // (bad row, missing key) degrades to IMDSv2 mode rather
-                // than failing the whole gateway boot.
-                let access_key = provider
-                    .config_json
-                    .get("aws_access_key_id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                let secret_key = provider
-                    .config_json
-                    .get("aws_secret_access_key")
-                    .map(|v| {
-                        crate::handlers::providers::decrypt_secret_from_json(
-                            v,
-                            &state.config.encryption_key,
-                        )
-                        .unwrap_or_else(|e| {
-                            tracing::error!(
-                                provider = %provider.name,
-                                "Failed to decrypt aws_secret_access_key — treating as IMDSv2 mode: {e}"
-                            );
-                            String::new()
-                        })
-                    })
-                    .unwrap_or_default();
-                let credentials = if access_key.is_empty() && secret_key.is_empty() {
-                    String::new() // IMDSv2 mode
-                } else {
-                    format!("{access_key}:{secret_key}")
-                };
-                Arc::new(
-                    BedrockProvider::new(provider.base_url.clone(), credentials)
-                        .with_custom_headers(headers.clone()),
-                )
-            }
-            _ => Arc::new(
-                CustomProvider::new(provider.name.clone(), provider.base_url.clone())
-                    .with_custom_headers(headers.clone()),
-            ),
-        };
-
         provider_map.insert(
             provider.id,
-            (
-                dyn_provider,
-                provider.provider_type.clone(),
-                provider.name.clone(),
-            ),
+            ProviderMaterials::from_provider(provider, &state.config.encryption_key),
         );
-
         tracing::info!(
             provider = %provider.name,
             provider_type = %provider.provider_type,
-            "Provider instantiated"
+            "Provider loaded"
         );
     }
 
@@ -1412,11 +1317,13 @@ pub(crate) async fn load_providers_into_router(
         label: Option<String>,
         rpm_cap: Option<i32>,
         tpm_cap: Option<i32>,
+        upstream_protocol: Option<String>,
     }
 
     let route_rows = sqlx::query_as::<_, RouteRow>(
         r#"SELECT mr.id, mr.model_id, mr.provider_id, mr.upstream_model,
-                  mr.weight, mr.label, mr.rpm_cap, mr.tpm_cap
+                  mr.weight, mr.label, mr.rpm_cap, mr.tpm_cap,
+                  mr.upstream_protocol
            FROM model_routes mr
            JOIN providers p ON p.id = mr.provider_id
            JOIN models    m ON m.model_id = mr.model_id
@@ -1433,12 +1340,51 @@ pub(crate) async fn load_providers_into_router(
     let mut providers_with_routes: std::collections::HashSet<uuid::Uuid> =
         std::collections::HashSet::new();
 
+    // One adapter per (provider, protocol) — a provider serving 55
+    // models over two dialects builds two adapters, not 55.
+    use think_watch_gateway::providers::protocol::UpstreamProtocol;
+    let mut adapter_cache: HashMap<
+        (uuid::Uuid, UpstreamProtocol),
+        Arc<dyn think_watch_gateway::providers::DynAiProvider>,
+    > = HashMap::new();
+
     for row in &route_rows {
-        if let Some((dyn_provider, _, provider_name)) = provider_map.get(&row.provider_id) {
+        if let Some(materials) = provider_map.get(&row.provider_id) {
+            // NULL (never probed) or an unrecognised value — a row
+            // written by a newer build, or hand-edited — both fall back
+            // to the provider type's dialect, which is what this route
+            // used before protocols became per-route.
+            let protocol = row
+                .upstream_protocol
+                .as_deref()
+                .and_then(UpstreamProtocol::parse)
+                .unwrap_or_else(|| {
+                    UpstreamProtocol::default_for_provider_type(&materials.provider_type)
+                });
+            let mut adapter_for = |p: UpstreamProtocol| {
+                adapter_cache
+                    .entry((row.provider_id, p))
+                    .or_insert_with(|| build_adapter(p, materials))
+                    .clone()
+            };
+            let dyn_provider = adapter_for(protocol);
+            // Pre-build the dialects this route could fall back to, so
+            // the gateway can recover from an upstream rejecting the
+            // configured one without reaching back into this crate for
+            // credential decryption. Cheap: adapters are shared per
+            // (provider, protocol), so this is a map lookup after the
+            // first route.
+            let alternates: Vec<(UpstreamProtocol, Arc<_>)> =
+                UpstreamProtocol::candidates_for(&materials.provider_type, &row.upstream_model)
+                    .into_iter()
+                    .filter(|p| *p != protocol)
+                    .map(|p| (p, adapter_for(p)))
+                    .collect();
+            let provider_name = &materials.name;
             router.register_route(
                 &row.model_id,
                 RouteEntry {
-                    provider: Arc::clone(dyn_provider),
+                    provider: Arc::clone(&dyn_provider),
                     provider_id: row.provider_id,
                     route_id: row.id,
                     provider_name: provider_name.clone(),
@@ -1451,6 +1397,8 @@ pub(crate) async fn load_providers_into_router(
                     tpm_cap: row
                         .tpm_cap
                         .and_then(|v| if v > 0 { Some(v as u32) } else { None }),
+                    protocol,
+                    alternates,
                 },
             );
             providers_with_routes.insert(row.provider_id);
@@ -1458,15 +1406,24 @@ pub(crate) async fn load_providers_into_router(
         }
     }
 
-    // Default prefix fallback for providers with no specific model routes
-    for (provider_id, (dyn_provider, provider_type, provider_name)) in &provider_map {
+    // Default prefix fallback for providers with no specific model
+    // routes. No route row means nothing was ever probed, so these run
+    // on the provider type's default dialect.
+    for (provider_id, materials) in &provider_map {
         if !providers_with_routes.contains(provider_id) {
+            let provider_type = &materials.provider_type;
+            let provider_name = &materials.name;
+            let protocol = UpstreamProtocol::default_for_provider_type(provider_type);
+            let dyn_provider = adapter_cache
+                .entry((*provider_id, protocol))
+                .or_insert_with(|| build_adapter(protocol, materials))
+                .clone();
             let prefixes = default_model_prefixes(provider_type);
             for prefix in &prefixes {
                 router.register_route(
                     prefix,
                     RouteEntry {
-                        provider: Arc::clone(dyn_provider),
+                        provider: Arc::clone(&dyn_provider),
                         provider_id: *provider_id,
                         // Synthetic route — derive a stable id from
                         // the provider so health entries cluster
@@ -1478,6 +1435,12 @@ pub(crate) async fn load_providers_into_router(
                         label: None,
                         rpm_cap: None,
                         tpm_cap: None,
+                        protocol,
+                        // Synthetic prefix routes exist only for
+                        // providers with no configured routes; there is
+                        // no route row to write a relearned protocol
+                        // back to, so leave them on the default dialect.
+                        alternates: Vec::new(),
                     },
                 );
             }

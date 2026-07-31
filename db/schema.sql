@@ -411,10 +411,29 @@ CREATE TABLE IF NOT EXISTS model_routes (
     -- same way circuit-broken routes are.
     rpm_cap         INTEGER CHECK (rpm_cap IS NULL OR rpm_cap > 0),
     tpm_cap         INTEGER CHECK (tpm_cap IS NULL OR tpm_cap > 0),
+    -- Wire dialect to speak to this upstream for this model, resolved
+    -- automatically (never asked of the admin): probed when the route
+    -- is imported, relearned at request time if the upstream's answer
+    -- says otherwise. NULL = not determined yet, in which case the
+    -- runtime falls back to the provider type's default — exactly the
+    -- pre-per-route-protocol behaviour.
+    --
+    -- Per route rather than per provider because aggregators serve
+    -- several model families over one host and one credential while
+    -- exposing a different API per family (e.g. `anthropic.*` only on
+    -- /v1/messages, everything else on /v1/chat/completions).
+    upstream_protocol VARCHAR(32),
     enabled         BOOLEAN NOT NULL DEFAULT TRUE,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
     UNIQUE (model_id, provider_id, upstream_model)
 );
+
+-- `CREATE TABLE IF NOT EXISTS` above is a no-op on databases that
+-- already have the table, so a column added after first boot needs its
+-- own idempotent ALTER. Kept alongside the declaration (rather than
+-- replacing it) so a fresh install still reads the whole shape in one
+-- place.
+ALTER TABLE model_routes ADD COLUMN IF NOT EXISTS upstream_protocol VARCHAR(32);
 
 CREATE INDEX IF NOT EXISTS idx_model_routes_model ON model_routes(model_id);
 CREATE INDEX IF NOT EXISTS idx_model_routes_provider ON model_routes(provider_id);

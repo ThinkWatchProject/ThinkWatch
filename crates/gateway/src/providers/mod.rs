@@ -4,6 +4,8 @@ pub mod bedrock;
 pub mod custom;
 pub mod google;
 pub mod openai;
+pub mod openai_responses;
+pub mod protocol;
 pub mod traits;
 
 pub use traits::AiProvider;

@@ -4,6 +4,7 @@
 //! as the production `main.rs`.
 
 pub mod app;
+pub mod gateway_adapters;
 pub mod handlers;
 pub mod init;
 pub mod mcp_runtime;
