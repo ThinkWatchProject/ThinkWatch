@@ -4,35 +4,25 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
-    # Security headers
-    add_header X-Content-Type-Options "nosniff" always;
-    add_header X-Frame-Options "DENY" always;
-    add_header X-XSS-Protection "1; mode=block" always;
-    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
-    # HSTS: pin the browser to HTTPS for a year + subdomains. The
-    # session cookies already carry the `Secure` attribute so a
-    # downgrade-to-HTTP request wouldn't carry the auth, but HSTS
-    # also blocks the downgrade itself before any request goes out.
-    # 1y matches the common "preload list" submission requirement.
-    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
-    # `connect-src 'self'` covers both /api/* fetch traffic (nginx
-    # proxies it to the console port on the same origin) and the
-    # dashboard WebSocket upgrade to /api/dashboard/ws (modern CSP
-    # treats `'self'` as ws/wss to the same origin). The trailing
-    # `http://localhost:*` was a dev-time leftover that does nothing
-    # useful in prod — origin-relative connections are already
-    # allowed by `'self'`, and a real localhost source on a prod
-    # tab would be a misuse, not a feature.
-    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self';" always;
-
     # Gzip
     gzip on;
     gzip_types text/plain text/css application/json application/javascript text/xml;
 
-    # Console API → backend console port
-    location /api/ {
+    # Console API → backend console port.
+    #
+    # `^~` matters: without it the regex location below wins for any
+    # proxied path ending in .js/.css (nginx matches regex locations
+    # before prefix ones), so Swagger UI's own bundle was looked up in
+    # the SPA's static root and answered with an HTML 404. `^~` stops
+    # regex matching once this prefix wins.
+    location ^~ /api/ {
         proxy_pass http://server:3001;
-        proxy_set_header Host $host;
+        # $http_host, not $host: $host drops the port, so any absolute
+        # URL the backend builds from it (Swagger UI's redirect to
+        # /api/docs/, OIDC redirect URIs, anything using the request
+        # host) points at port 80 and the browser gets
+        # ERR_CONNECTION_REFUSED on a deployment served anywhere else.
+        proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
@@ -44,8 +34,40 @@ server {
         proxy_set_header X-ThinkWatch-Proxy-Token "${TRUSTED_PROXY_SECRET}";
     }
 
-    # SPA fallback
+    # SPA fallback, and the only place security headers are injected.
+    #
+    # These used to sit at server level, which meant nginx stamped them
+    # onto proxied API responses too — on top of whatever the backend
+    # had already set for that route. Two X-Frame-Options headers with
+    # different values (the backend sends SAMEORIGIN so the console can
+    # frame its own Swagger UI; nginx added DENY) make browsers fall
+    # back to deny, and the API-docs page rendered as a blocked frame.
+    # Two Content-Security-Policy headers are worse: they intersect, so
+    # nginx's SPA policy silently overrode whatever the backend needed.
+    #
+    # The backend sets its own headers per route — it knows which ones
+    # each response needs. This block covers what nginx actually serves.
     location / {
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header X-XSS-Protection "1; mode=block" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        # HSTS: pin the browser to HTTPS for a year + subdomains. The
+        # session cookies already carry the `Secure` attribute so a
+        # downgrade-to-HTTP request wouldn't carry the auth, but HSTS
+        # also blocks the downgrade itself before any request goes out.
+        # 1y matches the common "preload list" submission requirement.
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+        # `frame-ancestors 'self'` replaces the X-Frame-Options header
+        # this block used to carry: same clickjacking protection, but
+        # expressed in the header the console's own pages already use,
+        # so it can't collide with the backend's framing decision for
+        # /api/* the way a second X-Frame-Options did.
+        #
+        # `connect-src 'self'` covers both /api/* fetch traffic (nginx
+        # proxies it to the console port on the same origin) and the
+        # dashboard WebSocket upgrade to /api/dashboard/ws (modern CSP
+        # treats `'self'` as ws/wss to the same origin).
+        add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'self';" always;
         try_files $uri $uri/ /index.html;
     }
 
@@ -53,5 +75,9 @@ server {
     location ~* \.(js|css|png|jpg|jpeg|gif|ico|svg|woff2?)$ {
         expires 1y;
         add_header Cache-Control "public, immutable";
+        # A location with any add_header of its own inherits none, so
+        # the ones that still matter for static files are repeated here.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
     }
 }
