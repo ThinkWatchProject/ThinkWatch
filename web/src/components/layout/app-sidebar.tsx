@@ -124,12 +124,17 @@ export function AppSidebar() {
             <SidebarMenuButton
               size="lg"
               onClick={() => navigate({ to: '/' })}
-              className="h-14 py-2"
+              className="h-14 py-2 group-data-[collapsible=icon]:h-8"
             >
-              <div className="flex aspect-square size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground">
+              {/* Collapsed, the sidebar forces every menu button to 32px
+                  (`group-data-[collapsible=icon]:size-8!`), which beats our
+                  h-14. A fixed 40px brand box then overflowed a 32px button
+                  whose overflow is hidden, so the mark rendered clipped in
+                  the icon rail — shrink the box and the mark to match. */}
+              <div className="flex aspect-square size-10 items-center justify-center rounded-xl bg-primary text-primary-foreground group-data-[collapsible=icon]:size-8 group-data-[collapsible=icon]:rounded-lg">
                 {/* SidebarMenuButton has a descendant rule [&_svg]:size-4 that
                     would shrink the brand mark to 16px. Override with !size-7. */}
-                <ThinkWatchMark className="!size-7" />
+                <ThinkWatchMark className="!size-7 group-data-[collapsible=icon]:!size-5" />
               </div>
               <div className="grid flex-1 text-left leading-tight">
                 <span className="truncate text-base font-bold tracking-tight">ThinkWatch</span>
