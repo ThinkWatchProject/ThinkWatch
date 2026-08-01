@@ -453,7 +453,14 @@ export function CostsPage() {
       {isSingleDimension && (
         <Card>
           <CardHeader>
-            <CardTitle className="text-base">{t('analyticsCosts.costByModel')}</CardTitle>
+            {/* The chart follows the selected grouping, so its title has
+                to as well — it read "Cost by Model" even when the rows
+                below were grouped by user. */}
+            <CardTitle className="text-base">
+              {t('analyticsCosts.costByDimension', {
+                dimension: t(`analyticsCosts.group.${selectedDimensions[0]}`),
+              })}
+            </CardTitle>
           </CardHeader>
           <CardContent>
             {loading ? (

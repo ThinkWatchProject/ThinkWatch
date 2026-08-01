@@ -851,7 +851,7 @@
     "totalCostMtd": "本月累计成本",
     "budgetUsage": "预算使用率",
     "costTrend": "成本趋势",
-    "costByModel": "按模型成本",
+    "costByDimension": "按{{dimension}}成本",
     "percentOfTotal": "占比",
     "requests": "请求数",
     "inputTokens": "输入令牌",

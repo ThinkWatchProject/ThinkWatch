@@ -1129,6 +1129,36 @@ pub async fn get_costs(
     let mut total_in: i64 = 0;
     let mut total_out: i64 = 0;
     let mut total_cost_sum: Decimal = Decimal::ZERO;
+    // A user dimension groups by `user_id`, which is a UUID — useless
+    // to whoever reads the report. Resolve to email here rather than in
+    // the console so the CSV export and any API client get the same
+    // readable value, and so a caller without `users:read` isn't
+    // required to look them up itself.
+    let user_idx = dims.iter().position(|d| *d == CostGroupBy::User);
+    let user_labels: std::collections::HashMap<String, String> = match user_idx {
+        None => std::collections::HashMap::new(),
+        Some(idx) => {
+            let ids: Vec<uuid::Uuid> = paged
+                .iter()
+                .filter_map(|(dim_values, _)| uuid::Uuid::parse_str(&dim_values[idx]).ok())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            if ids.is_empty() {
+                std::collections::HashMap::new()
+            } else {
+                let rows: Vec<(uuid::Uuid, String)> =
+                    sqlx::query_as("SELECT id, email FROM users WHERE id = ANY($1)")
+                        .bind(&ids)
+                        .fetch_all(&state.db)
+                        .await?;
+                rows.into_iter()
+                    .map(|(id, email)| (id.to_string(), email))
+                    .collect()
+            }
+        }
+    };
+
     let items: Vec<CostItem> = paged
         .into_iter()
         .map(|(dim_values, (req, in_tok, out_tok, cost))| {
@@ -1137,7 +1167,15 @@ pub async fn get_costs(
             total_out += out_tok;
             total_cost_sum += cost;
             let mut dimensions = std::collections::HashMap::new();
-            for (d, v) in dims.iter().zip(dim_values) {
+            for (i, (d, v)) in dims.iter().zip(dim_values).enumerate() {
+                // A user who has since been deleted keeps their spend in
+                // the report — fall back to the id rather than dropping
+                // the row or showing a blank.
+                let v = if Some(i) == user_idx {
+                    user_labels.get(&v).cloned().unwrap_or(v)
+                } else {
+                    v
+                };
                 dimensions.insert(d.key().to_string(), v);
             }
             CostItem {

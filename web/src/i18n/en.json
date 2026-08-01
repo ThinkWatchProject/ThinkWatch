@@ -851,7 +851,7 @@
     "totalCostMtd": "Total Cost (MTD)",
     "budgetUsage": "Budget Usage",
     "costTrend": "Cost Trend",
-    "costByModel": "Cost by Model",
+    "costByDimension": "Cost by {{dimension}}",
     "percentOfTotal": "% of Total",
     "requests": "Requests",
     "inputTokens": "Input Tokens",
