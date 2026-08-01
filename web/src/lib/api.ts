@@ -121,12 +121,20 @@ const KEYPAIR_REUSE_WINDOW_MS = 5_000;
 async function doRegisterKeyPair(): Promise<void> {
   const { generateAndStoreKeyPair } = await import('./crypto-store');
   const publicJwk = await generateAndStoreKeyPair();
-  await fetch(`${API_BASE}/api/auth/register-key`, {
+  const res = await fetch(`${API_BASE}/api/auth/register-key`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ public_key: publicJwk }),
   });
+  // A rejected registration leaves the browser holding a private key
+  // the server never accepted: every signed request after this point
+  // fails verification, which surfaces as the session mysteriously
+  // ending rather than as the failure it is. Fail here, where the
+  // caller can still say what went wrong.
+  if (!res.ok) {
+    throw new Error(`register-key failed with ${res.status}`);
+  }
   try {
     localStorage.setItem(KEYPAIR_LAST_REGISTERED_KEY, String(Date.now()));
   } catch {
@@ -209,9 +217,16 @@ async function tryRefreshToken(): Promise<boolean> {
       });
       if (!res.ok) return false;
       const data = await res.json();
-      // The new tokens are in cookies the browser already set;
-      // generate a fresh ECDSA key pair and register the public key.
-      await registerKeyPair();
+      // The new tokens are in cookies the browser already set. The
+      // signing key pair is deliberately NOT regenerated here: the
+      // server only clears the signing-key slot on a fresh login, and
+      // `register-key` refuses to overwrite an existing one (so a
+      // stolen access cookie can't rebind it). Rotating on refresh
+      // therefore left the browser holding a private key the server had
+      // never accepted — every signed request then failed verification,
+      // and the console recovered from the resulting 401s by logging
+      // the user out. The existing key stays valid across refreshes;
+      // its TTL is extended server-side.
       if (Array.isArray(data.permissions)) {
         setCachedPermissions(data.permissions, data.denied_permissions);
       }

@@ -47,12 +47,19 @@ pub async fn store_public_key(
     ttl_secs: i64,
 ) -> anyhow::Result<StoreKeyOutcome> {
     let redis_key = format!("signing_pubkey:{user_id}");
-    // SET NX returns bool: the FIRST register-key call for this
-    // session wins (Ok(true)). A second call (potentially an attacker
-    // who captured the access cookie racing the legitimate browser)
-    // gets Ok(false). Same binding shape as test_rate_limit.rs's
-    // enforce_admin_rate_limit.
-    let stored: bool = fred::interfaces::KeysInterface::set(
+    // The FIRST register-key call for this session wins; a second one
+    // (potentially an attacker who captured the access cookie, racing
+    // the legitimate browser) must not overwrite the key.
+    //
+    // `SET … NX` answers `OK` when it wrote and **nil** when it
+    // refused, so the reply has to be read as an Option. Binding it to
+    // `bool` looked like it expressed "stored / not stored" but cannot
+    // represent nil at all: the refusal path failed to parse and became
+    // a 500, which the console reported as a broken session and
+    // recovered from by logging the user out. That path was unreachable
+    // while this endpoint was still returning 429 for an unrelated
+    // reason, so the type error sat here undetected.
+    let stored: Option<String> = fred::interfaces::KeysInterface::set(
         redis,
         &redis_key,
         pubkey_jwk_json,
@@ -61,7 +68,7 @@ pub async fn store_public_key(
         false,
     )
     .await?;
-    if !stored {
+    if stored.is_none() {
         // NX refused the write — key already exists. Don't touch the
         // IP key; we'd half-update the binding (pubkey from session A,
         // IP from attacker B) which is worse than refusing entirely.

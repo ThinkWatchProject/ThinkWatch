@@ -120,12 +120,6 @@ describe('api client', () => {
           permissions: ['read'],
         }),
       })
-      // register-key call: success
-      .mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({ status: 'ok' }),
-      })
       // Retry call: success
       .mockResolvedValueOnce({
         ok: true,
@@ -137,15 +131,19 @@ describe('api client', () => {
 
     const result = await apiModule.api('/api/protected')
 
-    // 4 calls: original, refresh, register-key, retry
-    expect(mockFetch).toHaveBeenCalledTimes(4)
+    // 3 calls: original, refresh, retry
+    expect(mockFetch).toHaveBeenCalledTimes(3)
     // Verify refresh was called
     const [refreshUrl, refreshOpts] = mockFetch.mock.calls[1]
     expect(refreshUrl).toBe('/api/auth/refresh')
     expect(refreshOpts.method).toBe('POST')
-    // Verify register-key was called
-    const [registerUrl] = mockFetch.mock.calls[2]
-    expect(registerUrl).toBe('/api/auth/register-key')
+    // The signing key must NOT be rotated here. The server only clears
+    // the signing-key slot on a fresh login and refuses to overwrite an
+    // existing one, so re-registering on refresh left the browser
+    // signing with a key the server had rejected — every later request
+    // failed verification and the session ended for no visible reason.
+    const calledUrls = mockFetch.mock.calls.map(([url]: [string]) => url)
+    expect(calledUrls).not.toContain('/api/auth/register-key')
     expect(result).toEqual({ data: 'refreshed' })
   })
 })
