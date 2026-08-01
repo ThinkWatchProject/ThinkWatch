@@ -46,6 +46,13 @@ services:
       S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:?S3_SECRET_ACCESS_KEY is required for body offload}
       S3_PATH_STYLE: ${S3_PATH_STYLE:-true}
       RUST_LOG: ${RUST_LOG:-info,think_watch=info}
+      # Shared with the `web` service below. Requests carrying it are
+      # believed when they say who the real client is; everything else
+      # is attributed to the address it connected from. Without this the
+      # server sees every user as the nginx container — one shared
+      # rate-limit bucket, useless audit IPs, and sessions that break
+      # whenever that container gets a new address.
+      TRUSTED_PROXY_SECRET: ${TRUSTED_PROXY_SECRET:?TRUSTED_PROXY_SECRET is required (shared with the web service)}
     depends_on:
       postgres:
         condition: service_healthy
@@ -78,6 +85,13 @@ services:
 
   web:
     image: ghcr.io/thinkwatch/think-watch-web:${IMAGE_TAG:-latest}
+    environment:
+      TRUSTED_PROXY_SECRET: ${TRUSTED_PROXY_SECRET:?TRUSTED_PROXY_SECRET is required (shared with the server)}
+      # Substitute ONLY our variable. The nginx entrypoint's default is
+      # to run envsubst over every `$$VAR` in the template, which would
+      # eat `$$host`, `$$remote_addr` and friends and produce a config
+      # that proxies to nowhere.
+      NGINX_ENVSUBST_FILTER: TRUSTED_PROXY_SECRET
     ports:
       - "${WEB_PORT:-80}:80"
     depends_on:

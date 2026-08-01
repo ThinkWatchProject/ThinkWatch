@@ -20,7 +20,11 @@ RUN pnpm build
 # Stage 2: Serve with Nginx
 FROM nginx:1.29-alpine
 
-COPY deploy/docker/nginx.conf /etc/nginx/conf.d/default.conf
+# Not conf.d: files under /etc/nginx/templates are run through
+# envsubst by the image's entrypoint at container start, which is how
+# TRUSTED_PROXY_SECRET reaches the config without baking a secret into
+# the image.
+COPY deploy/docker/nginx.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=builder /app/dist /usr/share/nginx/html
 
 EXPOSE 80

@@ -543,7 +543,13 @@ pub async fn extract_client_ip(
     let connection_ip = extensions
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|ci| ci.0.ip().to_string());
-    resolve_client_ip(&state.dynamic_config, headers, connection_ip).await
+    resolve_client_ip(
+        &state.dynamic_config,
+        headers,
+        connection_ip,
+        state.config.trusted_proxy_secret.as_deref(),
+    )
+    .await
 }
 
 /// Core IP resolution. Same trust contract as [`extract_client_ip`] but
@@ -558,44 +564,105 @@ pub async fn resolve_client_ip(
     dc: &think_watch_common::dynamic_config::DynamicConfig,
     headers: &axum::http::HeaderMap,
     connection_ip: Option<String>,
+    // Shared secret from `AppConfig::trusted_proxy_secret`. `None` when
+    // no reverse proxy is configured, in which case only the address
+    // whitelist can grant trust.
+    proxy_secret: Option<&str>,
 ) -> Option<String> {
+    // The secret is itself the statement "a proxy of ours is in front
+    // of you", which makes the TCP peer address definitionally useless
+    // — it is the proxy. So a valid secret enables forwarded-IP
+    // resolution even under the default `connection` source, and the
+    // bundled reverse-proxy deployment is correct with no settings to
+    // discover. Without the secret, `connection` means what it says.
+    let has_secret = presents_proxy_secret(headers, proxy_secret);
     let ip_source = dc.client_ip_source().await;
-
-    if ip_source != "connection" {
-        // Require a non-empty trusted-proxy whitelist before trusting
-        // any client-supplied header. If the operator picked `xff` or
-        // `x-real-ip` but didn't configure `security.trusted_proxies`,
-        // the old code happily honored whatever the client sent —
-        // every request could spoof X-Forwarded-For to forge the IP
-        // used for rate limiting, audit logging, and session binding.
-        // Fall back to the TCP peer address in that misconfiguration.
-        let trusted_proxies = dc
-            .get_string("security.trusted_proxies")
-            .await
-            .unwrap_or_default();
-        if trusted_proxies.trim().is_empty() {
-            tracing::warn!(
-                ip_source = %ip_source,
-                "client_ip_source is not 'connection' but security.trusted_proxies is empty — \
-                 ignoring forwarded-IP headers to prevent spoofing"
-            );
-            return connection_ip;
-        }
-        let conn_ip = connection_ip.as_deref().unwrap_or("");
-        let is_trusted = trusted_proxies
-            .split(',')
-            .map(|s| s.trim())
-            .any(|proxy| proxy == conn_ip || proxy == "*");
-        if !is_trusted {
-            tracing::warn!(
-                connection_ip = conn_ip,
-                "Request from untrusted proxy, falling back to connection IP"
-            );
-            return connection_ip;
-        }
+    if ip_source == "connection" && !has_secret {
+        return connection_ip;
     }
 
-    match ip_source.as_str() {
+    // Believing a client-supplied header requires proof that it came
+    // from infrastructure we control. Without that, any request could
+    // forge the IP used for rate limiting, audit logging, PoW
+    // difficulty and session binding — so an unproven request falls
+    // back to the TCP peer address.
+    //
+    // Two proofs are accepted. The secret is the one to prefer: a
+    // proxy's address is not a stable fact (container IPs change on
+    // every recreate; under k8s or a mesh they aren't knowable in
+    // advance), while a shared secret survives all of that. The address
+    // whitelist stays for deployments that already rely on it.
+    let trusted_proxies = dc
+        .get_string("security.trusted_proxies")
+        .await
+        .unwrap_or_default();
+    let conn_ip = connection_ip.as_deref().unwrap_or("");
+    let whitelisted = trusted_proxies
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .any(|proxy| proxy == conn_ip || proxy == "*");
+
+    if !whitelisted && !has_secret {
+        tracing::warn!(
+            ip_source = %ip_source,
+            connection_ip = conn_ip,
+            "Forwarded-IP header ignored: request carries no valid proxy secret and its \
+             address is not in security.trusted_proxies"
+        );
+        return connection_ip;
+    }
+
+    // `connection` here means the operator never configured a source
+    // but our proxy vouched for the request — read the header it sets.
+    let effective_source = if ip_source == "connection" {
+        "x-real-ip".to_string()
+    } else {
+        ip_source
+    };
+    forwarded_ip(&effective_source, dc, headers)
+        .await
+        .or(connection_ip)
+}
+
+/// Header carrying the shared secret. Named for this project so it
+/// can't be confused with a header some other hop already sets.
+const PROXY_SECRET_HEADER: &str = "x-thinkwatch-proxy-token";
+
+/// Did this request come through our own reverse proxy?
+///
+/// The comparison is constant-time: a byte-by-byte early exit would let
+/// an attacker who can hit the port directly recover the secret one
+/// character at a time from response timing, and that secret is what
+/// stands between them and forging every IP the system records.
+fn presents_proxy_secret(headers: &axum::http::HeaderMap, secret: Option<&str>) -> bool {
+    let Some(secret) = secret.filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    let Some(presented) = headers
+        .get(PROXY_SECRET_HEADER)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    if presented.len() != secret.len() {
+        return false;
+    }
+    presented
+        .bytes()
+        .zip(secret.bytes())
+        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+        == 0
+}
+
+/// Pull the client address out of the forwarded headers, per the
+/// configured source and (for XFF) which hop to read.
+async fn forwarded_ip(
+    source: &str,
+    dc: &think_watch_common::dynamic_config::DynamicConfig,
+    headers: &axum::http::HeaderMap,
+) -> Option<String> {
+    match source {
         "xff" => {
             let position = dc.client_ip_xff_position().await;
             let depth = dc.client_ip_xff_depth().await.max(1) as usize;
@@ -629,8 +696,7 @@ pub async fn resolve_client_ip(
             // check but yields a blank string after trim — same
             // "present but absent" failure mode as the xff branch.
             .filter(|s| !s.is_empty()),
-        // "connection" — use TCP peer address from ConnectInfo
-        _ => connection_ip,
+        _ => None,
     }
 }
 
@@ -1062,4 +1128,55 @@ async fn auth_via_api_key(
     request.extensions_mut().insert(ApiKeyAuthenticated);
 
     Ok(next.run(request).await)
+}
+
+#[cfg(test)]
+mod proxy_trust_tests {
+    use super::*;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    fn headers_with(token: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(PROXY_SECRET_HEADER, HeaderValue::from_str(token).unwrap());
+        h
+    }
+
+    #[test]
+    fn the_secret_is_what_grants_trust() {
+        let secret = "a3f1c0de";
+        assert!(presents_proxy_secret(&headers_with(secret), Some(secret)));
+    }
+
+    #[test]
+    fn a_client_that_guesses_the_header_name_gains_nothing() {
+        // The whole point: knowing where to put the token is not
+        // knowing the token.
+        assert!(!presents_proxy_secret(
+            &headers_with("not-the-secret"),
+            Some("a3f1c0de")
+        ));
+        assert!(!presents_proxy_secret(&HeaderMap::new(), Some("a3f1c0de")));
+    }
+
+    #[test]
+    fn no_configured_secret_means_no_request_can_claim_proxy_trust() {
+        // A deployment with no proxy must not be talked into believing
+        // forwarded headers by a request that simply asserts it is one.
+        assert!(!presents_proxy_secret(&headers_with("anything"), None));
+        assert!(!presents_proxy_secret(&headers_with(""), Some("")));
+    }
+
+    #[test]
+    fn a_prefix_of_the_secret_is_not_the_secret() {
+        // Length is checked before the byte compare; a truncated guess
+        // must not pass, and must not reveal how much of it was right.
+        assert!(!presents_proxy_secret(
+            &headers_with("a3f1"),
+            Some("a3f1c0de")
+        ));
+        assert!(!presents_proxy_secret(
+            &headers_with("a3f1c0de00"),
+            Some("a3f1c0de")
+        ));
+    }
 }

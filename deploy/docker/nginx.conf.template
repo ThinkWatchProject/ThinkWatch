@@ -36,6 +36,12 @@ server {
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
+        # Proof to the backend that this request came through us, so it
+        # can believe the forwarded-IP headers above. Set unconditionally
+        # so a client-supplied value is overwritten, never appended —
+        # and the backend rejects a wrong value, so a client that guesses
+        # the header name gains nothing without the secret itself.
+        proxy_set_header X-ThinkWatch-Proxy-Token "${TRUSTED_PROXY_SECRET}";
     }
 
     # SPA fallback

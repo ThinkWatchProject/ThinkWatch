@@ -25,6 +25,21 @@ pub struct AppConfig {
     /// (and the Prometheus recorder) is not installed at all, so the
     /// server has no token-leak surface on that path.
     pub metrics_bearer_token: Option<String>,
+
+    /// Shared secret proving a request came through our own reverse
+    /// proxy, presented as `X-ThinkWatch-Proxy-Token`.
+    ///
+    /// Forwarded-IP headers are only believed when this matches (or the
+    /// connection IP is in `security.trusted_proxies`). A secret is used
+    /// rather than an address whitelist because the proxy's address is
+    /// not a stable fact: container IPs change on every recreate, and
+    /// under k8s or a service mesh they aren't knowable in advance at
+    /// all. Identity survives all of that; topology doesn't.
+    ///
+    /// Absent = forwarded headers are ignored unless the connection IP
+    /// is explicitly whitelisted, which is the safe default for a
+    /// server exposed directly to clients.
+    pub trusted_proxy_secret: Option<String>,
 }
 
 impl AppConfig {
@@ -61,6 +76,10 @@ impl AppConfig {
 
             // Metrics: empty = disabled (endpoint not installed).
             metrics_bearer_token: std::env::var("METRICS_BEARER_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
+
+            trusted_proxy_secret: std::env::var("TRUSTED_PROXY_SECRET")
                 .ok()
                 .filter(|s| !s.is_empty()),
         })
@@ -149,6 +168,7 @@ impl AppConfig {
             clickhouse_user: None,
             clickhouse_password: None,
             metrics_bearer_token: None,
+            trusted_proxy_secret: None,
         }
     }
 

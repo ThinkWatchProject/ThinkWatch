@@ -95,14 +95,25 @@ pub struct AccessLogLayer {
     audit: AuditLogger,
     dynamic_config: Arc<DynamicConfig>,
     port: u16,
+    /// Carried so this layer resolves the client IP under exactly the
+    /// same trust contract as `auth_guard` — an access log that
+    /// believed a forwarded header the auth path rejected would record
+    /// an attacker-chosen address next to the real request.
+    proxy_secret: Option<Arc<str>>,
 }
 
 impl AccessLogLayer {
-    pub fn new(audit: AuditLogger, dynamic_config: Arc<DynamicConfig>, port: u16) -> Self {
+    pub fn new(
+        audit: AuditLogger,
+        dynamic_config: Arc<DynamicConfig>,
+        port: u16,
+        proxy_secret: Option<Arc<str>>,
+    ) -> Self {
         Self {
             audit,
             dynamic_config,
             port,
+            proxy_secret,
         }
     }
 }
@@ -116,6 +127,7 @@ impl<S> Layer<S> for AccessLogLayer {
             audit: self.audit.clone(),
             dynamic_config: self.dynamic_config.clone(),
             port: self.port,
+            proxy_secret: self.proxy_secret.clone(),
         }
     }
 }
@@ -126,6 +138,7 @@ pub struct AccessLogService<S> {
     audit: AuditLogger,
     dynamic_config: Arc<DynamicConfig>,
     port: u16,
+    proxy_secret: Option<Arc<str>>,
 }
 
 impl<S> Service<Request> for AccessLogService<S>
@@ -172,6 +185,7 @@ where
 
         let audit = self.audit.clone();
         let dc = self.dynamic_config.clone();
+        let proxy_secret = self.proxy_secret.clone();
         let port = self.port;
         let headers = request.headers().clone();
         let start = std::time::Instant::now();
@@ -205,8 +219,13 @@ where
             // The previous inlined copy honored XFF / X-Real-IP
             // unconditionally, letting any direct connection spoof the
             // IP recorded in access_logs / IP-keyed analytics.
-            let ip = crate::middleware::auth_guard::resolve_client_ip(&dc, &headers, connection_ip)
-                .await;
+            let ip = crate::middleware::auth_guard::resolve_client_ip(
+                &dc,
+                &headers,
+                connection_ip,
+                proxy_secret.as_deref(),
+            )
+            .await;
 
             // Build the access-log entry through `AnonymousActor`:
             // even though some requests are authenticated, this

@@ -189,6 +189,10 @@ impl TestApp {
             clickhouse_user: ch_user,
             clickhouse_password: ch_password,
             metrics_bearer_token: None,
+            // No proxy in front of the in-process test server, so
+            // forwarded-IP headers must never be believed — same
+            // contract as a directly exposed deployment.
+            trusted_proxy_secret: None,
         };
         config.validate().map_err(anyhow::Error::msg)?;
 

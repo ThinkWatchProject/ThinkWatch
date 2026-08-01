@@ -152,6 +152,21 @@ spec:
             capabilities:
               drop:
                 - ALL
+          env:
+            # Stamped onto every proxied request so the server can tell
+            # this hop apart from a client and believe the forwarded
+            # client IP. Without it every user shares the pod's address
+            # for rate limiting, audit and session binding.
+            - name: TRUSTED_PROXY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "tw.secret.name" . }}
+                  key: TRUSTED_PROXY_SECRET
+            # Substitute ONLY that variable — the entrypoint's default
+            # runs envsubst over every `$var` in the template, which
+            # would eat nginx's own `$host` / `$remote_addr`.
+            - name: NGINX_ENVSUBST_FILTER
+              value: TRUSTED_PROXY_SECRET
           ports:
             - name: http
               containerPort: 80

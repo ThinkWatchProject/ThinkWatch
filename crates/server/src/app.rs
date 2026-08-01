@@ -433,6 +433,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
             state.audit.clone(),
             state.dynamic_config.clone(),
             _config.gateway_port,
+            _config.trusted_proxy_secret.as_deref().map(Arc::from),
         ))
         .with_state(state.clone());
 
@@ -1166,7 +1167,12 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
                 "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'",
             ),
         ))
-        .layer(crate::middleware::access_log::AccessLogLayer::new(state.audit.clone(), state.dynamic_config.clone(), config.console_port))
+        .layer(crate::middleware::access_log::AccessLogLayer::new(
+            state.audit.clone(),
+            state.dynamic_config.clone(),
+            config.console_port,
+            config.trusted_proxy_secret.as_deref().map(Arc::from),
+        ))
         .with_state(state);
 
     // /metrics lives on the CONSOLE port (internal, bearer-gated) so
