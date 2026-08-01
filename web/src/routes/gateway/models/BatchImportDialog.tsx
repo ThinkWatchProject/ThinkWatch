@@ -130,8 +130,7 @@ export function BatchImportDialog({
       ]);
       setRemoteModels(rmodels.map((m) => m.id));
       // Models this upstream has already told us it won't serve. They
-      // stay selectable — the import re-checks and reports — but
-      // flagging them here saves the admin a pointless round trip.
+      // are shown but not selectable — see `importable`.
       setUnavailable(
         new Map(
           rmodels
@@ -186,8 +185,17 @@ export function BatchImportDialog({
     return remoteModels.filter((m) => m.toLowerCase().includes(q));
   }, [remoteModels, search]);
 
+  /// A model is offerable only if it isn't already imported and the
+  /// upstream hasn't told us it refuses to serve it. Importing a
+  /// refused model can't work — the server drops it — so letting it be
+  /// ticked would be a checkbox that does nothing and a count that
+  /// lies. The way back for a stale verdict is the provider's
+  /// "re-check models" action, not a doomed import.
+  const importable = (modelId: string) =>
+    !existingIds.has(modelId) && !unavailable.has(modelId);
+
   const toggleModel = (modelId: string) => {
-    if (existingIds.has(modelId)) return;
+    if (!importable(modelId)) return;
     setSelected((prev) => {
       const next = new Set(prev);
       if (next.has(modelId)) next.delete(modelId);
@@ -197,7 +205,7 @@ export function BatchImportDialog({
   };
 
   const toggleSelectAll = () => {
-    const selectable = filteredRemoteModels.filter((m) => !existingIds.has(m));
+    const selectable = filteredRemoteModels.filter(importable);
     const allSelected = selectable.length > 0 && selectable.every((m) => selected.has(m));
     setSelected((prev) => {
       const next = new Set(prev);
@@ -316,10 +324,8 @@ export function BatchImportDialog({
                     {t('models.selected', { count: selected.size })}
                   </span>
                   <Button type="button" variant="outline" size="sm" onClick={toggleSelectAll}>
-                    {filteredRemoteModels.filter((m) => !existingIds.has(m)).length > 0 &&
-                    filteredRemoteModels
-                      .filter((m) => !existingIds.has(m))
-                      .every((m) => selected.has(m))
+                    {filteredRemoteModels.filter(importable).length > 0 &&
+                    filteredRemoteModels.filter(importable).every((m) => selected.has(m))
                       ? t('models.deselectAll')
                       : t('models.selectAll')}
                   </Button>
@@ -327,6 +333,7 @@ export function BatchImportDialog({
                 <div className="border rounded-md overflow-auto flex-1 min-h-0 max-h-[40vh]">
                   {filteredRemoteModels.map((modelId) => {
                     const exists = existingIds.has(modelId);
+                    const refused = unavailable.has(modelId);
                     const checked = exists || selected.has(modelId);
                     return (
                       <label
@@ -334,12 +341,12 @@ export function BatchImportDialog({
                         className="flex items-center gap-2 px-3 py-1.5 hover:bg-muted/50 cursor-pointer text-sm border-b last:border-b-0"
                       >
                         <Checkbox
-                          checked={checked}
-                          disabled={exists}
+                          checked={checked && !refused}
+                          disabled={!importable(modelId)}
                           onCheckedChange={() => toggleModel(modelId)}
                         />
                         <span
-                          className={`font-mono text-xs truncate ${exists ? 'text-muted-foreground' : ''}`}
+                          className={`font-mono text-xs truncate ${exists || refused ? 'text-muted-foreground' : ''}`}
                         >
                           {modelId}
                         </span>
