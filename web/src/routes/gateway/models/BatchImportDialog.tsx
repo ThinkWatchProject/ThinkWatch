@@ -241,7 +241,13 @@ export function BatchImportDialog({
             count: res.skipped.length,
             models: res.skipped.map((s) => s.upstream).join(', '),
           }),
-          { description: res.skipped[0].reason, duration: 10000 },
+          {
+            // Only quote the upstream's wording when it can only be
+            // about the one model. Showing the first of thirteen
+            // reasons reads as if it explained all thirteen.
+            description: res.skipped.length === 1 ? res.skipped[0].reason : undefined,
+            duration: 10000,
+          },
         );
       }
       onClose();

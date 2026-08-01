@@ -190,7 +190,13 @@ fn is_inconclusive(err: &GatewayError) -> bool {
 /// Probe one model across its candidate dialects, first answer wins.
 async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdict {
     let candidates = UpstreamProtocol::candidates_for(&materials.provider_type, upstream_model);
-    let mut last_refusal: Option<String> = None;
+    // Every refusal, not just the last one. The verdict is "no dialect
+    // works", and reporting a single attempt's wording invites the
+    // reader to conclude the other dialects were never tried — which is
+    // exactly the wrong lesson, since the fix for a genuinely
+    // dialect-specific failure is different from the fix for "this
+    // upstream won't serve you this model at all".
+    let mut refusals: Vec<String> = Vec::new();
 
     for candidate in candidates {
         let adapter = build_adapter(candidate, materials);
@@ -210,7 +216,7 @@ async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdi
                 );
                 return Verdict::Unknown;
             }
-            Ok(Err(e)) => last_refusal = Some(e.to_string()),
+            Ok(Err(e)) => refusals.push(format!("{candidate}: {e}")),
             Err(_elapsed) => {
                 tracing::warn!(
                     provider = %materials.name,
@@ -223,12 +229,21 @@ async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdi
         }
     }
 
-    match last_refusal {
-        Some(reason) => Verdict::Unavailable(reason),
+    if refusals.is_empty() {
         // No candidates at all shouldn't happen, but "we learned
         // nothing" is the honest reading if it does.
-        None => Verdict::Unknown,
+        return Verdict::Unknown;
     }
+    Verdict::Unavailable(unavailable_reason(&refusals))
+}
+
+/// Compose the wording an operator reads when a model is refused.
+///
+/// Names every dialect that was tried. The reader's next question is
+/// always "did it even try the right API?", and a message quoting one
+/// attempt leaves that open.
+fn unavailable_reason(refusals: &[String]) -> String {
+    format!("refused on every supported API ({})", refusals.join(" | "))
 }
 
 /// Resolve a verdict for each model: cached ones for free, the rest
@@ -333,6 +348,20 @@ mod tests {
             status: 404,
             message: "no such model".into(),
         }));
+    }
+
+    #[test]
+    fn the_reason_names_every_dialect_that_was_tried() {
+        // An operator seeing only the last attempt would reasonably
+        // conclude the others were never tried, and go looking for a
+        // protocol fix that doesn't exist.
+        let reason = unavailable_reason(&[
+            "openai_chat: does not support the '/v1/chat/completions' API".to_string(),
+            "openai_responses: does not support the '/v1/responses' API".to_string(),
+        ]);
+        assert!(reason.contains("openai_chat"), "{reason}");
+        assert!(reason.contains("openai_responses"), "{reason}");
+        assert!(reason.contains("every supported API"), "{reason}");
     }
 
     #[test]
