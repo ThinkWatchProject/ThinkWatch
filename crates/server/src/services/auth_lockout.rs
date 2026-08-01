@@ -23,7 +23,7 @@
 
 use fred::clients::Client;
 use fred::interfaces::KeysInterface;
-use fred::types::{Expiration, SetOptions};
+use fred::types::Expiration;
 
 use think_watch_common::errors::AppError;
 
@@ -66,23 +66,12 @@ pub async fn is_locked(redis: &Client, locked_key: &str) -> Result<bool, AppErro
 /// fresh key leaves it without expiry, which would keep stale
 /// lockouts alive forever.
 pub async fn record_failure(redis: &Client, counter_key: &str) -> Result<u64, AppError> {
-    let _: () = redis
-        .set(
-            counter_key,
-            "0",
-            Some(Expiration::EX(COUNTER_WINDOW_SECS)),
-            Some(SetOptions::NX),
-            false,
-        )
+    let n = think_watch_common::fixed_window::incr(redis, counter_key, COUNTER_WINDOW_SECS)
         .await
         .map_err(|e| {
-            tracing::error!(error = %e, key = %counter_key, "Redis lockout counter init failed (fail-closed)");
+            tracing::error!(error = %e, key = %counter_key, "Redis lockout counter incr failed (fail-closed)");
             AppError::Internal(anyhow::anyhow!("Authentication temporarily unavailable"))
         })?;
-    let n: u64 = redis.incr_by(counter_key, 1).await.map_err(|e| {
-        tracing::error!(error = %e, key = %counter_key, "Redis lockout counter incr failed (fail-closed)");
-        AppError::Internal(anyhow::anyhow!("Authentication temporarily unavailable"))
-    })?;
     Ok(n)
 }
 

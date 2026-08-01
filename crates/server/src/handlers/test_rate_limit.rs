@@ -9,7 +9,6 @@
 //! so an attacker using a stolen token runs against their own bucket
 //! instead of inheriting the legit admin's quota.
 
-use fred::interfaces::KeysInterface;
 use think_watch_common::errors::AppError;
 use uuid::Uuid;
 
@@ -47,23 +46,14 @@ pub async fn check_admin_rate_limit(
     limit_per_min: u32,
 ) -> Result<(), AppError> {
     let key = format!("rl:admin:{endpoint_tag}:{user_id}:{credential_fingerprint}");
-    // Atomically create the counter with a TTL if absent; the follow-up
-    // INCR then always lands on a key that has an expiry. Matches the
-    // pattern used on the login rate-limits (see SEC-03).
-    let _: Result<bool, _> = redis
-        .set(
-            &key,
-            "0",
-            Some(fred::types::Expiration::EX(60)),
-            Some(fred::types::SetOptions::NX),
-            false,
-        )
-        .await;
-    let count: u32 = match redis.incr::<u32, _>(&key).await {
+    // Shared fixed-window counter — see `fixed_window` for why the
+    // create-then-INCR spelling this used to have could strand a key
+    // with no expiry and lock the subject out permanently.
+    let count = match think_watch_common::fixed_window::incr(redis, &key, 60).await {
         Ok(n) => n,
         Err(_) => return Ok(()),
     };
-    if count > limit_per_min {
+    if count > limit_per_min as u64 {
         return Err(AppError::RateLimited);
     }
     Ok(())

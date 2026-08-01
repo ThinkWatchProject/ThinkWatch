@@ -46,6 +46,7 @@ pub mod retry;
 
 // --- Utilities ---
 pub mod crypto;
+pub mod fixed_window;
 pub mod json_secret;
 pub mod pii; // BlobRedactor — at-rest body redaction shared by gateway + mcp-gateway
 pub mod regex_util;

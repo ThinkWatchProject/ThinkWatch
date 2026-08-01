@@ -1018,23 +1018,12 @@ async fn auth_via_api_key(
 
     // Per-key soft rate limit on the console surface. A compromised key
     // shouldn't be able to spam admin endpoints at machine speed — cap
-    // at ~2 req/s with the same atomic SET-NX-EX + INCR counter used
-    // elsewhere. Soft: a Redis hiccup lets traffic through rather than
+    // at ~2 req/s with the same fixed-window counter used elsewhere. Soft: a Redis hiccup lets traffic through rather than
     // locking admins out mid-investigation.
     const CONSOLE_API_KEY_LIMIT_PER_MIN: u32 = 120;
     let rl_key = format!("rl:console_key:{}", row.id);
-    let _: Result<bool, _> = fred::interfaces::KeysInterface::set(
-        &state.redis,
-        &rl_key,
-        "0",
-        Some(fred::types::Expiration::EX(60)),
-        Some(fred::types::SetOptions::NX),
-        false,
-    )
-    .await;
-    if let Ok(count) =
-        fred::interfaces::KeysInterface::incr_by::<u32, _>(&state.redis, &rl_key, 1).await
-        && count > CONSOLE_API_KEY_LIMIT_PER_MIN
+    if let Ok(count) = think_watch_common::fixed_window::incr(&state.redis, &rl_key, 60).await
+        && count > CONSOLE_API_KEY_LIMIT_PER_MIN as u64
     {
         tracing::warn!(
             api_key_id = %row.id,

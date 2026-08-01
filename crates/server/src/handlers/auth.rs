@@ -170,23 +170,10 @@ pub async fn issue_pow_challenge(
     // re-issue a challenge on a wrong-password retry, so a real
     // user mistyping twice already needs ~3 mints.
     let key = format!("pow_mint_ip:{client_ip}");
-    let _: () = fred::interfaces::KeysInterface::set(
-        &state.redis,
-        &key,
-        "0",
-        Some(fred::types::Expiration::EX(60)),
-        Some(fred::types::SetOptions::NX),
-        false,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Redis pow-mint rate-limit init failed: {e}");
-        AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
-    })?;
-    let count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &key, 1)
+    let count = think_watch_common::fixed_window::incr(&state.redis, &key, 60)
         .await
         .map_err(|e| {
-            tracing::error!("Redis pow-mint rate-limit incr failed: {e}");
+            tracing::error!("Redis pow-mint rate limit failed (fail-closed): {e}");
             AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
         })?;
     if count > 60 {
@@ -455,23 +442,10 @@ pub async fn login(
     // to `()` so fred's reply parser accepts both the OK and nil
     // shapes — the previous `let _: bool` panicked on the second
     // login from the same `(ip, email)` pair.
-    let _: () = fred::interfaces::KeysInterface::set(
-        &state.redis,
-        &rate_key,
-        "0",
-        Some(fred::types::Expiration::EX(60)),
-        Some(fred::types::SetOptions::NX),
-        false,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Redis rate-limit init failed (fail-closed): {e}");
-        AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
-    })?;
-    let count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1)
+    let count = think_watch_common::fixed_window::incr(&state.redis, &rate_key, 60)
         .await
         .map_err(|e| {
-            tracing::error!("Redis rate-limit check failed (fail-closed): {e}");
+            tracing::error!("Redis login rate limit failed (fail-closed): {e}");
             AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
         })?;
     if count > 10 {
@@ -481,23 +455,10 @@ pub async fn login(
     }
 
     // Per-IP rate limit: max 30 attempts per minute across all emails (fail-closed).
-    let _: () = fred::interfaces::KeysInterface::set(
-        &state.redis,
-        &ip_rate_key,
-        "0",
-        Some(fred::types::Expiration::EX(60)),
-        Some(fred::types::SetOptions::NX),
-        false,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Redis IP rate-limit init failed (fail-closed): {e}");
-        AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
-    })?;
-    let ip_count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &ip_rate_key, 1)
+    let ip_count = think_watch_common::fixed_window::incr(&state.redis, &ip_rate_key, 60)
         .await
         .map_err(|e| {
-            tracing::error!("Redis IP rate-limit check failed (fail-closed): {e}");
+            tracing::error!("Redis login per-IP rate limit failed (fail-closed): {e}");
             AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
         })?;
     if ip_count > 30 {
@@ -581,23 +542,11 @@ pub async fn login(
         // with the 401 — refusing the response over a counter blip
         // would hide real auth failures from the user.
         let fail_key = subnet_fail_key(&client_ip);
-        let nx_result: Result<(), _> = fred::interfaces::KeysInterface::set(
-            &state.redis,
-            &fail_key,
-            "0",
-            Some(fred::types::Expiration::EX(SUBNET_FAIL_WINDOW_SECS)),
-            Some(fred::types::SetOptions::NX),
-            false,
-        )
-        .await;
-        if let Err(e) = nx_result {
-            tracing::warn!(error = %e, key = %fail_key, "subnet failure counter init failed");
-        } else {
-            let incr_result: Result<u64, _> =
-                fred::interfaces::KeysInterface::incr_by(&state.redis, &fail_key, 1).await;
-            if let Err(e) = incr_result {
-                tracing::warn!(error = %e, key = %fail_key, "subnet failure counter incr failed");
-            }
+        if let Err(e) =
+            think_watch_common::fixed_window::incr(&state.redis, &fail_key, SUBNET_FAIL_WINDOW_SECS)
+                .await
+        {
+            tracing::warn!(error = %e, key = %fail_key, "subnet failure counter incr failed");
         }
 
         // Log failed attempt — `AnonymousActor` pre-fills IP / UA /
@@ -978,23 +927,10 @@ pub async fn register_key(
     // (e.g. transient network blip) without buying the attacker any
     // useful concurrency.
     let rk_rate_key = format!("register_key_rate:{}", auth_user.claims.sub);
-    let _: () = fred::interfaces::KeysInterface::set(
-        &state.redis,
-        &rk_rate_key,
-        "0",
-        Some(fred::types::Expiration::EX(60)),
-        Some(fred::types::SetOptions::NX),
-        false,
-    )
-    .await
-    .map_err(|e| {
-        tracing::error!("Redis register-key rate-limit init failed (fail-closed): {e}");
-        AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
-    })?;
-    let attempts: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &rk_rate_key, 1)
+    let attempts = think_watch_common::fixed_window::incr(&state.redis, &rk_rate_key, 60)
         .await
         .map_err(|e| {
-            tracing::error!("Redis register-key rate-limit incr failed (fail-closed): {e}");
+            tracing::error!("Redis register-key rate limit failed (fail-closed): {e}");
             AppError::Internal(anyhow::anyhow!("Rate limiting unavailable"))
         })?;
     if attempts > 5 {

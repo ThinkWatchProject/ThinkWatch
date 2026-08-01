@@ -106,14 +106,12 @@ pub async fn setup_initialize(
     // first-boot. `unknown` is its own bucket (covers misconfigured
     // proxy / direct localhost).
     let rate_key = format!("setup_rate_limit:{client_ip}");
-    let count: u64 = fred::interfaces::KeysInterface::incr_by(&state.redis, &rate_key, 1)
+    // The "set the TTL only when the counter comes back as 1" spelling
+    // this used to have never restores an expiry on a key that already
+    // lost one — see `fixed_window`.
+    let count = think_watch_common::fixed_window::incr(&state.redis, &rate_key, 60)
         .await
         .unwrap_or(1);
-    if count == 1 {
-        let _: () = fred::interfaces::KeysInterface::expire(&state.redis, &rate_key, 60, None)
-            .await
-            .unwrap_or(());
-    }
     if count > 5 {
         return Err(AppError::BadRequest(
             "Too many setup attempts. Please try again later.".into(),
