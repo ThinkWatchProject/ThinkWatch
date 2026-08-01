@@ -96,7 +96,14 @@ services:
       - ./data-dev/clickhouse:/var/lib/clickhouse
       - ./clickhouse/initdb.d/:/docker-entrypoint-initdb.d/:ro
       - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
-      - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
+      # NOT ./clickhouse/users.d — that directory is the production
+      # stack's, and this image's entrypoint WRITES default-user.xml
+      # into it from CLICKHOUSE_USER/PASSWORD. Sharing it meant one
+      # `make infra` silently rewrote the production ClickHouse
+      # credentials (which hot-reloads users.d), and every audit insert
+      # started failing AUTHENTICATION_FAILED against a stack nobody
+      # had touched. Dev needs no override at all: the entrypoint
+      # provisions the user from the env vars above.
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8123/ping"]
       interval: 5s

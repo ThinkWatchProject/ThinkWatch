@@ -230,6 +230,11 @@ services:
       - ./data/clickhouse:/var/lib/clickhouse
       - ./clickhouse/initdb.d/:/docker-entrypoint-initdb.d/:ro
       - ./clickhouse/config.d/:/etc/clickhouse-server/config.d/:ro
+      # Writable, and it has to be: this image's entrypoint rewrites
+      # default-user.xml from CLICKHOUSE_USER / CLICKHOUSE_PASSWORD on
+      # every boot, and fails to start if it can't. What must never
+      # happen is a *second* stack mounting the same directory — see
+      # the note in docker-compose.dev.yml.
       - ./clickhouse/users.d/:/etc/clickhouse-server/users.d/
     healthcheck:
       # 127.0.0.1, not `localhost`: with `--listen_host=0.0.0.0` CH binds
