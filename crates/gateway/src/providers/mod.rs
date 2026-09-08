@@ -1,70 +1,8 @@
-pub mod anthropic;
-pub mod azure_openai;
-pub mod bedrock;
-pub mod custom;
-pub mod google;
-pub mod openai;
-pub mod openai_responses;
-pub mod protocol;
+//! 已搬到 thinkwatch-core（`tw-provider`）。这里只留再导出。
+
 pub mod traits;
 
-pub use traits::{AiProvider, CallCtx};
-
-use futures::Stream;
-use std::pin::Pin;
-use traits::*;
-
-/// Dyn-compatible version of `AiProvider` that boxes the future returned by
-/// `chat_completion`. This is necessary because `AiProvider::chat_completion`
-/// uses `impl Future` (RPITIT) which is not dyn-compatible.
-///
-/// All types implementing `AiProvider` automatically implement `DynAiProvider`.
-pub trait DynAiProvider: Send + Sync {
-    fn name(&self) -> &str;
-
-    fn chat_completion_boxed(
-        &self,
-        request: ChatCompletionRequest,
-        ctx: CallCtx,
-    ) -> Pin<
-        Box<
-            dyn std::future::Future<Output = Result<ChatCompletionResponse, GatewayError>>
-                + Send
-                + '_,
-        >,
-    >;
-
-    fn stream_chat_completion(
-        &self,
-        request: ChatCompletionRequest,
-        ctx: CallCtx,
-    ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>;
-}
-
-impl<T: AiProvider> DynAiProvider for T {
-    fn name(&self) -> &str {
-        AiProvider::name(self)
-    }
-
-    fn chat_completion_boxed(
-        &self,
-        request: ChatCompletionRequest,
-        ctx: CallCtx,
-    ) -> Pin<
-        Box<
-            dyn std::future::Future<Output = Result<ChatCompletionResponse, GatewayError>>
-                + Send
-                + '_,
-        >,
-    > {
-        Box::pin(AiProvider::chat_completion(self, request, ctx))
-    }
-
-    fn stream_chat_completion(
-        &self,
-        request: ChatCompletionRequest,
-        ctx: CallCtx,
-    ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
-        AiProvider::stream_chat_completion(self, request, ctx)
-    }
-}
+pub use tw_provider::providers::{
+    anthropic, azure_openai, bedrock, custom, google, openai, openai_responses, protocol,
+};
+pub use tw_provider::{AiProvider, CallCtx, DynAiProvider};
