@@ -357,6 +357,7 @@ impl AiProvider for BedrockProvider {
     async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         let url = self.endpoint_url(&request.model);
         let bedrock_req = convert_to_bedrock(&request);
@@ -372,7 +373,7 @@ impl AiProvider for BedrockProvider {
             .header("content-type", "application/json")
             .body(body_bytes);
         let builder = ProviderBase::apply_headers(builder, &signed_headers);
-        let builder = self.base.apply_custom_headers(builder, &request);
+        let builder = self.base.apply_custom_headers(builder, &ctx);
 
         let resp = ProviderBase::send(builder).await?;
         let resp = ProviderBase::check_status(resp, "Bedrock").await?;
@@ -388,6 +389,7 @@ impl AiProvider for BedrockProvider {
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.base.client.clone();
         let url = self.stream_endpoint_url(&request.model);
@@ -396,7 +398,7 @@ impl AiProvider for BedrockProvider {
         let access_key_id = self.access_key_id.clone();
         let secret_access_key = self.secret_access_key.clone();
         let provider_client = self.base.client.clone();
-        let custom_headers = self.base.resolve_headers(&request);
+        let custom_headers = self.base.resolve_headers(&ctx);
 
         let bedrock_req = convert_to_bedrock(&request);
 
@@ -598,9 +600,6 @@ mod tests {
             max_tokens: Some(256),
             stream: None,
             extra: serde_json::Value::Null,
-            caller_user_id: None,
-            caller_user_email: None,
-            trace_id: None,
         }
     }
 

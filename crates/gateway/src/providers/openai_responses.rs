@@ -164,6 +164,7 @@ impl AiProvider for OpenAiResponsesProvider {
     async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         let body = convert_request(&request, false);
         let builder = self
@@ -171,10 +172,7 @@ impl AiProvider for OpenAiResponsesProvider {
             .client
             .post(self.responses_url())
             .header("content-type", "application/json");
-        let builder = self
-            .base
-            .apply_custom_headers(builder, &request)
-            .json(&body);
+        let builder = self.base.apply_custom_headers(builder, &ctx).json(&body);
 
         let resp = ProviderBase::send(builder).await?;
         let resp = ProviderBase::check_status(resp, "OpenAI Responses").await?;
@@ -188,10 +186,11 @@ impl AiProvider for OpenAiResponsesProvider {
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.base.client.clone();
         let url = self.responses_url();
-        let headers = self.base.resolve_headers(&request);
+        let headers = self.base.resolve_headers(&ctx);
         let model = request.model.clone();
         let body = convert_request(&request, true);
 
@@ -320,9 +319,6 @@ mod tests {
             max_tokens: Some(16),
             stream: None,
             extra: serde_json::json!({"tools": [{"type": "web_search"}]}),
-            caller_user_id: None,
-            caller_user_email: None,
-            trace_id: None,
         }
     }
 

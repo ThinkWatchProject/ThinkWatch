@@ -1,6 +1,6 @@
 use crate::providers::DynAiProvider;
 use crate::providers::traits::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, GatewayError,
+    CallCtx, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, GatewayError,
 };
 use futures::Stream;
 use std::pin::Pin;
@@ -284,6 +284,7 @@ impl DynAiProvider for FailoverProvider {
     fn chat_completion_boxed(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<
         Box<
             dyn std::future::Future<Output = Result<ChatCompletionResponse, GatewayError>>
@@ -308,7 +309,7 @@ impl DynAiProvider for FailoverProvider {
 
                 match backend
                     .provider
-                    .chat_completion_boxed(request.clone())
+                    .chat_completion_boxed(request.clone(), ctx.clone())
                     .await
                 {
                     Ok(resp) => {
@@ -339,6 +340,7 @@ impl DynAiProvider for FailoverProvider {
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         // For streaming we can only retry before the stream starts producing data.
         // We try each healthy backend in order until one returns a stream successfully.
@@ -357,7 +359,9 @@ impl DynAiProvider for FailoverProvider {
         }
 
         match chosen_idx {
-            Some(idx) => self.backends[idx].provider.stream_chat_completion(request),
+            Some(idx) => self.backends[idx]
+                .provider
+                .stream_chat_completion(request, ctx),
             None => {
                 // All backends unhealthy — return an error stream
                 Box::pin(futures::stream::once(async {
@@ -388,6 +392,7 @@ mod tests {
         async fn chat_completion(
             &self,
             _request: ChatCompletionRequest,
+            _ctx: CallCtx,
         ) -> Result<ChatCompletionResponse, GatewayError> {
             Err(GatewayError::ProviderError("dummy".into()))
         }
@@ -395,6 +400,7 @@ mod tests {
         fn stream_chat_completion(
             &self,
             _request: ChatCompletionRequest,
+            _ctx: CallCtx,
         ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
             Box::pin(futures::stream::empty())
         }

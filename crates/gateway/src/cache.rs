@@ -240,9 +240,6 @@ mod tests {
             max_tokens: Some(1024),
             stream: None,
             extra: serde_json::json!({}),
-            caller_user_id: None,
-            caller_user_email: None,
-            trace_id: None,
         }
     }
 

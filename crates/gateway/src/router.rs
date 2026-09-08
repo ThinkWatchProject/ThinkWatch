@@ -264,6 +264,7 @@ mod tests {
         async fn chat_completion(
             &self,
             _request: ChatCompletionRequest,
+            _ctx: CallCtx,
         ) -> Result<ChatCompletionResponse, GatewayError> {
             Err(GatewayError::ProviderError("dummy".into()))
         }
@@ -271,6 +272,7 @@ mod tests {
         fn stream_chat_completion(
             &self,
             _request: ChatCompletionRequest,
+            _ctx: CallCtx,
         ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
             Box::pin(futures::stream::empty())
         }

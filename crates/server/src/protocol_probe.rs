@@ -158,9 +158,6 @@ fn probe_request(upstream_model: &str) -> ChatCompletionRequest {
         max_tokens: Some(1),
         stream: None,
         extra: serde_json::Value::Null,
-        caller_user_id: None,
-        caller_user_email: None,
-        trace_id: None,
     }
 }
 
@@ -202,7 +199,14 @@ async fn probe_one(materials: &ProviderMaterials, upstream_model: &str) -> Verdi
         let adapter = build_adapter(candidate, materials);
         let attempt = tokio::time::timeout(
             PROBE_TIMEOUT,
-            adapter.chat_completion_boxed(probe_request(upstream_model)),
+            // The probe has no caller: it runs from the admin import path,
+            // not from a user request. An empty CallCtx is the honest
+            // representation — header templates resolve to blanks and no
+            // trace id is forwarded, because there is no trace to join.
+            adapter.chat_completion_boxed(
+                probe_request(upstream_model),
+                think_watch_gateway::providers::CallCtx::default(),
+            ),
         )
         .await;
 

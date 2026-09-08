@@ -111,9 +111,13 @@ pub async fn proxy_chat_completion(
         }
     }
 
-    // 5. Attach caller identity for custom header template resolution
-    request.caller_user_id = identity.user_id.clone();
-    request.caller_user_email = identity.user_email.clone();
+    // 5. Caller identity travels alongside the request, not inside it —
+    //    see `CallCtx`. Built once here and cloned into each provider call.
+    let call_ctx = crate::providers::traits::CallCtx::new(
+        Some(trace_id.clone()),
+        identity.user_id.clone(),
+        identity.user_email.clone(),
+    );
 
     // 6. PII redaction — redact user messages before sending upstream.
     //    Placeholders are stable (no per-request salt) so two callers
@@ -369,6 +373,7 @@ pub async fn proxy_chat_completion(
         let stream = super::super::protocol_relearn::open_stream_with_relearn(
             entry,
             request,
+            call_ctx.clone(),
             state.db.clone(),
         );
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
@@ -390,7 +395,7 @@ pub async fn proxy_chat_completion(
         )
         .await;
         let (chosen_entry, mut response, sel_record) =
-            select_route_with_failover(routes, &request, &sel_ctx)
+            select_route_with_failover(routes, &request, &call_ctx, &sel_ctx)
                 .await
                 .map_err(|e| {
                     // select_route_with_failover just errored across every

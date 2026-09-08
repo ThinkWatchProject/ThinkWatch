@@ -33,12 +33,10 @@ impl AiProvider for OpenAiProvider {
     async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         let builder = self.base.client.post(self.completions_url());
-        let builder = self
-            .base
-            .apply_custom_headers(builder, &request)
-            .json(&request);
+        let builder = self.base.apply_custom_headers(builder, &ctx).json(&request);
 
         let resp = ProviderBase::send(builder).await?;
         let resp = ProviderBase::check_status(resp, "OpenAI").await?;
@@ -51,10 +49,11 @@ impl AiProvider for OpenAiProvider {
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.base.client.clone();
         let url = self.completions_url();
-        let custom_headers = self.base.resolve_headers(&request);
+        let custom_headers = self.base.resolve_headers(&ctx);
 
         // Ensure stream is set to true in the outgoing request
         let mut request = request;

@@ -8,7 +8,7 @@ pub mod openai_responses;
 pub mod protocol;
 pub mod traits;
 
-pub use traits::AiProvider;
+pub use traits::{AiProvider, CallCtx};
 
 use futures::Stream;
 use std::pin::Pin;
@@ -25,6 +25,7 @@ pub trait DynAiProvider: Send + Sync {
     fn chat_completion_boxed(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<
         Box<
             dyn std::future::Future<Output = Result<ChatCompletionResponse, GatewayError>>
@@ -36,6 +37,7 @@ pub trait DynAiProvider: Send + Sync {
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>;
 }
 
@@ -47,6 +49,7 @@ impl<T: AiProvider> DynAiProvider for T {
     fn chat_completion_boxed(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<
         Box<
             dyn std::future::Future<Output = Result<ChatCompletionResponse, GatewayError>>
@@ -54,13 +57,14 @@ impl<T: AiProvider> DynAiProvider for T {
                 + '_,
         >,
     > {
-        Box::pin(AiProvider::chat_completion(self, request))
+        Box::pin(AiProvider::chat_completion(self, request, ctx))
     }
 
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
-        AiProvider::stream_chat_completion(self, request)
+        AiProvider::stream_chat_completion(self, request, ctx)
     }
 }

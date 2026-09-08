@@ -47,6 +47,7 @@ impl AiProvider for AzureOpenAiProvider {
     async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         // In Azure, the "model" field is the deployment name
         let url = self.completions_url(&request.model);
@@ -55,10 +56,7 @@ impl AiProvider for AzureOpenAiProvider {
             .client
             .post(&url)
             .header("content-type", "application/json");
-        let builder = self
-            .base
-            .apply_custom_headers(builder, &request)
-            .json(&request);
+        let builder = self.base.apply_custom_headers(builder, &ctx).json(&request);
 
         let resp = ProviderBase::send(builder).await?;
         let resp = ProviderBase::check_status(resp, "Azure OpenAI").await?;
@@ -71,10 +69,11 @@ impl AiProvider for AzureOpenAiProvider {
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.base.client.clone();
         let url = self.completions_url(&request.model);
-        let headers = self.base.resolve_headers(&request);
+        let headers = self.base.resolve_headers(&ctx);
 
         let mut stream_request = request;
         stream_request.stream = Some(true);

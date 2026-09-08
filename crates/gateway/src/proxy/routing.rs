@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 use super::GatewayState;
 use crate::health::{CircuitBreakerConfig, RouteHealth};
-use crate::providers::traits::{ChatCompletionRequest, GatewayError};
+use crate::providers::traits::{CallCtx, ChatCompletionRequest, GatewayError};
 use crate::router::{AffinityMode, RouteEntry};
 use crate::strategy::{self, RoutingStrategy};
 
@@ -311,6 +311,7 @@ fn is_retryable(err: &GatewayError) -> bool {
 pub(super) async fn select_route_with_failover<'a>(
     routes: &'a [RouteEntry],
     request: &ChatCompletionRequest,
+    call_ctx: &CallCtx,
     ctx: &SelectionCtx<'_>,
 ) -> Result<
     (
@@ -342,7 +343,10 @@ pub(super) async fn select_route_with_failover<'a>(
         // (which would double-count earlier failed attempts in
         // a failover chain and skew the latency strategy).
         let attempt_started_at = std::time::Instant::now();
-        let mut result = entry.provider.chat_completion_boxed(req.clone()).await;
+        let mut result = entry
+            .provider
+            .chat_completion_boxed(req.clone(), call_ctx.clone())
+            .await;
 
         // The upstream may reject the dialect this route was configured
         // with — models get moved between APIs, and the import-time
@@ -360,7 +364,9 @@ pub(super) async fn select_route_with_failover<'a>(
                     to = %protocol,
                     "Upstream rejected the configured protocol — retrying with an alternate"
                 );
-                let retry = adapter.chat_completion_boxed(req.clone()).await;
+                let retry = adapter
+                    .chat_completion_boxed(req.clone(), call_ctx.clone())
+                    .await;
                 let recovered = retry.is_ok();
                 result = retry;
                 if recovered {

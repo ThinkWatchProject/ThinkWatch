@@ -166,10 +166,14 @@ pub async fn proxy_anthropic_messages(
         max_tokens: Some(max_tokens),
         stream: Some(is_stream),
         extra: serde_json::json!({}),
-        caller_user_id: identity.user_id.clone(),
-        caller_user_email: identity.user_email.clone(),
-        trace_id: Some(trace_id.clone()),
     };
+
+    // Caller identity travels alongside the request, not inside it — see `CallCtx`.
+    let call_ctx = crate::providers::traits::CallCtx::new(
+        Some(trace_id.clone()),
+        identity.user_id.clone(),
+        identity.user_email.clone(),
+    );
 
     if is_stream {
         let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
@@ -224,6 +228,7 @@ pub async fn proxy_anthropic_messages(
         let stream = super::super::protocol_relearn::open_stream_with_relearn(
             entry,
             stream_request,
+            call_ctx.clone(),
             state.db.clone(),
         );
         let stream_restorer = Some(PiiStreamRestorer::new(&redaction_ctx));
@@ -247,7 +252,7 @@ pub async fn proxy_anthropic_messages(
         )
         .await;
         let (chosen_entry, mut response, sel_record) =
-            select_route_with_failover(routes, &request, &sel_ctx)
+            select_route_with_failover(routes, &request, &call_ctx, &sel_ctx)
                 .await
                 .map_err(|e| {
                     emit_gateway_error_log(

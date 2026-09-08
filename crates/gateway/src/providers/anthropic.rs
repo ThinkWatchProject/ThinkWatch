@@ -225,6 +225,7 @@ impl AiProvider for AnthropicProvider {
     async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         let builder = self
             .base
@@ -232,7 +233,7 @@ impl AiProvider for AnthropicProvider {
             .post(format!("{}/v1/messages", self.base.base_url))
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json");
-        let builder = self.base.apply_custom_headers(builder, &request);
+        let builder = self.base.apply_custom_headers(builder, &ctx);
 
         let anthropic_req = convert_request(request);
         let builder = builder.json(&anthropic_req);
@@ -251,10 +252,11 @@ impl AiProvider for AnthropicProvider {
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.base.client.clone();
         let url = format!("{}/v1/messages", self.base.base_url);
-        let headers = self.base.resolve_headers(&request);
+        let headers = self.base.resolve_headers(&ctx);
 
         let mut anthropic_req = convert_request(request);
         anthropic_req.stream = Some(true);

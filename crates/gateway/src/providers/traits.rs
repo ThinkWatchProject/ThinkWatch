@@ -14,19 +14,62 @@ pub struct ChatCompletionRequest {
     pub stream: Option<bool>,
     #[serde(flatten)]
     pub extra: serde_json::Value,
-    /// Caller identity for template header resolution. Not serialized
-    /// to upstream — used only by the provider to resolve {{user_id}}
-    /// and {{user_email}} in custom headers.
-    #[serde(skip)]
-    pub caller_user_id: Option<String>,
-    #[serde(skip)]
-    pub caller_user_email: Option<String>,
-    /// Per-request trace id from the gateway entry layer. Forwarded
-    /// to the upstream as `x-trace-id` so a single id correlates the
-    /// downstream request, the gateway log, and the provider-side
-    /// request trace (when the provider also threads it through).
-    #[serde(skip)]
+}
+
+/// Per-call metadata that is *not* part of the request payload: caller
+/// identity for header-template substitution, plus the trace id that
+/// correlates the downstream request, the gateway log and the upstream
+/// log line.
+///
+/// This used to live on `ChatCompletionRequest` as three `#[serde(skip)]`
+/// fields. That was wrong in a way that only shows up at the seams:
+/// `ChatCompletionRequest` is the *wire format*, and a struct that
+/// serializes to the upstream body should not also be the carrier for
+/// "who is calling". Every construction site paid for it with three
+/// lines of `None`, and anything that legitimately built a request
+/// without a caller (cache probes, the protocol prober, Bedrock's
+/// internal re-shaping) had to opt out of fields it never wanted.
+///
+/// `attrs` is an open dictionary rather than named fields on purpose:
+/// the substitution engine only does `{{key}}` → value and does not
+/// understand what any key means. Adding `{{team_id}}` to a header
+/// template becomes a caller-side change, not a signature change here.
+#[derive(Debug, Clone, Default)]
+pub struct CallCtx {
+    /// Forwarded upstream as `x-trace-id` when present (OBS-01).
     pub trace_id: Option<String>,
+    /// Values for `{{...}}` placeholders in custom header templates.
+    /// Conventional keys: `user_id`, `user_email`.
+    pub attrs: std::collections::HashMap<String, String>,
+}
+
+impl CallCtx {
+    /// Convenience for the common enterprise case: caller identity plus
+    /// a trace id. Empty/absent values are simply not inserted, so a
+    /// template referencing a missing key resolves to the empty string
+    /// (the previous behaviour).
+    pub fn new(
+        trace_id: Option<String>,
+        user_id: Option<String>,
+        user_email: Option<String>,
+    ) -> Self {
+        let mut attrs = std::collections::HashMap::new();
+        if let Some(v) = user_id {
+            attrs.insert("user_id".to_string(), v);
+        }
+        if let Some(v) = user_email {
+            attrs.insert("user_email".to_string(), v);
+        }
+        Self { trace_id, attrs }
+    }
+
+    /// Trace-only context, for internal calls with no caller identity.
+    pub fn trace(trace_id: impl Into<String>) -> Self {
+        Self {
+            trace_id: Some(trace_id.into()),
+            attrs: std::collections::HashMap::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -265,36 +308,30 @@ impl ProviderBase {
         self
     }
 
-    /// Resolve template variables (`{{user_id}}`, `{{user_email}}`) in
-    /// custom header values using the caller identity from the request.
-    pub fn resolve_headers(&self, request: &ChatCompletionRequest) -> Vec<(String, String)> {
-        let uid = request.caller_user_id.as_deref().unwrap_or("");
-        let email = request.caller_user_email.as_deref().unwrap_or("");
+    /// Resolve `{{...}}` template variables in custom header values from
+    /// `ctx.attrs`. A placeholder whose key is absent resolves to the
+    /// empty string rather than being left literal — an upstream that
+    /// receives `X-User: {{user_id}}` is worse than one that receives
+    /// `X-User:`, because the literal looks like a working config.
+    pub fn resolve_headers(&self, ctx: &CallCtx) -> Vec<(String, String)> {
         self.custom_headers
             .iter()
-            .map(|(k, v)| {
-                (
-                    k.clone(),
-                    v.replace("{{user_id}}", uid)
-                        .replace("{{user_email}}", email),
-                )
-            })
+            .map(|(k, v)| (k.clone(), substitute_template(v, &ctx.attrs)))
             .collect()
     }
 
     /// Append the caller-resolved custom headers to a `RequestBuilder`.
     /// Centralizes what would otherwise be duplicated in every
     /// provider's `chat_completion` and `stream_chat_completion`.
-    /// Also injects `x-trace-id` from the request's trace_id so the
-    /// upstream log line and the gateway log line share a correlation
-    /// id (OBS-01).
+    /// Also injects `x-trace-id` from `ctx` so the upstream log line and
+    /// the gateway log line share a correlation id (OBS-01).
     pub fn apply_custom_headers(
         &self,
         builder: reqwest::RequestBuilder,
-        request: &ChatCompletionRequest,
+        ctx: &CallCtx,
     ) -> reqwest::RequestBuilder {
-        let mut builder = Self::apply_headers(builder, &self.resolve_headers(request));
-        if let Some(ref trace_id) = request.trace_id {
+        let mut builder = Self::apply_headers(builder, &self.resolve_headers(ctx));
+        if let Some(ref trace_id) = ctx.trace_id {
             builder = builder.header("x-trace-id", trace_id.as_str());
         }
         builder
@@ -402,11 +439,15 @@ pub trait AiProvider: Send + Sync {
     fn chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> impl std::future::Future<Output = Result<ChatCompletionResponse, GatewayError>> + Send;
 
+    /// `ctx` is taken by value, like `request`: the returned stream is
+    /// `'static` and outlives any borrow the caller could lend us.
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>;
 }
 
@@ -483,5 +524,95 @@ mod chat_message_roundtrip_tests {
         let msg: ChatMessage = serde_json::from_value(raw).unwrap();
         let out = serde_json::to_value(&msg).unwrap();
         assert_eq!(out["name"], "alice");
+    }
+}
+
+/// Replace every `{{key}}` occurrence in `template` with `attrs[key]`,
+/// or with the empty string when the key is absent.
+fn substitute_template(
+    template: &str,
+    attrs: &std::collections::HashMap<String, String>,
+) -> String {
+    // Fast path: most header values carry no placeholder at all.
+    if !template.contains("{{") {
+        return template.to_string();
+    }
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        match after.find("}}") {
+            Some(end) => {
+                let key = after[..end].trim();
+                if let Some(v) = attrs.get(key) {
+                    out.push_str(v);
+                }
+                rest = &after[end + 2..];
+            }
+            // Unterminated `{{` — emit the rest verbatim rather than
+            // silently truncating a header value.
+            None => {
+                out.push_str(&rest[start..]);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod call_ctx_tests {
+    use super::*;
+
+    fn attrs(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn substitutes_known_keys() {
+        let a = attrs(&[("user_id", "u1"), ("user_email", "a@b.c")]);
+        assert_eq!(substitute_template("{{user_id}}", &a), "u1");
+        assert_eq!(
+            substitute_template("id={{user_id}};mail={{user_email}}", &a),
+            "id=u1;mail=a@b.c"
+        );
+    }
+
+    #[test]
+    fn missing_key_becomes_empty_not_literal() {
+        // The old implementation had the same behaviour via `unwrap_or("")`.
+        // Keeping it: a literal `{{user_id}}` reaching the upstream looks
+        // like a working config and is harder to diagnose than a blank.
+        assert_eq!(substitute_template("{{nope}}", &attrs(&[])), "");
+        assert_eq!(substitute_template("x{{nope}}y", &attrs(&[])), "xy");
+    }
+
+    #[test]
+    fn passes_through_values_without_placeholders() {
+        let a = attrs(&[("user_id", "u1")]);
+        assert_eq!(substitute_template("plain", &a), "plain");
+        assert_eq!(substitute_template("", &a), "");
+    }
+
+    #[test]
+    fn unterminated_placeholder_is_kept_verbatim() {
+        // Truncating here would silently shorten a header value.
+        assert_eq!(substitute_template("a{{user", &attrs(&[])), "a{{user");
+    }
+
+    #[test]
+    fn new_skips_absent_identity() {
+        let ctx = CallCtx::new(Some("t1".into()), None, Some("a@b.c".into()));
+        assert_eq!(ctx.trace_id.as_deref(), Some("t1"));
+        assert!(!ctx.attrs.contains_key("user_id"));
+        assert_eq!(
+            ctx.attrs.get("user_email").map(String::as_str),
+            Some("a@b.c")
+        );
     }
 }

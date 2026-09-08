@@ -20,7 +20,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::providers::protocol::UpstreamProtocol;
-use crate::providers::traits::{ChatCompletionChunk, ChatCompletionRequest, GatewayError};
+use crate::providers::traits::{CallCtx, ChatCompletionChunk, ChatCompletionRequest, GatewayError};
 use crate::router::RouteEntry;
 
 /// Does this failure look like "wrong dialect" rather than "bad
@@ -86,6 +86,7 @@ pub(super) fn is_protocol_mismatch(err: &GatewayError) -> bool {
 pub(super) fn open_stream_with_relearn(
     entry: &RouteEntry,
     request: ChatCompletionRequest,
+    ctx: CallCtx,
     db: sqlx::PgPool,
 ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
     // Own everything the stream needs: it outlives this call, and all
@@ -97,7 +98,7 @@ pub(super) fn open_stream_with_relearn(
     let provider_name = entry.provider_name.clone();
 
     Box::pin(async_stream::stream! {
-        let mut inner = primary.stream_chat_completion(request.clone());
+        let mut inner = primary.stream_chat_completion(request.clone(), ctx.clone());
         let mut first = inner.next().await;
 
         if let Some(Err(ref e)) = first
@@ -111,7 +112,7 @@ pub(super) fn open_stream_with_relearn(
                     to = %protocol,
                     "Upstream rejected the configured protocol on a stream — retrying with an alternate"
                 );
-                let mut retry = adapter.stream_chat_completion(request.clone());
+                let mut retry = adapter.stream_chat_completion(request.clone(), ctx.clone());
                 let retry_first = retry.next().await;
                 let recovered = !matches!(retry_first, Some(Err(_)));
                 let keep_going =

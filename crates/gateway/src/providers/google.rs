@@ -175,6 +175,7 @@ impl AiProvider for GoogleProvider {
     async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Result<ChatCompletionResponse, GatewayError> {
         let model = request.model.clone();
         let gemini_req = convert_request(&request);
@@ -186,7 +187,7 @@ impl AiProvider for GoogleProvider {
 
         let builder = self
             .base
-            .apply_custom_headers(self.base.client.post(&url), &request)
+            .apply_custom_headers(self.base.client.post(&url), &ctx)
             .json(&gemini_req);
 
         let resp = ProviderBase::send(builder).await?;
@@ -203,11 +204,12 @@ impl AiProvider for GoogleProvider {
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         let client = self.base.client.clone();
         let base_url = self.base.base_url.clone();
         let model = request.model.clone();
-        let headers = self.base.resolve_headers(&request);
+        let headers = self.base.resolve_headers(&ctx);
 
         let gemini_req = convert_request(&request);
 

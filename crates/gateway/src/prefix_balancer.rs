@@ -1,6 +1,6 @@
 use crate::providers::DynAiProvider;
 use crate::providers::traits::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, GatewayError,
+    CallCtx, ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, GatewayError,
 };
 use futures::Stream;
 use std::collections::HashMap;
@@ -111,6 +111,7 @@ impl DynAiProvider for PrefixBalancer {
     fn chat_completion_boxed(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<
         Box<
             dyn std::future::Future<Output = Result<ChatCompletionResponse, GatewayError>>
@@ -133,7 +134,10 @@ impl DynAiProvider for PrefixBalancer {
                 let backend_idx = (idx + attempt) % len;
                 let backend = &self.backends[backend_idx];
 
-                match backend.chat_completion_boxed(request.clone()).await {
+                match backend
+                    .chat_completion_boxed(request.clone(), ctx.clone())
+                    .await
+                {
                     Ok(resp) => return Ok(resp),
                     Err(e) if attempt + 1 < len => {
                         tracing::warn!(
@@ -156,6 +160,7 @@ impl DynAiProvider for PrefixBalancer {
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
         if self.backends.is_empty() {
             return Box::pin(futures::stream::once(async {
@@ -176,7 +181,7 @@ impl DynAiProvider for PrefixBalancer {
             None => 0,
         };
 
-        self.backends[idx].stream_chat_completion(request)
+        self.backends[idx].stream_chat_completion(request, ctx)
     }
 }
 
@@ -197,6 +202,7 @@ mod tests {
         async fn chat_completion(
             &self,
             _request: ChatCompletionRequest,
+            _ctx: CallCtx,
         ) -> Result<ChatCompletionResponse, GatewayError> {
             Err(GatewayError::ProviderError("dummy".into()))
         }
@@ -204,6 +210,7 @@ mod tests {
         fn stream_chat_completion(
             &self,
             _request: ChatCompletionRequest,
+            _ctx: CallCtx,
         ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
             Box::pin(futures::stream::empty())
         }
@@ -229,9 +236,6 @@ mod tests {
             max_tokens: None,
             stream: None,
             extra: serde_json::Value::Null,
-            caller_user_id: None,
-            caller_user_email: None,
-            trace_id: None,
         }
     }
 

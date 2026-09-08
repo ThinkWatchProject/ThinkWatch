@@ -31,14 +31,16 @@ impl AiProvider for CustomProvider {
     async fn chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Result<ChatCompletionResponse, GatewayError> {
-        self.inner.chat_completion(request).await
+        self.inner.chat_completion(request, ctx).await
     }
 
     fn stream_chat_completion(
         &self,
         request: ChatCompletionRequest,
+        ctx: CallCtx,
     ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
-        self.inner.stream_chat_completion(request)
+        self.inner.stream_chat_completion(request, ctx)
     }
 }
