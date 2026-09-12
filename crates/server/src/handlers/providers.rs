@@ -41,7 +41,9 @@ pub(crate) fn decrypt_secret_from_json(
     value: &serde_json::Value,
     encryption_key: &str,
 ) -> Result<String, AppError> {
-    JsonSecret::from_json(value)?.decrypt(encryption_key)
+    // `?` on both halves so `From<SecretError>` applies — a bare tail
+    // expression would hand back core's error type instead of ours.
+    Ok(JsonSecret::from_json(value)?.decrypt(encryption_key)?)
 }
 
 /// Take a header list as supplied in a request and return a JSON array

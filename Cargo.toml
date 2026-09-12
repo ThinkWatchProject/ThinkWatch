@@ -78,8 +78,6 @@ futures = "0.3"
 tokio-stream = "0.1"
 async-stream = "0.3"
 
-# Crypto — pinned exact. See the auth section for the rationale.
-aes-gcm = "=0.10.3"
 sha2 = "=0.11.0"
 sha1 = "=0.11.0"
 hmac = "=0.13.0"

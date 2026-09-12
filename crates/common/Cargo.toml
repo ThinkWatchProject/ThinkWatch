@@ -21,7 +21,6 @@ dotenvy = { workspace = true }
 tokio = { workspace = true }
 utoipa = { workspace = true }
 reqwest = { workspace = true }
-aes-gcm = { workspace = true }
 rand = { workspace = true }
 hex = { workspace = true }
 sha1 = { workspace = true }

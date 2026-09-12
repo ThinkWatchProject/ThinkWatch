@@ -3060,6 +3060,7 @@ dependencies = [
  "rustls-platform-verifier",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "sync_wrapper",
  "tokio",
  "tokio-rustls",
@@ -4053,7 +4054,6 @@ dependencies = [
 name = "think-watch-common"
 version = "1.0.1"
 dependencies = [
- "aes-gcm",
  "anyhow",
  "async-trait",
  "aws-credential-types",
