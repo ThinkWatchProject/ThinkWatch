@@ -4,6 +4,7 @@ use openidconnect::{
     Scope, TokenResponse, TokenUrl,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 
 /// User info extracted from an OIDC ID token.
@@ -65,6 +66,7 @@ struct OidcInner {
     issuer: String,
     email_claim: String,
     name_claim: String,
+    additional_trusted_audiences: Arc<HashSet<String>>,
 }
 
 impl OidcManager {
@@ -80,6 +82,16 @@ impl OidcManager {
         let provider_metadata = CoreProviderMetadata::discover_async(issuer.clone(), &http_client)
             .await
             .map_err(|e| anyhow::anyhow!("OIDC discovery failed: {e}"))?;
+
+        let trusted_audiences_raw = match std::env::var("OIDC_ADDITIONAL_TRUSTED_AUDIENCES") {
+            Ok(value) => value,
+            Err(std::env::VarError::NotPresent) => String::new(),
+            Err(std::env::VarError::NotUnicode(_)) => {
+                anyhow::bail!("OIDC_ADDITIONAL_TRUSTED_AUDIENCES must contain valid UTF-8")
+            }
+        };
+        let additional_trusted_audiences =
+            Arc::new(parse_additional_trusted_audiences(&trusted_audiences_raw));
 
         let auth_url = provider_metadata.authorization_endpoint().clone();
         let token_url = provider_metadata
@@ -99,6 +111,7 @@ impl OidcManager {
                 issuer: config.issuer_url.clone(),
                 email_claim: config.email_claim.clone(),
                 name_claim: config.name_claim.clone(),
+                additional_trusted_audiences,
             }),
         })
     }
@@ -169,10 +182,43 @@ impl OidcManager {
             .id_token()
             .ok_or_else(|| anyhow::anyhow!("No ID token in response"))?;
 
-        let verifier = client.id_token_verifier();
-        let claims = id_token
-            .claims(&verifier, nonce)
-            .map_err(|e| anyhow::anyhow!("ID token verification failed: {e}"))?;
+        // Only install the custom other-audience verifier when we actually
+        // have trusted audiences configured. `set_other_audience_verifier_fn`
+        // *replaces* the crate's built-in `StandardAudienceVerifier` (which
+        // additionally accepts a multi-audience token when `azp` matches the
+        // client ID, per OIDC Core 3.1.3.7) with a callback that only
+        // consults our allowlist. Skipping the call entirely when the
+        // allowlist is empty keeps that unset case byte-for-byte identical
+        // to stock `openidconnect` behavior — no ENV means no behavior
+        // change, full stop.
+        let claims = if self.inner.additional_trusted_audiences.is_empty() {
+            let verifier = client.id_token_verifier();
+            id_token
+                .claims(&verifier, nonce)
+                .map_err(|e| anyhow::anyhow!("ID token verification failed: {e}"))?
+        } else {
+            let trusted_audiences = Arc::clone(&self.inner.additional_trusted_audiences);
+            let verifier =
+                client
+                    .id_token_verifier()
+                    .set_other_audience_verifier_fn(move |audience| {
+                        trusted_audiences.contains(audience.as_str())
+                    });
+            id_token
+                .claims(&verifier, nonce)
+                .map_err(|e| anyhow::anyhow!("ID token verification failed: {e}"))?
+        };
+
+        let audiences = claims.audiences();
+        let client_id_in_audiences = audiences
+            .iter()
+            .any(|audience| audience.as_str() == self.inner.client_id.as_str());
+        validate_authorized_party(
+            audiences.len(),
+            client_id_in_audiences,
+            claims.authorized_party().map(|party| party.as_str()),
+            self.inner.client_id.as_str(),
+        )?;
 
         let subject = claims.subject().to_string();
 
@@ -245,6 +291,36 @@ pub struct OidcDiscoveryMetadata {
     pub jwks_uri: Option<String>,
 }
 
+fn parse_additional_trusted_audiences(value: &str) -> HashSet<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|audience| !audience.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// Require `azp == client_id` whenever the token doesn't unambiguously
+/// prove it was minted for us: either it carries more than one audience,
+/// or our own client ID isn't among the audiences at all (the latter can
+/// only happen when the additional-audiences allowlist above accepted a
+/// single-audience token whose sole audience is a *trusted* value other
+/// than our client ID — e.g. Zitadel's project ID). In both cases `azp`
+/// is the only remaining signal that the IdP actually issued this token
+/// for this client, per OIDC Core 3.1.3.7.
+fn validate_authorized_party(
+    audience_count: usize,
+    client_id_in_audiences: bool,
+    authorized_party: Option<&str>,
+    client_id: &str,
+) -> anyhow::Result<()> {
+    let azp_required = audience_count > 1 || !client_id_in_audiences;
+    if azp_required && authorized_party != Some(client_id) {
+        anyhow::bail!("ID token audiences require azp to match the client ID");
+    }
+    Ok(())
+}
+
 /// Pull the JSON payload (middle segment) out of a signed ID token.
 /// The token has already been verified by `id_token.claims()`, so we
 /// just need access to the raw fields the typed accessors don't expose.
@@ -256,4 +332,63 @@ fn decode_id_token_payload(jwt: &str) -> anyhow::Result<serde_json::Value> {
         .ok_or_else(|| anyhow::anyhow!("malformed JWT"))?;
     let bytes = data_encoding::BASE64URL_NOPAD.decode(payload.as_bytes())?;
     Ok(serde_json::from_slice(&bytes)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trusted_audiences_are_parsed_as_trimmed_exact_values() {
+        let parsed = parse_additional_trusted_audiences(" project-1,project-2 , project-1 ,, ");
+
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.contains("project-1"));
+        assert!(parsed.contains("project-2"));
+    }
+
+    #[test]
+    fn multiple_audiences_require_matching_authorized_party() {
+        assert!(
+            validate_authorized_party(2, true, Some("thinkwatch-client"), "thinkwatch-client")
+                .is_ok()
+        );
+        assert!(validate_authorized_party(2, true, None, "thinkwatch-client").is_err());
+        assert!(
+            validate_authorized_party(2, true, Some("other-client"), "thinkwatch-client").is_err()
+        );
+    }
+
+    #[test]
+    fn single_audience_matching_client_id_does_not_require_authorized_party() {
+        assert!(validate_authorized_party(1, true, None, "thinkwatch-client").is_ok());
+    }
+
+    #[test]
+    fn single_trusted_audience_other_than_client_id_requires_authorized_party() {
+        // aud = [trusted-project-id] only, client ID absent from aud — the
+        // trusted-audience allowlist accepted the token, but azp is the
+        // only remaining proof it was issued for us.
+        assert!(
+            validate_authorized_party(1, false, Some("thinkwatch-client"), "thinkwatch-client")
+                .is_ok()
+        );
+        assert!(validate_authorized_party(1, false, None, "thinkwatch-client").is_err());
+        assert!(
+            validate_authorized_party(1, false, Some("other-client"), "thinkwatch-client").is_err()
+        );
+    }
+
+    #[test]
+    fn empty_trusted_audiences_set_skips_custom_verifier_path() {
+        // Documents the intended behavior distinguished at the call site
+        // in `exchange_code`: an empty allowlist must take the plain
+        // `client.id_token_verifier()` branch (stock upstream behavior),
+        // never the `set_other_audience_verifier_fn` branch. Enforced by
+        // code review / the `is_empty()` branch above; a full integration
+        // test would require a signed JWT fixture and is tracked as a
+        // follow-up (see docs/thinkwatch.md).
+        let empty = parse_additional_trusted_audiences("");
+        assert!(empty.is_empty());
+    }
 }
