@@ -54,7 +54,7 @@ fn build_syslog_message(facility: u8, entry: &AuditEntry, newline: bool) -> Stri
 
     let mut message = format!(
         "<{priority}>1 {ts} think-watch audit - {action} {sd} {action} on {resource}",
-        ts = &entry.created_at,
+        ts = entry.created_at,
         action = entry.action,
         sd = structured_data,
     );
