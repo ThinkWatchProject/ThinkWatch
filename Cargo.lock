@@ -4655,6 +4655,7 @@ dependencies = [
 [[package]]
 name = "tw-crypto"
 version = "0.1.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=main#622b1ead971d30f92611e7d0b5e5b6d36e1c0ddf"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4667,6 +4668,7 @@ dependencies = [
 [[package]]
 name = "tw-protocol"
 version = "0.1.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=main#622b1ead971d30f92611e7d0b5e5b6d36e1c0ddf"
 dependencies = [
  "bytes",
  "futures",
@@ -4679,6 +4681,7 @@ dependencies = [
 [[package]]
 name = "tw-provider"
 version = "0.1.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=main#622b1ead971d30f92611e7d0b5e5b6d36e1c0ddf"
 dependencies = [
  "async-stream",
  "aws-credential-types",
@@ -4704,6 +4707,7 @@ dependencies = [
 [[package]]
 name = "tw-resil"
 version = "0.1.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=main#622b1ead971d30f92611e7d0b5e5b6d36e1c0ddf"
 dependencies = [
  "futures",
  "metrics",
@@ -4717,6 +4721,7 @@ dependencies = [
 [[package]]
 name = "tw-types"
 version = "0.1.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?branch=main#622b1ead971d30f92611e7d0b5e5b6d36e1c0ddf"
 dependencies = [
  "serde",
  "serde_json",
