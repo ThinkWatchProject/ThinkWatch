@@ -300,25 +300,43 @@ fn parse_additional_trusted_audiences(value: &str) -> HashSet<String> {
         .collect()
 }
 
-/// Require `azp == client_id` whenever the token doesn't unambiguously
-/// prove it was minted for us: either it carries more than one audience,
-/// or our own client ID isn't among the audiences at all (the latter can
-/// only happen when the additional-audiences allowlist above accepted a
-/// single-audience token whose sole audience is a *trusted* value other
-/// than our client ID — e.g. Zitadel's project ID). In both cases `azp`
-/// is the only remaining signal that the IdP actually issued this token
-/// for this client, per OIDC Core 3.1.3.7.
+/// Enforce OIDC Core 3.1.3.7's `azp` steps, which `openidconnect` leaves
+/// to the caller — its own implementation of steps 4 and 5 is commented
+/// out upstream, with a note preferring that clients supply the check.
+///
+/// Step 5 (`azp`, if present, must be our client ID) is checked
+/// unconditionally. Step 4 (a multi-audience token should carry `azp`)
+/// makes a *missing* `azp` fatal only when the audiences don't already
+/// prove sole intent for us.
+///
+/// `client_id_in_audiences` is false-only in theory: `IdTokenVerifier`
+/// enforces `client_id ∈ aud` in its `aud_match_required` block *before*
+/// `other_aud_verifier_fn` is consulted, so a token that omits our client
+/// ID never reaches this function no matter what the allowlist says. It
+/// stays a parameter as defense in depth against that guarantee changing
+/// (an `aud_match_required(false)`, or an upstream rewrite) — it is not
+/// load-bearing today, and the test covering it documents a state the
+/// crate currently makes unreachable.
 fn validate_authorized_party(
     audience_count: usize,
     client_id_in_audiences: bool,
     authorized_party: Option<&str>,
     client_id: &str,
 ) -> anyhow::Result<()> {
-    let azp_required = audience_count > 1 || !client_id_in_audiences;
-    if azp_required && authorized_party != Some(client_id) {
-        anyhow::bail!("ID token audiences require azp to match the client ID");
+    match authorized_party {
+        // Step 5: present but pointing at somebody else. Nothing about
+        // the audience count can excuse this — the IdP is telling us the
+        // token was authorized for a different client.
+        Some(party) if party != client_id => {
+            anyhow::bail!("ID token azp does not match the client ID")
+        }
+        // Step 4: absent, and the audiences alone don't establish that
+        // this token was minted for us.
+        None if audience_count > 1 || !client_id_in_audiences => {
+            anyhow::bail!("ID token audiences require azp to match the client ID")
+        }
+        _ => Ok(()),
     }
-    Ok(())
 }
 
 /// Pull the JSON payload (middle segment) out of a signed ID token.
@@ -360,6 +378,22 @@ mod tests {
     }
 
     #[test]
+    fn mismatched_authorized_party_is_rejected_even_with_a_single_audience() {
+        // OIDC Core step 5 has no audience-count precondition. aud =
+        // [thinkwatch-client] with azp = other-client means the IdP
+        // authorized a different client, and stock `openidconnect` would
+        // let it through because its azp check is commented out.
+        assert!(
+            validate_authorized_party(1, true, Some("other-client"), "thinkwatch-client").is_err()
+        );
+        // The same shape with a matching azp stays fine.
+        assert!(
+            validate_authorized_party(1, true, Some("thinkwatch-client"), "thinkwatch-client")
+                .is_ok()
+        );
+    }
+
+    #[test]
     fn single_audience_matching_client_id_does_not_require_authorized_party() {
         assert!(validate_authorized_party(1, true, None, "thinkwatch-client").is_ok());
     }
@@ -386,8 +420,9 @@ mod tests {
         // `client.id_token_verifier()` branch (stock upstream behavior),
         // never the `set_other_audience_verifier_fn` branch. Enforced by
         // code review / the `is_empty()` branch above; a full integration
-        // test would require a signed JWT fixture and is tracked as a
-        // follow-up (see docs/thinkwatch.md).
+        // test would require a signed JWT fixture and issuer discovery,
+        // so it belongs with the other network-bound auth tests rather
+        // than here.
         let empty = parse_additional_trusted_audiences("");
         assert!(empty.is_empty());
     }
