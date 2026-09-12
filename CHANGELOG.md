@@ -11,6 +11,87 @@ target.
 
 ## [Unreleased]
 
+## [1.0.2] — 2026-09-13
+
+The shared gateway layer moves out into its own repository, and OIDC
+learns to accept an ID token whose `aud` carries more than the client
+ID. Mostly a fix release otherwise — the deploy and auth items below are
+the ones worth reading before you upgrade.
+
+### Added
+
+- **`OIDC_ADDITIONAL_TRUSTED_AUDIENCES`** — a comma-separated allowlist
+  of extra ID-token audiences to trust. Some IdPs put something besides
+  the client ID in `aud`; Zitadel includes the parent project ID, and
+  `openidconnect`'s stock verifier rejects every non-client-ID audience,
+  so login failed outright. Leave it unset and verification is
+  byte-for-byte what it was. Set, it widens exactly one check: the extra
+  audiences on a multi-audience token are matched against this list as
+  exact strings — no wildcards, no prefixes. The client ID must still
+  appear in `aud` regardless. Documented in `.env.example`. Thanks to
+  @DaniW42 for the report and the patch (#12).
+- **Automatic upstream protocol detection** — the gateway learns an
+  upstream's dialect and relearns it when the upstream changes, instead
+  of relying on a static guess. Protocol is now a property of the route.
+- **Reverse-proxy identification** — the server recognizes its own
+  reverse proxy, which is what makes the dashboard WebSocket and the API
+  docs work behind nginx.
+
+### Changed
+
+- **`azp` is validated whenever it is present**, per OIDC Core 3.1.3.7
+  step 5, which has no audience-count precondition. Previously it was
+  only checked when a multi-audience token made it mandatory, so a
+  single-audience token naming this client with `azp` pointing at a
+  *different* client was accepted — the IdP stating plainly that the
+  token was authorized for somebody else. **This can reject a token that
+  1.0.1 accepted.** If your IdP sets `azp` to something other than your
+  client ID, logins will start failing and the message will say so;
+  that is the IdP to fix, not this setting.
+- **The shared gateway layer now comes from
+  [ThinkWatch-Core](https://github.com/ThinkWatchProject/ThinkWatch-Core)**
+  as a git dependency rather than living in this tree. Six crates —
+  types, protocol, provider, resilience, crypto, and the JSON secret
+  envelope — are one implementation shared with the desktop edition
+  instead of two copies drifting apart. No runtime or API change; it
+  affects you only if you build from source, where the build now needs
+  network access to resolve that dependency. The published images are
+  unaffected.
+- **Stored secrets are redacted on read and decrypted on use.** Provider
+  credentials no longer travel in plaintext through code paths that
+  merely display or list them.
+
+### Fixed
+
+- **Deploy** — nginx broke the API docs three separate ways; the
+  dashboard WebSocket wasn't proxied; the prod stack's healthchecks were
+  wrong; and the dev stack could overwrite production's ClickHouse
+  credentials. The last one is the reason to read this list.
+- **Auth** — the console logged itself out after every token refresh.
+  Rate-limit counters could be created without an expiry and sit in
+  Redis forever.
+- **Models** — the gateway no longer offers models the upstream refuses,
+  no longer imports models it won't serve, and reports every dialect
+  that was refused rather than only the last. Provider `base_url`
+  trailing slashes are normalized.
+- **Analytics** — spend is attributed to a person, not a UUID.
+- **Audit** — a syslog forwarder formatting fix that had CI red on
+  clippy 1.98 (#11, thanks @DaniW42). Two more instances of the same
+  lint, plus a `result_large_err` false positive in the MCP lifecycle
+  stages, measured rather than boxed: the `Ok` variant is 296 bytes
+  against the `Err`'s 152, so boxing saves nothing and adds an
+  allocation.
+- **UI** — the brand mark stays inside the collapsed sidebar rail.
+
+### Contributing
+
+`CONTRIBUTING.md` and a PR template now state the branch contract that
+had only lived in `docs/operations/release.md`: routine work targets
+`dev`, and `main` is the release line. A workflow comments on PRs opened
+against `main` from anything other than `dev` or a `hotfix/*` branch,
+because GitHub pre-fills the base with the default branch and walks
+contributors into it.
+
 ### Added
 - _(nothing yet)_
 
@@ -139,7 +220,8 @@ unreleased builds should: stop the gateway, run `db/schema.sql`
 against PostgreSQL, restart against this tag. The schema is
 idempotent end-to-end, so the apply is safe to repeat.
 
-[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/ThinkWatchProject/ThinkWatch/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.2
 [1.0.1]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.1
 [1.0.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v1.0.0
 [0.5.0]: https://github.com/ThinkWatchProject/ThinkWatch/releases/tag/v0.5.0
