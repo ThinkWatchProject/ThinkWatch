@@ -1,0 +1,49 @@
+# Nudge PRs that were opened against `main` toward `dev`.
+#
+# GitHub pre-fills a new PR's base with the repo's default branch, which
+# here is `main` — the release-only line (see docs/operations/release.md).
+# A contributor following the UI therefore lands on the wrong branch by
+# default, and the first signal they get today is a human asking them to
+# retarget. This says it immediately instead.
+#
+# `pull_request_target` rather than `pull_request` because a PR from a
+# fork gets a read-only token under the latter, so it could not comment
+# — and a fork PR is exactly the case this exists for. That trigger runs
+# with the base repository's token, so this workflow **must never check
+# out or execute PR code**. It doesn't: no actions/checkout, no build,
+# nothing but one API call against metadata GitHub already gave us.
+name: PR base guard
+
+on:
+  pull_request_target:
+    types: [opened, reopened]
+    branches: [main]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  nudge:
+    runs-on: ubuntu-latest
+    # The two legitimate ways to target `main`: the release PR (`dev` ->
+    # `main`) and a hotfix branch. Everything else is a mis-targeted
+    # contribution.
+    if: >-
+      github.event.pull_request.head.ref != 'dev' &&
+      !startsWith(github.event.pull_request.head.ref, 'hotfix/') &&
+      !startsWith(github.event.pull_request.head.ref, 'release/')
+    steps:
+      - name: Ask for a retarget to dev
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+        run: |
+          gh pr comment "$PR" --repo "$REPO" --body \
+          'Thanks for the PR. One thing before review: **this targets `main`, and it should target `dev`.**
+
+          `main` is a release-only line — branch-protected, linear history, and every commit on it is a tagged release snapshot. Routine work lands on `dev` and reaches `main` with the next release. GitHub pre-filled `main` here because it is the default branch, so this is our defaults being unhelpful rather than anything you did wrong.
+
+          No need to close and reopen: click **Edit** next to the PR title and change the base branch to `dev`. The commits and the discussion carry over.
+
+          See [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md) and [docs/operations/release.md](../blob/main/docs/operations/release.md) for the branch contract.'
