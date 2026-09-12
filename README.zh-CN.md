@@ -234,13 +234,3 @@ ThinkWatch 采用 [Business Source License 1.1](LICENSE) 进行源码可见分�
 具体的生产阈值、Billable Tokens 与 MCP Tool Calls 定义、梯度方案
 以及后续切换到 `GPL-2.0-or-later` 的规则，见
 [LICENSING.zh-CN.md](LICENSING.zh-CN.md)。
-
-## Star History
-
-<a href="https://www.star-history.com/#ThinkWatchProject/ThinkWatch&Date">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=ThinkWatchProject/ThinkWatch&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=ThinkWatchProject/ThinkWatch&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=ThinkWatchProject/ThinkWatch&type=Date" />
- </picture>
-</a>
