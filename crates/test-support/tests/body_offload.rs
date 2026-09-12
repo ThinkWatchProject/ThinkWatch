@@ -222,7 +222,7 @@ async fn oversize_body_offloads_to_blob_store_and_dereferences_via_endpoint() {
     assert!(
         resolved.contains(PROBE_PROMPT),
         "dereferenced body should contain the original prompt — got first 200: {:?}",
-        &resolved.chars().take(200).collect::<String>()
+        resolved.chars().take(200).collect::<String>()
     );
     assert!(
         !resolved.starts_with("s3://"),

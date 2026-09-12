@@ -455,7 +455,7 @@ pub async fn test_forwarder(
             let priority = facility * 8 + 6u8;
             let msg = format!(
                 "<{}>1 {} think-watch audit - {} [audit@0 test=\"true\"] test message\n",
-                priority, &test_entry.created_at, test_entry.action,
+                priority, test_entry.created_at, test_entry.action,
             );
             if forwarder.forwarder_type == "udp_syslog" {
                 match std::net::UdpSocket::bind("0.0.0.0:0") {

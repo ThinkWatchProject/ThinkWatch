@@ -20,6 +20,15 @@ use crate::cache::{CallerScope, McpResponseCache};
 use crate::lifecycle::McpSurface;
 use crate::proxy::{JsonRpcRequest, JsonRpcResponse};
 
+// clippy::result_large_err — measured, not waved away: the `Ok` variant
+// `Authorized<McpSurface>` is 296 bytes and the `Err` variant
+// `JsonRpcResponse` is 152, so the `Result` is sized by `Ok` at 296
+// either way. `Result<_, Box<JsonRpcResponse>>` also measures 296 —
+// boxing saves exactly zero bytes here and adds an allocation on the
+// short-circuit path. The `Err` is a short-circuit response, not an
+// error; the caller mutates its `id` and hands it straight to
+// `HandleOutcome::Buffered` by value.
+#[allow(clippy::result_large_err)]
 #[tracing::instrument(
     skip_all,
     fields(trace_id = %state.trace_id, server_id = %server_id, ttl_secs = cache_ttl_secs),
