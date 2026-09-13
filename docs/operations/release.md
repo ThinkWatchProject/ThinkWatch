@@ -159,6 +159,26 @@ page.
 
 Total wall-clock: ~13 min for a typical release.
 
+### Who owns which image tag
+
+| Tag | Set by | Means |
+|---|---|---|
+| `:X.Y.Z` | `release.yml` (tag push) | That release, exactly |
+| `:latest` | `release.yml`, stable releases only | The newest stable release |
+| `:<commit sha>` | `ci.yml` (push to `main`) | That commit on `main`, released or not |
+
+**`ci.yml` must never push `:latest`.** Both workflows used to, with no
+concurrency group between them, so cutting a release raced the `main`
+push that carried it — two runs, same tag, last writer wins. v1.0.2 lost
+that race: `think-watch-server:latest` pointed at a `main` build instead
+of the tagged release, and `think-watch-web:latest` was correct only
+because CI's web job happened to be cancelled that run. The mismatch is
+invisible from the Release page, which looks entirely healthy.
+
+A branch push cannot know which commit is the newest stable release, so
+it must not claim the tag that asserts it. To deploy an unreleased
+`main`, pull it by commit SHA on purpose.
+
 ## Pre-release tags
 
 For `1.0.0-rc.1`, `1.1.0-beta.2`, `2.0.0-alpha.5`:
