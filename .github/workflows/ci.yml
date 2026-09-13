@@ -204,12 +204,24 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # **Tagged by commit SHA only. `:latest` belongs to release.yml.**
+      #
+      # Both workflows used to push `:latest`, with no concurrency group
+      # between them, so a release raced the `main` push that carried it.
+      # v1.0.2 lost that race: `think-watch-server:latest` ended up
+      # pointing at a main-branch build rather than the tagged release,
+      # while `think-watch-web:latest` stayed correct only because this
+      # workflow's web job happened to be cancelled mid-run.
+      #
+      # `:latest` means "the newest stable release", which is a fact only
+      # a tag knows. A branch push cannot know it, so it must not claim
+      # it. The SHA tag stays — that is how you deploy an unreleased
+      # `main` on purpose, and it can never collide with a release tag.
       - name: Create and push multi-arch manifest
         working-directory: ${{ runner.temp }}/digests
         run: |
           IMAGE="${IMAGE_PREFIX}/think-watch-server"
           docker buildx imagetools create \
-            -t "${IMAGE}:latest" \
             -t "${IMAGE}:${{ github.sha }}" \
             $(printf "${IMAGE}@sha256:%s " *)
 
@@ -250,8 +262,9 @@ jobs:
           file: deploy/docker/Dockerfile.web
           push: true
           platforms: linux/amd64,linux/arm64
+          # SHA only — see the note on the server manifest job above.
+          # `:latest` is release.yml's to set.
           tags: |
-            ${{ env.IMAGE_PREFIX }}/think-watch-web:latest
             ${{ env.IMAGE_PREFIX }}/think-watch-web:${{ github.sha }}
           cache-from: type=gha,scope=web
           cache-to: type=gha,scope=web,mode=max
