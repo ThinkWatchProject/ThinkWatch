@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useNow } from '@/hooks/use-now';
 import { useTranslation } from 'react-i18next';
-import { useResetOnChange } from '@/hooks/use-reset-on-change';
+import { skipToken, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -42,9 +42,6 @@ interface OutboxBacklogDialogProps {
   /// already has it loaded.
   forwarderName?: string;
   onOpenChange: (open: boolean) => void;
-  /// Called after a retry / delete / natural drain so the parent can
-  /// refresh its backlog counts column without a separate poll.
-  onChanged?: () => void;
 }
 
 /// Per-forwarder backlog triage — the content that used to live on the
@@ -58,61 +55,39 @@ export function OutboxBacklogDialog({
   forwarderId,
   forwarderName,
   onOpenChange,
-  onChanged,
 }: OutboxBacklogDialogProps) {
   const { t, i18n } = useTranslation();
-  const [data, setData] = useState<OutboxResponse | null>(null);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const queryClient = useQueryClient();
   const [busyId, setBusyId] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const now = useNow();
 
-  const load = useCallback(
-    async (isInitial: boolean) => {
-      if (!forwarderId) return;
-      if (isInitial) setLoading(true);
-      setError('');
-      try {
-        const res = await api<OutboxResponse>(
-          `/api/admin/webhook-outbox?forwarder_id=${forwarderId}`,
-        );
-        setData(res);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : t('common.error'));
-      } finally {
-        if (isInitial) setLoading(false);
-      }
-    },
-    [forwarderId, t],
-  );
-
-  useResetOnChange(forwarderId, () => {
-    if (!forwarderId) setData(null);
+  const outboxQuery = useQuery({
+    queryKey: ['admin', 'webhook-outbox', { forwarder_id: forwarderId }],
+    queryFn: forwarderId
+      ? ({ signal }) =>
+          api<OutboxResponse>(`/api/admin/webhook-outbox?forwarder_id=${forwarderId}`, {
+            signal,
+          })
+      : skipToken,
+    refetchInterval: autoRefresh ? 10_000 : false,
   });
+  const data = outboxQuery.data ?? null;
+  // Only the first load shows the skeleton; the 10s poll refreshes in place.
+  const loading = outboxQuery.isLoading;
+  const error = outboxQuery.error?.message ?? '';
 
-  useEffect(() => {
-    if (!forwarderId) return;
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load(true);
-  }, [forwarderId, load]);
-
-  useEffect(() => {
-    if (!forwarderId || !autoRefresh) return;
-    const id = window.setInterval(() => void load(false), 10_000);
-    return () => window.clearInterval(id);
-  }, [forwarderId, autoRefresh, load]);
+  /// A retry or a delete changes this list and the parent's backlog counts,
+  /// which live under the same prefix — one invalidation refreshes both.
+  const invalidateOutbox = () =>
+    queryClient.invalidateQueries({ queryKey: ['admin', 'webhook-outbox'] });
 
   const handleRetry = async (id: string) => {
     setBusyId(id);
     try {
       await apiPost(`/api/admin/webhook-outbox/${id}/retry`, {});
       toast.success(t('webhookOutbox.retryQueued'));
-      await load(false);
-      onChanged?.();
+      await invalidateOutbox();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
@@ -126,8 +101,7 @@ export function OutboxBacklogDialog({
     try {
       await apiDelete(`/api/admin/webhook-outbox/${id}`);
       toast.success(t('webhookOutbox.deleted'));
-      await load(false);
-      onChanged?.();
+      await invalidateOutbox();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
@@ -178,7 +152,7 @@ export function OutboxBacklogDialog({
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => load(false)}
+                onClick={() => void outboxQuery.refetch()}
                 disabled={loading}
               >
                 <RefreshCw

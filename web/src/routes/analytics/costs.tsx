@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState, useMemo } from 'react';
+import { useCallback, useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Table,
@@ -76,12 +77,27 @@ function getDimensionValue(row: CostRow, dim: CostDimension): string {
   return row.dimensions[dim] ?? '—';
 }
 
+/** Query string for `/api/analytics/costs`; `extra` adds export-only params. */
+function costsQueryString(
+  teamId: string,
+  dimensions: CostDimension[],
+  range: TimeRange,
+  extra?: Record<string, string>,
+): string {
+  const params = new URLSearchParams();
+  if (teamId) params.set('team_id', teamId);
+  params.set('group_by', dimensions.join(','));
+  if (range !== 'mtd') params.set('range', range);
+  if (extra) for (const [k, v] of Object.entries(extra)) params.set(k, v);
+  const qs = params.toString();
+  return qs ? `?${qs}` : '';
+}
+
+const NO_COST_ROWS: CostRow[] = [];
+const NO_COST_STATS: CostStats = { total_cost_mtd: '0', budget_usage_pct: null };
+
 export function CostsPage() {
   const { t } = useTranslation();
-  const [rows, setRows] = useState<CostRow[]>([]);
-  const [stats, setStats] = useState<CostStats>({ total_cost_mtd: '0', budget_usage_pct: null });
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
 
   // Team filter
   const { teams } = useTeams();
@@ -107,72 +123,49 @@ export function CostsPage() {
     });
   }, []);
 
-  const queryString = useCallback(
-    (extra?: Record<string, string>): string => {
-      const params = new URLSearchParams();
-      if (selectedTeam) params.set('team_id', selectedTeam);
-      params.set('group_by', selectedDimensions.join(','));
-      if (timeRange !== 'mtd') params.set('range', timeRange);
-      if (extra) for (const [k, v] of Object.entries(extra)) params.set(k, v);
-      const qs = params.toString();
-      return qs ? `?${qs}` : '';
-    },
-    [selectedTeam, selectedDimensions, timeRange],
-  );
-
-  const fetchData = useCallback((signal?: AbortSignal) => {
-    setLoading(true);
-    // Cost-stats endpoint accepts `range=24h|7d|30d` (anything else
-    // — including `mtd` — falls back to 24h server-side). Forward the
-    // page's range so the period total + delta match the chart, and
-    // request `compare=true` to populate `prev_total_cost`.
-    const statsParams = new URLSearchParams();
-    if (selectedTeam) statsParams.set('team_id', selectedTeam);
-    if (timeRange !== 'mtd') {
-      statsParams.set('range', timeRange);
-      statsParams.set('compare', 'true');
-    }
-    const statsQs = statsParams.toString();
-    Promise.all([
-      api<{ items: CostRow[]; total: { request_count: number; input_tokens: number; output_tokens: number; total_cost: string } }>(`/api/analytics/costs${queryString()}`, { signal }),
-      api<CostStats>(`/api/analytics/costs/stats${statsQs ? `?${statsQs}` : ''}`, { signal }),
-    ])
-      .then(([costData, statsData]) => {
-        if (signal?.aborted) return;
-        setRows(costData.items);
-        setStats(statsData);
-      })
-      .catch((err) => {
-        // Swallow aborts — the next effect tick will refetch with
-        // the new params. Surface real errors only.
-        if (err instanceof DOMException && err.name === 'AbortError') return;
-        if (signal?.aborted) return;
-        setError(err instanceof Error ? err.message : t('common.error'));
-      })
-      .finally(() => {
-        if (signal?.aborted) return;
-        setLoading(false);
+  // Each filter combination is its own cache entry, so rapid toggling
+  // (e.g. clicking time-range chips fast) can never let a stale response
+  // overwrite the fresher numbers.
+  const costsQuery = useQuery({
+    queryKey: [
+      'analytics',
+      'costs',
+      { team_id: selectedTeam, group_by: selectedDimensions, range: timeRange },
+    ],
+    queryFn: ({ signal }) =>
+      api<{ items: CostRow[]; total: { request_count: number; input_tokens: number; output_tokens: number; total_cost: string } }>(
+        `/api/analytics/costs${costsQueryString(selectedTeam, selectedDimensions, timeRange)}`,
+        { signal },
+      ),
+  });
+  const statsQuery = useQuery({
+    queryKey: ['analytics', 'costs', 'stats', { team_id: selectedTeam, range: timeRange }],
+    queryFn: ({ signal }) => {
+      // Cost-stats endpoint accepts `range=24h|7d|30d` (anything else
+      // — including `mtd` — falls back to 24h server-side). Forward the
+      // page's range so the period total + delta match the chart, and
+      // request `compare=true` to populate `prev_total_cost`.
+      const statsParams = new URLSearchParams();
+      if (selectedTeam) statsParams.set('team_id', selectedTeam);
+      if (timeRange !== 'mtd') {
+        statsParams.set('range', timeRange);
+        statsParams.set('compare', 'true');
+      }
+      const statsQs = statsParams.toString();
+      return api<CostStats>(`/api/analytics/costs/stats${statsQs ? `?${statsQs}` : ''}`, {
+        signal,
       });
-  }, [queryString, selectedTeam, timeRange, t]);
-
-  useEffect(() => {
-    // Cancel the in-flight pair when params change OR the page
-    // unmounts. Without this, rapid toggling (e.g. clicking time-
-    // range chips fast) lets a stale Promise.all settle last and
-    // overwrite the fresher data with older numbers.
-    const controller = new AbortController();
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchData(controller.signal);
-    return () => controller.abort();
-  }, [fetchData]);
+    },
+  });
+  const rows = costsQuery.data?.items ?? NO_COST_ROWS;
+  const stats = statsQuery.data ?? NO_COST_STATS;
+  const loading = costsQuery.isPending || statsQuery.isPending;
+  const error = (costsQuery.error ?? statsQuery.error)?.message ?? '';
 
   const handleExport = useCallback(async () => {
     setExporting(true);
     try {
-      const res = await fetch(`/api/analytics/costs${queryString({ format: 'csv', limit: '1000' })}`, {
+      const res = await fetch(`/api/analytics/costs${costsQueryString(selectedTeam, selectedDimensions, timeRange, { format: 'csv', limit: '1000' })}`, {
         credentials: 'include',
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -194,7 +187,7 @@ export function CostsPage() {
     } finally {
       setExporting(false);
     }
-  }, [queryString, selectedDimensions, t]);
+  }, [selectedTeam, selectedDimensions, timeRange, t]);
 
   // Chart: top N rows by cost for single-dimension mode. Sort via
   // Decimal so extreme values don't get compared as f64. The full

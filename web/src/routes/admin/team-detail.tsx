@@ -1,6 +1,7 @@
-import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
+import { type FormEvent, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -61,19 +62,38 @@ interface UserSummary {
   display_name: string;
 }
 
+const NO_MEMBERS: TeamMember[] = [];
+
 export function TeamDetailPage() {
   const { t } = useTranslation();
   const { id: teamId } = routeApi.useParams();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
-  const [team, setTeam] = useState<Team | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const teamQuery = useQuery({
+    queryKey: ['admin', 'teams', teamId],
+    queryFn: ({ signal }) => api<Team>(`/api/admin/teams/${teamId}`, { signal }),
+  });
+  const team = teamQuery.data ?? null;
+  const loading = teamQuery.isPending;
+  const error = teamQuery.error?.message ?? '';
 
-  // Members
-  const [members, setMembers] = useState<TeamMember[]>([]);
-  const [membersLoading, setMembersLoading] = useState(true);
+  // Members. A failed load stays silent — the team itself may have failed.
+  const membersQuery = useQuery({
+    queryKey: ['admin', 'teams', teamId, 'members'],
+    queryFn: ({ signal }) => api<TeamMember[]>(`/api/admin/teams/${teamId}/members`, { signal }),
+  });
+  const members = membersQuery.data ?? NO_MEMBERS;
+  const membersLoading = membersQuery.isPending;
   const membersPager = useClientPagination(members, 20);
+
+  /// Refetch the team itself, or one of its `members` / `roles` lists.
+  /// `exact`, because the team's key is a prefix of both lists' keys.
+  const invalidate = (list?: 'members' | 'roles') =>
+    queryClient.invalidateQueries({
+      queryKey: list ? ['admin', 'teams', teamId, list] : ['admin', 'teams', teamId],
+      exact: true,
+    });
 
   // Edit dialog
   const [editOpen, setEditOpen] = useState(false);
@@ -94,58 +114,15 @@ export function TeamDetailPage() {
   // Team roles
   interface TeamRole { role_id: string; name: string; is_system: boolean; assigned_at: string }
   interface AvailableRole { id: string; name: string; is_system: boolean }
-  const [teamRoles, setTeamRoles] = useState<TeamRole[]>([]);
-  const [rolesLoading, setRolesLoading] = useState(true);
+  const teamRolesQuery = useQuery({
+    queryKey: ['admin', 'teams', teamId, 'roles'],
+    queryFn: ({ signal }) => api<TeamRole[]>(`/api/admin/teams/${teamId}/roles`, { signal }),
+  });
+  const teamRoles = teamRolesQuery.data ?? [];
+  const rolesLoading = teamRolesQuery.isPending;
   const [availableRoles, setAvailableRoles] = useState<AvailableRole[]>([]);
   const [assignRoleOpen, setAssignRoleOpen] = useState(false);
   const [pendingRoleId, setPendingRoleId] = useState('');
-
-  const fetchTeam = useCallback(async () => {
-    try {
-      const data = await api<Team>(`/api/admin/teams/${teamId}`);
-      setTeam(data);
-      setError('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t, teamId]);
-
-  const fetchMembers = useCallback(async () => {
-    setMembersLoading(true);
-    try {
-      const data = await api<TeamMember[]>(`/api/admin/teams/${teamId}/members`);
-      setMembers(data);
-    } catch {
-      // silently ignore — the team itself may have failed
-    } finally {
-      setMembersLoading(false);
-    }
-  }, [teamId]);
-
-  const fetchTeamRoles = useCallback(async () => {
-    setRolesLoading(true);
-    try {
-      const data = await api<TeamRole[]>(`/api/admin/teams/${teamId}/roles`);
-      setTeamRoles(data);
-    } catch {
-      // silently ignore
-    } finally {
-      setRolesLoading(false);
-    }
-  }, [teamId]);
-
-  useEffect(() => {
-    // Async loader: its first statement is the `await`, so every setState
-    // inside runs in the continuation — never synchronously with this
-    // effect, and never as a cascading render. The rule's cross-function
-    // analysis does not model `await`.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void fetchTeam();
-    void fetchMembers();
-    void fetchTeamRoles();
-  }, [fetchMembers, fetchTeam, fetchTeamRoles, teamId]);
 
   // Edit team
   const openEdit = () => {
@@ -171,7 +148,7 @@ export function TeamDetailPage() {
       });
       toast.success(t('teams.toast.updated'));
       setEditOpen(false);
-      await fetchTeam();
+      await invalidate();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : t('common.error'));
     } finally {
@@ -213,8 +190,8 @@ export function TeamDetailPage() {
       });
       setPendingUserId('');
       setAddMemberOpen(false);
-      await fetchMembers();
-      await fetchTeam(); // refresh member_count
+      await invalidate('members');
+      await invalidate(); // refresh member_count
     } catch (err) {
       setMemberError(err instanceof Error ? err.message : t('common.error'));
     }
@@ -223,10 +200,14 @@ export function TeamDetailPage() {
   const removeMember = async (userId: string) => {
     try {
       await apiDelete(`/api/admin/teams/${teamId}/members/${userId}`);
-      setMembers((prev) => prev.filter((m) => m.user_id !== userId));
-      if (team) {
-        setTeam({ ...team, member_count: Math.max(0, team.member_count - 1) });
-      }
+      // The delete succeeded, so its effect on both entries is known —
+      // write it into the cache instead of refetching them.
+      queryClient.setQueryData<TeamMember[]>(['admin', 'teams', teamId, 'members'], (prev) =>
+        prev?.filter((m) => m.user_id !== userId),
+      );
+      queryClient.setQueryData<Team>(['admin', 'teams', teamId], (prev) =>
+        prev && { ...prev, member_count: Math.max(0, prev.member_count - 1) },
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     }
@@ -465,7 +446,7 @@ export function TeamDetailPage() {
                                 try {
                                   await apiDelete(`/api/admin/teams/${teamId}/roles/${r.role_id}`);
                                   toast.success(t('teamDetail.roleRemoved'));
-                                  await fetchTeamRoles();
+                                  await invalidate('roles');
                                 } catch (err) {
                                   toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
                                 }
@@ -610,7 +591,7 @@ export function TeamDetailPage() {
                   await apiPost(`/api/admin/teams/${teamId}/roles`, { role_id: pendingRoleId });
                   toast.success(t('teamDetail.roleAssigned'));
                   setAssignRoleOpen(false);
-                  await fetchTeamRoles();
+                  await invalidate('roles');
                 } catch (err) {
                   toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
                 }

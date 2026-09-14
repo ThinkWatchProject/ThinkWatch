@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
+import { renderWithQueryClient } from '@/test/render'
 import { UserLimitsTab } from './user-limits-tab'
 
 vi.mock('@/lib/api', () => ({
@@ -55,7 +56,7 @@ describe('UserLimitsTab — remaining / exceeded labels', () => {
       dashboard({ ruleMax: 1000, ruleCurrent: 250, capLimit: 1_000_000, capCurrent: 600_000 }),
     )
 
-    render(<UserLimitsTab userId="user-1" />)
+    renderWithQueryClient(<UserLimitsTab userId="user-1" />)
 
     await waitFor(() => {
       expect(screen.getByText('25%')).toBeInTheDocument()
@@ -72,7 +73,7 @@ describe('UserLimitsTab — remaining / exceeded labels', () => {
       dashboard({ ruleMax: 100, ruleCurrent: 100, capLimit: 500, capCurrent: 600 }),
     )
 
-    render(<UserLimitsTab userId="user-2" />)
+    renderWithQueryClient(<UserLimitsTab userId="user-2" />)
 
     await waitFor(() => {
       // Rule pct caps at 100 because of Math.min, cap pct also caps at 100
@@ -103,7 +104,7 @@ describe('UserLimitsTab — remaining / exceeded labels', () => {
       recent_events: [],
     })
 
-    render(<UserLimitsTab userId="user-3" />)
+    renderWithQueryClient(<UserLimitsTab userId="user-3" />)
 
     await waitFor(() => {
       expect(screen.getByText('0%')).toBeInTheDocument()

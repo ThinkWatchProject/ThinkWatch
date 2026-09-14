@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { useNavigate, useParams } from '@tanstack/react-router';
+import { skipToken, useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -35,53 +35,27 @@ export function TracePage() {
   const { t, i18n } = useTranslation();
   const navigate = useNavigate();
   const params = useParams({ strict: false }) as { traceId?: string };
-  const [traceInput, setTraceInput] = useState(params.traceId ?? '');
-  const [data, setData] = useState<TraceResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
+  const traceId = params.traceId;
+  const [traceInput, setTraceInput] = useState(traceId ?? '');
   // Auto-poll keeps the timeline fresh while a long-running request
   // is still emitting events. Defaults on so the operator doesn't
   // have to manually refresh; backend has a 60/min admin rate limit
   // so a 5s cadence is well within budget.
   const [autoRefresh, setAutoRefresh] = useState(true);
 
-  // Single source of truth for the fetch — both the param-change
-  // effect and the polling interval call this. Loading flag only
-  // flips on the *first* load so polling refreshes don't blank the
-  // timeline.
-  const fetchTrace = useCallback((traceId: string, isInitial: boolean) => {
-    if (isInitial) setLoading(true);
-    setError('');
-    api<TraceResponse>(`/api/admin/trace/${encodeURIComponent(traceId)}`)
-      .then(setData)
-      .catch((err) => setError(err instanceof Error ? err.message : t('common.error')))
-      .finally(() => {
-        if (isInitial) setLoading(false);
-      });
-  }, [t]);
-
-  // Clearing the old trace happens during render, not in the effect: an
-  // effect would paint the previous trace for a frame under the new id.
-  useResetOnChange(params.traceId, () => {
-    if (!params.traceId) setData(null);
+  const traceQuery = useQuery({
+    queryKey: ['admin', 'trace', traceId],
+    queryFn: traceId
+      ? ({ signal }) =>
+          api<TraceResponse>(`/api/admin/trace/${encodeURIComponent(traceId)}`, { signal })
+      : skipToken,
+    refetchInterval: autoRefresh ? 5_000 : false,
   });
-
-  useEffect(() => {
-    if (!params.traceId) return;
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchTrace(params.traceId, true);
-  }, [fetchTrace, params.traceId]);
-
-  useEffect(() => {
-    if (!params.traceId || !autoRefresh) return;
-    const id = window.setInterval(() => {
-      fetchTrace(params.traceId!, false);
-    }, 5_000);
-    return () => window.clearInterval(id);
-  }, [params.traceId, autoRefresh, fetchTrace]);
+  const data = traceQuery.data ?? null;
+  // Only the first load of an id shows the skeleton; a polling refetch
+  // leaves the timeline on screen while it runs.
+  const loading = traceQuery.isLoading;
+  const error = traceQuery.error?.message ?? '';
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

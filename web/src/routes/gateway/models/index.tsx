@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { keepPreviousData, skipToken, useQuery, useQueryClient } from '@tanstack/react-query';
+import i18n from '@/i18n';
 import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { useSearch, useNavigate } from '@tanstack/react-router';
 import { Card, CardContent } from '@/components/ui/card';
@@ -76,6 +78,34 @@ export type {
 // later additions to the canonical shape (e.g. region, config_json).
 import type { Provider } from '../provider-types';
 
+const NO_MODELS: ModelRow[] = [];
+const NO_PROVIDERS: Provider[] = [];
+const NO_ROUTE_HEALTH: Record<string, RouteHealthEntry> = {};
+
+const routesKey = (modelId: string) => ['admin', 'models', modelId, 'routes'];
+
+function healthByRoute(list: RouteHealthEntry[]): Record<string, RouteHealthEntry> {
+  const m: Record<string, RouteHealthEntry> = {};
+  for (const e of list) m[e.route_id] = e;
+  return m;
+}
+
+/// The global default routing strategy, when the settings hold a valid one.
+function defaultRoutingStrategy(data: {
+  gateway?: { entries?: { key: string; value: unknown }[] };
+}): RoutingStrategy | undefined {
+  const v = data?.gateway?.entries?.find(
+    (e) => e.key === 'gateway.default_routing_strategy',
+  )?.value;
+  if (
+    typeof v === 'string' &&
+    ['weighted', 'latency', 'health', 'latency_health'].includes(v)
+  ) {
+    return v as RoutingStrategy;
+  }
+  return undefined;
+}
+
 /* ---------- component ---------- */
 
 export function ModelsPage() {
@@ -86,23 +116,65 @@ export function ModelsPage() {
   const routeSearch = useSearch({ from: '/gateway/models' });
   const navigate = useNavigate();
 
+  const queryClient = useQueryClient();
+
   // Model list state
-  const [models, setModels] = useState<ModelRow[]>([]);
-  const [totalModels, setTotalModels] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<'' | ModelStatus>('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(50);
+  const modelsQuery = useQuery({
+    queryKey: [
+      'admin',
+      'models',
+      { page, page_size: pageSize, q: debouncedSearch, status: statusFilter },
+    ],
+    queryFn: ({ signal }) => {
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+      if (debouncedSearch) params.set('q', debouncedSearch);
+      if (statusFilter) params.set('status', statusFilter);
+      return api<{ items: ModelRow[]; total: number }>(`/api/admin/models?${params}`, {
+        signal,
+      });
+    },
+    // Keep the total — and so the pager and the cleanup count — steady
+    // while another page loads. The rows still give way to the skeleton;
+    // see `loading`.
+    placeholderData: keepPreviousData,
+  });
+  const models = modelsQuery.data?.items ?? NO_MODELS;
+  const totalModels = modelsQuery.data?.total ?? 0;
+  const loading = modelsQuery.isPending || modelsQuery.isPlaceholderData;
+  const error = modelsQuery.error?.message ?? '';
+  /// Refetch the page on screen. Other cached pages are already stale
+  /// and refetch when they are next shown.
+  const invalidateModels = () =>
+    queryClient.invalidateQueries({
+      queryKey: [
+        'admin',
+        'models',
+        { page, page_size: pageSize, q: debouncedSearch, status: statusFilter },
+      ],
+      exact: true,
+    });
 
   // Providers — static lookup for the route editor + batch import.
-  const [providers, setProviders] = useState<Provider[]>([]);
+  // Non-critical: the routes list still works without the lookup.
+  const providersQuery = useQuery({
+    queryKey: ['admin', 'providers'],
+    queryFn: ({ signal }) => api<Provider[]>('/api/admin/providers', { signal }),
+  });
+  const providers = providersQuery.data ?? NO_PROVIDERS;
 
   // Platform baseline pricing — powers the "estimated cost" preview
-  // shown inline under the weight fields. Loaded once on mount.
-  const [pricing, setPricing] = useState<PlatformPricing | null>(null);
+  // shown inline under the weight fields. Non-critical — the cost
+  // preview just won't render without it.
+  const pricingQuery = useQuery({
+    queryKey: ['admin', 'platform-pricing'],
+    queryFn: ({ signal }) => api<PlatformPricing>('/api/admin/platform-pricing', { signal }),
+  });
+  const pricing = pricingQuery.data ?? null;
 
   // Delete-all-unrouted confirmation
   const [cleanupOpen, setCleanupOpen] = useState(false);
@@ -115,20 +187,57 @@ export function ModelsPage() {
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
 
-  // Global default routing strategy. Fetched once when first detail
-  // drawer opens, used by RoutingModeSection to show admin whether the
-  // model's setting differs from the global default.
-  const [globalStrategy, setGlobalStrategy] = useState<RoutingStrategy>('latency_health');
+  // Global default routing strategy. The wizard's mode picker uses it
+  // to label "this model uses the global default" vs "this model
+  // overrides". Falls back to `latency_health` so the UI keeps working
+  // even if the settings endpoint is flaky.
+  const settingsQuery = useQuery({
+    queryKey: ['admin', 'settings'],
+    queryFn: ({ signal }) =>
+      api<{ gateway?: { entries?: { key: string; value: unknown }[] } }>('/api/admin/settings', {
+        signal,
+      }),
+    select: defaultRoutingStrategy,
+  });
+  const globalStrategy: RoutingStrategy = settingsQuery.data ?? 'latency_health';
 
   // Detail drawer: which model_id is open, and its lazily-loaded routes.
   const [detailModelId, setDetailModelId] = useState<string | null>(null);
-  const [routesByModel, setRoutesByModel] = useState<Record<string, RouteRow[]>>({});
-  const [routesLoading, setRoutesLoading] = useState<Set<string>>(new Set());
+  const routesQuery = useQuery({
+    queryKey: ['admin', 'models', detailModelId, 'routes'],
+    queryFn: detailModelId
+      ? ({ signal }) =>
+          api<RouteRow[]>(`/api/admin/models/${encodeURIComponent(detailModelId)}/routes`, {
+            signal,
+          }).catch((err: unknown) => {
+            if (!signal.aborted) {
+              toast.error(err instanceof Error ? err.message : i18n.t('common.error'));
+            }
+            throw err;
+          })
+      : skipToken,
+  });
+  const invalidateRoutes = (modelId: string) =>
+    queryClient.invalidateQueries({ queryKey: routesKey(modelId) });
   /// Per-route live health (state + EWMA latency), keyed by route_id.
-  /// Only populated while the detail drawer is open and refreshed on a
-  /// 5s interval so the badge / latency column reflects what the
-  /// breaker is actually using to make selection decisions.
-  const [routeHealth, setRouteHealth] = useState<Record<string, RouteHealthEntry>>({});
+  /// Only fetched while the detail drawer is open, and polled on a 5s
+  /// cadence so the badge / latency column reflects what the breaker is
+  /// actually using to make selection decisions: the tracker is the same
+  /// Redis-backed view the breaker reads at selection time. Silent on
+  /// failure — health is observability only.
+  const routeHealthQuery = useQuery({
+    queryKey: ['admin', 'models', detailModelId, 'route-health'],
+    queryFn: detailModelId
+      ? ({ signal }) =>
+          api<RouteHealthEntry[]>(
+            `/api/admin/models/${encodeURIComponent(detailModelId)}/route-health`,
+            { signal },
+          )
+      : skipToken,
+    select: healthByRoute,
+    refetchInterval: 5000,
+  });
+  const routeHealth = routeHealthQuery.data ?? NO_ROUTE_HEALTH;
 
   // Model create/edit
   // Model edit/create — ModelEditorDialog owns form state + saving;
@@ -157,127 +266,32 @@ export function ModelsPage() {
     initialProviderId: string | null;
   }>({ open: false, initialProviderId: null });
 
-  /* ---------- data fetching ---------- */
-
-  const fetchModels = useCallback(
-    async (
-      p = page,
-      q = debouncedSearch,
-      ps = pageSize,
-      status: '' | ModelStatus = statusFilter,
-    ) => {
-      setLoading(true);
-      try {
-        const params = new URLSearchParams({ page: String(p), page_size: String(ps) });
-        if (q) params.set('q', q);
-        if (status) params.set('status', status);
-        const res = await api<{ items: ModelRow[]; total: number }>(
-          `/api/admin/models?${params}`,
-        );
-        setModels(res.items);
-        setTotalModels(res.total);
-        setError('');
-      } catch (err) {
-        setError(err instanceof Error ? err.message : t('common.error'));
-      } finally {
-        setLoading(false);
-      }
-    },
-    [page, debouncedSearch, pageSize, statusFilter, t],
-  );
-
-  const fetchPricing = useCallback(async () => {
-    try {
-      const p = await api<PlatformPricing>('/api/admin/platform-pricing');
-      setPricing(p);
-    } catch {
-      // Non-critical — cost preview just won't render.
-    }
-  }, []);
-
-  const fetchProviders = useCallback(async () => {
-    try {
-      const provs = await api<Provider[]>('/api/admin/providers');
-      setProviders(provs);
-    } catch {
-      // Non-critical: the routes list still works without the lookup.
-    }
-  }, []);
-
-  const fetchRoutesFor = useCallback(async (modelId: string) => {
-    setRoutesLoading((s) => new Set(s).add(modelId));
-    try {
-      const rows = await api<RouteRow[]>(
-        `/api/admin/models/${encodeURIComponent(modelId)}/routes`,
-      );
-      setRoutesByModel((m) => ({ ...m, [modelId]: rows }));
-    } catch (err) {
-      toast.error(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setRoutesLoading((s) => {
-        const next = new Set(s);
-        next.delete(modelId);
-        return next;
-      });
-    }
-  }, [t]);
-
-  useEffect(() => {
-    // Async loader: its first statement is the `await`, so every setState
-    // inside runs in the continuation — never synchronously with this
-    // effect, and never as a cascading render. The rule's cross-function
-    // analysis does not model `await`.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void fetchProviders();
-    void fetchPricing();
-    // Pull the global default strategy once. The wizard's mode picker
-    // uses it to label "this model uses the global default" vs "this
-    // model overrides". Falls back to `latency` on error so the UI
-    // keeps working even if the settings endpoint is flaky.
-    void api<{ gateway?: { entries?: { key: string; value: unknown }[] } }>(
-      '/api/admin/settings',
-    )
-      .then((data) => {
-        const v = data?.gateway?.entries?.find(
-          (e) => e.key === 'gateway.default_routing_strategy',
-        )?.value;
-        if (
-          typeof v === 'string' &&
-          ['weighted', 'latency', 'health', 'latency_health'].includes(v)
-        ) {
-          setGlobalStrategy(v as RoutingStrategy);
-        }
-      })
-      .catch(() => undefined);
-  }, [fetchProviders, fetchPricing]);
-
-  useEffect(() => {
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void fetchModels();
-  }, [fetchModels]);
-
   // Deeplink handler: when landed with `?import=<providerId>` and the
   // provider list has finished loading, auto-open the batch dialog
   // pre-selected. Strip the param after firing so reopening the
   // dialog manually doesn't get re-triggered by a refresh.
+  //
+  // Opening the dialog follows from the URL and the provider list, so it
+  // happens during render; only stripping the param is an effect. The
+  // tracker starts empty rather than at the first value, because the
+  // provider list can already be cached on the very first render.
+  const importProviderId =
+    routeSearch.import && providers.some((p) => p.id === routeSearch.import)
+      ? routeSearch.import
+      : null;
+  const [seenImportProviderId, setSeenImportProviderId] = useState<string | null>(null);
+  if (importProviderId !== seenImportProviderId) {
+    setSeenImportProviderId(importProviderId);
+    if (importProviderId) setBatchImport({ open: true, initialProviderId: importProviderId });
+  }
   useEffect(() => {
-    if (!routeSearch.import || providers.length === 0) return;
-    const pid = routeSearch.import;
-    if (!providers.some((p) => p.id === pid)) return;
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setBatchImport({ open: true, initialProviderId: pid });
+    if (!importProviderId) return;
     void navigate({
       to: '/gateway/models',
       search: { import: undefined },
       replace: true,
     });
-  }, [routeSearch.import, providers, navigate]);
+  }, [importProviderId, navigate]);
 
   useEffect(() => {
     const h = setTimeout(() => setDebouncedSearch(search.trim()), 250);
@@ -297,40 +311,7 @@ export function ModelsPage() {
 
   /* ---------- detail drawer ---------- */
 
-  const openDetail = (modelId: string) => {
-    setDetailModelId(modelId);
-    if (!routesByModel[modelId]) void fetchRoutesFor(modelId);
-  };
-
-  // Poll route-health for the open model on a 5s cadence. The
-  // tracker is the same Redis-backed view the breaker reads at
-  // selection time, so the badges + EWMA column reflect what the
-  // gateway is actually doing.
-  useEffect(() => {
-    if (!detailModelId) return;
-    let cancelled = false;
-    const fetchOnce = async () => {
-      try {
-        const list = await api<RouteHealthEntry[]>(
-          `/api/admin/models/${encodeURIComponent(detailModelId)}/route-health`,
-        );
-        if (cancelled) return;
-        const m: Record<string, RouteHealthEntry> = {};
-        for (const e of list) m[e.route_id] = e;
-        setRouteHealth(m);
-      } catch {
-        // Silent — health is observability only.
-      }
-    };
-    void fetchOnce();
-    const id = setInterval(() => {
-      void fetchOnce();
-    }, 5000);
-    return () => {
-      cancelled = true;
-      clearInterval(id);
-    };
-  }, [detailModelId]);
+  const openDetail = (modelId: string) => setDetailModelId(modelId);
 
   /* ---------- model CRUD ---------- */
 
@@ -343,7 +324,7 @@ export function ModelsPage() {
       const res = await apiDelete<{ deleted: number }>('/api/admin/models/unrouted');
       toast.success(t('models.cleanupDone', { count: res.deleted }));
       setCleanupOpen(false);
-      await fetchModels();
+      await invalidateModels();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
@@ -364,7 +345,7 @@ export function ModelsPage() {
           : t('models.batchDisabled', { count: res.updated }),
       );
       setSelectedIds(new Set());
-      await fetchModels();
+      await invalidateModels();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     }
@@ -380,7 +361,7 @@ export function ModelsPage() {
       toast.success(t('models.bulkDeleted', { count: res.deleted }));
       setSelectedIds(new Set());
       setBulkDeleteOpen(false);
-      await fetchModels();
+      await invalidateModels();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     } finally {
@@ -395,7 +376,7 @@ export function ModelsPage() {
       toast.success(t('models.toast.deleted'));
       setDeleteModel(null);
       setDetailModelId(null);
-      await fetchModels();
+      await invalidateModels();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     }
@@ -412,7 +393,7 @@ export function ModelsPage() {
   /// users land with a pile of `enabled = false` routes; this is how
   /// they go live without clicking each switch individually.
   const setAllRoutesEnabled = async (modelId: string, enabled: boolean) => {
-    const list = routesByModel[modelId];
+    const list = queryClient.getQueryData<RouteRow[]>(routesKey(modelId));
     if (!list || list.length === 0) return;
     const ids = list
       .filter((r) => r.enabled !== enabled)
@@ -425,8 +406,8 @@ export function ModelsPage() {
           ? t('models.batchEnabled', { count: ids.length })
           : t('models.batchDisabled', { count: ids.length }),
       );
-      await fetchRoutesFor(modelId);
-      await fetchModels();
+      await invalidateRoutes(modelId);
+      await invalidateModels();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     }
@@ -441,7 +422,7 @@ export function ModelsPage() {
       await apiPatch(`/api/admin/models/${m.id}`, { routing_strategy: strategy });
       // Refresh the model row so the cached `routing_strategy` field
       // reflects the new value next time the drawer opens.
-      await fetchModels();
+      await invalidateModels();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     }
@@ -459,22 +440,18 @@ export function ModelsPage() {
     updates: { id: string; weight: number }[],
   ) => {
     if (updates.length === 0) return;
-    setRoutesByModel((m) => {
-      const list = m[modelId];
-      if (!list) return m;
-      const byId = new Map(updates.map((u) => [u.id, u.weight]));
-      return {
-        ...m,
-        [modelId]: list.map((r) =>
-          byId.has(r.id) ? { ...r, weight: byId.get(r.id)! } : r,
-        ),
-      };
-    });
+    // Cancel any refetch in flight first, so it can't land after the
+    // optimistic write and put the old weights back.
+    void queryClient.cancelQueries({ queryKey: routesKey(modelId) });
+    const byId = new Map(updates.map((u) => [u.id, u.weight]));
+    queryClient.setQueryData<RouteRow[]>(routesKey(modelId), (list) =>
+      list?.map((r) => (byId.has(r.id) ? { ...r, weight: byId.get(r.id)! } : r)),
+    );
     try {
       await apiPatch('/api/admin/model-routes/batch-weights', { updates });
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
-      void fetchRoutesFor(modelId);
+      void invalidateRoutes(modelId);
     }
   };
 
@@ -486,7 +463,7 @@ export function ModelsPage() {
       toast.success(t('models.routeDeleted'));
       const modelId = deleteRoute.model_id;
       setDeleteRoute(null);
-      await fetchRoutesFor(modelId);
+      await invalidateRoutes(modelId);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     }
@@ -563,7 +540,7 @@ export function ModelsPage() {
         </Alert>
       )}
 
-      {providers.length === 0 && !loading && (
+      {providersQuery.isFetched && providers.length === 0 && !loading && (
         <Alert className="mb-4">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{t('models.noProvidersHint')}</AlertDescription>
@@ -711,7 +688,7 @@ export function ModelsPage() {
         model={modelEditor.model}
         pricing={pricing}
         onClose={() => setModelEditor({ open: false, model: null })}
-        onSaved={fetchModels}
+        onSaved={invalidateModels}
       />
 
       <RouteEditorDialog
@@ -721,7 +698,7 @@ export function ModelsPage() {
         providers={providers}
         routeHealth={routeHealth}
         onClose={() => setRouteEditor({ open: false, route: null, targetModel: null })}
-        onSaved={fetchRoutesFor}
+        onSaved={invalidateRoutes}
       />
 
       <BatchImportDialog
@@ -730,8 +707,8 @@ export function ModelsPage() {
         providers={providers}
         detailModelId={detailModelId}
         onClose={() => setBatchImport({ open: false, initialProviderId: null })}
-        onSaved={fetchModels}
-        onSavedForModel={fetchRoutesFor}
+        onSaved={invalidateModels}
+        onSavedForModel={invalidateRoutes}
       />
 
       {/* Delete confirms */}
@@ -780,8 +757,8 @@ export function ModelsPage() {
 
       <ModelDetailSheet
         model={detailModelId ? models.find((m) => m.model_id === detailModelId) ?? null : null}
-        routes={detailModelId ? routesByModel[detailModelId] : undefined}
-        routesLoading={detailModelId ? routesLoading.has(detailModelId) : false}
+        routes={routesQuery.data}
+        routesLoading={routesQuery.isLoading}
         routeHealth={routeHealth}
         globalStrategy={globalStrategy}
         pricing={pricing}

@@ -1,5 +1,6 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -93,12 +94,37 @@ function formatTime(ts: string | null): string {
   return new Date(ts).toLocaleString();
 }
 
+const NO_BACKLOG_COUNTS: Record<string, number> = {};
+
+function countsByForwarder(rows: Array<{ forwarder_id: string; count: number }>) {
+  const map: Record<string, number> = {};
+  for (const r of rows) map[r.forwarder_id] = r.count;
+  return map;
+}
+
 export function LogForwardersPage() {
   const { t } = useTranslation();
-  const [forwarders, setForwarders] = useState<LogForwarder[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const forwardersQuery = useQuery({
+    queryKey: ['admin', 'log-forwarders'],
+    queryFn: ({ signal }) => api<LogForwarder[]>('/api/admin/log-forwarders', { signal }),
+  });
+  const forwarders = forwardersQuery.data ?? [];
+  const loading = forwardersQuery.isPending;
   const pager = useClientPagination(forwarders, 20);
+  const invalidateForwarders = () =>
+    queryClient.invalidateQueries({ queryKey: ['admin', 'log-forwarders'] });
+
+  // One dismissable banner for load and action failures alike. Each load
+  // outcome writes to it once: a failure shows its message, a success
+  // clears whatever the banner held.
   const [error, setError] = useState('');
+  const loadOutcomeAt = Math.max(forwardersQuery.dataUpdatedAt, forwardersQuery.errorUpdatedAt);
+  const [seenLoadOutcomeAt, setSeenLoadOutcomeAt] = useState(0);
+  if (loadOutcomeAt !== seenLoadOutcomeAt) {
+    setSeenLoadOutcomeAt(loadOutcomeAt);
+    setError(forwardersQuery.error?.message ?? '');
+  }
   const [dialogOpen, setDialogOpen] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<TestResult | null>(null);
@@ -136,50 +162,20 @@ export function LogForwardersPage() {
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
 
   // Per-forwarder outbox backlog counts + the drawer triaging one of them.
-  const [backlogCounts, setBacklogCounts] = useState<Record<string, number>>({});
-  const [backlogForwarderId, setBacklogForwarderId] = useState<string | null>(null);
-
-  const loadForwarders = useCallback(async () => {
-    try {
-      const data = await api<LogForwarder[]>('/api/admin/log-forwarders');
-      setForwarders(data);
-      setError('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
-
-  const loadBacklogCounts = useCallback(async () => {
-    try {
-      const rows = await api<Array<{ forwarder_id: string; count: number }>>(
-        '/api/admin/webhook-outbox/counts',
-      );
-      const map: Record<string, number> = {};
-      for (const r of rows) map[r.forwarder_id] = r.count;
-      setBacklogCounts(map);
-    } catch {
-      // Non-critical — leave the column blank if the endpoint hiccups.
-    }
-  }, []);
-
-  useEffect(() => {
-    // Async loader: its first statement is the `await`, so every setState
-    // inside runs in the continuation — never synchronously with this
-    // effect, and never as a cascading render. The rule's cross-function
-    // analysis does not model `await`.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    loadForwarders();
-    loadBacklogCounts();
-  }, [loadForwarders, loadBacklogCounts]);
-
-  // Poll backlog counts on the same cadence as the drain worker so the
+  // The counts poll on the same cadence as the drain worker so the
   // operator watching a stuck destination sees it drain down live.
-  useEffect(() => {
-    const id = window.setInterval(loadBacklogCounts, 10_000);
-    return () => window.clearInterval(id);
-  }, [loadBacklogCounts]);
+  // Non-critical — the column stays blank if the endpoint hiccups.
+  const backlogCountsQuery = useQuery({
+    queryKey: ['admin', 'webhook-outbox', 'counts'],
+    queryFn: ({ signal }) =>
+      api<Array<{ forwarder_id: string; count: number }>>('/api/admin/webhook-outbox/counts', {
+        signal,
+      }),
+    select: countsByForwarder,
+    refetchInterval: 10_000,
+  });
+  const backlogCounts = backlogCountsQuery.data ?? NO_BACKLOG_COUNTS;
+  const [backlogForwarderId, setBacklogForwarderId] = useState<string | null>(null);
 
   const resetForm = () => {
     setFormName('');
@@ -227,7 +223,7 @@ export function LogForwardersPage() {
       });
       setDialogOpen(false);
       resetForm();
-      loadForwarders();
+      void invalidateForwarders();
       toast.success(t('logForwarders.toast.created'));
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
@@ -244,7 +240,7 @@ export function LogForwardersPage() {
       await apiPost(`/api/admin/log-forwarders/${id}/toggle`, {
         enabled: !currentlyEnabled,
       });
-      loadForwarders();
+      void invalidateForwarders();
       toast.success(t('logForwarders.toast.toggled'));
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
@@ -256,7 +252,7 @@ export function LogForwardersPage() {
       await apiDelete(`/api/admin/log-forwarders/${id}`);
       setDeleteDialogOpen(false);
       setDeleteTargetId(null);
-      loadForwarders();
+      void invalidateForwarders();
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
     }
@@ -278,7 +274,7 @@ export function LogForwardersPage() {
   const handleResetStats = async (id: string) => {
     try {
       await apiPost(`/api/admin/log-forwarders/${id}/reset-stats`, {});
-      loadForwarders();
+      void invalidateForwarders();
       toast.success(t('logForwarders.toast.statsReset'));
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
@@ -360,7 +356,7 @@ export function LogForwardersPage() {
       });
       setEditDialogOpen(false);
       setEditForwarder(null);
-      loadForwarders();
+      void invalidateForwarders();
       toast.success(t('logForwarders.toast.updated'));
     } catch (err) {
       setError(err instanceof Error ? err.message : t('common.error'));
@@ -820,7 +816,6 @@ export function LogForwardersPage() {
         onOpenChange={(open) => {
           if (!open) setBacklogForwarderId(null);
         }}
-        onChanged={loadBacklogCounts}
       />
     </div>
   );

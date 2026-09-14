@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { ServiceLogo } from '@/components/ui/service-logo';
 import { Button } from '@/components/ui/button';
@@ -76,11 +77,20 @@ function serverDisplay(s: ServerConnections): string {
     : s.server_name;
 }
 
+const NO_SERVERS: ServerConnections[] = [];
+
 export function ConnectionsPage() {
   const { t } = useTranslation();
-  const [servers, setServers] = useState<ServerConnections[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string>('');
+  const queryClient = useQueryClient();
+  const connectionsQuery = useQuery({
+    queryKey: ['mcp', 'connections'],
+    queryFn: ({ signal }) => api<ServerConnections[]>('/api/mcp/connections', { signal }),
+  });
+  const servers = connectionsQuery.data ?? NO_SERVERS;
+  const loading = connectionsQuery.isPending;
+  const error = connectionsQuery.error?.message ?? '';
+  const invalidateConnections = () =>
+    queryClient.invalidateQueries({ queryKey: ['mcp', 'connections'] });
 
   // "Add account" dialog. The dialog's mode is derived from the
   // target server's `auth_shape` — a server is OAuth or static, never
@@ -112,30 +122,6 @@ export function ConnectionsPage() {
       return null;
     },
   );
-
-  const fetchAll = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const data = await api<ServerConnections[]>('/api/mcp/connections', { signal });
-      setServers(data);
-      setError('');
-    } catch (err) {
-      if (signal?.aborted) return;
-      setError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    // Async loader: its first statement is the `await`, so every setState
-    // inside runs in the continuation — never synchronously with this
-    // effect, and never as a cascading render. The rule's cross-function
-    // analysis does not model `await`.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchAll(controller.signal);
-    return () => controller.abort();
-  }, [fetchAll]);
 
   // Parse the URL hash for `connected=...` / `error=...` / `need=...`
   // markers. Strip the fragment after we've consumed it so a refresh
@@ -229,7 +215,7 @@ export function ConnectionsPage() {
           toast.success(t('connections.tokenSaved'));
         }
         setAddTarget(null);
-        await fetchAll();
+        await invalidateConnections();
       }
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
@@ -247,7 +233,7 @@ export function ConnectionsPage() {
         `/api/mcp/connections/${server_id}/${encodeURIComponent(account_label)}/default`,
         {},
       );
-      await fetchAll();
+      await invalidateConnections();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     }
@@ -263,7 +249,7 @@ export function ConnectionsPage() {
       );
       toast.success(t('connections.revoked'));
       setRevokeTarget(null);
-      await fetchAll();
+      await invalidateConnections();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     }

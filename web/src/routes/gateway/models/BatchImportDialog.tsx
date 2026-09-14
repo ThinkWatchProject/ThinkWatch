@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useResetOnChange } from '@/hooks/use-reset-on-change';
+import { useQuery } from '@tanstack/react-query';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -34,6 +34,8 @@ import type { RouteRow } from './types';
 /// as just `deepseek-v4`). Empty falls back to the upstream name.
 type ImportDecision = { target_model_id: string | null; new_model_id?: string };
 
+const NO_CATALOG_MODELS: { model_id: string; display_name: string }[] = [];
+
 /// Two-step batch import: pick provider + tick remote models, then
 /// decide per-item "new catalog entry vs attach to existing exposed
 /// model". Owns ALL of its working state internally — parent only
@@ -65,106 +67,108 @@ export function BatchImportDialog({
   const { t } = useTranslation();
   const [step, setStep] = useState<1 | 2>(1);
   const [providerId, setProviderId] = useState('');
-  const [remoteModels, setRemoteModels] = useState<string[]>([]);
-  const [unavailable, setUnavailable] = useState<Map<string, string>>(new Map());
-  const [remoteModelsLoading, setRemoteModelsLoading] = useState(false);
-  const [remoteModelsError, setRemoteModelsError] = useState('');
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [search, setSearch] = useState('');
   const [saving, setSaving] = useState(false);
-  const [existingIds, setExistingIds] = useState<Set<string>>(new Set());
-  // Catalog list for step 2's "attach to existing" picker — fetched
-  // once per open so stepping back and forward is instant.
-  const [catalogModels, setCatalogModels] = useState<
-    { model_id: string; display_name: string }[]
-  >([]);
   const [decisions, setDecisions] = useState<Record<string, ImportDecision>>({});
 
-  // Reset on open. Catalog list is fetched here too so step 2 has
-  // it ready by the time the user gets there.
-  // The reset happens during render; the catalog fetch stays in an effect
-  // below, since that is a genuine side effect rather than state alignment.
-  useResetOnChange(open, () => {
-    if (!open) return;
-    setStep(1);
-    setProviderId('');
-    setRemoteModels([]);
-    setRemoteModelsError('');
-    setSelected(new Set());
-    setSearch('');
-    setExistingIds(new Set());
-    setDecisions({});
+  // Reset on open, during render. The reset is also where the deeplink
+  // lands: when the dialog opens with an `initialProviderId`
+  // (`?import=<providerId>` query param landed by the Providers page),
+  // that provider comes pre-selected and its lists load on their own.
+  //
+  // `wasOpen` starts closed rather than at the first `open`, so a dialog
+  // that mounts already open counts as opening too — which is exactly
+  // the deeplink when the provider list is already cached.
+  const [wasOpen, setWasOpen] = useState(false);
+  if (open !== wasOpen) {
+    setWasOpen(open);
+    if (open) {
+      setStep(1);
+      setProviderId(
+        initialProviderId && providers.some((p) => p.id === initialProviderId)
+          ? initialProviderId
+          : '',
+      );
+      setSelected(new Set());
+      setSearch('');
+      setDecisions({});
+    }
+  }
+
+  // Catalog list for step 2's "attach to existing" picker — loaded on
+  // open so step 2 has it ready by the time the user gets there.
+  const catalogQuery = useQuery({
+    queryKey: ['admin', 'models', 'ids'],
+    queryFn: ({ signal }) =>
+      api<{ model_id: string; display_name: string }[]>('/api/admin/models/ids', { signal }),
+    enabled: open,
   });
+  const catalogModels = catalogQuery.data ?? NO_CATALOG_MODELS;
 
-  useEffect(() => {
-    if (!open) return;
-    void api<{ model_id: string; display_name: string }[]>('/api/admin/models/ids')
-      .then(setCatalogModels)
-      .catch(() => setCatalogModels([]));
-  }, [open]);
+  // The picked provider's upstream catalog, and the routes it already has.
+  const remoteModelsQuery = useQuery({
+    queryKey: ['admin', 'providers', providerId, 'remote-models'],
+    queryFn: ({ signal }) =>
+      api<{ id: string; available?: boolean; reason?: string }[]>(
+        `/api/admin/providers/${providerId}/remote-models`,
+        { signal },
+      ),
+    enabled: open && !!providerId,
+  });
+  const existingRoutesQuery = useQuery({
+    queryKey: ['admin', 'model-routes', { provider_id: providerId, page: 1, page_size: 10000 }],
+    queryFn: ({ signal }) =>
+      api<{ items: RouteRow[]; total: number }>(
+        `/api/admin/model-routes?provider_id=${providerId}&page=1&page_size=10000`,
+        { signal },
+      ),
+    enabled: open && !!providerId,
+  });
+  // Nothing is offered until both answers are fresh from this pick, not
+  // merely cached: a cached copy can predate an import made since, and a
+  // list that can't yet tell which models are already imported offers
+  // duplicates.
+  const remoteModelsLoading = remoteModelsQuery.isFetching || existingRoutesQuery.isFetching;
+  const remoteModelsError = remoteModelsLoading
+    ? ''
+    : ((remoteModelsQuery.error ?? existingRoutesQuery.error)?.message ?? '');
+  const { remoteModels, unavailable, existingIds } = useMemo(() => {
+    const rmodels = remoteModelsQuery.data;
+    const existing = existingRoutesQuery.data;
+    if (!rmodels || !existing) {
+      return {
+        remoteModels: [] as string[],
+        unavailable: new Map<string, string>(),
+        existingIds: new Set<string>(),
+      };
+    }
+    // A remote name counts as "already imported" when it appears
+    // as either a route's exposed model_id (new-catalog-entry
+    // imports) or its upstream_model (attach-to-existing imports
+    // — where model_id is the rename target, so a model_id-only
+    // check would miss it).
+    const seen = new Set<string>();
+    for (const r of existing.items) {
+      seen.add(r.model_id);
+      seen.add(r.upstream_model);
+    }
+    return {
+      remoteModels: rmodels.map((m) => m.id),
+      // Models this upstream has already told us it won't serve. They
+      // are shown but not selectable — see `importable`.
+      unavailable: new Map<string, string>(
+        rmodels.filter((m) => m.available === false).map((m) => [m.id, m.reason ?? '']),
+      ),
+      existingIds: seen,
+    };
+  }, [remoteModelsQuery.data, existingRoutesQuery.data]);
 
-  const onProviderChange = useCallback(async (pid: string) => {
+  const onProviderChange = (pid: string) => {
     setProviderId(pid);
     setSelected(new Set());
     setSearch('');
-    setRemoteModels([]);
-    setUnavailable(new Map());
-    setRemoteModelsError('');
-    setExistingIds(new Set());
-
-    if (!pid) return;
-
-    setRemoteModelsLoading(true);
-    try {
-      const [rmodels, existing] = await Promise.all([
-        api<{ id: string; available?: boolean; reason?: string }[]>(
-          `/api/admin/providers/${pid}/remote-models`,
-        ),
-        api<{ items: RouteRow[]; total: number }>(
-          `/api/admin/model-routes?provider_id=${pid}&page=1&page_size=10000`,
-        ),
-      ]);
-      setRemoteModels(rmodels.map((m) => m.id));
-      // Models this upstream has already told us it won't serve. They
-      // are shown but not selectable — see `importable`.
-      setUnavailable(
-        new Map(
-          rmodels
-            .filter((m) => m.available === false)
-            .map((m) => [m.id, m.reason ?? '']),
-        ),
-      );
-      // A remote name counts as "already imported" when it appears
-      // as either a route's exposed model_id (new-catalog-entry
-      // imports) or its upstream_model (attach-to-existing imports
-      // — where model_id is the rename target, so a model_id-only
-      // check would miss it).
-      const seen = new Set<string>();
-      for (const r of existing.items) {
-        seen.add(r.model_id);
-        seen.add(r.upstream_model);
-      }
-      setExistingIds(seen);
-    } catch (err) {
-      setRemoteModelsError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setRemoteModelsLoading(false);
-    }
-  }, [t]);
-
-  // Deeplink: when the dialog opens with an `initialProviderId`
-  // (`?import=<providerId>` query param landed by the Providers
-  // page), auto-select that provider and kick its remote-models
-  // fetch.
-  useEffect(() => {
-    if (!open || !initialProviderId) return;
-    if (!providers.some((p) => p.id === initialProviderId)) return;
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void onProviderChange(initialProviderId);
-  }, [open, initialProviderId, providers, onProviderChange]);
+  };
 
   /// Heuristic for "did the admin probably mean to attach this to
   /// an already-exposed model, or to make a new one?". Matches on
@@ -324,7 +328,7 @@ export function BatchImportDialog({
               </Alert>
             )}
 
-            {!remoteModelsLoading && remoteModels.length > 0 && (
+            {!remoteModelsLoading && !remoteModelsError && remoteModels.length > 0 && (
               <>
                 <div className="flex items-center gap-2">
                   <div className="relative flex-1">

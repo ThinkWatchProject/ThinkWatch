@@ -1,6 +1,8 @@
 import React, { Fragment, useEffect, useMemo, useState, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearch } from '@tanstack/react-router';
+import { useQuery } from '@tanstack/react-query';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { subHours, format } from 'date-fns';
 import Decimal from 'decimal.js';
 import { Card, CardContent } from '@/components/ui/card';
@@ -682,18 +684,7 @@ export function UnifiedLogsPage() {
   // and the expanded-row toggle.
   const [searchInput, setSearchInput] = useState(activeQuery);
   const [bodySearchInput, setBodySearchInput] = useState(activeBodyQuery);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const [expandedRow, setExpandedRow] = useState<string | null>(null);
-  // Monotonic id stamped on every fetch so a slow response from the
-  // previous category can't overwrite the latest result. Without this,
-  // switching from "访问日志" (14k rows) to "网关日志" (4 rows) shows
-  // 543 access-log-shaped rows under gateway column headers for the
-  // duration of the in-flight access request — the exact "the data
-  // doesn't match the label" bug operators hit.
-  const fetchTokenRef = useRef(0);
 
   // Mirror the active query into a ref so we can sync the input *only*
   // when the URL truly changes from somewhere else (browser back/forward,
@@ -747,17 +738,18 @@ export function UnifiedLogsPage() {
     [navigate],
   );
 
-  const fetchLogs = useCallback(async () => {
-    // Stamp this attempt and clear stale rows BEFORE the network call
-    // so the skeleton — not the previous category's data — bridges the
-    // request window.
-    const myToken = ++fetchTokenRef.current;
-    setLogs([]);
-    setTotal(0);
-    setExpandedRow(null);
-    setLoading(true);
-    setError('');
-    try {
+  // Every filter is part of the key, so a response only ever lands under
+  // the filters that asked for it: switching from "访问日志" (14k rows)
+  // to "网关日志" (4 rows) while the access request is still in flight
+  // shows the skeleton, not 543 access-log-shaped rows under gateway
+  // column headers — the "the data doesn't match the label" bug
+  // operators hit.
+  const logsQuery = useQuery({
+    queryKey: [
+      ...CATEGORY_API[category].slice('/api/'.length).split('/'),
+      { q: activeQuery, body_q: activeBodyQuery, from, to, page },
+    ],
+    queryFn: ({ signal }) => {
       const parsed = parseQuery(activeQuery);
       const params = new URLSearchParams();
       for (const [k, v] of Object.entries(parsed.params)) {
@@ -785,28 +777,19 @@ export function UnifiedLogsPage() {
         params.set('body_q', activeBodyQuery);
       }
       const qs = params.toString();
-      const url = `${CATEGORY_API[category]}${qs ? `?${qs}` : ''}`;
-      const res = await api<LogsResponse>(url);
-      // Drop a stale response if the user has since switched categories
-      // or fired another search — the newer fetch is now authoritative.
-      if (fetchTokenRef.current !== myToken) return;
-      setLogs(res.items ?? []);
-      setTotal(res.total ?? 0);
-    } catch (err) {
-      if (fetchTokenRef.current !== myToken) return;
-      setError(err instanceof Error ? err.message : t('common.error'));
-      setLogs([]);
-      setTotal(0);
-    } finally {
-      if (fetchTokenRef.current === myToken) setLoading(false);
-    }
-  }, [category, activeQuery, activeBodyQuery, from, to, page, t]);
+      return api<LogsResponse>(`${CATEGORY_API[category]}${qs ? `?${qs}` : ''}`, { signal });
+    },
+  });
+  const logs = logsQuery.data?.items ?? [];
+  const total = logsQuery.data?.total ?? 0;
+  const loading = logsQuery.isPending;
+  const error = logsQuery.error?.message ?? '';
 
-  // Hand-rolled load: the spinner flag is the first half of "start a
-  // fetch" and belongs with it. See "Data fetching" in web/README.md —
-  // this goes away with a data-fetching layer, not by moving the flag.
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  useEffect(() => { fetchLogs(); }, [fetchLogs]);
+  // A new result set starts with every row collapsed.
+  useResetOnChange(
+    JSON.stringify([category, activeQuery, activeBodyQuery, from, to, page]),
+    () => setExpandedRow(null),
+  );
 
   const handleSearch = () => {
     updateSearch({ q: searchInput, body_q: bodySearchInput, page: 0 });

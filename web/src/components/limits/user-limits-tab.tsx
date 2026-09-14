@@ -31,8 +31,9 @@
 //   POST /api/admin/limits/bulk/{rules|budgets}/{disable|delete} — bulk
 // ============================================================================
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useNow } from '@/hooks/use-now';
 import { AlertCircle, Plus, Trash2, PowerOff, RotateCw, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -174,10 +175,18 @@ interface DrawerInit {
 
 export function UserLimitsTab({ userId }: UserLimitsTabProps) {
   const { t } = useTranslation();
-  const [data, setData] = useState<LimitsDashboard | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const queryClient = useQueryClient();
+  const dashboardQuery = useQuery({
+    queryKey: ['admin', 'users', userId, 'limits-dashboard'],
+    queryFn: ({ signal }) =>
+      api<LimitsDashboard>(`/api/admin/users/${userId}/limits-dashboard`, { signal }),
+  });
+  const data = dashboardQuery.data ?? null;
+  const loading = dashboardQuery.isPending;
+  const error = dashboardQuery.error?.message ?? '';
+  const reload = () =>
+    queryClient.invalidateQueries({ queryKey: ['admin', 'users', userId, 'limits-dashboard'] });
+  const [selection, setSelection] = useState<Set<string>>(new Set());
   const [bulkAction, setBulkAction] = useState<'disable' | 'delete' | null>(null);
   const [drawer, setDrawer] = useState<DrawerInit | null>(null);
   const [resetTarget, setResetTarget] = useState<
@@ -185,39 +194,6 @@ export function UserLimitsTab({ userId }: UserLimitsTabProps) {
     | { kind: 'cap'; period: Period; label: string }
     | null
   >(null);
-
-  const reload = useCallback(async () => {
-    setError('');
-    try {
-      const res = await api<LimitsDashboard>(`/api/admin/users/${userId}/limits-dashboard`);
-      setData(res);
-      // Drop stale selections.
-      setSelected((prev) => {
-        const live = new Set<string>();
-        res.rules.forEach((r) => {
-          const k = rowKey(r);
-          if (k) live.add(k);
-        });
-        res.caps.forEach((c) => {
-          const k = rowKey(c);
-          if (k) live.add(k);
-        });
-        return new Set(Array.from(prev).filter((k) => live.has(k)));
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : t('common.operationFailed'));
-    } finally {
-      setLoading(false);
-    }
-  }, [userId, t]);
-
-  useEffect(() => {
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    reload();
-  }, [reload]);
 
   const overrideKeys = useMemo(() => {
     if (!data) return { rules: new Set<string>(), caps: new Set<string>() };
@@ -229,10 +205,26 @@ export function UserLimitsTab({ userId }: UserLimitsTabProps) {
     };
   }, [data]);
 
+  // Drop stale selections: an override the latest load no longer lists
+  // stops counting as selected.
+  const selected = useMemo(() => {
+    if (!data) return selection;
+    const live = new Set<string>();
+    data.rules.forEach((r) => {
+      const k = rowKey(r);
+      if (k) live.add(k);
+    });
+    data.caps.forEach((c) => {
+      const k = rowKey(c);
+      if (k) live.add(k);
+    });
+    return new Set(Array.from(selection).filter((k) => live.has(k)));
+  }, [data, selection]);
+
   const someSelected = selected.size > 0;
 
   const toggleOne = (key: string) =>
-    setSelected((prev) => {
+    setSelection((prev) => {
       const next = new Set(prev);
       if (next.has(key)) next.delete(key);
       else next.add(key);
@@ -259,7 +251,7 @@ export function UserLimitsTab({ userId }: UserLimitsTabProps) {
           count: selected.size,
         }),
       );
-      setSelected(new Set());
+      setSelection(new Set());
       await reload();
     } catch (e) {
       toast.error(e instanceof Error ? e.message : t('common.operationFailed'));

@@ -297,7 +297,7 @@ const registerRoute = createRoute({
       <RegisterPage
         onRegistered={() => {
           // Hard navigate so RootComponent remounts and picks up
-          // the freshly-set auth cookies via useAuth → fetchUser.
+          // the freshly-set auth cookies when useAuth loads /api/auth/me.
           window.location.href = '/';
         }}
       />

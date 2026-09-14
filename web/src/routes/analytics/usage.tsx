@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState, useMemo } from 'react';
+import { useState, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery } from '@tanstack/react-query';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import {
   Table,
@@ -43,6 +44,14 @@ interface UsageStats {
   total_requests: number;
 }
 
+const NO_ROWS: UsageRow[] = [];
+const NO_STATS: UsageStats = { total_tokens: 0, total_requests: 0 };
+
+/** The `?team_id=` filter both usage endpoints take; empty for "all teams". */
+function teamFilter(teamId: string): string {
+  return teamId ? `?team_id=${teamId}` : '';
+}
+
 // `var(--color-value)` resolves to `var(--chart-1)` once ChartContainer
 // expands the config — matches the chart-1 color the dashboard
 // stat-card sparklines use, so the analytics surface stays visually
@@ -53,37 +62,25 @@ const TOKEN_TREND_CONFIG = {
 
 export function UsagePage() {
   const { t } = useTranslation();
-  const [rows, setRows] = useState<UsageRow[]>([]);
-  const [stats, setStats] = useState<UsageStats>({ total_tokens: 0, total_requests: 0 });
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
 
   // Team filter
   const { teams } = useTeams();
   const [selectedTeam, setSelectedTeam] = useState<string>('');
 
-  const fetchData = useCallback((teamId: string) => {
-    setLoading(true);
-    const teamSuffix = teamId ? `?team_id=${teamId}` : '';
-    Promise.all([
-      api<UsageRow[]>(`/api/analytics/usage${teamSuffix}`),
-      api<UsageStats>(`/api/analytics/usage/stats${teamSuffix}`),
-    ])
-      .then(([usageData, statsData]) => {
-        setRows(usageData);
-        setStats(statsData);
-      })
-      .catch((err) => setError(err instanceof Error ? err.message : t('common.error')))
-      .finally(() => setLoading(false));
-  }, [t]);
-
-  useEffect(() => {
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchData(selectedTeam);
-  }, [selectedTeam, fetchData]);
+  const usageQuery = useQuery({
+    queryKey: ['analytics', 'usage', { team_id: selectedTeam }],
+    queryFn: ({ signal }) =>
+      api<UsageRow[]>(`/api/analytics/usage${teamFilter(selectedTeam)}`, { signal }),
+  });
+  const statsQuery = useQuery({
+    queryKey: ['analytics', 'usage', 'stats', { team_id: selectedTeam }],
+    queryFn: ({ signal }) =>
+      api<UsageStats>(`/api/analytics/usage/stats${teamFilter(selectedTeam)}`, { signal }),
+  });
+  const rows = usageQuery.data ?? NO_ROWS;
+  const stats = statsQuery.data ?? NO_STATS;
+  const loading = usageQuery.isPending || statsQuery.isPending;
+  const error = (usageQuery.error ?? statsQuery.error)?.message ?? '';
 
   // Aggregate tokens by date for chart
   const chartData = useMemo(() => {

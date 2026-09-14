@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate, useSearch } from '@tanstack/react-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import Decimal from 'decimal.js';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -1076,50 +1077,60 @@ export function SettingsPage() {
 
 /* ---------- Platform pricing card ---------- */
 
+// Pricing comes from the backend as a `Decimal(18,10)` string —
+// routing it through JS `Number` clips at ~15 significant digits
+// and silently mis-displays prices like `0.00000012345` once they
+// scale up to per-million. Stay in decimal.js end-to-end on this
+// form to match the rest of the cost surface.
+function toPerMillion(p: {
+  input_price_per_token: string;
+  output_price_per_token: string;
+  currency: string;
+}) {
+  return {
+    inputPerM: new Decimal(p.input_price_per_token).mul(1_000_000).toString(),
+    outputPerM: new Decimal(p.output_price_per_token).mul(1_000_000).toString(),
+    currency: p.currency,
+  };
+}
+
 // The baseline `$/token` that Models use as `cost = baseline × weight × tokens`.
 // Self-contained: own fetch, own autosave. Lives under the gateway tab
 // because costs are an AI-Gateway concern.
 function PlatformPricingCard() {
   const { t } = useTranslation();
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const queryClient = useQueryClient();
+  const pricingQuery = useQuery({
+    queryKey: ['admin', 'platform-pricing'],
+    queryFn: ({ signal }) =>
+      api<{
+        input_price_per_token: string;
+        output_price_per_token: string;
+        currency: string;
+      }>('/api/admin/platform-pricing', { signal }),
+    select: toPerMillion,
+  });
+  const error = pricingQuery.error?.message ?? '';
   // Edit in $/1M tokens because 0.0000025 is unreadable — multiply
   // by 1e6 on load and divide by 1e6 on save.
   const [inputPerM, setInputPerM] = useState('');
   const [outputPerM, setOutputPerM] = useState('');
   const [currency, setCurrency] = useState('USD');
 
-  const reload = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const p = await api<{
-        input_price_per_token: string;
-        output_price_per_token: string;
-        currency: string;
-      }>('/api/admin/platform-pricing');
-      // Pricing comes from the backend as a `Decimal(18,10)` string —
-      // routing it through JS `Number` clips at ~15 significant digits
-      // and silently mis-displays prices like `0.00000012345` once they
-      // scale up to per-million. Stay in decimal.js end-to-end on this
-      // form to match the rest of the cost surface.
-      setInputPerM(new Decimal(p.input_price_per_token).mul(1_000_000).toString());
-      setOutputPerM(new Decimal(p.output_price_per_token).mul(1_000_000).toString());
-      setCurrency(p.currency);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setLoading(false);
+  // The form is a draft of the server's pricing, seeded once: from the
+  // first response this card fetched itself — never from a cached copy
+  // that could predate another admin's save — and never again after, so
+  // no refetch lands under the cursor mid-edit.
+  const [seeded, setSeeded] = useState(false);
+  if (!seeded && pricingQuery.isFetchedAfterMount) {
+    setSeeded(true);
+    if (pricingQuery.data) {
+      setInputPerM(pricingQuery.data.inputPerM);
+      setOutputPerM(pricingQuery.data.outputPerM);
+      setCurrency(pricingQuery.data.currency);
     }
-  }, [t]);
-
-  useEffect(() => {
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void reload();
-  }, [reload]);
+  }
+  const loading = !seeded;
 
   // Endpoint takes the full payload, so each field's autosave PATCHes
   // the whole thing using the latest state. Per-field SaveIndicator
@@ -1151,7 +1162,11 @@ function PlatformPricingCard() {
       output_price_per_token: outputDec.div(1_000_000).toString(),
       currency,
     });
-  }, [inputPerM, outputPerM, currency, t]);
+    // The Models page's cost preview reads this entry. Refetch it while the
+    // card still has it on screen, so it is current when that page mounts;
+    // the form was seeded once and ignores the refetch.
+    void queryClient.invalidateQueries({ queryKey: ['admin', 'platform-pricing'] });
+  }, [inputPerM, outputPerM, currency, queryClient, t]);
 
   const isLoaded = !loading;
   const inputSave = useFieldAutosave({ value: inputPerM, isLoaded, persist: persistAll });

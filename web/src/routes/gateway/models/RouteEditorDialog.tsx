@@ -1,5 +1,6 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery } from '@tanstack/react-query';
 import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -33,6 +34,15 @@ import {
 } from './types';
 import type { Provider } from '../provider-types';
 
+/// One entry of `GET /api/admin/providers/{id}/remote-models`.
+interface RemoteModel {
+  id: string;
+  available?: boolean;
+  reason?: string;
+}
+
+const remoteModelIds = (rows: RemoteModel[]) => rows.map((r) => r.id);
+
 /// Create/edit dialog for a Route entry on a Model. Owns its own
 /// form, remote-model picker cache, and saving state. Parent only
 /// needs to manage `open` + which `route`/`targetModel` is active +
@@ -65,11 +75,6 @@ export function RouteEditorDialog({
   const [form, setForm] = useState<RouteFormState>(emptyRouteForm);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
-  // Per-provider remote-model catalog, lazily populated when a
-  // provider is picked. `null` = fetched, no /models endpoint;
-  // `undefined` = not yet fetched.
-  const [remoteCache, setRemoteCache] = useState<Record<string, string[] | null>>({});
-  const [remoteLoading, setRemoteLoading] = useState(false);
 
   // Reset form on open transition.
   useResetOnChange(`${open}\u0000${route?.id ?? ''}\u0000${targetModel?.model_id ?? ''}`, () => {
@@ -93,29 +98,20 @@ export function RouteEditorDialog({
   });
 
   // Pull the upstream-model picker options from the selected provider's
-  // remote catalog. Cached per provider so switching providers back-
-  // and-forth within one dialog session is instant.
-  useEffect(() => {
-    if (!open) return;
-    const pid = form.provider_id;
-    if (!pid) return;
-    if (remoteCache[pid] !== undefined) return;
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setRemoteLoading(true);
-    void api<string[]>(`/api/admin/providers/${pid}/remote-models`)
-      .then((rows) => {
-        setRemoteCache((c) => ({ ...c, [pid]: rows }));
-      })
-      .catch(() => {
-        // Provider with no /models endpoint, or temporary fetch
-        // failure — leave cache empty and fall back to free input.
-        setRemoteCache((c) => ({ ...c, [pid]: null }));
-      })
-      .finally(() => setRemoteLoading(false));
-  }, [open, form.provider_id, remoteCache]);
+  // remote catalog. Each lookup costs the backend a call to the
+  // upstream's own model listing, so a provider's list is kept rather
+  // than refetched: switching providers back and forth is instant. A
+  // provider with no /models endpoint, or a temporary fetch failure,
+  // falls back to free input.
+  const pid = form.provider_id;
+  const remoteQuery = useQuery({
+    queryKey: ['admin', 'providers', pid, 'remote-models'],
+    queryFn: ({ signal }) =>
+      api<RemoteModel[]>(`/api/admin/providers/${pid}/remote-models`, { signal }),
+    enabled: open && !!pid,
+    staleTime: Infinity,
+    select: remoteModelIds,
+  });
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
@@ -222,10 +218,9 @@ export function RouteEditorDialog({
             <div className="space-y-2">
               <Label htmlFor="route_upstream">{t('models.col.upstreamModel')}</Label>
               {(() => {
-                const pid = form.provider_id;
-                const remote = pid ? remoteCache[pid] : undefined;
+                const remote = remoteQuery.data;
                 // Loading: provider picked, fetch in flight.
-                if (pid && remote === undefined && remoteLoading) {
+                if (remoteQuery.isLoading) {
                   return (
                     <div className="flex items-center gap-2 text-xs text-muted-foreground h-9 px-3 border rounded-md">
                       <Loader2 className="h-3.5 w-3.5 animate-spin" />

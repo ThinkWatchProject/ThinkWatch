@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { StatusIndicator } from '@/components/ui/status-indicator';
@@ -64,10 +65,16 @@ interface McpServer {
 
 export function McpServersPage() {
   const { t } = useTranslation();
-  const [servers, setServers] = useState<McpServer[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const serversQuery = useQuery({
+    queryKey: ['mcp', 'servers'],
+    queryFn: ({ signal }) => api<McpServer[]>('/api/mcp/servers', { signal }),
+  });
+  const servers = serversQuery.data ?? [];
+  const loading = serversQuery.isPending;
+  const error = serversQuery.error?.message ?? '';
   const pager = useClientPagination(servers, 20);
-  const [error, setError] = useState('');
+  const invalidateServers = () => queryClient.invalidateQueries({ queryKey: ['mcp', 'servers'] });
 
   const [editServer, setEditServer] = useState<McpServer | null>(null);
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
@@ -79,35 +86,12 @@ export function McpServersPage() {
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
 
-  const fetchServers = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const data = await api<McpServer[]>('/api/mcp/servers', { signal });
-      setServers(data);
-    } catch (err) {
-      if (signal?.aborted) return;
-      setError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    // Async loader: its first statement is the `await`, so every setState
-    // inside runs in the continuation — never synchronously with this
-    // effect, and never as a cascading render. The rule's cross-function
-    // analysis does not model `await`.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchServers(controller.signal);
-    return () => controller.abort();
-  }, [fetchServers]);
-
   const handleDelete = async (id: string) => {
     try {
       await apiDelete(`/api/mcp/servers/${id}`);
       setDeleteTargetId(null);
       toast.success(t('common.deleteSuccess'));
-      await fetchServers();
+      await invalidateServers();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
     }
@@ -175,7 +159,7 @@ export function McpServersPage() {
       }
       setSelectedIds(new Set());
       setBulkDeleteOpen(false);
-      await fetchServers();
+      await invalidateServers();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
     } finally {
@@ -216,7 +200,7 @@ export function McpServersPage() {
           t('mcpServers.discoverSuccess', { count: res.tools_discovered }),
         );
       }
-      await fetchServers();
+      await invalidateServers();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('mcpServers.discoverFailed'));
     } finally {
@@ -485,7 +469,7 @@ export function McpServersPage() {
               onCancel={() => setEditServer(null)}
               onSaved={() => {
                 setEditServer(null);
-                void fetchServers();
+                void invalidateServers();
               }}
             />
           )}
