@@ -134,7 +134,7 @@ impl IntoResponse for AppError {
 impl From<tw_crypto::json_secret::SecretError> for AppError {
     /// The shared layer must not know this crate's error taxonomy — that
     /// is why `tw-crypto` carries its own `SecretError` rather than
-    /// returning `AppError` directly (thinkwatch-core DESIGN §9.3).
+    /// returning `AppError` directly.
     ///
     /// A secret that will not decrypt is always `Internal`: the caller
     /// supplied a well-formed request, and the failure is either a wrong
