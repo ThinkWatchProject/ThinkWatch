@@ -6,6 +6,7 @@ The management console for ThinkWatch, built with React 19, TypeScript, and Vite
 
 - **React 19** with TypeScript
 - **TanStack Router** for file-based routing
+- **TanStack Query** for server state — see [Data fetching](#data-fetching)
 - **shadcn/ui** (Radix UI + Tailwind CSS 4) for components
 - **react-i18next** for internationalization (English + Chinese)
 - **Vitest** + React Testing Library for testing
@@ -23,28 +24,36 @@ pnpm exec tsc --noEmit  # Type check
 
 ## Data fetching
 
-Loads are hand-rolled: a `useCallback` that fetches and sets state, plus a
-`useEffect` that calls it. There is no data-fetching layer in this app.
+Server state goes through [TanStack Query](https://tanstack.com/query). A
+component asks for what it renders with `useQuery`, and the query layer owns
+the rest: the loading flag, the cache, cancelling a request nobody is waiting
+for, and keeping a late response from landing under filters that have since
+changed. No load runs in an effect.
 
-That shape trips `react-hooks/set-state-in-effect`, and the sites that it
-flags carry a one-line suppression saying which of two things is going on:
+- **Keys follow the endpoint.** `GET /api/admin/teams/{id}/members` is keyed
+  `['admin', 'teams', id, 'members']`, with query-string parameters in a
+  trailing object. A key names everything its `queryFn` reads —
+  `@tanstack/query/exhaustive-deps` enforces that — and invalidating a
+  prefix such as `['admin', 'teams']` reaches every query under it. Pass
+  `exact: true` when a prefix would reach further than the write did.
+- **Writes invalidate.** After a mutation, `await
+  queryClient.invalidateQueries({ queryKey })` for what the screen shows.
+  Awaiting keeps orderings like "close the dialog once the list is fresh".
+  Screens that aren't open need nothing: every successful write through
+  `api()` drops the cached queries no screen is using (`onSuccessfulWrite`,
+  wired up in `main.tsx`), so none of them reopens onto pre-write data.
+- **Pass the signal.** `queryFn: ({ signal }) => api(path, { signal })` lets
+  the layer cancel a request once no component needs its answer.
+- **Derive, don't copy.** Read `query.data` where it is rendered. When a
+  screen needs local state that follows what was loaded — a form draft, a
+  selection — adjust it during render, the way `useResetOnChange` does.
 
-- **The rule is wrong.** `useEffect(() => { load(); }, [load])` where `load`
-  is async and its first statement is the `await`. Every setState inside
-  runs in the continuation — never synchronously with the effect, never a
-  cascading render. The rule's cross-function analysis does not model
-  `await`.
-- **The rule is right and the fix is architectural.** The loader's first
-  statement flips a spinner. Hoisting that flag out to render-time silences
-  the rule, but it splits "start a load" across two places and leaves every
-  other caller of the loader responsible for remembering half of it.
+`src/lib/query-client.ts` builds the client and says why its defaults differ
+from the library's. Tests render through `renderWithQueryClient` from
+`src/test/render.tsx`, which gives every call an empty cache.
 
-**Both go away with a data-fetching layer** (TanStack Query or equivalent),
-which owns the loading flag and the cache and removes the effect entirely.
-That is a deliberate piece of work, not something to fold into a lint pass.
-Until then, do not add new suppressions of this rule without one of the two
-reasons above — every other finding it reports is a real one, and the rest
-of the codebase is clean of them.
+Do not add new suppressions of `react-hooks/set-state-in-effect` — every
+finding it reports is a real one, and the codebase is clean of them.
 
 ## Project Structure
 
@@ -58,6 +67,7 @@ src/
 │   └── use-mobile.ts   # Responsive breakpoint detection
 ├── lib/
 │   ├── api.ts          # HTTP client with HMAC signing & auto token refresh
+│   ├── query-client.ts # TanStack Query client & its defaults
 │   └── utils.ts        # Utility functions
 ├── i18n/
 │   ├── en.json         # English translations
@@ -88,6 +98,7 @@ src/
 │       ├── settings.tsx    # Dynamic system settings (7 tabs)
 │       └── log-forwarders.tsx  # Log forwarding configuration
 ├── test/
+│   ├── render.tsx      # render() inside a fresh query cache
 │   └── setup.ts        # Test setup (jest-dom + i18n)
 └── router.tsx          # Route definitions & setup redirect logic
 ```
