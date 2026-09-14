@@ -220,6 +220,13 @@ ThinkWatch/
 
 > 文档：**[thinkwat.ch/zh-CN/docs](https://thinkwat.ch/zh-CN/docs)**
 
+## 相关项目
+
+| 仓库 | 说明 |
+|---|---|
+| [ThinkWatch Lite](https://github.com/ThinkWatchProject/ThinkWatch-Lite) | 面向个人开发者的桌面应用。把本地 AI API 网关放进菜单栏，看清 Claude Code、Codex 花了多少钱，每个请求被路由到哪里，哪些内容被脱敏。开发中，先支持 macOS。MIT 协议。 |
+| [ThinkWatch Core](https://github.com/ThinkWatchProject/ThinkWatch-Core) | 本地 AI API 网关的 Rust crate：路由、故障转移、成本核算与脱敏。ThinkWatch Lite 基于它构建，本服务端版直接依赖其中 5 个 crate：共享类型、协议处理、provider、信封加密，以及重试与故障转移。MIT 协议。 |
+
 ## 贡献
 
 欢迎贡献。提交大型变更前请先开 Issue 讨论。

@@ -352,6 +352,13 @@ ThinkWatch/
 
 > Documentation: **[thinkwat.ch/docs](https://thinkwat.ch/docs)**
 
+## Related projects
+
+| Repository | What it is |
+|---|---|
+| [ThinkWatch Lite](https://github.com/ThinkWatchProject/ThinkWatch-Lite) | A desktop app for individual developers. It puts a local AI API gateway in your menu bar, so you can see what Claude Code and Codex cost, where each request was routed, and what was redacted. In development, macOS first. MIT. |
+| [ThinkWatch Core](https://github.com/ThinkWatchProject/ThinkWatch-Core) | Rust crates for a local AI API gateway: routing, failover, cost accounting, and redaction. ThinkWatch Lite is built on it, and this server edition depends on five of its crates: shared types, protocol handling, providers, envelope encryption, and retry and failover. MIT. |
+
 ## Contributing
 
 Contributions are welcome. Please open an issue to discuss before submitting a PR for major changes.
