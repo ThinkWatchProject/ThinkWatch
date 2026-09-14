@@ -147,3 +147,49 @@ describe('api client', () => {
     expect(result).toEqual({ data: 'refreshed' })
   })
 })
+
+// main.tsx drops cached queries no screen is using on every successful
+// write, so a screen never reopens onto data from before one.
+describe('write notifications', () => {
+  const okFetch = () =>
+    vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve({}) })
+
+  it('tells listeners about a successful write', async () => {
+    vi.stubGlobal('fetch', okFetch())
+    const listener = vi.fn()
+    apiModule.onSuccessfulWrite(listener)
+
+    await apiModule.api('/api/items', { method: 'POST', body: { name: 'a' } })
+
+    expect(listener).toHaveBeenCalledTimes(1)
+  })
+
+  it('stays quiet for reads and for writes that fail', async () => {
+    const listener = vi.fn()
+    apiModule.onSuccessfulWrite(listener)
+
+    vi.stubGlobal('fetch', okFetch())
+    await apiModule.api('/api/items')
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      statusText: 'Bad Request',
+      json: () => Promise.resolve({ error: { message: 'Invalid input' } }),
+    }))
+    await expect(apiModule.api('/api/items/1', { method: 'DELETE' })).rejects.toThrow('Invalid input')
+
+    expect(listener).not.toHaveBeenCalled()
+  })
+
+  it('stops calling a listener that unsubscribed', async () => {
+    vi.stubGlobal('fetch', okFetch())
+    const listener = vi.fn()
+    const unsubscribe = apiModule.onSuccessfulWrite(listener)
+    unsubscribe()
+
+    await apiModule.api('/api/items/1', { method: 'PATCH', body: {} })
+
+    expect(listener).not.toHaveBeenCalled()
+  })
+})

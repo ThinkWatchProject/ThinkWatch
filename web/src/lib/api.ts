@@ -243,6 +243,31 @@ async function tryRefreshToken(): Promise<boolean> {
   }
 }
 
+// --- Write notifications ---
+//
+// Screens keep what they load in the query cache (src/lib/query-client.ts),
+// and one write can change what several of them hold: adding a team member
+// moves the team list's member count, the user list's team column and the
+// team's own page. The screen making a write refreshes what it shows, but it
+// rarely knows what else the write touched. Every write passes through
+// `api()`, so this is where the cache hears about all of them.
+
+const writeListeners = new Set<() => void>();
+
+/// Run `listener` after every successful request that isn't a GET.
+/// Returns a function that unsubscribes it.
+export function onSuccessfulWrite(listener: () => void): () => void {
+  writeListeners.add(listener);
+  return () => {
+    writeListeners.delete(listener);
+  };
+}
+
+function notifyWrite(method: string): void {
+  if (method.toUpperCase() === 'GET') return;
+  for (const listener of writeListeners) listener();
+}
+
 // --- API Client ---
 
 function validate<T>(path: string, json: unknown, schema?: ZodType<T>): T {
@@ -293,7 +318,10 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
         body: bodyStr,
         signal: options.signal,
       });
-      if (retryRes.ok) return validate(path, await retryRes.json(), options.schema);
+      if (retryRes.ok) {
+        notifyWrite(method);
+        return validate(path, await retryRes.json(), options.schema);
+      }
       // After a successful refresh, the retry can still legitimately
       // return non-401 statuses — a 403 means "session is fine, but
       // this user can't do that"; a 500 means upstream broke. Don't
@@ -339,6 +367,7 @@ export async function api<T>(path: string, options: ApiOptions<T> = {}): Promise
     throw new ApiError(serverMessage || 'Request failed', res.status, errorType);
   }
 
+  notifyWrite(method);
   return validate(path, await res.json(), options.schema);
 }
 
