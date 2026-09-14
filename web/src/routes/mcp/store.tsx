@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Link } from '@tanstack/react-router';
@@ -79,7 +79,7 @@ export function McpStorePage() {
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
-  const fetchTemplates = async () => {
+  const fetchTemplates = useCallback(async () => {
     try {
       const params = new URLSearchParams();
       if (activeCategory) params.set('category', activeCategory);
@@ -92,7 +92,7 @@ export function McpStorePage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeCategory, searchQuery]);
 
   const fetchCategories = async () => {
     try {
@@ -118,7 +118,7 @@ export function McpStorePage() {
       void fetchTemplates();
     }, 200);
     return () => clearTimeout(timer);
-  }, [searchQuery, activeCategory]);
+  }, [searchQuery, activeCategory, fetchTemplates]);
 
   // Separate featured templates when no filter is active
   const featuredTemplates =

@@ -21,6 +21,31 @@ pnpm test         # Run tests
 pnpm exec tsc --noEmit  # Type check
 ```
 
+## Data fetching
+
+Loads are hand-rolled: a `useCallback` that fetches and sets state, plus a
+`useEffect` that calls it. There is no data-fetching layer in this app.
+
+That shape trips `react-hooks/set-state-in-effect`, and the sites that it
+flags carry a one-line suppression saying which of two things is going on:
+
+- **The rule is wrong.** `useEffect(() => { load(); }, [load])` where `load`
+  is async and its first statement is the `await`. Every setState inside
+  runs in the continuation — never synchronously with the effect, never a
+  cascading render. The rule's cross-function analysis does not model
+  `await`.
+- **The rule is right and the fix is architectural.** The loader's first
+  statement flips a spinner. Hoisting that flag out to render-time silences
+  the rule, but it splits "start a load" across two places and leaves every
+  other caller of the loader responsible for remembering half of it.
+
+**Both go away with a data-fetching layer** (TanStack Query or equivalent),
+which owns the loading flag and the cache and removes the effect entirely.
+That is a deliberate piece of work, not something to fold into a lint pass.
+Until then, do not add new suppressions of this rule without one of the two
+reasons above — every other finding it reports is a real one, and the rest
+of the codebase is clean of them.
+
 ## Project Structure
 
 ```

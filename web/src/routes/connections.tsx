@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { ServiceLogo } from '@/components/ui/service-logo';
@@ -113,7 +113,7 @@ export function ConnectionsPage() {
     },
   );
 
-  const fetchAll = async (signal?: AbortSignal) => {
+  const fetchAll = useCallback(async (signal?: AbortSignal) => {
     try {
       const data = await api<ServerConnections[]>('/api/mcp/connections', { signal });
       setServers(data);
@@ -124,7 +124,7 @@ export function ConnectionsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -135,7 +135,7 @@ export function ConnectionsPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchAll(controller.signal);
     return () => controller.abort();
-  }, []);
+  }, [fetchAll]);
 
   // Parse the URL hash for `connected=...` / `error=...` / `need=...`
   // markers. Strip the fragment after we've consumed it so a refresh

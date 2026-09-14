@@ -149,7 +149,7 @@ export function LogForwardersPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   const loadBacklogCounts = useCallback(async () => {
     try {

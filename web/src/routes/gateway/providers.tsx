@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from '@tanstack/react-router';
 import { Card, CardContent } from '@/components/ui/card';
@@ -40,7 +40,7 @@ export function ProvidersPage() {
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState<string | null>(null);
 
-  const fetchProviders = async (signal?: AbortSignal) => {
+  const fetchProviders = useCallback(async (signal?: AbortSignal) => {
     try {
       const data = await api<Provider[]>('/api/admin/providers', { signal });
       setProviders(data);
@@ -50,7 +50,7 @@ export function ProvidersPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -61,7 +61,7 @@ export function ProvidersPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchProviders(controller.signal);
     return () => controller.abort();
-  }, []);
+  }, [fetchProviders]);
 
   const handleDelete = async (id: string) => {
     try {

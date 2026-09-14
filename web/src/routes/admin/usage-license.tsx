@@ -57,7 +57,7 @@ export function UsageLicensePage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [t]);
 
   const tokensPct = useMemo(() => {
     if (!data) return 0;

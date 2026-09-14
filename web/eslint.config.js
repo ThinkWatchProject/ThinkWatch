@@ -68,9 +68,15 @@ export default defineConfig([
     // the rule here buys a warning that has to be re-fixed forever. The
     // files are leaf primitives that rarely change; losing HMR on them is
     // the cheaper side of the trade.
+    //
+    // The compiler rule is off here for the same reason: shadcn's sidebar
+    // writes `document.cookie` inside a `useCallback` to persist the open
+    // state. That is the upstream implementation, and editing it has the
+    // same problem — the next `add` puts it back.
     files: ['src/components/ui/**'],
     rules: {
       'react-refresh/only-export-components': 'off',
+      'react-compiler/react-compiler': 'off',
     },
   },
 ])

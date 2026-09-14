@@ -100,6 +100,10 @@ export function RouteEditorDialog({
     const pid = form.provider_id;
     if (!pid) return;
     if (remoteCache[pid] !== undefined) return;
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setRemoteLoading(true);
     void api<string[]>(`/api/admin/providers/${pid}/remote-models`)
       .then((rows) => {

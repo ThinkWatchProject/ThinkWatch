@@ -198,7 +198,6 @@ export function useLiveDashboard(range: string) {
       closeQuietly(ws);
       ws = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range]);
 
   return { live, connected };

@@ -140,7 +140,10 @@ export function DashboardPage() {
   // Live-log pause state lifted from the panel so the toggle can live
   // in the Section eyebrow alongside the title.
   const [livePaused, setLivePaused] = useState(false);
-  const allProviders = live?.providers ?? [];
+  // `?? []` allocates a fresh array on every render while `live` is null,
+  // which defeats both memos below — they recompute every time and the
+  // provider list re-renders with them.
+  const allProviders = useMemo(() => live?.providers ?? [], [live]);
   const providerCounts = useMemo(
     () => ({
       all: allProviders.length,
@@ -153,10 +156,7 @@ export function DashboardPage() {
     if (live === null) return null;
     if (providerFilter === 'all') return allProviders;
     return allProviders.filter((p) => p.kind === providerFilter);
-    // `allProviders` is derived from `live` on the same render, so
-    // including both as deps would be redundant — `allProviders`
-    // alone reflects the live-state change.
-  }, [allProviders, providerFilter]);
+  }, [allProviders, live, providerFilter]);
 
   return (
     // Full-viewport layout — the entire dashboard fits on one screen with

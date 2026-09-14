@@ -97,7 +97,7 @@ export function GatewaySecurityPage() {
         toast.error(err instanceof Error ? err.message : t('common.error'));
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [t]);
 
   const handleSave = async () => {
     setSaving(true);

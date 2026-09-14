@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { type ReactNode, useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Button } from '@/components/ui/button';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
@@ -55,7 +55,7 @@ export function RoleWizard({
   const isFirst = currentIdx === 0;
   const currentErr = currentId ? errors[currentId] : null;
 
-  const goNext = () => {
+  const goNext = useCallback(() => {
     const step = steps[currentIdx];
     const err = step?.validate?.() ?? null;
     if (err) {
@@ -65,14 +65,14 @@ export function RoleWizard({
     setErrors((s) => ({ ...s, [step.id]: null }));
     const next = steps[currentIdx + 1];
     if (next) setCurrentId(next.id);
-  };
+  }, [currentIdx, steps]);
 
-  const goPrev = () => {
+  const goPrev = useCallback(() => {
     const prev = steps[currentIdx - 1];
     if (prev) setCurrentId(prev.id);
-  };
+  }, [currentIdx, steps]);
 
-  const handleSubmit = () => {
+  const handleSubmit = useCallback(() => {
     // Validate all prior steps + current one.
     for (let i = 0; i <= currentIdx; i++) {
       const err = steps[i].validate?.() ?? null;
@@ -83,7 +83,7 @@ export function RoleWizard({
       }
     }
     onSubmit();
-  };
+  }, [currentIdx, onSubmit, steps]);
 
   // Keyboard shortcuts: Cmd/Ctrl+Enter to advance (or submit on the last
   // step), Cmd/Ctrl+Shift+Enter to go back. Skipped when focus is in a
@@ -101,8 +101,7 @@ export function RoleWizard({
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentIdx, isLast]);
+  }, [currentIdx, goNext, goPrev, handleSubmit, isLast]);
 
   return (
     <Tabs

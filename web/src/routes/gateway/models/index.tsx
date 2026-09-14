@@ -183,7 +183,7 @@ export function ModelsPage() {
         setLoading(false);
       }
     },
-    [page, debouncedSearch, pageSize, statusFilter],
+    [page, debouncedSearch, pageSize, statusFilter, t],
   );
 
   const fetchPricing = useCallback(async () => {
@@ -220,7 +220,7 @@ export function ModelsPage() {
         return next;
       });
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     // Async loader: its first statement is the `await`, so every setState
@@ -252,6 +252,10 @@ export function ModelsPage() {
   }, [fetchProviders, fetchPricing]);
 
   useEffect(() => {
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchModels();
   }, [fetchModels]);
 
@@ -263,14 +267,17 @@ export function ModelsPage() {
     if (!routeSearch.import || providers.length === 0) return;
     const pid = routeSearch.import;
     if (!providers.some((p) => p.id === pid)) return;
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setBatchImport({ open: true, initialProviderId: pid });
     void navigate({
       to: '/gateway/models',
       search: { import: undefined },
       replace: true,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeSearch.import, providers]);
+  }, [routeSearch.import, providers, navigate]);
 
   useEffect(() => {
     const h = setTimeout(() => setDebouncedSearch(search.trim()), 250);

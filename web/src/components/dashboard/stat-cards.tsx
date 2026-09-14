@@ -11,15 +11,7 @@
  * rejected fetch and falls back to a terminal card variant.
  */
 
-import {
-  Suspense,
-  use,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
+import { Suspense, type ReactNode, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Area, AreaChart } from 'recharts';
 import { toast } from 'sonner';
@@ -60,7 +52,7 @@ export function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
   const { t } = useTranslation();
   const defaultOrder = useMemo(() => Object.keys(cards), [cards]);
 
-  const mergeOrder = (saved: unknown): string[] => {
+  const mergeOrder = useCallback((saved: unknown): string[] => {
     if (!Array.isArray(saved) || !saved.every((k) => typeof k === 'string')) {
       return defaultOrder;
     }
@@ -68,7 +60,7 @@ export function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
     const known = saved.filter((k) => k in cards);
     for (const k of defaultOrder) if (!known.includes(k)) known.push(k);
     return known;
-  };
+  }, [cards, defaultOrder]);
 
   const [order, setOrder] = useState<string[]>(() => {
     try {
@@ -104,8 +96,7 @@ export function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
     };
     // Intentionally only reconcile once per mount — subsequent drags
     // write through to the server, so there's no race to rehydrate.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mergeOrder]);
 
   const persist = (next: string[]) => {
     setOrder(next);

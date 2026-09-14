@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { CheckCircle2, AlertTriangle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
@@ -50,7 +50,7 @@ export function SharedCredentialPanel({
   const [pasted, setPasted] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const refresh = async () => {
+  const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const s = await apiGet<SharedCredentialStatus>(
@@ -64,11 +64,15 @@ export function SharedCredentialPanel({
     } finally {
       setLoading(false);
     }
-  };
+  }, [serverId]);
 
   useEffect(() => {
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
-  }, [serverId]);
+  }, [refresh, serverId]);
 
   const startOAuth = async () => {
     setSubmitting(true);

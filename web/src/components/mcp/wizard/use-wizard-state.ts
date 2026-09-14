@@ -71,7 +71,6 @@ function readStorage(sessionId: string): WizardState | null {
   // (clear the blob, fall back to a fresh wizard) is the right UX.
   const result = PersistedWizardStateSchema.safeParse(json);
   if (!result.success) {
-    // eslint-disable-next-line no-console
     console.warn(
       `[wizard] sessionStorage blob failed schema validation for session ${sessionId}; starting fresh:`,
       result.error.issues,
@@ -294,7 +293,7 @@ export function useWizardState(): WizardController {
     if (typeof window !== 'undefined') {
       window.history.replaceState(null, '', window.location.pathname);
     }
-  }, []);
+  }, [init.resumed]);
 
   // Template prefill — fetch the template by slug and apply its
   // defaults onto the wizard state. Runs once on mount when the wizard
@@ -322,7 +321,6 @@ export function useWizardState(): WizardController {
         // register a server manually; we just can't claim it came
         // from this template. Log to console so a misrouted slug or
         // backend regression isn't entirely silent in DevTools.
-        // eslint-disable-next-line no-console
         console.warn(
           `[wizard] template prefill failed for slug=${slug}:`,
           err,
@@ -334,13 +332,16 @@ export function useWizardState(): WizardController {
     return () => {
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [init.templateSlug]);
 
   // Resume probe — confirm the OAuth dance landed a credential blob.
   useEffect(() => {
     if (!init.resumed) return;
     if (state.credential_owner !== 'admin_shared') {
+      // Hand-rolled load: the spinner flag is the first half of "start a
+      // fetch" and belongs with it. See "Data fetching" in web/README.md —
+      // this goes away with a data-fetching layer, not by moving the flag.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setResumeChecking(false);
       return;
     }
@@ -376,8 +377,7 @@ export function useWizardState(): WizardController {
     return () => {
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [init.resumed, init.sessionId, state.credential_owner]);
 
   // Persist on every mutation.
   useEffect(() => {
@@ -406,7 +406,7 @@ export function useWizardState(): WizardController {
     } catch {
       /* ignore */
     }
-  }, []);
+  }, [init.sessionId]);
 
   return {
     state,

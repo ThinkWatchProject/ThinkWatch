@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -79,7 +79,7 @@ export function McpServersPage() {
   const [bulkDeleteOpen, setBulkDeleteOpen] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
 
-  const fetchServers = async (signal?: AbortSignal) => {
+  const fetchServers = useCallback(async (signal?: AbortSignal) => {
     try {
       const data = await api<McpServer[]>('/api/mcp/servers', { signal });
       setServers(data);
@@ -89,7 +89,7 @@ export function McpServersPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -100,7 +100,7 @@ export function McpServersPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchServers(controller.signal);
     return () => controller.abort();
-  }, []);
+  }, [fetchServers]);
 
   const handleDelete = async (id: string) => {
     try {

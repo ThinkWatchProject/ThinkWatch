@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Card, CardContent } from '@/components/ui/card';
@@ -150,7 +150,7 @@ export function UsersPage() {
   const [resetConfirmUser, setResetConfirmUser] = useState<User | null>(null);
   const [resetLoading, setResetLoading] = useState(false);
 
-  const fetchUsers = async (signal?: AbortSignal) => {
+  const fetchUsers = useCallback(async (signal?: AbortSignal) => {
     try {
       const params = new URLSearchParams({
         page: String(page),
@@ -192,7 +192,7 @@ export function UsersPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [availablePermissions, availableRoles, debouncedSearch, page, pageSize, t]);
 
   /// Would a delete / disable / role-strip on this user drop the
   /// platform's super-admin quorum to zero? Mirrors the backend
@@ -223,8 +223,7 @@ export function UsersPage() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchUsers(controller.signal);
     return () => controller.abort();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, pageSize, debouncedSearch]);
+  }, [page, pageSize, debouncedSearch, fetchUsers]);
 
   // --- Create user ---
   const resetCreateForm = () => {

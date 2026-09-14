@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { getRouteApi, useNavigate } from '@tanstack/react-router';
 import { Button } from '@/components/ui/button';
@@ -100,7 +100,7 @@ export function TeamDetailPage() {
   const [assignRoleOpen, setAssignRoleOpen] = useState(false);
   const [pendingRoleId, setPendingRoleId] = useState('');
 
-  const fetchTeam = async () => {
+  const fetchTeam = useCallback(async () => {
     try {
       const data = await api<Team>(`/api/admin/teams/${teamId}`);
       setTeam(data);
@@ -110,9 +110,9 @@ export function TeamDetailPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t, teamId]);
 
-  const fetchMembers = async () => {
+  const fetchMembers = useCallback(async () => {
     setMembersLoading(true);
     try {
       const data = await api<TeamMember[]>(`/api/admin/teams/${teamId}/members`);
@@ -122,9 +122,9 @@ export function TeamDetailPage() {
     } finally {
       setMembersLoading(false);
     }
-  };
+  }, [teamId]);
 
-  const fetchTeamRoles = async () => {
+  const fetchTeamRoles = useCallback(async () => {
     setRolesLoading(true);
     try {
       const data = await api<TeamRole[]>(`/api/admin/teams/${teamId}/roles`);
@@ -134,7 +134,7 @@ export function TeamDetailPage() {
     } finally {
       setRolesLoading(false);
     }
-  };
+  }, [teamId]);
 
   useEffect(() => {
     // Async loader: its first statement is the `await`, so every setState
@@ -145,8 +145,7 @@ export function TeamDetailPage() {
     void fetchTeam();
     void fetchMembers();
     void fetchTeamRoles();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [teamId]);
+  }, [fetchMembers, fetchTeam, fetchTeamRoles, teamId]);
 
   // Edit team
   const openEdit = () => {
