@@ -744,14 +744,10 @@ export function DeleteApiKeyDialog({
 
   const handleRevoke = async () => {
     if (!keyId) return;
-    try {
-      await apiDelete(`/api/keys/${keyId}`);
-      onOpenChange(false);
-      onSuccess();
-    } catch (err) {
-      // Toast is handled by the parent — just close and report via throw
-      throw err;
-    }
+    // Failures propagate: the toast is the parent's job, not this dialog's.
+    await apiDelete(`/api/keys/${keyId}`);
+    onOpenChange(false);
+    onSuccess();
   };
 
   return (

@@ -70,9 +70,6 @@ export function SettingsPage() {
   const [health, setHealth] = useState<{ postgres: boolean; redis: boolean; clickhouse: boolean | null; s3: boolean | null } | null>(null);
   const [auditConfig, setAuditConfig] = useState<AuditConfig | null>(null);
 
-  // Editable settings from GET /api/admin/settings
-  const [_allSettings, setAllSettings] = useState<Record<string, SettingEntry[]>>({});
-
   const [loading, setLoading] = useState(true);
   // Names of endpoints whose initial fetch failed. Surfaced as a single
   // banner so admins can tell a half-loaded page from a half-permission'd
@@ -217,9 +214,7 @@ export function SettingsPage() {
         setSystemInfo(sys);
         setHealth(hp);
         setAuditConfig(audit);
-        const s = settings ?? {};
-        setAllSettings(s);
-        populateForm(s);
+        populateForm(settings ?? {});
         setLoadErrors(failures);
       })
       .finally(() => setLoading(false));

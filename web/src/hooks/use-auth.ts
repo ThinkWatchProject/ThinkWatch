@@ -49,6 +49,12 @@ export function useAuth() {
     }
   }, []);
 
+  // `fetchUser` is async and its first statement is the `await`, so every
+  // setState inside it runs in the continuation — never synchronously with
+  // this effect, and never as a cascading render. The rule's cross-function
+  // analysis does not model `await`, so it reads the documented
+  // fetch-on-mount shape as a violation.
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { fetchUser(); }, [fetchUser]);
 
   // Listen for cross-tab logout broadcasts so this tab drops its

@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -211,12 +212,15 @@ export function UsersPage() {
   // Typing a new search term should always land on page 1 — otherwise
   // you'd type "adm" and land on page 4 of a filtered result that
   // only has 2 pages.
-  useEffect(() => {
-    setPage(1);
-  }, [debouncedSearch]);
+  useResetOnChange(debouncedSearch, () => setPage(1));
 
   useEffect(() => {
     const controller = new AbortController();
+    // Async loader: its first statement is the `await`, so every setState
+    // inside runs in the continuation — never synchronously with this
+    // effect, and never as a cascading render. The rule's cross-function
+    // analysis does not model `await`.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchUsers(controller.signal);
     return () => controller.abort();
     // eslint-disable-next-line react-hooks/exhaustive-deps

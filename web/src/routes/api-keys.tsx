@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -240,8 +241,8 @@ export function ApiKeysPage() {
 
   // Keys re-fetch on tab change because the "Inactive" tab unions a
   // second server-side query, not just a client-side mask.
+  useResetOnChange(tab, () => setLoading(true));
   useEffect(() => {
-    setLoading(true);
     fetchKeys(tab === 'inactive' ? 'inactive' : 'live');
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tab]);

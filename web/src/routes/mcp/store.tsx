@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Link } from '@tanstack/react-router';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -103,11 +104,16 @@ export function McpStorePage() {
   };
 
   useEffect(() => {
+    // Async loader: its first statement is the `await`, so every setState
+    // inside runs in the continuation — never synchronously with this
+    // effect, and never as a cascading render. The rule's cross-function
+    // analysis does not model `await`.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchCategories();
   }, []);
 
+  useResetOnChange(`${searchQuery}\u0000${activeCategory}`, () => setLoading(true));
   useEffect(() => {
-    setLoading(true);
     const timer = setTimeout(() => {
       void fetchTemplates();
     }, 200);

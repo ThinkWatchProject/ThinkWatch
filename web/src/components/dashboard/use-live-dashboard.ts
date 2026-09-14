@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 
 import { api } from '@/lib/api';
 import { DashboardLiveSchema, WsTicketSchema, type DashboardLive } from '@/lib/schemas';
@@ -16,19 +17,29 @@ export function useLiveDashboard(range: string) {
   const [connected, setConnected] = useState(false);
   // Ref mirror so the WS callbacks can read "have we ever received data?"
   // without capturing a stale closure.
+  //
+  // **Mirrored in an effect, not during render.** Assigning a ref while
+  // rendering writes during a pass React is free to throw away, which
+  // leaves the ref holding a value that was never committed.
   const liveRef = useRef<DashboardLive | null>(null);
-  liveRef.current = live;
+  useEffect(() => {
+    liveRef.current = live;
+  }, [live]);
+
+  // Clear the previous range's snapshot so the panels (especially the
+  // top-users leaderboard, which is range-scoped) show their skeleton
+  // during the reconnect handshake instead of rendering old-window data
+  // under the new range's eyebrow. The ticket mint + WS upgrade + first
+  // frame round-trip is typically <500ms but can stretch on a cold-start;
+  // without this the UI would show a mismatched window for that interval
+  // with no loading signal.
+  //
+  // Done during render rather than at the top of the effect below, so the
+  // stale window is never painted at all — from an effect it is cleared one
+  // frame after the new range is already on screen.
+  useResetOnChange(range, () => setLive(null));
 
   useEffect(() => {
-    // Clear the previous range's snapshot so the panels (especially
-    // the top-users leaderboard, which is range-scoped) show their
-    // skeleton during the reconnect handshake instead of rendering
-    // old-window data under the new range's eyebrow. The ticket mint
-    // + WS upgrade + first frame round-trip is typically <500ms but
-    // can stretch on a cold-start; without this the UI would show a
-    // mismatched window for that interval with no loading signal.
-    setLive(null);
-
     let ws: WebSocket | null = null;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;

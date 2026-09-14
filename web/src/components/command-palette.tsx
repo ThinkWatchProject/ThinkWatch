@@ -1,6 +1,7 @@
 import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from '@tanstack/react-router';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import {
@@ -45,11 +46,15 @@ interface RecentGatewayResponse {
 /// users without `logs:read_all` just won't see the section.
 function useRecentTraces(open: boolean): CmdAction[] {
   const [items, setItems] = useState<CmdAction[]>([]);
+  // Clearing on close is state alignment, not a side effect — doing it
+  // during render means the palette never paints yesterday's traces for a
+  // frame when it is reopened.
+  useResetOnChange(open, () => {
+    if (!open) setItems([]);
+  });
+
   useEffect(() => {
-    if (!open) {
-      setItems([]);
-      return;
-    }
+    if (!open) return;
     let cancelled = false;
     api<RecentGatewayResponse>('/api/gateway/logs?limit=5&offset=0', {
       no401Redirect: true,
@@ -125,12 +130,12 @@ export function CommandPalette() {
   }, []);
 
   // Reset state on open
-  useEffect(() => {
+  useResetOnChange(open, () => {
     if (open) {
       setQuery('');
       setActiveIdx(0);
     }
-  }, [open]);
+  });
 
   const recentTraces = useRecentTraces(open);
 

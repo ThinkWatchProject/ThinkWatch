@@ -65,6 +65,7 @@ async function loginAdmin(page: Page) {
       `Login failed for ${ADMIN_EMAIL} — set PW_ADMIN_EMAIL and PW_ADMIN_PASSWORD to match your dev DB.\n` +
         `Defaults: admin@thinkwatch.local / Admin_pass_1!\n` +
         `Underlying error: ${e instanceof Error ? e.message : e}`,
+      { cause: e },
     );
   }
 }

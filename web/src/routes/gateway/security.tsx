@@ -160,7 +160,9 @@ export function GatewaySecurityPage() {
           '/api/admin/settings/content-filter/presets',
         );
         setCfPresets(presets);
-      } catch {}
+      } catch {
+        // Presets are a convenience; the editor works fully without them.
+      }
     }
   };
 

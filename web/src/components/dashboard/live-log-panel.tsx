@@ -9,6 +9,7 @@
 
 import { memo, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Pause, Play } from 'lucide-react';
 
 import { Card } from '@/components/ui/card';
@@ -171,26 +172,18 @@ export function LiveLogPanel({
 }) {
   const { t } = useTranslation();
   const [snapshot, setSnapshot] = useState<LiveLogRow[] | null>(null);
-  useEffect(() => {
-    if (paused) {
-      setSnapshot(rows);
-    } else {
-      setSnapshot(null);
-    }
-    // Intentionally ignore `rows` here — we only snapshot on the
-    // pause edge. The `rows === null` reset below handles the case
-    // where the upstream `live` state gets cleared (range toggle).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [paused]);
+  // Snapshot on the pause edge only — keyed on `paused`, so a new batch of
+  // rows arriving while paused does not overwrite what the user froze.
+  useResetOnChange(paused, () => {
+    setSnapshot(paused ? rows : null);
+  });
   // If the live stream is reset mid-pause (range change clears `live`),
   // drop the snapshot too so the panel doesn't keep showing old-window
   // rows under the new range's eyebrow. Re-pause on the next WS frame
   // re-captures from the new window.
-  useEffect(() => {
-    if (paused && rows === null) {
-      setSnapshot(null);
-    }
-  }, [paused, rows]);
+  useResetOnChange(rows, () => {
+    if (paused && rows === null) setSnapshot(null);
+  });
   const displayed = paused ? snapshot : rows;
 
   // Mirror what the row layout will be so headers and rows align perfectly.

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import {
   Card,
   CardContent,
@@ -398,10 +399,10 @@ function ProviderAndIssuerStep({ draft, canEdit, onSaved }: ProviderAndIssuerSte
 
   // Re-sync local state when the draft changes externally (the parent
   // refetches after every step).
-  useEffect(() => {
+  useResetOnChange(`${draft?.provider_preset ?? ''}\u0000${draft?.issuer_url ?? ''}`, () => {
     setProvider((draft?.provider_preset as ProviderId) ?? 'generic');
     setIssuer(draft?.issuer_url ?? '');
-  }, [draft?.provider_preset, draft?.issuer_url]);
+  });
 
   const preset = findPreset(provider);
 
@@ -589,11 +590,14 @@ function CredentialsStep({ draft, canEdit, onSaved }: CredentialsStepProps) {
   const [nameClaim, setNameClaim] = useState(draft?.name_claim ?? 'name');
   const [saving, setSaving] = useState(false);
 
-  useEffect(() => {
-    setClientId(draft?.client_id ?? '');
-    setEmailClaim(draft?.email_claim ?? 'email');
-    setNameClaim(draft?.name_claim ?? 'name');
-  }, [draft?.client_id, draft?.email_claim, draft?.name_claim]);
+  useResetOnChange(
+    `${draft?.client_id ?? ''}\u0000${draft?.email_claim ?? ''}\u0000${draft?.name_claim ?? ''}`,
+    () => {
+      setClientId(draft?.client_id ?? '');
+      setEmailClaim(draft?.email_claim ?? 'email');
+      setNameClaim(draft?.name_claim ?? 'name');
+    },
+  );
 
   const provider = findPreset(draft?.provider_preset);
   const hasSecret = draft?.has_secret ?? false;

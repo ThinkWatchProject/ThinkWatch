@@ -11,14 +11,13 @@ import {
 import { Section } from '@/components/dashboard/section';
 import {
   CostCard,
-  DASHBOARD_CARD_TIMEOUT_MS,
   KeysCard,
   StatCard,
   StatCardGrid,
   SuspendedCard,
   TokensCard,
-  withTimeout,
 } from '@/components/dashboard/stat-cards';
+import { DASHBOARD_CARD_TIMEOUT_MS, withTimeout } from '@/components/dashboard/card-timeout';
 import { TopUsersPanel, TopUsersTotalBadge } from '@/components/dashboard/top-users-panel';
 import { useLiveDashboard } from '@/components/dashboard/use-live-dashboard';
 import {

@@ -27,10 +27,50 @@ export default defineConfig([
       // `warn` rather than `error` while we land the underlying
       // refactors; flip to error once the existing finds are cleaned up.
       'react-compiler/react-compiler': 'warn',
+      // A leading underscore already means "deliberately unused" throughout
+      // this codebase — constructor parameters that exist only to match an
+      // upstream signature, `{ _clientId: _, ...rest }` to drop a field.
+      // Without this the convention reads as five defects.
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+          destructuredArrayIgnorePattern: '^_',
+          ignoreRestSiblings: true,
+        },
+      ],
     },
     languageOptions: {
       ecmaVersion: 2020,
       globals: globals.browser,
+    },
+  },
+  {
+    // Playwright fixtures, not React. `base.extend({ adminPage: async
+    // ({ page }, use) => ... })` hands the fixture a callback named `use`,
+    // and the hooks rule reads that call as a `use()` hook outside a
+    // component. There is no React in this directory at all.
+    files: ['e2e/**'],
+    rules: {
+      'react-hooks/rules-of-hooks': 'off',
+    },
+  },
+  {
+    // `src/components/ui/` is shadcn output, not code we write. Its house
+    // style deliberately ships a component and its variants from one file
+    // (`Button` + `buttonVariants`, `Sidebar` + `useSidebar`), which costs
+    // Fast Refresh on those modules.
+    //
+    // **Splitting them would not survive.** The next `pnpm dlx shadcn add`
+    // overwrites the file and the finding comes straight back, so enforcing
+    // the rule here buys a warning that has to be re-fixed forever. The
+    // files are leaf primitives that rarely change; losing HMR on them is
+    // the cheaper side of the trade.
+    files: ['src/components/ui/**'],
+    rules: {
+      'react-refresh/only-export-components': 'off',
     },
   },
 ])

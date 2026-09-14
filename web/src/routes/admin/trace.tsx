@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { useNavigate, useParams } from '@tanstack/react-router';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -59,11 +60,14 @@ export function TracePage() {
       });
   };
 
+  // Clearing the old trace happens during render, not in the effect: an
+  // effect would paint the previous trace for a frame under the new id.
+  useResetOnChange(params.traceId, () => {
+    if (!params.traceId) setData(null);
+  });
+
   useEffect(() => {
-    if (!params.traceId) {
-      setData(null);
-      return;
-    }
+    if (!params.traceId) return;
     fetchTrace(params.traceId, true);
   }, [params.traceId]);
 

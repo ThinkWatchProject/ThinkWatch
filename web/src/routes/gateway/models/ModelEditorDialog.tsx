@@ -1,5 +1,6 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useState, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import {
@@ -65,7 +66,7 @@ export function ModelEditorDialog({
   // Reset form whenever the dialog opens. Without this, an admin
   // who edits model A, closes, then edits model B would see A's
   // values in B's dialog.
-  useEffect(() => {
+  useResetOnChange(`${open}\u0000${model?.model_id ?? ''}`, () => {
     if (!open) return;
     if (model) {
       setForm({
@@ -82,7 +83,7 @@ export function ModelEditorDialog({
       setForm(emptyModelForm);
     }
     setError('');
-  }, [open, model]);
+  });
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();

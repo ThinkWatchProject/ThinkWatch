@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -81,7 +82,9 @@ export function BatchImportDialog({
 
   // Reset on open. Catalog list is fetched here too so step 2 has
   // it ready by the time the user gets there.
-  useEffect(() => {
+  // The reset happens during render; the catalog fetch stays in an effect
+  // below, since that is a genuine side effect rather than state alignment.
+  useResetOnChange(open, () => {
     if (!open) return;
     setStep(1);
     setProviderId('');
@@ -91,21 +94,14 @@ export function BatchImportDialog({
     setSearch('');
     setExistingIds(new Set());
     setDecisions({});
+  });
+
+  useEffect(() => {
+    if (!open) return;
     void api<{ model_id: string; display_name: string }[]>('/api/admin/models/ids')
       .then(setCatalogModels)
       .catch(() => setCatalogModels([]));
   }, [open]);
-
-  // Deeplink: when the dialog opens with an `initialProviderId`
-  // (`?import=<providerId>` query param landed by the Providers
-  // page), auto-select that provider and kick its remote-models
-  // fetch.
-  useEffect(() => {
-    if (!open || !initialProviderId) return;
-    if (!providers.some((p) => p.id === initialProviderId)) return;
-    void onProviderChange(initialProviderId);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, initialProviderId, providers]);
 
   const onProviderChange = async (pid: string) => {
     setProviderId(pid);
@@ -155,6 +151,17 @@ export function BatchImportDialog({
       setRemoteModelsLoading(false);
     }
   };
+
+  // Deeplink: when the dialog opens with an `initialProviderId`
+  // (`?import=<providerId>` query param landed by the Providers
+  // page), auto-select that provider and kick its remote-models
+  // fetch.
+  useEffect(() => {
+    if (!open || !initialProviderId) return;
+    if (!providers.some((p) => p.id === initialProviderId)) return;
+    void onProviderChange(initialProviderId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, initialProviderId, providers]);
 
   /// Heuristic for "did the admin probably mean to attach this to
   /// an already-exposed model, or to make a new one?". Matches on

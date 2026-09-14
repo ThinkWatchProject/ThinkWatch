@@ -54,6 +54,11 @@ export function ProvidersPage() {
 
   useEffect(() => {
     const controller = new AbortController();
+    // Async loader: its first statement is the `await`, so every setState
+    // inside runs in the continuation — never synchronously with this
+    // effect, and never as a cascading render. The rule's cross-function
+    // analysis does not model `await`.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchProviders(controller.signal);
     return () => controller.abort();
   }, []);

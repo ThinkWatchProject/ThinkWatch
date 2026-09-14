@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { useSearch, useNavigate } from '@tanstack/react-router';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -222,6 +223,11 @@ export function ModelsPage() {
   }, []);
 
   useEffect(() => {
+    // Async loader: its first statement is the `await`, so every setState
+    // inside runs in the continuation — never synchronously with this
+    // effect, and never as a cascading render. The rule's cross-function
+    // analysis does not model `await`.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchProviders();
     void fetchPricing();
     // Pull the global default strategy once. The wizard's mode picker
@@ -271,16 +277,15 @@ export function ModelsPage() {
     return () => clearTimeout(h);
   }, [search]);
 
-  useEffect(() => {
-    setPage(1);
-  }, [debouncedSearch]);
+  useResetOnChange(debouncedSearch, () => setPage(1));
 
   // Drop selection whenever the visible page changes — selected IDs
   // could otherwise persist across pages where the user can no longer
   // see what they're about to delete.
-  useEffect(() => {
-    setSelectedIds(new Set());
-  }, [page, pageSize, debouncedSearch, statusFilter]);
+  useResetOnChange(
+    `${page}\u0000${pageSize}\u0000${debouncedSearch}\u0000${statusFilter}`,
+    () => setSelectedIds(new Set()),
+  );
 
 
   /* ---------- detail drawer ---------- */

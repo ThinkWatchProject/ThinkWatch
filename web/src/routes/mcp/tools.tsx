@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -73,9 +74,7 @@ export function McpToolsPage() {
 
   // Any filter change resets to page 1 — otherwise a filter that
   // narrows the list would leave us on an empty tail page.
-  useEffect(() => {
-    setPage(1);
-  }, [debouncedQuery, filterServer, pageSize]);
+  useResetOnChange(`${debouncedQuery}\u0000${filterServer}\u0000${pageSize}`, () => setPage(1));
 
   const fetchTools = useCallback(async () => {
     setLoading(true);

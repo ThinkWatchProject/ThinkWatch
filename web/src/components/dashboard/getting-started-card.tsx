@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link } from '@tanstack/react-router';
 import { X, KeyRound, Plug, Users } from 'lucide-react';
@@ -24,14 +24,17 @@ export function GettingStartedCard({
   signals: { hasApiKeys: boolean; hasProviders: boolean };
 }) {
   const { t } = useTranslation();
-  const [dismissed, setDismissed] = useState(false);
-  useEffect(() => {
+  // Read in the initialiser, not an effect: an effect renders the card
+  // once before hiding it, so a user who dismissed it still sees it flash
+  // on every page load.
+  const [dismissed, setDismissed] = useState(() => {
     try {
-      if (window.localStorage.getItem(DISMISSED_KEY) === '1') setDismissed(true);
+      return window.localStorage.getItem(DISMISSED_KEY) === '1';
     } catch {
-      // ignore
+      // Private windows and blocked site data both throw here.
+      return false;
     }
-  }, []);
+  });
 
   if (dismissed) return null;
   // Auto-suppress once the platform is past first-run state — the

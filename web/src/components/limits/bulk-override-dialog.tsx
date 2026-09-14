@@ -14,8 +14,9 @@
 // independently; partial failures surface as per-user outcome rows.
 // ============================================================================
 
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import {
   Dialog,
   DialogContent,
@@ -117,7 +118,7 @@ export function BulkOverrideDialog({
   // Reset form state each time the dialog opens — stale values from a
   // prior session would be confusing, and the spec is usually
   // different for each cohort anyway.
-  useEffect(() => {
+  useResetOnChange(open, () => {
     if (!open) return;
     setKind('rule');
     setSurface('ai_gateway');
@@ -129,7 +130,7 @@ export function BulkOverrideDialog({
     setCustomExpiry('');
     setReason('');
     setOutcomes(null);
-  }, [open]);
+  });
 
   const resolveExpiry = (): string | null | 'invalid' => {
     if (expiryPreset === 'permanent') return null;
