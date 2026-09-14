@@ -62,9 +62,15 @@ export function usePaginatedList<T>(
 
   // Typing a new search term should always land on page 1 — staying on
   // page 4 of a filtered result with 2 pages is confusing.
-  useEffect(() => {
+  //
+  // Adjusted during render rather than in an effect so the request for
+  // page 4 is never issued at all; an effect would fire it, then fire the
+  // page-1 request behind it and race the two responses.
+  const [pagedSearch, setPagedSearch] = useState(debouncedSearch);
+  if (pagedSearch !== debouncedSearch) {
+    setPagedSearch(debouncedSearch);
     setPage(1);
-  }, [debouncedSearch]);
+  }
 
   // The search/extraParams objects stabilise across re-renders by
   // being stringified into the query URL; reading them into a ref

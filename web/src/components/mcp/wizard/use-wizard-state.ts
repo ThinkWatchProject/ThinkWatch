@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { apiDelete, apiGet } from '@/lib/api';
 import {
   PersistedWizardStateSchema,
@@ -71,7 +71,6 @@ function readStorage(sessionId: string): WizardState | null {
   // (clear the blob, fall back to a fresh wizard) is the right UX.
   const result = PersistedWizardStateSchema.safeParse(json);
   if (!result.success) {
-    // eslint-disable-next-line no-console
     console.warn(
       `[wizard] sessionStorage blob failed schema validation for session ${sessionId}; starting fresh:`,
       result.error.issues,
@@ -236,44 +235,50 @@ interface WizardController {
  *      lets the admin click forward to Step 4.
  */
 export function useWizardState(): WizardController {
-  // Source the session_id once: from URL hash (resume), from
-  // sessionStorage's most-recent (rare, e.g. browser back), or fresh.
-  const sessionIdRef = useRef<string>('');
-  const resumedRef = useRef<boolean>(false);
-  // Template prefill from `?template=<slug>` only fires on the very
-  // first mount of a fresh session. Resumes (which already have a
-  // sessionStorage blob carrying `template_slug`) skip the fetch.
-  const initialTemplateSlugRef = useRef<string | null>(null);
-  if (!sessionIdRef.current) {
+  // Source the session once, in a lazy initialiser.
+  //
+  // **These are not refs.** All three values are decided on the first render
+  // and only read afterwards — that is state with no setter. Writing them to
+  // refs during render and reading them back is precisely what the compiler
+  // cannot reason about: it is allowed to skip a re-render, and a ref that
+  // was only ever assigned during render has no defined value when it does.
+  //
+  // The session id comes from the URL hash (resume), or is generated fresh.
+  // Template prefill from `?template=<slug>` fires only on the very first
+  // mount of a fresh session; resumes already carry `template_slug` in their
+  // sessionStorage blob, so they skip the fetch.
+  const [init] = useState(() => {
     const fromHash = readResumeIdFromHash();
     if (fromHash) {
-      sessionIdRef.current = fromHash;
-      resumedRef.current = true;
-    } else {
-      sessionIdRef.current = genSessionId();
-      initialTemplateSlugRef.current = readTemplateSlugFromQuery();
+      const restored = readStorage(fromHash);
+      return {
+        sessionId: fromHash,
+        // A resume marker pointing at a session we do not have locally is
+        // rare (private window, cleared sessionStorage). Fall through to a
+        // fresh wizard and let the admin start over.
+        resumed: Boolean(restored),
+        templateSlug: null as string | null,
+        initialState: restored || defaultState(fromHash),
+      };
     }
-  }
-
-  const [state, setState] = useState<WizardState>(() => {
-    if (resumedRef.current) {
-      const restored = readStorage(sessionIdRef.current);
-      if (restored) return restored;
-      // Resume marker pointed at a session we don't have locally — rare
-      // (private window, cleared sessionStorage). Fall through to a
-      // fresh wizard and let the admin start over.
-      resumedRef.current = false;
-    }
-    return defaultState(sessionIdRef.current);
+    const id = genSessionId();
+    return {
+      sessionId: id,
+      resumed: false,
+      templateSlug: readTemplateSlugFromQuery(),
+      initialState: defaultState(id),
+    };
   });
 
-  const [resumeChecking, setResumeChecking] = useState<boolean>(resumedRef.current);
+  const [state, setState] = useState<WizardState>(init.initialState);
+
+  const [resumeChecking, setResumeChecking] = useState<boolean>(init.resumed);
   // Template fetch is deferred to a useEffect (network call) — track
   // the in-flight state so Step 1 can show a spinner instead of
   // letting the admin type into a URL field that's about to be
   // overwritten by the template's `endpoint_template`.
   const [templateLoading, setTemplateLoading] = useState<boolean>(
-    initialTemplateSlugRef.current !== null,
+    init.templateSlug !== null,
   );
 
   // Strip `#wizard_resume=` from the URL on resume mounts. We
@@ -284,17 +289,17 @@ export function useWizardState(): WizardController {
   // `?template=` gets stripped inside the fetch effect AFTER the
   // setState lands — see below.
   useEffect(() => {
-    if (!resumedRef.current) return;
+    if (!init.resumed) return;
     if (typeof window !== 'undefined') {
       window.history.replaceState(null, '', window.location.pathname);
     }
-  }, []);
+  }, [init.resumed]);
 
   // Template prefill — fetch the template by slug and apply its
   // defaults onto the wizard state. Runs once on mount when the wizard
   // was opened from `/mcp/store` via `/mcp/servers/new?template=...`.
   useEffect(() => {
-    const slug = initialTemplateSlugRef.current;
+    const slug = init.templateSlug;
     if (!slug) return;
     let alive = true;
     (async () => {
@@ -316,7 +321,6 @@ export function useWizardState(): WizardController {
         // register a server manually; we just can't claim it came
         // from this template. Log to console so a misrouted slug or
         // backend regression isn't entirely silent in DevTools.
-        // eslint-disable-next-line no-console
         console.warn(
           `[wizard] template prefill failed for slug=${slug}:`,
           err,
@@ -328,13 +332,16 @@ export function useWizardState(): WizardController {
     return () => {
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [init.templateSlug]);
 
   // Resume probe — confirm the OAuth dance landed a credential blob.
   useEffect(() => {
-    if (!resumedRef.current) return;
+    if (!init.resumed) return;
     if (state.credential_owner !== 'admin_shared') {
+      // Hand-rolled load: the spinner flag is the first half of "start a
+      // fetch" and belongs with it. See "Data fetching" in web/README.md —
+      // this goes away with a data-fetching layer, not by moving the flag.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setResumeChecking(false);
       return;
     }
@@ -348,7 +355,7 @@ export function useWizardState(): WizardController {
           scopes: string[];
         }>(
           `/api/admin/mcp/wizards/${encodeURIComponent(
-            sessionIdRef.current,
+            init.sessionId,
           )}/credential-status`,
         );
         if (!alive) return;
@@ -370,8 +377,7 @@ export function useWizardState(): WizardController {
     return () => {
       alive = false;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [init.resumed, init.sessionId, state.credential_owner]);
 
   // Persist on every mutation.
   useEffect(() => {
@@ -391,7 +397,7 @@ export function useWizardState(): WizardController {
   }, []);
 
   const reset = useCallback(async () => {
-    const sid = sessionIdRef.current;
+    const sid = init.sessionId;
     clearStorage(sid);
     // Best-effort — discard the Redis blob if any. Failure is fine,
     // it'll TTL out within an hour.
@@ -400,7 +406,7 @@ export function useWizardState(): WizardController {
     } catch {
       /* ignore */
     }
-  }, []);
+  }, [init.sessionId]);
 
   return {
     state,
@@ -408,7 +414,7 @@ export function useWizardState(): WizardController {
     patchOAuth,
     goToStep,
     reset,
-    resumed: resumedRef.current,
+    resumed: init.resumed,
     resumeChecking,
     templateLoading,
   };

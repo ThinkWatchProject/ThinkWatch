@@ -35,8 +35,13 @@ export function useFieldAutosave<T>({
   // arrow), so we capture it in a ref instead of depending on it in the
   // effect — otherwise the timer would restart every render and never
   // actually fire.
+  // Updated in an effect rather than during render: a render pass can be
+  // discarded, and a ref assigned in one would then hold a callback that
+  // never belonged to the committed tree.
   const persistRef = useRef(persist);
-  persistRef.current = persist;
+  useEffect(() => {
+    persistRef.current = persist;
+  });
 
   // Snapshot of the last value the server acknowledged. Seeded on first
   // load so the hook doesn't interpret "page just populated" as a change.

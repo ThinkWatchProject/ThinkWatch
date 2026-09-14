@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { ServiceLogo } from '@/components/ui/service-logo';
@@ -95,9 +95,25 @@ export function ConnectionsPage() {
   const [revokeTarget, setRevokeTarget] = useState<{ server_id: string; account_label: string } | null>(null);
 
   // Highlight callback success / failure from URL fragment
-  const [flash, setFlash] = useState<{ kind: 'connected' | 'error'; detail: string } | null>(null);
+  // Seeded from the OAuth callback fragment in the initialiser rather than
+  // an effect: an effect paints the page once without the banner, so the
+  // "connected" confirmation arrives as a flash of layout shift on the very
+  // screen the user is checking for it.
+  const [flash] = useState<{ kind: 'connected' | 'error'; detail: string } | null>(
+    () => {
+      if (typeof window === 'undefined') return null;
+      const hash = window.location.hash.replace(/^#/, '');
+      if (!hash) return null;
+      const params = new URLSearchParams(hash);
+      if (params.has('connected')) {
+        return { kind: 'connected' as const, detail: params.get('connected') ?? '' };
+      }
+      if (params.has('error')) return { kind: 'error' as const, detail: params.get('error') ?? '' };
+      return null;
+    },
+  );
 
-  const fetchAll = async (signal?: AbortSignal) => {
+  const fetchAll = useCallback(async (signal?: AbortSignal) => {
     try {
       const data = await api<ServerConnections[]>('/api/mcp/connections', { signal });
       setServers(data);
@@ -108,27 +124,28 @@ export function ConnectionsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t]);
 
   useEffect(() => {
     const controller = new AbortController();
+    // Async loader: its first statement is the `await`, so every setState
+    // inside runs in the continuation — never synchronously with this
+    // effect, and never as a cascading render. The rule's cross-function
+    // analysis does not model `await`.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchAll(controller.signal);
     return () => controller.abort();
-  }, []);
+  }, [fetchAll]);
 
   // Parse the URL hash for `connected=...` / `error=...` / `need=...`
   // markers. Strip the fragment after we've consumed it so a refresh
   // doesn't re-fire the toast.
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const hash = window.location.hash.replace(/^#/, '');
-    if (!hash) return;
-    const params = new URLSearchParams(hash);
-    if (params.has('connected')) {
-      setFlash({ kind: 'connected', detail: params.get('connected') ?? '' });
-    } else if (params.has('error')) {
-      setFlash({ kind: 'error', detail: params.get('error') ?? '' });
-    }
+    if (!window.location.hash) return;
+    // `flash` is seeded from the hash in its own initialiser (see above);
+    // this effect only has to clean the URL back up, so a refresh doesn't
+    // re-fire the banner.
     history.replaceState(null, '', window.location.pathname);
   }, []);
 

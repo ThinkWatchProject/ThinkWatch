@@ -55,9 +55,22 @@ export function RoleMembers({ role, teamsById, onMembersChanged }: RoleMembersPr
     }
   }, [role.id]);
 
-  useEffect(() => {
+  // Blank the list when the *role* changes, not on every reload: the other
+  // callers of `reloadMembers` run after an add or a remove, and flashing a
+  // skeleton there would make a one-row change look like a full reload.
+  const [shownRole, setShownRole] = useState(role.id);
+  if (shownRole !== role.id) {
+    setShownRole(role.id);
     setMembers(null);
     setMembersError(false);
+  }
+
+  useEffect(() => {
+    // Async loader: its first statement is the `await`, so every setState
+    // inside runs in the continuation — never synchronously with this
+    // effect, and never as a cascading render. The rule's cross-function
+    // analysis does not model `await`.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     reloadMembers();
   }, [reloadMembers]);
 

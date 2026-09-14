@@ -97,7 +97,7 @@ export function GatewaySecurityPage() {
         toast.error(err instanceof Error ? err.message : t('common.error'));
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [t]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -160,7 +160,9 @@ export function GatewaySecurityPage() {
           '/api/admin/settings/content-filter/presets',
         );
         setCfPresets(presets);
-      } catch {}
+      } catch {
+        // Presets are a convenience; the editor works fully without them.
+      }
     }
   };
 

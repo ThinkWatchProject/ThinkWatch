@@ -11,15 +11,7 @@
  * rejected fetch and falls back to a terminal card variant.
  */
 
-import {
-  Suspense,
-  use,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
+import { Suspense, type ReactNode, use, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Area, AreaChart } from 'recharts';
 import { toast } from 'sonner';
@@ -44,34 +36,6 @@ import type {
   UsageStats,
 } from './types';
 
-// 12s is past every realistic CH analytics query (P99 < 3s on the
-// existing dashboards) but short enough that a frozen result lands
-// the per-card error fallback well before a user gives up scrolling.
-export const DASHBOARD_CARD_TIMEOUT_MS = 12_000;
-
-/**
- * Race a promise against a deadline; on timeout reject with a
- * labelled Error that the ErrorBoundary surfaces. The cleared timer
- * keeps the JS heap clean when the underlying request resolves first.
- */
-export function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const id = setTimeout(() => {
-      reject(new Error(`Timed out fetching ${label} (>${ms}ms)`));
-    }, ms);
-    p.then(
-      (v) => {
-        clearTimeout(id);
-        resolve(v);
-      },
-      (e) => {
-        clearTimeout(id);
-        reject(e);
-      },
-    );
-  });
-}
-
 const STAT_ORDER_KEY = 'dashboard.stat-order.v1';
 
 /**
@@ -88,7 +52,7 @@ export function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
   const { t } = useTranslation();
   const defaultOrder = useMemo(() => Object.keys(cards), [cards]);
 
-  const mergeOrder = (saved: unknown): string[] => {
+  const mergeOrder = useCallback((saved: unknown): string[] => {
     if (!Array.isArray(saved) || !saved.every((k) => typeof k === 'string')) {
       return defaultOrder;
     }
@@ -96,7 +60,7 @@ export function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
     const known = saved.filter((k) => k in cards);
     for (const k of defaultOrder) if (!known.includes(k)) known.push(k);
     return known;
-  };
+  }, [cards, defaultOrder]);
 
   const [order, setOrder] = useState<string[]>(() => {
     try {
@@ -132,8 +96,7 @@ export function StatCardGrid({ cards }: { cards: Record<string, ReactNode> }) {
     };
     // Intentionally only reconcile once per mount — subsequent drags
     // write through to the server, so there's no race to rehydrate.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [mergeOrder]);
 
   const persist = (next: string[]) => {
     setOrder(next);

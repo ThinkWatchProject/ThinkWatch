@@ -33,6 +33,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useNow } from '@/hooks/use-now';
 import { AlertCircle, Plus, Trash2, PowerOff, RotateCw, Pencil } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -211,6 +212,10 @@ export function UserLimitsTab({ userId }: UserLimitsTabProps) {
   }, [userId, t]);
 
   useEffect(() => {
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     reload();
   }, [reload]);
 
@@ -794,9 +799,11 @@ function RowActions({
 
 function ExpiryCell({ at }: { at?: string | null }) {
   const { t } = useTranslation();
+  // Label reads in hours and days, so a minute is a fine resolution.
+  const now = useNow(60_000);
   if (!at) return <span className="text-muted-foreground">—</span>;
   const target = new Date(at);
-  const ms = target.getTime() - Date.now();
+  const ms = target.getTime() - now;
   if (ms <= 0) return <Badge variant="destructive">{t('userLimitOverrides.expired')}</Badge>;
   const hours = ms / 3_600_000;
   const fmt = hours < 48 ? `${hours.toFixed(1)}h` : `${(hours / 24).toFixed(1)}d`;

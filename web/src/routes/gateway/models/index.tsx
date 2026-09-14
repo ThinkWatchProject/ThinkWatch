@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { useSearch, useNavigate } from '@tanstack/react-router';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -182,7 +183,7 @@ export function ModelsPage() {
         setLoading(false);
       }
     },
-    [page, debouncedSearch, pageSize, statusFilter],
+    [page, debouncedSearch, pageSize, statusFilter, t],
   );
 
   const fetchPricing = useCallback(async () => {
@@ -219,9 +220,14 @@ export function ModelsPage() {
         return next;
       });
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
+    // Async loader: its first statement is the `await`, so every setState
+    // inside runs in the continuation — never synchronously with this
+    // effect, and never as a cascading render. The rule's cross-function
+    // analysis does not model `await`.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchProviders();
     void fetchPricing();
     // Pull the global default strategy once. The wizard's mode picker
@@ -246,6 +252,10 @@ export function ModelsPage() {
   }, [fetchProviders, fetchPricing]);
 
   useEffect(() => {
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchModels();
   }, [fetchModels]);
 
@@ -257,30 +267,32 @@ export function ModelsPage() {
     if (!routeSearch.import || providers.length === 0) return;
     const pid = routeSearch.import;
     if (!providers.some((p) => p.id === pid)) return;
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setBatchImport({ open: true, initialProviderId: pid });
     void navigate({
       to: '/gateway/models',
       search: { import: undefined },
       replace: true,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [routeSearch.import, providers]);
+  }, [routeSearch.import, providers, navigate]);
 
   useEffect(() => {
     const h = setTimeout(() => setDebouncedSearch(search.trim()), 250);
     return () => clearTimeout(h);
   }, [search]);
 
-  useEffect(() => {
-    setPage(1);
-  }, [debouncedSearch]);
+  useResetOnChange(debouncedSearch, () => setPage(1));
 
   // Drop selection whenever the visible page changes — selected IDs
   // could otherwise persist across pages where the user can no longer
   // see what they're about to delete.
-  useEffect(() => {
-    setSelectedIds(new Set());
-  }, [page, pageSize, debouncedSearch, statusFilter]);
+  useResetOnChange(
+    `${page}\u0000${pageSize}\u0000${debouncedSearch}\u0000${statusFilter}`,
+    () => setSelectedIds(new Set()),
+  );
 
 
   /* ---------- detail drawer ---------- */

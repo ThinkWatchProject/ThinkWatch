@@ -1,5 +1,6 @@
 import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -62,7 +63,7 @@ export function McpToolsPage() {
       .catch((err) =>
         setError(err instanceof Error ? err.message : t('common.error')),
       );
-  }, []);
+  }, [t]);
 
   // Debounce the search box so we're not hammering the API on every
   // keystroke.
@@ -73,9 +74,7 @@ export function McpToolsPage() {
 
   // Any filter change resets to page 1 — otherwise a filter that
   // narrows the list would leave us on an empty tail page.
-  useEffect(() => {
-    setPage(1);
-  }, [debouncedQuery, filterServer, pageSize]);
+  useResetOnChange(`${debouncedQuery}\u0000${filterServer}\u0000${pageSize}`, () => setPage(1));
 
   const fetchTools = useCallback(async () => {
     setLoading(true);
@@ -95,9 +94,13 @@ export function McpToolsPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, debouncedQuery, filterServer]);
+  }, [page, pageSize, debouncedQuery, filterServer, t]);
 
   useEffect(() => {
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchTools();
   }, [fetchTools]);
 

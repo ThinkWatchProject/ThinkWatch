@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { api } from '@/lib/api';
 import i18n from '@/i18n';
 
@@ -241,17 +242,23 @@ export function usePowChallenge(email: string): PowState & { refresh: () => void
   // solution bound to the previous email. The server would reject
   // it (defense in depth via the email-binding check) but the user
   // sees "Invalid credentials" instead of an honest retry.
-  useEffect(() => {
-    teardown();
+  // Two halves, deliberately split. Invalidating the solution is state
+  // alignment and belongs in render: the whole point of this block is that
+  // the form must **stop being submittable immediately**, and an effect
+  // leaves it submittable for the frame in between.
+  useResetOnChange(`${emailReady}\u0000${normalizedEmail}`, () => {
     setSolution(null);
     setTried(0);
     setError(null);
     setExpiresAt(0);
-    if (!emailReady) {
-      setStatus('idle');
-      return;
-    }
-    setStatus('fetching');
+    setStatus(emailReady ? 'fetching' : 'idle');
+  });
+
+  // Tearing down the worker and scheduling the next fetch are side effects,
+  // and stay here.
+  useEffect(() => {
+    teardown();
+    if (!emailReady) return;
     const handle = setTimeout(() => void start(normalizedEmail), 400);
     return () => clearTimeout(handle);
   }, [emailReady, normalizedEmail, start, teardown]);

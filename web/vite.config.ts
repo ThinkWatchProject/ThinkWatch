@@ -1,4 +1,4 @@
-import { defineConfig } from 'vite'
+import { defineConfig, type PluginOption } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 import { visualizer } from 'rollup-plugin-visualizer'
@@ -34,7 +34,7 @@ export default defineConfig({
     react(),
     tailwindcss(),
     // Bundle analysis: generates stats.html after `pnpm build`
-    visualizer({ filename: 'stats.html', gzipSize: true }) as any,
+    visualizer({ filename: 'stats.html', gzipSize: true }) as PluginOption,
   ],
   resolve: {
     alias: {

@@ -292,8 +292,11 @@ export function ScopeDropdown({
   // or exact id), which is what the admin wants when the list doesn't
   // contain the thing they're looking for.
   const queryTrim = query.trim();
-  const queryLower = queryTrim.toLowerCase();
   const filteredProviders = React.useMemo(() => {
+    // Derived inside the memo rather than above it: a local computed during
+    // render is something the compiler cannot prove stable across the memo
+    // boundary, so it refuses to preserve the memoisation at all.
+    const queryLower = query.trim().toLowerCase();
     if (!queryLower) return Array.from(modelsByProvider.entries());
     return Array.from(modelsByProvider.entries())
       .map(([p, ms]) => {
@@ -310,7 +313,7 @@ export function ScopeDropdown({
         return [p, kept] as const;
       })
       .filter(([, ms]) => ms.length > 0);
-  }, [modelsByProvider, queryLower]);
+  }, [modelsByProvider, query]);
 
   // Show the "add as pattern / exact" suggestion only when the typed
   // string isn't already selected and doesn't exactly match a known
@@ -562,11 +565,12 @@ export function ToolScopeDropdown({
   const sel = selected ?? new Set<string>();
 
   const queryTrim = query.trim();
-  const queryLower = queryTrim.toLowerCase();
 
   // Filter servers + tools by the typed query (server name, tool
   // display name, or namespaced tool key).
   const filteredServers = React.useMemo(() => {
+    // Derived inside the memo — see the note on `filteredProviders`.
+    const queryLower = query.trim().toLowerCase();
     if (!queryLower) return Array.from(mcpToolsByServer.entries());
     return Array.from(mcpToolsByServer.entries())
       .map(([server, group]) => {
@@ -580,7 +584,7 @@ export function ToolScopeDropdown({
         return [server, { ...group, tools: keptTools }] as const;
       })
       .filter(([, group]) => group.tools.length > 0);
-  }, [mcpToolsByServer, queryLower]);
+  }, [mcpToolsByServer, query]);
 
   // Known keys let us hide the "add exact" hint when the user typed
   // something that already matches a tool (they should click instead).

@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { AlertCircle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -15,11 +16,9 @@ import { cn } from '@/lib/utils';
 import { AuthHeaderFieldset, type AuthHeaderFields } from './auth-header-fieldset';
 import { SharedCredentialPanel } from './shared-credential-panel';
 import {
-  oauthFromServer,
-  oauthPayload,
   OAuthFieldset,
-  type OAuthFields,
 } from './oauth-fieldset';
+import { oauthFromServer, oauthPayload, type OAuthFields } from './oauth-fields';
 
 export interface McpServerForEdit {
   id: string;
@@ -102,7 +101,9 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
   const [error, setError] = useState('');
 
   // Reset state if a different server is edited without unmounting.
-  useEffect(() => {
+  // Keyed on the `server` object itself, exactly as the effect's dependency
+  // array was — the parent controls that identity.
+  useResetOnChange(server, () => {
     setTab('basic');
     setName(server.name);
     setDisplayLabel(server.display_label ?? '');
@@ -122,7 +123,7 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
       valueTemplate: server.auth_value_template,
     });
     setError('');
-  }, [server]);
+  });
 
   // Per-tab "has pending change" indicators. We stay shallow: deep
   // diffs aren't worth it for a form this size, and any change to
@@ -230,11 +231,11 @@ export function ServerEditForm({ server, onSaved, onCancel }: ServerEditFormProp
     credentialOwner === 'admin_shared' && server.credential_owner !== 'admin_shared';
 
   // Auto-switch off the credential tab if the user moves to anonymous
-  // while sitting on it — otherwise the dialog body would render
-  // empty content.
-  useEffect(() => {
-    if (!showCredTab && tab === 'credential') setTab('auth');
-  }, [showCredTab, tab]);
+  // while sitting on it — otherwise the dialog body would render empty
+  // content. Adjusted during render: the condition is false immediately
+  // after the switch, so this settles in one extra pass and never paints
+  // the empty tab.
+  if (!showCredTab && tab === 'credential') setTab('auth');
 
   return (
     <div className="space-y-4">

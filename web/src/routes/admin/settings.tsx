@@ -70,9 +70,6 @@ export function SettingsPage() {
   const [health, setHealth] = useState<{ postgres: boolean; redis: boolean; clickhouse: boolean | null; s3: boolean | null } | null>(null);
   const [auditConfig, setAuditConfig] = useState<AuditConfig | null>(null);
 
-  // Editable settings from GET /api/admin/settings
-  const [_allSettings, setAllSettings] = useState<Record<string, SettingEntry[]>>({});
-
   const [loading, setLoading] = useState(true);
   // Names of endpoints whose initial fetch failed. Surfaced as a single
   // banner so admins can tell a half-loaded page from a half-permission'd
@@ -217,9 +214,7 @@ export function SettingsPage() {
         setSystemInfo(sys);
         setHealth(hp);
         setAuditConfig(audit);
-        const s = settings ?? {};
-        setAllSettings(s);
-        populateForm(s);
+        populateForm(settings ?? {});
         setLoadErrors(failures);
       })
       .finally(() => setLoading(false));
@@ -1116,9 +1111,13 @@ function PlatformPricingCard() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [t]);
 
   useEffect(() => {
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void reload();
   }, [reload]);
 

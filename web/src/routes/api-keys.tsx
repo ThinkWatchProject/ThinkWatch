@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -216,7 +217,7 @@ export function ApiKeysPage() {
   // endpoint hides them. Expired and rotated keys still appear in the
   // live set with `disabled_reason` set, so we union both sources and
   // dedupe by id (archived row wins — it carries the deletion record).
-  const fetchKeys = async (mode: 'live' | 'inactive' = 'live') => {
+  const fetchKeys = useCallback(async (mode: 'live' | 'inactive' = 'live') => {
     try {
       if (mode === 'inactive') {
         const [live, archived] = await Promise.all([
@@ -236,15 +237,18 @@ export function ApiKeysPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t]);
 
   // Keys re-fetch on tab change because the "Inactive" tab unions a
   // second server-side query, not just a client-side mask.
+  useResetOnChange(tab, () => setLoading(true));
   useEffect(() => {
-    setLoading(true);
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchKeys(tab === 'inactive' ? 'inactive' : 'live');
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab]);
+  }, [fetchKeys, tab]);
 
   useEffect(() => {
     api<string[]>('/api/keys/cost-centers')

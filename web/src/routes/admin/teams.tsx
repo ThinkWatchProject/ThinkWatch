@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { type FormEvent, useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from '@tanstack/react-router';
 import { Button } from '@/components/ui/button';
@@ -51,7 +51,7 @@ export function TeamsPage() {
   // Delete
   const [deleteTarget, setDeleteTarget] = useState<Team | null>(null);
 
-  const fetchTeams = async () => {
+  const fetchTeams = useCallback(async () => {
     setLoading(true);
     try {
       const data = await api<Team[]>('/api/admin/teams');
@@ -62,11 +62,15 @@ export function TeamsPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, [t]);
 
   useEffect(() => {
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchTeams();
-  }, []);
+  }, [fetchTeams]);
 
   const openCreate = () => {
     setFormName('');

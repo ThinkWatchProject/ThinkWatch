@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useNow } from '@/hooks/use-now';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -64,6 +66,7 @@ export function OutboxBacklogDialog({
   const [loading, setLoading] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const now = useNow();
 
   const load = useCallback(
     async (isInitial: boolean) => {
@@ -81,14 +84,19 @@ export function OutboxBacklogDialog({
         if (isInitial) setLoading(false);
       }
     },
-    [forwarderId],
+    [forwarderId, t],
   );
 
+  useResetOnChange(forwarderId, () => {
+    if (!forwarderId) setData(null);
+  });
+
   useEffect(() => {
-    if (!forwarderId) {
-      setData(null);
-      return;
-    }
+    if (!forwarderId) return;
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     void load(true);
   }, [forwarderId, load]);
 
@@ -134,11 +142,12 @@ export function OutboxBacklogDialog({
   };
 
   // "next attempt" relative-time hint — operators care more about
-  // "due in 12s" than wall-clock when the queue is moving.
+  // "due in 12s" than wall-clock when the queue is moving, so this one
+  // ticks every second.
   const fmtRelative = (iso: string) => {
     const d = new Date(iso).getTime();
     if (!Number.isFinite(d)) return '';
-    const delta = Math.round((d - Date.now()) / 1000);
+    const delta = Math.round((d - now) / 1000);
     if (delta <= 0) return t('webhookOutbox.due');
     if (delta < 60) return `${delta}s`;
     if (delta < 3600) return `${Math.round(delta / 60)}m`;

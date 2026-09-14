@@ -9,7 +9,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -40,9 +40,15 @@ export function ConfirmDialog({
   const { t } = useTranslation();
   const [inputValue, setInputValue] = useState('');
 
-  useEffect(() => {
+  // Clear the typed confirmation when the dialog closes, adjusted during
+  // render rather than in an effect: an effect would paint the stale text
+  // for one frame on the way out, and React re-runs this render before
+  // anything reaches the screen.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
     if (!open) setInputValue('');
-  }, [open]);
+  }
 
   const canConfirm = requireInput ? inputValue === requireInput : true;
 

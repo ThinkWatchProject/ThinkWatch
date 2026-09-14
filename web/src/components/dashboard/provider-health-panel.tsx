@@ -41,7 +41,7 @@ export function ProviderFilterTabs({
   const onKeyDown = (e: ReactKeyboardEvent<HTMLButtonElement>) => {
     const idx = tabs.findIndex((t) => t.key === value);
     if (idx < 0) return;
-    let next = idx;
+    let next: number;
     if (e.key === 'ArrowRight') next = (idx + 1) % tabs.length;
     else if (e.key === 'ArrowLeft') next = (idx - 1 + tabs.length) % tabs.length;
     else if (e.key === 'Home') next = 0;

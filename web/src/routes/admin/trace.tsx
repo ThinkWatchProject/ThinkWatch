@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { useNavigate, useParams } from '@tanstack/react-router';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -48,7 +49,7 @@ export function TracePage() {
   // effect and the polling interval call this. Loading flag only
   // flips on the *first* load so polling refreshes don't blank the
   // timeline.
-  const fetchTrace = (traceId: string, isInitial: boolean) => {
+  const fetchTrace = useCallback((traceId: string, isInitial: boolean) => {
     if (isInitial) setLoading(true);
     setError('');
     api<TraceResponse>(`/api/admin/trace/${encodeURIComponent(traceId)}`)
@@ -57,15 +58,22 @@ export function TracePage() {
       .finally(() => {
         if (isInitial) setLoading(false);
       });
-  };
+  }, [t]);
+
+  // Clearing the old trace happens during render, not in the effect: an
+  // effect would paint the previous trace for a frame under the new id.
+  useResetOnChange(params.traceId, () => {
+    if (!params.traceId) setData(null);
+  });
 
   useEffect(() => {
-    if (!params.traceId) {
-      setData(null);
-      return;
-    }
+    if (!params.traceId) return;
+    // Hand-rolled load: the spinner flag is the first half of "start a
+    // fetch" and belongs with it. See "Data fetching" in web/README.md —
+    // this goes away with a data-fetching layer, not by moving the flag.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchTrace(params.traceId, true);
-  }, [params.traceId]);
+  }, [fetchTrace, params.traceId]);
 
   useEffect(() => {
     if (!params.traceId || !autoRefresh) return;
@@ -73,7 +81,7 @@ export function TracePage() {
       fetchTrace(params.traceId!, false);
     }, 5_000);
     return () => window.clearInterval(id);
-  }, [params.traceId, autoRefresh]);
+  }, [params.traceId, autoRefresh, fetchTrace]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();

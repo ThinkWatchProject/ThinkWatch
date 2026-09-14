@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { api } from '@/lib/api';
@@ -24,10 +25,13 @@ export function RoleHistory({ roleId, limit }: RoleHistoryProps) {
   const [history, setHistory] = useState<RoleHistoryEntry[] | null>(null);
   const [error, setError] = useState(false);
 
-  useEffect(() => {
-    let cancelled = false;
+  useResetOnChange(roleId, () => {
     setHistory(null);
     setError(false);
+  });
+
+  useEffect(() => {
+    let cancelled = false;
     api<{ items: RoleHistoryEntry[] }>(`/api/admin/roles/${roleId}/history`)
       .then((res) => {
         if (!cancelled) setHistory(res.items);
