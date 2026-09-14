@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { renderWithQueryClient } from '@/test/render'
 import { ApiKeysPage } from './api-keys'
 
 vi.mock('@/lib/api', () => ({
@@ -68,7 +69,7 @@ describe('ApiKeysPage', () => {
   it('renders API keys table', async () => {
     mockKeysFetch([makeKey()])
 
-    render(<ApiKeysPage />)
+    renderWithQueryClient(<ApiKeysPage />)
 
     await waitFor(() => {
       expect(screen.getByText('test-key')).toBeInTheDocument()
@@ -93,7 +94,7 @@ describe('ApiKeysPage', () => {
       makeKey({ id: 'key-2', name: 'expired-key', disabled_reason: 'expired', is_active: false }),
     ])
 
-    render(<ApiKeysPage />)
+    renderWithQueryClient(<ApiKeysPage />)
 
     await waitFor(() => {
       expect(screen.getByText('active-key')).toBeInTheDocument()
@@ -111,7 +112,7 @@ describe('ApiKeysPage', () => {
 
     mockKeysFetch([makeKey({ id: 'key-1', name: 'expiring-key', expires_at: threeDaysFromNow })])
 
-    render(<ApiKeysPage />)
+    renderWithQueryClient(<ApiKeysPage />)
 
     await waitFor(() => {
       expect(screen.getByText('expiring-key')).toBeInTheDocument()
@@ -125,7 +126,7 @@ describe('ApiKeysPage', () => {
     mockKeysFetch([])
 
     const user = userEvent.setup()
-    render(<ApiKeysPage />)
+    renderWithQueryClient(<ApiKeysPage />)
 
     // Wait for loading to finish
     await waitFor(() => {

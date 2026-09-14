@@ -1,5 +1,6 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
@@ -43,11 +44,6 @@ interface McpServer {
 
 export function McpToolsPage() {
   const { t } = useTranslation();
-  const [tools, setTools] = useState<McpTool[]>([]);
-  const [total, setTotal] = useState(0);
-  const [servers, setServers] = useState<McpServer[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const [filterServer, setFilterServer] = useState('');
   const [query, setQuery] = useState('');
   const [debouncedQuery, setDebouncedQuery] = useState('');
@@ -57,13 +53,11 @@ export function McpToolsPage() {
 
   // Load the server filter options once — the list is short and
   // doesn't need its own pagination.
-  useEffect(() => {
-    api<McpServer[]>('/api/mcp/servers')
-      .then(setServers)
-      .catch((err) =>
-        setError(err instanceof Error ? err.message : t('common.error')),
-      );
-  }, [t]);
+  const serversQuery = useQuery({
+    queryKey: ['mcp', 'servers'],
+    queryFn: ({ signal }) => api<McpServer[]>('/api/mcp/servers', { signal }),
+  });
+  const servers = serversQuery.data ?? [];
 
   // Debounce the search box so we're not hammering the API on every
   // keystroke.
@@ -76,33 +70,26 @@ export function McpToolsPage() {
   // narrows the list would leave us on an empty tail page.
   useResetOnChange(`${debouncedQuery}\u0000${filterServer}\u0000${pageSize}`, () => setPage(1));
 
-  const fetchTools = useCallback(async () => {
-    setLoading(true);
-    try {
+  const toolsQuery = useQuery({
+    queryKey: ['mcp', 'tools', { page, page_size: pageSize, q: debouncedQuery, server_id: filterServer }],
+    queryFn: ({ signal }) => {
       const params = new URLSearchParams({
         page: String(page),
         page_size: String(pageSize),
       });
       if (debouncedQuery) params.set('q', debouncedQuery);
       if (filterServer) params.set('server_id', filterServer);
-      const res = await api<McpToolListResponse>(`/api/mcp/tools?${params}`);
-      setTools(res.items);
-      setTotal(res.total);
-      setError('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setLoading(false);
-    }
-  }, [page, pageSize, debouncedQuery, filterServer, t]);
-
-  useEffect(() => {
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void fetchTools();
-  }, [fetchTools]);
+      return api<McpToolListResponse>(`/api/mcp/tools?${params}`, { signal });
+    },
+    // Hold on to the previous page's response while the next one loads, so
+    // the count and the pager keep their total instead of dropping to zero.
+    // The rows themselves still give way to the skeleton — see `loading`.
+    placeholderData: keepPreviousData,
+  });
+  const tools = toolsQuery.data?.items ?? [];
+  const total = toolsQuery.data?.total ?? 0;
+  const loading = toolsQuery.isPending || toolsQuery.isPlaceholderData;
+  const error = (toolsQuery.error ?? serversQuery.error)?.message ?? '';
 
   return (
     <div className="flex flex-col flex-1 min-h-0">

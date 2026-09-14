@@ -1,13 +1,12 @@
 import {
-  useEffect,
   useMemo,
   useRef,
   useState,
-  useCallback,
   type FormEvent,
   type ReactNode,
 } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -111,6 +110,12 @@ import {
 
 type RoleResponse = BaseRoleResponse;
 
+const NO_ROLES: RoleResponse[] = [];
+const NO_PERMISSIONS: PermissionDef[] = [];
+const NO_MODEL_ROWS: ModelRow[] = [];
+const NO_SERVERS: McpServer[] = [];
+const NO_MCP_TOOLS: McpToolRow[] = [];
+
 // (Types, POLICY_TEMPLATES, SIMPLE_TEMPLATES, and the simple↔policy
 // conversion helpers all live in `./roles/types.ts` — see the
 // imports at the top of this file.)
@@ -121,17 +126,66 @@ type RoleResponse = BaseRoleResponse;
 
 export function RolesPage() {
   const { t } = useTranslation();
-  const [roles, setRoles] = useState<RoleResponse[]>([]);
-  const [permissions, setPermissions] = useState<PermissionDef[]>([]);
-  const [availableModelRows, setAvailableModelRows] = useState<ModelRow[]>([]);
-  const [availableServers, setAvailableServers] = useState<McpServer[]>([]);
-  const [availableMcpTools, setAvailableMcpTools] = useState<McpToolRow[]>([]);
+  const queryClient = useQueryClient();
+  const rolesQuery = useQuery({
+    queryKey: ['admin', 'roles'],
+    queryFn: ({ signal }) => api<{ items: RoleResponse[] }>('/api/admin/roles', { signal }),
+  });
+  const permissionsQuery = useQuery({
+    queryKey: ['admin', 'permissions'],
+    queryFn: ({ signal }) => api<PermissionDef[]>('/api/admin/permissions', { signal }),
+  });
+  // Both /api/admin/models and /api/mcp/tools are paginated and
+  // clamp page_size server-side. The role wizard's permission
+  // tree needs the complete catalog — loop-fetch so a deployment
+  // with 200+ models or tools doesn't silently lose rows.
+  const modelsQuery = useQuery({
+    queryKey: ['admin', 'models', { all: true }],
+    queryFn: () => fetchAllPaginated<ModelRow>('/api/admin/models'),
+  });
+  const mcpToolsQuery = useQuery({
+    queryKey: ['mcp', 'tools', { all: true }],
+    queryFn: () => fetchAllPaginated<McpToolRow>('/api/mcp/tools'),
+  });
+  const serversQuery = useQuery({
+    queryKey: ['mcp', 'servers'],
+    queryFn: ({ signal }) => api<McpServer[]>('/api/mcp/servers', { signal }),
+  });
+  // Teams power the scope badge on member rows. team_managers
+  // can read this endpoint too — they just see fewer teams.
+  const teamsQuery = useQuery({
+    queryKey: ['admin', 'teams'],
+    queryFn: ({ signal }) =>
+      api<Array<{ id: string; name: string }>>('/api/admin/teams', { signal }),
+  });
+  // Every list here fails quietly (auth / network) and renders empty.
+  const roles = rolesQuery.data?.items ?? NO_ROLES;
+  const permissions = permissionsQuery.data ?? NO_PERMISSIONS;
+  const availableModelRows = modelsQuery.data ?? NO_MODEL_ROWS;
+  const availableServers = serversQuery.data ?? NO_SERVERS;
+  const availableMcpTools = mcpToolsQuery.data ?? NO_MCP_TOOLS;
   // Team list — used to render scope badges as "team: engineering"
   // instead of the raw `team:<uuid>` the wire format carries.
-  const [teamsById, setTeamsById] = useState<Map<string, { id: string; name: string }>>(
-    new Map(),
+  const teamsById = useMemo(
+    () => new Map((teamsQuery.data ?? []).map((t) => [t.id, t])),
+    [teamsQuery.data],
   );
-  const [loading, setLoading] = useState(true);
+  // The table waits for every catalog, as it did when they loaded as one
+  // batch: the edit dialog parses a role's policy against the permission
+  // catalog, and must not open against an empty one.
+  const loading = [
+    rolesQuery,
+    permissionsQuery,
+    modelsQuery,
+    mcpToolsQuery,
+    serversQuery,
+    teamsQuery,
+  ].some((q) => q.isPending);
+  /// Refetch the roles list — `user_count` and every role's policy. `exact`
+  /// leaves the members lists under `['admin', 'roles', id]` to RoleMembers,
+  /// which refreshes its own after each change.
+  const invalidateRoles = () =>
+    queryClient.invalidateQueries({ queryKey: ['admin', 'roles'], exact: true });
 
   // Filters
   const [search, setSearch] = useState('');
@@ -199,48 +253,6 @@ export function RolesPage() {
     skipped: number;
     failed: { name: string; reason: string }[];
   } | null>(null);
-
-  // ------------------------------------------------------------------
-  // Data fetch
-  // ------------------------------------------------------------------
-
-  const fetchData = useCallback(async () => {
-    try {
-      const [rolesRes, perms, modelsRes, serversRes, teamsRes, toolsRes] = await Promise.all([
-        api<{ items: RoleResponse[] }>('/api/admin/roles'),
-        api<PermissionDef[]>('/api/admin/permissions'),
-        // Both /api/admin/models and /api/mcp/tools are paginated and
-        // clamp page_size server-side. The role wizard's permission
-        // tree needs the complete catalog — loop-fetch so a deployment
-        // with 200+ models or tools doesn't silently lose rows.
-        fetchAllPaginated<ModelRow>('/api/admin/models').catch(() => [] as ModelRow[]),
-        api<McpServer[]>('/api/mcp/servers').catch(() => [] as McpServer[]),
-        // Teams power the scope badge on member rows. team_managers
-        // can read this endpoint too — they just see fewer teams.
-        api<Array<{ id: string; name: string }>>('/api/admin/teams').catch(() => []),
-        fetchAllPaginated<McpToolRow>('/api/mcp/tools').catch(() => [] as McpToolRow[]),
-      ]);
-      setRoles(rolesRes.items);
-      setPermissions(perms);
-      setAvailableModelRows(modelsRes);
-      setAvailableServers(serversRes);
-      setAvailableMcpTools(toolsRes);
-      setTeamsById(new Map(teamsRes.map((t) => [t.id, t])));
-    } catch {
-      // silently fail (auth / network); leave previous state
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    // Async loader: its first statement is the `await`, so every setState
-    // inside runs in the continuation — never synchronously with this
-    // effect, and never as a cascading render. The rule's cross-function
-    // analysis does not model `await`.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchData();
-  }, [fetchData]);
 
   const grouped = useMemo(() => groupByResource(permissions), [permissions]);
   const dangerousKeys = useMemo(
@@ -444,7 +456,7 @@ export function RolesPage() {
         setCreateOpen(false);
         resetCreateForm();
         setCreateConstraints({});
-        await fetchData();
+        await invalidateRoles();
         toast.success(t('roles.createdSuccessfully', { name: created.name }));
         return;
       } catch {
@@ -495,7 +507,7 @@ export function RolesPage() {
         });
         setEditOpen(false);
         setEditRole(null);
-        fetchData();
+        void invalidateRoles();
       } catch {
         // surfaced via toast
       } finally {
@@ -624,7 +636,7 @@ export function RolesPage() {
         }
       }
       setImportResult({ created, skipped, failed });
-      if (created > 0) await fetchData();
+      if (created > 0) await invalidateRoles();
     } finally {
       setImporting(false);
     }
@@ -647,7 +659,7 @@ export function RolesPage() {
         {},
       );
       editForm.reset(fromRoleResponse(updated));
-      await fetchData();
+      await invalidateRoles();
     } catch {
       // surfaced via toast
     } finally {
@@ -737,7 +749,7 @@ export function RolesPage() {
         await apiDelete(`/api/admin/roles/${deleteRole.id}`);
       }
       closeDelete();
-      fetchData();
+      void invalidateRoles();
     } catch (e) {
       setDeleteError(e instanceof Error ? e.message : t('common.operationFailed'));
     } finally {
@@ -1076,7 +1088,7 @@ export function RolesPage() {
               dangerousKeys={dangerousKeys}
               availableServers={availableServers}
               teamsById={teamsById}
-              onMembersChanged={fetchData}
+              onMembersChanged={invalidateRoles}
             />
           )}
         </DialogContent>
@@ -1222,7 +1234,7 @@ export function RolesPage() {
                     <RoleMembers
                       role={editRole}
                       teamsById={teamsById}
-                      onMembersChanged={fetchData}
+                      onMembersChanged={invalidateRoles}
                     />
                   </div>
                 ) : null,

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from '@tanstack/react-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { StatusIndicator } from '@/components/ui/status-indicator';
@@ -28,10 +29,17 @@ import { EditProviderDialog } from './provider-dialogs';
 export function ProvidersPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const providersQuery = useQuery({
+    queryKey: ['admin', 'providers'],
+    queryFn: ({ signal }) => api<Provider[]>('/api/admin/providers', { signal }),
+  });
+  const providers = providersQuery.data ?? [];
+  const loading = providersQuery.isPending;
+  const error = providersQuery.error?.message ?? '';
   const pager = useClientPagination(providers, 20);
-  const [error, setError] = useState('');
+  const invalidateProviders = () =>
+    queryClient.invalidateQueries({ queryKey: ['admin', 'providers'] });
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
 
   // Edit state
@@ -40,35 +48,12 @@ export function ProvidersPage() {
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
   const [rechecking, setRechecking] = useState<string | null>(null);
 
-  const fetchProviders = useCallback(async (signal?: AbortSignal) => {
-    try {
-      const data = await api<Provider[]>('/api/admin/providers', { signal });
-      setProviders(data);
-    } catch (err) {
-      if (signal?.aborted) return;
-      setError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    // Async loader: its first statement is the `await`, so every setState
-    // inside runs in the continuation — never synchronously with this
-    // effect, and never as a cascading render. The rule's cross-function
-    // analysis does not model `await`.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchProviders(controller.signal);
-    return () => controller.abort();
-  }, [fetchProviders]);
-
   const handleDelete = async (id: string) => {
     try {
       await apiDelete(`/api/admin/providers/${id}`);
       setDeleteTargetId(null);
       toast.success(t('common.deleteSuccess'));
-      await fetchProviders();
+      await invalidateProviders();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.operationFailed'));
     }
@@ -257,14 +242,14 @@ export function ProvidersPage() {
       <CreateProviderDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
-        onSuccess={() => fetchProviders()}
+        onSuccess={invalidateProviders}
       />
 
       <EditProviderDialog
         open={editDialogOpen}
         onOpenChange={setEditDialogOpen}
         provider={editProvider}
-        onSuccess={() => fetchProviders()}
+        onSuccess={invalidateProviders}
       />
 
       <ConfirmDialog

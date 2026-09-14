@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Plus, Trash2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -42,37 +43,19 @@ interface RoleMembersProps {
  */
 export function RoleMembers({ role, teamsById, onMembersChanged }: RoleMembersProps) {
   const { t } = useTranslation();
-  const [members, setMembers] = useState<RoleMember[] | null>(null);
-  const [membersError, setMembersError] = useState(false);
-
-  const reloadMembers = useCallback(async () => {
-    try {
-      const res = await api<{ items: RoleMember[] }>(`/api/admin/roles/${role.id}/members`);
-      setMembers(res.items);
-      setMembersError(false);
-    } catch {
-      setMembersError(true);
-    }
-  }, [role.id]);
-
-  // Blank the list when the *role* changes, not on every reload: the other
-  // callers of `reloadMembers` run after an add or a remove, and flashing a
-  // skeleton there would make a one-row change look like a full reload.
-  const [shownRole, setShownRole] = useState(role.id);
-  if (shownRole !== role.id) {
-    setShownRole(role.id);
-    setMembers(null);
-    setMembersError(false);
-  }
-
-  useEffect(() => {
-    // Async loader: its first statement is the `await`, so every setState
-    // inside runs in the continuation — never synchronously with this
-    // effect, and never as a cascading render. The rule's cross-function
-    // analysis does not model `await`.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    reloadMembers();
-  }, [reloadMembers]);
+  const queryClient = useQueryClient();
+  // Keyed by role, so switching roles never shows the previous role's
+  // members, while a reload after an add or a remove keeps the rows on
+  // screen — a one-row change should not look like a full reload.
+  const membersQuery = useQuery({
+    queryKey: ['admin', 'roles', role.id, 'members'],
+    queryFn: ({ signal }) =>
+      api<{ items: RoleMember[] }>(`/api/admin/roles/${role.id}/members`, { signal }),
+  });
+  const members = membersQuery.data?.items ?? null;
+  const membersError = membersQuery.isError;
+  const reloadMembers = () =>
+    queryClient.invalidateQueries({ queryKey: ['admin', 'roles', role.id, 'members'] });
 
   const [users, setUsers] = useState<PickableUser[] | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);

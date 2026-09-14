@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
-import { apiDelete, apiGet } from '@/lib/api';
+import { skipToken, useQuery, useQueryClient } from '@tanstack/react-query';
+import { api, apiDelete } from '@/lib/api';
 import {
   PersistedWizardStateSchema,
   type PersistedWizardState,
@@ -270,24 +271,10 @@ export function useWizardState(): WizardController {
     };
   });
 
+  const queryClient = useQueryClient();
   const [state, setState] = useState<WizardState>(init.initialState);
 
-  const [resumeChecking, setResumeChecking] = useState<boolean>(init.resumed);
-  // Template fetch is deferred to a useEffect (network call) — track
-  // the in-flight state so Step 1 can show a spinner instead of
-  // letting the admin type into a URL field that's about to be
-  // overwritten by the template's `endpoint_template`.
-  const [templateLoading, setTemplateLoading] = useState<boolean>(
-    init.templateSlug !== null,
-  );
-
-  // Strip `#wizard_resume=` from the URL on resume mounts. We
-  // CANNOT strip `?template=` here because React 18 strict mode
-  // double-invokes effects: the first mount would fetch + strip,
-  // its setState gets cancelled by the cleanup, and the second
-  // mount has no slug left in the URL to re-fetch from. So
-  // `?template=` gets stripped inside the fetch effect AFTER the
-  // setState lands — see below.
+  // Strip `#wizard_resume=` from the URL on resume mounts.
   useEffect(() => {
     if (!init.resumed) return;
     if (typeof window !== 'undefined') {
@@ -298,95 +285,110 @@ export function useWizardState(): WizardController {
   // Template prefill — fetch the template by slug and apply its
   // defaults onto the wizard state. Runs once on mount when the wizard
   // was opened from `/mcp/store` via `/mcp/servers/new?template=...`.
-  useEffect(() => {
-    const slug = init.templateSlug;
-    if (!slug) return;
-    let alive = true;
-    (async () => {
-      try {
-        const tmpl = await apiGet<StoreTemplateForWizard>(
-          `/api/mcp/store/${encodeURIComponent(slug)}`,
-        );
-        if (!alive) return;
-        setState((s) => applyTemplateDefaults(s, tmpl));
-        // NOW strip the query — only after the prefill landed. If we
-        // stripped earlier and React 18 strict-mode unmounted us,
-        // the second mount would have an empty URL and never re-fetch.
-        if (typeof window !== 'undefined') {
-          window.history.replaceState(null, '', window.location.pathname);
-        }
-      } catch (err) {
-        // Slug doesn't exist (404) or backend hiccup — leave the
-        // wizard in its empty default state. The admin can still
-        // register a server manually; we just can't claim it came
-        // from this template. Log to console so a misrouted slug or
-        // backend regression isn't entirely silent in DevTools.
-        console.warn(
-          `[wizard] template prefill failed for slug=${slug}:`,
-          err,
-        );
-      } finally {
-        if (alive) setTemplateLoading(false);
-      }
-    })();
-    return () => {
-      alive = false;
-    };
-  }, [init.templateSlug]);
+  const slug = init.templateSlug;
+  const templateQuery = useQuery({
+    queryKey: ['mcp', 'store', slug],
+    queryFn: slug
+      ? ({ signal }) =>
+          api<StoreTemplateForWizard>(`/api/mcp/store/${encodeURIComponent(slug)}`, {
+            signal,
+          }).catch((err: unknown) => {
+            // Slug doesn't exist (404) or backend hiccup — leave the
+            // wizard in its empty default state. The admin can still
+            // register a server manually; we just can't claim it came
+            // from this template. Log to console so a misrouted slug or
+            // backend regression isn't entirely silent in DevTools.
+            if (!signal.aborted) {
+              console.warn(`[wizard] template prefill failed for slug=${slug}:`, err);
+            }
+            throw err;
+          })
+      : skipToken,
+    // Applied once, onto a fresh wizard — a refetch would have nowhere to go.
+    staleTime: Infinity,
+  });
+  // In flight — Step 1 shows a spinner instead of letting the admin type
+  // into a URL field that's about to be overwritten by the template's
+  // `endpoint_template`.
+  const templateLoading = templateQuery.isLoading;
 
-  // Resume probe — confirm the OAuth dance landed a credential blob.
+  // Apply the defaults during the render the template arrives in, so no
+  // frame shows Step 1 without them.
+  const template = templateQuery.data;
+  const [templateApplied, setTemplateApplied] = useState(false);
+  if (template && !templateApplied) {
+    setTemplateApplied(true);
+    setState((s) => applyTemplateDefaults(s, template));
+  }
+
+  // Strip `?template=` only once the prefill has landed: a failed prefill
+  // leaves the slug in the URL, so a refresh tries it again.
   useEffect(() => {
-    if (!init.resumed) return;
-    if (state.credential_owner !== 'admin_shared') {
-      // Hand-rolled load: the spinner flag is the first half of "start a
-      // fetch" and belongs with it. See "Data fetching" in web/README.md —
-      // this goes away with a data-fetching layer, not by moving the flag.
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setResumeChecking(false);
-      return;
+    if (!templateApplied) return;
+    if (typeof window !== 'undefined') {
+      window.history.replaceState(null, '', window.location.pathname);
     }
-    let alive = true;
-    (async () => {
-      try {
-        const status = await apiGet<{
-          credential_type: string;
-          upstream_subject?: string | null;
-          expires_at?: string | null;
-          scopes: string[];
-        }>(
-          `/api/admin/mcp/wizards/${encodeURIComponent(
-            init.sessionId,
-          )}/credential-status`,
-        );
-        if (!alive) return;
-        const sharedPending: SharedPending = {
-          kind: 'oauth_done',
-          upstream_subject: status.upstream_subject ?? null,
-          expires_at: status.expires_at ?? null,
-          scopes: status.scopes ?? [],
-        };
-        setState((s) => ({ ...s, shared_pending: sharedPending, step: 3 }));
-      } catch {
-        // 404 = blob not there (TTL expired, or callback hasn't run).
-        // Leave shared_pending null; Step 3 will show "OAuth flow
-        // didn't complete — re-run authorize".
-      } finally {
-        if (alive) setResumeChecking(false);
-      }
-    })();
-    return () => {
-      alive = false;
+  }, [templateApplied]);
+
+  // Resume probe — confirm the OAuth dance landed a credential blob. Only
+  // an admin_shared resume has one to confirm, and switching the owner back
+  // to admin_shared probes again: switching away cleared `shared_pending`.
+  const probeCredential = init.resumed && state.credential_owner === 'admin_shared';
+  const credentialQuery = useQuery({
+    queryKey: ['admin', 'mcp', 'wizards', init.sessionId, 'credential-status'],
+    queryFn: probeCredential
+      ? ({ signal }) =>
+          api<{
+            credential_type: string;
+            upstream_subject?: string | null;
+            expires_at?: string | null;
+            scopes: string[];
+          }>(`/api/admin/mcp/wizards/${encodeURIComponent(init.sessionId)}/credential-status`, {
+            signal,
+          })
+      : skipToken,
+    // A landed probe moves the wizard to Step 3. A network reconnect
+    // must not refetch it and pull the admin back there mid-wizard.
+    refetchOnReconnect: false,
+  });
+  const resumeChecking = probeCredential && credentialQuery.isLoading;
+
+  // Each successful probe lands in the wizard state once, during the
+  // render it arrives in. A 404 = blob not there (TTL expired, or callback
+  // hasn't run): shared_pending stays null, and Step 3 will show "OAuth
+  // flow didn't complete — re-run authorize".
+  const credential = credentialQuery.data;
+  const [landedProbeAt, setLandedProbeAt] = useState(0);
+  if (probeCredential && credential && credentialQuery.dataUpdatedAt !== landedProbeAt) {
+    setLandedProbeAt(credentialQuery.dataUpdatedAt);
+    const sharedPending: SharedPending = {
+      kind: 'oauth_done',
+      upstream_subject: credential.upstream_subject ?? null,
+      expires_at: credential.expires_at ?? null,
+      scopes: credential.scopes ?? [],
     };
-  }, [init.resumed, init.sessionId, state.credential_owner]);
+    setState((s) => ({ ...s, shared_pending: sharedPending, step: 3 }));
+  }
 
   // Persist on every mutation.
   useEffect(() => {
     writeStorage(state);
   }, [state]);
 
-  const patch = useCallback((partial: Partial<WizardState>) => {
-    setState((s) => ({ ...s, ...partial }));
-  }, []);
+  const patch = useCallback(
+    (partial: Partial<WizardState>) => {
+      // Leaving admin_shared discards the resume probe, one still in flight
+      // included: its answer is about the owner the admin just left, and
+      // switching back probes again from scratch.
+      if (partial.credential_owner && partial.credential_owner !== 'admin_shared') {
+        queryClient.removeQueries({
+          queryKey: ['admin', 'mcp', 'wizards', init.sessionId, 'credential-status'],
+        });
+      }
+      setState((s) => ({ ...s, ...partial }));
+    },
+    [queryClient, init.sessionId],
+  );
 
   const patchOAuth = useCallback((partial: Partial<WizardState['oauth']>) => {
     setState((s) => ({ ...s, oauth: { ...s.oauth, ...partial } }));

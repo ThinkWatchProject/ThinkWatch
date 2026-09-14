@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { renderWithQueryClient } from '@/test/render'
 import { SettingsPage } from './settings'
 
 vi.mock('@/lib/api', () => ({
@@ -64,7 +65,7 @@ beforeEach(() => {
 
 describe('SettingsPage', () => {
   it('renders settings tabs', async () => {
-    render(<SettingsPage />)
+    renderWithQueryClient(<SettingsPage />)
 
     await waitFor(() => {
       expect(screen.queryByText('Loading...')).not.toBeInTheDocument()
@@ -81,7 +82,7 @@ describe('SettingsPage', () => {
   })
 
   it('loads and displays system info', async () => {
-    render(<SettingsPage />)
+    renderWithQueryClient(<SettingsPage />)
 
     await waitFor(() => {
       expect(screen.getByText('1.2.3')).toBeInTheDocument()
@@ -98,7 +99,7 @@ describe('SettingsPage', () => {
     mockApiPatch.mockResolvedValue({ ok: true })
 
     const user = userEvent.setup()
-    render(<SettingsPage />)
+    renderWithQueryClient(<SettingsPage />)
 
     // Wait for the page to finish loading + seed the autosave snapshot.
     const siteInput = await screen.findByDisplayValue('TestThinkWatch')

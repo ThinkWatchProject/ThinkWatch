@@ -1,5 +1,6 @@
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useResetOnChange } from '@/hooks/use-reset-on-change';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -87,27 +88,19 @@ interface AvailableRole {
   policy_document: PolicyDocument;
 }
 
+const NO_ROLES: AvailableRole[] = [];
+const NO_PERMISSIONS: PermissionDef[] = [];
+
 export function UsersPage() {
   const { t } = useTranslation();
-  const [users, setUsers] = useState<User[]>([]);
-  const [availableRoles, setAvailableRoles] = useState<AvailableRole[]>([]);
-  const [availablePermissions, setAvailablePermissions] = useState<PermissionDef[]>([]);
+  const queryClient = useQueryClient();
   const { teams: availableTeams } = useTeams();
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
   const [search, setSearch] = useState('');
   // Server-side pagination. `debouncedSearch` feeds the API so fast
   // typing doesn't fan out one request per keystroke.
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
-  const [total, setTotal] = useState(0);
-  // Global view of who currently holds the super_admin role. Needed
-  // to disable destructive row actions on whoever is the sole holder,
-  // since the paginated user list can't see users on other pages.
-  // Refetched alongside the users list so it stays in sync with
-  // delete / disable / role-change mutations.
-  const [superAdminIds, setSuperAdminIds] = useState<Set<string>>(new Set());
 
   // Create dialog
   const [createOpen, setCreateOpen] = useState(false);
@@ -150,49 +143,61 @@ export function UsersPage() {
   const [resetConfirmUser, setResetConfirmUser] = useState<User | null>(null);
   const [resetLoading, setResetLoading] = useState(false);
 
-  const fetchUsers = useCallback(async (signal?: AbortSignal) => {
-    try {
+  const usersQuery = useQuery({
+    queryKey: ['admin', 'users', { page, per_page: pageSize, search: debouncedSearch }],
+    queryFn: async ({ signal }) => {
       const params = new URLSearchParams({
         page: String(page),
         per_page: String(pageSize),
       });
       if (debouncedSearch) params.set('search', debouncedSearch);
-      const [usersRes, rolesRes, permsRes, superRes] = await Promise.all([
-        api<{ data: User[]; total: number }>(`/api/admin/users?${params.toString()}`, { signal }),
-        // Roles list is small and only needed for the picker; fetch
-        // once on mount, not on every page/search change.
-        availableRoles.length === 0
-          ? api<{ items: AvailableRole[] }>('/api/admin/roles', { signal }).catch(() => ({ items: [] }))
-          : Promise.resolve({ items: availableRoles }),
-        // Permissions catalog is needed by policyToPerms to expand
-        // wildcards and validate action keys in the effective-permissions
-        // preview. Also fetch once.
-        availablePermissions.length === 0
-          ? api<PermissionDef[]>('/api/admin/permissions', { signal }).catch(() => [] as PermissionDef[])
-          : Promise.resolve(availablePermissions),
-        // Global super-admin id set, refetched every load so the row
-        // action disable state stays accurate after any mutation.
-        api<{ ids: string[] }>('/api/admin/users/super-admin-ids', { signal })
-          .catch(() => ({ ids: [] as string[] })),
-      ]);
-      setUsers(
-        usersRes.data.map((u) => ({
-          ...u,
-          role_assignments: u.role_assignments ?? [],
-        })),
+      const res = await api<{ data: User[]; total: number }>(
+        `/api/admin/users?${params.toString()}`,
+        { signal },
       );
-      setTotal(usersRes.total);
-      setSuperAdminIds(new Set(superRes.ids));
-      // Unified picker — system + custom roles all show up together.
-      if (availableRoles.length === 0) setAvailableRoles(rolesRes.items);
-      if (availablePermissions.length === 0) setAvailablePermissions(permsRes);
-    } catch (err) {
-      if (signal?.aborted) return;
-      setError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setLoading(false);
-    }
-  }, [availablePermissions, availableRoles, debouncedSearch, page, pageSize, t]);
+      return {
+        ...res,
+        data: res.data.map((u) => ({ ...u, role_assignments: u.role_assignments ?? [] })),
+      };
+    },
+    // Paging and searching keep the current rows on screen until the next
+    // set lands, instead of blanking the table in between.
+    placeholderData: keepPreviousData,
+  });
+  // Roles list is small and only needed for the picker; unlike the user
+  // list it doesn't change with the page or the search. Unified picker —
+  // system + custom roles all show up together.
+  const rolesQuery = useQuery({
+    queryKey: ['admin', 'roles'],
+    queryFn: ({ signal }) => api<{ items: AvailableRole[] }>('/api/admin/roles', { signal }),
+  });
+  // Permissions catalog is needed by policyToPerms to expand
+  // wildcards and validate action keys in the effective-permissions
+  // preview.
+  const permissionsQuery = useQuery({
+    queryKey: ['admin', 'permissions'],
+    queryFn: ({ signal }) => api<PermissionDef[]>('/api/admin/permissions', { signal }),
+  });
+  // Global view of who currently holds the super_admin role. Needed
+  // to disable destructive row actions on whoever is the sole holder,
+  // since the paginated user list can't see users on other pages.
+  // It sits under the same prefix as the list, so every mutation that
+  // refreshes the list refreshes this too.
+  const superAdminIdsQuery = useQuery({
+    queryKey: ['admin', 'users', 'super-admin-ids'],
+    queryFn: ({ signal }) =>
+      api<{ ids: string[] }>('/api/admin/users/super-admin-ids', { signal }),
+  });
+  const users = usersQuery.data?.data ?? [];
+  const total = usersQuery.data?.total ?? 0;
+  const loading = usersQuery.isPending;
+  const error = usersQuery.error?.message ?? '';
+  // The picker catalogs and the super-admin set fall back to empty when
+  // they fail to load; only the user list itself reports an error.
+  const availableRoles = rolesQuery.data?.items ?? NO_ROLES;
+  const availablePermissions = permissionsQuery.data ?? NO_PERMISSIONS;
+  const superAdminIds = new Set(superAdminIdsQuery.data?.ids);
+  const invalidateUsers = () => queryClient.invalidateQueries({ queryKey: ['admin', 'users'] });
 
   /// Would a delete / disable / role-strip on this user drop the
   /// platform's super-admin quorum to zero? Mirrors the backend
@@ -213,17 +218,6 @@ export function UsersPage() {
   // you'd type "adm" and land on page 4 of a filtered result that
   // only has 2 pages.
   useResetOnChange(debouncedSearch, () => setPage(1));
-
-  useEffect(() => {
-    const controller = new AbortController();
-    // Async loader: its first statement is the `await`, so every setState
-    // inside runs in the continuation — never synchronously with this
-    // effect, and never as a cascading render. The rule's cross-function
-    // analysis does not model `await`.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchUsers(controller.signal);
-    return () => controller.abort();
-  }, [page, pageSize, debouncedSearch, fetchUsers]);
 
   // --- Create user ---
   const resetCreateForm = () => {
@@ -255,7 +249,7 @@ export function UsersPage() {
           scope: a.scope,
         })),
       });
-      setCreateOpen(false); resetCreateForm(); await fetchUsers();
+      setCreateOpen(false); resetCreateForm(); await invalidateUsers();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : t('common.error'));
     } finally { setSubmitting(false); }
@@ -296,7 +290,7 @@ export function UsersPage() {
           await apiDelete(`/api/admin/teams/${tid}/members/${editUser.id}`);
         }
       }
-      setEditOpen(false); setEditUser(null); await fetchUsers();
+      setEditOpen(false); setEditUser(null); await invalidateUsers();
     } catch (err) {
       setEditError(err instanceof Error ? err.message : t('common.error'));
     } finally { setEditLoading(false); }
@@ -315,7 +309,7 @@ export function UsersPage() {
       } else if (type === 'toggle') {
         await apiPatch(`/api/admin/users/${user.id}`, { is_active: !user.is_active });
       }
-      setConfirmAction(null); await fetchUsers();
+      setConfirmAction(null); await invalidateUsers();
     } catch (err) {
       setConfirmError(err instanceof Error ? err.message : t('common.error'));
     } finally { setConfirmLoading(false); }
@@ -377,7 +371,7 @@ export function UsersPage() {
     setSelectedUserIds(new Set());
     setBulkAction(null);
     setBulkBusy(false);
-    await fetchUsers();
+    await invalidateUsers();
   };
 
   // --- Reset password ---

@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useResetOnChange } from '@/hooks/use-reset-on-change';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Card, CardContent } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -82,6 +82,11 @@ interface PaginatedResponse<T> {
   page: number;
   per_page: number;
 }
+
+const NO_COST_CENTERS: string[] = [];
+const NO_MODELS: ModelRow[] = [];
+const NO_MCP_TOOLS: McpToolRow[] = [];
+const UNRESTRICTED_SCOPE: PolicyScope = { allowed_models: null, allowed_mcp_tools: null };
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -184,21 +189,8 @@ function ExpiryCell({ apiKey }: { apiKey: ApiKey }) {
 
 export function ApiKeysPage() {
   const { t } = useTranslation();
-  const [keys, setKeys] = useState<ApiKey[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const queryClient = useQueryClient();
   const [tab, setTab] = useState('active');
-
-  // Shared data for dialogs
-  const [costCenterOptions, setCostCenterOptions] = useState<string[]>([]);
-  // Full catalog — filtered down to the caller's policy scope below
-  // before it reaches the dialog pickers.
-  const [availableModels, setAvailableModels] = useState<ModelRow[]>([]);
-  const [availableMcpTools, setAvailableMcpTools] = useState<McpToolRow[]>([]);
-  const [policyScope, setPolicyScope] = useState<PolicyScope>({
-    allowed_models: null,
-    allowed_mcp_tools: null,
-  });
 
   // Dialog states
   const [createDialogOpen, setCreateDialogOpen] = useState(false);
@@ -217,65 +209,64 @@ export function ApiKeysPage() {
   // endpoint hides them. Expired and rotated keys still appear in the
   // live set with `disabled_reason` set, so we union both sources and
   // dedupe by id (archived row wins — it carries the deletion record).
-  const fetchKeys = useCallback(async (mode: 'live' | 'inactive' = 'live') => {
-    try {
-      if (mode === 'inactive') {
-        const [live, archived] = await Promise.all([
-          api<PaginatedResponse<ApiKey>>('/api/keys'),
-          api<PaginatedResponse<ApiKey>>('/api/keys?archived=true'),
-        ]);
-        const byId = new Map<string, ApiKey>();
-        for (const k of live.data) byId.set(k.id, k);
-        for (const k of archived.data) byId.set(k.id, k);
-        setKeys([...byId.values()]);
-      } else {
-        const res = await api<PaginatedResponse<ApiKey>>('/api/keys');
-        setKeys(res.data);
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
+  const liveKeysQuery = useQuery({
+    queryKey: ['keys'],
+    queryFn: ({ signal }) => api<PaginatedResponse<ApiKey>>('/api/keys', { signal }),
+  });
+  const archivedKeysQuery = useQuery({
+    queryKey: ['keys', { archived: true }],
+    queryFn: ({ signal }) =>
+      api<PaginatedResponse<ApiKey>>('/api/keys?archived=true', { signal }),
+    // Only the "Inactive" tab reads the archived view; the other tabs are
+    // masks over the live list.
+    enabled: tab === 'inactive',
+  });
+  const keys = useMemo(() => {
+    const live = liveKeysQuery.data?.data ?? [];
+    if (tab !== 'inactive') return live;
+    const byId = new Map<string, ApiKey>();
+    for (const k of live) byId.set(k.id, k);
+    for (const k of archivedKeysQuery.data?.data ?? []) byId.set(k.id, k);
+    return [...byId.values()];
+  }, [liveKeysQuery.data, archivedKeysQuery.data, tab]);
+  const loading = liveKeysQuery.isPending || (tab === 'inactive' && archivedKeysQuery.isPending);
+  const error =
+    (liveKeysQuery.error ?? (tab === 'inactive' ? archivedKeysQuery.error : null))?.message ?? '';
 
-  // Keys re-fetch on tab change because the "Inactive" tab unions a
-  // second server-side query, not just a client-side mask.
-  useResetOnChange(tab, () => setLoading(true));
-  useEffect(() => {
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchKeys(tab === 'inactive' ? 'inactive' : 'live');
-  }, [fetchKeys, tab]);
-
-  useEffect(() => {
-    api<string[]>('/api/keys/cost-centers')
-      .then(setCostCenterOptions)
-      .catch(() => setCostCenterOptions([]));
-    // /api/admin/models and /api/mcp/tools are both paginated and clamp
-    // page_size to 200; the dialog pickers want the complete catalog so
-    // they can be filtered down to the caller's policy scope locally.
-    fetchAllPaginated<ModelRow>('/api/admin/models')
-      .then(setAvailableModels)
-      .catch(() => setAvailableModels([]));
-    // `include_user_tools=true` unions the system catalog (`mcp_tools`)
-    // with this caller's per-user catalog (`mcp_user_tools` rows where
-    // user_id = self), so an admin can grant their own GitHub /
-    // Atlassian / Feishu personal tools to an API key. Without this
-    // flag the picker would be empty for auth-required servers, since
-    // those servers never populate the system-level table by design.
-    // (serde's bool deserializer requires `true`/`false` — `1`/`0` 400s.)
-    fetchAllPaginated<McpToolRow>('/api/mcp/tools?include_user_tools=true')
-      .then(setAvailableMcpTools)
-      .catch(() => setAvailableMcpTools([]));
-    api<PolicyScope>('/api/keys/policy-scope')
-      .then(setPolicyScope)
-      .catch(() =>
-        setPolicyScope({ allowed_models: null, allowed_mcp_tools: null }),
-      );
-  }, []);
+  // Shared data for dialogs. A catalog that fails to load leaves its picker
+  // empty — or, for the policy scope, unrestricted.
+  const costCentersQuery = useQuery({
+    queryKey: ['keys', 'cost-centers'],
+    queryFn: ({ signal }) => api<string[]>('/api/keys/cost-centers', { signal }),
+  });
+  // /api/admin/models and /api/mcp/tools are both paginated and clamp
+  // page_size to 200; the dialog pickers want the complete catalog so
+  // they can be filtered down to the caller's policy scope locally.
+  const modelsQuery = useQuery({
+    queryKey: ['admin', 'models', { all: true }],
+    queryFn: () => fetchAllPaginated<ModelRow>('/api/admin/models'),
+  });
+  // `include_user_tools=true` unions the system catalog (`mcp_tools`)
+  // with this caller's per-user catalog (`mcp_user_tools` rows where
+  // user_id = self), so an admin can grant their own GitHub /
+  // Atlassian / Feishu personal tools to an API key. Without this
+  // flag the picker would be empty for auth-required servers, since
+  // those servers never populate the system-level table by design.
+  // (serde's bool deserializer requires `true`/`false` — `1`/`0` 400s.)
+  const mcpToolsQuery = useQuery({
+    queryKey: ['mcp', 'tools', { all: true, include_user_tools: true }],
+    queryFn: () => fetchAllPaginated<McpToolRow>('/api/mcp/tools?include_user_tools=true'),
+  });
+  const policyScopeQuery = useQuery({
+    queryKey: ['keys', 'policy-scope'],
+    queryFn: ({ signal }) => api<PolicyScope>('/api/keys/policy-scope', { signal }),
+  });
+  const costCenterOptions = costCentersQuery.data ?? NO_COST_CENTERS;
+  // Full catalog — filtered down to the caller's policy scope below
+  // before it reaches the dialog pickers.
+  const availableModels = modelsQuery.data ?? NO_MODELS;
+  const availableMcpTools = mcpToolsQuery.data ?? NO_MCP_TOOLS;
+  const policyScope = policyScopeQuery.data ?? UNRESTRICTED_SCOPE;
 
   // Shape + filter the raw catalogs into the maps the scope dropdowns
   // consume. `allowed_models === null` means the caller's roles grant
@@ -330,9 +321,11 @@ export function ApiKeysPage() {
   // ---------------------------------------------------------------------------
 
   const handleCostCenterAdded = (tag: string) => {
-    if (!costCenterOptions.includes(tag)) {
-      setCostCenterOptions((prev) => [...prev, tag].sort());
-    }
+    // A new tag reaches the server only with the key that carries it; list
+    // it now so the dialog can select it before then.
+    queryClient.setQueryData<string[]>(['keys', 'cost-centers'], (prev = []) =>
+      prev.includes(tag) ? prev : [...prev, tag].sort(),
+    );
   };
 
   const openEditDialog = (k: ApiKey) => {
@@ -345,12 +338,14 @@ export function ApiKeysPage() {
     setRotateDialogOpen(true);
   };
 
-  const refetchForCurrentTab = () => fetchKeys(tab === 'inactive' ? 'inactive' : 'live');
+  /// Everything under `/api/keys`: both key lists, and the cost centers a
+  /// saved key may have added.
+  const invalidateKeys = () => queryClient.invalidateQueries({ queryKey: ['keys'] });
 
   const handleRevokeSuccess = () => {
     setRevokeTargetId(null);
     toast.success(t('common.deleteSuccess'));
-    refetchForCurrentTab();
+    void invalidateKeys();
   };
 
   // ---------------------------------------------------------------------------
@@ -383,7 +378,7 @@ export function ApiKeysPage() {
       <CreateApiKeyDialog
         open={createDialogOpen}
         onOpenChange={setCreateDialogOpen}
-        onSuccess={refetchForCurrentTab}
+        onSuccess={invalidateKeys}
         modelsByProvider={modelsByProvider}
         mcpToolsByServer={mcpToolsByServer}
         costCenterOptions={costCenterOptions}
@@ -393,7 +388,7 @@ export function ApiKeysPage() {
       <EditApiKeyDialog
         open={editDialogOpen}
         onOpenChange={setEditDialogOpen}
-        onSuccess={refetchForCurrentTab}
+        onSuccess={invalidateKeys}
         apiKey={editingKey}
         modelsByProvider={modelsByProvider}
         mcpToolsByServer={mcpToolsByServer}
@@ -404,7 +399,7 @@ export function ApiKeysPage() {
       <RotateApiKeyDialog
         open={rotateDialogOpen}
         onOpenChange={setRotateDialogOpen}
-        onSuccess={refetchForCurrentTab}
+        onSuccess={invalidateKeys}
         apiKey={rotatingKey}
       />
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useResetOnChange } from '@/hooks/use-reset-on-change';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Card,
   CardContent,
@@ -56,39 +57,36 @@ const TEST_BROADCAST_CHANNEL = 'thinkwatch-sso-test';
 export function OidcWizardCard() {
   const { t } = useTranslation();
   const canEdit = hasPermission('settings:write');
-  const [data, setData] = useState<OidcSettings | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const queryClient = useQueryClient();
+  const oidcQuery = useQuery({
+    queryKey: ['admin', 'settings', 'oidc'],
+    queryFn: ({ signal }) => api<OidcSettings>('/api/admin/settings/oidc', { signal }),
+  });
+  const data = oidcQuery.data ?? null;
+  const loading = oidcQuery.isPending;
+  const error = oidcQuery.error?.message ?? null;
 
   // Whether the admin is currently editing (draft visible). When
   // there's no draft and the active config is set up, the card
   // collapses to the on/off summary.
   const [editing, setEditing] = useState(false);
 
-  const reload = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const d = await api<OidcSettings>('/api/admin/settings/oidc');
-      setData(d);
-      // Auto-enter editing mode when there's already a draft (the
-      // admin's previous session). Otherwise stay collapsed and
-      // wait for "Edit config" / "Set up SSO".
-      setEditing((prev) => prev || !!d.draft);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : t('common.error'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
+  // Auto-enter editing mode whenever a load finds a draft (the admin's
+  // previous session). Otherwise stay collapsed and wait for "Edit
+  // config" / "Set up SSO". Keyed on the load rather than the data, so
+  // every successful reload re-applies it, cached or not.
+  const [seenLoadAt, setSeenLoadAt] = useState(0);
+  if (oidcQuery.dataUpdatedAt !== seenLoadAt) {
+    setSeenLoadAt(oidcQuery.dataUpdatedAt);
+    if (oidcQuery.data?.draft) setEditing(true);
+  }
 
-  useEffect(() => {
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void reload();
-  }, [reload]);
+  // Stable identity on purpose: the test-login step's popup listener
+  // re-subscribes every time `onResult` changes.
+  const reload = useCallback(
+    () => queryClient.invalidateQueries({ queryKey: ['admin', 'settings', 'oidc'] }),
+    [queryClient],
+  );
 
   if (loading) {
     return (

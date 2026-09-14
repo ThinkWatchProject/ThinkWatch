@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, type FormEvent } from 'react';
+import { useState, useEffect, useMemo, type FormEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 import { invalidateSetupStatusCache } from '@/router';
 import { Button } from '@/components/ui/button';
@@ -104,16 +104,18 @@ export function SetupPage() {
   // Settings form
   const [siteName, setSiteName] = useState('ThinkWatch');
 
-  const [adminErrors, setAdminErrors] = useState<Record<string, string>>({});
-  // Per-field touched state. `validateAdmin` always rebuilds the full
-  // error map, but the render path gates visibility on `touched[field]`
-  // so blurring the email input doesn't immediately flash "必填" under
+  // Per-field touched state. `adminErrors` always holds the full error
+  // map, but the render path gates visibility on `touched[field]` so
+  // blurring the email input doesn't immediately flash "必填" under
   // every other field the user has yet to visit.
   const [adminTouched, setAdminTouched] = useState<Record<string, boolean>>({});
 
-  // Hoisted out of the closure so the regex literals aren't recompiled
-  // on every render (RegExp inside a body recompiles per call).
-  const validateAdmin = useCallback((): boolean => {
+  // Derived from the live form values rather than stored. After the user
+  // clicks Next on an empty form (which marks every field touched),
+  // typing into a field has to clear its "必填" on that keystroke — not
+  // leave it on screen until the field is also blurred, which looks like
+  // the validator is ignoring their input.
+  const adminErrors = useMemo(() => {
     const errors: Record<string, string> = {};
     if (!email.trim()) errors.email = t('setup.validation.required');
     if (!displayName.trim()) errors.displayName = t('setup.validation.required');
@@ -127,13 +129,11 @@ export function SetupPage() {
       errors.password = t('setup.admin.passwordComplexity');
     }
     if (password !== confirmPassword) errors.confirmPassword = t('setup.admin.passwordMismatch');
-    setAdminErrors(errors);
-    return Object.keys(errors).length === 0;
+    return errors;
   }, [email, displayName, password, confirmPassword, t]);
 
   const markAdminTouched = (field: string) => {
     setAdminTouched((prev) => (prev[field] ? prev : { ...prev, [field]: true }));
-    validateAdmin();
   };
 
   // Generates a 16-char password that always satisfies the complexity
@@ -168,21 +168,6 @@ export function SetupPage() {
     setAdminTouched((prev) => ({ ...prev, password: true, confirmPassword: true }));
   };
 
-  // Keep `adminErrors` in sync with the live form values. Without this,
-  // after the user clicks Next on an empty form (which marks every
-  // field touched), typing into a field fixes its value but the stale
-  // "必填" error stays on screen until the user also blurs that field
-  // — which looks like the validator is ignoring their input.
-  // validateAdmin is useCallback-ed on [email, displayName, password,
-  // confirmPassword, t] so this effect fires on every real change.
-  useEffect(() => {
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    validateAdmin();
-  }, [validateAdmin]);
-
   const goNext = () => {
     const currentIndex = STEPS.indexOf(step);
     if (step === 'admin') {
@@ -194,7 +179,7 @@ export function SetupPage() {
         password: true,
         confirmPassword: true,
       });
-      if (!validateAdmin()) return;
+      if (Object.keys(adminErrors).length > 0) return;
     }
     if (currentIndex < STEPS.length - 1) {
       setError('');

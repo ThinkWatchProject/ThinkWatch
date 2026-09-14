@@ -1,6 +1,7 @@
-import { type FormEvent, useCallback, useEffect, useState } from 'react';
+import { type FormEvent, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from '@tanstack/react-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -36,10 +37,16 @@ import { toast } from 'sonner';
 export function TeamsPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
-  const [teams, setTeams] = useState<Team[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
+  const queryClient = useQueryClient();
+  const teamsQuery = useQuery({
+    queryKey: ['admin', 'teams'],
+    queryFn: ({ signal }) => api<Team[]>('/api/admin/teams', { signal }),
+  });
+  const teams = teamsQuery.data ?? [];
+  const loading = teamsQuery.isPending;
+  const error = teamsQuery.error?.message ?? '';
   const teamsPager = useClientPagination(teams, 20);
+  const invalidateTeams = () => queryClient.invalidateQueries({ queryKey: ['admin', 'teams'] });
 
   // Create
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -50,27 +57,6 @@ export function TeamsPage() {
 
   // Delete
   const [deleteTarget, setDeleteTarget] = useState<Team | null>(null);
-
-  const fetchTeams = useCallback(async () => {
-    setLoading(true);
-    try {
-      const data = await api<Team[]>('/api/admin/teams');
-      setTeams(data);
-      setError('');
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('common.error'));
-    } finally {
-      setLoading(false);
-    }
-  }, [t]);
-
-  useEffect(() => {
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void fetchTeams();
-  }, [fetchTeams]);
 
   const openCreate = () => {
     setFormName('');
@@ -91,7 +77,7 @@ export function TeamsPage() {
       await apiPost('/api/admin/teams', { name: formName, description: formDesc || null });
       toast.success(t('teams.toast.created'));
       setDialogOpen(false);
-      await fetchTeams();
+      await invalidateTeams();
     } catch (err) {
       setFormError(err instanceof Error ? err.message : t('common.error'));
     } finally {
@@ -105,7 +91,7 @@ export function TeamsPage() {
       await apiDelete(`/api/admin/teams/${deleteTarget.id}`);
       toast.success(t('teams.toast.deleted'));
       setDeleteTarget(null);
-      await fetchTeams();
+      await invalidateTeams();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : t('common.error'));
     }

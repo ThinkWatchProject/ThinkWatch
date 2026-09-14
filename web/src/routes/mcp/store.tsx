@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useResetOnChange } from '@/hooks/use-reset-on-change';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link } from '@tanstack/react-router';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
@@ -72,53 +72,46 @@ function i18nText(text: string | null | undefined, lang: string): string {
 
 export function McpStorePage() {
   const { t, i18n } = useTranslation();
-  const [templates, setTemplates] = useState<StoreTemplate[]>([]);
-  const [categories, setCategories] = useState<CategoryCount[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState('');
   const [activeCategory, setActiveCategory] = useState<string | null>(null);
   const [syncing, setSyncing] = useState(false);
 
-  const fetchTemplates = useCallback(async () => {
-    try {
-      const params = new URLSearchParams();
-      if (activeCategory) params.set('category', activeCategory);
-      if (searchQuery) params.set('search', searchQuery);
-      const qs = params.toString();
-      const data = await api<StoreTemplate[]>(`/api/mcp/store${qs ? `?${qs}` : ''}`);
-      setTemplates(data);
-    } catch {
-      /* ignore */
-    } finally {
-      setLoading(false);
-    }
-  }, [activeCategory, searchQuery]);
-
-  const fetchCategories = async () => {
-    try {
-      const data = await api<CategoryCount[]>('/api/mcp/store/categories');
-      setCategories(data);
-    } catch {
-      /* ignore */
-    }
-  };
-
-  useEffect(() => {
-    // Async loader: its first statement is the `await`, so every setState
-    // inside runs in the continuation — never synchronously with this
-    // effect, and never as a cascading render. The rule's cross-function
-    // analysis does not model `await`.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void fetchCategories();
-  }, []);
-
-  useResetOnChange(`${searchQuery}\u0000${activeCategory}`, () => setLoading(true));
+  // The search box and the category chips settle for 200ms before they
+  // become a request, so typing a word costs one round-trip, not one per key.
+  const [debouncedSearch, setDebouncedSearch] = useState(searchQuery);
+  const [debouncedCategory, setDebouncedCategory] = useState(activeCategory);
   useEffect(() => {
     const timer = setTimeout(() => {
-      void fetchTemplates();
+      setDebouncedSearch(searchQuery);
+      setDebouncedCategory(activeCategory);
     }, 200);
     return () => clearTimeout(timer);
-  }, [searchQuery, activeCategory, fetchTemplates]);
+  }, [searchQuery, activeCategory]);
+
+  // Both lists fail quietly: the page still renders, just without them.
+  const categoriesQuery = useQuery({
+    queryKey: ['mcp', 'store', 'categories'],
+    queryFn: ({ signal }) => api<CategoryCount[]>('/api/mcp/store/categories', { signal }),
+  });
+  const templatesQuery = useQuery({
+    queryKey: ['mcp', 'store', { category: debouncedCategory, search: debouncedSearch }],
+    queryFn: ({ signal }) => {
+      const params = new URLSearchParams();
+      if (debouncedCategory) params.set('category', debouncedCategory);
+      if (debouncedSearch) params.set('search', debouncedSearch);
+      const qs = params.toString();
+      return api<StoreTemplate[]>(`/api/mcp/store${qs ? `?${qs}` : ''}`, { signal });
+    },
+  });
+  const categories = categoriesQuery.data ?? [];
+  const templates = templatesQuery.data ?? [];
+  // A filter still inside its debounce window counts as loading, so the
+  // skeleton answers the keystroke instead of arriving 200ms after it.
+  const loading =
+    templatesQuery.isPending ||
+    debouncedSearch !== searchQuery ||
+    debouncedCategory !== activeCategory;
 
   // Separate featured templates when no filter is active
   const featuredTemplates =
@@ -150,7 +143,7 @@ export function McpStorePage() {
               try {
                 const res = await apiPost<{ count: number }>('/api/admin/mcp-store/sync', {});
                 toast.success(t('mcpStore.syncSuccess', { count: res.count }));
-                await fetchTemplates();
+                await queryClient.invalidateQueries({ queryKey: ['mcp', 'store'] });
               } catch (err) {
                 toast.error(err instanceof Error ? err.message : t('common.error'));
               } finally {

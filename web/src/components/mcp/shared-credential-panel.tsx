@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { CheckCircle2, AlertTriangle } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { apiDelete, apiGet, apiPost, apiPut } from '@/lib/api';
+import { api, apiDelete, apiPost, apiPut } from '@/lib/api';
 import { toast } from 'sonner';
 
 interface SharedCredentialStatus {
@@ -45,34 +46,27 @@ export function SharedCredentialPanel({
   const oauthCapable = authShape === 'oauth';
   const allowStaticToken = authShape === 'static';
   const { t } = useTranslation();
-  const [status, setStatus] = useState<SharedCredentialStatus | null>(null);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const statusQuery = useQuery({
+    queryKey: ['admin', 'mcp', 'servers', serverId, 'shared-credential'],
+    queryFn: ({ signal }) =>
+      api<SharedCredentialStatus>(`/api/admin/mcp/servers/${serverId}/shared-credential`, {
+        signal,
+      }).catch((err: unknown) => {
+        // Status endpoint is read-only; failure here just leaves the
+        // panel reading "not configured" — the user can save and retry.
+        if (!signal.aborted) console.warn('shared-credential status fetch failed', err);
+        throw err;
+      }),
+  });
+  const status = statusQuery.data ?? null;
+  const loading = statusQuery.isPending;
+  const refresh = () =>
+    queryClient.invalidateQueries({
+      queryKey: ['admin', 'mcp', 'servers', serverId, 'shared-credential'],
+    });
   const [pasted, setPasted] = useState('');
   const [submitting, setSubmitting] = useState(false);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const s = await apiGet<SharedCredentialStatus>(
-        `/api/admin/mcp/servers/${serverId}/shared-credential`,
-      );
-      setStatus(s);
-    } catch (err) {
-      // Status endpoint is read-only; failure here just leaves the
-      // panel in "loading" state — the user can save and retry.
-      console.warn('shared-credential status fetch failed', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [serverId]);
-
-  useEffect(() => {
-    // Hand-rolled load: the spinner flag is the first half of "start a
-    // fetch" and belongs with it. See "Data fetching" in web/README.md —
-    // this goes away with a data-fetching layer, not by moving the flag.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refresh();
-  }, [refresh, serverId]);
 
   const startOAuth = async () => {
     setSubmitting(true);
