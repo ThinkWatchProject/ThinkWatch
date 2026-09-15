@@ -1,5 +1,12 @@
 # Stage 1: Build
-FROM node:24-alpine AS builder
+#
+# Runs on the building machine's own platform rather than once per target.
+# dist/ is static files, identical for every architecture, so it is built
+# once, natively, and stage 2 only copies it. Built per target, arm64 ran
+# `pnpm install` and `pnpm build` under QEMU: the build alone took 260s
+# against 23s natively, and when Node crashed there with SIGILL the step
+# never exited — the CI job sat idle until GitHub's six-hour limit.
+FROM --platform=$BUILDPLATFORM node:24-alpine AS builder
 
 # Pin pnpm to a known-good 11.x. The workspace YAML's `allowBuilds`
 # field requires pnpm 11+ (see web/pnpm-workspace.yaml top comment).
