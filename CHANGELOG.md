@@ -11,6 +11,18 @@ target.
 
 ## [Unreleased]
 
+### Fixed
+
+- **CI** — the `main` push that merged #23 never produced its web image.
+  `Dockerfile.web` built the frontend once per architecture, Node crashed
+  with SIGILL in the QEMU-emulated arm64 build, and the build step hung
+  until GitHub cancelled the job at the six-hour limit. The static files
+  are identical on every architecture, so they are now built once,
+  natively, and copied into each architecture's nginx image — emulated,
+  `pnpm build` alone took 260s against 23s. The job also times out after
+  20 minutes. Image contents are unchanged; release builds already ran on
+  native runners.
+
 ## [1.0.2] — 2026-09-13
 
 The shared gateway layer moves out into its own repository, and OIDC

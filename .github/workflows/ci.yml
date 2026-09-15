@@ -232,13 +232,20 @@ jobs:
             $(printf "${IMAGE}@sha256:%s " *)
 
   # ---------------------------------------------------------------------------
-  # Docker Web: static files are arch-independent, single buildx with QEMU
+  # Docker Web: static files are arch-independent. Dockerfile.web builds them
+  # once on this runner's own platform and copies them into each arch's nginx
+  # image, so no build step runs under emulation.
   # ---------------------------------------------------------------------------
   docker-web:
     name: Web Build & Push
     runs-on: ubuntu-latest
     needs: [rust, frontend]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    # A healthy run takes minutes. With no limit, a hung build holds the
+    # runner for GitHub's six-hour maximum — which is what happened when
+    # Node crashed under QEMU in the old per-arch build and the step never
+    # exited.
+    timeout-minutes: 20
     permissions:
       contents: read
       packages: write
