@@ -4,6 +4,17 @@
 //! breaker is per-process-mutex; this module is the multi-instance
 //! companion that drives selection-time filtering).
 //!
+//! ### Not shared with the desktop gateway
+//!
+//! thinkwatch-core has a breaker of its own (`tw-gateway::health`), and
+//! the two are kept apart on purpose. That one is in-process, trips on
+//! consecutive failures, bypasses itself when a route has one candidate
+//! and fails open when every candidate is down — right for one user
+//! with nowhere else to go. This one is shared across replicas through
+//! Redis, trips on an error rate over a window, is tuned by an admin,
+//! and filters open routes out. The premises are opposite; one
+//! abstraction over both would serve neither.
+//!
 //! ### Storage
 //!
 //! Each route gets:

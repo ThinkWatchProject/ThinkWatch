@@ -12,7 +12,6 @@ path = "src/main.rs"
 
 [dependencies]
 tw-crypto = { workspace = true }
-tw-resil = { workspace = true }
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }
 think-watch-gateway = { workspace = true }
