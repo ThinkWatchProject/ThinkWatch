@@ -2,7 +2,6 @@ pub mod cache;
 pub mod channel;
 pub mod content_filter;
 pub mod cost_tracker;
-pub mod failover;
 pub mod health;
 pub mod lifecycle;
 pub mod metadata;

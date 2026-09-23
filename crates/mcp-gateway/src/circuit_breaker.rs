@@ -1,7 +1,6 @@
 //! Per-MCP-server circuit breaker.
 //!
-//! Mirrors the design of `think_watch_gateway::failover::FailoverBackend`
-//! but is dead-simple: one MCP server = one breaker. There is no failover
+//! Dead-simple: one MCP server = one breaker. There is no failover
 //! pool because each MCP server is unique (a different tool surface), so
 //! when its CB trips we just fail fast on subsequent calls until the
 //! recovery window elapses.
