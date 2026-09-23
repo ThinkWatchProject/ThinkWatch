@@ -156,6 +156,7 @@ pub(crate) fn build_chat_pump(
     client: Dialect,
     deps_state: GatewayState,
     request: &ChatRequestSnapshot,
+    provider: &str,
 ) -> (
     axum::response::Response,
     Pin<Box<dyn std::future::Future<Output = Invoked<ChatCompletionSurface>> + Send>>,
@@ -171,6 +172,19 @@ pub(crate) fn build_chat_pump(
     let readers_for_tail = Arc::clone(&readers);
 
     let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
+
+    // Tool calls are inspected on what the client is about to receive —
+    // converted, if it was — since that is what it would execute.
+    let mut inspector = crate::tool_inspection::StreamInspector::new(
+        deps_state.tool_inspection.load_full(),
+        deps_state.audit.clone(),
+        crate::tool_inspection::Caller::of(
+            &request.identity,
+            &request.trace_id,
+            &request.mapped_model,
+        ),
+        provider.to_string(),
+    );
 
     let body = async_stream::stream! {
         let mut done_tx = Some(done_tx);
@@ -226,6 +240,17 @@ pub(crate) fn build_chat_pump(
                         Some(c) => c.process(&chunk),
                         None => chunk.to_vec(),
                     };
+                    if let Some((err, safe)) = inspector.as_mut().and_then(|i| i.check(&client_bytes)) {
+                        yield Ok(Bytes::from(cut(&mut shaper, convert.as_mut(), client, &client_bytes[..safe], &err)));
+                        if let Some(tx) = done_tx.take() {
+                            let _ = tx.send(StreamOutcome::UpstreamError {
+                                error_type: err.error_tag().to_string(),
+                                message: err.to_string(),
+                                status_code: err.status_code(),
+                            });
+                        }
+                        return;
+                    }
                     let out = shaper.process(&client_bytes);
                     if !out.is_empty() {
                         yield Ok(Bytes::from(out));
@@ -254,6 +279,19 @@ pub(crate) fn build_chat_pump(
             }
         }
         let tail = convert.as_mut().map(|c| c.finish()).unwrap_or_default();
+        // The converter's last bytes can complete a tool call (the block's
+        // stop), so they are inspected too.
+        if let Some((err, safe)) = inspector.as_mut().and_then(|i| i.check(&tail)) {
+            yield Ok(Bytes::from(cut(&mut shaper, None, client, &tail[..safe], &err)));
+            if let Some(tx) = done_tx.take() {
+                let _ = tx.send(StreamOutcome::UpstreamError {
+                    error_type: err.error_tag().to_string(),
+                    message: err.to_string(),
+                    status_code: err.status_code(),
+                });
+            }
+            return;
+        }
         let mut out = shaper.process(&tail);
         out.extend(shaper.finish());
         if !out.is_empty() {
@@ -318,6 +356,29 @@ pub(crate) fn build_chat_pump(
         }
     });
     (response, tail)
+}
+
+/// End a stream at a tool call the inspection stops: what came before it
+/// still goes out, then the refusal, in the caller's format.
+///
+/// An incomplete tool call cannot be executed, so the client is left with
+/// nothing it can run.
+fn cut(
+    shaper: &mut StreamShaper,
+    convert: Option<&mut tw_dialect::convert::StreamConverter>,
+    client: Dialect,
+    safe: &[u8],
+    err: &tw_types::GatewayError,
+) -> Vec<u8> {
+    let message = err.to_string();
+    let mut out = shaper.process(safe);
+    let refusal = match convert {
+        Some(c) => c.fail(&message),
+        None => error_frame(client, &message),
+    };
+    out.extend(shaper.process(&refusal));
+    out.extend(shaper.finish());
+    out
 }
 
 /// An error in the caller's format, for a stream that was forwarded

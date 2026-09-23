@@ -13,7 +13,9 @@ mod users;
 pub use content_filter::{
     ContentFilterPreset, ContentFilterTestMatch, ContentFilterTestRequest,
     ContentFilterTestResponse, PiiRedactorTestMatch, PiiRedactorTestRequest,
-    PiiRedactorTestResponse, list_content_filter_presets, test_content_filter, test_pii_redactor,
+    PiiRedactorTestResponse, ToolInspectionTestMatch, ToolInspectionTestRequest,
+    ToolInspectionTestResponse, ToolRuleView, list_content_filter_presets, list_tool_rules,
+    test_content_filter, test_pii_redactor, test_tool_inspection,
 };
 pub use oidc::{
     DisableOidcRequest, OidcActiveSnapshot, OidcDraftSnapshot, OidcSettingsResponse,
@@ -41,7 +43,8 @@ pub use users::{
 // types after the submodule split.
 #[allow(unused_imports)]
 pub use content_filter::{
-    __path_list_content_filter_presets, __path_test_content_filter, __path_test_pii_redactor,
+    __path_list_content_filter_presets, __path_list_tool_rules, __path_test_content_filter,
+    __path_test_pii_redactor, __path_test_tool_inspection,
 };
 #[allow(unused_imports)]
 pub use oidc::{

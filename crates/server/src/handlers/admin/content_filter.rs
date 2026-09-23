@@ -190,3 +190,122 @@ pub async fn test_pii_redactor(
         matches,
     }))
 }
+
+// ---------------------------------------------------------------------------
+// Tool-call inspection — built-in rules and test sandbox
+// ---------------------------------------------------------------------------
+
+/// A built-in tool-call rule, as the settings page lists it.
+#[derive(Debug, Serialize)]
+pub struct ToolRuleView {
+    pub id: String,
+    /// English name; the UI may localise by id.
+    pub name: String,
+    /// Why a hit is worth a look (English).
+    pub why: String,
+    /// What it does in enforce mode out of the box: `cut` or `record`.
+    pub default_action: &'static str,
+}
+
+/// GET /api/admin/settings/tool-inspection/rules — the built-in rules an
+/// admin can switch off or re-grade.
+#[utoipa::path(
+    get,
+    path = "/api/admin/settings/tool-inspection/rules",
+    tag = "Settings",
+    responses(
+        (status = 200, description = "Built-in tool-call inspection rules"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn list_tool_rules(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+) -> Result<Json<Vec<ToolRuleView>>, AppError> {
+    auth_user
+        .require_global_permission(&state.db, "content_filter:read")
+        .await?;
+    let rules = tw_guard::tools::rules::builtin()
+        .dangerous
+        .iter()
+        .map(|s| ToolRuleView {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            why: s.why.clone(),
+            default_action: if s.high() { "cut" } else { "record" },
+        })
+        .collect();
+    Ok(Json(rules))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ToolInspectionTestRequest {
+    /// A tool call's arguments, as the model would send them.
+    pub text: String,
+    /// The config being edited, not the one saved.
+    pub config: think_watch_gateway::tool_inspection::ToolInspectionConfig,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ToolInspectionTestMatch {
+    pub rule: String,
+    pub name: String,
+    pub custom: bool,
+    /// Would enforce mode cut the response.
+    pub cut: bool,
+    pub excerpt: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ToolInspectionTestResponse {
+    pub matches: Vec<ToolInspectionTestMatch>,
+}
+
+/// POST /api/admin/settings/tool-inspection/test — run a sample of tool
+/// arguments against a draft config. Each rule reports its first match,
+/// as the gateway does.
+#[utoipa::path(
+    post,
+    path = "/api/admin/settings/tool-inspection/test",
+    tag = "Settings",
+    request_body(
+        content = serde_json::Value,
+        description = "text: string, config: tool inspection settings",
+    ),
+    responses(
+        (status = 200, description = "The rules that match"),
+        (status = 400, description = "The config is invalid"),
+        (status = 403, description = "Forbidden"),
+    ),
+    security(("BearerAuth" = []))
+)]
+pub async fn test_tool_inspection(
+    auth_user: AuthUser,
+    State(state): State<AppState>,
+    Json(req): Json<ToolInspectionTestRequest>,
+) -> Result<Json<ToolInspectionTestResponse>, AppError> {
+    auth_user
+        .require_global_permission(&state.db, "content_filter:read")
+        .await?;
+    if let Some(problem) = req.config.problem() {
+        return Err(AppError::BadRequest(problem));
+    }
+    let inspection = think_watch_gateway::tool_inspection::ToolInspection::from_config(&req.config);
+    let matches = inspection
+        .rules
+        .rules
+        .iter()
+        .filter_map(|r| {
+            let m = r.re.find(&req.text)?;
+            Some(ToolInspectionTestMatch {
+                rule: r.id.clone(),
+                name: r.name.clone(),
+                custom: r.custom,
+                cut: r.high,
+                excerpt: m.as_str().chars().take(120).collect(),
+            })
+        })
+        .collect();
+    Ok(Json(ToolInspectionTestResponse { matches }))
+}

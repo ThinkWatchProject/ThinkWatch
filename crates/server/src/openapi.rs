@@ -122,6 +122,8 @@ use crate::handlers::{
         crate::handlers::admin::test_content_filter,
         crate::handlers::admin::list_content_filter_presets,
         crate::handlers::admin::test_pii_redactor,
+        crate::handlers::admin::list_tool_rules,
+        crate::handlers::admin::test_tool_inspection,
         // Teams
         crate::handlers::teams::list_teams,
         crate::handlers::teams::get_team,

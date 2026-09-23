@@ -122,6 +122,68 @@ export interface PiiTestResponse {
   matches: PiiTestMatch[];
 }
 
+export type ToolInspectionMode = 'off' | 'observe' | 'enforce';
+export type ToolAction = 'cut' | 'record';
+
+export interface ToolCustomRule {
+  name: string;
+  pattern: string;
+  action: ToolAction;
+}
+
+/** `security.tool_inspection`, as stored. */
+export interface ToolInspectionConfig {
+  mode: ToolInspectionMode;
+  /** Built-in rules switched off, by id. */
+  disabled: string[];
+  /** Built-in rules whose Enforce action differs from the factory one. */
+  actions: Record<string, ToolAction>;
+  custom: ToolCustomRule[];
+}
+
+/** A built-in rule, from `/api/admin/settings/tool-inspection/rules`. */
+export interface ToolRule {
+  id: string;
+  name: string;
+  why: string;
+  default_action: ToolAction;
+}
+
+export interface ToolTestMatch {
+  rule: string;
+  name: string;
+  custom: boolean;
+  cut: boolean;
+  excerpt: string;
+}
+
+/// Same posture as the content filter normalizer: anything missing or
+/// mistyped becomes the default rather than crashing the page.
+export function normalizeToolInspection(raw: unknown): ToolInspectionConfig {
+  const o = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+  const mode = o.mode === 'off' || o.mode === 'enforce' ? o.mode : 'observe';
+  const disabled = Array.isArray(o.disabled)
+    ? o.disabled.filter((x): x is string => typeof x === 'string')
+    : [];
+  const actions: Record<string, ToolAction> = {};
+  if (o.actions && typeof o.actions === 'object') {
+    for (const [k, v] of Object.entries(o.actions as Record<string, unknown>)) {
+      if (v === 'cut' || v === 'record') actions[k] = v;
+    }
+  }
+  const custom = Array.isArray(o.custom)
+    ? o.custom.map((r: unknown) => {
+        const c = (r && typeof r === 'object' ? r : {}) as Record<string, unknown>;
+        return {
+          name: typeof c.name === 'string' ? c.name : '',
+          pattern: typeof c.pattern === 'string' ? c.pattern : '',
+          action: c.action === 'cut' ? 'cut' : 'record',
+        } as ToolCustomRule;
+      })
+    : [];
+  return { mode, disabled, actions, custom };
+}
+
 /// Defensive normalizer for content filter rules loaded from the
 /// settings JSON. The DB column is JSONB so anything could be in
 /// there; we coerce missing or wrong-typed fields to safe defaults

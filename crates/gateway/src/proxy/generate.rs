@@ -438,6 +438,17 @@ async fn generate(
         && let Some(cached) = state.cache.get(fp).await
     {
         metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
+        // A stored answer passed the inspection in force when it was
+        // stored, not necessarily the one in force now.
+        if let Some(e) = crate::tool_inspection::check_whole(
+            &state.tool_inspection.load(),
+            &state.audit,
+            &crate::tool_inspection::Caller::of(&identity, &metadata.request_id, &mapped_model),
+            "cache",
+            &cached.body,
+        ) {
+            return Err(ctx.emit(e).into());
+        }
         let total = cached.prompt_tokens + cached.completion_tokens;
         if let Err(e) = state.quota.consume(&quota_key, total).await {
             tracing::warn!(quota_key = %quota_key, tokens = total, "quota consume on cache hit failed: {e}");
@@ -620,6 +631,21 @@ async fn generate(
         &model_cfg.output_guardrails,
     ) {
         finalize_health(&state, &sel_record, false).await;
+        return Err(ctx.emit(e).into());
+    }
+
+    // Tool calls, on the whole answer before any of it has gone out. A
+    // refusal is the gateway's policy, not the upstream failing, so the
+    // route's health counts it as a success. Like an output-guardrail
+    // refusal, the answer is neither cached nor billed.
+    if let Some(e) = crate::tool_inspection::check_whole(
+        &state.tool_inspection.load(),
+        &state.audit,
+        &crate::tool_inspection::Caller::of(&identity, &metadata.request_id, &mapped_model),
+        &entry.provider_name,
+        &completed.body,
+    ) {
+        finalize_health(&state, &sel_record, true).await;
         return Err(ctx.emit(e).into());
     }
 

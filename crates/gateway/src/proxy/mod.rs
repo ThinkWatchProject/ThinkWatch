@@ -57,6 +57,9 @@ pub struct GatewayState {
     pub cache: Arc<ResponseCache>,
     /// Hot-swappable so admins can update PII patterns without restarting.
     pub pii_redactor: Arc<ArcSwap<PiiRedactor>>,
+    /// Hot-swappable like the two above: which tool calls an upstream
+    /// returns get recorded or cut.
+    pub tool_inspection: Arc<ArcSwap<crate::tool_inspection::ToolInspection>>,
     pub cost_tracker: Arc<CostTracker>,
     pub rate_limiter: Arc<RateLimiter>,
     /// PG pool — used to query enabled rate-limit rules and budget caps
