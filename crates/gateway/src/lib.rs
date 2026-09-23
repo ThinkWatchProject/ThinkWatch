@@ -1,5 +1,4 @@
 pub mod cache;
-pub mod channel;
 pub mod content_filter;
 pub mod cost_tracker;
 pub mod health;
@@ -9,7 +8,6 @@ pub mod metrics_labels;
 pub mod model_mapping;
 pub mod output_guardrails;
 pub mod pii_redactor;
-pub mod prefix_balancer;
 pub mod providers;
 pub mod proxy;
 pub mod quota;
