@@ -199,8 +199,23 @@ pub(crate) fn build_chat_pump(
             r.collector = Some(wire.collect.collector());
         }
         let mut convert = wire.convert.as_ref().map(|s| s.stream());
+        // Bedrock streams AWS eventstream frames, not SSE. Unframe them at
+        // the door, so the sniffer, the collector and the converter all
+        // read the same SSE they read from every other upstream.
+        let mut unframe = (wire.dialect == Dialect::Bedrock)
+            .then(tw_upstream::eventstream::Transcoder::new);
         let mut source = upstream.bytes_stream();
         while let Some(item) = source.next().await {
+            let item = match item {
+                Ok(raw) => match unframe.as_mut() {
+                    None => Ok(raw),
+                    Some(t) => t
+                        .feed(&raw)
+                        .map(Bytes::from)
+                        .map_err(|e| format!("Bedrock ended the stream: {e}")),
+                },
+                Err(e) => Err(format!("The upstream stream broke off: {e}")),
+            };
             match item {
                 Ok(chunk) => {
                     if let Ok(mut r) = readers.lock() {
@@ -216,10 +231,9 @@ pub(crate) fn build_chat_pump(
                         yield Ok(Bytes::from(out));
                     }
                 }
-                Err(e) => {
+                Err(message) => {
                     // Headers are gone; the only way left to say it is in
                     // the stream, in the caller's own format.
-                    let message = format!("The upstream stream broke off: {e}");
                     tracing::warn!("{message}");
                     let tail = match convert.as_mut() {
                         Some(c) => c.fail(&message),

@@ -7,7 +7,7 @@ edition.workspace = true
 tw-types = { workspace = true }
 tw-resil = { workspace = true }
 tw-dialect = { workspace = true }
-tw-upstream = { workspace = true, features = ["sigv4"] }
+tw-upstream = { workspace = true, features = ["bedrock"] }
 tw-wire = { workspace = true }
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }

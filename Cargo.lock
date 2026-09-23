@@ -1779,7 +1779,7 @@ dependencies = [
  "libc",
  "percent-encoding",
  "pin-project-lite",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "system-configuration",
  "tokio",
  "tower-service",
@@ -2731,7 +2731,7 @@ dependencies = [
  "quinn-udp",
  "rustc-hash",
  "rustls",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2769,7 +2769,7 @@ dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
- "socket2 0.5.10",
+ "socket2 0.6.3",
  "tracing",
  "windows-sys 0.60.2",
 ]
@@ -4662,8 +4662,8 @@ dependencies = [
 
 [[package]]
 name = "tw-crypto"
-version = "0.32.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.32.0#1783bf5e586fd6064392047204c7fa6f7dc25517"
+version = "0.35.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.35.0#f7590fa074c1fd068f6ac5156588a98a87d5b032"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4675,8 +4675,8 @@ dependencies = [
 
 [[package]]
 name = "tw-dialect"
-version = "0.32.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.32.0#1783bf5e586fd6064392047204c7fa6f7dc25517"
+version = "0.35.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.35.0#f7590fa074c1fd068f6ac5156588a98a87d5b032"
 dependencies = [
  "serde",
  "serde_json",
@@ -4684,8 +4684,8 @@ dependencies = [
 
 [[package]]
 name = "tw-resil"
-version = "0.32.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.32.0#1783bf5e586fd6064392047204c7fa6f7dc25517"
+version = "0.35.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.35.0#f7590fa074c1fd068f6ac5156588a98a87d5b032"
 dependencies = [
  "futures",
  "metrics",
@@ -4697,8 +4697,8 @@ dependencies = [
 
 [[package]]
 name = "tw-types"
-version = "0.32.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.32.0#1783bf5e586fd6064392047204c7fa6f7dc25517"
+version = "0.35.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.35.0#f7590fa074c1fd068f6ac5156588a98a87d5b032"
 dependencies = [
  "serde",
  "serde_json",
@@ -4707,11 +4707,13 @@ dependencies = [
 
 [[package]]
 name = "tw-upstream"
-version = "0.32.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.32.0#1783bf5e586fd6064392047204c7fa6f7dc25517"
+version = "0.35.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.35.0#f7590fa074c1fd068f6ac5156588a98a87d5b032"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
+ "aws-smithy-eventstream",
+ "bytes",
  "http 1.4.0",
  "reqwest 0.13.2",
  "serde_json",
@@ -4719,8 +4721,8 @@ dependencies = [
 
 [[package]]
 name = "tw-wire"
-version = "0.32.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.32.0#1783bf5e586fd6064392047204c7fa6f7dc25517"
+version = "0.35.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.35.0#f7590fa074c1fd068f6ac5156588a98a87d5b032"
 dependencies = [
  "bytes",
  "chrono",
@@ -5124,7 +5126,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
