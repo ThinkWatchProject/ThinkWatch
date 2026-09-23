@@ -36,8 +36,7 @@ use think_watch_common::limits::{BudgetCap, RateLimitRule};
 
 use crate::pii_redactor::{PiiRedactor, PiiStreamRestorer};
 use crate::providers::traits::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, GatewayError,
-    Usage,
+    ChatCompletionChunk, ChatCompletionResponse, ChatMessage, GatewayError, Usage,
 };
 use crate::proxy::{
     GatewayRequestIdentity, GatewayState, SelectionRecord, emit_gateway_log_with_extra,
@@ -126,9 +125,12 @@ pub(crate) struct ChatRequestSnapshot {
     /// the user authored (request.messages holds the redacted form
     /// after the upfront redaction pass).
     pub messages_for_audit: Vec<ChatMessage>,
-    /// Request post-redaction, kept for cache key derivation and
-    /// (for streaming) cache fill on natural completion.
-    pub request_for_cache: ChatCompletionRequest,
+    /// 这次请求的指纹:脱敏之后、发给上游的那份字节。缓存按它定位,
+    /// 流式那条路正常收尾时也用它回填。
+    ///
+    /// **是字节不是结构** —— 旧的写法带着整个请求,而算 key 时只挑了
+    /// 其中三个字段,漏掉的(比如 tools)就成了撞槽的来源
+    pub cache_fingerprint: Vec<u8>,
     pub request_started_at: std::time::Instant,
 }
 
@@ -425,7 +427,7 @@ impl Surface for ChatCompletionSurface {
         if let Some(response) = response {
             deps.state
                 .cache
-                .set(&deps.request.request_for_cache, response, None)
+                .set(&deps.request.cache_fingerprint, response, None)
                 .await;
         }
     }

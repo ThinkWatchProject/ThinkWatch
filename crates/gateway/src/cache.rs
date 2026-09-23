@@ -1,4 +1,4 @@
-use crate::providers::traits::{ChatCompletionRequest, ChatCompletionResponse, ChatMessage};
+use crate::providers::traits::{ChatCompletionRequest, ChatCompletionResponse};
 use fred::clients::Client;
 use fred::interfaces::KeysInterface;
 use std::sync::Arc;
@@ -76,52 +76,55 @@ impl ResponseCache {
         }
     }
 
-    /// Compute the cache key for a request. Purely semantic — no user
-    /// scoping. Identical model + messages + params = same key.
-    pub fn cache_key(request: &ChatCompletionRequest) -> String {
-        Self::cache_key_for(&request.model, &request.messages, request.max_tokens)
-    }
-
-    /// Compute the cache key from the model + messages + max_tokens
-    /// triple directly. Most callers should use [`cache_key`]; this
-    /// variant exists for tests and any future caller that constructs
-    /// the key without holding the full request struct.
-    pub fn cache_key_for(model: &str, messages: &[ChatMessage], max_tokens: Option<u32>) -> String {
-        let messages_json = serde_json::to_string(messages).unwrap_or_default();
-
-        let mut input = Vec::with_capacity(256);
-        input.extend_from_slice(model.as_bytes());
-        input.push(b':');
-        input.extend_from_slice(messages_json.as_bytes());
-        if let Some(mt) = max_tokens {
-            input.extend_from_slice(b":mt=");
-            input.extend_from_slice(mt.to_string().as_bytes());
-        }
-
+    /// Compute the cache key for a request.
+    ///
+    /// **The fingerprint is the upstream request itself.** Earlier this
+    /// hashed a hand-picked triple — model, messages, max_tokens — which
+    /// silently ignored everything else that changes the answer. Two
+    /// requests with the same messages and different `tools` produced the
+    /// same key, and the second one got the first one's tool call. That
+    /// was survivable only because tools never reached an upstream at
+    /// all; fixing the conversion layer would have turned it into served
+    /// wrong answers.
+    ///
+    /// Encoding the intermediate representation cannot miss a field by
+    /// construction: whatever the upstream is going to be asked is what
+    /// gets hashed.
+    ///
+    /// **Computed after redaction, on purpose.** What is stored carries
+    /// placeholders (`{{EMAIL_1}}`), and restoration happens on the way
+    /// out using *this* caller's context. So two callers asking the same
+    /// question with their own e-mail addresses share one slot and each
+    /// gets their own value back — that is the point of a semantic
+    /// cache, not a leak.
+    pub fn cache_key_for(fingerprint: &[u8]) -> String {
         // xxh3_128 is ~10x faster than SHA-256 for non-cryptographic hashing
-        let hash = xxh3_128(&input);
+        let hash = xxh3_128(fingerprint);
         format!("llm_cache:{hash:032x}")
     }
 
-    /// Look up a cached response by semantic key (model + messages + params).
-    pub async fn get(&self, request: &ChatCompletionRequest) -> Option<ChatCompletionResponse> {
-        if !Self::is_cacheable(request) {
-            return None;
-        }
-        self.get_for(&request.model, &request.messages, request.max_tokens)
-            .await
+    /// The bytes that identify a request.
+    ///
+    /// The whole request, not a chosen subset — `extra` is flattened, so
+    /// `tools`, `tool_choice` and every other field the caller sent are
+    /// in here by construction. That is the point: the previous key was
+    /// three hand-picked fields, and a field nobody remembered to add
+    /// was a silent collision.
+    pub fn fingerprint(request: &ChatCompletionRequest) -> Vec<u8> {
+        let mut r = request.clone();
+        // Streaming changes the framing, not the answer, so a streaming
+        // request should hit what a buffered one stored.
+        r.stream = None;
+        serde_json::to_vec(&r).unwrap_or_default()
     }
 
-    /// Like [`get`] but takes an explicit `messages` slice. Bypasses
-    /// the `is_cacheable` temperature check — caller is responsible
-    /// for asserting cacheability if it matters.
-    pub async fn get_for(
-        &self,
-        model: &str,
-        messages: &[ChatMessage],
-        max_tokens: Option<u32>,
-    ) -> Option<ChatCompletionResponse> {
-        let key = Self::cache_key_for(model, messages, max_tokens);
+    /// Look up a cached response.
+    ///
+    /// `fingerprint` comes from [`Cache::fingerprint`], computed before
+    /// redaction — see [`Cache::cache_key_for`] for why that ordering is
+    /// not optional.
+    pub async fn get(&self, fingerprint: &[u8]) -> Option<ChatCompletionResponse> {
+        let key = Self::cache_key_for(fingerprint);
         let cached: Option<String> = self.redis.get(&key).await.ok().flatten();
 
         cached.and_then(|json| {
@@ -167,37 +170,14 @@ return total
     }
 
     /// Store a response in the cache. `scope` MUST identify the
-    /// requesting tenant — see `get` for the contract.
+    /// Store a response under the request's fingerprint.
     pub async fn set(
         &self,
-        request: &ChatCompletionRequest,
+        fingerprint: &[u8],
         response: &ChatCompletionResponse,
         ttl: Option<u64>,
     ) {
-        if !Self::is_cacheable(request) {
-            return;
-        }
-        self.set_for(
-            &request.model,
-            &request.messages,
-            request.max_tokens,
-            response,
-            ttl,
-        )
-        .await;
-    }
-
-    /// Like [`set`] but takes an explicit `messages` slice. Skips the
-    /// cacheability check; caller filters cacheable requests.
-    pub async fn set_for(
-        &self,
-        model: &str,
-        messages: &[ChatMessage],
-        max_tokens: Option<u32>,
-        response: &ChatCompletionResponse,
-        ttl: Option<u64>,
-    ) {
-        let key = Self::cache_key_for(model, messages, max_tokens);
+        let key = Self::cache_key_for(fingerprint);
         let ttl_secs = match ttl {
             Some(v) => v,
             None => self.default_ttl().await,
@@ -228,75 +208,103 @@ mod tests {
     use super::*;
     use crate::providers::traits::ChatMessage;
 
-    fn req(model: &str, prompt: &str) -> ChatCompletionRequest {
+    fn req(model: &str, text: &str) -> ChatCompletionRequest {
         ChatCompletionRequest {
-            model: model.to_string(),
+            model: model.into(),
             messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: serde_json::Value::String(prompt.to_string()),
+                role: "user".into(),
+                content: serde_json::Value::String(text.into()),
                 ..Default::default()
             }],
-            temperature: Some(0.0),
-            max_tokens: Some(1024),
+            temperature: None,
+            max_tokens: None,
             stream: None,
             extra: serde_json::json!({}),
         }
     }
 
-    #[test]
-    fn cache_key_is_deterministic() {
-        let r = req("gpt-4o", "What is 2+2?");
-        let k1 = ResponseCache::cache_key(&r);
-        let k2 = ResponseCache::cache_key(&r);
-        assert_eq!(k1, k2);
+    fn key(r: &ChatCompletionRequest) -> String {
+        ResponseCache::cache_key_for(&ResponseCache::fingerprint(r))
     }
 
     #[test]
-    fn same_prompt_same_key_regardless_of_user() {
-        // Semantic cache: identical requests share the same entry
+    fn the_same_request_always_produces_the_same_key() {
         let r = req("gpt-4o", "What is 2+2?");
-        let k = ResponseCache::cache_key(&r);
-        // Same request always produces the same key
-        assert_eq!(k, ResponseCache::cache_key(&r));
+        assert_eq!(key(&r), key(&r));
     }
 
     #[test]
     fn different_models_produce_different_keys() {
-        let k1 = ResponseCache::cache_key(&req("gpt-4o", "ping"));
-        let k2 = ResponseCache::cache_key(&req("gpt-5", "ping"));
-        assert_ne!(k1, k2);
+        assert_ne!(
+            key(&req("gpt-4o", "ping")),
+            key(&req("gpt-4o-mini", "ping"))
+        );
     }
 
     #[test]
-    fn different_messages_produce_different_keys() {
-        let k1 = ResponseCache::cache_key(&req("gpt-4o", "hello"));
-        let k2 = ResponseCache::cache_key(&req("gpt-4o", "world"));
-        assert_ne!(k1, k2);
+    fn different_prompts_produce_different_keys() {
+        assert_ne!(key(&req("gpt-4o", "a")), key(&req("gpt-4o", "b")));
     }
 
     #[test]
-    fn cache_key_has_expected_prefix() {
-        let key = ResponseCache::cache_key(&req("gpt-4o", "ping"));
-        assert!(key.starts_with("llm_cache:"), "got {key}");
+    fn different_tools_produce_different_keys() {
+        // 这条是这次改写的理由。旧 key 只覆盖 model + messages +
+        // max_tokens，于是「同样的问题，不同的工具」撞进同一个槽，
+        // 第二个请求拿到第一个的工具调用。
+        //
+        // 以前碰不上，是因为工具根本到不了上游（见 core 的 issue #50）——
+        // 把转换修好，它就会变成实实在在的错答案。
+        let tools = |name: &str| {
+            serde_json::json!({ "tools": [{
+                "type": "function",
+                "function": { "name": name, "parameters": { "type": "object" } }
+            }]})
+        };
+        let mut a = req("gpt-4o", "do it");
+        a.extra = tools("submit");
+        let mut b = req("gpt-4o", "do it");
+        b.extra = tools("cancel");
+        assert_ne!(key(&a), key(&b), "工具不同，答案就不同");
     }
 
     #[test]
-    fn streaming_requests_are_cacheable() {
-        let mut r = req("gpt-4o", "ping");
-        r.stream = Some(true);
-        assert!(ResponseCache::is_cacheable(&r));
+    fn any_field_the_caller_sent_is_in_the_key() {
+        // 旧 key 是手挑的三个字段，漏掉的都是撞槽的来源。
+        // 现在整份请求都进指纹，漏不掉
+        let base = req("gpt-4o", "x");
+        for extra in [
+            serde_json::json!({ "top_p": 0.5 }),
+            serde_json::json!({ "stop": ["END"] }),
+            serde_json::json!({ "seed": 7 }),
+            serde_json::json!({ "response_format": { "type": "json_object" } }),
+        ] {
+            let mut v = base.clone();
+            v.extra = extra.clone();
+            assert_ne!(key(&base), key(&v), "{extra} 没进 key");
+        }
     }
 
     #[test]
-    fn high_temperature_requests_are_not_cacheable() {
-        let mut r = req("gpt-4o", "ping");
+    fn streaming_does_not_change_the_key() {
+        // 流式改的是分帧，不是答案。流式请求该命中非流式存下的那份
+        let mut a = req("gpt-4o", "x");
+        a.stream = Some(true);
+        assert_eq!(key(&a), key(&req("gpt-4o", "x")));
+    }
+
+    #[test]
+    fn a_nonzero_temperature_is_not_cacheable() {
+        let mut r = req("gpt-4o", "x");
         r.temperature = Some(0.7);
         assert!(!ResponseCache::is_cacheable(&r));
+        r.temperature = Some(0.0);
+        assert!(ResponseCache::is_cacheable(&r));
+        r.temperature = None;
+        assert!(ResponseCache::is_cacheable(&r));
     }
 
     #[test]
-    fn temperature_zero_is_cacheable() {
-        let r = req("gpt-4o", "ping");
-        assert!(ResponseCache::is_cacheable(&r));
+    fn keys_carry_their_prefix() {
+        assert!(key(&req("gpt-4o", "x")).starts_with("llm_cache:"));
     }
 }

@@ -184,6 +184,8 @@ pub async fn proxy_responses(
         )))
     })?;
 
+    let cache_fingerprint = crate::cache::ResponseCache::fingerprint(&request);
+
     if is_stream {
         let sel_ctx = build_selection_ctx(&state, &mapped_model, identity.user_id.as_deref()).await;
         let (entry, sel_record) = select_route_for_stream(routes, &sel_ctx)
@@ -217,7 +219,7 @@ pub async fn proxy_responses(
                 session_id: session_id.clone(),
                 mapped_model: mapped_model.clone(),
                 messages_for_audit: messages_for_audit.clone(),
-                request_for_cache: request.clone(),
+                cache_fingerprint: cache_fingerprint.clone(),
                 request_started_at,
             },
             preflight: crate::lifecycle::ChatPreflightLists {
@@ -311,7 +313,7 @@ pub async fn proxy_responses(
                 session_id: session_id.clone(),
                 mapped_model: mapped_model.clone(),
                 messages_for_audit: messages_for_audit.clone(),
-                request_for_cache: request.clone(),
+                cache_fingerprint: cache_fingerprint.clone(),
                 request_started_at,
             },
             preflight: crate::lifecycle::ChatPreflightLists {

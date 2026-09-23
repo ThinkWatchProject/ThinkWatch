@@ -144,6 +144,10 @@ pub async fn proxy_chat_completion(
     let (redacted_messages, redaction_ctx) = pii_redactor.redact_messages(&request.messages);
     request.messages = redacted_messages;
 
+    // 指纹在脱敏之后算：缓存存的是带占位符的那一版，取出来时按各自的
+    // 上下文还原，所以两个调用方问同样的问题能共用一个槽
+    let cache_fingerprint = crate::cache::ResponseCache::fingerprint(&request);
+
     // 7. Check token quota — use user/api_key as quota key when available.
     //
     // Key is `{id}:{client-requested model}`, NOT the upstream model the
@@ -191,7 +195,7 @@ pub async fn proxy_chat_completion(
     //    real call across an unbounded quota window — i.e. quota
     //    enforcement becomes optional. Debit the cached
     //    `usage.total_tokens` so monthly caps still bind.
-    if let Some(mut cached) = state.cache.get(&request).await {
+    if let Some(mut cached) = state.cache.get(&cache_fingerprint).await {
         metrics::counter!("gateway_cache_total", "result" => "hit").increment(1);
         tracing::debug!(model = %request.model, stream = is_stream, "Cache HIT");
 
@@ -352,7 +356,7 @@ pub async fn proxy_chat_completion(
                 session_id: session_id.clone(),
                 mapped_model: mapped_model.clone(),
                 messages_for_audit: messages_for_audit.clone(),
-                request_for_cache: request.clone(),
+                cache_fingerprint: cache_fingerprint.clone(),
                 request_started_at,
             },
             preflight: crate::lifecycle::ChatPreflightLists {
@@ -454,7 +458,7 @@ pub async fn proxy_chat_completion(
                 session_id: session_id.clone(),
                 mapped_model: mapped_model.clone(),
                 messages_for_audit: messages_for_audit.clone(),
-                request_for_cache: request.clone(),
+                cache_fingerprint: cache_fingerprint.clone(),
                 request_started_at,
             },
             preflight: crate::lifecycle::ChatPreflightLists {
