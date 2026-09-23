@@ -176,6 +176,48 @@ impl ContentFilter {
     /// Check all user messages against the rules.
     /// Returns the highest-priority match found, if any.
     /// Priority: Block > Warn > Log.
+    /// 在中间表示上查。
+    ///
+    /// 和 [`check`] 判的是同一件事，区别只在**文本从哪来**:那边要从
+    /// 一个 `serde_json::Value` 里猜哪个字段是文本，这边结构是确定的。
+    /// 猜的那份漏掉过工具结果里的嵌套内容 —— 而注入正是可以藏在那儿的。
+    pub fn check_request(&self, request: &tw_dialect::ir::Request) -> Option<ContentFilterMatch> {
+        use tw_dialect::ir::{Part, Role};
+
+        fn texts(parts: &[Part], out: &mut Vec<String>) {
+            for p in parts {
+                match p {
+                    Part::Text(t) => out.push(t.clone()),
+                    // 工具结果里的内容同样是模型要读的东西
+                    Part::ToolResult(r) => texts(&r.content, out),
+                    _ => {}
+                }
+            }
+        }
+
+        let mut best: Option<ContentFilterMatch> = None;
+        for msg in &request.messages {
+            if msg.role != Role::User {
+                continue;
+            }
+            let mut collected = Vec::new();
+            texts(&msg.parts, &mut collected);
+            let text = collected.join("\n");
+            if text.is_empty() {
+                continue;
+            }
+            if let Some(m) = self.check_text(&text)
+                && match &best {
+                    None => true,
+                    Some(b) => action_priority(m.action) > action_priority(b.action),
+                }
+            {
+                best = Some(m);
+            }
+        }
+        best
+    }
+
     pub fn check(&self, messages: &[ChatMessage]) -> Option<ContentFilterMatch> {
         let mut best: Option<ContentFilterMatch> = None;
 

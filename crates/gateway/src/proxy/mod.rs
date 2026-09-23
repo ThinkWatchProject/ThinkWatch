@@ -31,6 +31,7 @@ mod log_ctx;
 mod pipeline;
 mod protocol_relearn;
 mod routing;
+pub mod transport;
 
 // pub(crate) re-exports — `lifecycle` module reaches in for these.
 pub(crate) use accounting::{post_flight_account, stream_usage_or_estimate};

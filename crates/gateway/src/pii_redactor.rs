@@ -227,6 +227,41 @@ impl PiiRedactor {
         (redacted, RedactionContext { replacements })
     }
 
+    /// 在中间表示上脱敏。结构是确定的，不用猜。
+    ///
+    /// 和 [`Self::redact_messages`] 判的是同一件事，区别只在**文本从哪来**：
+    /// 那边要在一个 `serde_json::Value` 上猜哪个字段是文本，猜漏了 Anthropic
+    /// 的 `tool_result` 块里嵌套的内容、数组形式的 `system`、Responses 里字段
+    /// 名不叫 `text` 的文本部件。这边走 [`tw_dialect::ir`]，结构由类型保证，
+    /// 不存在「猜错字段名」这类漏洞。
+    ///
+    /// 只脱用户侧的内容，和 `redact_messages` 一致：只处理
+    /// `Message.role == Role::User`，assistant 消息原样放过。
+    ///
+    /// `Request.system` 不脱——系统提示是运营方写进配置的，不是调用方输入的；
+    /// 脱了系统提示里的邮箱、IP 之类，会把运营方写的指令改样，且这些值本身
+    /// 也不是需要保护的用户 PII。
+    pub fn redact_request(&self, request: &mut tw_dialect::ir::Request) -> RedactionContext {
+        use tw_dialect::ir::Role;
+
+        let mut counters: HashMap<String, u32> = HashMap::new();
+        let mut replacements: HashMap<String, String> = HashMap::new();
+
+        for msg in &mut request.messages {
+            if msg.role != Role::User {
+                continue;
+            }
+            self.redact_parts(
+                &mut msg.parts,
+                &mut counters,
+                &mut replacements,
+                "user message",
+            );
+        }
+
+        RedactionContext { replacements }
+    }
+
     /// Apply the redaction patterns to a single text blob. Shared
     /// between the single-string and multimodal-array branches of
     /// `redact_messages` so both shapes get identical treatment.
@@ -286,6 +321,44 @@ impl PiiRedactor {
         }
 
         redacted_content
+    }
+
+    /// [`Self::redact_request`] 的递归部分：就地脱敏一组 IR 部件。
+    ///
+    /// `Part::ToolResult` 要递归进它自己的 `content`——工具结果里常带着
+    /// 模型帮用户查出来的原始数据（读邮件、查订单之类），旧的
+    /// `serde_json::Value` 实现没有「工具结果」这个概念，只会漏过去。
+    ///
+    /// `Image` / `File` / `Thinking` / `ToolCall` 不动：
+    /// 图片和文件是二进制媒体，不是可脱敏的文本；`Thinking` 是模型自己的
+    /// 推理过程，不是调用方输入；`ToolCall.input` 是模型生成的调用参数，
+    /// 改动它会破坏工具调用本身（而且它不是 `redact_messages` 原本处理的
+    /// 范围，保持行为一致）。
+    fn redact_parts(
+        &self,
+        parts: &mut [tw_dialect::ir::Part],
+        counters: &mut HashMap<String, u32>,
+        replacements: &mut HashMap<String, String>,
+        log_origin: &str,
+    ) {
+        use tw_dialect::ir::Part;
+
+        for part in parts {
+            match part {
+                Part::Text(s) => {
+                    *s = self.redact_text(s, counters, replacements, log_origin);
+                }
+                Part::ToolResult(r) => {
+                    self.redact_parts(
+                        &mut r.content,
+                        counters,
+                        replacements,
+                        "user message (tool result)",
+                    );
+                }
+                Part::Image(_) | Part::File { .. } | Part::Thinking(_) | Part::ToolCall(_) => {}
+            }
+        }
     }
 
     /// Restore placeholders in the response content back to original PII values.
@@ -914,5 +987,155 @@ mod tests {
         let content = redacted[0].content.as_str().unwrap();
         assert!(content.contains("EMAIL"), "body got: {content}");
         assert!(!content.contains("alice@example.com"));
+    }
+
+    // ── redact_request（IR 上的脱敏） ──────────────────────────────────
+
+    use tw_dialect::ir::{Message, Part, Request, Role, ToolResult};
+
+    fn ir_user_message(parts: Vec<Part>) -> Message {
+        Message {
+            role: Role::User,
+            parts,
+        }
+    }
+
+    fn ir_assistant_message(parts: Vec<Part>) -> Message {
+        Message {
+            role: Role::Assistant,
+            parts,
+        }
+    }
+
+    fn ir_request(messages: Vec<Message>) -> Request {
+        Request {
+            model: "test".into(),
+            messages,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn redact_request_redacts_a_plain_text_part_in_a_user_message() {
+        let redactor = PiiRedactor::new();
+        let mut request = ir_request(vec![ir_user_message(vec![Part::Text(
+            "Email me at alice@example.com".into(),
+        )])]);
+
+        let ctx = redactor.redact_request(&mut request);
+
+        let Part::Text(text) = &request.messages[0].parts[0] else {
+            panic!("expected a text part");
+        };
+        assert!(text.contains("EMAIL"), "got: {text}");
+        assert!(!text.contains("alice@example.com"));
+        let ph = find_placeholder(&ctx, "alice@example.com");
+        assert!(ph.starts_with("{{EMAIL_"));
+    }
+
+    /// 钉住旧实现漏掉的洞：`redact_messages` 在 `serde_json::Value` 上猜
+    /// 结构，没有「工具结果」这个概念，工具结果里嵌套的内容会原样放过。
+    /// 工具结果里恰恰常带用户数据——模型调用一个读邮件、查订单之类的工具，
+    /// 结果里原样带着 PII，又被喂回同一次对话。
+    #[test]
+    fn redact_request_redacts_pii_nested_inside_a_tool_result() {
+        let redactor = PiiRedactor::new();
+        let mut request = ir_request(vec![ir_user_message(vec![Part::ToolResult(ToolResult {
+            id: "call_1".into(),
+            content: vec![Part::Text(
+                "Found the order, shipped to alice@example.com".into(),
+            )],
+            is_error: false,
+        })])]);
+
+        let ctx = redactor.redact_request(&mut request);
+
+        let Part::ToolResult(result) = &request.messages[0].parts[0] else {
+            panic!("expected a tool result part");
+        };
+        let Part::Text(text) = &result.content[0] else {
+            panic!("expected a text part inside the tool result");
+        };
+        assert!(text.contains("EMAIL"), "got: {text}");
+        assert!(!text.contains("alice@example.com"));
+        let ph = find_placeholder(&ctx, "alice@example.com");
+        assert!(ph.starts_with("{{EMAIL_"));
+    }
+
+    #[test]
+    fn redact_request_does_not_redact_assistant_messages() {
+        let redactor = PiiRedactor::new();
+        let mut request = ir_request(vec![ir_assistant_message(vec![Part::Text(
+            "Sure, contact alice@example.com".into(),
+        )])]);
+
+        let ctx = redactor.redact_request(&mut request);
+
+        let Part::Text(text) = &request.messages[0].parts[0] else {
+            panic!("expected a text part");
+        };
+        assert_eq!(text, "Sure, contact alice@example.com");
+        assert!(ctx.replacements.is_empty());
+    }
+
+    /// 系统提示是运营方写进配置的，不是调用方输入的：脱了会破坏指令本身，
+    /// 而且提示里出现的邮箱、IP 之类通常是有意的配置，不是要保护的用户 PII。
+    #[test]
+    fn redact_request_does_not_redact_the_system_prompt() {
+        let redactor = PiiRedactor::new();
+        let mut request = Request {
+            model: "test".into(),
+            system: vec!["Escalate to ops@example.com when unsure.".into()],
+            messages: vec![ir_user_message(vec![Part::Text("hi".into())])],
+            ..Default::default()
+        };
+
+        redactor.redact_request(&mut request);
+
+        assert_eq!(
+            request.system[0],
+            "Escalate to ops@example.com when unsure."
+        );
+    }
+
+    /// 同一个值不管出现在普通文本部件里还是嵌套在工具结果里，都必须拿到
+    /// 同一个占位符——还原逻辑靠的就是这份映射，编号一旦分岔就还原不回去。
+    #[test]
+    fn a_value_repeated_across_a_tool_result_restores_everywhere() {
+        // 同一个值出现两次，编号各取各的（`{{EMAIL_1}}`、`{{EMAIL_2}}`）——
+        // 这和 `redact_messages` 共用同一个 `redact_text`，编号规则不是契约。
+        // **契约是还原**：两处都得原样回来，包括藏在工具结果里的那一处
+        let redactor = PiiRedactor::new();
+        let mut request = ir_request(vec![ir_user_message(vec![
+            Part::Text("Contact alice@example.com".into()),
+            Part::ToolResult(ToolResult {
+                id: "call_1".into(),
+                content: vec![Part::Text("Confirmed: alice@example.com".into())],
+                is_error: false,
+            }),
+        ])]);
+
+        let ctx = redactor.redact_request(&mut request);
+
+        let Part::Text(first) = &request.messages[0].parts[0] else {
+            panic!("expected a text part");
+        };
+        let Part::ToolResult(result) = &request.messages[0].parts[1] else {
+            panic!("expected a tool result part");
+        };
+        let Part::Text(second) = &result.content[0] else {
+            panic!("expected a text part inside the tool result");
+        };
+
+        assert!(!first.contains("alice@example.com"), "{first}");
+        assert!(!second.contains("alice@example.com"), "{second}");
+
+        let restore = |s: &str| {
+            ctx.replacements
+                .iter()
+                .fold(s.to_string(), |acc, (ph, orig)| acc.replace(ph, orig))
+        };
+        assert_eq!(restore(first), "Contact alice@example.com");
+        assert_eq!(restore(second), "Confirmed: alice@example.com");
     }
 }
