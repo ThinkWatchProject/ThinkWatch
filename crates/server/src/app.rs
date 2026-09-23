@@ -69,6 +69,9 @@ pub struct AppState {
     pub content_filter: Arc<arc_swap::ArcSwap<ContentFilter>>,
     /// Hot-swappable PII redactor.
     pub pii_redactor: Arc<arc_swap::ArcSwap<PiiRedactor>>,
+    /// Hot-swappable tool-call inspection.
+    pub tool_inspection:
+        Arc<arc_swap::ArcSwap<think_watch_gateway::tool_inspection::ToolInspection>>,
     /// In-memory registry of upstream MCP servers. Shared between the MCP
     /// gateway runtime and the console CRUD handlers so that adding/removing
     /// a server in the admin UI is reflected immediately, without restart.
@@ -145,6 +148,20 @@ pub async fn load_pii_redactor(dc: &DynamicConfig) -> PiiRedactor {
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
     PiiRedactor::from_config(&configs)
+}
+
+/// Build the tool-call inspection from `security.tool_inspection`. A
+/// missing or unreadable value means the default: observe, every built-in
+/// rule on.
+pub async fn load_tool_inspection(
+    dc: &DynamicConfig,
+) -> think_watch_gateway::tool_inspection::ToolInspection {
+    let cfg: think_watch_gateway::tool_inspection::ToolInspectionConfig = dc
+        .get("security.tool_inspection")
+        .await
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+    think_watch_gateway::tool_inspection::ToolInspection::from_config(&cfg)
 }
 
 /// Build the cross-crate at-rest `BlobRedactor` from the SAME
@@ -266,6 +283,7 @@ pub async fn create_gateway_app(_config: &AppConfig, state: AppState) -> anyhow:
             state.dynamic_config.clone(),
         )),
         pii_redactor: state.pii_redactor.clone(),
+        tool_inspection: state.tool_inspection.clone(),
         // Share AppState's cost tracker so the platform-pricing PATCH
         // handler's `invalidate_baseline()` call is observed by THIS
         // process's hot path (gateway request handling) — without the
@@ -986,6 +1004,15 @@ pub fn create_console_app(config: &AppConfig, state: AppState) -> anyhow::Result
         .route(
             "/api/admin/settings/pii-redactor/test",
             post(handlers::admin::test_pii_redactor),
+        )
+        // Tool-call inspection
+        .route(
+            "/api/admin/settings/tool-inspection/rules",
+            get(handlers::admin::list_tool_rules),
+        )
+        .route(
+            "/api/admin/settings/tool-inspection/test",
+            post(handlers::admin::test_tool_inspection),
         )
         // Log forwarders CRUD
         .route(

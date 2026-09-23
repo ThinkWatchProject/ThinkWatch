@@ -52,6 +52,11 @@ const DYNAMIC_ENUMS = {
     'revoke', 'write', 'read_own', 'read_team', 'read_all',
     'configure_oidc', 'edit_system',
   ],
+  // The built-in tool-call rules the server lists
+  // (`/api/admin/settings/tool-inspection/rules`, from thinkwatch-core's
+  // rules file). A rule core adds later falls back to the server's English.
+  'settings.toolInspection.rules.${_}.name': ['curl-pipe-sh', 'base64-decode-exec', 'exfil-env', 'exfil-credentials', 'exfil-credentials-reversed', 'ssh-key-read', 'write-startup-item', 'crontab-install', 'rm-rf-root', 'chmod-777'],
+  'settings.toolInspection.rules.${_}.why': ['curl-pipe-sh', 'base64-decode-exec', 'exfil-env', 'exfil-credentials', 'exfil-credentials-reversed', 'ssh-key-read', 'write-startup-item', 'crontab-install', 'rm-rf-root', 'chmod-777'],
   'roles.template_${_}': ['gateway_user', 'read_only', 'ops_admin', 'analytics_only'],
   'logs.preset.${_}': ['last1h', 'last6h', 'last24h', 'last3d', 'last7d', 'last30d'],
   // Column labels for the unified logs table — `getColumns` in

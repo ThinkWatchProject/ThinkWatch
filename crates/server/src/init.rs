@@ -90,9 +90,11 @@ pub async fn init_state(
 
     let initial_content_filter = app::load_content_filter(&dynamic_config).await;
     let initial_pii_redactor = app::load_pii_redactor(&dynamic_config).await;
+    let initial_tool_inspection = app::load_tool_inspection(&dynamic_config).await;
     let initial_blob_redactor = app::load_blob_redactor(&dynamic_config).await;
     let content_filter = Arc::new(arc_swap::ArcSwap::from_pointee(initial_content_filter));
     let pii_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(initial_pii_redactor));
+    let tool_inspection = Arc::new(arc_swap::ArcSwap::from_pointee(initial_tool_inspection));
     let blob_redactor = Arc::new(arc_swap::ArcSwap::from_pointee(initial_blob_redactor));
 
     let init_http_secs = dynamic_config.perf_http_client_secs().await as u64;
@@ -157,6 +159,7 @@ pub async fn init_state(
         clickhouse: ch_client,
         content_filter,
         pii_redactor,
+        tool_inspection,
         mcp_registry: think_watch_mcp_gateway::registry::Registry::new(),
         mcp_circuit_breakers: think_watch_mcp_gateway::circuit_breaker::McpCircuitBreakers::new(),
         mcp_pool: Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -236,6 +239,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
     let dc_clone = state.dynamic_config.clone();
     let cf_clone = state.content_filter.clone();
     let pii_clone = state.pii_redactor.clone();
+    let tools_clone = state.tool_inspection.clone();
     let blob_clone = state.blob_redactor.clone();
     let http_clone = state.http_client.clone();
     let pool_clone = state.mcp_pool.clone();
@@ -267,6 +271,9 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                                pii: &arc_swap::ArcSwap<
             think_watch_gateway::pii_redactor::PiiRedactor,
         >,
+                               tools: &arc_swap::ArcSwap<
+            think_watch_gateway::tool_inspection::ToolInspection,
+        >,
                                blob: &arc_swap::ArcSwap<think_watch_common::pii::BlobRedactor>,
                                http: &arc_swap::ArcSwap<reqwest::Client>,
                                pool: &arc_swap::ArcSwap<
@@ -280,6 +287,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
             cf.store(Arc::new(new_filter));
             let new_pii = app::load_pii_redactor(dc).await;
             pii.store(Arc::new(new_pii));
+            tools.store(Arc::new(app::load_tool_inspection(dc).await));
             // Same pattern set, parallel hot-swap — the at-rest
             // BlobRedactor used by both gateway and mcp-gateway
             // audit pipelines must stay in lockstep with the
@@ -325,6 +333,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                             &dc_clone,
                             &cf_clone,
                             &pii_clone,
+                            &tools_clone,
                             &blob_clone,
                             &http_clone,
                             &pool_clone,
@@ -338,6 +347,7 @@ pub async fn spawn_config_subscriber(state: &AppState) -> anyhow::Result<()> {
                         &dc_clone,
                         &cf_clone,
                         &pii_clone,
+                        &tools_clone,
                         &blob_clone,
                         &http_clone,
                         &pool_clone,

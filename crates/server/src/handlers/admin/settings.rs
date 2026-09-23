@@ -303,6 +303,10 @@ pub async fn update_settings(
         let pii = crate::app::load_pii_redactor(&state.dynamic_config).await;
         state.pii_redactor.store(std::sync::Arc::new(pii));
     }
+    if req.settings.contains_key("security.tool_inspection") {
+        let tools = crate::app::load_tool_inspection(&state.dynamic_config).await;
+        state.tool_inspection.store(std::sync::Arc::new(tools));
+    }
 
     // Apply ClickHouse TTL changes for any retention setting that was updated.
     // ClickHouse runs the cleanup asynchronously in its merge worker, so this
@@ -699,6 +703,15 @@ fn validate_setting(key: &str, value: &serde_json::Value) -> Result<(), AppError
                         "PII pattern {i}: missing 'name'"
                     )));
                 }
+            }
+        }
+
+        "security.tool_inspection" => {
+            let cfg: think_watch_gateway::tool_inspection::ToolInspectionConfig =
+                serde_json::from_value(value.clone())
+                    .map_err(|e| AppError::BadRequest(format!("{key}: {e}")))?;
+            if let Some(problem) = cfg.problem() {
+                return Err(AppError::BadRequest(format!("{key}: {problem}")));
             }
         }
 

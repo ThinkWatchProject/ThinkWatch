@@ -108,7 +108,14 @@ pub(super) fn launch_stream_pump(
     shaper: StreamShaper,
     client: Dialect,
 ) -> axum::response::Response {
-    let (response, tail) = build_chat_pump(open, shaper, client, deps.state.clone(), &deps.request);
+    let (response, tail) = build_chat_pump(
+        open,
+        shaper,
+        client,
+        deps.state.clone(),
+        &deps.request,
+        &deps.route.provider_name,
+    );
     tokio::spawn(async move {
         let invoked = tail.await;
         run_post_invoke::<ChatCompletionSurface>(invoked, &deps).await;

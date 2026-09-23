@@ -5,6 +5,13 @@
 //! success / streaming / error / cache-hit paths all carry the same
 //! payload semantics.
 //!
+//! Not shared with the desktop gateway, on purpose. That one hands
+//! bodies to a local store through a small bounded channel and keeps
+//! the first 256 KB of a response; this one is an audit trail — gated
+//! per field by dynamic config, PII-redacted on request, offloaded to
+//! object storage when oversize. The two answer different questions, and
+//! one abstraction over both would serve neither.
+//!
 //! Body capture status values come from the shared
 //! `think_watch_common::audit::BodyCaptureStatus` enum so the producer
 //! side (this file + mcp-gateway) and consumer side (handlers, flush
