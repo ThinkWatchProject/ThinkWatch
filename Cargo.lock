@@ -4675,8 +4675,8 @@ dependencies = [
 
 [[package]]
 name = "tw-crypto"
-version = "0.37.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.37.0#62b818634a660cbce419e26d45e3d8e9f792ccd9"
+version = "0.38.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.38.0#f4d406753e8a5d9f8c02b5ce49ca61658d12a37c"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -4688,8 +4688,8 @@ dependencies = [
 
 [[package]]
 name = "tw-dialect"
-version = "0.37.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.37.0#62b818634a660cbce419e26d45e3d8e9f792ccd9"
+version = "0.38.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.38.0#f4d406753e8a5d9f8c02b5ce49ca61658d12a37c"
 dependencies = [
  "serde",
  "serde_json",
@@ -4697,8 +4697,8 @@ dependencies = [
 
 [[package]]
 name = "tw-guard"
-version = "0.37.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.37.0#62b818634a660cbce419e26d45e3d8e9f792ccd9"
+version = "0.38.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.38.0#f4d406753e8a5d9f8c02b5ce49ca61658d12a37c"
 dependencies = [
  "base64 0.22.1",
  "regex",
@@ -4712,16 +4712,16 @@ dependencies = [
 
 [[package]]
 name = "tw-secret"
-version = "0.37.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.37.0#62b818634a660cbce419e26d45e3d8e9f792ccd9"
+version = "0.38.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.38.0#f4d406753e8a5d9f8c02b5ce49ca61658d12a37c"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "tw-types"
-version = "0.37.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.37.0#62b818634a660cbce419e26d45e3d8e9f792ccd9"
+version = "0.38.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.38.0#f4d406753e8a5d9f8c02b5ce49ca61658d12a37c"
 dependencies = [
  "serde",
  "serde_json",
@@ -4730,8 +4730,8 @@ dependencies = [
 
 [[package]]
 name = "tw-upstream"
-version = "0.37.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.37.0#62b818634a660cbce419e26d45e3d8e9f792ccd9"
+version = "0.38.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.38.0#f4d406753e8a5d9f8c02b5ce49ca61658d12a37c"
 dependencies = [
  "aws-credential-types",
  "aws-sigv4",
@@ -4744,15 +4744,10 @@ dependencies = [
 
 [[package]]
 name = "tw-wire"
-version = "0.37.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.37.0#62b818634a660cbce419e26d45e3d8e9f792ccd9"
+version = "0.38.0"
+source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.38.0#f4d406753e8a5d9f8c02b5ce49ca61658d12a37c"
 dependencies = [
- "bytes",
- "chrono",
- "http 1.4.0",
- "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
