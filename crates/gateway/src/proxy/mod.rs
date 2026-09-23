@@ -31,6 +31,7 @@ mod log_ctx;
 mod pipeline;
 mod protocol_relearn;
 mod routing;
+pub mod shaper;
 pub mod transport;
 
 // pub(crate) re-exports — `lifecycle` module reaches in for these.

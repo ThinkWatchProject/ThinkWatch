@@ -31,6 +31,81 @@ pub struct RedactionContext {
     pub replacements: HashMap<String, String>,
 }
 
+/// 在 JSON 里装 base64 的键。替换不进这些值 —— 一段数字恰好出现在
+/// 图片编码里的概率很小，但一旦出现，改掉的是图片，不是 PII。
+const BASE64_CARRIERS: &[&str] = &["data", "bytes"];
+
+impl RedactionContext {
+    /// 把找到的 PII 替换套到一份**原始**请求上。
+    ///
+    /// 直通的请求没有经过中间表示 —— 同方言时它原样发出去，才保得住
+    /// `cache_control` 这些中间表示不认识的东西。可 PII 是在中间表示上
+    /// 找的（那边结构确定），所以要把「值 → 占位符」回套到原始 JSON 上。
+    ///
+    /// **在解析后的 `Value` 上做，不在字节上做**:客户端可能把字符
+    /// 转义成 `\u0040`，字节里就找不到原值了。
+    ///
+    /// 长的原值先替，免得 `a@x.com` 先把 `aa@x.com` 里的那一截吃掉。
+    ///
+    /// 同一个值若也出现在系统提示里，那里也会被替换 —— 只在它同时是
+    /// 用户写下的 PII 时才会发生。
+    pub fn apply_to(&self, value: &mut serde_json::Value) {
+        if self.replacements.is_empty() {
+            return;
+        }
+        let mut pairs: Vec<(&str, &str)> = self
+            .replacements
+            .iter()
+            .map(|(ph, orig)| (orig.as_str(), ph.as_str()))
+            .collect();
+        pairs.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.0.cmp(b.0)));
+        walk_strings(value, &mut |s| {
+            for (orig, ph) in &pairs {
+                if s.contains(orig) {
+                    *s = s.replace(orig, ph);
+                }
+            }
+        });
+    }
+
+    /// 在一整份响应的字节上把占位符换回原值。
+    ///
+    /// 整包响应里占位符是完整的，所以可以直接在字节上换。原值要按 JSON
+    /// 字符串的规则转义 —— 一个带引号的原值直接塞回去会把 JSON 弄坏。
+    /// 流式不能这么做：占位符会被切在两帧里，而两帧之间隔着帧结构，
+    /// 在字节流上不连续（见 [`PiiStreamRestorer`]）。
+    pub fn restore_bytes(&self, body: &[u8]) -> Vec<u8> {
+        if self.replacements.is_empty() {
+            return body.to_vec();
+        }
+        let mut text = String::from_utf8_lossy(body).into_owned();
+        for (ph, orig) in &self.replacements {
+            if text.contains(ph.as_str()) {
+                let escaped = serde_json::to_string(orig).unwrap_or_default();
+                // 去掉 to_string 加的那对引号，留下转义好的内容
+                let inner = &escaped[1..escaped.len().saturating_sub(1)];
+                text = text.replace(ph.as_str(), inner);
+            }
+        }
+        text.into_bytes()
+    }
+}
+
+fn walk_strings(v: &mut serde_json::Value, f: &mut impl FnMut(&mut String)) {
+    match v {
+        serde_json::Value::String(s) => f(s),
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|i| walk_strings(i, f)),
+        serde_json::Value::Object(map) => {
+            for (k, child) in map.iter_mut() {
+                if !BASE64_CARRIERS.contains(&k.as_str()) {
+                    walk_strings(child, f);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 impl Default for PiiRedactor {
     fn default() -> Self {
         Self::new()
@@ -301,13 +376,27 @@ impl PiiRedactor {
         let mut redacted_content = content_str.to_string();
         for (start, end, pattern_idx) in filtered {
             let pattern = &self.patterns[pattern_idx];
-            let matched_value = &redacted_content[start..end];
-            let counter = counters
-                .entry(pattern.placeholder_prefix.clone())
-                .or_insert(0);
-            *counter += 1;
-            let placeholder = format!("{{{{{}_{}}}}}", pattern.placeholder_prefix, counter);
-            replacements.insert(placeholder.clone(), matched_value.to_string());
+            let matched_value = redacted_content[start..end].to_string();
+            // 同一个值只给一个占位符。两个理由:模型看到 `{{EMAIL_1}}` 和
+            // `{{EMAIL_2}}` 会当成两个人;而且直通请求要把「值 → 占位符」
+            // 套到原始 JSON 上,那必须是个函数,一个值对两个占位符就无从套
+            let prefix = format!("{{{{{}_", pattern.placeholder_prefix);
+            let existing = replacements
+                .iter()
+                .find(|(ph, orig)| ph.starts_with(&prefix) && **orig == matched_value)
+                .map(|(ph, _)| ph.clone());
+            let placeholder = match existing {
+                Some(ph) => ph,
+                None => {
+                    let counter = counters
+                        .entry(pattern.placeholder_prefix.clone())
+                        .or_insert(0);
+                    *counter += 1;
+                    let ph = format!("{{{{{}_{}}}}}", pattern.placeholder_prefix, counter);
+                    replacements.insert(ph.clone(), matched_value);
+                    ph
+                }
+            };
             redacted_content.replace_range(start..end, &placeholder);
         }
 
@@ -1102,9 +1191,8 @@ mod tests {
     /// 同一个占位符——还原逻辑靠的就是这份映射，编号一旦分岔就还原不回去。
     #[test]
     fn a_value_repeated_across_a_tool_result_restores_everywhere() {
-        // 同一个值出现两次，编号各取各的（`{{EMAIL_1}}`、`{{EMAIL_2}}`）——
-        // 这和 `redact_messages` 共用同一个 `redact_text`，编号规则不是契约。
-        // **契约是还原**：两处都得原样回来，包括藏在工具结果里的那一处
+        // 同一个值出现两次拿同一个占位符，而且两处都得原样还原 ——
+        // 包括藏在工具结果里的那一处
         let redactor = PiiRedactor::new();
         let mut request = ir_request(vec![ir_user_message(vec![
             Part::Text("Contact alice@example.com".into()),
@@ -1129,6 +1217,11 @@ mod tests {
 
         assert!(!first.contains("alice@example.com"), "{first}");
         assert!(!second.contains("alice@example.com"), "{second}");
+        assert_eq!(
+            first.strip_prefix("Contact "),
+            second.strip_prefix("Confirmed: "),
+            "同一个值该是同一个占位符"
+        );
 
         let restore = |s: &str| {
             ctx.replacements
@@ -1137,5 +1230,84 @@ mod tests {
         };
         assert_eq!(restore(first), "Contact alice@example.com");
         assert_eq!(restore(second), "Confirmed: alice@example.com");
+    }
+    #[test]
+    fn the_same_value_gets_the_same_placeholder() {
+        // 模型看到两个不同的占位符会当成两个人；直通请求也要求
+        // 「值 → 占位符」是个函数
+        let redactor = PiiRedactor::new();
+        let mut request = ir_request(vec![ir_user_message(vec![Part::Text(
+            "to a@example.com, cc a@example.com, bcc b@example.com".into(),
+        )])]);
+        let ctx = redactor.redact_request(&mut request);
+        assert_eq!(ctx.replacements.len(), 2, "{:?}", ctx.replacements);
+    }
+
+    #[test]
+    fn applying_to_a_raw_request_reaches_text_the_client_escaped() {
+        // 客户端可能发 `\u0040`，字节里就没有 `@` 了。在解析后的 Value
+        // 上做，看到的是解开的字符串
+        let redactor = PiiRedactor::new();
+        let mut ir = ir_request(vec![ir_user_message(vec![Part::Text(
+            "mail a@example.com".into(),
+        )])]);
+        let ctx = redactor.redact_request(&mut ir);
+
+        let raw = r#"{"messages":[{"role":"user","content":"mail a\u0040example.com"}]}"#;
+        let mut v: serde_json::Value = serde_json::from_str(raw).unwrap();
+        ctx.apply_to(&mut v);
+        let text = v["messages"][0]["content"].as_str().unwrap();
+        assert!(!text.contains("a@example.com"), "{text}");
+        assert!(text.starts_with("mail {{EMAIL_"), "{text}");
+    }
+
+    #[test]
+    fn applying_to_a_raw_request_leaves_base64_alone() {
+        let ctx = RedactionContext {
+            replacements: [("{{PHONE_1}}".to_string(), "13800138000".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let mut v = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "call 13800138000"},
+                {"type": "image", "source": {"type": "base64", "data": "AB13800138000CD"}}
+            ]
+        });
+        ctx.apply_to(&mut v);
+        assert_eq!(v["content"][0]["text"], "call {{PHONE_1}}");
+        assert_eq!(
+            v["content"][1]["source"]["data"], "AB13800138000CD",
+            "改掉的会是图片，不是 PII"
+        );
+    }
+
+    #[test]
+    fn the_longer_value_is_replaced_first() {
+        let ctx = RedactionContext {
+            replacements: [
+                ("{{EMAIL_1}}".to_string(), "a@x.com".to_string()),
+                ("{{EMAIL_2}}".to_string(), "aa@x.com".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let mut v = serde_json::json!({"text": "aa@x.com and a@x.com"});
+        ctx.apply_to(&mut v);
+        assert_eq!(v["text"], "{{EMAIL_2}} and {{EMAIL_1}}");
+    }
+
+    #[test]
+    fn restoring_bytes_escapes_the_original_so_the_json_survives() {
+        // 原值带引号时，原样塞回去会把 JSON 弄坏
+        let ctx = RedactionContext {
+            replacements: [("{{NAME_1}}".to_string(), r#"O"Brien"#.to_string())]
+                .into_iter()
+                .collect(),
+        };
+        let body = br#"{"content":[{"type":"text","text":"Hi {{NAME_1}}"}]}"#;
+        let out = ctx.restore_bytes(body);
+        let v: serde_json::Value = serde_json::from_slice(&out).expect("still valid JSON");
+        assert_eq!(v["content"][0]["text"], r#"Hi O"Brien"#);
     }
 }
