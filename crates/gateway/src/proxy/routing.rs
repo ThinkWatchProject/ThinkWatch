@@ -378,7 +378,7 @@ pub(super) async fn select_route_with_failover<'a>(
                 );
                 metrics::counter!(
                     "gateway_provider_fallback_total",
-                    "from" => crate::metrics_labels::normalize_provider_label(&entry.provider_name),
+                    "from" => tw_resil::metrics_labels::normalize_provider_label(&entry.provider_name),
                 )
                 .increment(1);
                 // Record the failed attempt in health so the

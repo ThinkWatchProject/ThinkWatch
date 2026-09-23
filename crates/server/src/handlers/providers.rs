@@ -15,14 +15,14 @@ use crate::middleware::auth_guard::AuthUser;
 //
 // Every header `value` and the `aws_secret_access_key` field are wrapped as
 // `{"$enc": "<hex-envelope>"}` before INSERT/UPDATE. The hex payload is the
-// AES-256-GCM versioned envelope produced by `think_watch_common::crypto`
+// AES-256-GCM versioned envelope produced by `tw_crypto::crypto`
 // (same envelope MCP OAuth client_secrets use). Hex (not base64) keeps us
 // dependency-aligned with the OIDC / TOTP storage path which already encodes
 // the envelope as hex.
 //
 // ---------------------------------------------------------------------------
 
-use think_watch_common::json_secret::JsonSecret;
+use tw_crypto::json_secret::JsonSecret;
 
 /// Encrypt `plaintext` and return a value suitable for storing inside
 /// `providers.config_json`. Thin wrapper over [`JsonSecret::encrypt`]

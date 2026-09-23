@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use uuid::Uuid;
 
-use think_watch_common::cb_registry::{CbState, record_cb_with_kind};
+use tw_resil::cb_registry::{CbState, record_cb_with_kind};
 
 /// Tunables for a single circuit breaker.
 #[derive(Debug, Clone, Copy)]
@@ -406,7 +406,7 @@ mod tests {
     /// at first-touch and never updated it.
     #[tokio::test]
     async fn rename_takes_effect_on_next_state_change() {
-        use think_watch_common::cb_registry::snapshot_cb_states;
+        use tw_resil::cb_registry::snapshot_cb_states;
 
         let cb = McpCircuitBreakers::with_config(cfg());
         let id = Uuid::new_v4();

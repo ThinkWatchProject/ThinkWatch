@@ -4047,6 +4047,7 @@ dependencies = [
  "tokio",
  "totp-rs",
  "tracing",
+ "tw-crypto",
  "uuid",
 ]
 
@@ -4081,7 +4082,6 @@ dependencies = [
  "tokio",
  "tracing",
  "tw-crypto",
- "tw-resil",
  "url",
  "utoipa",
  "uuid",
@@ -4121,7 +4121,6 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "tw-dialect",
- "tw-protocol",
  "tw-resil",
  "tw-types",
  "tw-upstream",
@@ -4155,6 +4154,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tw-crypto",
+ "tw-resil",
  "uuid",
  "xxhash-rust",
 ]
@@ -4199,7 +4200,9 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "tw-crypto",
  "tw-dialect",
+ "tw-resil",
  "tw-types",
  "url",
  "utoipa",
@@ -4246,6 +4249,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "tw-crypto",
  "url",
  "uuid",
  "wiremock",
@@ -4676,19 +4680,6 @@ source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.32
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "tw-protocol"
-version = "0.32.0"
-source = "git+https://github.com/ThinkWatchProject/ThinkWatch-Core.git?tag=v0.32.0#1783bf5e586fd6064392047204c7fa6f7dc25517"
-dependencies = [
- "bytes",
- "futures",
- "metrics",
- "reqwest 0.13.2",
- "serde_json",
- "tracing",
 ]
 
 [[package]]

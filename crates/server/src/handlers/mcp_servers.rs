@@ -2,10 +2,10 @@ use axum::Json;
 use axum::extract::{Path, State};
 use uuid::Uuid;
 
-use think_watch_common::crypto;
 use think_watch_common::dto::CreateMcpServerRequest;
 use think_watch_common::errors::AppError;
 use think_watch_common::models::McpServer;
+use tw_crypto::crypto;
 
 use super::serde_util::deserialize_some;
 use crate::app::AppState;
@@ -427,13 +427,10 @@ pub async fn create_server(
     // crypto failures shouldn't roll back a row insert.
     let shared_static_token_encrypted = match req.shared_static_token.as_deref() {
         Some(token) if !token.is_empty() => {
-            let key =
-                think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
-                    .map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("encryption key error: {e}"))
-                    })?;
+            let key = tw_crypto::crypto::parse_encryption_key(&state.config.encryption_key)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
             Some(
-                think_watch_common::crypto::encrypt(token.as_bytes(), &key)
+                tw_crypto::crypto::encrypt(token.as_bytes(), &key)
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("encrypt token: {e}")))?,
             )
         }
@@ -637,12 +634,9 @@ pub async fn create_server(
         } else if let Some(cred) = &wizard_cred {
             // Decrypt the access token we just stored — the
             // encryption key handle is already parsed above.
-            let key =
-                think_watch_common::crypto::parse_encryption_key(&state.config.encryption_key)
-                    .map_err(|e| {
-                        AppError::Internal(anyhow::anyhow!("encryption key error: {e}"))
-                    })?;
-            think_watch_common::crypto::decrypt(&cred.access_token_encrypted, &key)
+            let key = tw_crypto::crypto::parse_encryption_key(&state.config.encryption_key)
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("encryption key error: {e}")))?;
+            tw_crypto::crypto::decrypt(&cred.access_token_encrypted, &key)
                 .ok()
                 .and_then(|b| String::from_utf8(b).ok())
         } else {
