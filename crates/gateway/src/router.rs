@@ -1,6 +1,5 @@
 use crate::output_guardrails::OutputGuardrail;
-use crate::providers::DynAiProvider;
-use crate::providers::protocol::UpstreamProtocol;
+use crate::protocol::UpstreamProtocol;
 use crate::strategy::RoutingStrategy;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -22,8 +21,11 @@ use uuid::Uuid;
 /// intervention. To run an A/B between two upstream model names on the
 /// same provider, register two routes with different `upstream_model`
 /// values and the desired weights.
+#[derive(Clone)]
 pub struct RouteEntry {
-    pub provider: Arc<dyn DynAiProvider>,
+    /// Where this route sends. Shared by every route of the same
+    /// provider: the host and credentials do not change with the dialect.
+    pub upstream: Arc<crate::proxy::transport::Upstream>,
     pub provider_id: Uuid,
     /// `model_routes.id` — stable identifier used by the health
     /// tracker (Redis keys), the decision log, and route-mode
@@ -55,17 +57,13 @@ pub struct RouteEntry {
     /// Wire dialect `provider` speaks — the resolved value of
     /// `model_routes.upstream_protocol`.
     pub protocol: UpstreamProtocol,
-    /// Adapters for the *other* dialects this same upstream could be
-    /// asked in, pre-built alongside `provider`.
-    ///
-    /// They exist so the runtime can recover from an upstream that
-    /// rejects the dialect we picked ("model X does not support the
-    /// /v1/chat/completions API") without the gateway crate needing a
-    /// provider factory — building one here would mean reaching back
-    /// into the server crate that owns credential decryption. Empty for
-    /// providers whose transport admits no alternative (Bedrock SigV4,
-    /// Gemini).
-    pub alternates: Vec<(UpstreamProtocol, Arc<dyn DynAiProvider>)>,
+    /// The other dialects this upstream could be asked in, tried when it
+    /// rejects the configured one ("model X does not support the
+    /// /v1/chat/completions API"). Only a dialect changes between them —
+    /// host and credentials are the same — so this is a list of formats,
+    /// not a list of adapters. Empty where the transport admits nothing
+    /// else (Bedrock, Gemini).
+    pub alternates: Vec<UpstreamProtocol>,
 }
 
 /// Per-model overrides for routing strategy / affinity. `None` on
@@ -127,7 +125,7 @@ impl AffinityMode {
 /// one. On retryable error the proxy advances to another candidate
 /// from the same set.
 ///
-/// Also supports prefix-match as a fallback (e.g. `"gpt-" -> OpenAiProvider`)
+/// Also supports prefix-match as a fallback (e.g. `"gpt-"` for every OpenAI model)
 /// for providers that have no explicit model routes configured.
 pub struct ModelRouter {
     /// Exact model name -> list of routes, sorted by weight DESC for
@@ -248,45 +246,17 @@ impl ModelRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::traits::*;
-    use futures::Stream;
-    use std::pin::Pin;
-
-    struct DummyProvider {
-        provider_name: String,
-    }
-
-    impl AiProvider for DummyProvider {
-        fn name(&self) -> &str {
-            &self.provider_name
-        }
-
-        async fn chat_completion(
-            &self,
-            _request: ChatCompletionRequest,
-            _ctx: CallCtx,
-        ) -> Result<ChatCompletionResponse, GatewayError> {
-            Err(GatewayError::ProviderError("dummy".into()))
-        }
-
-        fn stream_chat_completion(
-            &self,
-            _request: ChatCompletionRequest,
-            _ctx: CallCtx,
-        ) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
-            Box::pin(futures::stream::empty())
-        }
-    }
-
     /// Test helper — collapse RouteEntry construction down to fields
     /// the tests actually assert on. New fields default to neutral
     /// values so tests don't break each time the struct grows.
     fn entry(name: &str, provider_id: Uuid, weight: u32) -> RouteEntry {
-        let provider: Arc<dyn DynAiProvider> = Arc::new(DummyProvider {
-            provider_name: name.into(),
-        });
         RouteEntry {
-            provider,
+            upstream: Arc::new(crate::proxy::transport::Upstream::new(
+                "https://example.invalid",
+                Vec::new(),
+                crate::proxy::transport::Shape::Standard,
+                name,
+            )),
             provider_id,
             route_id: Uuid::new_v4(),
             provider_name: name.into(),
@@ -306,7 +276,7 @@ mod tests {
         router.register_route("gpt-4o", entry("openai", Uuid::nil(), 100));
         let found = router.route("gpt-4o");
         assert!(found.is_some());
-        assert_eq!(found.unwrap()[0].provider.name(), "openai");
+        assert_eq!(found.unwrap()[0].provider_name, "openai");
     }
 
     #[test]
@@ -315,7 +285,7 @@ mod tests {
         router.register_route("gpt-", entry("openai", Uuid::nil(), 100));
         let found = router.route("gpt-4o-mini");
         assert!(found.is_some());
-        assert_eq!(found.unwrap()[0].provider.name(), "openai");
+        assert_eq!(found.unwrap()[0].provider_name, "openai");
     }
 
     #[test]
@@ -332,7 +302,7 @@ mod tests {
         let found = router.route("gpt-4o-mini");
         assert!(found.is_some());
         // "gpt-4o" is a longer prefix than "gpt-" for "gpt-4o-mini"
-        assert_eq!(found.unwrap()[0].provider.name(), "specific");
+        assert_eq!(found.unwrap()[0].provider_name, "specific");
     }
 
     #[test]
@@ -352,8 +322,8 @@ mod tests {
         router.sort_routes();
         let entries = router.route("gpt-4o").unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].provider.name(), "heavy");
-        assert_eq!(entries[1].provider.name(), "light");
+        assert_eq!(entries[0].provider_name, "heavy");
+        assert_eq!(entries[1].provider_name, "light");
     }
 
     #[test]

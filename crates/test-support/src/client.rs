@@ -36,6 +36,9 @@ pub struct TestClient {
     /// the test loopback — by default the server falls back to the
     /// connection IP (also 127.0.0.1) and ignores the header.
     forwarded_for: Arc<Mutex<Option<String>>>,
+    /// Extra headers sent on every request, for tests about what the
+    /// gateway forwards to an upstream.
+    headers: Arc<Mutex<Vec<(String, String)>>>,
 }
 
 impl TestClient {
@@ -56,6 +59,7 @@ impl TestClient {
             signing: Arc::new(Mutex::new(None)),
             bearer: Arc::new(Mutex::new(None)),
             forwarded_for: Arc::new(Mutex::new(None)),
+            headers: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -69,6 +73,14 @@ impl TestClient {
 
     pub fn clear_bearer(&self) {
         *self.bearer.lock().unwrap() = None;
+    }
+
+    /// Send `name: value` on every following request.
+    pub fn set_header(&self, name: impl Into<String>, value: impl Into<String>) {
+        self.headers
+            .lock()
+            .unwrap()
+            .push((name.into(), value.into()));
     }
 
     pub fn set_forwarded_for(&self, ip: impl Into<String>) {
@@ -278,6 +290,9 @@ impl TestClient {
         }
         if let Some(xff) = self.forwarded_for.lock().unwrap().clone() {
             req = req.header("x-forwarded-for", xff);
+        }
+        for (k, v) in self.headers.lock().unwrap().iter() {
+            req = req.header(k, v);
         }
         req = self.maybe_sign(req, &method, path, body_bytes.as_deref());
 

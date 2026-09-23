@@ -162,21 +162,9 @@ pub async fn test_pii_redactor(
         .require_global_permission(&state.db, "pii_redactor:read")
         .await?;
     use think_watch_gateway::pii_redactor::PiiRedactor;
-    use think_watch_gateway::providers::traits::ChatMessage;
 
     let redactor = PiiRedactor::from_config(&req.patterns);
-    let messages = vec![ChatMessage {
-        role: "user".to_string(),
-        content: serde_json::Value::String(req.text.clone()),
-        ..Default::default()
-    }];
-    let (redacted, ctx) = redactor.redact_messages(&messages);
-
-    let redacted_text = redacted
-        .first()
-        .and_then(|m| m.content.as_str())
-        .unwrap_or("")
-        .to_string();
+    let (redacted_text, ctx) = redactor.redact_str(&req.text);
 
     let matches = ctx
         .replacements

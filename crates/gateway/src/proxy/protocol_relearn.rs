@@ -9,19 +9,15 @@
 //! '/v1/chat/completions' API" — and there's no reason to make an
 //! operator read the log and go fix a setting.
 //!
-//! So the gateway retries the same route through one of its
-//! pre-built alternate adapters and, when one answers, writes the
+//! So the gateway retries the same route in one of its alternate
+//! dialects (see `generate::send`) and, when one answers, writes the
 //! working dialect back to the route. One request pays the retry; every
 //! later request goes straight out on the right protocol.
 
-use futures::{Stream, StreamExt};
-use std::pin::Pin;
-use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::providers::protocol::UpstreamProtocol;
-use crate::providers::traits::{CallCtx, ChatCompletionChunk, ChatCompletionRequest, GatewayError};
-use crate::router::RouteEntry;
+use crate::protocol::UpstreamProtocol;
+use tw_types::GatewayError;
 
 /// Does this failure look like "wrong dialect" rather than "bad
 /// request" or "upstream down"?
@@ -38,7 +34,7 @@ pub(super) fn is_protocol_mismatch(err: &GatewayError) -> bool {
             }
             message
         }
-        // `ProviderBase::check_status` reports most non-2xx upstream
+        // `transport::check_status` reports most non-2xx upstream
         // replies as `ProviderError("{label} returned {status}: {body}")`
         // rather than the structured variant, so the status has to be
         // read back out of the text. Matching only the structured shape
@@ -63,82 +59,6 @@ pub(super) fn is_protocol_mismatch(err: &GatewayError) -> bool {
         || m.contains("invalid endpoint")
         || m.contains("unknown endpoint");
     names_an_api && sounds_unsupported
-}
-
-/// Open a stream against `entry`, recovering from a rejected dialect
-/// the same way the buffered path does.
-///
-/// A stream can't be retried once bytes have reached the client — but a
-/// dialect rejection arrives as the *first* item, before any chunk. So
-/// peek that item, and if it's a mismatch, reopen against the route's
-/// alternates and push the peeked item back onto the front.
-///
-/// All of that happens *inside* the returned stream, on first poll, not
-/// before it is returned. Awaiting the first item up front would hold
-/// the response headers until the first token arrived, which changes
-/// time-to-headers for every streaming request and breaks the
-/// client-disconnect accounting that depends on the response having
-/// already started.
-///
-/// Without this, a client that only ever streams would keep paying the
-/// failed first attempt forever, since nothing would ever record the
-/// working dialect.
-pub(super) fn open_stream_with_relearn(
-    entry: &RouteEntry,
-    request: ChatCompletionRequest,
-    ctx: CallCtx,
-    db: sqlx::PgPool,
-) -> Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>> {
-    // Own everything the stream needs: it outlives this call, and all
-    // of it is Arc-cheap to clone.
-    let primary = Arc::clone(&entry.provider);
-    let alternates = entry.alternates.clone();
-    let route_id = entry.route_id;
-    let configured = entry.protocol;
-    let provider_name = entry.provider_name.clone();
-
-    Box::pin(async_stream::stream! {
-        let mut inner = primary.stream_chat_completion(request.clone(), ctx.clone());
-        let mut first = inner.next().await;
-
-        if let Some(Err(ref e)) = first
-            && is_protocol_mismatch(e)
-        {
-            for (protocol, adapter) in &alternates {
-                tracing::info!(
-                    provider = %provider_name,
-                    model = %request.model,
-                    from = %configured,
-                    to = %protocol,
-                    "Upstream rejected the configured protocol on a stream — retrying with an alternate"
-                );
-                let mut retry = adapter.stream_chat_completion(request.clone(), ctx.clone());
-                let retry_first = retry.next().await;
-                let recovered = !matches!(retry_first, Some(Err(_)));
-                let keep_going =
-                    matches!(retry_first, Some(Err(ref e)) if is_protocol_mismatch(e));
-                first = retry_first;
-                inner = retry;
-                if recovered {
-                    persist(&db, route_id, *protocol).await;
-                    break;
-                }
-                if !keep_going {
-                    break;
-                }
-            }
-        }
-
-        // `None` here means the upstream produced nothing at all — the
-        // empty stream is the faithful representation and the pump
-        // handles it.
-        if let Some(item) = first {
-            yield item;
-            while let Some(next) = inner.next().await {
-                yield next;
-            }
-        }
-    })
 }
 
 /// Pull the HTTP status back out of a `check_status` message

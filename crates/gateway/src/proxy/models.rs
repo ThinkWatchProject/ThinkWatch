@@ -3,7 +3,7 @@
 use axum::Json;
 use axum::extract::State;
 
-use super::super::GatewayState;
+use super::GatewayState;
 
 /// GET /v1/models
 ///

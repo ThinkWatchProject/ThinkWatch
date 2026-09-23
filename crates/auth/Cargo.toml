@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+tw-crypto = { workspace = true }
 think-watch-common = { workspace = true }
 jsonwebtoken = { workspace = true }
 argon2 = { workspace = true }

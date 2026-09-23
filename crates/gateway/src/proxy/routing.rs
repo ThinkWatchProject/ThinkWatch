@@ -7,9 +7,9 @@ use uuid::Uuid;
 
 use super::GatewayState;
 use crate::health::{CircuitBreakerConfig, RouteHealth};
-use crate::providers::traits::{CallCtx, ChatCompletionRequest, GatewayError};
 use crate::router::{AffinityMode, RouteEntry};
 use crate::strategy::{self, RoutingStrategy};
+use tw_types::{CallCtx, GatewayError};
 
 /// What the affinity layer can pin a session to.
 #[derive(Debug, Clone, Copy)]
@@ -310,17 +310,11 @@ fn is_retryable(err: &GatewayError) -> bool {
 /// another candidate from the remaining set until exhausted.
 pub(super) async fn select_route_with_failover<'a>(
     routes: &'a [RouteEntry],
-    request: &ChatCompletionRequest,
+    outbound: &super::generate::Outbound,
     call_ctx: &CallCtx,
     ctx: &SelectionCtx<'_>,
-) -> Result<
-    (
-        &'a RouteEntry,
-        crate::providers::traits::ChatCompletionResponse,
-        SelectionRecord,
-    ),
-    GatewayError,
-> {
+    caller_model: &str,
+) -> Result<(&'a RouteEntry, crate::lifecycle::Completed, SelectionRecord), GatewayError> {
     let started_at = std::time::Instant::now();
     let candidates: Vec<&RouteEntry> = routes.iter().collect();
 
@@ -333,56 +327,21 @@ pub(super) async fn select_route_with_failover<'a>(
         };
         tried.push(entry.provider_id);
 
-        let mut req = request.clone();
-        if let Some(ref upstream) = entry.upstream_model {
-            req.model = upstream.clone();
-        }
+        let upstream_model = entry.upstream_model.as_deref().unwrap_or(caller_model);
 
         // Per-attempt clock: record latency against this route as
         // *its* time, not "everything since the request started"
         // (which would double-count earlier failed attempts in
         // a failover chain and skew the latency strategy).
         let attempt_started_at = std::time::Instant::now();
-        let mut result = entry
-            .provider
-            .chat_completion_boxed(req.clone(), call_ctx.clone())
-            .await;
-
-        // The upstream may reject the dialect this route was configured
-        // with — models get moved between APIs, and the import-time
-        // probe groups by model family, which can be one bucket too
-        // coarse. Rather than surface that to an operator, try the
-        // route's other dialects and remember whichever answers.
-        if let Err(ref e) = result
-            && super::protocol_relearn::is_protocol_mismatch(e)
-        {
-            for (protocol, adapter) in &entry.alternates {
-                tracing::info!(
-                    provider = %entry.provider_name,
-                    model = %req.model,
-                    from = %entry.protocol,
-                    to = %protocol,
-                    "Upstream rejected the configured protocol — retrying with an alternate"
-                );
-                let retry = adapter
-                    .chat_completion_boxed(req.clone(), call_ctx.clone())
-                    .await;
-                let recovered = retry.is_ok();
-                result = retry;
-                if recovered {
-                    super::protocol_relearn::persist(&ctx.state.db, entry.route_id, *protocol)
-                        .await;
-                    break;
-                }
-                if let Err(ref e) = result
-                    && !super::protocol_relearn::is_protocol_mismatch(e)
-                {
-                    // A different failure means we've stopped learning
-                    // anything about dialects — stop burning requests.
-                    break;
-                }
-            }
-        }
+        // A rejected dialect is retried inside `send`, on this same route.
+        let result =
+            match super::generate::send(entry, outbound, call_ctx, &ctx.state.db, upstream_model)
+                .await
+            {
+                Ok((resp, wire)) => super::generate::read_whole(resp, &wire, caller_model).await,
+                Err(e) => Err(e),
+            };
 
         let attempt_latency_ms = attempt_started_at
             .elapsed()
@@ -412,14 +371,14 @@ pub(super) async fn select_route_with_failover<'a>(
             }
             Err(e) if is_retryable(&e) => {
                 tracing::warn!(
-                    provider = %entry.provider.name(),
+                    provider = %entry.provider_name,
                     provider_id = %entry.provider_id,
                     error = %e,
                     "Route failed, trying next"
                 );
                 metrics::counter!(
                     "gateway_provider_fallback_total",
-                    "from" => crate::metrics_labels::normalize_provider_label(entry.provider.name()),
+                    "from" => tw_resil::metrics_labels::normalize_provider_label(&entry.provider_name),
                 )
                 .increment(1);
                 // Record the failed attempt in health so the

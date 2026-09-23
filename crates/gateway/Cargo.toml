@@ -4,12 +4,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-# 共用层来自 thinkwatch-core（MIT）。方向是单向的：代码只能从 core
-# 流向企业版，反过来不行 —— 任何进 core 的代码从此刻起就是 MIT。
-tw-types = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.29.0" }
-tw-protocol = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.29.0" }
-tw-provider = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.29.0" }
-tw-resil = { git = "https://github.com/ThinkWatchProject/ThinkWatch-Core.git", tag = "v0.29.0" }
+tw-types = { workspace = true }
+tw-resil = { workspace = true }
+tw-dialect = { workspace = true }
+tw-upstream = { workspace = true, features = ["bedrock"] }
+tw-wire = { workspace = true }
 think-watch-common = { workspace = true }
 think-watch-auth = { workspace = true }
 sqlx = { workspace = true }

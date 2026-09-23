@@ -1,5 +1,6 @@
-//! Gateway proxy module: shared state, identity, and the four AI
-//! surface route handlers. Splits across files for readability —
+//! Gateway proxy module: shared state, identity, and the AI surface
+//! route handlers (`generate` for the three generation endpoints,
+//! `models` for the listing). Splits across files for readability —
 //! see the leaf modules' docs for what lives where.
 
 use arc_swap::ArcSwap;
@@ -14,34 +15,36 @@ use crate::cost_tracker::CostTracker;
 use crate::health::HealthTracker;
 use crate::model_mapping::ModelMapper;
 use crate::pii_redactor::PiiRedactor;
-use crate::providers::traits::GatewayError;
 use crate::quota::QuotaManager;
 use crate::rate_limiter::RateLimiter;
 use crate::router::ModelRouter;
 use think_watch_common::dynamic_config::DynamicConfig;
 use think_watch_common::limits::SurfaceConstraints;
 use think_watch_common::limits::weight;
+use tw_types::GatewayError;
 
 mod accounting;
 mod body_capture;
-mod handlers;
+pub(crate) mod generate;
 mod headers;
 mod identity;
 mod log_ctx;
+mod models;
 mod pipeline;
 mod protocol_relearn;
 mod routing;
+pub mod shaper;
+pub mod transport;
 
 // pub(crate) re-exports — `lifecycle` module reaches in for these.
-pub(crate) use accounting::{post_flight_account, stream_usage_or_estimate};
+pub(crate) use accounting::post_flight_account;
 pub(crate) use body_capture::prepare_body_capture;
 pub(crate) use log_ctx::emit_gateway_log_with_extra;
 pub(crate) use routing::{SelectionRecord, finalize_health};
 
 // pub re-exports — `server::app` mounts these as route handlers.
-pub use handlers::{
-    list_models_handler, proxy_anthropic_messages, proxy_chat_completion, proxy_responses,
-};
+pub use generate::{proxy_anthropic_messages, proxy_chat_completion, proxy_responses};
+pub use models::list_models_handler;
 
 /// Shared application state for the gateway proxy handlers.
 #[derive(Clone)]
@@ -246,7 +249,7 @@ mod helper_tests {
     /// GatewayError's canonical status verbatim.
     #[test]
     fn stream_outcome_upstream_error_preserves_status() {
-        use crate::streaming::StreamOutcome;
+        use crate::lifecycle::StreamOutcome;
         for err in [
             GatewayError::UpstreamRateLimited {
                 retry_after_secs: Some(12),
@@ -279,7 +282,7 @@ mod helper_tests {
 
     #[test]
     fn stream_outcome_natural_and_cancelled_have_canonical_status() {
-        use crate::streaming::StreamOutcome;
+        use crate::lifecycle::StreamOutcome;
         assert_eq!(StreamOutcome::Natural.logged_status_and_detail().0, 200);
         assert_eq!(
             StreamOutcome::ClientCancelled.logged_status_and_detail().0,
@@ -348,7 +351,7 @@ mod helper_tests {
 
     #[test]
     fn retry_after_parser_handles_delta_seconds_and_garbage() {
-        use crate::providers::traits::parse_retry_after_seconds;
+        use tw_types::parse_retry_after_seconds;
         assert_eq!(parse_retry_after_seconds("30"), Some(30));
         assert_eq!(parse_retry_after_seconds("  45  "), Some(45));
         assert_eq!(parse_retry_after_seconds("0"), Some(0));

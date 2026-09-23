@@ -102,7 +102,7 @@ pub async fn init_state(
         think_watch_gateway::router::ModelRouter::new(),
     ));
 
-    let crypto_key = think_watch_common::crypto::parse_encryption_key(&config.encryption_key)
+    let crypto_key = tw_crypto::crypto::parse_encryption_key(&config.encryption_key)
         .map_err(|e| anyhow::anyhow!("invalid ENCRYPTION_KEY: {e}"))?;
     // `redirect::Policy::none()` is the SSRF defense — without it
     // reqwest follows up to 10 redirects, which silently bypasses
@@ -203,7 +203,7 @@ async fn build_oidc(config: &AppConfig, dc: &DynamicConfig) -> Option<OidcManage
 /// instances must NOT call it (the inner registry is a `OnceLock`).
 pub fn install_cb_listener(state: &AppState) {
     let audit_for_cb = state.audit.clone();
-    think_watch_common::cb_registry::set_open_listener(move |key, kind| {
+    tw_resil::cb_registry::set_open_listener(move |key, kind| {
         use think_watch_common::audit::{AuditActor, SystemActor};
         audit_for_cb.log(
             SystemActor

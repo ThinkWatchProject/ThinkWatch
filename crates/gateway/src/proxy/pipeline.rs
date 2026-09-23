@@ -12,24 +12,20 @@
 //! Plus [`LogCtx::new`] (in `log_ctx.rs`) builds the audit context in
 //! one call instead of 12-field literals at every site.
 
-use std::pin::Pin;
-
-use futures::Stream;
-
 use super::identity::{budgets_for_ai_gateway, rules_for_ai_gateway};
 use super::{GatewayErrorResponse, GatewayRequestIdentity, GatewayState};
 
+use super::shaper::StreamShaper;
 use crate::lifecycle::{
-    ChatCompletionOutcome, ChatCompletionSurface, ChatPostInvokeDeps, ChatPumpContext,
+    ChatCompletionOutcome, ChatCompletionSurface, ChatPostInvokeDeps, Completed, OpenUpstream,
     build_chat_pump,
 };
-use crate::pii_redactor::PiiStreamRestorer;
-use crate::providers::traits::{ChatCompletionChunk, ChatCompletionResponse, GatewayError};
 use think_watch_common::lifecycle::stages::{
     check_access, check_budget, check_limits, run_post_invoke,
 };
 use think_watch_common::lifecycle::state::{CapturedView, Invoked, LimitCheckRecord, Raw};
 use think_watch_common::limits::{BudgetCap, RateLimitRule};
+use tw_dialect::ir::Dialect;
 
 /// Pre-flight result threaded through to `ChatPostInvokeDeps` later
 /// in the handler. Computed once by [`run_preflight_stages`] so the
@@ -108,11 +104,11 @@ fn short_circuit_to_response(outcome: ChatCompletionOutcome) -> GatewayErrorResp
 /// record_outcome → write_cache → record_usage → emit_audit.
 pub(super) fn launch_stream_pump(
     deps: ChatPostInvokeDeps,
-    pump_ctx: ChatPumpContext,
-    stream: Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>,
-    stream_restorer: Option<PiiStreamRestorer>,
+    open: OpenUpstream,
+    shaper: StreamShaper,
+    client: Dialect,
 ) -> axum::response::Response {
-    let (response, tail) = build_chat_pump(stream, stream_restorer, pump_ctx);
+    let (response, tail) = build_chat_pump(open, shaper, client, deps.state.clone(), &deps.request);
     tokio::spawn(async move {
         let invoked = tail.await;
         run_post_invoke::<ChatCompletionSurface>(invoked, &deps).await;
@@ -120,22 +116,15 @@ pub(super) fn launch_stream_pump(
     response
 }
 
-/// Drive a buffered (non-streaming) response through the post-invoke
-/// pipeline: construct `Invoked`, run the hook chain (cache fill +
-/// audit emit + breaker + budget debit), then unwrap the emitted
-/// response variant.
+/// Drive a whole answer through the post-invoke pipeline — cache fill,
+/// audit, breaker, budget debit — and hand it back.
 ///
-/// Reads identity / trace_id / started_at / mapped_model directly off
-/// `deps.request` — handlers don't have to re-thread them through the
-/// call.
-///
-/// PII restore is the caller's job because anthropic/responses need
-/// to convert the response shape *after* restore, while chat returns
-/// the response shape directly.
+/// PII restoration is the caller's job: the hooks see, and the cache
+/// keeps, the placeholder form.
 pub(super) async fn run_buffered_post_invoke(
     deps: &ChatPostInvokeDeps,
-    response: ChatCompletionResponse,
-) -> ChatCompletionResponse {
+    completed: Completed,
+) -> Completed {
     let invoked = Invoked {
         identity: deps.request.identity.clone(),
         trace_id: deps.request.trace_id.clone(),
@@ -145,11 +134,11 @@ pub(super) async fn run_buffered_post_invoke(
             currents: Vec::new(),
         },
         access_candidate: deps.request.mapped_model.clone(),
-        view: CapturedView::Buffered(ChatCompletionOutcome::Success(response)),
+        view: CapturedView::Buffered(ChatCompletionOutcome::Success(completed)),
     };
     let emitted = run_post_invoke::<ChatCompletionSurface>(invoked, deps).await;
     match emitted.response {
-        Some(ChatCompletionOutcome::Success(r)) => r,
+        Some(ChatCompletionOutcome::Success(c)) => c,
         _ => unreachable!(
             "Invocation::Buffered(Success(_)) must yield Emitted::Success — \
              the hook chain doesn't construct other variants"

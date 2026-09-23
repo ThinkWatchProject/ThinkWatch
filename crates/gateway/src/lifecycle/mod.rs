@@ -1,316 +1,335 @@
-//! AI-gateway-side wiring for the
-//! `think_watch_common::lifecycle` pipeline. Defines
-//! [`ChatCompletionSurface`] (one [`Surface`] impl shared across
-//! all three AI handlers — chat completions, Anthropic Messages,
-//! OpenAI Responses — because their providers normalise upstream
-//! streams to OpenAI `ChatCompletionChunk` so the captured shape
-//! is identical), plus the [`ChatPostInvokeDeps`] bundle the
-//! post-invoke hooks read.
+//! AI-gateway-side wiring for the `think_watch_common::lifecycle`
+//! pipeline: [`ChatCompletionSurface`] (one [`Surface`] impl shared by
+//! the three generation endpoints) and the [`ChatPostInvokeDeps`] bundle
+//! the post-invoke hooks read.
 //!
-//! The single per-request variation point between the three
-//! handlers — whether to fill the response cache (chat does;
-//! Anthropic / Responses don't, matching the pre-migration
-//! buffered behaviour) — is a `cache_enabled: bool` flag on
-//! `ChatPostInvokeDeps` rather than three near-identical Surface
-//! impls. When/if Anthropic or Responses ever needs a
-//! buffered-Response type distinct from `ChatCompletionResponse`
-//! (e.g. native Anthropic cache shape), splitting into separate
-//! Surface impls is the natural next step.
+//! **What the hooks capture is the caller's bytes.** Earlier every
+//! provider normalised its stream into OpenAI chat chunks, so the three
+//! endpoints shared one typed shape. Requests now go out in the caller's
+//! own format when the route allows it, and come back in it, so the
+//! shape all three share is simpler: the response bytes as the caller
+//! receives them (before PII is painted back), and the usage read off
+//! the upstream's own bytes.
 //!
-//! Hook responsibilities (each Surface trait method):
+//! Hook responsibilities:
 //! - `record_outcome` → `finalize_health` (breaker).
-//! - `write_cache` → `cache.set` (gated by `cache_enabled` AND
-//!   `CapturedView::is_success`).
-//! - `record_usage` → `post_flight_account` (limits + budget
-//!   debit).
-//! - `emit_audit` → `prepare_body_capture` +
-//!   `emit_gateway_log_with_extra`.
+//! - `write_cache` → `cache.set` (gated by `cache_enabled` AND success).
+//! - `record_usage` → `post_flight_account` (limits + budget debit).
+//! - `emit_audit` → `prepare_body_capture` + `emit_gateway_log_with_extra`.
 
-use std::sync::Arc;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
+use axum::body::{Body, Bytes};
+use axum::http::{HeaderValue, header};
+use futures::StreamExt;
 use rust_decimal::Decimal;
 use think_watch_common::audit::{AuditActor, AuditEntry, GatewayActor};
 use think_watch_common::lifecycle::Surface;
-use think_watch_common::lifecycle::state::{CapturedView, Invoked};
+use think_watch_common::lifecycle::state::{CapturedView, Invoked, LimitCheckRecord};
 use think_watch_common::limits::{BudgetCap, RateLimitRule};
+use tw_dialect::ir::Dialect;
+use tw_types::GatewayError;
 
-use crate::pii_redactor::{PiiRedactor, PiiStreamRestorer};
-use crate::providers::traits::{
-    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, ChatMessage, GatewayError,
-    Usage,
-};
+use crate::pii_redactor::PiiRedactor;
+use crate::proxy::generate::{Wire, tokens};
+use crate::proxy::shaper::{StreamShaper, rewrite_model};
 use crate::proxy::{
     GatewayRequestIdentity, GatewayState, SelectionRecord, emit_gateway_log_with_extra,
-    finalize_health, post_flight_account, prepare_body_capture, stream_usage_or_estimate,
+    finalize_health, post_flight_account, prepare_body_capture,
 };
-use crate::streaming::{
-    StreamOutcome, StreamResult, assemble_response, stream_to_sse_with_restorer,
-};
-use axum::response::IntoResponse;
-use futures::Stream;
-use std::pin::Pin;
-use think_watch_common::lifecycle::state::LimitCheckRecord;
 
-/// Surface marker for the OpenAI chat completions API
-/// (`POST /v1/chat/completions`). Zero-size. Crate-private — the
-/// handlers in `crate::proxy` are the only callers, and keeping
-/// the surface marker `pub(crate)` lets `ChatPostInvokeDeps` and
-/// `SelectionRecord` stay crate-private without leaking through
-/// the `Surface` trait's associated-type visibility check.
+pub use think_watch_common::lifecycle::streaming::StreamOutcome;
+
+/// Surface marker for the generation endpoints. Crate-private so
+/// `ChatPostInvokeDeps` and `SelectionRecord` stay crate-private without
+/// leaking through the `Surface` trait's associated-type visibility check.
 pub(crate) struct ChatCompletionSurface;
 
-/// Either the buffered completion response that came back from the
-/// upstream, or a [`GatewayError`] short-circuit produced by a
-/// pipeline stage. Distinct from `S::StreamResponse` because the
-/// cache stores the structured completion shape, not the wire SSE
-/// envelope; distinct from a single `Response = GatewayError` choice
-/// because the buffered success path needs typed access to the
-/// completion fields for cache writes + body capture.
+/// A whole answer, in the caller's format.
+pub struct Completed {
+    /// As the caller will receive it, except that PII placeholders are
+    /// still in place — this is also the form the cache stores, so a
+    /// later caller can paint in their own values.
+    pub body: Vec<u8>,
+    /// Read off the upstream's bytes, whatever format they were in.
+    pub usage: Option<tw_wire::Usage>,
+}
+
+/// Either the upstream's answer or a short-circuit from a pipeline stage.
 pub enum ChatCompletionOutcome {
-    /// Upstream produced a complete response.
-    Success(ChatCompletionResponse),
-    /// A pipeline stage short-circuited. The handler turns this
-    /// into a wire response via `GatewayErrorResponse::from`. As of
-    /// phase 2, `proxy_chat_completion` doesn't yet drive its early
-    /// errors through the common stages — when it does, this is
-    /// the variant short-circuit factories return.
+    Success(Completed),
     ShortCircuit(GatewayError),
 }
 
-/// Streaming capture for the OpenAI chat surface. Pre-computed
-/// inside the pump's tail future so the three post-invoke hooks
-/// don't each pay for token resolution / response assembly.
+/// What a finished stream leaves behind for the hooks. Computed once in
+/// the pump's tail so the hooks read it rather than each recomputing.
 pub struct ChatStreamCaptured {
-    /// Raw chunks (chunk-bounded by `MAX_CACHED_CHUNKS` upstream).
-    /// Currently unused by the hooks — kept so a future audit-debug
-    /// view can replay the upstream timeline.
-    pub chunks: Vec<ChatCompletionChunk>,
-    /// Last usage seen on any chunk; `None` when the upstream never
-    /// surfaced one (common without `stream_options.include_usage`).
-    pub raw_usage: Option<Usage>,
-    /// Resolved tokens from [`stream_usage_or_estimate`] — preserves
-    /// the cancelled-stream contract that audit / budget agree on
-    /// the token count even when no usage chunk arrived.
     pub prompt_tokens: u32,
     pub completion_tokens: u32,
-    /// Cost in USD using current platform pricing.
     pub cost_usd: Decimal,
-    /// Assembled response for cache fill / audit body. `None` when
-    /// the stream produced no chunks before terminating.
-    pub assembled: Option<ChatCompletionResponse>,
+    /// The stream assembled into a whole answer, for the cache and the
+    /// audit row. `None` when it produced nothing or could not be
+    /// assembled.
+    pub assembled: Option<Vec<u8>>,
 }
 
-/// Snapshot of the in-flight request — captured once at handler
-/// entry, then read across the per-route attempts in failover and
-/// from the streaming tail task. Replicated (vs. borrowed) so the
-/// detached tail doesn't need to thread a `&` through `'static`
-/// bounds.
+/// The in-flight request, captured once at the handler and read by every
+/// attempt and by the streaming tail task. Owned rather than borrowed so
+/// the detached tail needs no `'static` borrow.
 pub(crate) struct ChatRequestSnapshot {
-    /// Resolved client identity (api key + user + email + IP, …).
     pub identity: GatewayRequestIdentity,
-    /// Per-request correlation id. Chat completions sources this
-    /// from `metadata.request_id`; Anthropic / Responses use the
-    /// raw `x-trace-id` header. Either way it's the single id every
-    /// audit row + gateway log carries for this request.
+    /// The one id every audit row and gateway log carries for this request.
     pub trace_id: String,
-    /// Optional multi-turn conversation id from the `x-session-id`
-    /// header.
+    /// Multi-turn conversation id from `x-session-id`.
     pub session_id: Option<String>,
-    /// Caller-facing model id after `model_mapper.map(...)`,
-    /// before route-level `upstream_model` resolution. This is the
-    /// id that lands in `gateway_logs.model` and the audit detail
-    /// — operators query against the post-alias canonical name,
-    /// not the raw bytes the caller wrote.
+    /// The model the caller named, after aliasing — what lands in
+    /// `gateway_logs.model`. Never the upstream's own name.
     pub mapped_model: String,
-    /// Pre-redaction messages so audit body capture reflects what
-    /// the user authored (request.messages holds the redacted form
-    /// after the upfront redaction pass).
-    pub messages_for_audit: Vec<ChatMessage>,
-    /// Request post-redaction, kept for cache key derivation and
-    /// (for streaming) cache fill on natural completion.
-    pub request_for_cache: ChatCompletionRequest,
+    /// The request body exactly as the caller sent it, before redaction:
+    /// the audit row is the record of what the user wrote. Body capture
+    /// applies its own redaction toggle on top.
+    pub request_for_audit: Vec<u8>,
+    /// Where the cache keeps this request's answer. `None` when the
+    /// request must not be cached.
+    pub cache_fingerprint: Option<Vec<u8>>,
     pub request_started_at: std::time::Instant,
 }
 
-/// Pre-flight rule + cap lists materialised once and reused by the
-/// post-flight `record_usage` debit. Computed by
-/// `run_preflight_stages` so the handler doesn't re-derive them.
+/// Pre-flight rule + cap lists, reused by the post-flight debit.
 pub(crate) struct ChatPreflightLists {
     pub request_rules: Vec<RateLimitRule>,
     pub budget_caps: Vec<BudgetCap>,
 }
 
-/// The route + sel_record actually chosen for this request. In the
-/// non-stream failover path this is the successful candidate; in
-/// the stream path it's the single pick (no retry after first chunk).
+/// The route that actually served the request.
 pub(crate) struct ChatPickedRoute {
-    /// Provider id that served the request (`"openai"`,
-    /// `"anthropic"`, …).
     pub provider_name: String,
     /// Upstream-side model id when the route remapped it.
     pub upstream_model: Option<String>,
-    /// Selection record for the picked route — used by
-    /// `finalize_health` inside `record_outcome`.
+    /// Used by `finalize_health` inside `record_outcome`.
     pub sel_record: SelectionRecord,
 }
 
-/// Per-request post-invoke hook deps for the chat surface. Built
-/// once before `invoke_upstream`; consumed by [`run_post_invoke`]
-/// (in the foreground for buffered, inside the detached tail task
-/// for streaming).
-///
-/// Crate-private so the `pub(crate) SelectionRecord` field doesn't
-/// leak through. The handlers in `crate::proxy` are the only
-/// callers anyway.
-///
-/// [`run_post_invoke`]: think_watch_common::lifecycle::stages::run_post_invoke
+/// Everything the post-invoke hooks read. Built once before the upstream
+/// call; consumed in the foreground for a whole answer, inside the
+/// detached tail task for a stream.
 pub(crate) struct ChatPostInvokeDeps {
     pub state: GatewayState,
-    /// Snapshot of the PII redactor — taken once per request so the
-    /// audit-time body capture sees the same patterns the redaction
-    /// pass used (a mid-flight hot-swap doesn't change what's
-    /// already in flight).
+    /// Snapshot of the redactor, so body capture sees the same patterns
+    /// the request was redacted with even across a hot swap.
     pub pii_redactor: Arc<PiiRedactor>,
     pub request: ChatRequestSnapshot,
     pub preflight: ChatPreflightLists,
     pub route: ChatPickedRoute,
-    /// Whether `write_cache` should fill the response cache for this
-    /// surface. The OpenAI chat completion handler caches; Anthropic
-    /// Messages and the OpenAI Responses handler do not (their
-    /// buffered counterparts don't cache either, so the streaming
-    /// fill would be inconsistent). One flag per request keeps the
-    /// three handler call sites composable with a single surface
-    /// impl instead of three near-identical clones.
+    /// Only chat completions caches.
     pub cache_enabled: bool,
 }
 
-/// Materialise the [`ChatStreamCaptured`] view from a finished
-/// [`StreamResult`]. Resolves token counts, assembles the canonical
-/// response, and computes the cost — all once, so the post-invoke
-/// hooks can read pre-computed fields instead of recomputing per
-/// hook.
-pub async fn capture_chat_stream(
-    state: &GatewayState,
-    mapped_model: &str,
-    request_messages: &[ChatMessage],
-    result: StreamResult,
-) -> (StreamOutcome, ChatStreamCaptured) {
-    let (prompt_tokens, completion_tokens) = stream_usage_or_estimate(&result, request_messages);
-    let cost_usd = state
-        .cost_tracker
-        .calculate_cost(mapped_model, prompt_tokens, completion_tokens)
-        .await;
-    let assembled = assemble_response(&result.chunks, result.usage.clone());
-    let captured = ChatStreamCaptured {
-        chunks: result.chunks,
-        raw_usage: result.usage,
-        prompt_tokens,
-        completion_tokens,
-        cost_usd,
-        assembled,
-    };
-    (result.outcome, captured)
-}
+/// The upstream call a stream makes, not yet started.
+pub(crate) type OpenUpstream = Pin<
+    Box<dyn std::future::Future<Output = Result<(reqwest::Response, Wire), GatewayError>> + Send>,
+>;
 
-/// Carry-over the streaming pump's tail future needs to construct a
-/// fully-populated `Invoked<ChatCompletionSurface>` once the
-/// upstream stream terminates. Built once per request alongside
-/// `ChatPostInvokeDeps` — see `ChatPumpContext::from_deps` for the
-/// canonical builder that copies the overlapping fields.
-pub(crate) struct ChatPumpContext {
-    pub state: GatewayState,
-    pub identity: GatewayRequestIdentity,
-    pub trace_id: String,
-    pub started_at: std::time::Instant,
-    pub client_ip: Option<String>,
-    /// The post-mapper model id, also stored on `Invoked.access_candidate`
-    /// for the audit row's `detail.subject` field.
-    pub mapped_model: String,
-    /// Post-redaction messages from the in-flight request body —
-    /// the same shape the upstream actually received, used by
-    /// `stream_usage_or_estimate` to estimate token counts on a
-    /// client-cancelled stream that didn't surface a final usage
-    /// chunk.
-    pub messages_for_estimate: Vec<ChatMessage>,
-}
-
-impl ChatPumpContext {
-    /// Build the pump context from the already-constructed
-    /// `ChatPostInvokeDeps`. The two structs share many fields (state,
-    /// identity, trace_id, …) so handlers don't have to spell them
-    /// twice. `messages_for_estimate` is taken separately because
-    /// `deps` carries the pre-redaction messages for the audit
-    /// pipeline, but token estimation needs the post-redaction form
-    /// (= what upstream actually saw).
-    pub(crate) fn from_deps(
-        deps: &ChatPostInvokeDeps,
-        messages_for_estimate: Vec<ChatMessage>,
-    ) -> Self {
-        Self {
-            state: deps.state.clone(),
-            identity: deps.request.identity.clone(),
-            trace_id: deps.request.trace_id.clone(),
-            started_at: deps.request.request_started_at,
-            client_ip: deps.request.identity.ip_address.clone(),
-            mapped_model: deps.request.mapped_model.clone(),
-            messages_for_estimate,
-        }
-    }
-}
-
-/// Build the streaming pump for the chat surface: wraps the
-/// provider's chunk stream into an axum SSE body and returns it
-/// alongside a tail future that resolves to the
-/// `Invoked<ChatCompletionSurface>` the post-invoke pipeline
-/// consumes.
+/// Build the streaming pump: forward the upstream's bytes to the caller —
+/// converted if the route speaks another format, shaped either way — and
+/// return a tail future that resolves once the stream ends.
 ///
-/// Symmetric with MCP's `build_mcp_pump` — the handler can
-/// `tokio::spawn(async move { run_post_invoke(tail.await, &deps).await })`
-/// the moment the tuple comes back, without doing token resolution
-/// or `Invoked` construction inline.
+/// **The upstream is called on the stream's first poll, not before the
+/// response is returned.** Awaiting it up front would hold the caller's
+/// response headers until the upstream's arrived, and a caller who gave
+/// up in that window would leave no trace: hyper drops the handler, and
+/// nothing after the await point runs. Inside the stream, that same
+/// disconnect drops the body and the tail records it as cancelled. A
+/// rejected dialect is still retried inside `open`, before any byte
+/// reaches the caller.
 ///
-/// The tail future synthesises a `ClientCancelled` outcome on a
-/// `result_rx` recv error. In practice this only triggers during
-/// runtime teardown (the pump's spawned forwarder always sends
-/// otherwise); the synthesised outcome lets the audit pipeline
-/// record a 499 row instead of silently dropping the request.
+/// Nothing is buffered. Usage is sniffed and the whole answer assembled
+/// alongside the bytes, not by holding them back.
+///
+/// **A dropped stream is a cancelled request.** When the client goes,
+/// hyper drops the body, and with it the sender the tail is waiting on;
+/// the tail then records `ClientCancelled`.
 pub(crate) fn build_chat_pump(
-    stream: Pin<Box<dyn Stream<Item = Result<ChatCompletionChunk, GatewayError>> + Send>>,
-    restorer: Option<PiiStreamRestorer>,
-    ctx: ChatPumpContext,
+    open: OpenUpstream,
+    mut shaper: StreamShaper,
+    client: Dialect,
+    deps_state: GatewayState,
+    request: &ChatRequestSnapshot,
 ) -> (
     axum::response::Response,
     Pin<Box<dyn std::future::Future<Output = Invoked<ChatCompletionSurface>> + Send>>,
 ) {
-    let (sse, result_rx) = stream_to_sse_with_restorer(stream, restorer);
-    let response = sse.into_response();
+    struct Readers {
+        sniffer: Option<tw_wire::Sniffer>,
+        collector: Option<tw_dialect::convert::Collector>,
+    }
+    let readers = Arc::new(Mutex::new(Readers {
+        sniffer: None,
+        collector: None,
+    }));
+    let readers_for_tail = Arc::clone(&readers);
+
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<StreamOutcome>();
+
+    let body = async_stream::stream! {
+        let mut done_tx = Some(done_tx);
+
+        let (upstream, wire) = match open.await {
+            Ok(opened) => opened,
+            Err(e) => {
+                // Headers already went out as 200, so the refusal is said
+                // in the stream — and logged with the upstream's own status,
+                // so a throttled upstream stays 429 on the audit row.
+                let mut out = shaper.process(&error_frame(client, &e.to_string()));
+                out.extend(shaper.finish());
+                yield Ok::<Bytes, std::convert::Infallible>(Bytes::from(out));
+                if let Some(tx) = done_tx.take() {
+                    let _ = tx.send(StreamOutcome::UpstreamError {
+                        error_type: e.error_tag().to_string(),
+                        message: e.to_string(),
+                        status_code: e.status_code(),
+                    });
+                }
+                return;
+            }
+        };
+        if let Ok(mut r) = readers.lock() {
+            r.sniffer = Some(tw_wire::Sniffer::new());
+            r.collector = Some(wire.collect.collector());
+        }
+        let mut convert = wire.convert.as_ref().map(|s| s.stream());
+        // Bedrock streams AWS eventstream frames, not SSE. Unframe them at
+        // the door, so the sniffer, the collector and the converter all
+        // read the same SSE they read from every other upstream.
+        let mut unframe = (wire.dialect == Dialect::Bedrock)
+            .then(tw_upstream::eventstream::Transcoder::new);
+        let mut source = upstream.bytes_stream();
+        while let Some(item) = source.next().await {
+            let item = match item {
+                Ok(raw) => match unframe.as_mut() {
+                    None => Ok(raw),
+                    Some(t) => t
+                        .feed(&raw)
+                        .map(Bytes::from)
+                        .map_err(|e| format!("Bedrock ended the stream: {e}")),
+                },
+                Err(e) => Err(format!("The upstream stream broke off: {e}")),
+            };
+            match item {
+                Ok(chunk) => {
+                    if let Ok(mut r) = readers.lock() {
+                        if let Some(s) = r.sniffer.as_mut() { s.feed(&chunk); }
+                        if let Some(c) = r.collector.as_mut() { c.process(&chunk); }
+                    }
+                    let client_bytes = match convert.as_mut() {
+                        Some(c) => c.process(&chunk),
+                        None => chunk.to_vec(),
+                    };
+                    let out = shaper.process(&client_bytes);
+                    if !out.is_empty() {
+                        yield Ok(Bytes::from(out));
+                    }
+                }
+                Err(message) => {
+                    // Headers are gone; the only way left to say it is in
+                    // the stream, in the caller's own format.
+                    tracing::warn!("{message}");
+                    let tail = match convert.as_mut() {
+                        Some(c) => c.fail(&message),
+                        None => error_frame(client, &message),
+                    };
+                    let mut out = shaper.process(&tail);
+                    out.extend(shaper.finish());
+                    yield Ok(Bytes::from(out));
+                    if let Some(tx) = done_tx.take() {
+                        let _ = tx.send(StreamOutcome::UpstreamError {
+                            error_type: "transport".into(),
+                            message,
+                            status_code: 502,
+                        });
+                    }
+                    return;
+                }
+            }
+        }
+        let tail = convert.as_mut().map(|c| c.finish()).unwrap_or_default();
+        let mut out = shaper.process(&tail);
+        out.extend(shaper.finish());
+        if !out.is_empty() {
+            yield Ok(Bytes::from(out));
+        }
+        if let Some(tx) = done_tx.take() {
+            let _ = tx.send(StreamOutcome::Natural);
+        }
+    };
+
+    let mut response = axum::response::Response::new(Body::from_stream(body));
+    let h = response.headers_mut();
+    h.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream"),
+    );
+    h.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+
+    let identity = request.identity.clone();
+    let trace_id = request.trace_id.clone();
+    let started_at = request.request_started_at;
+    let mapped_model = request.mapped_model.clone();
+
     let tail = Box::pin(async move {
-        let result = result_rx.await.unwrap_or_else(|_| StreamResult {
-            usage: None,
-            chunks: Vec::new(),
-            natural_completion: false,
-            outcome: StreamOutcome::ClientCancelled,
-        });
-        let (outcome, captured) = capture_chat_stream(
-            &ctx.state,
-            &ctx.mapped_model,
-            &ctx.messages_for_estimate,
-            result,
+        let outcome = done_rx.await.unwrap_or(StreamOutcome::ClientCancelled);
+        metrics::counter!(
+            "gateway_stream_completion_total",
+            "outcome" => outcome.metric_label()
         )
-        .await;
+        .increment(1);
+
+        let (usage, assembled) = match readers_for_tail.lock() {
+            Ok(mut r) => (
+                r.sniffer.take().and_then(|s| s.finish()),
+                r.collector.take().and_then(|c| c.finish().ok()),
+            ),
+            Err(_) => (None, None),
+        };
+        let (prompt_tokens, completion_tokens) = usage.as_ref().map(tokens).unwrap_or((0, 0));
+        let cost_usd = deps_state
+            .cost_tracker
+            .calculate_cost(&mapped_model, prompt_tokens, completion_tokens)
+            .await;
+        let captured = ChatStreamCaptured {
+            prompt_tokens,
+            completion_tokens,
+            cost_usd,
+            // A cache hit hands this back to a caller, so it carries the
+            // caller's model name like everything else they receive.
+            assembled: assembled.map(|b| rewrite_model(&b, &mapped_model)),
+        };
         Invoked {
-            identity: ctx.identity,
-            trace_id: ctx.trace_id,
-            started_at: ctx.started_at,
-            client_ip: ctx.client_ip,
+            client_ip: identity.ip_address.clone(),
+            identity,
+            trace_id,
+            started_at,
             limit_check: LimitCheckRecord {
                 currents: Vec::new(),
             },
-            access_candidate: ctx.mapped_model,
+            access_candidate: mapped_model,
             view: CapturedView::Streaming { outcome, captured },
         }
     });
     (response, tail)
+}
+
+/// An error in the caller's format, for a stream that was forwarded
+/// untouched and so has no converter to write one.
+fn error_frame(client: Dialect, message: &str) -> Vec<u8> {
+    let body = tw_dialect::convert::error_body(client, 502, message);
+    let v: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
+    match client {
+        Dialect::Chat => tw_dialect::frame::data(&v),
+        _ => tw_dialect::frame::named("error", &v),
+    }
+    .into_bytes()
 }
 
 impl Surface for ChatCompletionSurface {
@@ -384,14 +403,7 @@ impl Surface for ChatCompletionSurface {
     }
 
     async fn record_outcome(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
-        // Stream: Natural + ClientCancelled count as success against
-        // the upstream (the latter is the client's choice). Upstream
-        // errors fail the breaker.
-        // Buffered: the buffered success path doesn't currently go
-        // through this hook (proxy_chat_completion's buffered branch
-        // still emits inline) — the ShortCircuit variant is not
-        // expected from invoke_upstream. Match-all-other defaults to
-        // success so the type system is exhaustive.
+        // A client that leaves did nothing wrong to the upstream.
         let success = match &invoked.view {
             CapturedView::Streaming { outcome, .. } => matches!(
                 outcome,
@@ -404,40 +416,32 @@ impl Surface for ChatCompletionSurface {
     }
 
     async fn write_cache(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
-        // Per-surface cache opt-in — Anthropic / Responses streaming
-        // paths don't cache (their buffered cousins don't either, so
-        // a streaming fill would be the only place caching happens).
-        // Single flag on deps keeps the three handler call sites on
-        // one surface impl without duplicating hook bodies.
         if !deps.cache_enabled {
             return;
         }
-        // Buffered success: cache the response.
-        // Streaming Natural: cache the assembled completion (the
-        // run_post_invoke stage gate already filtered non-Natural
-        // outcomes — assembled is the canonical completion shape,
-        // identical to what a buffered request would have stored).
-        let response = match &invoked.view {
-            CapturedView::Buffered(ChatCompletionOutcome::Success(r)) => Some(r),
+        let Some(fp) = &deps.request.cache_fingerprint else {
+            return;
+        };
+        // A stream reaches here only on a natural end — the stage gate
+        // already filtered the rest — and its assembled form is exactly
+        // what a whole answer would have stored.
+        let (prompt_tokens, completion_tokens) = extract_usage_tokens(&invoked.view);
+        let body = match &invoked.view {
+            CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => Some(&c.body),
             CapturedView::Streaming { captured, .. } => captured.assembled.as_ref(),
             CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => None,
         };
-        if let Some(response) = response {
-            deps.state
-                .cache
-                .set(&deps.request.request_for_cache, response, None)
-                .await;
+        if let Some(body) = body {
+            let cached = crate::cache::Cached {
+                body: body.clone(),
+                prompt_tokens,
+                completion_tokens,
+            };
+            deps.state.cache.set(fp, &cached, None).await;
         }
     }
 
     async fn record_usage(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
-        // Debit the limits engine + budget caps using the same token
-        // resolution `emit_audit` will surface. Streaming pre-computed
-        // the counts (see `capture_chat_stream`) so the budget reflects
-        // what the upstream actually generated even on a client-cancel
-        // before the final usage chunk arrived. ShortCircuit outcomes
-        // contribute zero tokens — the debit is a no-op there but the
-        // call still happens for trace-shape symmetry.
         let (prompt_tokens, completion_tokens) = extract_usage_tokens(&invoked.view);
         post_flight_account(
             deps.state.db.clone(),
@@ -459,54 +463,42 @@ impl Surface for ChatCompletionSurface {
     }
 
     async fn emit_audit(deps: &Self::PostInvokeDeps, invoked: &Invoked<Self>) {
-        // Streaming: pull pre-computed token counts + cost +
-        // assembled response from the captured view.
-        // Buffered: read from the response.
-        let (assembled_ref, prompt_tokens, completion_tokens, cost, logged_status, error_detail) =
-            match &invoked.view {
-                CapturedView::Streaming { outcome, captured } => {
-                    let (status, detail) = outcome.logged_status_and_detail();
-                    (
-                        captured.assembled.as_ref(),
-                        captured.prompt_tokens,
-                        captured.completion_tokens,
-                        captured.cost_usd,
-                        status,
-                        detail,
-                    )
-                }
-                CapturedView::Buffered(ChatCompletionOutcome::Success(r)) => {
-                    let (pt, ct) = r
-                        .usage
-                        .as_ref()
-                        .map(|u| (u.prompt_tokens, u.completion_tokens))
-                        .unwrap_or((0, 0));
-                    let cost = deps
-                        .state
-                        .cost_tracker
-                        .calculate_cost(&deps.request.mapped_model, pt, ct)
-                        .await;
-                    (Some(r), pt, ct, cost, 200_i64, None)
-                }
-                CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(e)) => (
-                    None,
-                    0u32,
-                    0u32,
-                    Decimal::ZERO,
-                    e.status_code(),
-                    Some(serde_json::json!({
-                        "error_type": e.error_tag(),
-                        "error_message": e.to_string(),
-                    })),
-                ),
-            };
+        let (prompt_tokens, completion_tokens) = extract_usage_tokens(&invoked.view);
+        let (response_body, cost, logged_status, error_detail) = match &invoked.view {
+            CapturedView::Streaming { outcome, captured } => {
+                let (status, detail) = outcome.logged_status_and_detail();
+                (
+                    captured.assembled.as_deref(),
+                    captured.cost_usd,
+                    status,
+                    detail,
+                )
+            }
+            CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => {
+                let cost = deps
+                    .state
+                    .cost_tracker
+                    .calculate_cost(&deps.request.mapped_model, prompt_tokens, completion_tokens)
+                    .await;
+                (Some(c.body.as_slice()), cost, 200_i64, None)
+            }
+            CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(e)) => (
+                None,
+                Decimal::ZERO,
+                e.status_code(),
+                Some(serde_json::json!({
+                    "error_type": e.error_tag(),
+                    "error_message": e.to_string(),
+                })),
+            ),
+        };
         let body_capture = prepare_body_capture(
             &deps.state.dynamic_config,
             &deps.pii_redactor,
             &deps.state.blob_store,
             &deps.request.trace_id,
-            &deps.request.messages_for_audit,
-            assembled_ref,
+            &deps.request.request_for_audit,
+            response_body,
         )
         .await;
         emit_gateway_log_with_extra(
@@ -532,23 +524,17 @@ impl Surface for ChatCompletionSurface {
     }
 }
 
-/// Pull `(prompt_tokens, completion_tokens)` out of a captured view.
-/// Streaming uses the values `capture_chat_stream` resolved (handles
-/// the no-usage-chunk-arrived case for client-cancelled streams);
-/// buffered reads from `response.usage`. Shared between
-/// [`ChatCompletionSurface::record_usage`] and
-/// [`ChatCompletionSurface::emit_audit`] so the two hooks always
-/// agree on the token count.
+/// `(prompt, completion)` from a captured view — shared by
+/// `record_usage` and `emit_audit` so the budget and the audit row can
+/// never disagree.
 fn extract_usage_tokens(view: &CapturedView<ChatCompletionSurface>) -> (u32, u32) {
     match view {
         CapturedView::Streaming { captured, .. } => {
             (captured.prompt_tokens, captured.completion_tokens)
         }
-        CapturedView::Buffered(ChatCompletionOutcome::Success(r)) => r
-            .usage
-            .as_ref()
-            .map(|u| (u.prompt_tokens, u.completion_tokens))
-            .unwrap_or((0, 0)),
+        CapturedView::Buffered(ChatCompletionOutcome::Success(c)) => {
+            c.usage.as_ref().map(tokens).unwrap_or((0, 0))
+        }
         CapturedView::Buffered(ChatCompletionOutcome::ShortCircuit(_)) => (0, 0),
     }
 }

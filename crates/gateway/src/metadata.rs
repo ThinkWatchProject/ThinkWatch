@@ -1,4 +1,3 @@
-use crate::providers::traits::ChatCompletionRequest;
 use axum::http::HeaderMap;
 use std::collections::HashMap;
 
@@ -31,11 +30,12 @@ impl RequestMetadata {
     ///
     /// Validation: max 10 tags, max 64 chars per key, max 256 chars per value.
     /// Tags that exceed limits are silently dropped.
-    pub fn extract(headers: &HeaderMap, body: &ChatCompletionRequest) -> Self {
+    pub fn extract(headers: &HeaderMap, body: &serde_json::Value) -> Self {
         let mut tags = HashMap::new();
 
-        // Extract from request body `extra` field — look for a "metadata" object
-        if let Some(metadata_obj) = body.extra.get("metadata")
+        // A top-level `metadata` object — OpenAI and Anthropic both put
+        // caller tags there.
+        if let Some(metadata_obj) = body.get("metadata")
             && let Some(map) = metadata_obj.as_object()
         {
             for (k, v) in map {
@@ -93,7 +93,11 @@ impl RequestMetadata {
 
         Self {
             tags,
-            model: body.model.clone(),
+            model: body
+                .get("model")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
             request_id,
             timestamp,
         }
@@ -115,29 +119,12 @@ mod tests {
     use super::*;
     use axum::http::{HeaderMap, HeaderValue};
 
-    fn make_request(model: &str) -> ChatCompletionRequest {
-        ChatCompletionRequest {
-            model: model.to_string(),
-            messages: vec![],
-            temperature: None,
-            max_tokens: None,
-            stream: None,
-            extra: serde_json::json!({}),
-        }
+    fn make_request(model: &str) -> serde_json::Value {
+        serde_json::json!({ "model": model, "messages": [] })
     }
 
-    fn make_request_with_metadata(
-        model: &str,
-        metadata: serde_json::Value,
-    ) -> ChatCompletionRequest {
-        ChatCompletionRequest {
-            model: model.to_string(),
-            messages: vec![],
-            temperature: None,
-            max_tokens: None,
-            stream: None,
-            extra: serde_json::json!({ "metadata": metadata }),
-        }
+    fn make_request_with_metadata(model: &str, metadata: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "model": model, "messages": [], "metadata": metadata })
     }
 
     #[test]

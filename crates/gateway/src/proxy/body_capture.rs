@@ -94,8 +94,8 @@ pub(crate) async fn prepare_body_capture(
     pii_redactor: &PiiRedactor,
     blob_store: &Arc<dyn think_watch_common::blob_store::BlobStore>,
     trace_id: &str,
-    messages: &[crate::providers::traits::ChatMessage],
-    response: Option<&crate::providers::traits::ChatCompletionResponse>,
+    request: &[u8],
+    response: Option<&[u8]>,
 ) -> BodyCapture {
     let capture_req = dynamic_config.audit_capture_request_bodies().await;
     let capture_resp = dynamic_config.audit_capture_response_bodies().await;
@@ -111,8 +111,7 @@ pub(crate) async fn prepare_body_capture(
     let mut request_bytes: Option<u32> = None;
     let mut response_bytes: Option<u32> = None;
     let request = if capture_req {
-        let raw =
-            serde_json::to_string(messages).unwrap_or_else(|_| "[serialize_error]".to_owned());
+        let raw = String::from_utf8_lossy(request).into_owned();
         request_bytes = Some(raw.len() as u32);
         Some(
             process_body(
@@ -134,8 +133,7 @@ pub(crate) async fn prepare_body_capture(
     };
     let response_body = match (capture_resp, response) {
         (true, Some(resp)) => {
-            let raw =
-                serde_json::to_string(resp).unwrap_or_else(|_| "[serialize_error]".to_owned());
+            let raw = String::from_utf8_lossy(resp).into_owned();
             response_bytes = Some(raw.len() as u32);
             Some(
                 process_body(

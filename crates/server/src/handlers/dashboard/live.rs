@@ -158,7 +158,7 @@ pub(super) async fn build_live_snapshot(
 
     // Snapshot the in-process CB registry once so we can decorate every
     // provider row with its real state below.
-    let cb_states = think_watch_common::cb_registry::snapshot_cb_states();
+    let cb_states = tw_resil::cb_registry::snapshot_cb_states();
 
     let seed_provider = |kind: ProviderKind, name: &str| ProviderHealth {
         kind,

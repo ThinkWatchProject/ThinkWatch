@@ -67,10 +67,9 @@ async fn oidc_client_secret_round_trips_through_admin_patch() {
         "plaintext secret leaked into the system_settings hex value"
     );
 
-    let key =
-        think_watch_common::crypto::parse_encryption_key(&app.state.config.encryption_key).unwrap();
+    let key = tw_crypto::crypto::parse_encryption_key(&app.state.config.encryption_key).unwrap();
     let raw = hex::decode(hex_text).expect("hex decode");
-    let decoded = think_watch_common::crypto::decrypt(&raw, &key).expect("decrypt the OIDC secret");
+    let decoded = tw_crypto::crypto::decrypt(&raw, &key).expect("decrypt the OIDC secret");
     assert_eq!(
         String::from_utf8(decoded).unwrap(),
         secret,
@@ -139,10 +138,9 @@ async fn totp_secret_lands_encrypted_in_users_row() {
     );
 
     // Decrypting recovers the original.
-    let key =
-        think_watch_common::crypto::parse_encryption_key(&app.state.config.encryption_key).unwrap();
+    let key = tw_crypto::crypto::parse_encryption_key(&app.state.config.encryption_key).unwrap();
     let bytes = hex::decode(&stored).expect("hex decode");
-    let recovered = think_watch_common::crypto::decrypt(&bytes, &key).expect("decrypt totp secret");
+    let recovered = tw_crypto::crypto::decrypt(&bytes, &key).expect("decrypt totp secret");
     assert_eq!(
         String::from_utf8(recovered).unwrap(),
         plaintext_secret,
@@ -167,7 +165,7 @@ async fn totp_secret_lands_encrypted_in_users_row() {
     );
     let codes_bytes = hex::decode(&codes_blob).expect("hex decode recovery codes");
     let codes_decrypted =
-        think_watch_common::crypto::decrypt(&codes_bytes, &key).expect("decrypt recovery codes");
+        tw_crypto::crypto::decrypt(&codes_bytes, &key).expect("decrypt recovery codes");
     let parsed: Vec<String> = serde_json::from_slice(&codes_decrypted).expect("codes JSON parse");
     assert_eq!(parsed.len(), 10, "should mint 10 recovery codes");
 }
@@ -179,7 +177,7 @@ async fn totp_secret_lands_encrypted_in_users_row() {
 /// Decrypt a `JsonSecret`-wrapped value using the test app's master
 /// key. Panics if the value isn't a well-formed envelope.
 fn decode_enc_envelope(v: &Value, encryption_key: &str) -> String {
-    use think_watch_common::json_secret::JsonSecret;
+    use tw_crypto::json_secret::JsonSecret;
     let secret = JsonSecret::from_json(v).expect("envelope");
     assert!(
         secret.is_encrypted(),
@@ -235,7 +233,7 @@ async fn provider_create_encrypts_header_values_at_rest() {
     let headers = stored["headers"]
         .as_array()
         .expect("headers must be a JSON array");
-    use think_watch_common::json_secret::JsonSecret;
+    use tw_crypto::json_secret::JsonSecret;
     assert_eq!(headers.len(), 2);
     for h in headers {
         let v = &h["value"];
@@ -295,7 +293,7 @@ async fn provider_create_encrypts_aws_bedrock_secret() {
         "plaintext aws_secret_access_key leaked: {stored_str}"
     );
 
-    use think_watch_common::json_secret::JsonSecret;
+    use tw_crypto::json_secret::JsonSecret;
     let wrapped = &stored["aws_secret_access_key"];
     assert!(
         JsonSecret::json_is_encrypted(wrapped),
