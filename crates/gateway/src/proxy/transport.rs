@@ -1,78 +1,106 @@
-//! Sending a converted request upstream.
+//! Sending a request upstream.
 //!
-//! `tw-dialect` produces a [`Prepared`] — final bytes, a path, a query —
-//! and this is where that goes out on the wire. Everything specific to a
-//! vendor lives in [`Shape`]: how the URL is spelled and, for Bedrock,
-//! what has to be signed.
+//! What arrives here is already the bytes the upstream is meant to see —
+//! either the caller's own body forwarded as-is, or one `tw-dialect`
+//! converted. Everything vendor-specific lives in [`Shape`]: how the URL
+//! is spelled and, for Bedrock, what gets signed.
 //!
-//! **The body is not touched here.** A converted body is already the
-//! thing the upstream is meant to see, and for Bedrock it is the thing
-//! the signature covers — change a byte after signing and the request is
+//! **The body is not touched here.** For Bedrock it is the thing the
+//! signature covers — change a byte after signing and the request is
 //! rejected.
 
 use std::sync::Arc;
+use std::time::Duration;
 
-use reqwest::RequestBuilder;
-use tw_dialect::convert::Prepared;
+use tw_types::{CallCtx, GatewayError};
 use tw_upstream::sigv4::Signer;
 
-use crate::providers::traits::{CallCtx, GatewayError};
+/// The HTTP client every upstream call goes through.
+///
+/// **Different from the desktop gateway on purpose.** Desktop sets no
+/// overall timeout, because one user's six-minute task should not be cut
+/// off by something in the middle. Here there are many tenants and a
+/// stuck upstream pins a connection forever, so 300 seconds bounds it —
+/// generous for a slow completion, final for a hung one.
+///
+/// Redirects are refused. `base_url` is typed in by an admin, and a
+/// compromised provider answering `302 Location: http://169.254.169.254/`
+/// would otherwise walk gateway traffic into the instance metadata
+/// service.
+pub fn client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(300))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .expect("reqwest client builder cannot fail on stable inputs")
+}
 
 /// How one upstream spells its URLs.
-///
-/// Most of them take the path the dialect produced. Two do not: Azure
-/// puts the model in the path as a deployment and the API version in the
-/// query, and Bedrock derives its host from a region and signs every
-/// request.
 pub enum Shape {
-    /// `base_url` + whatever path the dialect produced.
+    /// `base_url` + the path the dialect produced.
     Standard,
     /// `{base}/openai/deployments/{deployment}/chat/completions?api-version=…`
     ///
-    /// The deployment name is the upstream model: Azure has no model
-    /// field in the body, it is addressed by URL.
+    /// Azure addresses a model by deployment name in the URL; there is no
+    /// model field it reads from the body.
     Azure { api_version: String },
-    /// `https://bedrock-runtime.{region}.amazonaws.com{path}`, signed.
+    /// `https://bedrock-runtime.{region}.amazonaws.com` + the path, signed.
     ///
-    /// The dialect already wrote `/model/{id}/converse[-stream]` into
-    /// the path, so only the host is added here.
+    /// The provider row keeps the region in `base_url`. The dialect
+    /// already wrote `/model/{id}/converse[-stream]` into the path.
     Bedrock { signer: Arc<Signer> },
 }
 
 /// One upstream, ready to be sent to.
 pub struct Upstream {
     pub client: reqwest::Client,
+    /// Trailing slashes trimmed on construction — a pasted URL often
+    /// carries one, and `https://host//v1/…` is a bare 404.
     pub base_url: String,
     /// Header templates from the provider row, `{{…}}` unresolved.
     pub headers: Vec<(String, String)>,
     pub shape: Shape,
+    /// Shown in error messages, e.g. "Anthropic returned 500".
+    pub label: String,
 }
 
 impl Upstream {
-    /// Build the request. Signing happens last, over the final bytes.
-    pub async fn request(
+    pub fn new(base_url: &str, headers: Vec<(String, String)>, shape: Shape, label: &str) -> Self {
+        Self {
+            client: client(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            headers,
+            shape,
+            label: label.to_string(),
+        }
+    }
+
+    /// Send `body` to `path`, and turn a non-2xx answer into an error.
+    ///
+    /// Signing happens last, over the exact bytes being sent.
+    pub async fn send(
         &self,
-        prepared: &Prepared,
+        body: Vec<u8>,
+        path: &str,
+        query: Option<&str>,
         ctx: &CallCtx,
-    ) -> Result<RequestBuilder, GatewayError> {
-        let url = self.url(prepared);
+    ) -> Result<reqwest::Response, GatewayError> {
+        let url = self.url(&body, path, query);
 
         let mut req = self
             .client
             .post(&url)
             .header("content-type", "application/json");
-
         for (k, v) in &self.headers {
-            req = req.header(k, substitute(v, ctx));
+            req = req.header(k, tw_types::substitute_template(v, &ctx.attrs));
         }
         if let Some(trace) = &ctx.trace_id {
             req = req.header("x-trace-id", trace.as_str());
         }
-
         if let Shape::Bedrock { signer } = &self.shape {
-            // Last, and over `prepared.body` exactly as it will be sent.
             let signed = signer
-                .sign(&self.client, &url, &prepared.body)
+                .sign(&self.client, &url, &body)
                 .await
                 .map_err(|e| GatewayError::ProviderError(e.to_string()))?;
             for (k, v) in signed {
@@ -80,107 +108,120 @@ impl Upstream {
             }
         }
 
-        Ok(req.body(prepared.body.clone()))
+        let resp = req
+            .body(body)
+            .send()
+            .await
+            .map_err(|e| GatewayError::NetworkError(e.to_string()))?;
+        check_status(resp, &self.label).await
     }
 
-    fn url(&self, prepared: &Prepared) -> String {
+    fn url(&self, body: &[u8], path: &str, query: Option<&str>) -> String {
         match &self.shape {
-            Shape::Standard => {
-                tw_upstream::upstream_url(&self.base_url, &prepared.path, prepared.query.as_deref())
-            }
-            Shape::Azure { api_version } => {
-                // Azure ignores the dialect's path: the model is a
-                // deployment in the URL, not a field in the body.
-                let base = self.base_url.trim_end_matches('/');
-                let deployment = deployment_of(prepared);
+            // Azure only reshapes chat completions; anything else it is
+            // asked for goes where the dialect put it.
+            Shape::Azure { api_version } if path.ends_with("/chat/completions") => {
+                let deployment = model_in(body);
                 format!(
-                    "{base}/openai/deployments/{deployment}/chat/completions?api-version={api_version}"
+                    "{}/openai/deployments/{deployment}/chat/completions?api-version={api_version}",
+                    self.base_url
                 )
             }
-            Shape::Bedrock { .. } => {
-                let path = prepared.path.trim_start_matches('/');
-                format!("https://bedrock-runtime.{}/{path}", self.base_url)
-            }
+            Shape::Bedrock { signer } => format!(
+                "https://bedrock-runtime.{}.amazonaws.com/{}",
+                signer.region,
+                path.trim_start_matches('/')
+            ),
+            _ => tw_upstream::upstream_url(&self.base_url, path, query),
         }
     }
 }
 
-/// Azure addresses a model by deployment name in the URL. The dialect
-/// wrote the model into the body, so read it back out.
-fn deployment_of(prepared: &Prepared) -> String {
-    serde_json::from_slice::<serde_json::Value>(&prepared.body)
+/// Turn a non-2xx upstream answer into the error the caller sees.
+///
+/// 429 keeps the upstream's `Retry-After` so a client's retry policy does
+/// not hammer the same quota window. 401/403 become an auth error. Any
+/// other failure carries the upstream's body, **truncated**: error bodies
+/// have carried stack traces, AWS account ids and full debug strings,
+/// and forwarding them verbatim turns the gateway into a leak. The full
+/// body goes to the log.
+async fn check_status(
+    resp: reqwest::Response,
+    label: &str,
+) -> Result<reqwest::Response, GatewayError> {
+    let status = resp.status();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after_secs = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .and_then(tw_types::parse_retry_after_seconds);
+        return Err(GatewayError::UpstreamRateLimited { retry_after_secs });
+    }
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(GatewayError::UpstreamAuthError);
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        tracing::warn!(provider = label, status = %status, body = %body, "upstream returned non-2xx");
+        const CLIENT_MAX: usize = 512;
+        let shown = if body.len() > CLIENT_MAX {
+            // Char-boundary safe: provider errors are often not ASCII
+            let mut end = CLIENT_MAX;
+            while end > 0 && !body.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}…[truncated]", &body[..end])
+        } else {
+            body
+        };
+        return Err(GatewayError::ProviderError(format!(
+            "{label} returned {status}: {shown}"
+        )));
+    }
+    Ok(resp)
+}
+
+/// The model a converted chat body names — Azure needs it in the URL.
+fn model_in(body: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(body)
         .ok()
         .and_then(|v| v.get("model").and_then(|m| m.as_str()).map(str::to_string))
         .unwrap_or_default()
-}
-
-/// Resolve `{{…}}` placeholders in a header value from the caller's
-/// attributes. An absent key resolves to empty rather than staying
-/// literal — an upstream that receives `X-User: {{user_id}}` is worse
-/// than one that receives `X-User:`, because the literal looks like a
-/// working config.
-fn substitute(template: &str, ctx: &CallCtx) -> String {
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(start) = rest.find("{{") {
-        out.push_str(&rest[..start]);
-        let Some(end) = rest[start..].find("}}") else {
-            break;
-        };
-        let key = &rest[start + 2..start + end];
-        out.push_str(ctx.attrs.get(key).map(String::as_str).unwrap_or_default());
-        rest = &rest[start + end + 2..];
-    }
-    out.push_str(rest);
-    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn prepared(path: &str, body: &str) -> Prepared {
-        // A Prepared is only ever built by the dialect layer, so reach
-        // through it rather than fabricating the struct.
-        let target = tw_dialect::ir::Target {
-            dialect: tw_dialect::ir::Dialect::Chat,
-            official: false,
-            default_max_tokens: 1024,
-        };
-        let mut p = tw_dialect::convert::encode(
-            &tw_dialect::ir::Request {
-                model: "gpt-4o".into(),
-                ..Default::default()
-            },
-            &target,
-        );
-        p.path = path.to_string();
-        p.body = body.as_bytes().to_vec();
-        p
-    }
-
     fn up(base: &str, shape: Shape) -> Upstream {
-        Upstream {
-            client: reqwest::Client::new(),
-            base_url: base.into(),
-            headers: vec![],
-            shape,
-        }
+        Upstream::new(base, vec![], shape, "test")
     }
 
     #[test]
     fn a_standard_upstream_takes_the_path_the_dialect_produced() {
-        let u = up("https://api.openai.com", Shape::Standard);
+        let u = up("https://api.openai.com/", Shape::Standard);
         assert_eq!(
-            u.url(&prepared("/v1/chat/completions", "{}")),
+            u.url(b"{}", "/v1/chat/completions", None),
             "https://api.openai.com/v1/chat/completions"
         );
     }
 
     #[test]
+    fn a_query_is_carried_through() {
+        let u = up("https://g.example", Shape::Standard);
+        assert_eq!(
+            u.url(
+                b"{}",
+                "/v1beta/models/m:streamGenerateContent",
+                Some("alt=sse")
+            ),
+            "https://g.example/v1beta/models/m:streamGenerateContent?alt=sse"
+        );
+    }
+
+    #[test]
     fn azure_addresses_the_model_by_deployment_in_the_url() {
-        // Azure has no model field: the dialect's path is discarded and
-        // the model becomes part of the URL
         let u = up(
             "https://x.openai.azure.com/",
             Shape::Azure {
@@ -188,18 +229,16 @@ mod tests {
             },
         );
         assert_eq!(
-            u.url(&prepared(
-                "/v1/chat/completions",
-                r#"{"model":"my-deploy"}"#
-            )),
+            u.url(br#"{"model":"my-deploy"}"#, "/v1/chat/completions", None),
             "https://x.openai.azure.com/openai/deployments/my-deploy/chat/completions?api-version=2024-02-01"
         );
     }
 
     #[test]
-    fn bedrock_only_adds_the_host_because_the_dialect_wrote_the_path() {
+    fn bedrock_builds_its_host_from_the_region() {
+        // 企业版把 region 存在 base_url 里 —— 主机名由它拼出来
         let u = up(
-            "us-east-1.amazonaws.com",
+            "us-east-1",
             Shape::Bedrock {
                 signer: Arc::new(Signer {
                     region: "us-east-1".into(),
@@ -209,23 +248,8 @@ mod tests {
             },
         );
         assert_eq!(
-            u.url(&prepared("/model/anthropic.claude-v2/converse", "{}")),
+            u.url(b"{}", "/model/anthropic.claude-v2/converse", None),
             "https://bedrock-runtime.us-east-1.amazonaws.com/model/anthropic.claude-v2/converse"
         );
-    }
-
-    #[test]
-    fn a_placeholder_with_no_value_resolves_to_nothing_not_to_itself() {
-        // `X-User: {{user_id}}` reaching an upstream looks like a
-        // working config; `X-User:` looks like what it is
-        let ctx = CallCtx::new(None, None, None);
-        assert_eq!(substitute("v={{missing}};", &ctx), "v=;");
-    }
-
-    #[test]
-    fn a_placeholder_is_filled_from_the_caller() {
-        let mut ctx = CallCtx::new(None, Some("u-1".into()), None);
-        ctx.attrs.insert("user_id".into(), "u-1".into());
-        assert_eq!(substitute("{{user_id}}/x", &ctx), "u-1/x");
     }
 }

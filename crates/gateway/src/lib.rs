@@ -8,6 +8,7 @@ pub mod metrics_labels;
 pub mod model_mapping;
 pub mod output_guardrails;
 pub mod pii_redactor;
+pub mod protocol;
 pub mod providers;
 pub mod proxy;
 pub mod quota;
